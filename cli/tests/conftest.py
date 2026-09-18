@@ -1022,3 +1022,22 @@ def checkout_fno_agents_binary():
         if p.exists():
             return p
     return None
+
+
+@pytest.fixture(autouse=True)
+def _door_binary_from_this_checkout(monkeypatch):
+    """Door-routed verbs shell out to a resolved ``fno-agents`` binary, and
+    on a dev checkout the installed one lags the worktree source: a store
+    verb then refuses against rows only the worktree build can see. Pin the
+    door to this checkout's build when one exists; an operator override
+    through $FNO_AGENTS_BIN always wins."""
+    import os
+
+    if (os.environ.get("FNO_AGENTS_BIN") or "").strip():
+        return
+    root = Path(__file__).resolve().parents[2]
+    for profile in ("debug", "release"):
+        candidate = root / "crates" / "fno-agents" / "target" / profile / "fno-agents"
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            monkeypatch.setenv("FNO_AGENTS_BIN", str(candidate))
+            return
