@@ -425,8 +425,7 @@ def is_design_stage(entry: object) -> bool:
     return plan_rung(entry) is Rung.DESIGN
 
 
-#: Doc-kind frontmatter keys; `type` is overloaded (_intake.normalize_type),
-#: so both keys feed one value set.
+#: Doc-kind frontmatter keys; `type` is overloaded, so both feed one value set.
 DOC_KIND_KEYS = ("kind", "type")
 BLUEPRINT_KINDS = frozenset({"quick-plan", "plan", "implementation-plan", "blueprint"})
 NOT_BLUEPRINT_KINDS = frozenset({"research", "findings", "think", "stub"})

@@ -444,8 +444,7 @@ class PlanFrontmatter(BaseModel):
     @classmethod
     def _fill_node_from_claims_synonym(cls, data: Any) -> Any:
         # `claims` is the writer-side duplicate of `node` (field note above);
-        # one-release fallback matching validate-plan.sh's node-then-claims
-        # read. Neither key still refuses.
+        # one-release fallback matching validate-plan.sh's node-then-claims read.
         if isinstance(data, dict) and not str(data.get("node") or "").strip():
             claims = data.get("claims")
             if isinstance(claims, str) and claims.strip():
