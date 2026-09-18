@@ -279,10 +279,7 @@ mod tests {
 }
 
 // The verb bodies: the named kill and the selector kill. They live beside
-// the policy they enforce; `use super::*` reaches the consts and the
-// escalation ladder they share.
-
-use super::*;
+// the policy they enforce.
 
 /// `fno mux kill-server [<name>]`: shut one session down. A live server Byes
 /// its clients, kills every pane child, and exits (its SocketGuard unlinks

@@ -52,7 +52,6 @@ mod pane_send_gate_tests;
 #[path = "server/tests/dead_row_resume_tests.rs"]
 mod dead_row_resume_tests;
 
-
 #[test]
 fn account_from_argv_reads_the_fno_account_token() {
     // x-c914: the birth account rides the same env(1) wrapper as FNO_NODE.

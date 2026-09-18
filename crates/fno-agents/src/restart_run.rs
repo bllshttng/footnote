@@ -433,7 +433,7 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
 
 #[cfg(test)]
 mod tests {
-    use super::{render_restart, render_upgrade, restart_gate, verdict};
+    use super::{render_upgrade, restart_gate, verdict};
     use crate::drift::{classify, ExeFingerprint};
     use std::path::PathBuf;
 
