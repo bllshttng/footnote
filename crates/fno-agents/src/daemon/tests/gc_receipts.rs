@@ -1873,8 +1873,9 @@ fn the_resume_form_comes_from_the_capability_table() {
             .iter()
             .map(|t| t.as_str().unwrap().replace("{session_id}", "s-1"))
             .collect();
-        let pre_exec: Vec<String> = form["pre_exec"]
-            .as_array()
+        let pre_exec: Vec<String> = form
+            .get("pre_exec")
+            .and_then(|p| p.as_array())
             .map(|arr| {
                 arr.iter()
                     .filter_map(|t| t.as_str().map(str::to_string))

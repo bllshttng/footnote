@@ -4225,7 +4225,10 @@ mod tests {
         // subcommand, where codex's globals go. The raw spliced argv then
         // composes with the declared pre_exec (the shared-daemon ownership
         // assertion), so the rendered shape is one `sh -c` whose script runs
-        // the daemon start and execs the filled resume.
+        // the daemon start and execs the filled resume. The grant folds
+        // FNO_WORKER_ADD_DIRS when the invoking environment carries one, so
+        // the expectation reads the same ambient var instead of pinning a
+        // roots list the machine is free to extend.
         let composed = |argv: &[&str]| -> Vec<String> {
             let script = format!(
                 "'codex' 'app-server' 'daemon' 'start'; exec {}",
@@ -4236,12 +4239,20 @@ mod tests {
             );
             vec!["sh".into(), "-c".into(), script]
         };
+        let mut roots = vec!["/path/that/does/not/exist/.fno/plans".to_string()];
+        for extra in crate::claude_ask::state_dirs_from_env() {
+            if !extra.is_empty() && !roots.contains(&extra) {
+                roots.push(extra);
+            }
+        }
+        let encoded = serde_json::to_string(&roots).unwrap();
+        let grant = format!("sandbox_workspace_write.writable_roots={encoded}");
         assert_eq!(
             build_resume_argv("codex", "uuid-1", Some("/path/that/does/not/exist")),
             Some(composed(&[
                 "codex",
                 "-c",
-                "sandbox_workspace_write.writable_roots=[\"/path/that/does/not/exist/.fno/plans\"]",
+                grant.as_str(),
                 "--cd",
                 "/path/that/does/not/exist",
                 "resume",
