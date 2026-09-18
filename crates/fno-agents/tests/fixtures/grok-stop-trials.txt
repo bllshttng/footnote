@@ -1,0 +1,22 @@
+# grok Stop-contract readings. Live continuation run: BLOCKED 2026-09-18.
+# Receipt: `grok models` prints "You are not authenticated." auth.json was
+# expired (is_expired=true) at its last good read 2026-09-17T23:31Z
+# (~/.grok/logs/unified.jsonl) and is absent now. No XAI_API_KEY, no keychain
+# item, no fno provider key. The keys below marked source=bundled-docs come
+# from grok 1.0.34's bundled user guide (~/.grok/docs/user-guide), not from a
+# live turn. The capability row stays "extension" until a live run re-measures
+# continued=true with fires_in_turn>=2.
+grok_version=1.0.34 (3736acbc8658) [stable] source=measured grok --version 2026-09-18
+stop_payload_keys=cwd,hookEventName,lastAssistantMessage,permissionMode,promptId,sessionId,stopHookActive,timestamp,workspaceRoot source=bundled-docs 10-hooks.md Input and common fields
+session_id_matches_cli_id=true source=bundled-docs 17-sessions.md (-s supplies the session id) and 10-hooks.md common fields
+env_session_id_matches=true source=bundled-docs 10-hooks.md hook env table, GROK_SESSION_ID set for every hook
+prompt_id_present=true source=bundled-docs 10-hooks.md common fields, absent for session-scoped events
+fires_in_turn=unmeasured (bundled-docs: Stop fires again per continuation round, 8-continuation cap)
+continued=unmeasured source=live-run-blocked, no grok login, row stays extension
+store_path=$GROK_HOME|$HOME/.grok/sessions/<url-encoded-cwd>/<session-id>/chat_history.jsonl source=bundled-docs 17-sessions.md Storage Layout
+store_has_prompt=unmeasured (bundled-docs: chat_history.jsonl holds the raw chat messages sent to the model)
+store_has_marker=unmeasured source=live-run-blocked, no grok login
+session_end_fire_has_prompt_id=false source=bundled-docs 10-hooks.md, session-end Stop fire (reason channel_closed or shutdown) is session-scoped
+inspect_plugins_fno=reachable path=/Users/bb16/.claude/plugins/cache/footnote/fno/0.3.2 enabled=true provides.hooks=true source=measured grok inspect --json 2026-09-18, no auth needed
+# The payload shape the replay tests drive (docs-derived, grok 1.0.34):
+payload_sample={"hookEventName":"stop","sessionId":"0198abcd-1234-5678-9abc-def012345678","cwd":"/repo","workspaceRoot":"/repo","permissionMode":"default","promptId":"prompt-1","stopHookActive":false,"lastAssistantMessage":"Reply with the token GROK_CONT_demo.","timestamp":"2026-09-18T00:00:00Z"}

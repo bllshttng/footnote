@@ -44,13 +44,53 @@ pub fn run(args: &[String]) -> i32 {
             .unwrap_or_default()
     };
     let session_id = str_field("session_id");
-    let transcript_path = str_field("transcript_path");
+    let transport_path = str_field("transcript_path");
     let payload_cwd = str_field("cwd");
     let last_assistant_message = parsed.as_ref().and_then(|v| {
         v.get("last_assistant_message")
             .and_then(Value::as_str)
             .map(str::to_string)
     });
+
+    // grok sends camelCase keys and no transcript path; normalize before the
+    // ownership read. A payload without grok's `hookEventName: "stop"` is not
+    // a grok fire and none of this moves: claude, codex and gemini read
+    // snake_case and resolve the transcript straight from the payload.
+    let mut session_id = session_id;
+    let mut transcript_path = transport_path;
+    let mut payload_cwd = payload_cwd;
+    let mut last_assistant_message = last_assistant_message;
+    let mut payload = payload;
+    if let Some(grok) = parsed.as_ref().and_then(normalize_grok_envelope) {
+        match grok {
+            GrokFire::Skip => return 0,
+            GrokFire::Turn {
+                session_id: sid,
+                cwd: grok_cwd,
+                last_assistant_message: lam,
+                transcript_path: store,
+                store_note,
+            } => {
+                if !store_note.is_empty() {
+                    eprintln!("target stop-hook: grok session store read for {sid}: {store_note}");
+                }
+                session_id = sid;
+                transcript_path = store.display().to_string();
+                payload_cwd = grok_cwd;
+                last_assistant_message = lam.clone();
+                // loop-check's intent channel reads snake_case off the stdin
+                // JSON, so rewrite the payload with grok's final text under the
+                // snake_case key. No loopcheck.rs edit: that file is over the
+                // shrink-only budget, and the rewrite makes one unnecessary.
+                if let Ok(mut v) = serde_json::from_str::<Value>(payload.trim()) {
+                    if let Some(text) = lam {
+                        v["last_assistant_message"] = Value::String(text);
+                    }
+                    payload = v.to_string();
+                }
+            }
+        }
+    }
 
     let cwd = if payload_cwd.is_empty() {
         cwd
@@ -70,6 +110,73 @@ pub fn run(args: &[String]) -> i32 {
             owner_cwd,
         } => run_owned(&cwd, &fire, &payload, state, driver, owner_cwd),
     }
+}
+
+/// A grok Stop fire, normalized onto the snake_case vocabulary the handler
+/// already reads. `Skip` is a fire that is not the session's turn gate: a
+/// subagent's stop, or the session-end observe-only fire with no `promptId`.
+enum GrokFire {
+    Skip,
+    Turn {
+        session_id: String,
+        cwd: String,
+        last_assistant_message: Option<String>,
+        transcript_path: PathBuf,
+        store_note: String,
+    },
+}
+
+/// Recognize a grok Stop payload and map it onto the snake_case fields. Fires
+/// only on grok's camelCase `hookEventName: "stop"`; claude and codex send
+/// snake_case and carry their own transcript path, so `None` leaves them on
+/// today's path. A subagent stop and the session-end fire (no `promptId`)
+/// answer `Skip`: neither is this session's turn gate, so `hook stop` exits 0
+/// with no output and no event.
+fn normalize_grok_envelope(parsed: &Value) -> Option<GrokFire> {
+    if parsed.get("hookEventName").and_then(Value::as_str) != Some("stop") {
+        return None;
+    }
+    if parsed.get("subagentType").is_some() {
+        return Some(GrokFire::Skip);
+    }
+    if parsed.get("promptId").is_none() {
+        return Some(GrokFire::Skip);
+    }
+    let session_id = parsed
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("GROK_SESSION_ID")
+                .ok()
+                .filter(|v| !v.is_empty())
+        })
+        .unwrap_or_default();
+    let cwd = parsed
+        .get("cwd")
+        .and_then(Value::as_str)
+        .or_else(|| parsed.get("workspaceRoot").and_then(Value::as_str))
+        .unwrap_or_default()
+        .to_string();
+    let lam = parsed
+        .get("lastAssistantMessage")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let root = crate::grok_store::grok_sessions_root();
+    let (transcript_path, store_note) = match crate::grok_store::lookup_session(&root, &session_id)
+    {
+        crate::pi::SessionLookup::One { file } => (file, String::new()),
+        crate::pi::SessionLookup::None => (PathBuf::new(), "none".to_string()),
+        crate::pi::SessionLookup::Duplicate { .. } => (PathBuf::new(), "duplicate".to_string()),
+        crate::pi::SessionLookup::Unknown { .. } => (PathBuf::new(), "unreadable".to_string()),
+    };
+    Some(GrokFire::Turn {
+        session_id,
+        cwd,
+        last_assistant_message: lam,
+        transcript_path,
+        store_note,
+    })
 }
 
 /// The owned path: the foreign-session guard, the build-dir export, the
@@ -110,7 +217,12 @@ fn run_owned(
         if !manifest_ctid.is_empty() {
             let basename = transcript_basename(&fire.transcript_path.display().to_string())
                 .unwrap_or_default();
-            if basename != manifest_ctid && !basename.ends_with(&format!("-{manifest_ctid}")) {
+            // An empty basename (grok with an unreadable store) is not
+            // foreign: the transcript_ok unavailable block owns that answer.
+            if !basename.is_empty()
+                && basename != manifest_ctid
+                && !basename.ends_with(&format!("-{manifest_ctid}"))
+            {
                 // Another session's manifest; genuinely not ours to judge.
                 return 0;
             }
@@ -595,7 +707,16 @@ fn transcript_basename(path: &str) -> Option<String> {
     if path.is_empty() {
         return None;
     }
-    let name = Path::new(path).file_name()?.to_string_lossy().into_owned();
+    let p = Path::new(path);
+    let name = p.file_name()?.to_string_lossy().into_owned();
+    if name == "chat_history.jsonl" {
+        // grok's store file name is constant, so the session id lives in the
+        // parent directory name; that is the id the manifest guard compares.
+        return p
+            .parent()?
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned());
+    }
     Some(name.strip_suffix(".jsonl").unwrap_or(&name).to_string())
 }
 
