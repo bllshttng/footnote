@@ -843,6 +843,9 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         "green": True,
         "pr_state": "OPEN",
         "mergeable": None,
+        # The fetch stub carries no mergeStateStatus, so the GitHub
+        # merge-state conjunct was never asked (the never-asked contract).
+        "github_merge_state": None,
         "checks": {
             "total": 1,
             "check_runs": 1,
@@ -1383,6 +1386,140 @@ def test_ready_reflects_mergeable(
         assert out["ready_blockers"] == []
     else:
         assert expected_blocker in out["ready_blockers"]
+
+
+def _merge_state_fetch(monkeypatch, merge_state):
+    """The green fetch plus the REST merge-state keys `fetch_pr_rest` now
+    carries, so `_github_merge_blockers` has something to read."""
+    monkeypatch.setattr(
+        _status,
+        "_fetch",
+        lambda pr, cwd: ({
+            "state": "OPEN",
+            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": merge_state,
+            "baseRefName": "main",
+        }, ""),
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2},
+    )
+    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
+    monkeypatch.setattr(
+        "fno.pr._merge._code_review_attestation_required",
+        lambda repo, pr_number=0: False,
+    )
+
+
+def test_ready_reads_githubs_blocked_merge_state(monkeypatch, capsys):
+    """`mergeable` answers "does it conflict"; `mergeable_state`
+    answers "will GitHub merge it". A ruleset holding the merge with no red
+    check must block ready, and the missing check must be named on the
+    payload and in the stderr clause workers quote."""
+    import json
+
+    import fno.rust_binary as rust_binary
+
+    _merge_state_fetch(monkeypatch, "blocked")
+    merge_calls: list = []
+
+    def fake(verb, payload, **kw):
+        # run_status also drives the durable-grant resolver through the same
+        # door; only the status op is this conjunct's transport.
+        if payload.get("op") == "status-merge-blocker":
+            merge_calls.append(payload)
+            return {
+                "state": "blocked",
+                "blockers": ["github_blocked"],
+                "missing_required_checks": ["smoke"],
+                "source": "rules/branches/main",
+            }
+        return {"state": "absent", "reason": "stub", "node_id": None, "claim_state": None}
+
+    monkeypatch.setattr(rust_binary, "verb_call", fake)
+    _status.run_status("42")
+    cap = capsys.readouterr()
+    out = json.loads(cap.out)
+    assert out["ready"] is False
+    assert "github_blocked" in out["ready_blockers"]
+    assert out["github_merge_state"]["missing_required_checks"] == ["smoke"]
+    assert "(missing: smoke)" in cap.err
+    assert len(merge_calls) == 1
+    assert merge_calls[0]["mergeStateStatus"] == "blocked"
+    assert merge_calls[0]["baseRefName"] == "main"
+
+
+def test_ready_fails_closed_when_the_rust_reader_is_unavailable(monkeypatch, capsys):
+    """AC4-EDGE: an unreadable merge state never reads as no blocker."""
+    import json
+
+    import fno.rust_binary as rust_binary
+
+    _merge_state_fetch(monkeypatch, "blocked")
+
+    def boom(verb, payload, **kw):
+        raise rust_binary.VerbUnavailable("binary not found")
+
+    monkeypatch.setattr(rust_binary, "verb_call", boom)
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert "github_merge_state_unknown" in out["ready_blockers"]
+    assert out["ready"] is False
+
+
+def test_a_clean_github_merge_state_adds_no_blocker(monkeypatch, capsys):
+    import json
+
+    import fno.rust_binary as rust_binary
+
+    _merge_state_fetch(monkeypatch, "clean")
+    monkeypatch.setattr(
+        rust_binary,
+        "verb_call",
+        lambda verb, payload, **kw: {
+            "state": "clean",
+            "blockers": [],
+            "missing_required_checks": None,
+            "source": "mergeable_state clean",
+        },
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is True
+    assert not any(b.startswith("github_") for b in out["ready_blockers"])
+
+
+def test_a_payload_without_merge_state_asks_nothing(monkeypatch, capsys):
+    """Old payloads and degraded fetches carry no mergeStateStatus: the Rust
+    op is never invoked (the same never-asked arm `mergeable=None` takes)."""
+    import json
+
+    import fno.rust_binary as rust_binary
+
+    _green_fetch(monkeypatch)
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2},
+    )
+
+    def no_status_op(verb, payload, **kw):
+        if payload.get("op") == "status-merge-blocker":
+            pytest.fail("a payload with no mergeStateStatus asked the Rust op")
+        return {"state": "absent", "reason": "stub", "node_id": None, "claim_state": None}
+
+    monkeypatch.setattr(rust_binary, "verb_call", no_status_op)
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is True
 
 
 def test_ready_skips_the_coverage_conjunct_on_a_no_lane_repo(monkeypatch, capsys):

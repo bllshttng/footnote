@@ -375,6 +375,8 @@ def verdict_line(payload: dict) -> str:
         clause = f"{len(blockers)} blockers: {', '.join(blockers)}"
     else:
         clause = "no blockers"
+    missing = (payload.get("github_merge_state") or {}).get("missing_required_checks")
+    clause += f" (missing: {', '.join(missing)})" if missing else ""
     # A red line names its first failing check and step, so the one-line read
     # already separates a pytest red from a lint red (the d-bdb035b6 incident:
     # two `smoke` reds fifteen minutes apart, unrelated remedies). The full
@@ -466,6 +468,19 @@ def _review_activity(branch: str, head: str, cwd: Optional[str]):
             None,
             {"probed": False, "path": None, "dirty": None, "head": None, "note": str(exc)},
         )
+
+
+def _github_merge_blockers(pr_json, rollup, cwd):
+    """GitHub's mergeStateStatus as named ready blockers; None when unasked."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+    if pr_json.get("mergeStateStatus") is None:
+        return None
+    try:
+        op = {k: pr_json.get(k) for k in ("mergeStateStatus", "baseRefName", "pr")}
+        op.update(op="status-merge-blocker", rollup=rollup, cwd=cwd)
+        return verb_call("authorized-merge", op, timeout=120)
+    except VerbUnavailable as exc:
+        return {"blockers": ["github_merge_state_unknown"], "source": str(exc)}
 
 
 def _ready_blockers(
@@ -912,6 +927,8 @@ def run_status(
         # wrong. A review that is RUNNING blocks whether or not one was ever
         # required.
         blockers.append(activity.blocker)
+    github_merge = None if is_terminal else _github_merge_blockers(pr_json, rollup, cwd)
+    blockers.extend((github_merge or {}).get("blockers") or [])
     # The operator-law overlay, through the SAME resolver the merge gate
     # applies at its own coverage verdict: a waiver clears exactly the
     # coverage conjuncts (never CI, never an optional finding), and the
@@ -1053,6 +1070,7 @@ def run_status(
         "green": green,
         "pr_state": pr_json.get("state"),
         "mergeable": pr_json.get("mergeable"),
+        "github_merge_state": github_merge,
         "checks": counts,
         # Red reads only: name the failing checks and, where the job log
         # reads, the failing step, its first error line, and the steps

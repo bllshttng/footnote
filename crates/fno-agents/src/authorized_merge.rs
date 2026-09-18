@@ -1347,6 +1347,20 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         );
         return (0, out, String::new());
     }
+    // The status ops are the pr-status fact readers riding this verb's
+    // payload, the same transport the hold and grant ops use:
+    // `{"op": "status-merge-blocker"|"status-failure-cause", ...}`.
+    if payload
+        .get("op")
+        .and_then(Value::as_str)
+        .is_some_and(|op| op.starts_with("status-"))
+    {
+        let out = crate::pr_status_facts::run_op(
+            payload.get("op").and_then(Value::as_str).unwrap_or(""),
+            &payload,
+        );
+        return (0, out, String::new());
+    }
     let request = match parse_request(&payload) {
         Ok(request) => request,
         Err(message) => return (2, String::new(), format!("authorized-merge: {message}\n")),
