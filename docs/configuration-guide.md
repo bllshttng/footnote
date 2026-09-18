@@ -192,7 +192,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `auto_merge.require_fresh_ci` | bool | `true` | advanced | Require green pull_request checks to have run against the current base tip. |
 | `auto_merge.conflict_resolution` | str | `opus` | never | Conflict-resolution agent for auto-merge rebases. |
 | `auto_merge.remediation` | str | `attempt` | never | Post-failure remediation policy for auto-merge. |
-| `auto_heal.enabled` | bool | `false` | advanced | Arm the pr-watch tick's heal phase: run the CI heal drive loop (pr-heal --all --apply, in Rust) over every red open PR each tick. Default false until the loop is measured on real PRs. |
+| `auto_heal.enabled` | bool | `false` | advanced | Arm the CI healer: each tick spawns one detached pr-heal --all --apply drive loop per project root, off the tick's own budget. Default false. Measured 2026-09-16 over 15 red open PRs: 1 push, 3 cancelled-run reruns, 11 escalations, 0 failures inherited from main. Arm with: fno config set auto_heal.enabled true. |
 | `pr_watch.enabled` | bool | `false` | advanced | Enable the global PR-state watcher daemon. |
 | `pr_watch.interval_seconds` | int | `600` | never | PR-watcher poll interval (seconds). |
 | `pr_watch.retries` | int | `3` | never | PR-watcher consecutive-failure park threshold. |
