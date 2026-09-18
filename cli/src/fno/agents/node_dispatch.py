@@ -120,9 +120,9 @@ def resolve_node_spawn(
     effective_verb: Optional[str] = None
     if not is_reconcile:
         effective_verb = node_effective_verb(node)
-    # x-aaaa: the verb code resolves (and refuses) BEFORE the resolver. The
-    # node's own declared verb is the last fallback: an out-of-family declared
-    # verb abstains from the table (effective_verb None) yet still launches.
+    # x-aaaa: the verb code resolves (and refuses) BEFORE the resolver; the
+    # node's declared verb is the last fallback (out-of-family abstains yet
+    # still launches).
     verb_code = "t" if is_reconcile else verb_code_for(
         effective_verb or node_verb
         or (str(node.get("dispatch_verb") or "").strip() or None)
@@ -205,10 +205,9 @@ def resolve_node_spawn(
     # One axis: `provider` is the harness under an older spelling, so it must
     # reach the resolver too, or the command follows the stage table instead.
     launch_axis = _launch_harness_axis(launch, node_cwd)
-    # The receipt names the RESOLVED verb; verb_source keeps the
-    # RAW state, canonicalized so receipt and command agree on the spelling.
-    # The node's declared verb is the last fallback before "builtin": an
-    # out-of-family declared verb abstains from the table yet still launches.
+    # The receipt names the RESOLVED verb; verb_source keeps the RAW state,
+    # canonicalized so receipt and command agree on the spelling. The node's
+    # declared verb is the last fallback before "builtin".
     receipt_verb = (
         effective_verb
         or node_verb
@@ -233,10 +232,8 @@ def resolve_node_spawn(
                 resolve_kwargs["command"]
             )
     else:
-        # the node's lifecycle context rides so the resolver derives; the
-        # node's DECLARED verb rides too - the resolver owns declared
-        # precedence (a declared target-family verb wins, out-of-family
-        # abstains to declared), so the spawn path must not strip it.
+        # The node's lifecycle context AND its declared verb ride so the
+        # resolver owns declared precedence; the spawn path must not strip it.
         if isinstance(node, dict):
             resolve_kwargs.update(_lifecycle_kwargs(node))
             declared = str(node.get("dispatch_verb") or "").strip() or None

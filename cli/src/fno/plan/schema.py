@@ -443,12 +443,9 @@ class PlanFrontmatter(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _fill_node_from_claims_synonym(cls, data: Any) -> Any:
-        # `claims` is the writer-side duplicate of `node` (see the field note
-        # above). One-release fallback, same shape as reconcile's
-        # _plan_link_id chain: a plan carrying only `claims:` validates with
-        # node filled from it, matching validate-plan.sh's node-then-claims
-        # read. Neither key still refuses - a plan bound to nothing has no
-        # claim to project.
+        # `claims` is the writer-side duplicate of `node` (field note above);
+        # one-release fallback matching validate-plan.sh's node-then-claims
+        # read. Neither key still refuses.
         if isinstance(data, dict) and not str(data.get("node") or "").strip():
             claims = data.get("claims")
             if isinstance(claims, str) and claims.strip():

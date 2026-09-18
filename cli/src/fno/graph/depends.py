@@ -189,21 +189,12 @@ def _collect_frontmatter_depends(plan_path: str) -> tuple[list[str], Path]:
 
     The canonical key is `blocked_by` (`fno do plan migrate-keys` RENAME);
     `depends_on` stays as a one-release fallback (the policy plan/schema.py
-    states), because plans written before the rename declare only it.
+    states). When both keys carry values, `blocked_by` wins and the ignored
+    key is named on stderr, so a half-migrated plan is loud rather than
+    silently halved.
 
-    Key precedence: `blocked_by` when it carries values, else `depends_on`.
-    When both keys carry values, `blocked_by` wins and the ignored key is
-    named on stderr, so a half-migrated plan is loud rather than silently
-    halved.
-
-    Value forms accepted in the frontmatter:
-    - Block list (preferred): the key followed by `- entry` lines.
-    - Inline YAML list: `blocked_by: [a, b]` or `blocked_by: []`.
-    - Scalar string: `blocked_by: ab-xxxxxxxx` or a single slug. Coerced
-      to a one-element list.
-
-    Complex inline forms (nested brackets, escaped commas) fall back to
-    a stderr warning + empty list rather than silently dropping edges.
+    Value forms: block list, inline YAML list, bare scalar; complex inline
+    forms warn + empty rather than dropping edges.
     """
     p = Path(plan_path)
     if p.is_file():
