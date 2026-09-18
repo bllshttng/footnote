@@ -147,9 +147,9 @@ export type AgentTranslation =
  * would fail agent resolution. A "provider/model" string is passed through.
  *
  * Restrictions: `disallowedTools` carries into opencode's disable-only tools
- * record (`{ name: false }`). An allowlist `tools` CANNOT be expressed there
- * — the record withholds only what it names false, everything unlisted stays
- * enabled — so a definition carrying one is refused outright rather than
+ * record (`{ name: false }`). An allowlist `tools` CANNOT be expressed there:
+ * the record withholds only what it names false, everything unlisted stays
+ * enabled, so a definition carrying one is refused outright rather than
  * registered as though it had asked for no restriction at all.
  */
 export function toOpencodeAgent(
@@ -287,24 +287,37 @@ function releaseReservation(key: string): void {
   for (const slot of reservations.values()) slot.delete(key)
 }
 
-/** Live children of one parent, straight from the server. `null` when the
- * read fails - an unreadable count is never read as headroom. */
-async function liveChildren(
-  client: SessionClient,
-  parentId: string,
-): Promise<Array<{ id?: string; parentID?: string }> | null> {
+/** Live children of one parent, straight from the server: a child is live
+ * while its latest assistant state is pending or running. A finished child
+ * stays a session row forever, so counting rows would fill the cap
+ * permanently. Returns `null` when any reconciliation read fails - an
+ * unreadable count is never read as headroom. */
+async function liveChildren(client: SessionClient, parentId: string): Promise<Set<string> | null> {
   const res = await client.session
     .list({})
     .catch(() => null)
   const rows = (res as { data?: Array<{ id?: string; parentID?: string }> } | null)?.data
   if (!Array.isArray(rows)) return null
-  return rows.filter((s) => s?.parentID === parentId)
+  const live = new Set<string>()
+  for (const row of rows) {
+    if (!row?.id || row.parentID !== parentId) continue
+    const id = row.id
+    const m = await client.session
+      .messages({ path: { id } })
+      .catch(() => null)
+    if (m === null || (m as { error?: unknown }).error) return null
+    const state = buildTaskResult(id, (m as { data?: ChildMessage[] }).data).state
+    if (state === "pending" || state === "running") live.add(id)
+  }
+  return live
 }
 
-function pendingNonceCount(parentId: string, ownToken: string): number {
+/** Reservations the live set does not already account for: pending nonces and
+ * children created after the list was read. */
+function pendingReservations(parentId: string, ownToken: string, liveIds: Set<string>): number {
   let n = 0
   for (const key of reservations.get(parentId)?.keys() ?? []) {
-    if (key !== ownToken && key.startsWith("nonce-")) n += 1
+    if (key !== ownToken && !liveIds.has(key)) n += 1
   }
   return n
 }
@@ -419,7 +432,7 @@ export function createTaskTool(deps: TaskDeps): ToolDefinition {
         release()
         return "error: capacity unknown (cannot read the live child set); no child created."
       }
-      const total = live.length + pendingNonceCount(parentKey, nonce)
+      const total = live.size + pendingReservations(parentKey, nonce, live)
       if (total >= MAX_CONCURRENCY) {
         release()
         return `error: concurrency limit reached (cap ${MAX_CONCURRENCY}, ${total} child delegations in flight). Wait for a slot.`
@@ -645,6 +658,10 @@ export function parseHookDecision(stdout: string): { deny: boolean; reason: stri
 
 type ProtectionOutcome = { denied: boolean; reason: string; reported: boolean }
 
+/** Process-wide report-once memory: a silent script is named on the first
+ * guarded tool call, never once per call. */
+const reportedSilent = new Set<string>()
+
 /** Run every protection script guarding `tool`; DENY wins over any allow. */
 export async function runProtections(
   tool: string,
@@ -656,12 +673,18 @@ export async function runProtections(
   const root = resolvePluginRoot()
   const payload = JSON.stringify(buildHookPayload(tool, sessionID, args, projectDir))
   let reported = false
+  const once = (key: string, line: string) => {
+    if (reportedSilent.has(key)) return
+    reportedSilent.add(key)
+    console.error(line)
+    reported = true
+  }
   for (const entry of protectionScriptsFor(tool)) {
     if (!root) {
-      if (!reported) {
-        console.error("[footnote] protection scripts unavailable (no plugin root resolved); tools run unprotected")
-        reported = true
-      }
+      once(
+        ":no-root",
+        "[footnote] protection scripts unavailable (no plugin root resolved); tools run unprotected",
+      )
       continue
     }
     let stdout = ""
@@ -672,11 +695,10 @@ export async function runProtections(
     }
     const d = parseHookDecision(stdout)
     if (d.deny) return { denied: true, reason: d.reason, reported }
-    if (!stdout.trim() && !reported) {
-      // A missing or timed-out script answers silence: reported once, never a
-      // silent block, and never once per tool call.
-      console.error(`[footnote] protection script ${entry.script} gave no decision; allowing`)
-      reported = true
+    if (!stdout.trim()) {
+      // A missing or timed-out script answers silence: reported once per
+      // script process-wide, never a silent block.
+      once(entry.script, `[footnote] protection script ${entry.script} gave no decision; allowing`)
     }
   }
   return { denied: false, reason: "", reported }

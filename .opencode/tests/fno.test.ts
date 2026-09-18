@@ -495,3 +495,34 @@ test("resolvePluginRoot reads the env chain and the plugin-root file", () => {
   expect(resolvePluginRoot({ CLAUDE_PLUGIN_ROOT: "/p2" })).toBe("/p2")
   expect(resolvePluginRoot({})).toBeNull()
 })
+
+test("a finished child frees its slot; a running one holds it (review fix)", async () => {
+  // Five children exist, but all read terminal: none counts against the cap.
+  const terminal = {
+    info: { role: "assistant", time: { created: 1, completed: 2 } },
+    parts: [{ type: "text", text: "done" }],
+  }
+  const client = mockClient({
+    list: async () => ({
+      data: Array.from({ length: 5 }, (_, i) => ({ id: `ses_live_${i}`, parentID: "ses_root" })),
+    }),
+    messages: async () => ({ data: [terminal] }),
+  })
+  const t = createTaskTool(baseDeps(client))
+  const out = await t.execute({ prompt: "x", category: "do" } as any, ctx)
+  expect(JSON.parse(out as string).state).toBe("completed")
+  // A child still running (no terminal state) counts against the cap.
+  const running = {
+    info: { role: "assistant", time: { created: 1 } },
+    parts: [],
+  }
+  const client2 = mockClient({
+    list: async () => ({
+      data: Array.from({ length: 5 }, (_, i) => ({ id: `ses_live_${i}`, parentID: "ses_root" })),
+    }),
+    messages: async () => ({ data: [running] }),
+  })
+  const t2 = createTaskTool(baseDeps(client2))
+  const refused = await t2.execute({ prompt: "x", category: "do" } as any, ctx)
+  expect(refused).toContain("concurrency limit reached")
+})

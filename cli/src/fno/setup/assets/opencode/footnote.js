@@ -255,6 +255,12 @@ export const FootnotePlugin = async ({ directory, worktree, client, $ }) => {
             .text()
         } catch (e) {
           console.error(`[footnote] distress-scan skipped (non-fatal): ${e}`)
+        } finally {
+          try {
+            unlinkSync(synth)
+          } catch {
+            // nothing to clean up / already gone
+          }
         }
       }
     },
