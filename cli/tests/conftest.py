@@ -1079,3 +1079,34 @@ def _door_binary_from_this_checkout(monkeypatch):
 
 
 _door_binary_pin_warned = False
+
+
+_FACADE_NAMES = (
+    "GRAPH_JSON",
+    "GRAPH_MD",
+    "GRAPH_HTML",
+    "GRAPH_ARCHIVE_JSON",
+    "LEDGER_JSON",
+    "BRIEFS_DIR",
+)
+
+
+@pytest.fixture(autouse=True)
+def _unbake_constants_facade():
+    """Undo the baked-facade trap fno.graph._constants documents.
+
+    ``monkeypatch.setattr(gc, "GRAPH_JSON", g)`` reads the current value
+    through the module ``__getattr__`` (which RESOLVES a real path) and
+    restores that resolved path as a concrete attribute on teardown, so
+    every later test in the process reads a dead tmp graph. The module doc
+    begs for ``setitem(vars(module), ...)``; dozens of sites use setattr
+    anyway. This deletes any facade name that became concrete during the
+    test, restoring lazy resolution for the whole process.
+    """
+    import fno.graph._constants as gc
+
+    baked = [name for name in _FACADE_NAMES if name in vars(gc)]
+    yield
+    for name in _FACADE_NAMES:
+        if name not in baked and name in vars(gc):
+            delattr(gc, name)
