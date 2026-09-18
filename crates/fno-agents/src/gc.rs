@@ -657,9 +657,10 @@ pub fn gc_sweep_release(
 pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSummary {
     // The settle plan is read-only, and the rehearsal subtracts it from the
     // graph read so the report shows the outcome the real pass would produce.
-    let planned = gc_sweep::plan_stale_do_rows(home);
+    let mut pr_reader = gc_sweep::gh_pr_state_reader();
+    let (planned, stamps) = gc_sweep::plan_settle(home, &mut pr_reader);
     let read = |h: &AgentsHome| {
-        gc_sweep::read_graph_entries(h).map(|g| gc_sweep::without_settled(g, &planned))
+        gc_sweep::read_graph_entries(h).map(|g| gc_sweep::without_settled(g, &planned, &stamps))
     };
     // Never emitted to in dry-run mode (the whole write+emit tail is skipped),
     // so an unused placeholder path satisfies the shared signature.

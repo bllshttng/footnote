@@ -82,6 +82,141 @@ pub(crate) fn additional_pr_open(extra: &Value, node_id: &str, primaries: &Prima
     })
 }
 
+/// One planned stamp: the node, the extra PR, and the recorded outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrStamp {
+    pub(crate) node: String,
+    pub(crate) number: i64,
+    pub(crate) url: Option<String>,
+    pub(crate) merge_status: &'static str,
+}
+
+/// A GitHub PR url's REST path: `https://github.com/<owner>/<repo>/pull/<n>`
+/// gives `repos/<owner>/<repo>/pulls/<n>`. Any other shape falls back to
+/// the caller's `{owner}/{repo}` placeholders.
+fn rest_path(url: &str) -> Option<String> {
+    let normalized = normalize_url(url);
+    let rest = normalized.strip_prefix("https://github.com/")?;
+    let mut segs = rest.split('/');
+    let owner = segs.next()?;
+    let repo = segs.next()?;
+    let kind = segs.next()?;
+    let n = segs.next()?;
+    if kind != "pull" || n.is_empty() {
+        return None;
+    }
+    Some(format!("repos/{owner}/{repo}/pulls/{n}"))
+}
+
+/// One GitHub read per unsettled extra on a held node, planned ahead of the
+/// settle. Only a done, merged node carrying an open do row is visited; a
+/// node with no `cwd` gets no read, and an entry with no number gets no
+/// path. `Merged` and `Closed` plan a stamp; `Open` and an unreadable
+/// answer plan nothing.
+pub(crate) fn plan_stamps(
+    entries: &[Value],
+    read: &mut dyn FnMut(&str, &str) -> Option<PrState>,
+) -> Vec<PrStamp> {
+    let mut stamps = Vec::new();
+    let primaries = primary_index(entries);
+    for entry in entries {
+        let Some(node_id) = crate::graph_store::entry_id(entry) else {
+            continue;
+        };
+        if entry.get("status").and_then(Value::as_str) != Some("done") {
+            continue;
+        }
+        if entry.get("merge_status").and_then(Value::as_str) != Some("merged") {
+            continue;
+        }
+        let has_open_do = entry
+            .get("sessions")
+            .and_then(Value::as_array)
+            .is_some_and(|rows| rows.iter().any(crate::graph_store::is_open_do_row));
+        if !has_open_do {
+            continue;
+        }
+        let Some(cwd) = entry.get("cwd").and_then(Value::as_str) else {
+            continue;
+        };
+        for extra in entry
+            .get("additional_prs")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if !additional_pr_open(extra, node_id, &primaries) {
+                continue;
+            }
+            let Some(number) = extra.get("number").and_then(Value::as_i64) else {
+                continue;
+            };
+            let url = extra.get("url").and_then(Value::as_str);
+            let path = url
+                .and_then(rest_path)
+                .unwrap_or_else(|| format!("repos/{{owner}}/{{repo}}/pulls/{number}"));
+            let Some(state) = read(&path, cwd) else {
+                continue;
+            };
+            let merge_status = match state {
+                PrState::Merged => "merged",
+                PrState::Closed => "closed",
+                PrState::Open => continue,
+            };
+            stamps.push(PrStamp {
+                node: node_id.to_string(),
+                number,
+                url: url.map(str::to_string),
+                merge_status,
+            });
+        }
+    }
+    stamps
+}
+
+/// Write planned stamps into rows in memory, for the dry run. The first
+/// matching entry per stamp wins; an already-settled entry is skipped.
+pub(crate) fn apply_stamps(entries: &mut [Value], stamps: &[PrStamp]) {
+    for stamp in stamps {
+        for entry in entries.iter_mut() {
+            if crate::graph_store::entry_id(entry) != Some(stamp.node.as_str()) {
+                continue;
+            }
+            let Some(extras) = entry
+                .get_mut("additional_prs")
+                .and_then(Value::as_array_mut)
+            else {
+                break;
+            };
+            for extra in extras {
+                if extra.get("number").and_then(Value::as_i64) != Some(stamp.number) {
+                    continue;
+                }
+                if let Some(want) = &stamp.url {
+                    let got = extra.get("url").and_then(Value::as_str).map(normalize_url);
+                    if got.as_deref() != Some(normalize_url(want).as_str()) {
+                        continue;
+                    }
+                }
+                if matches!(
+                    extra.get("merge_status").and_then(Value::as_str),
+                    Some("merged") | Some("closed")
+                ) {
+                    continue;
+                }
+                if let Some(obj) = extra.as_object_mut() {
+                    obj.insert(
+                        "merge_status".to_string(),
+                        Value::String(stamp.merge_status.to_string()),
+                    );
+                }
+                break;
+            }
+            break;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +306,131 @@ mod tests {
     fn normalize_trims_case_and_one_slash_only() {
         assert_eq!(normalize_url(" https://X.io/R/ "), "https://x.io/r");
         assert_eq!(normalize_url("https://x.io/r//"), "https://x.io/r/");
+    }
+
+    #[test]
+    fn plan_reads_once_per_unsettled_extra_and_stamps_the_answer() {
+        let entries = vec![
+            node(
+                "x-spec",
+                "https://github.com/o/r/pull/2042",
+                json!("merged"),
+            ),
+            json!({
+                "id": "x-hold", "status": "done", "merge_status": "merged",
+                "cwd": "/repo/wt",
+                "sessions": [{"phase": "do", "harness": "claude", "session_id": "s1",
+                              "started_at": "2026-09-01T01:00:00Z"}],
+                "additional_prs": [
+                    {"number": 1523, "url": "https://github.com/o/r/pull/1523"}
+                ]
+            }),
+        ];
+        let mut calls: Vec<(String, String)> = Vec::new();
+        let mut read = |path: &str, cwd: &str| {
+            calls.push((path.to_string(), cwd.to_string()));
+            Some(PrState::Merged)
+        };
+        let stamps = plan_stamps(&entries, &mut read);
+        assert_eq!(stamps.len(), 1);
+        assert_eq!(stamps[0].node, "x-hold".to_string());
+        assert_eq!(stamps[0].number, 1523);
+        assert_eq!(stamps[0].merge_status, "merged");
+        assert_eq!(
+            stamps[0].url.as_deref(),
+            Some("https://github.com/o/r/pull/1523")
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0],
+            ("repos/o/r/pulls/1523".to_string(), "/repo/wt".to_string())
+        );
+    }
+
+    #[test]
+    fn plan_skips_node_without_cwd_and_entry_without_number() {
+        let entries = vec![
+            json!({
+                "id": "x-nocwd", "status": "done", "merge_status": "merged",
+                "sessions": [{"phase": "do", "harness": "claude", "session_id": "s1",
+                              "started_at": "2026-09-01T01:00:00Z"}],
+                "additional_prs": [{"number": 5}]
+            }),
+            json!({
+                "id": "x-nonum", "status": "done", "merge_status": "merged",
+                "cwd": "/repo/wt",
+                "sessions": [{"phase": "do", "harness": "claude", "session_id": "s2",
+                              "started_at": "2026-09-01T01:00:00Z"}],
+                "additional_prs": [{"note": "no number"}]
+            }),
+        ];
+        let mut calls = 0;
+        let mut read = |_path: &str, _cwd: &str| {
+            calls += 1;
+            Some(PrState::Merged)
+        };
+        let stamps = plan_stamps(&entries, &mut read);
+        assert!(stamps.is_empty());
+        assert_eq!(calls, 0, "no cwd or no number, no read");
+    }
+
+    #[test]
+    fn plan_stamps_closed_and_lets_open_and_none_go() {
+        let held = json!({
+            "id": "x-hold", "status": "done", "merge_status": "merged",
+            "cwd": "/repo/wt",
+            "sessions": [{"phase": "do", "harness": "claude",
+                          "session_id": "s1", "started_at": "2026-09-01T01:00:00Z"}],
+            "additional_prs": [
+                {"number": 7, "url": "https://github.com/o/r/pull/7"},
+                {"number": 8, "url": "https://github.com/o/r/pull/8"},
+                {"number": 9, "url": "https://github.com/o/r/pull/9"}
+            ]
+        });
+        let mut answers: HashMap<String, Option<PrState>> = HashMap::new();
+        answers.insert("repos/o/r/pulls/7".to_string(), Some(PrState::Closed));
+        answers.insert("repos/o/r/pulls/8".to_string(), Some(PrState::Open));
+        answers.insert("repos/o/r/pulls/9".to_string(), None);
+        let entries = vec![held];
+        let mut read = |path: &str, _cwd: &str| answers.get(path).copied().flatten();
+        let stamps = plan_stamps(&entries, &mut read);
+        assert_eq!(stamps.len(), 1);
+        assert_eq!(stamps[0].number, 7);
+        assert_eq!(stamps[0].merge_status, "closed");
+    }
+
+    #[test]
+    fn apply_writes_only_the_matching_entry_and_skips_settled() {
+        let mut entries = vec![json!({
+            "id": "x-hold", "status": "done", "merge_status": "merged",
+            "additional_prs": [
+                {"number": 1522},
+                {"number": 1523, "merge_status": "merged"}
+            ]
+        })];
+        let stamps = vec![
+            PrStamp {
+                node: "x-hold".into(),
+                number: 1523,
+                url: None,
+                merge_status: "merged",
+            },
+            PrStamp {
+                node: "x-hold".into(),
+                number: 1522,
+                url: None,
+                merge_status: "merged",
+            },
+            PrStamp {
+                node: "x-absent".into(),
+                number: 1,
+                url: None,
+                merge_status: "merged",
+            },
+        ];
+        apply_stamps(&mut entries, &stamps);
+        let extras = entries[0]["additional_prs"].as_array().unwrap();
+        assert_eq!(extras[0]["merge_status"], json!("merged"));
+        assert_eq!(extras[1]["merge_status"], json!("merged"));
     }
 }
