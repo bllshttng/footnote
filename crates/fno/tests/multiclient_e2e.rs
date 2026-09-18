@@ -499,10 +499,21 @@ fn multiclient_kill_server_live_stale_and_missing() {
     c.input(b"echo pid=$$#\r");
     let child_pid: i32 = c.wait(15, "pane pid", |c| extract_pid(&c.pane_text(pane)));
 
-    // Live kill: exit 0, the attached client is Byed, the socket vanishes,
-    // the server process exits, and the pane child is dead (AC4-UI/FR).
+    // Live kill, unkept pane: the measure-first refusal names the pane and
+    // exits non-zero; `--end-unkept` is the deliberate override that then
+    // kills the server AND the pane child (AC4-UI/FR under the new
+    // contract; keeper-hosted survival is the matrix's proof).
     let out = fno_cmd(&scratch, &["mux", "kill-server", "main"]);
-    assert!(out.status.success(), "live kill exits 0: {out:?}");
+    assert!(
+        !out.status.success(),
+        "an unkept pane refuses the kill: {out:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unkept pane"),
+        "the refusal names the unkept pane: {out:?}"
+    );
+    let out = fno_cmd(&scratch, &["mux", "kill-server", "main", "--end-unkept"]);
+    assert!(out.status.success(), "end-unkept kill exits 0: {out:?}");
     // Bounded wait for the kill to land: the Bye(killed) frame OR the socket
     // closing, whichever wins the race (the two are unordered). Capped well
     // under the job timeout; a timeout fails with a named reason + state dump.
@@ -704,12 +715,14 @@ fn concurrent_graft_one_commits_one_refuses() {
                     binding: LayoutBinding::Anchor,
                     cwd: None,
                     portal: None,
+                    pane_id: None,
                 },
                 LayoutSlot {
                     name: "fresh".into(),
                     binding: LayoutBinding::Shell,
                     cwd: None,
                     portal: None,
+                    pane_id: None,
                 },
             ],
         }

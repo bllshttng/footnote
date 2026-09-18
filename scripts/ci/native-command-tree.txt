@@ -10,7 +10,7 @@ mux block	group	visible	-	-
 mux block annotate	leaf	visible	-	-
 mux block pipe	leaf	visible	-	-
 mux doctor	leaf	visible	-	--json,-J
-mux kill-server	leaf	visible	-	--json,-J
+mux kill-server	leaf	visible	-	--all,--end-unkept,--json,-J,--stale-idle
 mux layout	group	visible	-	!--session,--json,--server
 mux layout apply	leaf	visible	-	-
 mux layout get	leaf	visible	-	-

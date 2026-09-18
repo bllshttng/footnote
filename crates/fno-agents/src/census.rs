@@ -755,7 +755,7 @@ fn mux_rows(table: &[ProcRow]) -> Vec<Value> {
             .get("session")
             .and_then(Value::as_str)
             .unwrap_or("unnamed");
-        let panes = r.get("panes").and_then(Value::as_u64).unwrap_or(0);
+        let _panes = r.get("panes").and_then(Value::as_u64).unwrap_or(0);
         let pid = r.get("pid").and_then(Value::as_u64).map(|p| p as u32);
         let (verdict, evidence) = match pid {
             Some(pid) => {
