@@ -84,6 +84,8 @@ pub enum UpgradeOutcome {
         model_context_window_before: Option<String>,
         model_context_window_after: Option<String>,
     },
+    /// No codex CLI on the machine: nothing to own, nothing to upgrade.
+    Absent,
 }
 
 /// The snapshot refusal: `Some(reason)` when ANY thread blocks mutation.
@@ -199,6 +201,12 @@ fn codex_bin() -> Result<PathBuf, String> {
 
 /// The transaction entry. Lock, re-read, snapshot, restart, verify.
 pub async fn codex_daemon_upgrade_transaction() -> UpgradeOutcome {
+    // No codex CLI on the box: there is no shared daemon this machine could
+    // own, and a held line for a daemon that cannot exist is noise. Skipped,
+    // said once, plainly.
+    if crate::codex_daemon_readiness::codex_cli_path().is_none() {
+        return UpgradeOutcome::Absent;
+    }
     let adapter = CodexDaemonAdapter::from_environment();
     let _lock = match crate::harness_daemon::try_acquire_lock(&adapter.lock_path()) {
         Some(lock) => lock,
@@ -446,11 +454,21 @@ mod tests {
 /// swap and the only mutation this transaction performs. Blocking call; the
 /// vendor verb is expected to be prompt.
 fn vendor_restart(codex: &Path) -> Result<(), String> {
-    let output = std::process::Command::new(codex)
-        .args(["app-server", "daemon", "restart"])
-        .env("CODEX_HOME", codex_home())
-        .output()
-        .map_err(|e| format!("run codex: {e}"))?;
+    // The vendor verb is a blocking subprocess and the transaction holds the
+    // provider flock across it inside the async runtime, so the wait runs on
+    // its own thread: a slow restart parks that thread, never a runtime
+    // worker.
+    let codex = codex.to_path_buf();
+    let waited = std::thread::spawn(move || {
+        std::process::Command::new(codex)
+            .args(["app-server", "daemon", "restart"])
+            .env("CODEX_HOME", codex_home())
+            .output()
+            .map_err(|e| format!("run codex: {e}"))
+    });
+    let output = waited
+        .join()
+        .map_err(|_| "vendor restart thread panicked".to_string())??;
     if output.status.success() {
         Ok(())
     } else {

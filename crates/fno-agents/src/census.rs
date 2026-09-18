@@ -52,25 +52,29 @@ fn codex_app_server_rows() -> Vec<Value> {
     };
     let health = if readiness.healthy { "healthy" } else { "down" };
     let evidence = format!(
-        "installed {}, live {}, {}",
+        "installed {}, live {}, {}, home {}",
         readiness
             .installed_version
             .as_deref()
             .unwrap_or("unreadable"),
         readiness.live_version.as_deref().unwrap_or("unreadable"),
         health,
+        readiness.codex_home,
     );
+    // No exe: the readiness reader knows the pid, never the binary path, and
+    // the exe-position field must not carry a directory and read like one.
     let mut row = row(
         "codex-app-server",
         readiness.pid,
         Some("codex-app-server".to_string()),
-        readiness.codex_home.clone().into(),
+        None,
         readiness.start_token.map(|t| t as f64),
         verdict,
         evidence.as_str(),
     );
     row["installed_version"] = json!(readiness.installed_version);
     row["live_version"] = json!(readiness.live_version);
+    row["codex_home"] = json!(readiness.codex_home);
     vec![row]
 }
 

@@ -65,6 +65,11 @@ pub(crate) fn render_upgrade(
 ) -> (Vec<String>, Vec<String>, bool) {
     use crate::codex_daemon_upgrade::UpgradeOutcome;
     match outcome {
+        UpgradeOutcome::Absent => (
+            Vec::new(),
+            vec!["fno agents restart: no codex CLI on this machine; the shared-daemon upgrade leg is skipped.".to_string()],
+            false,
+        ),
         UpgradeOutcome::ReusedCurrent { installed, live } => {
             let say = format!(
                 "fno agents restart: codex app-server reused (installed {}, live {}).",
