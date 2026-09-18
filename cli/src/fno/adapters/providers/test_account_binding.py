@@ -273,18 +273,48 @@ def test_bearer_lane_defers_to_the_per_bearer_verdict(
     assert got.status == binding.MISMATCH
 
 
-def test_bearer_lane_refuses_a_shared_slot_holding_two_credentials(
+def test_bearer_lane_attributes_a_shared_slot_holding_one_principal(
+    store: Path, monkeypatch
+) -> None:
+    """A daemon adds a second blob for the SAME account; counting blobs read
+    one account twice and hid the operator's own usage (x-aff9)."""
+    record = _record("makers")
+    _bind(store, "makers", MAKERS)
+    proven = _serve(monkeypatch, {"t-a": MAKERS, "t-b": MAKERS})
+    monkeypatch.setattr(
+        managed, "canonical_slot_blobs", lambda _c: [_blob("t-a"), _blob("t-b")]
+    )
+    seen: list[str] = []
+
+    def verdict(cli, rid, root, bearer, **kw):
+        seen.append(bearer)
+        return "match"
+
+    monkeypatch.setattr(managed, "bearer_principal_verdict", verdict)
+
+    got = binding.resolve_account_binding(
+        record, root=store, bearer="tok-abc", by_id={"makers": record}
+    )
+
+    assert len(proven) == 2
+    assert seen == ["tok-abc"]
+    assert got.status == binding.MATCHED
+    assert got.matched_record == "makers"
+
+
+def test_bearer_lane_refuses_a_shared_slot_holding_two_principals(
     store: Path, monkeypatch
 ) -> None:
     record = _record("makers")
     _bind(store, "makers", MAKERS)
+    _serve(monkeypatch, {"t-a": MAKERS, "t-b": READYRULE})
     monkeypatch.setattr(
-        managed, "canonical_slot_blobs", lambda _c: [_blob("a"), _blob("b")]
+        managed, "canonical_slot_blobs", lambda _c: [_blob("t-a"), _blob("t-b")]
     )
     monkeypatch.setattr(
         managed,
         "bearer_principal_verdict",
-        lambda *a, **k: pytest.fail("a two-credential slot must settle offline"),
+        lambda *a, **k: pytest.fail("two principals must refuse before the bearer"),
     )
 
     got = binding.resolve_account_binding(
@@ -293,6 +323,29 @@ def test_bearer_lane_refuses_a_shared_slot_holding_two_credentials(
 
     assert got.status == binding.AMBIGUOUS
     assert got.reason == "ambiguous-slot"
+
+
+def test_bearer_lane_reports_an_unprovable_blob_as_unknown_not_ambiguous(
+    store: Path, monkeypatch
+) -> None:
+    record = _record("makers")
+    _bind(store, "makers", MAKERS)
+    _serve(monkeypatch, {"t-a": MAKERS})
+    monkeypatch.setattr(
+        managed, "canonical_slot_blobs", lambda _c: [_blob("t-a"), _blob("t-b")]
+    )
+    monkeypatch.setattr(
+        managed,
+        "bearer_principal_verdict",
+        lambda *a, **k: pytest.fail("an unresolved blob must settle before the bearer"),
+    )
+
+    got = binding.resolve_account_binding(
+        record, root=store, bearer="tok-abc", by_id={"makers": record}
+    )
+
+    assert got.status == binding.UNKNOWN
+    assert got.reason == "profile-unavailable"
 
 
 def test_a_cached_binding_reports_when_it_was_proven(store: Path, monkeypatch) -> None:
