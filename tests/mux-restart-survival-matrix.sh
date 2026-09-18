@@ -494,3 +494,58 @@ if [[ -n "$RED_ROWS" ]]; then
     exit 1
 fi
 echo "PASS: every row kept its child pid and its counter across all three restarts; the portal held its seat and its single viewer"
+
+# ── the unkept refusal: a missing keeper binary costs the pane nothing ───
+# A shell still opens (inline fallback, marked unkept); kill-server refuses
+# while it is live, naming the pane, the child, and the flag; --end-unkept
+# proceeds.
+echo "[unkept] pointing FNO_AGENTS_WORKER_BIN at a missing binary"
+UNKEPT_SESSION="$SESSION-unkept"
+UNKEPT_SOCK="$MUX_DIR/$UNKEPT_SESSION.sock"
+FNO_AGENTS_WORKER_BIN="$TMP_DIR/no-such-keeper" \
+    "$MUX_BIN" mux server --session "$UNKEPT_SESSION" >>"$TMP_DIR/unkept-server.log" 2>&1 &
+UNKEPT_SERVER_PID=$!
+for _ in {1..100}; do
+    if [[ -S "$UNKEPT_SOCK" ]]; then break; fi
+    sleep 0.1
+done
+python3 "$ATTACH_CLIENT" "$UNKEPT_SOCK" "$TMP_DIR/repo" >/dev/null 2>&1 || true
+sleep 0.5
+"$MUX_BIN" mux tab create --session "$UNKEPT_SESSION" >/dev/null 2>&1 || true
+sleep 0.5
+UNKEPT_PANE="$("$MUX_BIN" mux pane ls --session "$UNKEPT_SESSION" --json | python3 -c '
+import json, sys
+rows = json.load(sys.stdin)
+assert rows, "the shell pane never opened"
+print(rows[0]["pane_id"])
+')"
+UNKEPT_CHILD="$("$MUX_BIN" mux pane ls --session "$UNKEPT_SESSION" --json | python3 -c '
+import json, sys
+rows = json.load(sys.stdin)
+print(rows[0].get("child_pid") or 0)
+')"
+if [[ "$UNKEPT_CHILD" == "0" ]]; then
+    echo "FAIL: the unkept shell never opened" >&2
+    exit 1
+fi
+echo "[unkept] shell opened as pane $UNKEPT_PANE child $UNKEPT_CHILD despite the missing keeper"
+"$MUX_BIN" mux kill-server "$UNKEPT_SESSION" >/dev/null 2>&1 && {
+    echo "FAIL: kill-server proceeded past a live unkept pane" >&2
+    exit 1
+}
+"$MUX_BIN" mux pane ls --session "$UNKEPT_SESSION" --json >/dev/null 2>&1 || {
+    echo "FAIL: the refusal killed the server anyway" >&2
+    exit 1
+}
+echo "[unkept] kill-server refused while pane $UNKEPT_PANE child $UNKEPT_CHILD is live"
+"$MUX_BIN" mux kill-server "$UNKEPT_SESSION" --end-unkept >/dev/null 2>&1 || {
+    echo "FAIL: --end-unkept still refused" >&2
+    exit 1
+}
+if [[ -S "$UNKEPT_SOCK" ]]; then
+    echo "FAIL: --end-unkept did not end the server" >&2
+    exit 1
+fi
+kill -9 "$UNKEPT_SERVER_PID" 2>/dev/null || true
+wait "$UNKEPT_SERVER_PID" 2>/dev/null || true
+echo "PASS-UNKEPT: the fallback opened a shell unkept; kill-server refused, --end-unkept proceeded"

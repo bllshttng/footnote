@@ -62,6 +62,7 @@ mod server_axis;
 pub use crate::cli_args::{BlockAnnotateArgs, BlockPipeArgs, MuxCommon};
 
 mod block_args;
+pub mod kill_policy;
 mod pane_args;
 use block_args::{parse_block_annotate, parse_block_args};
 use clap::Parser as _;
@@ -804,7 +805,7 @@ const SIGKILL_GRACE: Duration = Duration::from_secs(1);
 /// subsystem it recovers. Every run prints which rung ended it, and an
 /// unrecoverable state names the next action instead of leaving a dead `&&`
 /// chain with no hint.
-pub fn kill_server(session: &str, json: bool) -> i32 {
+pub fn kill_server(session: &str, json: bool, end_unkept: bool) -> i32 {
     let sock = match proto::socket_path(session) {
         Ok(p) => p,
         Err(e) => {
@@ -816,24 +817,89 @@ pub fn kill_server(session: &str, json: bool) -> i32 {
         eprintln!("fno: no server for session {session:?}");
         return EXIT_ERROR;
     }
+    // Measure BEFORE any signal: the refusal must fire while every pane is
+    // still live. A wedged server answers no `pane ls` and cannot be
+    // measured - keep today's escalation ladder for it and say the pane set
+    // was unmeasured. A recovery verb must not depend on the subsystem it
+    // recovers.
+    let measured = kill_policy::measure_panes(session).ok();
+    if let Some(panes) = &measured {
+        let unkept: Vec<&kill_policy::PaneSnapshot> =
+            panes.iter().filter(|p| !p.is_kept()).collect();
+        if !unkept.is_empty() && !end_unkept {
+            let refusal = kill_policy::unkept_refusal(session, &unkept);
+            eprintln!("fno: {refusal}");
+            return EXIT_ERROR;
+        }
+    }
     let outcome = kill_server_inner(session, &sock);
     match outcome.path {
         KillPath::Unrecoverable => eprintln!("{}", outcome.note),
         _ => {
-            // On success `--json` prints `{session, killed, note, path}`;
-            // errors stay on stderr (mirrors the pane verbs' json/error split).
+            // The receipt names who was preserved and who ended: a kept pane
+            // outlives the kill (its keeper re-adopts it into the next
+            // server); an unkept one died with it. Empty arrays and an
+            // unmeasured note keep the wedge case honest.
+            let (preserved, ended, unmeasured) = match &measured {
+                Some(panes) => {
+                    let preserved: Vec<_> = panes
+                        .iter()
+                        .filter(|p| p.is_kept())
+                        .map(|p| p.to_json())
+                        .collect();
+                    let ended: Vec<_> = panes
+                        .iter()
+                        .filter(|p| !p.is_kept())
+                        .map(|p| p.to_json())
+                        .collect();
+                    (preserved, ended, false)
+                }
+                None => (Vec::new(), Vec::new(), true),
+            };
+            let mut note = outcome.note.clone();
+            if unmeasured {
+                note.push_str(" (the pane set was unmeasured)");
+            }
             if json {
                 println!(
                     "{}",
                     serde_json::json!({
                         "session": session,
                         "killed": true,
-                        "note": outcome.note,
+                        "note": note,
                         "path": outcome.path.json_tag(),
+                        "preserved": preserved,
+                        "ended": ended,
                     })
                 );
             } else {
-                println!("{}", outcome.note);
+                println!("{}", note);
+                for pane in preserved {
+                    println!(
+                        "preserved: pane {} child {} keeper {} ({})",
+                        pane["pane_id"].as_u64().unwrap_or(0),
+                        pane["child_pid"]
+                            .as_u64()
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "?".into()),
+                        pane["keeper_pid"]
+                            .as_u64()
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "?".into()),
+                        pane["name"].as_str().unwrap_or("unnamed"),
+                    );
+                }
+                for pane in ended {
+                    println!(
+                        "ended: pane {} child {} ({})",
+                        pane["pane_id"].as_u64().unwrap_or(0),
+                        pane["child_pid"]
+                            .as_u64()
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "?".into()),
+                        pane["name"].as_str().unwrap_or("unnamed"),
+                    );
+                }
             }
         }
     }
@@ -845,6 +911,138 @@ pub fn kill_server(session: &str, json: bool) -> i32 {
 /// request the connected server never answered - enter the same escalation
 /// ladder instead of refusing, because that is exactly the state the verb
 /// exists for.
+/// `fno mux kill-server --stale-idle | --all`: partition every live session
+/// with the shared pure partition, then kill each target with the SAME
+/// unkept refusal and receipt the named form carries. A refusal keeps the
+/// run going to the next session; wedged rows are named failures with their
+/// log paths, never targets. Under `--json` one object: `restarted`,
+/// `spared`, `wedged`, `other`, `refused`, and per session the `preserved`
+/// and `ended` arrays.
+pub fn kill_selector(selector: kill_policy::Selector, json: bool) -> i32 {
+    let rows: Vec<kill_policy::LsRow> = match session_rows() {
+        Ok(rows) => rows
+            .iter()
+            .filter_map(|row| {
+                let stale = row.wire_stale();
+                let json_row = session_row_json(row);
+                kill_policy::LsRow::parse(&json_row)
+                    // The LsRow::parse contract needs `state`; carry the
+                    // probed staleness through for live rows.
+                    .map(|mut parsed| {
+                        if stale {
+                            parsed.stale = true;
+                        }
+                        parsed
+                    })
+            })
+            .collect(),
+        Err(e) => {
+            eprintln!("fno: {e}");
+            return EXIT_ERROR;
+        }
+    };
+    let partition = kill_policy::partition(&rows);
+    let wedged: Vec<(String, Option<String>)> = partition.wedged.clone();
+    let targets = kill_policy::selector_targets(selector, &partition);
+    let mut summary = serde_json::json!({
+        "restarted": [],
+        "spared": partition.stale_with_panes,
+        "wedged": partition.wedged.iter().map(|(s, _)| s.clone()).collect::<Vec<_>>(),
+        "other": partition.other,
+        "refused": [],
+        "sessions": [],
+    });
+    let mut exit = EXIT_OK;
+    for session in &targets {
+        let sock = match proto::socket_path(session) {
+            Ok(p) => p,
+            Err(_) => {
+                exit = EXIT_ERROR;
+                continue;
+            }
+        };
+        let measured = kill_policy::measure_panes(session).ok();
+        if let Some(panes) = &measured {
+            let unkept: Vec<&kill_policy::PaneSnapshot> =
+                panes.iter().filter(|p| !p.is_kept()).collect();
+            if !unkept.is_empty() {
+                let refusal = kill_policy::unkept_refusal(session, &unkept);
+                eprintln!("fno: {refusal}");
+                summary["refused"]
+                    .as_array_mut()
+                    .expect("array")
+                    .push(serde_json::json!(session));
+                summary["sessions"]
+                    .as_array_mut()
+                    .expect("array")
+                    .push(serde_json::json!({
+                        "session": session,
+                        "killed": false,
+                        "refusal": refusal,
+                    }));
+                exit = EXIT_ERROR;
+                continue;
+            }
+        }
+        let outcome = kill_server_inner(session, &sock);
+        if matches!(outcome.path, KillPath::Unrecoverable) {
+            eprintln!("{}", outcome.note);
+            exit = EXIT_ERROR;
+        }
+        let (preserved, ended) = match &measured {
+            Some(panes) => (
+                panes
+                    .iter()
+                    .filter(|p| p.is_kept())
+                    .map(|p| p.to_json())
+                    .collect::<Vec<_>>(),
+                panes
+                    .iter()
+                    .filter(|p| !p.is_kept())
+                    .map(|p| p.to_json())
+                    .collect::<Vec<_>>(),
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        summary["restarted"]
+            .as_array_mut()
+            .expect("array")
+            .push(serde_json::json!(session));
+        summary["sessions"]
+            .as_array_mut()
+            .expect("array")
+            .push(serde_json::json!({
+                "session": session,
+                "killed": true,
+                "preserved": preserved,
+                "ended": ended,
+            }));
+    }
+    if json {
+        println!("{summary}");
+    } else {
+        for w in &wedged {
+            let (name, log) = (
+                w.0.as_str(),
+                w.1.as_deref().unwrap_or("(server log path unknown)"),
+            );
+            eprintln!(
+                "fno: mux session '{name}' is WEDGED (holds its socket but is not accepting connections). \
+`fno mux kill-server {name}` recovers it (escalates to SIGTERM/SIGKILL; its log: {log})."
+            );
+        }
+        if !partition.other.is_empty() {
+            eprintln!(
+                "fno: {} non-live mux row(s) (not restarted): {:?}",
+                partition.other.len(),
+                partition.other
+            );
+        }
+        println!("done");
+    }
+    exit
+}
+
 fn kill_server_inner(session: &str, sock: &Path) -> KillOutcome {
     let stream = match proto::connect_unix_timeout(sock, PROBE_TIMEOUT) {
         Ok(s) => s,
@@ -6332,14 +6530,14 @@ mod tests {
         // session uses resolves to a socket that does not exist -> exit 1.
         // The full live/stale matrix runs e2e against FNO_MUX_DIR-scoped
         // servers in 3.6.
-        let code = kill_server(&format!("fno-test-absent-{}", std::process::id()), false);
+        let code = kill_server(&format!("fno-test-absent-{}", std::process::id()), false, false);
         assert_eq!(code, EXIT_ERROR, "missing socket must exit 1");
     }
 
     #[test]
     fn mux_kill_server_invalid_name_is_usage_exit_2() {
         assert_eq!(
-            kill_server("../evil", false),
+            kill_server("../evil", false, false),
             EXIT_USAGE,
             "validation precedes any I/O"
         );

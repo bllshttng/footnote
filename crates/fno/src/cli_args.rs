@@ -65,12 +65,21 @@ pub enum MuxCmd {
         #[command(flatten)]
         json: JsonOnly,
     },
-    /// `mux kill-server [<name>] [--json]`
+    /// `mux kill-server [<name>] [--end-unkept | --stale-idle | --all] [--json]`
     KillServer {
         /// Optional server name (default resolution: flag > env > default)
         name: Option<String>,
         #[command(flatten)]
         json: JsonOnly,
+        /// End live panes no keeper holds (otherwise a kill refuses)
+        #[arg(long)]
+        end_unkept: bool,
+        /// Kill every live stale-wire session hosting no live pane
+        #[arg(long)]
+        stale_idle: bool,
+        /// Kill every live session
+        #[arg(long)]
+        all: bool,
     },
     /// `mux shell-init [<shell>] [--json]`
     ShellInit {
@@ -149,6 +158,30 @@ pub enum MuxCmd {
         #[command(subcommand)]
         op: WorkspaceOp,
     },
+}
+
+/// The kill-server request the role carries: a NAME with the break-glass
+/// flags, or one selector over the whole session table.
+#[derive(Debug, PartialEq, Eq)]
+pub struct KillRequest {
+    pub name: Option<String>,
+    pub json: bool,
+    pub end_unkept: bool,
+    pub stale_idle: bool,
+    pub all: bool,
+}
+
+impl KillRequest {
+    /// The named form with every selector off.
+    pub fn simple(name: Option<&str>, json: bool) -> Self {
+        KillRequest {
+            name: name.map(str::to_string),
+            json,
+            end_unkept: false,
+            stale_idle: false,
+            all: false,
+        }
+    }
 }
 
 /// `mux block`'s operation set.
@@ -1028,7 +1061,10 @@ mod tests {
             FrontDoor::Mux(MuxParsed {
                 cmd: MuxCmd::KillServer {
                     name: Some("work".into()),
-                    json: JsonOnly { json: true }
+                    json: JsonOnly { json: true },
+                    end_unkept: false,
+                    stale_idle: false,
+                    all: false,
                 }
             })
         );
@@ -1037,7 +1073,10 @@ mod tests {
             FrontDoor::Mux(MuxParsed {
                 cmd: MuxCmd::KillServer {
                     name: Some("--weird".into()),
-                    json: JsonOnly { json: false }
+                    json: JsonOnly { json: false },
+                    end_unkept: false,
+                    stale_idle: false,
+                    all: false,
                 }
             })
         );
