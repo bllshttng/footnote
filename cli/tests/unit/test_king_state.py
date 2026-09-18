@@ -174,6 +174,9 @@ def test_coronation_defaults_to_the_owner_repositories_state_root(monkeypatch, t
     from fno.paths import space_dir
 
     assert path == space_dir(owner) / "kings" / "x-f3d0.md"
+    # owner_pid named the crowning CLI's pid and read false in both
+    # directions; a manifest keys its holder on harness_session_id alone.
+    assert "owner_pid" not in path.read_text()
 
 
 def test_cleanup_does_not_delete_a_successors_refreshed_manifest(tmp_path):
