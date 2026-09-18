@@ -67,7 +67,11 @@ from fno.config._dispatch_verbs import is_verb_seed
 from fno.agents.lane_heal import lane_heal as _lane_heal
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
-from fno.agents.keeper_thread import complete_launch_argv, mint_session_id
+from fno.agents.keeper_thread import (
+    _mint_thread_session_id,
+    complete_launch_argv,
+    mint_session_id,
+)
 from fno.harness_names import unknown_thread_harness_message
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.reachability import mux_ref_names_a_pane
@@ -956,36 +960,6 @@ def _keeper_identify(sock: Path, timeout_sec: float = 10.0) -> dict:
             last_err = exc
         time.sleep(0.05)
     raise TimeoutError(f"no keeper answered Identify on {sock}: {last_err}")
-
-
-def _mint_thread_session_id(
-    harness: str,
-    cwd: Path,
-    requested: Optional[str] = None,
-    *,
-    model: Optional[str] = None,
-    effort: Optional[str] = None,
-    permission_mode: Optional[str] = None,
-    yolo: bool = False,
-) -> str:
-    """The harness session id a keeper thread launches on, fixed BEFORE launch.
-
-    The per-harness shapes live in :func:`fno.agents.keeper_thread.
-    mint_session_id`; the caller-assigned default is here because a UUIDv4 is
-    not a harness fact. The launch axes ride along because a harness whose
-    mint is a real model turn (agy) launches it on the spawn's selected
-    model, effort and permission posture.
-    """
-    minted = mint_session_id(
-        harness,
-        cwd,
-        requested,
-        model=model,
-        effort=effort,
-        permission_mode=permission_mode,
-        yolo=yolo,
-    )
-    return minted if minted is not None else str(uuid.uuid4())
 
 
 def _keeper_pid_start_time(pid: int) -> Optional[int]:

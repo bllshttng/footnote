@@ -19,12 +19,8 @@ def spawn_axes_call(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _answer_or_raise(answer: dict[str, Any], field: str) -> Any:
-    """The owner's answer for one ask, or a named refusal.
-
-    A `refused` key is the owner's fail-closed decision (re-raised in the
-    caller's own error type); a MISSING answer field means the binary that
-    answered predates the field, which must read as unavailable - a stale
-    binary answering the old shape must never read as an empty posture."""
+    """One ask's answer, a named owner refusal, or unavailable when the
+    binary predates the field (a stale answer must never read as empty)."""
     if answer.get("refused"):
         from fno.agents.dispatch import DispatchAskError
 
@@ -44,12 +40,9 @@ def keeper_posture(
     permission_mode: str | None,
     yolo: bool,
 ) -> list[str]:
-    """The launch permission tokens for one harness lane, from the Rust owner.
-
-    A non-empty note prints once to stderr as
-    ``agy posture: <effective> (<source>) - <note>`` so every launch names
-    the posture it ran with. Transport only: the vocabulary lives in
-    crates/fno-agents/src/codex_posture.rs, the rule in agy_launch.rs."""
+    """The launch permission tokens for one harness lane, from the Rust
+    owner. A non-empty note prints once to stderr as ``agy posture:
+    <effective> (<source>) - <note>``."""
     answer = spawn_axes_call(
         {
             "keeper_posture": {
@@ -79,8 +72,7 @@ def agy_mint_argv(
     permission_mode: str | None,
     yolo: bool,
 ) -> list[str]:
-    """The agy conversation-mint argv, from the Rust owner: the measured
-    print turn carrying the spawn's selected axes."""
+    """The agy conversation-mint argv, from the Rust owner."""
     answer = spawn_axes_call(
         {
             "agy_mint": {

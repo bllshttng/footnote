@@ -7,6 +7,7 @@ the measurement behind each row: docs/architecture/thread-lanes.md.
 """
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -101,6 +102,35 @@ def mint_session_id(
             permission_mode=permission_mode,
             yolo=yolo,
         )
+
+
+def _mint_thread_session_id(
+    harness: str,
+    cwd: Path,
+    requested: Optional[str] = None,
+    *,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+    permission_mode: Optional[str] = None,
+    yolo: bool = False,
+) -> str:
+    """The harness session id a keeper thread launches on, fixed BEFORE launch.
+
+    The per-harness shapes live in :func:`mint_session_id`; the caller-assigned
+    default (a UUIDv4) is not a harness fact, so it wraps that verb here. The
+    launch axes ride along because a harness whose mint is a real model turn
+    (agy) launches it on the spawn's selected model, effort and posture.
+    """
+    minted = mint_session_id(
+        harness,
+        cwd,
+        requested,
+        model=model,
+        effort=effort,
+        permission_mode=permission_mode,
+        yolo=yolo,
+    )
+    return minted if minted is not None else str(uuid.uuid4())
     from fno.agents.harness_map import capabilities
 
     binding = capabilities(harness).get("session_binding") or {}
