@@ -831,7 +831,7 @@ def _triad_install_dirs() -> list[Path]:
     return dirs
 
 
-def _verify_bindir_strict(source: Path, subtree: str, dest: Path, *, attempted: bool = False) -> None:
+def _verify_bindir_strict(source: Path, subtree: str, dest: Path) -> None:
     """One component verdict against a bindir that was just written, loud on
     every non-fresh row.
 
@@ -843,7 +843,7 @@ def _verify_bindir_strict(source: Path, subtree: str, dest: Path, *, attempted: 
     and fails the leg too (AC2-ERR): never a converged-looking update over a
     dead write.
     """
-    report = _component_verdict(source, subtree, dest, dest / _triad_names()[0], attempted=attempted)
+    report = _component_verdict(source, subtree, dest, dest / _triad_names()[0])
     if report is None:
         typer.echo(_install_exec_dead(dest / _triad_names()[0]), err=True)
         raise typer.Exit(1)
@@ -1048,12 +1048,16 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         """Name what did not converge; the Python update still proceeds."""
         if subtree is None:
             return
+        verdict_bin = _cargo_installed_bin() or install_root / "bin" / _triad_names()[0]
         report = _component_verdict(
             source,
             subtree,
             install_root / "bin",
-            _cargo_installed_bin() or install_root / "bin" / _triad_names()[0],
+            verdict_bin,
         )
+        if report is None:
+            typer.echo(_install_exec_dead(verdict_bin), err=True)
+            return
         for line in _component_lines(report):
             typer.echo(line, err=True)
 

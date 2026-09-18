@@ -59,11 +59,18 @@ impl Probe {
     /// Kill-shaped failures where the bytes are good and the path is the
     /// suspect: the only cases a repair would not hide a different bug. A
     /// timeout is a hang and a clean nonzero exit with output is a real CLI
-    /// error; exit 137 is the shell-visible form of the same SIGKILL.
+    /// error; exit 137 is the shell-visible form of the same SIGKILL, and
+    /// only when the process produced nothing - a 137 that wrote output is a
+    /// tool error, not a kill.
     pub fn repair_warranted(&self) -> bool {
         matches!(
             self,
-            Probe::Signal(_) | Probe::SpawnFailed(_) | Probe::Exit { code: 137, .. }
+            Probe::Signal(_)
+                | Probe::SpawnFailed(_)
+                | Probe::Exit {
+                    code: 137,
+                    had_output: false
+                }
         )
     }
 }

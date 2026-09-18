@@ -145,6 +145,21 @@ fn clean_nonzero_exit_with_output_earns_no_repair() {
 
 #[test]
 #[cfg(unix)]
+fn exit_137_with_output_is_a_tool_error_not_a_kill() {
+    // AC1-EDGE: nonzero exit HAVING WRITTEN OUTPUT never earns a repair,
+    // 137 included - the measured kill produces nothing.
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("fno-agents");
+    write_file(&bin, "#!/bin/sh\necho diagnostics\nexit 137\n", 0o755);
+    let before = ino(&bin);
+    let out = verify_and_repair(&bin, SHORT, probe_exec);
+    assert_eq!(out.repaired_after, None);
+    assert_eq!(ino(&bin), before);
+    assert!(no_siblings_left(dir.path()));
+}
+
+#[test]
+#[cfg(unix)]
 fn repair_against_the_running_executable_succeeds() {
     use std::cell::Cell;
     let bin = std::env::current_exe().unwrap();
