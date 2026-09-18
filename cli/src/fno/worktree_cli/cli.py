@@ -546,10 +546,6 @@ def reapable(
         False, "--allow-unborn",
         help="Lift the setup-window refusal for a tree a human named.",
     ),
-    done_node: bool = typer.Option(
-        False, "--done-node",
-        help="Turn on the done-node arm (merged sweep only; salvage runs first).",
-    ),
 ) -> None:
     """Say whether removing <path> can destroy anything. Read-only.
 
@@ -557,7 +553,10 @@ def reapable(
     discounted=0`. Exit 0 when reapable, 1 when something blocks. The gate
     itself is the fno-agents binary (crates/fno-agents/src/
     worktree_reapable.rs), the single implementation since the port; this leaf
-    only execs it, so Python and Rust cannot drift apart.
+    only execs it, so Python and Rust cannot drift apart. The done-node arm is
+    the merged sweep's flag (`WT_REAPABLE_DONE_NODE`), which reaches the
+    binary through scripts/lib/worktree-reapable.sh - the Python flag surface
+    never grows.
 
     A missing tracked file never blocks: HEAD holds its content, so removal
     loses nothing. Nor do the symlinks setup-worktree.sh writes, which
@@ -576,8 +575,6 @@ def reapable(
     flags = [path]
     if allow_unborn:
         flags.append("--allow-unborn")
-    if done_node:
-        flags.append("--done-node")
     # os.execv never returns; the binary prints the receipt and sets the exit.
     route_to_rust(["worktree-reapable", *flags], binary=binary)
 
