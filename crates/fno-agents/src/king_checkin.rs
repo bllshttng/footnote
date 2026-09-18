@@ -594,7 +594,7 @@ fn r_crown() -> Result<Value, String> {
     let payload: Value = serde_json::from_str(out.trim())
         .map_err(|e| format!("court payload did not parse: {e}: {}", err.trim()))?;
     let summary = payload.get("summary").cloned().unwrap_or(json!({}));
-    let mut anomalies: Vec<String> = Vec::new();
+    let mut court_anomalies: Vec<String> = Vec::new();
     for c in payload
         .get("crowns")
         .and_then(|c| c.as_array())
@@ -609,17 +609,83 @@ fn r_crown() -> Result<Value, String> {
             let reason = s_str(c, "reason")
                 .map(|r| format!(" ({r})"))
                 .unwrap_or_default();
-            anomalies.push(format!(
+            court_anomalies.push(format!(
                 "{holder} scope {scope} status {status} agree {agree:?}{reason}"
             ));
         }
     }
+
+    // The split reading is its OWN registry read, not a court field: the
+    // court filters to stored-live rows, so a terminal row still carrying
+    // crown fields is invisible there by construction, and a court failure
+    // must never read as "no splits either". A failed read names itself and
+    // leaves both counts null, never a measured-looking zero.
+    let split_read =
+        crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json())
+            .map(|registry| crate::crown_split::read_crown_splits(&registry.entries))
+            .map_err(|e| e.to_string());
+    let (double_ruled, stale_crowned, split_read_error, ruled_lines, stale_lines) =
+        crown_split_fields(split_read);
+    let mut anomalies = ruled_lines;
+    anomalies.extend(court_anomalies);
+    anomalies.extend(stale_lines);
     Ok(json!({
         "total": summary.get("total").cloned().unwrap_or(Value::Null),
         "splits": summary.get("splits").cloned().unwrap_or(Value::Null),
         "disagreements": summary.get("disagreements").cloned().unwrap_or(Value::Null),
+        "double_ruled": double_ruled,
+        "stale_crowned": stale_crowned,
+        "split_read_error": split_read_error,
         "anomalies": anomalies,
     }))
+}
+
+/// The split half of the crown reading, as JSON fields plus the anomaly
+/// lines it contributes. Pure so the never-zero rule is testable without a
+/// registry.
+fn crown_split_fields(
+    read: Result<crate::crown_split::CrownSplits, String>,
+) -> (Value, Value, Value, Vec<String>, Vec<String>) {
+    match read {
+        Ok(splits) => {
+            let ruled = splits
+                .double_ruled
+                .iter()
+                .map(|s| {
+                    format!(
+                        "DOUBLE RULED {} held by {} live rows ({})",
+                        s.scope,
+                        s.holders.len(),
+                        s.holders.join(", ")
+                    )
+                })
+                .collect();
+            let stale = splits
+                .stale
+                .iter()
+                .map(|s| {
+                    format!(
+                        "stale crown {} on {} (stored status {}); fno agents rm {}",
+                        s.scope, s.row, s.stored_status, s.row
+                    )
+                })
+                .collect();
+            (
+                json!(splits.double_ruled.len() as i64),
+                json!(splits.stale.len() as i64),
+                Value::Null,
+                ruled,
+                stale,
+            )
+        }
+        Err(reason) => (
+            Value::Null,
+            Value::Null,
+            json!(reason),
+            vec![format!("crown split read failed: {reason}")],
+            Vec::new(),
+        ),
+    }
 }
 
 /// The trailing-window refusal rate: the cheapest available proxy for
@@ -1396,8 +1462,10 @@ fn render_lines(
         None => {
             let crown = by_name("crown").map(|r| &r.value).unwrap_or(&Value::Null);
             lines.push(format!(
-                "crown: {} crowns, splits {}, disagreements {}",
+                "crown: {} crowns, double-ruled {}, stale-crowned {}, manifest-splits {}, disagreements {}",
                 dash(crown.get("total")),
+                dash(crown.get("double_ruled")),
+                dash(crown.get("stale_crowned")),
                 dash(crown.get("splits")),
                 dash(crown.get("disagreements")),
             ));
@@ -1407,12 +1475,16 @@ fn render_lines(
                 .into_iter()
                 .flatten()
             {
-                lines.push(format!(
-                    "  {}",
-                    s_str(anomaly, "scope")
-                        .unwrap_or(&anomaly.to_string())
-                        .to_string()
-                ));
+                if let Some(text) = anomaly.as_str() {
+                    lines.push(format!("  {text}"));
+                } else {
+                    lines.push(format!(
+                        "  {}",
+                        s_str(anomaly, "scope")
+                            .unwrap_or(&anomaly.to_string())
+                            .to_string()
+                    ));
+                }
             }
         }
     }
@@ -2951,5 +3023,48 @@ mod tests {
         assert_eq!(out.len(), 1, "lines: {out:?}");
         assert!(out[0].starts_with("king_wake"), "line: {}", out[0]);
         assert!(out[0].contains("tick_overdue"), "line: {}", out[0]);
+    }
+
+    #[test]
+    fn crown_split_fields_report_counts_and_lines_on_a_reading() {
+        let splits = crate::crown_split::CrownSplits {
+            double_ruled: vec![crate::crown_split::ScopeSplit {
+                scope: "shared".into(),
+                holders: vec!["king-a".into(), "king-b".into()],
+            }],
+            stale: vec![crate::crown_split::StaleCrown {
+                row: "king-dead".into(),
+                scope: "shared".into(),
+                stored_status: "orphaned".into(),
+            }],
+        };
+        let (double_ruled, stale_crowned, err, ruled, stale) = crown_split_fields(Ok(splits));
+        assert_eq!(double_ruled, json!(1));
+        assert_eq!(stale_crowned, json!(1));
+        assert!(err.is_null());
+        assert_eq!(
+            ruled,
+            vec!["DOUBLE RULED shared held by 2 live rows (king-a, king-b)"]
+        );
+        assert_eq!(
+            stale,
+            vec![
+                "stale crown shared on king-dead (stored status orphaned); fno agents rm king-dead"
+            ]
+        );
+    }
+
+    #[test]
+    fn crown_split_fields_never_zero_an_unread_registry() {
+        let (double_ruled, stale_crowned, err, ruled, stale) =
+            crown_split_fields(Err("registry unreadable: boom".into()));
+        assert!(double_ruled.is_null());
+        assert!(stale_crowned.is_null());
+        assert_eq!(err, json!("registry unreadable: boom"));
+        assert_eq!(
+            ruled,
+            vec!["crown split read failed: registry unreadable: boom"]
+        );
+        assert!(stale.is_empty());
     }
 }
