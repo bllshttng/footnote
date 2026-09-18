@@ -2065,8 +2065,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // Park sweep, the arm beside `stale_sweep`: same doc comment
                 // there covers the one-in-flight shape. The run closure walks
                 // every repo root the registry knows, so parked rows of other
-                // repos are un-parked from THEIR checkout (the head probe
-                // resolves PR numbers against the repo they belong to).
+                // repos are un-parked from THEIR checkout (the head probe resolves PR numbers against the repo).
                 if !park_sweep_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
                     let flag = Arc::clone(&park_sweep_in_flight);
                     let home = ctx.home.clone();
@@ -2078,6 +2077,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         });
                     });
                 }
+                crate::question_sweep::daemon_tick(&ctx.home, now_epoch_secs());
                 // An enabled active-backlog project keeps the daemon resident even
                 // when the board is drained (OQ1 Option A): idle-exit must never
                 // kill a live drain supervisor.

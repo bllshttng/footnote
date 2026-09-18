@@ -90,6 +90,12 @@ pub enum TerminationReason {
     NoWork,
     Budget,
     NoProgress,
+    /// A node held on an open operator question: the first fire blocked once
+    /// naming the question and the decide verb; this fire is the second on
+    /// the same still-open question, so the loop terminates instead of
+    /// re-asking. The journal (not the fingerprint) carries the held state.
+    /// Terminal, NOT a ship reason: the operator answers, a later run ships.
+    HeldOnQuestion,
     Interrupted,
     Aborted,
 }
@@ -1538,6 +1544,7 @@ mod attestation_journal;
 mod authorship;
 mod awaiting_merge;
 mod coverage_receipt;
+mod holds;
 mod king_decide;
 mod review_count;
 mod review_state;
@@ -1962,104 +1969,6 @@ pub struct UnattestedReviewer {
     /// `pass`. "No attestation exists" would be a lie to a session that ran the
     /// reviewer and was told no.
     failed_at_head: bool,
-}
-
-/// A question THIS session asked, that was closed WITH an answer, and for
-/// which no `operator_decision` event exists on any reachable journal. The
-/// stop gate holds the session until the decision is
-/// recorded, because a ruling that dies with the transcript is the failure
-/// the decision record exists to prevent.
-pub(crate) struct UnrecordedDecision {
-    pub(crate) question_id: String,
-    pub(crate) question: String,
-}
-
-/// Fold the question/decision family across a UNION of journals.
-///
-/// A question can be asked and closed in one journal while the decision lands
-/// in another (the operator verbs write to the canonical root's journal; a
-/// worktree stop gate reads its own cwd's), so membership is only decidable
-/// after every journal is folded - checking per-file would hold a session
-/// whose record sits one path away.
-///
-/// An unreadable or absent journal contributes nothing (fail open): this gate
-/// scans for an OBLIGATION contracted elsewhere, and a missing journal means
-/// no obligation is visible, not that one was breached. The substring
-/// prefilter mirrors the Python reader: the journals are shared, append-only,
-/// and never rotated, so parsing every line costs more than the scan.
-fn scan_unrecorded_decisions(
-    journals: &[std::path::PathBuf],
-    session_id: &str,
-) -> Vec<UnrecordedDecision> {
-    let mut asked: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut closed_with_answer: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    let mut recorded: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for path in journals {
-        let Ok(content) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        for line in content.lines() {
-            if !(line.contains("operator_question") || line.contains("operator_decision")) {
-                continue;
-            }
-            let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
-                continue;
-            };
-            let kind = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            let data = val
-                .get("data")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({}));
-            match kind {
-                "operator_question" => {
-                    if data.get("session_id").and_then(|v| v.as_str()) == Some(session_id) {
-                        if let Some(qid) = data.get("question_id").and_then(|v| v.as_str()) {
-                            asked.insert(
-                                qid.to_string(),
-                                data.get("question")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .chars()
-                                    .take(80)
-                                    .collect(),
-                            );
-                        }
-                    }
-                }
-                "operator_question_closed" => {
-                    let answered = data
-                        .get("answer")
-                        .and_then(|v| v.as_str())
-                        .map(|a| !a.trim().is_empty())
-                        .unwrap_or(false);
-                    if answered {
-                        if let Some(qid) = data.get("question_id").and_then(|v| v.as_str()) {
-                            closed_with_answer.insert(qid.to_string());
-                        }
-                    }
-                }
-                "operator_decision" => {
-                    if let Some(qid) = data.get("question_id").and_then(|v| v.as_str()) {
-                        recorded.insert(qid.to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let mut out: Vec<UnrecordedDecision> = asked
-        .into_iter()
-        .filter(|(qid, _)| closed_with_answer.contains(qid) && !recorded.contains(qid))
-        .map(|(question_id, question)| UnrecordedDecision {
-            question_id,
-            question,
-        })
-        .collect();
-    out.sort_by(|a, b| a.question_id.cmp(&b.question_id));
-    out
 }
 
 /// The `config.review.reviewers` entries NOT satisfied by a head-pinned
@@ -8189,54 +8098,141 @@ pub(crate) fn decide_with_payload(
         manifest.plan_path.as_deref(),
         &project_events,
     );
-    // ── Step 3b: decided question left no decision record ────────────────────
-    // The recording obligation is enforced here, never self-reported: a
-    // session that closed one of ITS OWN operator questions WITH an answer but
-    // emitted no matching operator_decision event is held, and the hold names
-    // the question. Scopes to questions this session asked so a foreign
-    // session's unfinished business cannot wedge an unrelated loop. The
-    // journals are folded as a UNION because the operator verbs write to the
-    // canonical root's journal while a worktree stop gate reads its own cwd's
-    // - a record on any of the three paths clears the gate.
-    let unrecorded = if session_id != "unknown" {
-        // One journal per space: the cwd's journal IS the canonical journal for
-        // this repo (the old worktree-vs-canonical fork is what the spaces move
-        // retired), so the union collapses to the two live journals.
-        let mut journals = vec![project_events.clone(), global_events.clone()];
-        if let Some(canon) = crate::paths::canonical_repo_root(&cwd) {
-            let canonical_journal = crate::paths::events_path(&canon);
-            if !journals.contains(&canonical_journal) {
-                journals.push(canonical_journal);
+    // ── Steps 3b/3c: the question gates (decided-but-unrecorded; held-on-open)
+    // Both folds live in `holds` beside the scans they drive; the journal
+    // union, the emit rows, and the order (unrecorded first, then held) are
+    // theirs.
+    if session_id != "unknown" {
+        match holds::question_gates(
+            &project_events,
+            &global_events,
+            &cwd,
+            &session_id,
+            node_id.as_deref().unwrap_or(""),
+            &emit,
+        ) {
+            holds::QuestionGateStop::None => {}
+            holds::QuestionGateStop::Block { reason } => {
+                return (0, allow_output("block", None, &reason, 0, None));
+            }
+            holds::QuestionGateStop::Terminate { reason, message } => {
+                return (0, allow_output("allow", Some(reason), &message, 0, None));
             }
         }
-        scan_unrecorded_decisions(&journals, &session_id)
-    } else {
-        Vec::new()
-    };
-    if !unrecorded.is_empty() {
-        let names = unrecorded
-            .iter()
-            .map(|u| format!("{} '{}'", u.question_id, u.question))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let reason = format!(
-            "a decided question has no decision record ({names}); record it with \
-             `fno backlog decide <node> \"...\" --question-id <id>` \
-             (the gate matches on the question id; a re-run of the clear is a \
-             no-op once the question is closed) \
-             so the decision survives this session"
-        );
+    }
+    // ── Check gh binary availability ──────────────────────────────────────────
+    // Only a NotFound spawn reads as absence. Every other spawn failure is
+    // SpawnTrouble: gh exists but could not be spawned right now, which is
+    // not a fact about the world and must not degrade the session. The probe
+    // outcome is emitted as an event row so what it concluded is observable.
+    let gh_bin = &parsed.gh_bin;
+    let gh_probe = probe_gh_bin(gh_bin.as_ref(), &cwd);
+    // Type is deliberately NOT "loop_check": read_prior_fires treats every
+    // loop_check row for this session as a fire observation, and a probe row
+    // with no fingerprint would break the no-progress streak on each fire.
+    // The probe is its own observable, not a fire decision.
+    emit(
+        "gh_probe",
+        serde_json::json!({
+            "session_id": session_id,
+            "outcome": gh_probe.outcome_str(),
+            "detail": gh_probe.detail_str(),
+        }),
+    );
+    let gh_available = !matches!(gh_probe, GhProbeOutcome::Absent);
+
+    if !gh_available
+        && matches!(
+            generic,
+            crate::delivery_completion::DeliveryCompletion::Inactive
+        )
+    {
+        if !manifest.attended && !manifest.advisory {
+            // Unattended + no advisory + no gh -> Interrupted
+            emit(
+                "termination",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "reason": "Interrupted",
+                    "message": "gh binary not found; unattended sessions require gh"
+                }),
+            );
+            return (
+                0,
+                allow_output(
+                    "allow",
+                    Some(TerminationReason::Interrupted),
+                    "gh binary not found; unattended sessions require gh",
+                    0,
+                    None,
+                ),
+            );
+        }
+        // Attended or declared advisory -> advisory mode (promise + budget only).
+        // Budget was already checked above; honor intent here so a promise can
+        // terminate an advisory session (AC5-ERR) - gh reads are impossible, so
+        // the promise alone is the completion signal.
         emit(
-            "loop_check",
+            "loop_advisory_mode",
             serde_json::json!({
                 "session_id": session_id,
-                "decision": "block",
-                "gate": "unrecorded_decision",
-                "unrecorded": unrecorded.iter().map(|u| u.question_id.clone()).collect::<Vec<_>>()
+                "attended": manifest.attended
             }),
         );
-        return (0, allow_output("block", None, &reason, 0, None));
+        let (advisory_intent, _advisory_intent_source) =
+            detect_intent(last_assistant_message.as_deref(), &transcript_path);
+        if let Intent::Aborted { ref reason } = advisory_intent {
+            emit(
+                "termination",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "reason": "Aborted",
+                    "message": reason
+                }),
+            );
+            return (
+                0,
+                allow_output(
+                    "allow",
+                    Some(TerminationReason::Aborted),
+                    "aborted tag detected (advisory mode)",
+                    0,
+                    None,
+                ),
+            );
+        }
+        if advisory_intent == Intent::Promise {
+            emit(
+                "termination",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "reason": "DoneAdvisory",
+                    "message": "promise accepted in advisory mode (gh unavailable)"
+                }),
+            );
+            return (
+                0,
+                allow_output(
+                    "allow",
+                    Some(TerminationReason::DoneAdvisory),
+                    "promise accepted in advisory mode (gh unavailable)",
+                    0,
+                    None,
+                ),
+            );
+        }
+        return (
+            0,
+            allow_output(
+                "block",
+                None,
+                "gh binary not found; running in advisory mode (promise + budget only)",
+                0,
+                None,
+            ),
+        );
     }
+
     // ── Step 4: intent + backstop ─────────────────────────────────────────────
     let (intent, intent_source) =
         detect_intent(last_assistant_message.as_deref(), &transcript_path);
