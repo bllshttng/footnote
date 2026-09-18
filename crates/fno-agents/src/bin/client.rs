@@ -133,6 +133,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "verify-evidence",
     "version",
     "wait",
+    "worktree-reapable",
 ];
 
 fn main() {
@@ -784,6 +785,13 @@ async fn run(args: Vec<String>) -> i32 {
     // in-process.
     if verb == "reclaim" {
         return fno_agents::reclaim::run_reclaim(&args[1..], &AgentsHome::from_env());
+    }
+    // `worktree-reapable`: the worktree-removal gate, daemon-free. Not a
+    // routable `fno agents` verb; the Python surface `fno agents workspace
+    // worktree reapable` is a thin exec of THIS verb, and the sweeps exec the
+    // binary through worktree-reapable.sh. Same `==` treatment as reclaim.
+    if verb == "worktree-reapable" {
+        return fno_agents::worktree_reapable::run_client(&args[1..]);
     }
     // `plugin-install`: the filtered-stage installer for the plugin
     // harnesses, daemon-free. The Python surface `fno config plugin install`

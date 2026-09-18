@@ -286,6 +286,7 @@ pub mod usage;
 pub mod verify_evidence;
 pub mod version;
 pub mod wait;
+pub mod worktree_reapable;
 pub mod write_queue;
 
 use serde::{Deserialize, Serialize};
