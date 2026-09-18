@@ -3691,7 +3691,7 @@ case "$*" in
   *"do pr push"*) printf '%s' 'PUSH_STDOUT' ; printf '%s' 'PUSH_STDERR' >&2; exit PUSH_EXIT ;;
   *"outstanding --json"*) echo '{"questions":[]}'; exit 0 ;;
   *"outstanding ask"*) echo "ask $*" >> "$D/fno-ask.log"; exit 0 ;;
-  *"backlog idea"*) echo "backlog node x-abc9 created"; exit 0 ;;
+  *"backlog idea"*) echo "backlog node fno-abc9 created"; exit 0 ;;
 esac
 exit 0
 "#
@@ -4034,7 +4034,7 @@ echo '[]'
         let fno = log_of(d, "fno.log");
         assert_eq!(fno.matches("backlog idea").count(), 1, "{fno}");
         let events = log_of(d, "events.jsonl");
-        assert!(events.contains("\"node_id\":\"x-abc9\""), "{events}");
+        assert!(events.contains("\"node_id\":\"fno-abc9\""), "{events}");
     }
 
     #[test]
@@ -4047,7 +4047,7 @@ echo '[]'
         stub_fno_push(d, "", 0, "");
         hold_claim(d);
         seed_tick_with_keys(d, &["aaa1:777"]);
-        seed_flake_row(d, Some("x-abc9"));
+        seed_flake_row(d, Some("fno-abc9"));
         run_heal(&drive_args(d, &[]));
         let fno = log_of(d, "fno.log");
         assert!(!fno.contains("backlog idea"), "{fno}");
