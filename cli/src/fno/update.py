@@ -322,14 +322,6 @@ def _install_exec_dead(verdict_bin: Path, *, prefix: str = "fno doctor update") 
     )
 
 
-def _verdict_component(report: Optional[dict], component: str) -> dict:
-    """One component row from a verdict report; {} when absent."""
-    for c in (report or {}).get("components", []):
-        if c.get("component") == component:
-            return c
-    return {}
-
-
 def _component_verdict(
     source: Path, subtree: str, bindir: Path, verdict_bin: Path, *,
     attempted: bool = False, include_mux: Optional[bool] = None,
