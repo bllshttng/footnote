@@ -39,6 +39,8 @@ def load_graph(path: Path | None = None, *, keep_malformed: bool = False) -> lis
     if not path.exists():
         return read_graph_strict(Path(path))
 
+    from fno.graph.store import read_file_bytes
+
     raw_bytes = read_file_bytes(Path(path))
     return _entries(json.loads(raw_bytes), keep_malformed=keep_malformed)
 
