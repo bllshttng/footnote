@@ -117,7 +117,7 @@ def test_an_armed_tick_with_no_roots_never_claims_a_run(tmp_path):
     assert rec.runs == []
 
 
-def test_the_armed_tick_passes_detach_and_a_30s_spawn_bound(tmp_path):
+def test_the_armed_tick_passes_detach_and_the_5s_spawn_belt(tmp_path):
     # The drive loop runs detached from the tick: the phase only
     # ever pays the spawn, so --detach rides the argv and the timeout only
     # bounds a wedged spawn, not the loop's remedies.
@@ -135,7 +135,7 @@ def test_the_armed_tick_passes_detach_and_a_30s_spawn_bound(tmp_path):
     assert outcome == "ran"
     assert "--detach" in runs[0], f"{runs}"
     assert "--cwd" in runs[0] and runs[0][-1] == str(tmp_path), f"{runs}"
-    assert captured["timeout"] == 30, captured
+    assert captured["timeout"] == 5, captured
 
 
 def test_a_drive_loop_that_fails_on_every_root_never_reports_ran(tmp_path):
