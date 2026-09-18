@@ -37,6 +37,43 @@ pub struct ProcRow {
 }
 
 /// A synthetic row for tests that walk a table without a live census.
+
+/// The shared Codex app-server's census row: health and installed-version
+/// readiness are DIFFERENT axes, so the row carries both. A healthy daemon
+/// running a version older than the installed CLI reads healthy + stale,
+/// never healthy alone and never no row.
+fn codex_app_server_rows() -> Vec<Value> {
+    let readiness = crate::codex_daemon_readiness::codex_daemon_readiness();
+    let verdict = match readiness.verdict {
+        crate::codex_daemon_readiness::VersionVerdict::Current => "current",
+        crate::codex_daemon_readiness::VersionVerdict::Stale => "stale",
+        crate::codex_daemon_readiness::VersionVerdict::Ahead => "ahead",
+        crate::codex_daemon_readiness::VersionVerdict::Unknown => "unknown",
+    };
+    let health = if readiness.healthy { "healthy" } else { "down" };
+    let evidence = format!(
+        "installed {}, live {}, {}",
+        readiness
+            .installed_version
+            .as_deref()
+            .unwrap_or("unreadable"),
+        readiness.live_version.as_deref().unwrap_or("unreadable"),
+        health,
+    );
+    let mut row = row(
+        "codex-app-server",
+        readiness.pid,
+        Some("codex-app-server".to_string()),
+        readiness.codex_home.clone().into(),
+        readiness.start_token.map(|t| t as f64),
+        verdict,
+        evidence.as_str(),
+    );
+    row["installed_version"] = json!(readiness.installed_version);
+    row["live_version"] = json!(readiness.live_version);
+    vec![row]
+}
+
 #[cfg(test)]
 pub(crate) fn test_proc_row(pid: u32, ppid: u32, command: &str) -> ProcRow {
     ProcRow {
@@ -491,6 +528,10 @@ fn fate(component: &str) -> (&'static str, &'static str) {
         "daemon" => ("restarts", "workers and panes"),
         "store-keeper" => ("cycles; the next read respawns it", "the graph on disk"),
         "mux-server" => ("kept; only `--mux` replaces it", "its panes"),
+        "codex-app-server" => (
+            "safe upgrade only through the session-preserving transaction",
+            "threads survive the daemon swap",
+        ),
         _ => ("kept", "its pane; current only when that pane ends"),
     }
 }
@@ -816,6 +857,7 @@ pub async fn census() -> Vec<Value> {
     let mut rows = vec![daemon_row().await];
     rows.extend(keeper_rows_from(&table));
     rows.extend(mux_rows(&table));
+    rows.extend(codex_app_server_rows());
     rows
 }
 

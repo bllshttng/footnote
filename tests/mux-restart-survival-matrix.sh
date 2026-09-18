@@ -123,6 +123,39 @@ ROSTER
 export FNO_CLAUDE_DAEMON_DIR="$DAEMON_DIR"
 
 cleanup() {
+    # Keepers FIRST, before kill-server unlinks their sockets: every keeper
+    # this run minted must end by named pid, or the proof leaks survivors
+    # (47 keepers at ppid 1 was the measured leak that taught this).
+    "$MUX_BIN" mux pane keeper list --json 2>/dev/null | python3 -c '
+import json, subprocess, sys
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for r in rows:
+    if not str(r.get("socket", "")).startswith(sys.argv[1]):
+        continue
+    for field in ("keeper_pid", "child_pid"):
+        pid = r.get(field)
+        if pid:
+            subprocess.run(["kill", "-9", str(pid)], capture_output=True)
+' "$TMP_DIR" || true
+    sleep 0.3
+    # The argv sweep: anything this run minted carries the run's unique temp
+    # prefix in its argv (keeper --sock, canary path, stub path). A missed
+    # keeper probe must not strand the process. The counter excludes its own
+    # ps and python lines.
+    ps -axo pid=,command= | python3 -c '
+import subprocess, sys
+needle = sys.argv[1]
+needles = ("fno-agents-worker", "canary", "stubbin")
+for ln in sys.stdin:
+    pid, _, rest = ln.strip().partition(" ")
+    if "ps -axo" in ln or "python3 -c" in ln:
+        continue
+    if needle in rest and any(n in rest for n in needles):
+        subprocess.run(["kill", "-9", pid], capture_output=True)
+' "$TMP_DIR" || true
     "$MUX_BIN" mux kill-server "$SESSION" >/dev/null 2>&1 || true
     if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
         kill -9 "$SERVER_PID" 2>/dev/null || true
