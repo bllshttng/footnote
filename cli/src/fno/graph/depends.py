@@ -172,7 +172,6 @@ def _parse_inline_yaml_list(src: str) -> list[str] | None:
 
 
 def _declares_values(raw: object) -> bool:
-    """Does a frontmatter key carry at least one usable value?"""
     if isinstance(raw, list):
         return any(str(x).strip() for x in raw)
     if isinstance(raw, str):
@@ -228,9 +227,9 @@ def _collect_frontmatter_depends(plan_path: str) -> tuple[list[str], Path]:
             if parsed is not None:
                 return parsed, plan_dir
             print(
-                f"Warning: depends_on in {plan_path} uses an inline-list form "
+                f"Warning: {plan_path} declares blockers in an inline-list form "
                 "this parser can't read (nested brackets or escaped commas). "
-                "Switch to block form (`depends_on:` then `- entry` lines).",
+                "Switch to block form (`- entry` lines).",
                 file=sys.stderr,
             )
             return [], plan_dir
