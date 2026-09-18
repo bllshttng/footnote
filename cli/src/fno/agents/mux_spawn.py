@@ -1149,18 +1149,19 @@ def build_pane_argv(
         return argv
     if provider == "agy":
         effort_argv = effort_tokens("agy", effort) if effort else []
-        # agy (Antigravity) interactive pane (US1). Mirrors AgyProvider in
-        # provider.rs: `--dangerously-skip-permissions` is the never-prompt lane
-        # so an unattended pane can't wedge on its first approval. This LANE
-        # mints no session id (the thread lane does), so no --session-id pin;
-        # `-p`/`--print` is agy's HEADLESS form (exits after printing) and must
-        # NOT be used for a pane. The shared readiness gate submits the seed
-        # after trust and the composer are ready.
-        argv = ["agy", "--dangerously-skip-permissions"]
+        # agy (Antigravity) interactive pane (US1). The posture tokens are the
+        # Rust owner's answer (agy_launch.keeper_posture, lane pane): the lane
+        # default is --dangerously-skip-permissions (the never-prompt lane, so
+        # an unattended pane can't wedge on its first approval), and an
+        # explicit --permission-mode REPLACES it. This LANE mints no session id
+        # (the thread lane does), so no --session-id pin; `-p`/`--print` is
+        # agy's HEADLESS form (exits after printing) and must NOT be used for
+        # a pane. The shared readiness gate submits the seed after trust and
+        # the composer are ready.
+        from fno.agents.spawn_axes_client import keeper_posture
+
+        argv = ["agy", *keeper_posture("agy", "pane", permission_mode, yolo)]
         argv += effort_argv
-        if permission_mode:
-            # skip -> [] (argv already carries the flag); anything else raises.
-            argv += permission_pane_tokens("agy", permission_mode)
         if model:
             argv += ["--model", model]
         argv += tier3
