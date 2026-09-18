@@ -25,6 +25,85 @@ pub(super) struct AdoptedKeeper {
 }
 
 impl Core {
+    /// The keeper attempt for a plain shell: try each shell candidate through
+    /// a keeper, carrying the shell-integration rc as an `env` argv prefix
+    /// (`pty::keeper_shell_argv`). `Ok(Some(id))` = hosted; the pane is
+    /// registered, its ring fed, and its rc dir owned by `shell_rc_dirs`.
+    /// `Ok(None)` = no keeper could host it: the caller falls back to the
+    /// inline pty and marks the pane unkept. `Err` = the spawn itself is
+    /// impossible (admission refused, no child pid). A failed candidate's rc
+    /// dir is removed here; only a REGISTERED pane's dir is kept.
+    #[cfg(not(test))]
+    pub(super) fn spawn_pane_kept(
+        &mut self,
+        rows: u16,
+        cols: u16,
+        cwd: &str,
+        id: u64,
+        dir: Option<&std::path::Path>,
+    ) -> Result<Option<u64>, String> {
+        let mut last = String::from("no shell candidate produced a keeper argv");
+        for cand in &self.shells {
+            let Some((argv, rc_dir)) = crate::pty::keeper_shell_argv(cand, &self.session_name, id)
+            else {
+                continue;
+            };
+            let permit = match crate::process_admission::admit_fleet() {
+                Ok(permit) => permit,
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&rc_dir);
+                    return Err(e.to_string());
+                }
+            };
+            match crate::pty::PtyShell::spawn_cmd_keeper_with_permit(
+                &keeper_worker_bin(),
+                &argv,
+                rows,
+                cols,
+                dir,
+                &self.session_name,
+                id,
+                self.out_tx.clone(),
+                self.exit_tx.clone(),
+                permit,
+            ) {
+                Ok((shell, ring)) => {
+                    // A shell pane carries no node provenance (no wrapper
+                    // argv worth parsing: the env prefix is integration, not
+                    // identity).
+                    self.register_pane(
+                        id,
+                        shell,
+                        rows,
+                        cols,
+                        None,
+                        None,
+                        cwd.to_string(),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )?;
+                    if !ring.is_empty() {
+                        if let Some(entry) = self.panes.get_mut(&id) {
+                            entry.vt.feed(&ring);
+                        }
+                    }
+                    self.shell_rc_dirs.insert(id, rc_dir);
+                    return Ok(Some(id));
+                }
+                Err(e) => {
+                    last = e.to_string();
+                    let _ = std::fs::remove_dir_all(&rc_dir);
+                }
+            }
+        }
+        self.notice_all(format!(
+            "keeper spawn failed for pane {id} ({last}); opening an unkept inline shell"
+        ));
+        Ok(None)
+    }
+
     /// Re-adopt surviving keeper panes at server start, BEFORE restore runs
     /// (an ordering constraint, not a preference: restore must see adopted
     /// panes as already-live members so it binds them instead of spawning
@@ -162,6 +241,14 @@ impl Core {
                             .map(|a| a.rsplit('/').next().unwrap_or(a).to_string())
                             .unwrap_or_default();
                         self.worker_session_pane.insert((harness, session_id), id);
+                    }
+                    // The shell-integration rc dir a keeper shell's argv
+                    // references outlived the spawning server: re-own it, so
+                    // a later close removes it and an adopted shell never
+                    // loses its rc to a server death.
+                    let rc_dir = crate::pty::shell_rc_dir(&self.session_name, id);
+                    if rc_dir.exists() {
+                        self.shell_rc_dirs.insert(id, rc_dir);
                     }
                     self.keeper_adopted.push(AdoptedKeeper {
                         pane: id,
