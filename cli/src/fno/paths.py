@@ -781,17 +781,6 @@ def graph_json() -> Path:
     return state_dir() / "graph.json"
 
 
-def graph_archive_json() -> Path:
-    """Return the path to graph-archive.json (terminal-node archive sweep).
-
-    A sibling of graph.json so it follows any ``config.paths.graph_json``
-    override automatically - the archive must live next to the graph it drains
-    from. No override of its own (and so no bare ``~/.fno``): it is never
-    meaningful to separate the archive from its working graph.
-    """
-    return graph_json().parent / "graph-archive.json"
-
-
 def relatedness_json() -> Path:
     """Return the path to relatedness.json (node-to-node relatedness sidecar).
 
@@ -855,16 +844,6 @@ def operator_lane() -> Path:
 def global_events_json() -> Path:
     """Return the cross-checkout event journal beside the global ledger."""
     return _guard_state_path(ledger_json().parent / "events.jsonl")
-
-
-def decisions_jsonl() -> Path:
-    """Return the machine-wide decision index beside the global ledger.
-
-    A separate file from :func:`global_events_json` on purpose: that journal
-    rotates, and a rotated-away ruling is a ruling the operator asked for and
-    cannot get back. This one never rotates and holds nothing else.
-    """
-    return _guard_state_path(ledger_json().parent / "decisions.jsonl")
 
 
 def questions_jsonl() -> Path:

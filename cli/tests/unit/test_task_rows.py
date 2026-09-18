@@ -457,7 +457,7 @@ def test_done_by_non_holder_refused(
 def test_exited_graph_write_releases_the_claim(
     tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """locked_mutate_graph sys.exit()s (does not raise) on a corrupt graph;
+    """commit_rows_via_store sys.exit()s (does not raise) on a corrupt graph;
     the transition must release the claim on that path too, or it stays held
     by the long-lived session pid until the whole session dies."""
     import fno.graph.store as store
@@ -681,7 +681,7 @@ def test_malformed_rows_survive_materialization(tmp_path: Path):
 
     The returned list is written back over entry["tasks"], so filtering the
     unreadable row out of it DELETES it from graph.json. read_graph and
-    locked_mutate_graph both keep what they cannot migrate.
+    commit_rows_via_store both keep what they cannot migrate.
     """
     from fno.graph.tasks import ensure_task_rows
 

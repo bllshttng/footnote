@@ -117,14 +117,14 @@ def test_idea_status_overridden_by_blocked_at_read_time(tmp_graph):
     through _apply_graph_defaults sees this, the raw on-disk write above does
     not.
     """
-    from fno.graph.store import read_graph
+    from fno.graph.store import read_graph_strict
 
     a = _invoke("--json", "backlog", "add", "Blocker A")
     blocker_id = json.loads(a.stdout)["id"]
     b = _invoke("--json", "backlog", "add", "Idea blocked by A", "--blocked-by", blocker_id)
     node_id = json.loads(b.stdout)["id"]
 
-    entries = read_graph(tmp_graph)
+    entries = read_graph_strict(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
     assert node.get("status") == "blocked", (
         f"blocked beats idea at read time; got {node.get('status')!r}"
@@ -572,7 +572,7 @@ def test_legacy_ready_row_migrates_to_idea(tmp_graph):
         ]
     }))
 
-    # Trigger any mutation - locked_mutate_graph runs recompute_statuses
+    # Trigger any mutation - commit_rows_via_store runs recompute_statuses
     # on every successful mutation, which is what the plan promises.
     r = _invoke("backlog", "add", "Trigger mutation")
     assert r.exit_code == 0, r.output

@@ -2,7 +2,7 @@
 
 The incident: `fno backlog get --strict x-d157` returned a confident
 "No node matching" while that row was present, under concurrent write load. This
-drives real writers through locked_mutate_graph against real bytes on disk and
+drives real writers through commit_rows_via_store against real bytes on disk and
 reads a known-present node back through the ACTUAL resolution path
 (read_graph_strict + resolve_node -- exactly what cmd_get calls, no mocked or
 stubbed reader). It asserts zero false negatives, and it fails if the corruption
@@ -19,7 +19,7 @@ import pytest
 from fno.graph.fuzzy import resolve_node
 from fno.graph.store import (
     GraphUnreadableError,
-    locked_mutate_graph,
+    commit_rows_via_store,
     read_graph,
     read_graph_strict,
 )
@@ -37,7 +37,7 @@ def scratch(tmp_path, monkeypatch):
                         "slug": "present-throughout"})
         return entries
 
-    locked_mutate_graph(g, _seed)
+    commit_rows_via_store(g, _seed)
     return g
 
 
@@ -52,7 +52,7 @@ def test_ac3fr_no_false_negative_under_concurrent_writes(scratch):
                 entries.append({"id": f"x-w{i:04x}", "title": f"n{i}",
                                 "status": "ready", "project": "fno", "domain": "code"})
                 return entries
-            locked_mutate_graph(scratch, _mut)
+            commit_rows_via_store(scratch, _mut)
         stop.set()
 
     def reader():
@@ -89,4 +89,4 @@ def test_ac3fr_resolution_path_does_not_swallow_corruption(scratch):
         read_graph_strict(scratch)
     # And the soft reader still swallows -- proving the two paths are distinct
     # and the resolution path is the strict one, not the soft one.
-    assert read_graph(scratch) == []
+    assert read_graph_strict(scratch) == []

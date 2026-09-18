@@ -1,5 +1,5 @@
 """apply() returns the over-budget warning; it never prints. The caller runs
-inside locked_mutate_graph, which re-runs the mutator on contention, so a
+inside commit_rows_via_store, which re-runs the mutator on contention, so a
 print there would repeat per retry and still fire when all retries fail."""
 
 from fno.backlog.dispatch_overrides import apply

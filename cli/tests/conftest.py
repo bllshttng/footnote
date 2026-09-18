@@ -61,7 +61,7 @@ def _quiet_gh_budget(monkeypatch):
 def _sandbox_decision_index(tmp_path, monkeypatch):
     """Keep the machine-wide decision index out of the developer's ~/.fno.
 
-    ``record_decision`` writes to ``paths.decisions_jsonl()`` on every call, and
+    ``record_decision`` writes to ``fno.decide._decisions_index_path()`` on every call, and
     that path is deliberately machine-wide: ``FNO_REPO_ROOT`` does not move it,
     so without this every test that records a decision appends to the real
     index and reads back another test's rows. Autouse rather than opt-in
@@ -69,7 +69,7 @@ def _sandbox_decision_index(tmp_path, monkeypatch):
     ``fno outstanding clear --answer``, which is not where anyone looks for it.
     """
     sandbox = tmp_path / ".decision-index" / "decisions.jsonl"
-    monkeypatch.setattr("fno.paths.decisions_jsonl", lambda: sandbox)
+    monkeypatch.setattr("fno.decide._decisions_index_path", lambda: sandbox)
 
 
 @pytest.fixture(autouse=True)
@@ -695,7 +695,7 @@ def _hermetic_authorized_merge(monkeypatch):
 # ---------------------------------------------------------------------------
 # Applied at MODULE LOAD, not as a fixture. The fno.graph package freezes its
 # path constants at IMPORT time - store.py does ``from _constants import
-# GRAPH_JSON`` at module top and ``read_graph(path: Path = GRAPH_JSON)`` as a
+# GRAPH_JSON`` at module top and ``read_graph_strict(path: Path = GRAPH_JSON)`` as a
 # default arg - so the graph/ledger paths bind to ``~/.fno`` before any per-test
 # fixture can redirect them. Under cross-test contamination the graph store's
 # fail-open (``Path.home() / ".fno"``) then leaked test nodes into the

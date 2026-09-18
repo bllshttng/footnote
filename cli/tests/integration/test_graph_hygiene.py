@@ -38,9 +38,9 @@ def _make_graph(path: Path, entries: list | None = None) -> None:
 # ---------------------------------------------------------------------------
 
 def test_load_graph_reads_entries_after_a_mutation(tmp_path):
-    """load_graph() returns the entries a locked_mutate_graph published."""
+    """load_graph() returns the entries a commit_rows_via_store published."""
     from fno.graph.load import load_graph
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     graph_path = tmp_path / "graph.json"
 
@@ -48,7 +48,7 @@ def test_load_graph_reads_entries_after_a_mutation(tmp_path):
         entries.append({"id": "ab-test02", "title": "Test 02", "status": "ready"})
         return entries
 
-    locked_mutate_graph(graph_path, _add_entry)
+    commit_rows_via_store(graph_path, _add_entry)
 
     entries = load_graph(graph_path)
     assert len(entries) == 1
@@ -63,7 +63,7 @@ def test_stale_sidecar_on_disk_is_ignored(tmp_path):
     the sidecar.
     """
     from fno.graph.load import load_graph
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     graph_path = tmp_path / "graph.json"
     sidecar_path = Path(str(graph_path) + ".sha256")
@@ -72,7 +72,7 @@ def test_stale_sidecar_on_disk_is_ignored(tmp_path):
         entries.append({"id": "ab-stale01", "title": "Stale sidecar"})
         return entries
 
-    locked_mutate_graph(graph_path, _add_entry)
+    commit_rows_via_store(graph_path, _add_entry)
     sidecar_path.write_text("0" * 64 + "\n")
     before = sidecar_path.stat().st_mtime_ns
 
@@ -91,7 +91,7 @@ def test_stale_sidecar_on_disk_is_ignored(tmp_path):
 
 def test_locked_mutate_keeps_last_10_backups(tmp_path):
     """After 15 sequential mutations, only 10 backups remain on disk."""
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     graph_path = tmp_path / "graph.json"
 
@@ -102,7 +102,7 @@ def test_locked_mutate_keeps_last_10_backups(tmp_path):
             entries.append({"id": f"ab-rot{_i:02d}", "title": f"Rotation {_i}"})
             return entries
 
-        locked_mutate_graph(graph_path, _add)
+        commit_rows_via_store(graph_path, _add)
         # Small sleep to ensure distinct timestamps in backup names
         time.sleep(0.01)
 

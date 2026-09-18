@@ -113,20 +113,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     from fno.graph.cli import _graph_path
-    from fno.graph.store import locked_mutate_graph, read_graph
+    from fno.graph.store import commit_rows_via_store, read_graph_strict
 
     graph_path = _graph_path()
 
     if args.restore:
         pairs = {k: float(v) for k, v in json.loads(args.restore.read_text()).items()}
         mutator, refused = _restore(pairs)
-        locked_mutate_graph(graph_path, mutator)
+        commit_rows_via_store(graph_path, mutator)
         print(f"restored {len(pairs) - len(refused)} rank(s) from {args.restore}")
         for node_id in refused:
             print(f"  left alone: {node_id} carries a rank written since the clear")
         return 0
 
-    pinned = _pinned(read_graph(graph_path))
+    pinned = _pinned(read_graph_strict(graph_path))
     if not pinned:
         print("no row carries a rank; nothing to clear")
         return 0
@@ -143,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     restore_file = Path.cwd() / f"agent-rank-pins-{stamp}.json"
     restore_file.write_text(json.dumps(dict(pinned), indent=2))
     mutator, skipped = _clear(dict(pinned))
-    locked_mutate_graph(graph_path, mutator)
+    commit_rows_via_store(graph_path, mutator)
     print(f"cleared {len(pinned) - len(skipped)} rank(s); restore file: {restore_file}")
     for node_id in skipped:
         print(f"  left alone: {node_id} was re-ranked after the preview read")

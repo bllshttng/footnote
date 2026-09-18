@@ -662,7 +662,7 @@ mod tests {
         fs::create_dir_all(dir.join("home")).unwrap();
         fs::write(
             dir.join("home/graph.json"),
-            "{\"entries\": [{\"id\": \"x-root\", \"type\": \"epic\"}]}",
+            "{\"entries\": [{\"id\": \"x-root\", \"slug\": \"x-root\", \"title\": \"x-root\", \"type\": \"epic\", \"status\": \"in_progress\", \"priority\": \"p2\"}]}",
         )
         .unwrap();
         let inputs = resolve_verdict_inputs(

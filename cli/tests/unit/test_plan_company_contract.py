@@ -189,7 +189,7 @@ def _contradictory_backlinks() -> dict:
 def test_graph_store_rejects_invalid_company_work_without_writing(
     tmp_path, company_work: dict, error: str
 ) -> None:
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     graph = tmp_path / "graph.json"
     graph.write_text(
@@ -199,13 +199,13 @@ def test_graph_store_rejects_invalid_company_work_without_writing(
     original = graph.read_bytes()
 
     with pytest.raises(ValueError, match=error):
-        locked_mutate_graph(graph, lambda entries: entries)
+        commit_rows_via_store(graph, lambda entries: entries)
 
     assert graph.read_bytes() == original
 
 
 def test_graph_store_persists_valid_company_work_and_unknown_fields(tmp_path: Path) -> None:
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     graph = tmp_path / "graph.json"
     graph.write_text(
@@ -223,7 +223,7 @@ def test_graph_store_persists_valid_company_work_and_unknown_fields(tmp_path: Pa
         + "\n"
     )
 
-    locked_mutate_graph(graph, lambda entries: entries)
+    commit_rows_via_store(graph, lambda entries: entries)
 
     saved = json.loads(graph.read_text())["entries"][0]
     assert saved["company_work"]["work_order"]["node_id"] == "x-e9a3"
@@ -231,7 +231,7 @@ def test_graph_store_persists_valid_company_work_and_unknown_fields(tmp_path: Pa
 
 
 def test_graph_store_persists_normalized_company_work(tmp_path: Path) -> None:
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     company_work = _refs().model_dump(mode="json")
     company_work["work_order"]["node_id"] = " x-e9a3 "
@@ -242,7 +242,7 @@ def test_graph_store_persists_normalized_company_work(tmp_path: Path) -> None:
         + "\n"
     )
 
-    locked_mutate_graph(graph, lambda entries: entries)
+    commit_rows_via_store(graph, lambda entries: entries)
 
     saved = json.loads(graph.read_text())["entries"][0]["company_work"]
     assert saved["work_order"]["node_id"] == "x-e9a3"

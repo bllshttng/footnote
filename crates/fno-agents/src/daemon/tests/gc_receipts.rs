@@ -3431,13 +3431,44 @@ pub(super) fn staged_graph_home() -> (tempfile::TempDir, AgentsHome) {
     (dir, home)
 }
 
-/// Stage a real graph file at the state root.
+/// Stage a real graph file at the state root. The store imports a seed
+/// file on FIRST open only, so a re-stage retires the previous store and
+/// the next read sees the new rows.
 pub(super) fn stage_graph(dir: &std::path::Path, entries: Value) {
+    for suffix in ["db", "db-wal", "db-shm"] {
+        let mut name = std::ffi::OsString::from("graph.");
+        name.push(suffix);
+        std::fs::remove_file(dir.join(name)).ok();
+    }
+    let rows: Vec<Value> = entries
+        .as_array()
+        .map(|rows| rows.iter().cloned().map(importable_row).collect())
+        .unwrap_or_default();
     std::fs::write(
         dir.join("graph.json"),
-        serde_json::to_vec(&json!({ "entries": entries })).unwrap(),
+        serde_json::to_vec(&json!({ "entries": rows })).unwrap(),
     )
     .unwrap();
+}
+
+/// The first-open import drops rows the model cannot represent, and the
+/// daemon fixtures carry only the fields a sweep reads. Fill the required
+/// minimum so every staged row survives the import.
+pub(super) fn importable_row(mut row: Value) -> Value {
+    if !row.is_object() {
+        return row;
+    }
+    let id = row
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let obj = row.as_object_mut().unwrap();
+    obj.entry("slug".to_string()).or_insert(json!(&id));
+    obj.entry("title".to_string()).or_insert(json!(&id));
+    obj.entry("type".to_string()).or_insert(json!("feature"));
+    obj.entry("priority".to_string()).or_insert(json!("p2"));
+    row
 }
 
 /// The settled-node shape: done, GitHub-confirmed merged, no additional PR.
@@ -3591,9 +3622,8 @@ fn a_settled_nodes_open_do_row_is_filled_and_kept() {
             "every named node done: N1 (via sessions; merge_status: N1:merged)".to_string()
         )]
     );
-    // THE assertion: the file still holds the row, now closed, never removed.
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
+    // THE assertion: the store still holds the row, now closed, never removed.
+    let raw = serde_json::json!({ "entries": crate::backlog::read_entries(&dir.path().join("graph.json")).unwrap() });
     let entry = &raw["entries"][0];
     let sessions = entry["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 1);
@@ -3645,10 +3675,9 @@ fn a_done_but_unmerged_node_still_holds_its_row() {
         summary.kept_open_do_row,
         vec![("row-b".to_string(), "N2".to_string())]
     );
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
+    let raw = serde_json::json!({ "entries": crate::backlog::read_entries(&dir.path().join("graph.json")).unwrap() });
     let row = &raw["entries"][0]["sessions"][0];
-    assert!(row.get("ended_at").is_none(), "{row}");
+    assert!(row.get("ended_at").map_or(true, Value::is_null), "{row}");
     let rendered = crate::reap_render::render_reap(&summary, false, false);
     assert!(
         rendered.contains("open do row on done node: N2"),
@@ -3692,9 +3721,10 @@ fn an_open_additional_pr_still_holds_its_row() {
         summary.kept_open_do_row,
         vec![("row-c".to_string(), "N3".to_string())]
     );
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-    assert!(raw["entries"][0]["sessions"][0].get("ended_at").is_none());
+    let raw = serde_json::json!({ "entries": crate::backlog::read_entries(&dir.path().join("graph.json")).unwrap() });
+    assert!(raw["entries"][0]["sessions"][0]
+        .get("ended_at")
+        .map_or(true, Value::is_null));
 }
 
 /// The measured live split, staged: of the reaper's kept rows, 15 nodes (17
@@ -3783,8 +3813,7 @@ fn the_live_eighteen_split_fifteen_and_three() {
     for node in ["Nu", "Np1", "Np2"] {
         assert!(held.contains(&&node.to_string()), "held: {held:?}");
     }
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
+    let raw = serde_json::json!({ "entries": crate::backlog::read_entries(&dir.path().join("graph.json")).unwrap() });
     for entry in raw["entries"].as_array().unwrap() {
         let node = entry["id"].as_str().unwrap();
         for row in entry["sessions"].as_array().unwrap() {
@@ -3840,8 +3869,10 @@ fn a_dry_run_settles_nothing_on_disk() {
     assert!(summary.kept_open_do_row.is_empty());
     let after = std::fs::read(dir.path().join("graph.json")).unwrap();
     assert_eq!(before, after, "a dry run wrote the graph");
-    let raw: Value = serde_json::from_slice(&after).unwrap();
-    assert!(raw["entries"][0]["sessions"][0].get("ended_at").is_none());
+    let raw = serde_json::json!({ "entries": crate::backlog::read_entries(&dir.path().join("graph.json")).unwrap() });
+    assert!(raw["entries"][0]["sessions"][0]
+        .get("ended_at")
+        .map_or(true, Value::is_null));
     assert!(
         !summary.dry_run_unverified.is_empty(),
         "the row stays on the retirement path, its remaining gate named: {summary:?}"
@@ -3891,8 +3922,12 @@ fn a_settle_that_cannot_read_is_named_and_changes_nothing() {
             vec![open_do_row("claude", "sess-f")],
         )]),
     );
-    // Corrupt the file: a failed read is a refusal, never a write.
-    std::fs::write(dir.path().join("graph.json"), b"{not json").unwrap();
+    // Corrupt the store: a failed read is a refusal, never a write.
+    std::fs::write(
+        crate::backlog::database_path(&dir.path().join("graph.json")),
+        b"{not json",
+    )
+    .unwrap();
 
     let (settled, refused) = gc_sweep::settle_stale_do_rows(&home);
 

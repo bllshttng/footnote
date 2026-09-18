@@ -15,7 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.graph.cli import cli
-from fno.graph.store import locked_mutate_graph, read_graph
+from fno.graph.store import commit_rows_via_store, read_graph_strict
 
 pytestmark = pytest.mark.usefixtures("native_backlog_door")
 
@@ -48,17 +48,17 @@ def tmp_graph(tmp_path, monkeypatch):
     from fno.graph import cli as graph_cli
 
     g = tmp_path / "graph.json"
-    locked_mutate_graph(g, lambda entries: entries)
+    commit_rows_via_store(g, lambda entries: entries)
     monkeypatch.setattr(graph_cli, "_graph_path", lambda: g)
     return g
 
 
 def _seed(g: Path, *nodes: dict) -> None:
-    locked_mutate_graph(g, lambda entries: entries + list(nodes))
+    commit_rows_via_store(g, lambda entries: entries + list(nodes))
 
 
 def _entry(g: Path, node_id: str) -> dict:
-    return next(e for e in read_graph(g) if e["id"] == node_id)
+    return next(e for e in read_graph_strict(g) if e["id"] == node_id)
 
 
 def _invoke(*args):
@@ -110,14 +110,14 @@ def test_status_idea_on_a_node_whose_plan_reads_ready_refuses(tmp_graph, tmp_pat
         _node("x-0001", status="superseded", superseded_by="x-aaaa", plan_path=str(plan)),
         _node("x-aaaa", supersedes=["x-0001"], status="ready"),
     )
-    before = read_graph(tmp_graph)
+    before = read_graph_strict(tmp_graph)
 
     r = _invoke("update", "x-0001", "--status", "idea")
 
     assert r.exit_code == 2, r.output
     assert "plan_path" in r.output
     assert "--plan-path null" in r.output
-    assert read_graph(tmp_graph) == before
+    assert read_graph_strict(tmp_graph) == before
 
 
 def test_status_ready_without_a_plan_refuses(tmp_graph):

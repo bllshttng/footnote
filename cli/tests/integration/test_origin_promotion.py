@@ -64,9 +64,9 @@ def test_ac2_hp_promotion_preserves_capture_evidence(hermetic: Path):
     assert promoted.exit_code == 0, promoted.output
     node_id = json.loads(promoted.output)["node_id"]
 
-    from fno.graph.store import read_graph
+    from fno.graph.store import read_graph_strict
 
-    node = next(e for e in read_graph(hermetic) if e["id"] == node_id)
+    node = next(e for e in read_graph_strict(hermetic) if e["id"] == node_id)
     assert node["source_kind"] == "operator_request"
     assert node["origin_evidence"] == f"{fu_id} source: PR#1700"
     from fno.graph._constants import REQUEST_ORIGINS
@@ -91,9 +91,9 @@ def test_ac2_hp_promotion_without_source_line_still_names_the_fu_id(hermetic: Pa
     assert promoted.exit_code == 0, promoted.output
     node_id = json.loads(promoted.output)["node_id"]
 
-    from fno.graph.store import read_graph
+    from fno.graph.store import read_graph_strict
 
-    node = next(e for e in read_graph(hermetic) if e["id"] == node_id)
+    node = next(e for e in read_graph_strict(hermetic) if e["id"] == node_id)
     assert node["origin_evidence"] == "fu-7a3d9c"
 
 
@@ -122,9 +122,9 @@ def test_ac2_edge_repromotion_is_idempotent_and_birth_stable(hermetic: Path):
     assert receipt["status"] == "already_promoted"
     assert receipt["node_id"] == node_id
 
-    from fno.graph.store import read_graph
+    from fno.graph.store import read_graph_strict
 
-    node = next(e for e in read_graph(hermetic) if e["id"] == node_id)
+    node = next(e for e in read_graph_strict(hermetic) if e["id"] == node_id)
     assert node["request_origin"] in ("operator_request", "unknown")
     assert node["origin_evidence"]
 

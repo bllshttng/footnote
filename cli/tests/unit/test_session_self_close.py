@@ -60,9 +60,9 @@ def _invoke(monkeypatch, g: Path, *args: str):
 
 
 def _row(g: Path) -> dict:
-    from fno.graph.store import read_graph
+    from fno.graph.store import read_graph_strict
 
-    return read_graph(g)[0]["sessions"][0]
+    return read_graph_strict(g)[0]["sessions"][0]
 
 
 def test_ac2_hp_the_owning_session_self_closes_and_receipt_says_ended(

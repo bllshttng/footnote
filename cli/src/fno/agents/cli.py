@@ -4853,7 +4853,9 @@ def yard(
     from fno.yard import RARITY_TIERS, fold
 
     rows = load_registry()
-    archive_path = paths.graph_archive_json()
+    # The archive file is the export --now deliverable (a sibling of the
+    # working graph); the residents themselves live in graph.db.
+    archive_path = paths.graph_json().parent / "graph-archive.json"
     # Strict on purpose: this is a truth-bound fold, not a browse verb. The
     # lenient reader turns a corrupt archive into [], which would mark every
     # citizen a first-sighting - fabricated outcome on the machine surface the

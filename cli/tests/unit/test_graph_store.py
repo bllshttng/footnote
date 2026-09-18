@@ -18,7 +18,7 @@ from fno.graph.store import (
     _apply_graph_defaults,
     append_session_record,
     _read_json,
-    locked_mutate_graph,
+    commit_rows_via_store,
     read_graph,
     render_canonical_views,
 )
@@ -91,7 +91,7 @@ def test_ac7_edge_mixed_version_round_trip(tmp_path):
     def mutator(entries):
         entries[0]["details"] = "touched"
         return entries
-    locked_mutate_graph(p, mutator)
+    commit_rows_via_store(p, mutator)
     saved = json.loads(p.read_text())["entries"][0]
     assert saved["locked_by"] == "worker-7"
     assert saved["session_id"] == "worker-7"  # mirror written
@@ -158,14 +158,14 @@ def test_ac1_hp_apply_graph_defaults():
 def test_scenario1_lazy_migration_artifact_url_default(tmp_path):
     """Scenario 1 (HP): Legacy entry without artifact_url key gets None on read."""
     path = _make_graph(tmp_path, [{"id": "ab-legacy01", "title": "T"}])
-    entries = read_graph(path)
+    entries = read_graph_strict(path)
     assert entries[0]["artifact_url"] is None
 
 
 def test_scenario1_lazy_migration_completion_note_default(tmp_path):
     """Scenario 1 (HP): Legacy entry without completion_note key gets None on read."""
     path = _make_graph(tmp_path, [{"id": "ab-legacy02", "title": "T"}])
-    entries = read_graph(path)
+    entries = read_graph_strict(path)
     assert entries[0]["completion_note"] is None
 
 
@@ -175,7 +175,7 @@ def test_scenario3_edge_preserves_shim_artifact_url(tmp_path):
         tmp_path,
         [{"id": "ab-shim0001", "title": "T", "artifact_url": "https://figma/foo"}],
     )
-    entries = read_graph(path)
+    entries = read_graph_strict(path)
     assert entries[0]["artifact_url"] == "https://figma/foo"
 
 
@@ -185,19 +185,19 @@ def test_scenario3_edge_preserves_shim_completion_note(tmp_path):
         tmp_path,
         [{"id": "ab-shim0002", "title": "T", "completion_note": "closed Q2"}],
     )
-    entries = read_graph(path)
+    entries = read_graph_strict(path)
     assert entries[0]["completion_note"] == "closed Q2"
 
 
-def test_ac1_hp_locked_mutate_graph(tmp_path):
-    """AC1-HP: locked_mutate_graph reads, applies mutator, writes back."""
+def test_ac1_hp_commit_rows_via_store(tmp_path):
+    """AC1-HP: commit_rows_via_store reads, applies mutator, writes back."""
     path = tmp_path / "graph.json"
 
     def mutator(entries):
         entries.append({"id": "ab-newnode0", "title": "New"})
         return entries
 
-    locked_mutate_graph(path, mutator)
+    commit_rows_via_store(path, mutator)
     result = _read_json(path)
     assert any(e.get("id") == "ab-newnode0" for e in result)
 
@@ -214,7 +214,7 @@ def test_touched_at_stamped_on_curation_change(tmp_path):
                 e["priority"] = "p1"
         return entries
 
-    locked_mutate_graph(path, mutator)
+    commit_rows_via_store(path, mutator)
     result = _read_json(path)
     node = next(e for e in result if e["id"] == "ab-1")
     assert node.get("touched_at")
@@ -243,7 +243,7 @@ def test_touched_at_unchanged_on_non_curation_write(tmp_path):
                 e["cwd"] = "/new/path"
         return entries
 
-    locked_mutate_graph(path, mutator)
+    commit_rows_via_store(path, mutator)
     result = _read_json(path)
     node = next(e for e in result if e["id"] == "ab-1")
     assert node.get("touched_at") == "2020-01-01T00:00:00+00:00"
@@ -258,7 +258,7 @@ def test_touched_at_null_on_new_node(tmp_path):
         entries.append({"id": "ab-brand-new", "title": "New", "priority": "p2"})
         return entries
 
-    locked_mutate_graph(path, mutator)
+    commit_rows_via_store(path, mutator)
     result = _read_json(path)
     node = next(e for e in result if e["id"] == "ab-brand-new")
     assert node.get("touched_at") is None
@@ -293,7 +293,7 @@ def test_touched_at_unchanged_on_blocked_node_unrelated_write(tmp_path):
                 e["details"] = "unrelated edit"
         return entries
 
-    locked_mutate_graph(path, mutator)
+    commit_rows_via_store(path, mutator)
     result = _read_json(path)
     blocked = next(e for e in result if e["id"] == "ab-blocked")
     assert blocked.get("touched_at") == "2020-01-01T00:00:00+00:00"
@@ -321,7 +321,7 @@ def test_render_pass_fail_open_when_vault_root_raises(tmp_path, monkeypatch):
         return entries
 
     # Must not raise despite vault_root() blowing up.
-    locked_mutate_graph(path, mutator)
+    commit_rows_via_store(path, mutator)
     render_canonical_views()
     result = _read_json(path)
     assert any(e.get("id") == "ab-failopen" for e in result)
@@ -360,7 +360,7 @@ def test_regression_view_pass_renders_the_store_not_global(tmp_path, monkeypatch
         entries.append({"id": "ab-sibling1", "title": "Sib"})
         return entries
 
-    locked_mutate_graph(path, mutator)
+    commit_rows_via_store(path, mutator)
     render_canonical_views()
 
     # Renders land beside the canonical store the pass read.
@@ -398,7 +398,7 @@ def test_canonical_graph_renders_to_board_targets(tmp_path, monkeypatch):
         entries.append({"id": "ab-canon01", "title": "Canon"})
         return entries
 
-    locked_mutate_graph(graph_json, mutator)
+    commit_rows_via_store(graph_json, mutator)
     render_canonical_views()
 
     # Board targets (state_dir) get the render, not graph.json's siblings.
@@ -434,7 +434,7 @@ def test_canonical_auto_render_keeps_archive_only_rows(tmp_path, monkeypatch):
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph_json)
     monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
 
-    locked_mutate_graph(
+    commit_rows_via_store(
         graph_json,
         lambda entries: [*entries, {"id": "ab-live0001", "title": "live"}],
     )
@@ -446,7 +446,7 @@ def test_canonical_auto_render_keeps_archive_only_rows(tmp_path, monkeypatch):
 def test_ac1_hp_read_graph_returns_with_defaults(tmp_path):
     """AC1-HP: read_graph applies defaults to entries."""
     path = _make_graph(tmp_path, [{"id": "ab-12341234", "title": "T"}])
-    entries = read_graph(path)
+    entries = read_graph_strict(path)
     assert len(entries) == 1
     assert entries[0]["priority"] == "p2"
 
@@ -455,7 +455,7 @@ def test_ac2_err_read_graph_corrupt_returns_empty(tmp_path):
     """AC2-ERR: read_graph returns [] on corruption (does not raise)."""
     path = tmp_path / "corrupt.json"
     path.write_text("{ INVALID JSON }")
-    entries = read_graph(path)
+    entries = read_graph_strict(path)
     assert entries == []
 
 
@@ -464,7 +464,7 @@ def test_legacy_underscore_status_key_migrates_on_read(tmp_path):
     path = _make_graph(
         tmp_path, [{"id": "ab-12341234", "title": "T", "_status": "claimed"}]
     )
-    entry = read_graph(path)[0]
+    entry = read_graph_strict(path)[0]
     assert "_status" not in entry
     # STATUS_MIGRATION still applies after the key fold.
     assert entry["status"] == "in_progress"
@@ -1080,7 +1080,7 @@ def _run_tx(client, monkeypatch, record):
     # Patch time.sleep on the store module (the loop's call path), the same
     # seam the sibling tx-backoff tests record through.
     monkeypatch.setattr(store_mod.time, "sleep", record)
-    return store_mod.locked_mutate_graph(client.path, lambda e: e)
+    return store_mod.commit_rows_via_store(client.path, lambda e: e)
 
 
 def test_two_colliding_writers_both_land_and_their_delays_differ(tmp_path, monkeypatch):

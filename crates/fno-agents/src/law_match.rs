@@ -1454,7 +1454,8 @@ mod tests {
             &graph,
             serde_json::json!({
                 "entries": [
-                    {"id": "x-aaaa", "parent": "x-bbbb", "project": "fno"}
+                    {"id": "x-aaaa", "slug": "x-aaaa", "title": "x-aaaa", "type": "feature",
+                     "status": "ready", "priority": "p2", "parent": "x-bbbb", "project": "fno"}
                 ]
             })
             .to_string(),
@@ -1532,7 +1533,8 @@ mod tests {
             &graph,
             serde_json::json!({
                 "entries": [
-                    {"id": "x-aaaa", "parent": "x-bbbb", "project": "fno"}
+                    {"id": "x-aaaa", "slug": "x-aaaa", "title": "x-aaaa", "type": "feature",
+                     "status": "ready", "priority": "p2", "parent": "x-bbbb", "project": "fno"}
                 ]
             })
             .to_string(),

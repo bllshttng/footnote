@@ -1432,7 +1432,7 @@ def test_priority_default_is_p2(tmp_graph):
 
 def test_priority_migration_on_mutation(tmp_graph):
     """Legacy high/medium/low values are backfilled to p1/p2/p3 on the
-    next graph mutation (recompute_statuses runs inside locked_mutate_graph).
+    next graph mutation (recompute_statuses runs inside commit_rows_via_store).
     """
     tmp_graph.write_text(json.dumps({
         "entries": [
@@ -1448,7 +1448,7 @@ def test_priority_migration_on_mutation(tmp_graph):
         ]
     }))
 
-    # Trigger a mutation; locked_mutate_graph runs recompute_statuses
+    # Trigger a mutation; commit_rows_via_store runs recompute_statuses
     # which contains the backfill loop.
     r = _invoke("backlog", "add", "Trigger mutation")
     assert r.exit_code == 0, r.output
@@ -2012,9 +2012,9 @@ def test_render_md_includes_additional_prs_on_done_nodes(tmp_graph):
          ],
          "created_at": "2026-01-01T00:00:00Z"}
     ]}))
-    from fno.graph.store import read_graph
+    from fno.graph.store import read_graph_strict
     from fno.graph.render import render_graph_md
-    entries = read_graph(tmp_graph)
+    entries = read_graph_strict(tmp_graph)
     md_path = tmp_graph.parent / "graph.md"
     render_graph_md(entries, md_path)
     text = md_path.read_text()

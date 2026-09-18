@@ -434,7 +434,7 @@ def index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     ``~/.fno/decisions.jsonl``, and reads back whatever else is in there.
     """
     path = tmp_path / "state" / "decisions.jsonl"
-    monkeypatch.setattr("fno.paths.decisions_jsonl", lambda: path)
+    monkeypatch.setattr("fno.decide._decisions_index_path", lambda: path)
     return path
 
 
@@ -2133,9 +2133,9 @@ def test_a_failed_projection_never_reports_a_lost_capture(
     import fno.graph.store as gs
 
     def boom(*a, **kw):
-        raise SystemExit(1)  # what locked_mutate_graph does on a corrupt graph
+        raise SystemExit(1)  # what commit_rows_via_store does on a corrupt graph
 
-    monkeypatch.setattr(gs, "locked_mutate_graph", boom)
+    monkeypatch.setattr(gs, "commit_rows_via_store", boom)
     res = runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
     assert res.exit_code == 0, res.output
     assert "graph projection failed" in res.output

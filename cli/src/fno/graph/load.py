@@ -68,9 +68,9 @@ def query_by_source_inbox_msg(msg_id: str, path: Path | None = None) -> list[dic
     hermetic-test redirect) is still honored by reading that file directly.
     """
     if path is not None:
-        from fno.graph.store import read_graph
+        from fno.graph.store import read_graph_strict
 
-        return [e for e in read_graph(path) if e.get("source_inbox_msg") == msg_id]
+        return [e for e in read_graph_strict(path) if e.get("source_inbox_msg") == msg_id]
     from fno.tracker import sidecar as sidecar_store
 
     return [

@@ -93,7 +93,7 @@ def test_two_conflicts_emit_two_events_then_commit(
     g = _graph(tmp_path)
     install(_FakeClient(conflicts=2, entries=[]), g)
 
-    committed = store.locked_mutate_graph(g, lambda entries: entries)
+    committed = store.commit_rows_via_store(g, lambda entries: entries)
 
     assert committed == []
     rows = _conflicts(journal)
@@ -114,7 +114,7 @@ def test_exhaustion_emits_exhausted_then_raises(
     install(_FakeClient(conflicts=5, entries=[]), g)
 
     with pytest.raises(RuntimeError, match="graph mutated under us 5 times"):
-        store.locked_mutate_graph(g, lambda entries: entries)
+        store.commit_rows_via_store(g, lambda entries: entries)
 
     rows = _conflicts(journal)
     assert len(rows) == 5, rows
@@ -146,4 +146,4 @@ def test_an_unwritable_journal_never_changes_the_outcome(
         store, "_finish_mutation", lambda path, outcome: outcome["entries"]
     )
 
-    assert store.locked_mutate_graph(g, lambda entries: entries) == []
+    assert store.commit_rows_via_store(g, lambda entries: entries) == []
