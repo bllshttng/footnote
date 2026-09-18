@@ -438,20 +438,23 @@ fn write_delivery_verdict(env: &Env, session_id: &str, complete: bool) {
 fn calls(env: &Env) -> String {
     fs::read_to_string(&env.calls_log).unwrap_or_default()
 }
-fn events_text(p: &Path) -> String {
-    fs::read_to_string(p).unwrap_or_default()
-}
 fn count_event(p: &Path, kind: &str, session_id: &str) -> usize {
-    events_text(p)
-        .lines()
-        .filter(|l| {
-            serde_json::from_str::<serde_json::Value>(l)
+    // Committed rows, not journal bytes: the cutover stopped journal appends,
+    // so a session_finalized written by the binary lives only in the store.
+    let _ = fno_event_store::import_all(p);
+    let rows = fno_event_store::query_events(
+        p,
+        &fno_event_store::EventQuery {
+            types: vec![kind.to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap_or_default();
+    rows.iter()
+        .filter(|r| {
+            serde_json::from_str::<serde_json::Value>(&r.line)
                 .ok()
-                .map(|v| {
-                    v.get("type").and_then(|t| t.as_str()) == Some(kind)
-                        && v.pointer("/data/session_id").and_then(|s| s.as_str())
-                            == Some(session_id)
-                })
+                .map(|v| v.pointer("/data/session_id").and_then(|s| s.as_str()) == Some(session_id))
                 .unwrap_or(false)
         })
         .count()
@@ -579,7 +582,7 @@ fn finalize_binary_repairs_a_prior_ship_before_returning() {
     fs::write(
         &env.events,
         format!(
-            "{{\"type\":\"session_finalized\",\"data\":{{\"session_id\":\"{run}\",\"ship\":true}}}}\n"
+            "{{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{{\"session_id\":\"{run}\",\"ship\":true}}}}\n"
         ),
     )
     .unwrap();
