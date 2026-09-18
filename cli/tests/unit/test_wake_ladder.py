@@ -628,3 +628,43 @@ def test_an_unreadable_registry_gates_with_no_account(monkeypatch):
     ok, detail = wake_and_deliver("uuid-full", "wake")
     assert ok is True
     assert gate_kwargs.get("account") is None
+
+
+def test_resume_unpinned_refusal_reports_wake_unpinned(monkeypatch):
+    # AC4-ERR: the resolver's refusal rides the receipt as wake-unpinned(...)
+    # and never as wake-already-in-flight, though ResumeUnpinned carries exit 2.
+    from fno.agents.fork_lineage import ResumeUnpinned
+
+    _allow_rung2_claim(monkeypatch)
+    monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: None)
+
+    def _refuse(**k):
+        raise ResumeUnpinned(
+            "session uuid-full last ran glm-5.3-flash[1m], which only route zai "
+            "serves, and this resume restores no route; resume it with: "
+            "fno agents spawn --resume uuid-full -P zai -m 'glm-5.3-flash[1m]'",
+            exit_code=2,
+        )
+
+    monkeypatch.setattr(dispatch, "dispatch_spawn", _refuse)
+    ok, detail = wake_and_deliver("uuid-full", "wake")
+    assert ok is False
+    assert detail.startswith("wake-unpinned(")
+    assert "-P zai" in detail
+
+
+def test_wake_if_asleep_propagates_the_refusal_detail(monkeypatch):
+    # The drain/heads-up sibling path used to drop the token at (False, None),
+    # so neither caller could name why the wake did not happen.
+    from fno.agents import discover as discover_mod
+
+    monkeypatch.setattr(dispatch, "_delivery_policy_refusal", lambda t: None)
+    monkeypatch.setattr(
+        discover_mod,
+        "resolve_reachable",
+        lambda t: (SimpleNamespace(agent="claude", session_id="u-x", cwd=None), False),
+    )
+    monkeypatch.setattr(
+        dispatch, "wake_drain_agent", lambda u, **k: (False, "wake-unpinned(no model)")
+    )
+    assert dispatch.wake_if_asleep_claude("tok") == (False, "wake-unpinned(no model)")

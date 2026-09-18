@@ -12,6 +12,9 @@ from __future__ import annotations
 
 from typing import Any, Optional, Sequence
 
+from fno.agents.dispatch_errors import DispatchAskError
+from fno.agents.spawn_axes_client import SpawnAxesUnavailable, spawn_axes_call
+
 
 def lineage_row_for(entries: Sequence[Any], resume_session_id: Optional[str]) -> Any:
     """The registry row this resume forks FROM, matched by uuid alone - the
@@ -28,11 +31,20 @@ def lineage_row_for(entries: Sequence[Any], resume_session_id: Optional[str]) ->
     )
 
 
-def inherited_model(src: Any, model: Optional[str], route_model: Optional[str]) -> Optional[str]:
-    """The lineage model, when the caller named no model of its own."""
-    if model or route_model:
-        return None
-    return getattr(src, "model", None)
+class ResumeUnpinned(DispatchAskError):
+    """An unpinned claude resume resolved no model, so the launch refuses."""
+
+
+def resume_axes(src, session_id, effort, route_model, *, routed):
+    try:
+        answer = spawn_axes_call({"resume_pin": {
+            "session_id": session_id, "routed": routed, "row": None if src is None else vars(src)}})
+    except SpawnAxesUnavailable as exc:
+        raise ResumeUnpinned(f"the resume-pin owner is unavailable: {exc}", exit_code=2) from exc
+    if "refusal" in answer:
+        raise ResumeUnpinned(answer["refusal"], exit_code=2)
+    get = answer.get
+    return get("model"), effort or get("effort"), route_model or get("route_model")
 
 
 def predecessor_ids(resume_session_id: Optional[str], revive: bool) -> list[str]:
@@ -66,23 +78,20 @@ def axis_overrides(
         # Lineage beats the lane default but loses to an explicit route - a
         # woken worker bills on the provider it was running.
         provider=route_provider or getattr(src, "provider", None) or lane_provider,
-        model=verified_model or model or route_model or inherited_model(src, model, route_model),
+        model=verified_model or model or route_model,
         model_basis=(
             "verified"
             if verified_model
             else (
                 "requested"
                 if (model or route_model)
-                else getattr(src, "model_basis", None)
+                else None
             )
         ),
         effort=effort or getattr(src, "effort", None),
         # The REQUEST verbatim beside the effect, so a silent substitution
         # stays diffable.
-        requested_model=model
-        or route_model
-        or getattr(src, "requested_model", None)
-        or inherited_model(src, model, route_model),
+        requested_model=model or route_model,
         requested_provider=route_provider
         or getattr(src, "requested_provider", None)
         or getattr(src, "provider", None)
