@@ -145,6 +145,14 @@ pub struct RegistryAgent {
     /// The served CHILD/PEER word for this row's spawn edge, read from the
     /// registry row. `None` (a pre-v32 row) renders flat like a peer.
     pub lineage_kind: Option<String>,
+    /// The registry NAME of the row `spawned_by_session` points at, derived
+    /// once per row set in [`merge_rows`]. `None` when the edge names a
+    /// session no row holds, or two rows claim the same id: an ambiguous
+    /// parent reads as absent, never as a confident wrong answer.
+    pub spawned_by_name: Option<String>,
+    /// Why this row's edge names no parent session (a v33 registry field,
+    /// read straight off the row). Spent by the sideline detail pane.
+    pub lineage_reason: Option<String>,
     /// Whether this row's terminal-looking status is a POSITIVE
     /// falsification or an absence of evidence. `Alive` for an active
     /// non-terminal status (mirrors `exited == false`). Orphaned and failed
@@ -1984,6 +1992,11 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        let lineage_reason = row
+            .get("lineage_reason")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let (badge, reason, answerable) = match inside_leg {
             Some(leg) if !leg.is_null() => {
                 let live = report_is_live(
@@ -2163,6 +2176,8 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             crown_scope,
             spawned_by_session,
             lineage_kind,
+            spawned_by_name: None,
+            lineage_reason,
             liveness,
             liveness_measured_at: measured_at,
             harness_title,
@@ -2383,6 +2398,8 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             crown_scope: None,
             spawned_by_session: None,
             lineage_kind: None,
+            spawned_by_name: None,
+            lineage_reason: None,
             liveness: Liveness::Alive,
             liveness_measured_at: None,
             harness_title: None,
@@ -2446,6 +2463,8 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             spawned_by_session: r.harness_session_id.clone(),
             // A parked fork belongs to its own worker: a CHILD of it.
             lineage_kind: Some("child".into()),
+            spawned_by_name: None,
+            lineage_reason: None,
             liveness: Liveness::Alive,
             liveness_measured_at: None,
             harness_title: r.harness_title.clone(),
@@ -2455,8 +2474,60 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
     }
     out.extend(parked);
     out.extend(foreign);
+    derive_spawned_by_name(&mut out);
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// Derive [`RegistryAgent::spawned_by_name`] once for the whole row set:
+/// each row's `spawned_by_session` is joined, case- and whitespace-
+/// insensitive (edges arrive with stray case; the same tolerance
+/// `spawn_edge::live_child_of` applies), to the row whose
+/// `harness_session_id` it names. An id two DIFFERENT names claim maps to
+/// no name: an ambiguous parent reads as absent, never as a confident
+/// wrong answer. An edge naming a session no row holds also reads as
+/// absent - that absence is a fact the reader must be able to see.
+fn derive_spawned_by_name(rows: &mut [RegistryAgent]) {
+    use std::collections::{HashMap, HashSet};
+    let mut name_by_sid: HashMap<String, String> = HashMap::new();
+    let mut ambiguous: HashSet<String> = HashSet::new();
+    for r in rows.iter() {
+        let Some(sid) = r
+            .harness_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let key = sid.to_ascii_lowercase();
+        match name_by_sid.get(&key) {
+            Some(prev) if prev != &r.name => {
+                name_by_sid.remove(&key);
+                ambiguous.insert(key);
+            }
+            Some(_) => {}
+            None => {
+                name_by_sid.insert(key, r.name.clone());
+            }
+        }
+    }
+    for r in rows.iter_mut() {
+        let Some(edge) = r
+            .spawned_by_session
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let key = edge.to_ascii_lowercase();
+        r.spawned_by_name = if ambiguous.contains(&key) {
+            None
+        } else {
+            name_by_sid.get(&key).cloned()
+        };
+    }
 }
 
 /// Rendering cap on lineage depth: a pathological chain must not push
@@ -2746,6 +2817,7 @@ mod tests {
     mod lineage_kind_tests;
     mod liveness_rule_tests;
     mod parked_child_tests;
+    mod spawned_by_name_tests;
     mod thread_row_status_tests;
     fn reg(rows: &str) -> String {
         format!(r#"{{"schema_version": 6, "agents": [{rows}]}}"#)
@@ -4357,6 +4429,8 @@ config_dir = "~/.claude-alt"
     // -------------------------------------------------------------------
     fn plain_row(name: &str, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
         RegistryAgent {
+            spawned_by_name: None,
+            lineage_reason: None,
             model: None,
             route: None,
             route_provider_id: None,

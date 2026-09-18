@@ -190,15 +190,27 @@ pub(crate) fn detail_fields(
             match row.and_then(|a| {
                 a.spawned_by_session
                     .as_deref()
-                    .map(|p| (a.lineage_kind.as_deref(), p))
+                    .map(|p| (a.spawned_by_name.as_deref(), a.lineage_kind.as_deref(), p))
             }) {
-                // A CHILD names its parent session; a PEER names it as the
-                // handoff it is, so the pane shows the relation un-nested.
-                // A pre-v32 edge (no word yet) reads plain, like the child
-                // record it is.
-                Some((Some("peer"), p)) => format!("{p} (handoff)"),
-                Some((_, p)) => p.to_string(),
-                None => NOT_RECORDED.to_string(),
+                // An edge resolves to the parent's registry NAME when the set
+                // holds that row: "<name> (<session>)". A PEER stays the
+                // handoff it is; a pre-v32 edge (no word yet) reads plain,
+                // like the child record it is. An edge naming a session no
+                // row holds renders the bare id - the absence is a fact the
+                // reader sees, never a fabricated name.
+                Some((name, Some("peer"), p)) => match name {
+                    Some(n) => format!("{n} ({p}) (handoff)"),
+                    None => format!("{p} (handoff)"),
+                },
+                Some((name, _, p)) => match name {
+                    Some(n) => format!("{n} ({p})"),
+                    None => p.to_string(),
+                },
+                // No edge: the birth's reason, when the birth recorded one.
+                None => row
+                    .and_then(|a| a.lineage_reason.as_deref())
+                    .unwrap_or(NOT_RECORDED)
+                    .to_string(),
             },
         ),
         (

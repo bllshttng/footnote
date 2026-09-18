@@ -65,6 +65,8 @@ fn overlay(items: Vec<crate::feed_overlay::FeedItem>) -> FeedOverlay {
 /// A pane-hosted row, so the joined case exercises agent_hit's FocusPane arm.
 fn joined_row(name: &str, cwd_base: Option<&str>, pane: Option<u64>) -> AgentRow {
     AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -716,4 +718,59 @@ fn the_composed_frame_paints_every_field_and_its_action() {
     assert!(text.contains(crate::client::feed_detail::NOT_RECORDED));
     // The action is named before it is pressed.
     assert!(text.contains("attach on portal 0"), "footer missing");
+}
+
+// (x-9cbf) The parent field spends the derived NAME when the edge resolves
+// to a row in the set, keeps the handoff word on a PEER edge, shows the bare
+// session id when the edge names no row, and falls back to the birth's own
+// reason (or the honest silence) when the row has no edge at all.
+#[test]
+fn the_parent_field_names_the_parent_row_when_the_edge_resolves() {
+    use crate::client::feed_detail::{self, Destination};
+    let item = feed_item(Some("x-a"), Some("s-1"));
+    let mut child = joined_row("jn-t-x-1", None, None);
+    child.spawned_by_session = Some("s-lead".into());
+    let parent_name = "t-x-lead";
+
+    // Child edge resolving to a row: "<name> (<session>)".
+    child.spawned_by_name = Some(parent_name.into());
+    child.lineage_kind = Some("child".into());
+    let fields = feed_detail::detail_fields(&item, &Destination::Exact(&child));
+    let parent = fields.iter().find(|(l, _)| *l == "parent").unwrap();
+    assert_eq!(parent.1, "t-x-lead (s-lead)");
+
+    // Peer edge: the same answer, plus the handoff word.
+    child.lineage_kind = Some("peer".into());
+    let fields = feed_detail::detail_fields(&item, &Destination::Exact(&child));
+    let parent = fields.iter().find(|(l, _)| *l == "parent").unwrap();
+    assert_eq!(parent.1, "t-x-lead (s-lead) (handoff)");
+
+    // Edge present, name absent (a session no row holds): the bare id, and
+    // never a fabricated or borrowed name.
+    child.spawned_by_name = None;
+    child.lineage_kind = Some("child".into());
+    let fields = feed_detail::detail_fields(&item, &Destination::Exact(&child));
+    let parent = fields.iter().find(|(l, _)| *l == "parent").unwrap();
+    assert_eq!(parent.1, "s-lead");
+    child.lineage_kind = Some("peer".into());
+    let fields = feed_detail::detail_fields(&item, &Destination::Exact(&child));
+    let parent = fields.iter().find(|(l, _)| *l == "parent").unwrap();
+    assert_eq!(parent.1, "s-lead (handoff)");
+
+    // No edge: the birth's reason stands in for the parent it could not name.
+    child.spawned_by_session = None;
+    child.lineage_kind = None;
+    child.lineage_reason = Some("daemon mint: spawn request carried no parent edge".into());
+    let fields = feed_detail::detail_fields(&item, &Destination::Exact(&child));
+    let parent = fields.iter().find(|(l, _)| *l == "parent").unwrap();
+    assert_eq!(
+        parent.1,
+        "daemon mint: spawn request carried no parent edge"
+    );
+
+    // No edge and no reason: the honest silence.
+    child.lineage_reason = None;
+    let fields = feed_detail::detail_fields(&item, &Destination::Exact(&child));
+    let parent = fields.iter().find(|(l, _)| *l == "parent").unwrap();
+    assert_eq!(parent.1, feed_detail::NOT_RECORDED);
 }

@@ -320,9 +320,10 @@ fn default_true() -> bool {
 /// v81: `RestoreRow.portal` (serde default), the verb fills held seats; floor 58.
 /// v82: `AgentRow.lineage_kind` (serde default), the served CHILD/PEER word;
 /// the sideline nests only CHILD rows; `BackendNotLive` also removed here.
-/// v83: `ClientMsg::AgentLaunch` + `ServerMsg::AgentLaunch`, the sideline
-/// new-agent composer's typed request/progress exchange; floor stays 58.
-pub const PROTO_VERSION: u32 = 83;
+/// v84: `AgentRow.spawned_by_name` + `AgentRow.lineage_reason` (serde
+/// default), the parent's registry name and the birth's reason, derived
+/// server-side; floor stays 58.
+pub const PROTO_VERSION: u32 = 84;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1248,6 +1249,19 @@ pub struct AgentRow {
     /// (v82) Served CHILD/PEER word; `child` nests, `peer`/absent renders flat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage_kind: Option<String>,
+    /// (v84) The registry NAME of the row `spawned_by_session` points at,
+    /// derived once per row set server-side (agents_view::merge_rows).
+    /// `None` when the edge names no row in the set or the id is claimed
+    /// by two different names. `#[serde(default)]` keeps a v83 reader
+    /// wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by_name: Option<String>,
+    /// (v84) Why a birth names no parent session (a v33 registry field,
+    /// read straight off the row). `None` when the row carries a parent
+    /// edge or predates the field. `#[serde(default)]` keeps a v83 reader
+    /// wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_reason: Option<String>,
     /// (v49) The row's own harness session id (claude/codex uuid),
     /// the join key for `spawned_by_session`. Same value the registry row
     /// carries; `None` for a row the registry wrote without one.
@@ -4384,6 +4398,8 @@ mod tests {
                 area: (24, 80),
                 agents: vec![
                     AgentRow {
+                        spawned_by_name: None,
+                        lineage_reason: None,
                         harness: None,
                         model: None,
                         route: None,
@@ -4439,6 +4455,8 @@ mod tests {
                         pane_activity: None,
                     },
                     AgentRow {
+                        spawned_by_name: None,
+                        lineage_reason: None,
                         harness: None,
                         model: None,
                         route: None,

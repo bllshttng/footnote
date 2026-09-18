@@ -32,6 +32,8 @@ async fn selector_shift_p_opens_the_portal_picker_without_sending() {
 /// squad 1's unnamed tabs 0/1, lagos on squad 2's tab 0.
 fn portal_pick_view() -> View {
     let agent = |squad: Option<u64>, name: &str, pane_id, tab, portal: Option<u8>| AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal,
         harness: None,
         model: None,

@@ -407,6 +407,8 @@ fn tab_label_text_collapses_only_the_exact_ordinal() {
 // x-df4c US4 helper: an AgentRow in squad 1 with the given tab/badge/exit.
 fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
     AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
@@ -946,6 +948,8 @@ fn focus_outline_wraps_both_seams_of_a_2x2_pane() {
 // An agent row hosting a given pane, under squad 1.
 pub(super) fn focus_agent(pane: u64) -> AgentRow {
     AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
@@ -2936,6 +2940,8 @@ fn set_layout_prunes_dead_squad_ids_from_expanded() {
 // (squad, exited) matter; badge/seen round out a plausible row.
 fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
     AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
@@ -3613,6 +3619,8 @@ fn client_compose_active_squad_glyph_in_both_caret_states() {
 // tri-state filtering tests below.
 fn view_with_dead_interleaved() -> View {
     let row = |name: &str, exited: bool| AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -3812,6 +3820,8 @@ fn work_queue_section_is_binary_and_hides_cards_when_collapsed() {
 #[test]
 fn section_header_is_clickable_but_never_selector_selectable() {
     let view = view_with_agents(vec![AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -4085,6 +4095,8 @@ fn same_named_squads_keep_separate_view_state() {
 #[test]
 fn elsewhere_section_live_only_hides_exited_orphans() {
     let orphan = |name: &str, exited: bool| AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -4151,6 +4163,8 @@ fn elsewhere_section_live_only_hides_exited_orphans() {
 #[test]
 fn section_header_caret_tracks_all_three_states() {
     let orphan = |name: &str, exited: bool| AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -4276,6 +4290,8 @@ fn client_compose_status_row_squad_cell_multi_squad_only() {
 #[test]
 fn chrome_hit_agent_rows_focus_or_hint() {
     let hosted = AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -4318,6 +4334,8 @@ fn chrome_hit_agent_rows_focus_or_hint() {
     // dedicated thread pane (x-07c2); a row with no attach id reaches
     // BY NAME (Follow/Locate tiers).
     let bg_attach = AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -4359,6 +4377,8 @@ fn chrome_hit_agent_rows_focus_or_hint() {
     // A watch-only row with no attach target: its reach opens the
     // dedicated pane by name (Follow tails it, Locate explains it).
     let bg_plain = AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -4444,6 +4464,8 @@ fn chrome_hit_bottom_chrome_row_is_swallowed() {
     // top-K cap, so all 40 render and the list still reaches the bottom.
     let agents: Vec<AgentRow> = (0..40)
         .map(|i| AgentRow {
+            spawned_by_name: None,
+            lineage_reason: None,
             harness: None,
             model: None,
             route: None,
@@ -5005,6 +5027,8 @@ fn row_menu_entries_gate_by_agent_state() {
     // row gets focus and NO splits (already placed); an exited row gets
     // remove and no stop.
     let mk = |name: &str, pane_id: Option<u64>, attach: Option<&str>, exited: bool| AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
@@ -6007,6 +6031,8 @@ async fn row_menu_disambiguates_same_named_agents() {
     // identity (pane_id/attach_id) so Focus acts on the row it was opened on,
     // never the other same-named row.
     let mk = |name: &str, pane_id: Option<u64>| AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
@@ -7861,6 +7887,8 @@ async fn row_menu_mail_opens_the_same_peek_composer() {
 /// A pane-hosted sideline row, the shape the move/break-out menu acts on.
 fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
     AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
@@ -8922,6 +8950,8 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
         area: (29, 72),
         agents: vec![
             AgentRow {
+                spawned_by_name: None,
+                lineage_reason: None,
                 harness: None,
                 model: None,
                 route: None,
@@ -8961,6 +8991,8 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 pane_activity: None,
             },
             AgentRow {
+                spawned_by_name: None,
+                lineage_reason: None,
                 harness: None,
                 model: None,
                 route: None,
@@ -9000,6 +9032,8 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 pane_activity: None,
             },
             AgentRow {
+                spawned_by_name: None,
+                lineage_reason: None,
                 harness: None,
                 model: None,
                 route: None,
@@ -9116,6 +9150,8 @@ fn squad_header_rollup_counts_in_every_view_state() {
     // all-exited squad keeps its ✗ count so dead agents stay discoverable.
     fn ar(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
         AgentRow {
+            spawned_by_name: None,
+            lineage_reason: None,
             portal: None,
             harness: None,
             model: None,
@@ -9559,6 +9595,8 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
         area: (29, 72),
         agents: vec![
             AgentRow {
+                spawned_by_name: None,
+                lineage_reason: None,
                 harness: None,
                 model: None,
                 route: None,
@@ -9598,6 +9636,8 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 pane_activity: None,
             },
             AgentRow {
+                spawned_by_name: None,
+                lineage_reason: None,
                 harness: None,
                 model: None,
                 route: None,
@@ -9637,6 +9677,8 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 pane_activity: None,
             },
             AgentRow {
+                spawned_by_name: None,
+                lineage_reason: None,
                 harness: None,
                 model: None,
                 route: None,
@@ -9679,6 +9721,8 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
             // load-bearing "attention is never dimmed" branch. The accent
             // must win over the external DIM modifier.
             AgentRow {
+                spawned_by_name: None,
+                lineage_reason: None,
                 harness: None,
                 model: None,
                 route: None,
@@ -10193,6 +10237,8 @@ fn client_selector_rows_reanchor_on_catalog_shrink() {
 /// 10 "~ backlog" · 11 ready card · 12 blocked card · 13 in-flight card.
 fn unified_rows_view() -> View {
     let agent = |squad: Option<u64>, name: &str, pane_id, attach_id: Option<&str>| AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
@@ -10933,6 +10979,8 @@ fn peek_body_seq_guard_drops_stale() {
 #[test]
 fn peek_overlay_renders_loading_transcript_and_answerable() {
     let row = AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -11385,6 +11433,8 @@ async fn selector_x_on_a_tombstone_sends_dismiss() {
     // AC4-EDGE (client half): x on a tombstone member row sends
     // DismissMember for its squad + attach_id (not a squad remove).
     let tomb = AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -11445,6 +11495,8 @@ async fn selector_x_on_a_tombstone_sends_dismiss() {
 /// A plain (non-tombstone) registry agent row under squad 1, varied by state.
 pub(super) fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRow {
     AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
@@ -12497,6 +12549,8 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
     let mut v = two_pane_view();
     v.layout.agents = vec![
         AgentRow {
+            spawned_by_name: None,
+            lineage_reason: None,
             harness: None,
             model: None,
             route: None,
@@ -12536,6 +12590,8 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             pane_activity: None,
         },
         AgentRow {
+            spawned_by_name: None,
+            lineage_reason: None,
             harness: None,
             model: None,
             route: None,
@@ -12614,6 +12670,8 @@ fn squad_rollup_bare_pane_folds_to_idle() {
     // that path is covered by pane_activity_folds_*, this one pins the
     // rollup with a measured idle pane.)
     let row = |name: &str, pane, badge| AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -12797,6 +12855,8 @@ async fn nav_goto_teleports_cross_squad_then_focuses() {
     // SelectSquad then FocusPane in order, and closes the navigator.
     let mut v = two_pane_view(); // active squad = 1 (footnote)
     v.layout.agents = vec![AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -13268,6 +13328,8 @@ fn nav_rows_lists_plain_panes_and_dedups_agent_panes() {
         },
     ];
     v.layout.agents = vec![AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -13445,6 +13507,8 @@ fn answerable(idx_labels: &[(&str, &str)], fp: u8) -> AnswerablePrompt {
 
 fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) -> AgentRow {
     AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         portal: None,
         harness: None,
         model: None,
