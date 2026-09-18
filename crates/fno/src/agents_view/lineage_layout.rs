@@ -1,23 +1,12 @@
-//! The lineage forest: depth cap, the CHILD-edge parent read, and the
-//! pre-order layout the sideline paints.
+//! The lineage forest: the depth cap and the pre-order layout the
+//! sideline paints. The CHILD-edge parent read (`lineage_parent`) stays
+//! beside the row types in `agents_view`.
 
 use std::collections::HashMap;
-
-use super::AgentRow;
 
 /// Rendering cap on lineage depth: a pathological chain must not push
 /// rows off-screen (same bounded-steps posture `crown_indent` held).
 pub const MAX_LINEAGE_DEPTH: usize = 8;
-
-/// The parent edge the sideline nests on: the row's `spawned_by_session`
-/// only when the edge is CHILD. A PEER handoff, or a pre-v32 row with no
-/// word, roots at depth 0 beside its spawner.
-pub fn lineage_parent(row: &AgentRow) -> Option<&str> {
-    match row.lineage_kind.as_deref() {
-        Some("child") => row.spawned_by_session.as_deref(),
-        _ => None,
-    }
-}
 
 /// Join rows into a lineage forest and lay it out for rendering.
 /// Returns `(order, depths)`: `order` is the render order as INPUT INDICES in
