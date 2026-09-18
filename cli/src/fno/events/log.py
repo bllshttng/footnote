@@ -245,7 +245,7 @@ def read_events(
 
     from fno.events.store_client import query_rows
 
-    return _filter_by_session(results, session_id)
+    return _filter_by_session(query_rows(events_path), session_id)
 
 
 # -- Audit --
@@ -274,19 +274,21 @@ def audit_session(
     if not strict:
         return {"ok": True, "events": events}
 
-    # Find all phases that had a phase_init
+    # Store rows nest the legacy payload under data; raw pre-cutover lines
+    # carry it as payload. Accept either so the audit reads both shapes.
     phases_initiated: set[str] = set()
     for event in events:
         if event["type"] == "phase_init":
-            phase = event.get("payload", {}).get("phase")
+            body = event.get("payload") or event.get("data") or {}
+            phase = body.get("phase")
             if phase:
                 phases_initiated.add(phase)
 
-    # Find all phases that had a gate_written
     phases_gate_written: set[str] = set()
     for event in events:
         if event["type"] == "gate_written":
-            phase = event.get("payload", {}).get("phase")
+            body = event.get("payload") or event.get("data") or {}
+            phase = body.get("phase")
             if phase:
                 phases_gate_written.add(phase)
 
