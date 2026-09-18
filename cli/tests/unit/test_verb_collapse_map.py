@@ -244,7 +244,9 @@ def test_map_covers_current_surface_once():
     # command-tree cutover then deleted the 29 mux rows: the typed mux tree
     # declares those paths natively and the verb-ratchet reads the generated
     # inventory, so no collapse-map row is consumed: 635 -> 606.
-    assert len(mapped) == 608, (
+    # The spawn seam's permission-posture and sandbox-verdict owners each
+    # take one row: 608 -> 610.
+    assert len(mapped) == 610, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
