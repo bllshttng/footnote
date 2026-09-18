@@ -79,17 +79,18 @@ pub fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(),
                         continue;
                     };
                     for (position, reference) in decisions.iter().enumerate() {
+                        // A projection row whose journal event is gone is
+                        // exactly what `fno backlog decide-reindex` exists
+                        // to recover, so a dangling or malformed reference
+                        // is dead weight to skip, never a refusal: refusing
+                        // here bricks the first open of every pre-flip
+                        // store whose seed carries embedded decisions.
                         let Some(event_id) = reference.get("decision_id").and_then(Value::as_str)
                         else {
-                            return Err(format!(
-                                "decisions import: node {node_id} decision at position {} has no decision_id",
-                                position + 1
-                            ));
+                            continue;
                         };
                         if !event_exists(&transaction, event_id)? {
-                            return Err(format!(
-                                "decisions import: node {node_id} references missing decision {event_id}"
-                            ));
+                            continue;
                         }
                         attach_node(&transaction, node_id, event_id)?;
                     }
