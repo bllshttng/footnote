@@ -1333,6 +1333,13 @@ class TestUntaintedStampDrift:
             managed_mod, "bearer_principal_verdict",
             lambda cli, record_id, r, bearer, **kw: verdicts[bearer],
         )
+        # The bearer lane proves the shared slot's blobs before the per-bearer
+        # verdict (x-aff9), so every planted blob must resolve to one principal
+        # or the lane refuses before the table above is consulted.
+        monkeypatch.setattr(
+            managed_mod, "slot_principal",
+            lambda blob: ({"account_uuid": "acc-slot", "organization_uuid": "org-1"}, None),
+        )
         monkeypatch.setattr(
             managed_mod, "reconcile_slot",
             lambda cli, **kw: (reconciled.append(cli) if reconciled is not None else None)
