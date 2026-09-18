@@ -96,9 +96,14 @@ pub(crate) enum Remedy {
     /// `gh run rerun <id>` (full rerun) for a cancelled run: it reached no
     /// verdict, so rerunning it IS reaching a verdict. `--failed` is wrong
     /// here: it reruns only `failure` conclusions and a cancelled run has
-    /// none. Issued at most once per head sha; a second cancelled verdict on
-    /// the same sha escalates.
+    /// none. Issued at most once per (head sha, run id); a second red verdict
+    /// on the same pair escalates.
     Rerun { run_id: String },
+    /// `gh run rerun <id> --failed` for a rerunnable escalation (a
+    /// test-shaped or unknown red): only the failed jobs rerun. Same
+    /// once-per-(sha, run id) guard, and the printed command is the applied
+    /// one.
+    RerunFailed { run_id: String },
     /// Not mechanically fixable. `repro` is the command that reproduces it
     /// locally, which is the whole value of the row.
     Escalate { repro: String },
@@ -113,6 +118,9 @@ pub(crate) struct Finding {
     pub check: String,
     pub signature: &'static str,
     pub remedy: Remedy,
+    /// The check's `html_url`, carried so the rerun guard can key on the
+    /// Actions run id at apply time, when the journal is readable.
+    pub link: String,
 }
 
 impl Finding {
@@ -121,7 +129,7 @@ impl Finding {
         match self.remedy {
             Remedy::Auto { .. } => "auto",
             Remedy::EditBody { .. } => "edit-body",
-            Remedy::Rerun { .. } => "rerun",
+            Remedy::Rerun { .. } | Remedy::RerunFailed { .. } => "rerun",
             Remedy::Escalate { .. } => "escalate",
             Remedy::Inherited => "inherited",
         }
@@ -137,6 +145,7 @@ impl Finding {
                 format!("fno do pr closure-trailer {}", nodes.join(" "))
             }
             Remedy::Rerun { run_id } => format!("gh run rerun {run_id}"),
+            Remedy::RerunFailed { run_id } => format!("gh run rerun {run_id} --failed"),
             Remedy::Escalate { repro } => repro.clone(),
             // Matched by CHECK NAME, which is all the main-HEAD read gives.
             // Measured: the same check was red on both, and the failing TEST
@@ -181,6 +190,9 @@ struct Signature {
     plan: &'static str,
     matches: fn(&Ctx) -> bool,
     resolve: fn(&Ctx) -> Remedy,
+    /// Whether a rerun can change this class's verdict. A deterministic
+    /// failure reruns to the same red and spends CI for nothing.
+    rerunnable: bool,
 }
 
 /// The pinned rustfmt toolchain. Keep in lockstep with `PINNED_FMT` in
@@ -210,6 +222,7 @@ const SIGNATURES: &[Signature] = &[
                     .to_string(),
             },
         },
+        rerunnable: true,
     },
     Signature {
         name: "rustfmt-drift",
@@ -228,6 +241,7 @@ const SIGNATURES: &[Signature] = &[
                     .collect(),
             }
         },
+        rerunnable: false,
     },
     Signature {
         name: "closure-trailer",
@@ -239,6 +253,7 @@ const SIGNATURES: &[Signature] = &[
         resolve: |c| Remedy::EditBody {
             nodes: closure_nodes(c.log),
         },
+        rerunnable: false,
     },
     Signature {
         name: "ruff-lint",
@@ -275,6 +290,7 @@ const SIGNATURES: &[Signature] = &[
                 ],
             )],
         },
+        rerunnable: false,
     },
     Signature {
         name: "mypy",
@@ -283,6 +299,7 @@ const SIGNATURES: &[Signature] = &[
         resolve: |_| Remedy::Escalate {
             repro: "cd cli && uv run mypy src/".to_string(),
         },
+        rerunnable: false,
     },
     Signature {
         name: "pytest",
@@ -300,6 +317,7 @@ const SIGNATURES: &[Signature] = &[
             }
             Remedy::Escalate { repro }
         },
+        rerunnable: true,
     },
     Signature {
         name: "shard-rollup",
@@ -314,6 +332,7 @@ const SIGNATURES: &[Signature] = &[
                 None => "a fan-in gate; heal its failing shards".to_string(),
             },
         },
+        rerunnable: true,
     },
     Signature {
         name: "cargo-test",
@@ -330,6 +349,7 @@ const SIGNATURES: &[Signature] = &[
             }
             Remedy::Escalate { repro }
         },
+        rerunnable: true,
     },
     Signature {
         name: "review-gate",
@@ -342,6 +362,7 @@ const SIGNATURES: &[Signature] = &[
         resolve: |_| Remedy::Escalate {
             repro: "not a CI failure; run the review, then `fno do pr status <n>`".to_string(),
         },
+        rerunnable: false,
     },
     Signature {
         name: "smoke-step",
@@ -359,6 +380,7 @@ const SIGNATURES: &[Signature] = &[
                 None => "the shard runner named no step".to_string(),
             },
         },
+        rerunnable: true,
     },
     Signature {
         name: "guard-script",
@@ -373,6 +395,7 @@ const SIGNATURES: &[Signature] = &[
                 None => "bash scripts/ci/  # see the log".to_string(),
             },
         },
+        rerunnable: false,
     },
 ];
 
@@ -403,6 +426,7 @@ pub(crate) fn classify(ctx: &Ctx, inherited: bool) -> Finding {
             check: ctx.check.to_string(),
             signature: "inherited",
             remedy: Remedy::Inherited,
+            link: ctx.link.to_string(),
         };
     }
     for sig in SIGNATURES {
@@ -411,6 +435,7 @@ pub(crate) fn classify(ctx: &Ctx, inherited: bool) -> Finding {
                 check: ctx.check.to_string(),
                 signature: sig.name,
                 remedy: (sig.resolve)(ctx),
+                link: ctx.link.to_string(),
             };
         }
     }
@@ -418,24 +443,42 @@ pub(crate) fn classify(ctx: &Ctx, inherited: bool) -> Finding {
         check: ctx.check.to_string(),
         signature: "unknown",
         remedy: unknown_remedy(ctx.log),
+        link: ctx.link.to_string(),
     }
+}
+
+/// True when a rerun can change this class's verdict. `unknown` counts: a
+/// check no signature recognizes is exactly the check nobody can say is
+/// real, which is the rerun's whole point.
+fn rerunnable_class(signature: &str) -> bool {
+    if signature == "unknown" {
+        return true;
+    }
+    SIGNATURES
+        .iter()
+        .any(|s| s.name == signature && s.rerunnable)
 }
 
 /// The playbook: every signature and its remedy, from the same table
 /// `classify` walks. Printed by `--playbook`; deliberately not duplicated into
 /// a doc, so the two can never disagree.
 pub(crate) fn playbook() -> String {
-    let mut out = String::from("signature       remedy\n");
+    let mut out = String::from("signature       rerunnable  remedy\n");
     for sig in SIGNATURES {
-        out.push_str(&format!("{:<15} {}\n", sig.name, sig.plan));
+        out.push_str(&format!(
+            "{:<15} {:<10} {}\n",
+            sig.name,
+            if sig.rerunnable { "yes" } else { "no" },
+            sig.plan
+        ));
     }
     out.push_str(&format!(
-        "{:<15} report only; the same check is red on main HEAD\n",
-        "inherited"
+        "{:<15} {:<10} report only; the same check is red on main HEAD\n",
+        "inherited", "no"
     ));
     out.push_str(&format!(
-        "{:<15} escalate with the last {TAIL_LINES} log lines\n",
-        "unknown"
+        "{:<15} {:<10} rerun once per (sha, run id), then escalate with the last {TAIL_LINES} log lines\n",
+        "unknown", "yes"
     ));
     out
 }
@@ -758,8 +801,23 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     Ok(a)
 }
 
-/// The PR's head sha, head ref, and body.
-fn read_pr(a: &Args, pr: &str) -> Result<(String, String, String), String> {
+/// One PR read off the pulls endpoint: everything `run_one` and the rebase
+/// triggers need, in the one call `read_pr` always made.
+struct PrState {
+    head: String,
+    head_ref: String,
+    body: String,
+    /// The PR's base branch, the `merge-slot:<ref>` claim's key.
+    base_ref: String,
+    /// GitHub answers `null` while it computes the merge commit; `null` must
+    /// never read as conflicting. Measured 2026-09-17: `mergeable_state` on
+    /// this repo never reads `behind`, so base drift is NOT read here -- the
+    /// compare endpoint owns that and the merge-slot claim already encodes it.
+    mergeable: Option<bool>,
+}
+
+/// The PR's head sha, head ref, body, base ref, and mergeability.
+fn read_pr(a: &Args, pr: &str) -> Result<PrState, String> {
     let raw = gh_api(a, &format!("repos/{{owner}}/{{repo}}/pulls/{pr}"), &[])?;
     let v: Value = serde_json::from_str(&raw).map_err(|e| format!("pr json: {e}"))?;
     let head = v
@@ -777,10 +835,22 @@ fn read_pr(a: &Args, pr: &str) -> Result<(String, String, String), String> {
         .and_then(|s| s.as_str())
         .unwrap_or_default()
         .to_string();
+    let base_ref = v
+        .pointer("/base/ref")
+        .and_then(|s| s.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let mergeable = v.get("mergeable").and_then(|m| m.as_bool());
     if head.is_empty() {
         return Err("pr json carried no head sha".to_string());
     }
-    Ok((head, head_ref, body))
+    Ok(PrState {
+        head,
+        head_ref,
+        body,
+        base_ref,
+        mergeable,
+    })
 }
 
 /// Classify every failing row of one PR. `cached_inherited` carries a
@@ -1065,8 +1135,8 @@ pub fn run_heal(argv: &[String]) -> i32 {
         eprintln!("pr-heal: needs a PR number (or --all, or --playbook)");
         return EXIT_READ_ERROR;
     };
-    let (code, reran_shas) = run_one(&a, &pr);
-    if !reran_shas.is_empty() {
+    let (code, reran_keys) = run_one(&a, &pr);
+    if !reran_keys.is_empty() {
         // The once-per-sha rerun guard reads rerun_shas off pr_heal_tick
         // rows. The drive loop writes its own; this is the single-PR apply
         // path's row, so a manual rerun is never issued a second time.
@@ -1075,7 +1145,9 @@ pub fn run_heal(argv: &[String]) -> i32 {
             &std::collections::BTreeMap::new(),
             0,
             false,
-            &reran_shas,
+            &reran_keys,
+            &[], // no acted PRs on the single-PR path: the status line's
+            // acted list is a drive-loop readout
             0.0,
         );
     }
@@ -1194,6 +1266,72 @@ fn claim_holder(head_ref: &str, claims_root: Option<&std::path::Path>) -> Option
     None
 }
 
+/// The live merge-slot holder for `base_ref`, as a PR number. The same claim
+/// and `pr:<n>` shape `authorized_merge` writes; heal only READS it -- never
+/// acquire, never release, never refresh. The empty base (an older stub read
+/// or a degenerate payload) names no slot. The root resolves through the test
+/// seam when set, else the canonical repo root, exactly as the merge sweep's
+/// own `slot_holder_read` does.
+fn merge_slot_holder_pr(
+    base_ref: &str,
+    claims_root: Option<&std::path::Path>,
+    cwd: &std::path::Path,
+) -> Option<u64> {
+    if base_ref.is_empty() {
+        return None;
+    }
+    let root = match claims_root {
+        Some(r) => Some(r.to_path_buf()),
+        None => crate::paths::canonical_repo_root(cwd),
+    };
+    let (state, rec) = crate::claims::status(&format!("merge-slot:{base_ref}"), root.as_deref());
+    if !matches!(
+        state,
+        crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
+    ) {
+        return None;
+    }
+    crate::authorized_merge::parse_slot_holder(&rec.map(|r| r.holder).unwrap_or_default())
+}
+
+/// Rebases allowed in one drive-loop run. Both triggers are bounded by
+/// construction, so the cap should never bind; if it does, a trigger leaked
+/// and the loop must stop rather than restart CI on the whole fleet.
+const REBASE_BUDGET: usize = 6;
+
+/// `behind-before=` / `behind-after=` values out of the push verb's receipt
+/// line. An unparseable receipt reads `?`, never a silent zero.
+fn behind_numbers(out: &str) -> (String, String) {
+    let grab = |tag: &str| {
+        out.split(tag)
+            .nth(1)
+            .map(|rest| rest.split_whitespace().next().unwrap_or("?").to_string())
+            .unwrap_or_else(|| "?".to_string())
+    };
+    (grab("behind-before="), grab("behind-after="))
+}
+
+/// The push verb's conflict exit: the rebase leg refused because the branch
+/// is not safely rebasable (needs_resolver or refused). The verb's other
+/// exit-3 refusals (protected branch, dirty tree) are NOT conflicts.
+fn is_rebase_conflict(stderr: &str) -> bool {
+    stderr.contains("not safely rebasable")
+}
+
+/// The conflicting file list out of the push verb's conflict stderr
+/// (`... status needs_resolver; files: a, b). Resolve ...`).
+fn conflict_files(stderr: &str) -> String {
+    stderr
+        .split("files: ")
+        .nth(1)
+        .map(|rest| rest.split(')').next().unwrap_or("").trim().to_string())
+        .unwrap_or_default()
+}
+
+fn first_line(s: &str) -> &str {
+    s.lines().next().unwrap_or("").trim()
+}
+
 /// A binary through the bin-dir seam when set (the same resolution the
 /// remedies use), so a test can stub `fno` without mutating PATH.
 fn seam_bin(a: &Args, name: &str) -> String {
@@ -1233,22 +1371,16 @@ fn open_questions_mention(a: &Args, marker: &str) -> bool {
     }
 }
 
-/// File one operator question for a failing check no signature recognized,
-/// via `fno inbox outstanding ask` -- the inbox, never a file nobody reads.
-/// Deduplicated on the marker, so a 600s tick cannot re-ask a question the
-/// board already carries. Returns true when a question was filed.
-fn escalate_unknown_signature(a: &Args, pr: &str, check: &str, head_ref: &str) -> bool {
-    let marker = format!("heal: PR {pr} check {check}");
-    if open_questions_mention(a, &marker) {
+/// File one operator question, deduplicated on the marker, attributed to the
+/// node the branch names. The inbox lane every heal escalation shares:
+/// `fno inbox outstanding ask --node <id>`, never a file nobody reads.
+/// Returns true when a question was filed.
+fn ask_inbox(a: &Args, marker: &str, question: &str, head_ref: &str) -> bool {
+    if open_questions_mention(a, marker) {
         return false;
     }
-    let question = format!(
-        "{marker} failed with no playbook signature. Classify it with \
-         `fno do pr heal {pr}` (that report carries the log tail) or add a \
-         signature in crates/fno-agents/src/heal.rs."
-    );
     let bin = seam_bin(a, "fno");
-    let mut argv: Vec<&str> = vec!["inbox", "outstanding", "ask", &question];
+    let mut argv: Vec<&str> = vec!["inbox", "outstanding", "ask", question];
     let node = branch_node_ids(head_ref).into_iter().next();
     let node_flag;
     if let Some(n) = &node {
@@ -1258,17 +1390,27 @@ fn escalate_unknown_signature(a: &Args, pr: &str, check: &str, head_ref: &str) -
     match run(&bin, &argv, &a.cwd, READ_TIMEOUT) {
         Ok((true, _, _)) => true,
         Ok((_, _, err)) => {
-            eprintln!(
-                "pr-heal: escalation for PR {pr} {check} refused: {}",
-                err.trim()
-            );
+            eprintln!("pr-heal: escalation refused: {}", err.trim());
             false
         }
         Err(e) => {
-            eprintln!("pr-heal: escalation for PR {pr} {check} failed: {e}");
+            eprintln!("pr-heal: escalation failed: {e}");
             false
         }
     }
+}
+
+/// File one operator question for a failing check no signature recognized.
+/// Deduplicated on the marker, so a 600s tick cannot re-ask a question the
+/// board already carries.
+fn escalate_unknown_signature(a: &Args, pr: &str, check: &str, head_ref: &str) -> bool {
+    let marker = format!("heal: PR {pr} check {check}");
+    let question = format!(
+        "{marker} failed with no playbook signature. Classify it with \
+         `fno do pr heal {pr}` (that report carries the log tail) or add a \
+         signature in crates/fno-agents/src/heal.rs."
+    );
+    ask_inbox(a, &marker, &question, head_ref)
 }
 
 /// The events journal for this invocation. `--events-file` is the test seam;
@@ -1482,6 +1624,23 @@ fn status_line(a: &Args) -> String {
     };
     let healed = data.get("healed").and_then(Value::as_u64).unwrap_or(0);
     let escalated = data.get("escalated").and_then(Value::as_u64).unwrap_or(0);
+    let rebased = data.get("rebased").and_then(Value::as_u64).unwrap_or(0);
+    let reran = data.get("reran").and_then(Value::as_u64).unwrap_or(0);
+    let acted = data
+        .get("acted_prs")
+        .and_then(Value::as_array)
+        .map(|v| {
+            v.iter()
+                .filter_map(|x| x.as_u64().map(|n| n.to_string()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let acted_clause = if acted.is_empty() {
+        "acted on nothing".to_string()
+    } else {
+        format!("acted on PR {acted}")
+    };
     let pids = live_heal_pids(&events_dir(a));
     let in_flight = if pids.is_empty() {
         "none".to_string()
@@ -1492,15 +1651,16 @@ fn status_line(a: &Args) -> String {
             .join(",")
     };
     format!(
-        "Heal: armed; last run {ts} ({}); healed {healed}, escalated {escalated}, in-flight {in_flight}",
+        "Heal: armed; last run {ts} ({}); healed {healed}, rebased {rebased}, reran {reran}, escalated {escalated}; {acted_clause}; in-flight {in_flight}",
         age_phrase(&ts)
     )
 }
 
-/// True when a prior `pr_heal_tick` row names `sha` in `rerun_shas`: the
-/// once-per-sha guard for the cancelled-run rerun. The journal is the state;
-/// a second verdict on the same sha means the rerun reached a real result.
-fn journal_has_rerun(path: &std::path::Path, sha: &str) -> bool {
+/// True when a prior `pr_heal_tick` row names `key` in `rerun_keys`: the
+/// once-per-(sha, run id) guard shared by every rerun class. The journal is
+/// the state; a second red verdict on the same pair means the rerun reached a
+/// real result.
+fn journal_has_rerun(path: &std::path::Path, key: &str) -> bool {
     let Ok(text) = std::fs::read_to_string(path) else {
         return false;
     };
@@ -1509,41 +1669,273 @@ fn journal_has_rerun(path: &std::path::Path, sha: &str) -> bool {
             row.get("type").and_then(Value::as_str) == Some("pr_heal_tick")
                 && row
                     .get("data")
-                    .and_then(|d| d.get("rerun_shas"))
+                    .and_then(|d| d.get("rerun_keys"))
                     .and_then(|v| v.as_array())
-                    .is_some_and(|shas| shas.iter().any(|s| s.as_str() == Some(sha)))
+                    .is_some_and(|keys| keys.iter().any(|k| k.as_str() == Some(key)))
         })
     })
 }
 
-/// Issue `gh run rerun` for every Rerun finding. At most once per
-/// head sha (journal-guarded); an already-issued or failed rerun demotes the
-/// row to Escalate, like a failed body edit, so the report never reads the
-/// PR as clean while the cancelled run is still cancelled.
-fn apply_rerun(a: &Args, findings: &mut [Finding], head: &str) -> usize {
-    let already = journal_has_rerun(&journal_path(a), head);
-    let mut reran = 0;
+/// Every `(sha, run id)` pair any tick ever reran, newest last. The drive
+/// loop's one journal read per run; flake detection filters it per PR head.
+// ponytail: O(journal) per run; the drive loop runs every 30m and already
+// reads GitHub several times per PR. A keyed sidecar is the upgrade path if
+// the journal ever gets big enough to measure.
+fn journal_rerun_keys(path: &std::path::Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|row| row.get("type").and_then(Value::as_str) == Some("pr_heal_tick"))
+        .filter_map(|row| {
+            row.get("data")
+                .and_then(|d| d.get("rerun_keys"))
+                .and_then(|v| v.as_array())
+                .map(|keys| {
+                    keys.iter()
+                        .filter_map(|k| k.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+        })
+        .flatten()
+        .collect()
+}
+
+/// The flake ledger. A rerun that came back green proves the first red was
+/// not real. One `pr_heal_flake` row per (sha, run id, check), guarded so the
+/// same observation never lands twice; the key is the failing test when the
+/// log named one, else the check name. A key's third row files one node, so
+/// a flake that reruns green forever is visible by construction.
+fn detect_flakes(
+    a: &Args,
+    head: &str,
+    rerun_keys_ever: &[String],
+    flake_guards: &std::collections::HashSet<String>,
+) {
+    let mut run_ids: Vec<String> = Vec::new();
+    for k in rerun_keys_ever {
+        if let Some((sha, run)) = k.split_once(':') {
+            if sha == head {
+                run_ids.push(run.to_string());
+            }
+        }
+    }
+    if run_ids.is_empty() {
+        return;
+    }
+    // An empty or unreadable checks read is never a green: a run GitHub has
+    // not registered (or another API fault) is not evidence of anything.
+    let Ok(rows) = crate::pr_push::read_checks_rows(&a.gh_bin, &a.cwd, head) else {
+        return;
+    };
+    for run in run_ids {
+        let run_rows: Vec<&Value> = rows
+            .iter()
+            .filter(|r| run_id(r["link"].as_str().unwrap_or("")).as_deref() == Some(&run))
+            .collect();
+        if run_rows.is_empty()
+            || run_rows
+                .iter()
+                .any(|r| matches!(r["bucket"].as_str(), Some("fail") | Some("cancel")))
+        {
+            continue;
+        }
+        for row in run_rows {
+            let check = row["name"].as_str().unwrap_or("").to_string();
+            if check.is_empty() {
+                continue;
+            }
+            let key_guard = format!("{head}:{run}:{check}");
+            if flake_guards.contains(&key_guard) {
+                continue;
+            }
+            // Where the log named a failing test, the key is the test; else
+            // the key is the check name. One best-effort log read, once per
+            // (sha, run id, check) -- the guard above keeps it rare.
+            let log = match crate::pr_push::job_id(row["link"].as_str().unwrap_or("")) {
+                Some(id) => gh_api(
+                    a,
+                    &format!("repos/{{owner}}/{{repo}}/actions/jobs/{id}/logs"),
+                    &[],
+                )
+                .map(|raw| strip_timestamps(&raw))
+                .unwrap_or_default(),
+                None => String::new(),
+            };
+            let test = [
+                pytest_nodeids(&log).into_iter().next(),
+                cargo_test_names(&log).into_iter().next(),
+                shard_rollup_shards(&log),
+            ]
+            .into_iter()
+            .flatten()
+            .next();
+            let key = test.unwrap_or_else(|| check.clone());
+            let prior = journal_flake_rows_for_key(&journal_path(a), &key);
+            let existing_node = prior.iter().flatten().next().cloned();
+            let node = if prior.len() + 1 >= 3 && existing_node.is_none() {
+                file_flake_node(a, &key)
+            } else {
+                existing_node
+            };
+            emit_flake_row(a, &key_guard, &key, head, &run, &check, node.as_deref());
+        }
+    }
+}
+
+/// Every `(sha, run id, check)` the flake ledger already recorded, read once
+/// per drive-loop run and consulted in memory.
+fn journal_flake_guards(path: &std::path::Path) -> std::collections::HashSet<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Default::default();
+    };
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|row| row.get("type").and_then(Value::as_str) == Some("pr_heal_flake"))
+        .filter_map(|row| {
+            row.get("data")
+                .and_then(|d| d.get("key_guard"))
+                .and_then(Value::as_str)
+                .map(|s| s.to_string())
+        })
+        .collect()
+}
+
+/// The node ids already filed for a flake key, and how many rows carry it.
+fn journal_flake_rows_for_key(path: &std::path::Path, key: &str) -> Vec<Option<String>> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|row| row.get("type").and_then(Value::as_str) == Some("pr_heal_flake"))
+        .filter_map(|row| {
+            let data = row.get("data")?;
+            if data.get("key").and_then(Value::as_str) == Some(key) {
+                Some(
+                    data.get("node_id")
+                        .and_then(Value::as_str)
+                        .map(|s| s.to_string()),
+                )
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// File the node behind the `fno backlog idea` verb through the seam, and
+/// parse the node id out of its output. Best-effort: a refused filing lands
+/// no row and the next occurrence retries.
+fn file_flake_node(a: &Args, key: &str) -> Option<String> {
+    let bin = seam_bin(a, "fno");
+    let msg = format!("{key} is flaky: passed on rerun 3 times");
+    let (ok, out, _) = run(
+        &bin,
+        &["backlog", "idea", &msg, "--source-kind", "from_observation"],
+        &a.cwd,
+        READ_TIMEOUT,
+    )
+    .ok()?;
+    if !ok {
+        return None;
+    }
+    let re = Regex::new(r"\b[a-z]+-[0-9a-f]{4,}\b").expect("static regex");
+    re.captures(&out).map(|c| c[0].to_string())
+}
+
+/// One `pr_heal_flake` journal row.
+fn emit_flake_row(
+    a: &Args,
+    key_guard: &str,
+    key: &str,
+    sha: &str,
+    run: &str,
+    check: &str,
+    node_id: Option<&str>,
+) {
+    let mut fields = serde_json::Map::new();
+    fields.insert("key_guard".to_string(), serde_json::json!(key_guard));
+    fields.insert("key".to_string(), serde_json::json!(key));
+    fields.insert("sha".to_string(), serde_json::json!(sha));
+    fields.insert("run_id".to_string(), serde_json::json!(run));
+    fields.insert("check".to_string(), serde_json::json!(check));
+    if let Some(n) = node_id {
+        fields.insert("node_id".to_string(), serde_json::json!(n));
+    }
+    if let Err(e) = crate::events::EventEmitter::new(journal_path(a), "pr-heal")
+        .emit_fields("pr_heal_flake", fields)
+    {
+        eprintln!("pr-heal: the pr_heal_flake row did not land: {e}");
+    }
+}
+
+/// Issue `gh run rerun` for every rerunnable finding: the cancelled runs that
+/// classify straight to [`Remedy::Rerun`], and the test-shaped or unknown
+/// escalations no one can call real yet. Guarded once per (sha, run id) --
+/// the dedup key, because nine failing checks can share one run id and one
+/// `--failed` rerun covers them all. An already-issued or failed rerun
+/// demotes the row to Escalate, so the report never reads the PR as clean
+/// while the run is still red. Returns the keys issued this run.
+fn apply_rerun(a: &Args, findings: &mut [Finding], head: &str) -> Vec<String> {
+    let mut issued: Vec<String> = Vec::new();
+    // One journal read per call: every (sha, run id) any tick ever reran.
+    let known: std::collections::HashSet<String> =
+        journal_rerun_keys(&journal_path(a)).into_iter().collect();
     for f in findings.iter_mut() {
-        let Remedy::Rerun { run_id } = f.remedy.clone() else {
+        let run_id = match &f.remedy {
+            Remedy::Rerun { run_id } | Remedy::RerunFailed { run_id } => Some(run_id.clone()),
+            // A real failure reruns only its failed jobs. A cancelled run has
+            // no failures to name, so `--failed` would rerun nothing.
+            Remedy::Escalate { .. } if rerunnable_class(f.signature) => run_id(&f.link),
+            _ => None,
+        };
+        let Some(run_id) = run_id else {
             continue;
         };
-        if already {
-            f.remedy = Remedy::Escalate {
-                repro: format!(
-                    "the run was cancelled and a rerun was already issued for sha {}; \
-                     if it is still red it reached a real verdict: fix it or rerun by hand",
-                    &head[..head.len().min(12)]
-                ),
+        let key = format!("{head}:{run_id}");
+        let was_cancelled = matches!(f.remedy, Remedy::Rerun { .. });
+        let rerun_args: Vec<&str> = if was_cancelled {
+            vec!["run", "rerun", &run_id]
+        } else {
+            vec!["run", "rerun", &run_id, "--failed"]
+        };
+        if known.contains(&key) || issued.iter().any(|k| k == &key) {
+            let short = &head[..head.len().min(12)];
+            f.remedy = match f.remedy.clone() {
+                Remedy::Rerun { .. } => Remedy::Escalate {
+                    repro: format!(
+                        "the run was cancelled and a rerun was already issued for sha {short}; \
+                         if it is still red it reached a real verdict: fix it or rerun by hand"
+                    ),
+                },
+                Remedy::RerunFailed { .. } | Remedy::Escalate { .. } => {
+                    let prior_repro = match f.remedy.clone() {
+                        Remedy::Escalate { repro } => repro,
+                        _ => String::new(),
+                    };
+                    Remedy::Escalate {
+                        repro: format!(
+                            "failed twice on the same sha {short}; a rerun already ran. {prior_repro}"
+                        ),
+                    }
+                }
+                other => other,
             };
             continue;
         }
-        match run(
-            &a.gh_bin,
-            &["run", "rerun", &run_id],
-            &a.cwd,
-            REMEDY_TIMEOUT,
-        ) {
-            Ok((true, _, _)) => reran += 1,
+        match run(&a.gh_bin, &rerun_args, &a.cwd, REMEDY_TIMEOUT) {
+            Ok((true, _, _)) => {
+                issued.push(key);
+                // The report names the rerun as the action taken, and the
+                // printed command matches the applied argv.
+                f.remedy = if was_cancelled {
+                    Remedy::Rerun { run_id }
+                } else {
+                    Remedy::RerunFailed { run_id }
+                };
+            }
             Ok((false, _, err)) => {
                 f.remedy = Remedy::Escalate {
                     repro: format!("gh run rerun {run_id} refused: {}", err.trim()),
@@ -1556,20 +1948,23 @@ fn apply_rerun(a: &Args, findings: &mut [Finding], head: &str) -> usize {
             }
         }
     }
-    reran
+    issued
 }
 
 /// One `pr_heal_tick` row per drive-loop invocation: the arm's visibility.
 /// Written to the global `~/.fno/events.jsonl` (or `--events-file`), the same
 /// journal `fno do pr watch status` reads through `pr-heal --status`.
-/// `escalated` sums the rows a person must look at; `rerun_shas` is the
-/// once-per-sha guard's ledger.
+/// `escalated` sums the rows a person must look at; `rerun_keys` is the
+/// once-per-(sha, run id) guard's ledger, and `acted_prs` names the PRs the
+/// run acted on, for the `Heal:` status line.
+#[allow(clippy::too_many_arguments)]
 fn emit_tick_event(
     a: &Args,
     counts: &std::collections::BTreeMap<&'static str, usize>,
     unknown: usize,
     dry_run: bool,
-    rerun_shas: &[String],
+    reran_keys: &[String],
+    acted_prs: &[String],
     duration_s: f64,
 ) {
     let path = journal_path(a);
@@ -1579,13 +1974,25 @@ fn emit_tick_event(
     }
     fields.insert("unknown".to_string(), serde_json::json!(unknown));
     fields.insert("dry_run".to_string(), serde_json::json!(dry_run));
+    // Explicit defaults: the newest tick row must carry the keys the done
+    // probe asserts on even when a run acted on nothing.
+    fields.insert(
+        "rebased".to_string(),
+        serde_json::json!(counts.get("rebased").copied().unwrap_or(0)),
+    );
     let escalated = counts.get("still_red").unwrap_or(&0)
         + counts.get("skip_escalate_only").unwrap_or(&0)
         + unknown;
     fields.insert("escalated".to_string(), serde_json::json!(escalated));
-    fields.insert("rerun".to_string(), serde_json::json!(rerun_shas.len()));
-    if !rerun_shas.is_empty() {
-        fields.insert("rerun_shas".to_string(), serde_json::json!(rerun_shas));
+    fields.insert("reran".to_string(), serde_json::json!(reran_keys.len()));
+    if !reran_keys.is_empty() {
+        fields.insert("rerun_keys".to_string(), serde_json::json!(reran_keys));
+    }
+    if !acted_prs.is_empty() {
+        // The status line reads these back as numbers; a string row would
+        // render as "acted on nothing" whatever the run did.
+        let nums: Vec<u64> = acted_prs.iter().filter_map(|p| p.parse().ok()).collect();
+        fields.insert("acted_prs".to_string(), serde_json::json!(nums));
     }
     fields.insert(
         "duration_s".to_string(),
@@ -1632,30 +2039,160 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
     let bump = |counts: &mut std::collections::BTreeMap<&'static str, usize>, key: &'static str| {
         *counts.entry(key).or_default() += 1;
     };
-    let mut unknown: Vec<(String, String, String)> = Vec::new();
-    let mut reran_shas: Vec<String> = Vec::new();
+    // The trailing Option is the finding's rerun key (`sha:runid`), present
+    // when the check's link names a run: an unknown that just got its one
+    // rerun must not escalate in the same breath.
+    let mut unknown: Vec<(String, String, String, Option<String>)> = Vec::new();
+    let mut reran_keys: Vec<String> = Vec::new();
+    let mut acted_prs: Vec<String> = Vec::new();
+    let mut rebased_this_run = 0usize;
+    // The epic's bar: no PR sits for more than one tick without a receipt
+    // saying why. One row per PR per run, whatever the outcome was.
+    let receipt = |pr: &str, action: &str, reason: &str| {
+        if dry_run {
+            return;
+        }
+        let mut fields = serde_json::Map::new();
+        fields.insert("pr".to_string(), serde_json::json!(pr));
+        fields.insert("action".to_string(), serde_json::json!(action));
+        fields.insert("reason".to_string(), serde_json::json!(reason));
+        if let Err(e) = crate::events::EventEmitter::new(journal_path(a), "pr-heal")
+            .emit_fields("pr_heal_pr", fields)
+        {
+            eprintln!("pr-heal: the pr_heal_pr row for PR {pr} did not land: {e}");
+        }
+    };
+    // One journal read per run for each ledger: every (sha, run id) any tick
+    // ever reran, and every (sha, run id, check) already recorded as a flake.
+    let rerun_keys_ever = journal_rerun_keys(&journal_path(a));
+    let flake_guards = journal_flake_guards(&journal_path(a));
     let mut worst = EXIT_CLEAN;
     for pr in open_pr_numbers(&pages) {
         bump(&mut counts, "seen");
         println!("── PR {pr}");
-        let (head, head_ref, _body) = match read_pr(a, &pr) {
+        let state = match read_pr(a, &pr) {
             Ok(v) => v,
             Err(msg) => {
                 eprintln!("pr-heal: {msg}");
                 bump(&mut counts, "skip_read_error");
+                receipt(&pr, "skip_read_error", first_line(&msg));
                 worst = worse_of(worst, EXIT_READ_ERROR);
                 continue;
             }
         };
+        let (head, head_ref) = (state.head.clone(), state.head_ref.clone());
         // Refusal 1: a live worker owns this node; a healer pushing under it
-        // is the two-writers failure.
+        // is the two-writers failure. It runs FIRST: a rebase is a bigger
+        // write than a fix push, so it never runs ahead of this check.
         if let Some((node, holder)) = claim_holder(&head_ref, claims_root) {
             println!(
                 "skip claim_held: {node} is held by {holder}; \
                  the healer never pushes under a live worker"
             );
             bump(&mut counts, "skip_claim_held");
+            receipt(&pr, "skip_claim_held", &format!("{node} held by {holder}"));
             continue;
+        }
+        // Rebase triggers, ahead of any classification: a push restarted CI,
+        // so classifying the old sha's checks would classify a dead run. Two
+        // bounded triggers -- a conflicting PR is stuck by definition, and the
+        // merge slot names the one PR that goes next. No threshold, no new
+        // config key: `mergeable_state` never reads `behind` on this repo, so
+        // the slot's behind-drift verdict is the bound.
+        let trigger = if state.mergeable == Some(false) {
+            Some("conflicting".to_string())
+        } else {
+            match merge_slot_holder_pr(&state.base_ref, claims_root, &a.cwd) {
+                Some(n) if n.to_string() == pr => Some("merge-slot".to_string()),
+                _ => None,
+            }
+        };
+        if let Some(trigger) = trigger {
+            let Some((_, wt)) = worktrees.iter().find(|(b, _)| b == &head_ref) else {
+                println!(
+                    "skip no_worktree: no checkout on branch {head_ref}; \
+                     the rebase runs from the PR's own worktree"
+                );
+                bump(&mut counts, "skip_no_worktree");
+                receipt(&pr, "skip_no_worktree", "rebase trigger, no worktree");
+                continue;
+            };
+            if rebased_this_run >= REBASE_BUDGET {
+                println!("skip rebase_budget: {rebased_this_run} rebases already this run");
+                bump(&mut counts, "skip_rebase_budget");
+                receipt(
+                    &pr,
+                    "skip_rebase_budget",
+                    "the per-run rebase budget is spent",
+                );
+                continue;
+            }
+            if dry_run {
+                println!("would rebase: PR {pr} ({trigger})");
+                bump(&mut counts, "would_rebase");
+                continue;
+            }
+            rebased_this_run += 1;
+            let bin = seam_bin(a, "fno");
+            let push = run(&bin, &["do", "pr", "push"], wt, REMEDY_TIMEOUT);
+            match push {
+                Ok((true, out, _)) => {
+                    let (before, after) = behind_numbers(&out);
+                    println!("rebased: PR {pr} {trigger} behind {before} -> {after}");
+                    bump(&mut counts, "rebased");
+                    acted_prs.push(pr.clone());
+                    receipt(
+                        &pr,
+                        "rebased",
+                        &format!("{trigger}; behind {before} -> {after}"),
+                    );
+                    // The push restarted CI; classifying the old sha's checks
+                    // would classify a dead run.
+                    continue;
+                }
+                Ok((false, _, err)) if is_rebase_conflict(&err) => {
+                    let files = conflict_files(&err);
+                    println!(
+                        "skip rebase_conflict: PR {pr} conflicts rebasing onto origin/main; the owner decides"
+                    );
+                    bump(&mut counts, "skip_rebase_conflict");
+                    receipt(&pr, "skip_rebase_conflict", &files);
+                    let marker = format!("heal: PR {pr} rebase conflict");
+                    let question = if files.is_empty() {
+                        format!(
+                            "{marker} onto origin/main. Resolve with \
+                             `fno do pr rebase {pr}` from the PR's worktree."
+                        )
+                    } else {
+                        format!(
+                            "{marker} onto origin/main in: {files}. Resolve with \
+                             `fno do pr rebase {pr}` from the PR's worktree."
+                        )
+                    };
+                    if ask_inbox(a, &marker, &question, &head_ref) {
+                        println!("escalated: PR {pr} rebase conflict is now an inbox question");
+                    }
+                    continue;
+                }
+                other => {
+                    let detail = other
+                        .map(|(_, _, err)| first_line(&err).to_string())
+                        .unwrap_or_else(|e| e);
+                    println!(
+                        "skip rebase_failed: the push verb refused ({detail}); \
+                         falling through to the heal path"
+                    );
+                    bump(&mut counts, "skip_rebase_failed");
+                    receipt(&pr, "skip_rebase_failed", &detail);
+                    // A rebase that could not run is not a verdict about the
+                    // PR: fall through to the normal heal path.
+                }
+            }
+        }
+        // A green rerun is a flake observation, not a silence. Runs before
+        // the findings read: it fires even when nothing is red anymore.
+        if !dry_run {
+            detect_flakes(a, &head, &rerun_keys_ever, &flake_guards);
         }
         let findings = match findings_for(
             a,
@@ -1669,6 +2206,7 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
             Err(msg) => {
                 eprintln!("pr-heal: {msg}");
                 bump(&mut counts, "skip_read_error");
+                receipt(&pr, "skip_read_error", first_line(&msg));
                 worst = worse_of(worst, EXIT_READ_ERROR);
                 continue;
             }
@@ -1679,23 +2217,41 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
         if own.is_empty() {
             println!("skip inherited: nothing red here that main is not already red on");
             bump(&mut counts, "skip_inherited");
+            receipt(
+                &pr,
+                "skip_inherited",
+                "nothing red here that main is not already red on",
+            );
             continue;
         }
-        // Refusal 2: an unknown signature is escalated, never guessed at.
+        // Refusal 2: an unknown signature is escalated, never guessed at --
+        // AFTER its one rerun, never in the same breath as issuing it.
         for f in own.iter().filter(|f| f.signature == "unknown") {
-            unknown.push((pr.clone(), f.check.clone(), head_ref.clone()));
+            let key = run_id(&f.link).map(|r| format!("{head}:{r}"));
+            unknown.push((pr.clone(), f.check.clone(), head_ref.clone(), key));
         }
-        let healable = own.iter().any(|f| {
-            matches!(
-                f.remedy,
-                Remedy::Auto { .. } | Remedy::EditBody { .. } | Remedy::Rerun { .. }
-            )
+        let healable = own.iter().any(|f| match &f.remedy {
+            Remedy::Auto { .. }
+            | Remedy::EditBody { .. }
+            | Remedy::Rerun { .. }
+            | Remedy::RerunFailed { .. } => true,
+            // A rerunnable escalation (pytest, smoke, an unknown) reruns
+            // before its repro is spent, when the run id is readable.
+            Remedy::Escalate { .. } => rerunnable_class(f.signature) && run_id(&f.link).is_some(),
+            Remedy::Inherited => false,
         });
         if !healable {
             // Known-but-escalate rows (pytest, mypy, a guard refusal) have a
             // playbook entry and a repro; the report is their lane.
             report(&findings, true, true);
             bump(&mut counts, "skip_escalate_only");
+            receipt(
+                &pr,
+                "skip_escalate_only",
+                own.first()
+                    .map(|f| f.check.as_str())
+                    .unwrap_or("unknown rows remain"),
+            );
             worst = worse_of(worst, EXIT_ESCALATIONS);
             continue;
         }
@@ -1717,6 +2273,11 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
                  heal it by hand from that PR's worktree"
             );
             bump(&mut counts, "skip_no_worktree");
+            receipt(
+                &pr,
+                "skip_no_worktree",
+                "no checkout on the branch; heal it by hand from the PR's worktree",
+            );
             worst = worse_of(worst, EXIT_ESCALATIONS);
             continue;
         };
@@ -1726,24 +2287,51 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
         };
         // Refusal 3 rides inside run_one: the pre-push re-read holds the
         // commit local over a run in flight, and it pushes exactly once.
-        let (code, shas) = run_one(&sub, &pr);
-        if !shas.is_empty() {
+        let (code, keys) = run_one(&sub, &pr);
+        if !keys.is_empty() {
             bump(&mut counts, "rerun");
-            reran_shas.extend(shas);
+            reran_keys.extend(keys);
+            acted_prs.push(pr.clone());
         }
         match code {
-            EXIT_CLEAN => bump(&mut counts, "healed"),
-            EXIT_IN_FLIGHT => bump(&mut counts, "skip_in_flight"),
-            EXIT_CWD_REFUSAL => bump(&mut counts, "skip_dirty_tree"),
-            _ => bump(&mut counts, "still_red"),
+            EXIT_CLEAN => {
+                bump(&mut counts, "healed");
+                acted_prs.push(pr.clone());
+                receipt(&pr, "healed", "the drive loop healed and pushed one fix");
+            }
+            EXIT_IN_FLIGHT => {
+                bump(&mut counts, "skip_in_flight");
+                receipt(
+                    &pr,
+                    "skip_in_flight",
+                    "a run is in flight; commit kept local",
+                );
+            }
+            EXIT_CWD_REFUSAL => {
+                bump(&mut counts, "skip_dirty_tree");
+                receipt(&pr, "skip_dirty_tree", "the PR's worktree refused an apply");
+            }
+            _ => {
+                bump(&mut counts, "still_red");
+                receipt(&pr, "escalated", "still red after the drive loop's pass");
+            }
         }
         worst = worse_of(worst, code);
     }
     let unknown_n = unknown.len();
     if !dry_run {
-        for (pr, check, head_ref) in &unknown {
-            if escalate_unknown_signature(a, pr, check, head_ref) {
-                println!("escalated: PR {pr} check {check} is now an inbox question");
+        for (pr, check, head_ref, key) in &unknown {
+            // A rerun issued THIS run already wrote its key to the journal
+            // only after this point; a key present NOW is a PRIOR run's
+            // rerun, so the second red is the verdict and the ask fires. An
+            // unparseable link (key None) escalates as today.
+            let already_reran = key
+                .as_ref()
+                .is_some_and(|k| journal_has_rerun(&journal_path(a), k));
+            if already_reran || key.is_none() {
+                if escalate_unknown_signature(a, pr, check, head_ref) {
+                    println!("escalated: PR {pr} check {check} is now an inbox question");
+                }
             }
         }
     }
@@ -1752,7 +2340,8 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
         &counts,
         unknown_n,
         dry_run,
-        &reran_shas,
+        &reran_keys,
+        &acted_prs,
         t0.elapsed().as_secs_f64(),
     );
     let skipped: Vec<String> = counts
@@ -1771,7 +2360,7 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
 }
 
 fn run_one(a: &Args, pr: &str) -> (i32, Vec<String>) {
-    let (head, head_ref, body) = match read_pr(a, pr) {
+    let state = match read_pr(a, pr) {
         Ok(v) => v,
         Err(msg) => {
             eprintln!("pr-heal: {msg}");
@@ -1783,6 +2372,7 @@ fn run_one(a: &Args, pr: &str) -> (i32, Vec<String>) {
             return (code, Vec::new());
         }
     };
+    let (head, head_ref, body) = (state.head, state.head_ref, state.body);
     if a.apply {
         if let Some(why) = refuse_wrong_worktree(a, &head_ref) {
             eprintln!("pr-heal: refusing to apply: {why}");
@@ -1800,12 +2390,7 @@ fn run_one(a: &Args, pr: &str) -> (i32, Vec<String>) {
         return (report(&findings, true, a.all), Vec::new());
     }
 
-    let reran = apply_rerun(a, &mut findings, &head);
-    let reran_shas: Vec<String> = if reran > 0 {
-        vec![head.clone()]
-    } else {
-        Vec::new()
-    };
+    let reran_keys = apply_rerun(a, &mut findings, &head);
     let healed = apply_auto(a, &mut findings);
     // A failed body edit must DEMOTE its rows. Logging the error and leaving
     // them as `EditBody` let `report` see zero escalations and exit 0 with the
@@ -1854,7 +2439,7 @@ fn run_one(a: &Args, pr: &str) -> (i32, Vec<String>) {
 
     let code = report(&findings, false, a.all);
     if !committed {
-        return (code, reran_shas);
+        return (code, reran_keys);
     }
     // Re-read BEFORE pushing through the shared guarded push. A push over a
     // run in flight cancels it, and that is the harm this verb exists to
@@ -1870,22 +2455,22 @@ fn run_one(a: &Args, pr: &str) -> (i32, Vec<String>) {
     match crate::pr_push::guarded_push(&ctx, &head) {
         crate::pr_push::PushOutcome::Pushed { .. } => {
             println!("pushed once");
-            (code, reran_shas)
+            (code, reran_keys)
         }
         crate::pr_push::PushOutcome::InFlight { .. } => {
             println!(
                 "run in flight; commit kept local, not pushing; \
                  rerun after fno do pr wait {pr}"
             );
-            (EXIT_IN_FLIGHT, reran_shas)
+            (EXIT_IN_FLIGHT, reran_keys)
         }
         crate::pr_push::PushOutcome::Unreadable(msg) => {
             println!("could not re-read checks ({msg}); commit kept local, not pushing");
-            (EXIT_IN_FLIGHT, reran_shas)
+            (EXIT_IN_FLIGHT, reran_keys)
         }
         crate::pr_push::PushOutcome::PushFailed(_) => {
             eprintln!("pr-heal: the fix is committed but the push failed");
-            (EXIT_READ_ERROR, reran_shas)
+            (EXIT_READ_ERROR, reran_keys)
         }
     }
 }
@@ -2848,15 +3433,30 @@ exit 0
     }
 
     #[test]
-    fn an_unknown_signature_escalates_to_the_inbox_once() {
+    fn an_unknown_red_reruns_once_then_escalates_as_real() {
+        // The rerun comes first, exactly once per (sha, run id); only a
+        // second red on the same pair is the verdict. The escalation names
+        // the double failure, so the operator reads a verdict, not a guess.
         let tmp = tempfile::tempdir().unwrap();
         let d = tmp.path();
         stub_gh_drive(d, true);
         stub_git_drive(d);
         stub_fno(d, r#"{"questions":[]}"#);
         hold_claim(d);
-        let code = run_heal(&drive_args(d, &[]));
-        assert_eq!(code, EXIT_ESCALATIONS, "the unknown row remains work");
+        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
+        let code1 = run_heal(&drive_args(d, &[]));
+        assert_eq!(
+            code1, EXIT_CLEAN,
+            "the rerun acted: first sighting exits clean"
+        );
+        let gh = log_of(d, "gh.log");
+        assert_eq!(gh.matches("run rerun 1 --failed").count(), 1, "{gh}");
+        assert_eq!(
+            log_of(d, "fno-ask.log"),
+            "",
+            "no ask before the rerun answers"
+        );
+        run_heal(&drive_args(d, &[]));
         let asks = log_of(d, "fno-ask.log");
         assert_eq!(asks.matches("outstanding ask").count(), 1, "{asks}");
         assert!(
@@ -3027,8 +3627,8 @@ exit 0
             "exactly one rerun: {gh}"
         );
         let events = log_of(d, "events.jsonl");
-        assert!(events.contains("\"rerun\":1"), "{events}");
-        assert!(events.contains("\"rerun_shas\":[\"aaa1\"]"), "{events}");
+        assert!(events.contains("\"reran\":1"), "{events}");
+        assert!(events.contains("\"rerun_keys\":[\"aaa1:777\"]"), "{events}");
     }
 
     #[test]
@@ -3083,6 +3683,428 @@ exit 0
             events.contains("\"still_red\":1"),
             "the demoted rerun is still red, never healed: {events}"
         );
+    }
+
+    // ── the rebase triggers ───────────────────────────────────────────────
+
+    /// A stub `gh` for the rebase tests: PR 1 carries `mergeable` (the test
+    /// names its value) and a `base` of main. Its one red check is
+    /// rustfmt-drift, so if the loop ever reached the heal path the remedy
+    /// would run and cargo.log would name it.
+    fn stub_gh_drive_rebase(dir: &Path, pr1_mergeable: &str) {
+        let body = r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "gh $*" >> "$D/gh.log"
+for a in "$@"; do case "$a" in
+  *'pulls?state=open'*)
+     echo '[{"number":1,"head":{"sha":"aaa1","ref":"feature/x-1111"},"base":{"ref":"main"},"mergeable":MERGEABLE,"body":"b"},{"number":2,"head":{"sha":"bbb2","ref":"feature/x-2222"},"base":{"ref":"main"},"mergeable":null,"body":"b"}]'
+     exit 0 ;;
+  *pulls/1*) echo '{"head":{"sha":"aaa1","ref":"feature/x-1111"},"base":{"ref":"main"},"mergeable":MERGEABLE,"body":"b"}'; exit 0 ;;
+  *pulls/2*) echo '{"head":{"sha":"bbb2","ref":"feature/x-2222"},"base":{"ref":"main"},"mergeable":null,"body":"b"}'; exit 0 ;;
+  *check-runs) echo '{"check_runs":[{"name":"cargo fmt --check (pinned)","status":"completed","conclusion":"failure","html_url":"https://github.com/o/r/actions/runs/1/job/9"}]}'; exit 0 ;;
+  */logs) echo "Diff in /w/w/crates/fno-agents/src/x.rs:1:"; exit 0 ;;
+  */status) echo '{"statuses":[]}'; exit 0 ;;
+esac; done
+echo '[]'
+"#
+        .replace("MERGEABLE", pr1_mergeable);
+        write_exec(dir, "gh", &body);
+    }
+
+    /// A stub `fno` whose `do pr push` seam answers a caller-named
+    /// stdout/exit/stderr triple; the inbox and backlog lanes log and answer.
+    fn stub_fno_push(dir: &Path, push_stdout: &str, push_exit: u8, push_stderr: &str) {
+        let body = r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "fno $*" >> "$D/fno.log"
+case "$*" in
+  *"do pr push"*) printf '%s' 'PUSH_STDOUT' ; printf '%s' 'PUSH_STDERR' >&2; exit PUSH_EXIT ;;
+  *"outstanding --json"*) echo '{"questions":[]}'; exit 0 ;;
+  *"outstanding ask"*) echo "ask $*" >> "$D/fno-ask.log"; exit 0 ;;
+  *"backlog idea"*) echo "backlog node fno-abc9 created"; exit 0 ;;
+esac
+exit 0
+"#
+        .replace("PUSH_STDOUT", push_stdout)
+        .replace("PUSH_EXIT", &push_exit.to_string())
+        .replace("PUSH_STDERR", push_stderr);
+        write_exec(dir, "fno", &body);
+    }
+
+    /// Hold a live `merge-slot:main` claim naming `pr`, as the sweep would.
+    fn hold_slot_claim(dir: &Path, pr: u64) {
+        let opts = crate::claims::AcquireOpts {
+            pid: Some(std::process::id()),
+            root: Some(dir.to_path_buf()),
+            events_dir: Some(dir.to_path_buf()),
+            ..Default::default()
+        };
+        match crate::claims::acquire("merge-slot:main", &format!("pr:{pr}"), opts) {
+            crate::claims::AcquireOutcome::Acquired(_) => {}
+            other => panic!("slot claim setup failed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_conflicting_pr_rebases_once_from_its_own_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive_rebase(d, "false");
+        stub_git_drive(d);
+        stub_cargo(d);
+        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
+        stub_fno_push(
+            d,
+            "pr-push: origin/main behind-before=9 behind-after=0 preflight=full ci=settled sha=abc pushed=1",
+            0,
+            "",
+        );
+        let code = run_heal(&drive_args(d, &[]));
+        // PR 2 has no worktree and reads as an escalation; PR 1's rebase
+        // itself exits clean.
+        assert_eq!(code, EXIT_ESCALATIONS);
+        let fno = log_of(d, "fno.log");
+        assert_eq!(fno.matches("do pr push").count(), 1, "one push: {fno}");
+        assert_eq!(log_of(d, "cargo.log"), "", "no heal in the same pass");
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("\"rebased\":1"), "{events}");
+        assert!(events.contains("pr_heal_pr"), "{events}");
+        // The emitter's own row, read back the way --status reads it: the
+        // acted list must survive the string-to-number trip.
+        let sa = parse_args(&[
+            "--status".to_string(),
+            "--armed".to_string(),
+            "--events-file".to_string(),
+            d.join("events.jsonl").to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        assert!(
+            status_line(&sa).contains("acted on PR 1"),
+            "{}",
+            status_line(&sa)
+        );
+    }
+
+    #[test]
+    fn the_merge_slot_holder_is_rebased_when_mergeable_reads_null() {
+        // `mergeable` reads null while GitHub computes; the merge slot is the
+        // other trigger, and the ONLY reason this PR rebases. PR 2 conflicts
+        // but holds no slot and has no worktree, so nothing else is rebased.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive_rebase(d, "null");
+        stub_git_drive(d);
+        stub_cargo(d);
+        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
+        stub_fno_push(d, "pr-push: origin/main behind-before=3 behind-after=0 preflight=skipped sha=abc pushed=1", 0, "");
+        hold_slot_claim(d, 1);
+        run_heal(&drive_args(d, &[]));
+        let fno = log_of(d, "fno.log");
+        assert_eq!(fno.matches("do pr push").count(), 1, "{fno}");
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("\"rebased\":1"), "{events}");
+        assert!(events.contains("\"skip_no_worktree\":1"), "{events}");
+    }
+
+    #[test]
+    fn a_rebase_conflict_files_one_deduped_inbox_question() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive_rebase(d, "false");
+        stub_git_drive(d);
+        stub_cargo(d);
+        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
+        stub_fno_push(
+            d,
+            "",
+            3,
+            "pr-push: the branch is not safely rebasable onto origin/main (status needs_resolver; files: crates/fno-agents/src/a.rs, crates/fno/src/b.rs). Resolve the conflicts, then run `fno do pr rebase --continue`.",
+        );
+        run_heal(&drive_args(d, &[]));
+        let asks = log_of(d, "fno-ask.log");
+        assert_eq!(asks.matches("outstanding ask").count(), 1, "{asks}");
+        assert!(
+            asks.contains("rebase conflict")
+                && asks.contains("crates/fno-agents/src/a.rs")
+                && asks.contains("crates/fno/src/b.rs"),
+            "{asks}"
+        );
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("\"skip_rebase_conflict\":1"), "{events}");
+    }
+
+    #[test]
+    fn a_live_worker_claim_blocks_the_rebase_of_its_pr() {
+        // Refusal 1 runs FIRST: a conflicting PR whose node a live worker
+        // holds is never rebased by the healer. PR 1 holds no trigger
+        // (mergeable null, no slot), PR 2's node is claim-held and
+        // conflicting, so no push may happen at all.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive_rebase(d, "null");
+        stub_git_drive(d);
+        stub_cargo(d);
+        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
+        stub_fno_push(d, "", 0, "");
+        hold_claim(d);
+        run_heal(&drive_args(d, &[]));
+        let fno = log_of(d, "fno.log");
+        assert!(
+            !fno.contains("do pr push"),
+            "the held PR is never rebased: {fno}"
+        );
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("\"skip_claim_held\":1"), "{events}");
+    }
+
+    #[test]
+    fn the_rebase_budget_stops_the_run_after_six() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        // Seven conflicting PRs, all on the one branch the git stub lists a
+        // worktree for: the cap binds on the 7th, and PR 7 gets the skip.
+        let mut prs = Vec::new();
+        for n in 1..=7 {
+            prs.push(format!(
+                "{{\"number\":{n},\"head\":{{\"sha\":\"aaa1\",\"ref\":\"feature/x-1111\"}},\"base\":{{\"ref\":\"main\"}},\"mergeable\":false}}"
+            ));
+        }
+        let listing = format!("[{}]", prs.join(","));
+        let body = r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "gh $*" >> "$D/gh.log"
+for a in "$@"; do case "$a" in
+  *'pulls?state=open'*) echo 'LISTING'
+     exit 0 ;;
+  *pulls/*) echo '{"head":{"sha":"aaa1","ref":"feature/x-1111"},"base":{"ref":"main"},"mergeable":false,"body":"b"}'; exit 0 ;;
+  *check-runs) echo '{"check_runs":[]}'; exit 0 ;;
+  */status) echo '{"statuses":[]}'; exit 0 ;;
+esac; done
+echo '[]'
+"#
+        .replace("LISTING", &listing);
+        write_exec(d, "gh", &body);
+        stub_git_drive(d);
+        stub_cargo(d);
+        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
+        stub_fno_push(
+            d,
+            "pr-push: origin/main behind-before=1 behind-after=0 preflight=absent sha=abc pushed=1",
+            0,
+            "",
+        );
+        run_heal(&drive_args(d, &[]));
+        let fno = log_of(d, "fno.log");
+        assert_eq!(fno.matches("do pr push").count(), 6, "{fno}");
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("\"skip_rebase_budget\":1"), "{events}");
+    }
+
+    /// The drive stub with PR 1's one red check a failing pytest shard: the
+    /// rerunnable-escalation class the widening exists for.
+    fn stub_gh_drive_pytest(dir: &Path) {
+        let body = r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "gh $*" >> "$D/gh.log"
+for a in "$@"; do case "$a" in
+  *'pulls?state=open'*)
+     echo '[{"number":1,"head":{"sha":"aaa1","ref":"pytest-leak-guard"},"base":{"ref":"main"},"mergeable":null},{"number":2,"head":{"sha":"bbb2","ref":"feature/x-2222"},"base":{"ref":"main"},"mergeable":null}]'
+     exit 0 ;;
+  *pulls/1*) echo '{"head":{"sha":"aaa1","ref":"pytest-leak-guard"},"base":{"ref":"main"},"mergeable":null,"body":"b"}'; exit 0 ;;
+  *pulls/2*) echo '{"head":{"sha":"bbb2","ref":"feature/x-2222"},"base":{"ref":"main"},"mergeable":null,"body":"b"}'; exit 0 ;;
+  *check-runs) echo '{"check_runs":[{"name":"smoke-pytest (5)",CHECKROW}]}'; exit 0 ;;
+  */logs) echo "FAILED tests/test_a.py::test_flaky_a"; exit 0 ;;
+  */status) echo '{"statuses":[]}'; exit 0 ;;
+esac; done
+echo '[]'
+"#
+        .replace("pytest-leak-guard", "feature/x-1111")
+        .replace(
+            "CHECKROW",
+            r#""status":"completed","conclusion":"failure","html_url":"https://github.com/o/r/actions/runs/777/job/9""#,
+        );
+        write_exec(dir, "gh", &body);
+    }
+
+    #[test]
+    fn a_rerunnable_red_reruns_once_per_sha_and_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive_pytest(d);
+        stub_git_drive(d);
+        stub_cargo(d);
+        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
+        stub_fno(d, r#"{"questions":[]}"#);
+        hold_claim(d);
+        let code = run_heal(&drive_args(d, &[]));
+        assert_eq!(code, EXIT_CLEAN, "the rerun acted: {code}");
+        let gh = log_of(d, "gh.log");
+        assert_eq!(
+            gh.matches("run rerun 777 --failed").count(),
+            1,
+            "exactly one --failed rerun: {gh}"
+        );
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("\"reran\":1"), "{events}");
+        assert!(events.contains("\"rerun_keys\":[\"aaa1:777\"]"), "{events}");
+    }
+
+    #[test]
+    fn nine_checks_sharing_one_run_id_cost_one_rerun() {
+        // The dedup key is (sha, run id), not the check name: nine failing
+        // checks from one workflow run are ONE rerun. Measured on PR 2162:
+        // nine red checks, one run id, one `--failed` rerun covers all nine.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh(d, false);
+        let mut findings: Vec<Finding> = (1..=9)
+            .map(|i| Finding {
+                check: format!("smoke-pytest ({i})"),
+                signature: "unknown",
+                remedy: Remedy::Escalate {
+                    repro: "unrecognized".to_string(),
+                },
+                link: format!("https://github.com/o/r/actions/runs/777/job/{i}"),
+            })
+            .collect();
+        let args = parse_args(&args_for(d, &["--apply"])).unwrap();
+        let issued = apply_rerun(&args, &mut findings, "aaa1");
+        assert_eq!(issued, vec!["aaa1:777".to_string()]);
+        // The printed command is the applied one, flag included.
+        assert_eq!(findings[0].detail(), "gh run rerun 777 --failed");
+        let gh = log_of(d, "gh.log");
+        assert_eq!(
+            gh.matches("run rerun 777 --failed").count(),
+            1,
+            "one rerun for nine checks: {gh}"
+        );
+    }
+
+    #[test]
+    fn a_second_red_on_the_rerun_key_escalates_as_real() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive_pytest(d);
+        stub_git_drive(d);
+        stub_cargo(d);
+        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
+        stub_fno(d, r#"{"questions":[]}"#);
+        hold_claim(d);
+        run_heal(&drive_args(d, &[]));
+        run_heal(&drive_args(d, &[]));
+        let gh = log_of(d, "gh.log");
+        assert_eq!(
+            gh.matches("run rerun 777 --failed").count(),
+            1,
+            "the rerun never re-issues: {gh}"
+        );
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("\"still_red\":1"), "{events}");
+    }
+
+    /// The drive stub with PR 1 fully green on Actions run 777: the shape a
+    /// rerun that came back clean leaves behind.
+    fn stub_gh_drive_flake(d: &Path) {
+        let body = r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "gh $*" >> "$D/gh.log"
+for a in "$@"; do case "$a" in
+  *'pulls?state=open'*)
+     echo '[{"number":1,"head":{"sha":"aaa1","ref":"feature/x-1111"},"base":{"ref":"main"},"mergeable":null},{"number":2,"head":{"sha":"bbb2","ref":"feature/x-2222"},"base":{"ref":"main"},"mergeable":null}]'
+     exit 0 ;;
+  *pulls/1*) echo '{"head":{"sha":"aaa1","ref":"feature/x-1111"},"base":{"ref":"main"},"mergeable":null,"body":"b"}'; exit 0 ;;
+  *pulls/2*) echo '{"head":{"sha":"bbb2","ref":"feature/x-2222"},"base":{"ref":"main"},"mergeable":null,"body":"b"}'; exit 0 ;;
+  *check-runs) echo '{"check_runs":[{"name":"ci","status":"completed","conclusion":"success","html_url":"https://github.com/o/r/actions/runs/777/job/9"}]}'; exit 0 ;;
+  */logs) echo "all steps passed"; exit 0 ;;
+esac; done
+echo '[]'
+"#;
+        write_exec(d, "gh", &body);
+    }
+
+    /// Seed one pr_heal_flake row for the `ci` key under a foreign guard.
+    fn seed_flake_row(dir: &Path, node: Option<&str>) {
+        let node_json = node
+            .map(|n| format!(",\"node_id\":\"{n}\""))
+            .unwrap_or_default();
+        let row = format!(
+            "{{\"ts\":\"2026-09-17T12:00:00Z\",\"type\":\"pr_heal_flake\",\"data\":{{\"key_guard\":\"old:1:ci\",\"key\":\"ci\",\"sha\":\"old\",\"run_id\":\"1\",\"check\":\"ci\"{node_json}}}}}\n"
+        );
+        let path = dir.join("events.jsonl");
+        let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+        text.push_str(&row);
+        std::fs::write(&path, text).unwrap();
+    }
+
+    /// Seed the journal with a tick row carrying rerun keys.
+    fn seed_tick_with_keys(dir: &Path, keys: &[&str]) {
+        let row = format!(
+            "{{\"ts\":\"2026-09-17T12:00:00Z\",\"type\":\"pr_heal_tick\",\"data\":{{\"rerun_keys\":{}}}}}\n",
+            serde_json::json!(keys)
+        );
+        std::fs::write(dir.join("events.jsonl"), row).unwrap();
+    }
+
+    #[test]
+    fn a_green_rerun_records_a_flake_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive_flake(d);
+        stub_git_drive(d);
+        stub_cargo(d);
+        stub_fno(d, r#"{"questions":[]}"#);
+        hold_claim(d);
+        seed_tick_with_keys(d, &["aaa1:777"]);
+        run_heal(&drive_args(d, &[]));
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("pr_heal_flake"), "{events}");
+        assert!(events.contains("\"key_guard\":\"aaa1:777:ci\""), "{events}");
+        assert!(events.contains("\"key\":\"ci\""), "{events}");
+    }
+
+    #[test]
+    fn the_third_flake_occurrence_files_one_node() {
+        // Two prior rows for key ci, no node yet: the third green rerun
+        // files exactly one node through `fno backlog idea`.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive_flake(d);
+        stub_git_drive(d);
+        stub_cargo(d);
+        stub_fno_push(d, "", 0, "");
+        hold_claim(d);
+        seed_tick_with_keys(d, &["aaa1:777"]);
+        seed_flake_row(d, None);
+        seed_flake_row(d, None);
+        run_heal(&drive_args(d, &[]));
+        let fno = log_of(d, "fno.log");
+        assert_eq!(fno.matches("backlog idea").count(), 1, "{fno}");
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("\"node_id\":\"fno-abc9\""), "{events}");
+    }
+
+    #[test]
+    fn a_flake_key_with_a_node_never_refiles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive_flake(d);
+        stub_git_drive(d);
+        stub_cargo(d);
+        stub_fno_push(d, "", 0, "");
+        hold_claim(d);
+        seed_tick_with_keys(d, &["aaa1:777"]);
+        seed_flake_row(d, Some("fno-abc9"));
+        run_heal(&drive_args(d, &[]));
+        let fno = log_of(d, "fno.log");
+        assert!(!fno.contains("backlog idea"), "{fno}");
+    }
+
+    #[test]
+    fn the_playbook_names_rerunnability() {
+        let text = playbook();
+        assert!(text.contains("rerunnable"), "{text}");
+        assert!(text.contains("yes"), "{text}");
+        assert!(text.contains("no "), "{text}");
     }
 
     // ── the detached drive loop ───────────────────────────────────────────
@@ -3235,8 +4257,38 @@ exit 0
         let line = status_line(&a);
         assert!(line.starts_with("Heal: armed; last run "), "{line}");
         assert!(line.contains("(12m ago)"), "{line}");
-        assert!(line.contains("healed 1, escalated 3"), "{line}");
+        assert!(
+            line.contains("healed 1, rebased 0, reran 0, escalated 3"),
+            "{line}"
+        );
+        assert!(line.contains("acted on nothing"), "{line}");
         assert!(line.contains("in-flight none"), "{line}");
+    }
+
+    #[test]
+    fn status_line_prints_rebased_reran_and_the_acted_prs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let ts = chrono::Utc::now().to_rfc3339();
+        std::fs::write(
+            &events,
+            format!(
+                "{{\"ts\":\"{ts}\",\"type\":\"pr_heal_tick\",\"data\":{{\"healed\":0,\"rebased\":1,\"reran\":2,\"escalated\":1,\"acted_prs\":[2155,2162]}}}}\n"
+            ),
+        )
+        .unwrap();
+        let a = parse_args(&[
+            "--status".to_string(),
+            "--armed".to_string(),
+            "--events-file".to_string(),
+            events.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let line = status_line(&a);
+        assert!(
+            line.contains("healed 0, rebased 1, reran 2, escalated 1; acted on PR 2155, 2162"),
+            "{line}"
+        );
     }
 
     #[test]

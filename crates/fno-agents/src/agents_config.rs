@@ -1050,6 +1050,9 @@ pub fn auto_merge_strategy(cwd: &Path) -> String {
 
 /// Resolve `[auto_merge] require_fresh_ci` (default ON). A malformed or absent
 /// value falls back to the safe default so a config typo cannot reopen stale CI.
+/// The healer (`fno-agents pr-heal --all --apply`) is the actor that runs the
+/// stale remedy (`fno do pr push` on a conflicting PR or the merge-slot
+/// holder), so arming the check no longer holds a merge no one unblocks.
 pub fn auto_merge_require_fresh_ci(cwd: &Path) -> bool {
     resolve(cwd, |t| {
         t.get("auto_merge")?

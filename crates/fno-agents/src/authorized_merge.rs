@@ -1007,7 +1007,7 @@ fn slot_holder_key(pr: u64) -> String {
     format!("pr:{pr}")
 }
 
-fn parse_slot_holder(holder: &str) -> Option<u64> {
+pub(crate) fn parse_slot_holder(holder: &str) -> Option<u64> {
     holder.strip_prefix("pr:")?.parse::<u64>().ok()
 }
 
