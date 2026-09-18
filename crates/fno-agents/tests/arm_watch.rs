@@ -523,3 +523,50 @@ fn heal_off_leaves_the_hold_and_pages() {
         1
     );
 }
+
+/// AC8-HP: the whole launchd tier paused under an armed breaker pages
+/// nothing, runs no self-heal repair, and says heal=paused.
+#[test]
+fn a_paused_tier_pages_nothing_and_heals_nothing() {
+    let td = tempfile::TempDir::new().unwrap();
+    let store = td.path().join("signals.json");
+    let paused: Vec<ArmStatus> = ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"]
+        .iter()
+        .map(|arm| {
+            let mut r = row(arm);
+            r.scheduler = Some("launchd:sh.fno.pr-watcher".to_string());
+            r.stale = false;
+            r.cause = Some("fleet_stop".to_string());
+            r.line = format!(
+                "{} cause=fleet_stop (fleet incident stopped at generation 5: two cargo runs; \
+                 held on purpose; wait for the breaker to clear)",
+                render_row(&r)
+            );
+            r
+        })
+        .collect();
+    let mut rows = lined(&paused);
+    let mut sends = 0usize;
+    let mut runs = 0usize;
+    let out = tick_with_heal(
+        &mut rows,
+        false,
+        true,
+        1800,
+        &store,
+        TS_UNIX,
+        || Ok(Vec::new()),
+        &mut |action| {
+            runs += 1;
+            assert_ne!(action, "refresh");
+            true
+        },
+        |_, body| {
+            sends += 1;
+            panic!("a paused tier pages nobody: {body}");
+        },
+    );
+    assert!(out.detail.starts_with("heal=paused"), "{}", out.detail);
+    assert_eq!(sends, 0);
+    assert_eq!(runs, 0);
+}

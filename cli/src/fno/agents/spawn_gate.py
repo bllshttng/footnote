@@ -68,7 +68,7 @@ EXIT_GATE_UNAVAILABLE = 87
 #: deadline - not this gate's 600s queue - bounds the wait.
 WAITABLE_REFUSAL_REASONS = frozenset(
     {
-        "load_backstop", "ram_floor", "swap_pressure",
+        "ram_floor", "swap_pressure",
         "cpu_instrument_unreadable",
         "cpu_share_undecidable", "fleet_cpu_share", "provider_cap",
         "max_live", "no_wait", "no_wait_mutex_held",
@@ -812,9 +812,7 @@ def _cpu_axis(prefetched: object = _NOT_PREFETCHED) -> Admission:
     Maps an unreadable instrument to ``refuse`` on ``cpu_instrument`` (LD3:
     the sensor blinds under exactly the load it measures, and an unreadable
     process table is itself a symptom) and otherwise hands the reading to
-    :func:`cpu_admission` with the 15-minute load as the backstop input. A
-    platform without ``getloadavg`` reads ``load_15m=None``, which the
-    backstop passes (LD3: unreadable load admits).
+    :func:`cpu_admission`, whose fleet CPU share decides alone.
 
     Shared with the ``--explain`` preview, so a dry run answers the question
     the real spawn will.
@@ -841,29 +839,20 @@ def _cpu_axis(prefetched: object = _NOT_PREFETCHED) -> Admission:
             capacity_cores=0.0,
             ceiling=0.0,
             gap=None,
-            load_15m=None,
-            backstop=0.0,
         )
     from fno.doctor_footprint import _admission_config, cpu_admission
 
-    share_ceiling, hard_max = _admission_config()
-    try:
-        load_15m: Optional[float] = os.getloadavg()[2]
-    except (OSError, AttributeError):
-        load_15m = None
+    share_ceiling = _admission_config()
     capacity = float(_load_cpus())
     return cpu_admission(
         reading,
         capacity_cores=capacity,
         share_ceiling=share_ceiling,
-        load_15m=load_15m,
-        hard_max_load_per_cpu=hard_max,
-        cpus=int(capacity) or 1,
     )
 
 
 def _load_cpus() -> int:
-    """The CPU denominator for the CPU axis and the backstop.
+    """The CPU denominator for the CPU axis.
 
     Footprint's capacity reading, which is the minimum of the affinity count,
     the host count and the cgroup quota. Two reasons it is worth the import

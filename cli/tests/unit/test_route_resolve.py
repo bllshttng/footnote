@@ -800,3 +800,46 @@ def test_strict_routing_arms_a_configured_verb_outside_the_tuple(tmp_path):
     assert any("agents.profiles.fix.lanes[0]" in step for step in chain)
     _payload, _chain, verdict = rr.resolve_slot("tdd", None, {}, settings=settings)
     assert verdict == "policy-held"
+
+
+@requires_rust
+def test_strict_routing_names_a_scalar_lanes(tmp_path):
+    """A scalar lanes is a shape fault, not an absent one.
+
+    Twice a config write stored 'zai-flash,codex-luna' where the routing
+    code requires a list, and each time strict routing refused every spawn
+    for hours with 'declares no lanes': text that sends the reader hunting
+    for a missing key. The table passes the scalar through and the Rust
+    guard names it in both legs.
+    """
+    from fno.config import settings_from_files
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[routing]\n"
+        "enforce_inventory = true\n"
+        "\n"
+        "[agents.profiles.target]\n"
+        'lanes = "zai-flash,codex-luna"\n',
+        encoding="utf-8",
+    )
+    settings = settings_from_files([cfg])
+    _payload, chain, _verdict = rr.resolve_slot("target", None, {}, settings=settings)
+    assert any("must be a list" in step for step in chain)
+    assert not any("declares no lanes" in step for step in chain)
+
+
+@requires_rust
+def test_an_unrouted_verb_still_walks_the_resolver_and_names_the_grid():
+    """A verb whose profile declares no lanes used to return early with an
+    empty chain: the harness default applied with no receipt naming why.
+    Every spawn now walks the ONE resolver, the walk answers with the grid's
+    own vocabulary, and the candidate is still None, so the built argv (which
+    injects a model only from a candidate) is byte-identical to before."""
+    candidate, chain, verdict = rr.resolve_slot(
+        "no-such-profile-verb", None, {}, inventory=rr.Inventory()
+    )
+    assert candidate is None
+    assert chain, "the walk must leave a receipt for an unrouted verb"
+    assert chain[-1] == "grid=no-inventory-declared"
+    assert verdict == "unarmed"

@@ -95,8 +95,7 @@ def _pin_load(
 ):
     """Pin the spawn-load snapshot so a verdict test is hermetic: the real
     snapshot reads the host's live load average, which no exit-code assertion
-    should ride on. The 15-minute figure feeds the CPU axis's backstop; the
-    1-minute load is display-only under x-7783."""
+    should ride on. Load is trend context only; nothing decides on it."""
     from types import SimpleNamespace
 
     from fno import doctor_footprint
@@ -113,12 +112,12 @@ def _pin_load(
     monkeypatch.setattr(doctor_footprint, "_spawn_load_snapshot", lambda: snapshot)
 
 
-def _pin_admission(monkeypatch, share: float = 0.5, hard: float = 40.0):
-    """Pin the CPU axis's config pair so a verdict test never reads the real
-    config roots (the defaults match a stock install)."""
+def _pin_admission(monkeypatch, share: float = 0.5):
+    """Pin the CPU axis's share ceiling so a verdict test never reads the real
+    config roots (the default matches a stock install)."""
     from fno import doctor_footprint
 
-    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (share, hard))
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: share)
 
 
 def _pin_capacity(monkeypatch, cores: int):
@@ -1365,15 +1364,12 @@ def test_spawn_load_snapshot_is_rendered_in_text_and_json(
             reading, process_threshold=None, json_output=False
         )
     out = capsys.readouterr().out
-    # x-7783 AC8: one cpu admission line, one load_15m line, no spawn load.
+    # x-c588: one cpu admission line, no load line, no spawn load.
     assert (
         "cpu admission: fleet 0.490 of 12.00 cores (4.1%) against "
         "max_fleet_cpu_share 50.0% -> admit" in out
     )
-    assert (
-        "load_15m: 140.0 against backstop 480.0 "
-        "(hard_max_load_per_cpu 40 x 12 cpus)" in out
-    )
+    assert "load_15m:" not in out
     assert "spawn load:" not in out
 
 
@@ -1852,9 +1848,9 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(
 def test_ac4_edge_capacity_over_exits_three_and_names_top_consumers(
     monkeypatch, no_worker_roots
 ) -> None:
-    """The backstop over its ceiling and a leak BOTH fire; the CPU axis keeps
+    """The fleet over its share ceiling and a leak BOTH fire; the CPU axis keeps
     the exit (3) as the more urgent alarm and the leak still prints with its
-    own words. The 1-minute load pinned beside it decides nothing (x-7783)."""
+    own words. The load pinned beside it decides nothing (x-c588)."""
     from fno import doctor_footprint
 
     _pin_load(monkeypatch, status="within", load=110.4, load_15m=500.0)
@@ -1864,8 +1860,8 @@ def test_ac4_edge_capacity_over_exits_three_and_names_top_consumers(
         monkeypatch,
         """\
         PID ELAPSED %CPU RSS COMMAND
-        201 02:00:00 80.0 1024 fno mux serve
-        202 01:00:00 40.0 2048 fno-agents-daemon --serve
+        201 02:00:00 800.0 1024 fno mux serve
+        202 01:00:00 400.0 2048 fno-agents-daemon --serve
         """,
         [],
         [],
@@ -1874,10 +1870,10 @@ def test_ac4_edge_capacity_over_exits_three_and_names_top_consumers(
     result = runner.invoke(app, ["doctor", "footprint"])
 
     assert result.exit_code == 3
-    assert "verdict: refuse on load_15m (500.0 against 480.0)" in result.stdout
+    assert "verdict: hold on fleet_cpu_share" in result.stdout
     assert "unexplained processes: 1 (2 direct, roster explains 1)" in result.stdout
-    assert "fno mux serve (80.0%)" in result.stdout
-    assert "fno-agents-daemon --serve (40.0%)" in result.stdout
+    assert "fno mux serve (800.0%)" in result.stdout
+    assert "fno-agents-daemon --serve (400.0%)" in result.stdout
 
 
 def test_ac4_edge_unexplained_processes_get_their_own_exit(
@@ -2279,7 +2275,7 @@ def test_spawn_gate_carries_a_gap_reading_into_the_interval(monkeypatch):
     monkeypatch.setattr(
         "fno.doctor_footprint.cause_reading", lambda: (reading, None)
     )
-    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 40.0))
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: 0.5)
     monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
     monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (1.0, 1.0, 1.0))
 
@@ -2294,9 +2290,9 @@ def test_spawn_gate_carries_a_gap_reading_into_the_interval(monkeypatch):
 
 def test_admission_names_its_axis_and_deciding_numbers(monkeypatch):
     """AC7's naming contract (x-5283) carried onto the new axis (x-7783):
-    the 15-minute backstop over its ceiling names load_15m as its axis and
-    prints the numbers that decided it, and the sustained line disclaims the
-    verdict. No one-minute figure appears on the deciding line."""
+    the share verdict names fleet_cpu_share as its axis and prints the
+    numbers that decided it, and the sustained line disclaims the verdict.
+    No load figure appears on the deciding line."""
     from fno import doctor_footprint
 
     reading = doctor_footprint.parse_footprint(
@@ -2313,14 +2309,15 @@ def test_admission_names_its_axis_and_deciding_numbers(monkeypatch):
     _pin_capacity(monkeypatch, 12)
     result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
     payload = json.loads(result.stdout)
-    assert payload["capacity_verdict"] == "refuse"
-    assert payload["admission"]["axis"] == "load_15m"
-    assert payload["admission"]["load_15m"] == 500.0
-    assert payload["admission"]["backstop"] == 480.0
+    assert payload["capacity_verdict"] == "admit"
+    assert payload["admission"]["axis"] == "fleet_cpu_share"
+    assert payload["admission"]["ceiling"] == 0.5
+    assert "backstop" not in payload["admission"]
     assert payload["load_1m"] == 110.4
 
     shown = runner.invoke(app, ["doctor", "footprint", "--cause-only"])
-    assert "verdict: refuse on load_15m (500.0 against 480.0)" in shown.output
+    assert "verdict: admit on fleet_cpu_share" in shown.output
+    assert "load_15m" not in shown.output
     assert "a separate axis - it did not decide the verdict" in shown.output
 
 
@@ -2358,9 +2355,6 @@ def test_cpu_admission_pins_the_shared_gate_fixture():
             reading,
             capacity_cores=inputs["capacity_cores"],
             share_ceiling=inputs["share_ceiling"],
-            load_15m=inputs["load_15m"],
-            hard_max_load_per_cpu=inputs["hard_max_load_per_cpu"],
-            cpus=inputs["cpus"],
         )
         expected = case["payload"]["admission"]
         assert adm.verdict == expected["verdict"], case["name"]

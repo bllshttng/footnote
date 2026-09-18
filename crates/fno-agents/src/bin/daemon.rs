@@ -66,11 +66,7 @@ fn main() {
     // env-only behavior (a daemon started by hand for debugging).
     if let Some(home_arg) = parse_home_arg(&args) {
         let env_home = AgentsHome::from_env();
-        let same = |a: &std::path::Path, b: &std::path::Path| {
-            std::fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf())
-                == std::fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf())
-        };
-        if !same(std::path::Path::new(&home_arg), env_home.root()) {
+        if !fno_agents::paths::same_path(std::path::Path::new(&home_arg), env_home.root()) {
             eprintln!(
                 "fno-agents-daemon: --home {} disagrees with FNO_AGENTS_HOME {}; refusing to start",
                 home_arg,

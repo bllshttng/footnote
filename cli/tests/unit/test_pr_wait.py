@@ -172,10 +172,11 @@ def test_torn_last_json_line_is_not_answered_by_an_older_line(monkeypatch, capsy
 
 
 def test_conflicting_head_refuses_with_a_rebase_receipt(monkeypatch, capsys) -> None:
-    """A conflicting head can never settle: GitHub starts no checks on it, so
-    `settled` stays false forever. The wait refuses after ONE poll with exit 5
-    instead of sleeping out the deadline - under --until settled and --until
-    green alike."""
+    """A conflicting head is owed a rebase whatever its check count reads:
+    GitHub starts no NEW check on it, so any check already there ran before
+    the base moved. The wait refuses after ONE poll with exit 5 instead of
+    sleeping out the deadline - under --until settled and --until green
+    alike."""
     _fake_cached_status(
         monkeypatch,
         {
@@ -194,6 +195,34 @@ def test_conflicting_head_refuses_with_a_rebase_receipt(monkeypatch, capsys) -> 
         assert slept == [], until  # no sleep: the answer was known at tick one
         err = capsys.readouterr().err
         assert "CONFLICTING" in err and "1f93dabf" in err
+        assert "fno do pr rebase" in err
+
+
+def test_conflicting_head_with_stale_settled_checks_still_refuses(monkeypatch, capsys) -> None:
+    """The shape measured on a live conflicting PR: OPEN + CONFLICTING with
+    `settled` already true and 35 finished checks carried on the head. The
+    rebase is owed whatever the check count reads, so the wait still refuses
+    with exit 5 after one poll - the old receipt text said this payload could
+    not exist."""
+    _fake_cached_status(
+        monkeypatch,
+        {
+            "pr": "9", "verdict": "red", "settled": True, "green": False,
+            "pr_state": "OPEN", "mergeable": "CONFLICTING", "head": "bf75a2840000",
+            "checks": {"total": 35, "pending": 0},
+        },
+        1,
+    )
+    for until in ("settled", "green"):
+        slept: list[float] = []
+        rc = _wait.wait_status(
+            "9", until=until, timeout=120, interval=60,
+            sleeper=lambda s: slept.append(s), clock=_Clock(0, 100),
+        )
+        assert rc == 5, until
+        assert slept == [], until
+        err = capsys.readouterr().err
+        assert "CONFLICTING" in err and "bf75a284" in err
         assert "fno do pr rebase" in err
 
 

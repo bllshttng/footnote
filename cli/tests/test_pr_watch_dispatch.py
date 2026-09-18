@@ -2396,7 +2396,8 @@ class TestTickRecordsAndDeadline:
     suppressing its launchd successors."""
 
     def _invoke_tick(self, monkeypatch, dispatch_tick, grant_queue=None,
-                     pr_watch_enabled=True, verb_error=None):
+                     pr_watch_enabled=True, verb_error=None,
+                     fleet_bucket: "int | None" = 0):
         import typer
         from typer.testing import CliRunner
         from unittest.mock import MagicMock
@@ -2429,7 +2430,16 @@ class TestTickRecordsAndDeadline:
         settings.pr_watch.max_age_days = 30
         settings.pr_watch.retries = 3
         settings.pr_watch.enabled = pr_watch_enabled
+        # A real interval: the fleet-tail cadence buckets on it, and a
+        # MagicMock interval would make the bucket wall-clock noise.
+        settings.pr_watch.interval_seconds = 600
         settings.recovery.enabled = False
+        # Fleet-tail cadence: stranded/recovery/watchdog run on the
+        # interval bucket's slot (0/1/2). Pin the bucket so the phase the
+        # test exercises actually runs; None leaves the clock to the test.
+        if fleet_bucket is not None:
+            monkeypatch.setattr("time.time",
+                                lambda b=fleet_bucket: b * 600 + 1.0, raising=True)
         monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
 
         events: list[tuple[str, dict]] = []
@@ -2607,7 +2617,7 @@ class TestTickRecordsAndDeadline:
             lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
             raising=True,
         )
-        def _notify_row(_roots=None) -> None:
+        def _notify_row(_roots=None, timeout_s=None) -> None:
             prcli._emit_tick_row("notify_watch", interval_s=300,
                                  skip_reason="notify_off")
 
@@ -2651,7 +2661,8 @@ class TestTickRecordsAndDeadline:
             lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
             raising=True,
         )
-        monkeypatch.setattr(prcli, "_run_notify_watch_phase", lambda _roots=None: None,
+        monkeypatch.setattr(prcli, "_run_notify_watch_phase",
+                            lambda _roots=None, timeout_s=None: None,
                             raising=True)
         monkeypatch.setattr(prcli, "_catchup_roots", lambda: [tmp_path], raising=True)
         monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [tmp_path],
@@ -2774,7 +2785,8 @@ class TestTickRecordsAndDeadline:
         monkeypatch.setattr(
             "fno.pr_watch._king_wake.run_king_wake", _stall_in_step, raising=True,
         )
-        monkeypatch.setattr(prcli, "_run_notify_watch_phase", lambda _roots=None: None, raising=True)
+        monkeypatch.setattr(prcli, "_run_notify_watch_phase",
+                            lambda _roots=None, timeout_s=None: None, raising=True)
         monkeypatch.setattr(prcli, "_catchup_roots", lambda: [tmp_path], raising=True)
         monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [tmp_path], raising=True)
         monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
@@ -2901,12 +2913,14 @@ class TestTickRecordsAndDeadline:
         firsts = []
         for _ in range(3):
             stranded_seen.clear()
-            res, _events = self._invoke_tick(monkeypatch, lambda **_kw: None)
+            res, _events = self._invoke_tick(
+                monkeypatch, lambda **_kw: None, fleet_bucket=None)
             assert res.exit_code == 0, res.output
             firsts.append(stranded_seen[0])
-            # The harness's MagicMock interval int()s to 1, so one clock
-            # tick per run is one interval bucket per run.
-            clock["t"] += 1.0
+            # The interval is 600s and one stranded run happens every three
+            # buckets (the fleet-tail cadence), so one run per clock step is
+            # three buckets per run: the rotation advances one root per run.
+            clock["t"] += 1800.0
         assert firsts == roots, f"each root led exactly once: {firsts}"
 
     def test_stranded_with_no_roots_sweeps_nothing(self, monkeypatch):
@@ -3029,6 +3043,8 @@ class TestTickRecordsAndDeadline:
         settings.pr_watch.max_age_days = 30
         settings.pr_watch.retries = 3
         settings.pr_watch.graphql_min_remaining = 200
+        settings.pr_watch.interval_seconds = 600
+        monkeypatch.setattr("time.time", lambda: 2 * 600 + 1.0)
         settings.recovery.enabled = True
         settings.recovery.watchdog.enabled = True
         settings.recovery.watchdog.mode = "report"
@@ -3078,7 +3094,7 @@ class TestTickRecordsAndDeadline:
         assert ("publish", "tick", "") in published
         assert ("roots", [str(tmp_path)]) in published
 
-    def _arm_watchdog_tick(self, monkeypatch, tmp_path, roots):
+    def _arm_watchdog_tick(self, monkeypatch, tmp_path, roots, fleet_bucket: "int | None" = 0):
         """The minimum scaffolding that reaches the recovery-root loop.
 
         Returns `(scanned, lines)`. `lines` is the tick logger's own output,
@@ -3087,7 +3103,9 @@ class TestTickRecordsAndDeadline:
         False` anywhere above this logger silently yields an empty capture,
         which is what it did on CI while working locally. The tick swallows
         every leg failure into a warning on this same logger, so when the loop
-        is not reached these lines name the reason."""
+        is not reached these lines name the reason. `fleet_bucket` pins the
+        interval bucket so the fleet-tail phase under test actually runs:
+        stranded on slot 0, recovery on 1, watchdog on 2."""
         import logging
         from types import SimpleNamespace
         from unittest.mock import MagicMock
@@ -3117,6 +3135,10 @@ class TestTickRecordsAndDeadline:
         settings.pr_watch.max_age_days = 30
         settings.pr_watch.retries = 3
         settings.pr_watch.graphql_min_remaining = 200
+        settings.pr_watch.interval_seconds = 600
+        if fleet_bucket is not None:
+            monkeypatch.setattr("time.time",
+                                lambda b=fleet_bucket: b * 600 + 1.0, raising=True)
         # The sections the arming gate reads are REAL objects, not mock
         # attributes. A MagicMock answers every attribute truthily, which hid
         # a shape change: `recovery.watchdog` became a nested object with
@@ -3256,7 +3278,8 @@ class TestTickRecordsAndDeadline:
         roots = [tmp_path / "a", tmp_path / "b", tmp_path / "c"]
         for root in roots:
             root.mkdir()
-        scanned, lines = self._arm_watchdog_tick(monkeypatch, tmp_path, roots)
+        scanned, lines = self._arm_watchdog_tick(monkeypatch, tmp_path, roots,
+                                                 fleet_bucket=2)
 
         # A floor larger than the whole tick: every root is unaffordable after
         # the first check, so the loop must stop rather than scan all three.
@@ -3297,7 +3320,8 @@ class TestTickRecordsAndDeadline:
         roots = [tmp_path / "a", tmp_path / "b", tmp_path / "c"]
         for root in roots:
             root.mkdir()
-        scanned, lines = self._arm_watchdog_tick(monkeypatch, tmp_path, roots)
+        scanned, lines = self._arm_watchdog_tick(monkeypatch, tmp_path, roots,
+                                                 fleet_bucket=2)
         monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "600")
 
         app = typer.Typer()
@@ -3447,6 +3471,8 @@ class TestTickRecordsAndDeadline:
         settings.pr_watch.max_age_days = 30
         settings.pr_watch.retries = 3
         settings.pr_watch.graphql_min_remaining = 200
+        settings.pr_watch.interval_seconds = 600
+        monkeypatch.setattr("time.time", lambda: 2 * 600 + 1.0)
         settings.recovery.enabled = True
         settings.recovery.watchdog.enabled = True
         settings.recovery.watchdog.mode = "wake"
@@ -3640,7 +3666,8 @@ class TestFleetLegRunsAfterACutPRLeg:
             king_wake_fn or (lambda _settings, emit, **_kw: {"woke": [], "crowns": 0}),
             raising=True,
         )
-        monkeypatch.setattr(prcli, "_run_notify_watch_phase", lambda _roots=None: None, raising=True)
+        monkeypatch.setattr(prcli, "_run_notify_watch_phase",
+                            lambda _roots=None, timeout_s=None: None, raising=True)
         monkeypatch.setattr(prcli, "_catchup_roots", lambda: [tmp_path], raising=True)
         monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [tmp_path], raising=True)
         monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
@@ -3655,6 +3682,10 @@ class TestFleetLegRunsAfterACutPRLeg:
         settings = MagicMock()
         settings.pr_watch.max_age_days = 30
         settings.pr_watch.retries = 3
+        # This class's subject is the RECOVERY leg: pin the interval bucket to
+        # recovery's fleet-tail slot (1) so it runs every invocation.
+        settings.pr_watch.interval_seconds = 600
+        monkeypatch.setattr("time.time", lambda: 1 * 600 + 1.0, raising=True)
         settings.recovery.enabled = True
         settings.autonomy.enabled = True
         monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)

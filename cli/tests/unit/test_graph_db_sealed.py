@@ -19,6 +19,7 @@ ALLOWLIST = {
     "agents/handle_collisions.py": "own collisions db",
     "agents/discover.py": "own discovery db",
     "graph/fts.py": "own fts5 cache index (graph.json.fts5), never graph.db",
+    "pr/_reviews.py": "read-only event store (events.db beside a journal), never graph.db",
 }
 
 # A file that touches the graph row store names it: the db path is derived

@@ -91,6 +91,7 @@ pub mod codex_fake_daemon;
 pub mod codex_inject;
 /// Public because `codex_resume` (pub, exercised by the parity test) names
 /// [`CodexRoute`] in its signature.
+pub mod codex_posture;
 pub mod codex_route;
 pub mod codex_store;
 pub mod codex_thread;
@@ -144,6 +145,7 @@ pub mod heal;
 pub mod honesty_sweep;
 pub mod hook;
 mod identity;
+pub mod install_verify;
 pub mod interrupt_classify;
 pub mod json_output;
 pub mod kill_criteria;
@@ -235,6 +237,7 @@ pub mod route_slot;
 pub mod row_truth;
 pub mod run_outcome;
 pub mod run_state;
+pub mod sandbox_probe;
 pub mod scoreboard;
 pub mod scrape;
 pub mod scratch;

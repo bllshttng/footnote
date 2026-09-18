@@ -146,3 +146,99 @@ fn concurrent_runs_serialize_under_the_shared_claim() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+fn build_admit(root: &std::path::Path, cargo_pid: u32, worktree: &std::path::Path) -> Command {
+    let mut cmd = Command::new(bin());
+    cmd.args(["test-run", "build-admit", "--cargo-pid"])
+        .arg(cargo_pid.to_string())
+        .arg("--worktree")
+        .arg(worktree)
+        .env("FNO_CLAIMS_ROOT", root)
+        .env("TMPDIR", root);
+    cmd
+}
+
+fn build_holder(root: &std::path::Path) -> Option<String> {
+    fno_agents::claims::status("build:cargo", Some(root))
+        .1
+        .map(|rec| rec.holder)
+}
+
+/// A second cargo waits on the first cargo's `build:cargo` claim, names the
+/// holder while it waits, and is admitted once that cargo process exits.
+#[test]
+fn a_second_cargo_waits_until_the_building_cargo_exits() {
+    let root = std::fs::canonicalize(tmp_claims_root("build-admit")).unwrap();
+    let (tree_a, tree_b) = (root.join("a"), root.join("b"));
+    std::fs::create_dir_all(&tree_a).unwrap();
+    std::fs::create_dir_all(&tree_b).unwrap();
+    let mut cargo_a = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut cargo_b = Command::new("sleep").arg("60").spawn().unwrap();
+
+    let first = build_admit(&root, cargo_a.id(), &tree_a).status().unwrap();
+    assert!(first.success(), "the first cargo must be admitted at once");
+    let holder = build_holder(&root).expect("the first cargo holds build:cargo");
+    assert!(holder.starts_with("cargo:"), "{holder}");
+
+    let mut waiter = build_admit(&root, cargo_b.id(), &tree_b)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        waiter.try_wait().unwrap().is_none(),
+        "the second cargo must hold while the first builds"
+    );
+
+    let _ = cargo_a.kill();
+    let _ = cargo_a.wait();
+    let released = Instant::now();
+    let status = waiter.wait().unwrap();
+    assert!(
+        status.success(),
+        "the waiter must be admitted, got {status}"
+    );
+    assert!(
+        released.elapsed() < Duration::from_secs(2),
+        "admission must follow the holder's exit within 2s, took {:?}",
+        released.elapsed()
+    );
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut waiter.stderr.take().unwrap(), &mut stderr).unwrap();
+    assert!(
+        stderr.contains("cargo admission: holding") && stderr.contains(&holder),
+        "stderr must name the holder: {stderr}"
+    );
+    assert_ne!(build_holder(&root), Some(holder), "the waiter now holds");
+    let _ = cargo_b.kill();
+    let _ = cargo_b.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A cargo started under the holding cargo (a test that runs cargo) is
+/// admitted at once and leaves the claim with its ancestor.
+#[test]
+fn a_cargo_under_the_holding_cargo_is_admitted_at_once() {
+    let root = std::fs::canonicalize(tmp_claims_root("build-nested")).unwrap();
+    let first = build_admit(&root, std::process::id(), &root.join("outer"))
+        .status()
+        .unwrap();
+    assert!(first.success());
+    let holder = build_holder(&root).expect("this test process holds build:cargo");
+
+    let mut nested_cargo = Command::new("sleep").arg("60").spawn().unwrap();
+    let start = Instant::now();
+    let nested = build_admit(&root, nested_cargo.id(), &root.join("inner"))
+        .status()
+        .unwrap();
+    assert!(nested.success());
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(build_holder(&root), Some(holder));
+    let _ = nested_cargo.kill();
+    let _ = nested_cargo.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}

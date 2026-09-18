@@ -1,10 +1,10 @@
-"""x-7783 Change 2: the CPU axis is read from one decider, never computed twice.
+"""x-c588: the CPU axis is read from one decider, never computed twice.
 
 The decision itself is ``cpu_admission`` in doctor_footprint, pinned against
 the shared fixture in test_footprint_verb.py. What lives here is the gate's
 own edge of that contract: ``_cpu_axis``'s mapping of a reading or an error
-to an Admission, the 15-minute backstop input, and the platform-tolerance
-edges. The hold and debounce behavior lives in test_fleet_load_governor.py.
+to an Admission, and the platform-tolerance edges. The hold and debounce
+behavior lives in test_fleet_load_governor.py.
 """
 from __future__ import annotations
 
@@ -35,16 +35,12 @@ def _reading(
 
 @pytest.fixture(autouse=True)
 def _quiet_edges(monkeypatch):
-    """No unit test reads the real machine: the share/backstop pair is the
+    """No unit test reads the real machine: the share ceiling is the
     stock default and the capacity is pinned."""
     from fno import doctor_footprint
 
-    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 40.0))
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: 0.5)
     monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
-
-
-def _pin_load15(monkeypatch, value: float):
-    monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (1.0, 1.0, value))
 
 
 def test_unreadable_instrument_refuses_with_the_error_text():
@@ -57,62 +53,40 @@ def test_unreadable_instrument_refuses_with_the_error_text():
     assert "--force to bypass" in admission.reason
 
 
-def test_backstop_refuses_on_load_15m_and_names_no_one_minute_figure(monkeypatch):
-    """AC6-EDGE: a 15-minute load of 500 on 12 cpus against hard 40 refuses
-    on the backstop carrying `load_15m: 500.0`, and no one-minute figure
-    appears in the message."""
-    _pin_load15(monkeypatch, 500.0)
-    admission = spawn_gate._cpu_axis((_reading(0.1, 6.9), None))
-    assert admission.verdict == "refuse"
-    assert admission.axis == "load_15m"
-    assert admission.load_15m == 500.0
-    assert admission.backstop == 480.0
-    assert "500.0" in admission.reason and "480.0" in admission.reason
-    assert "1-min" not in admission.reason
+def test_load_707_admits_when_the_fleet_share_is_under_its_ceiling(monkeypatch):
+    """x-c588 regression, the 2026-09-17 20:28 reading: load_15m 707.5 on
+    12 cpus with the fleet holding 1.961 of 12.00 cores. The load number
+    decides nothing; the share admits and names itself."""
 
-
-def test_backstop_passes_at_141_on_the_same_box(monkeypatch):
-    _pin_load15(monkeypatch, 141.0)
-    admission = spawn_gate._cpu_axis((_reading(0.1, 6.9), None))
+    monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (500.0, 600.0, 707.5))
+    admission = spawn_gate._cpu_axis((_reading(1.961, 6.9), None))
     assert admission.verdict == "admit"
     assert admission.axis == "fleet_cpu_share"
+    assert "max_fleet_cpu_share" in admission.reason
 
 
-def test_disabled_backstop_passes_any_load(monkeypatch):
-    from fno import doctor_footprint
+def test_no_refusal_names_load(monkeypatch):
+    """Any finite load however large refuses nowhere while the share sits
+    under its ceiling."""
 
-    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 0.0))
-    _pin_load15(monkeypatch, 500.0)
+    monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (99999.0, 99999.0, 99999.0))
     admission = spawn_gate._cpu_axis((_reading(0.1, 6.9), None))
     assert admission.verdict == "admit"
+    assert "load" not in admission.reason.lower()
 
 
-def test_unreadable_load_admits(monkeypatch):
-    """LD3: unreadable load admits - the platform may have no getloadavg."""
-
-    def boom():
-        raise OSError("no loadavg here")
-
-    monkeypatch.setattr(spawn_gate.os, "getloadavg", boom)
-    admission = spawn_gate._cpu_axis((_reading(0.1, 6.9), None))
-    assert admission.verdict == "admit"
-    assert admission.load_15m is None
-
-
-def test_gapped_reading_refuses_inside_the_interval(monkeypatch):
+def test_gapped_reading_refuses_inside_the_interval():
     gap = "3 pidless row(s) with no identity route (codex)"
-    _pin_load15(monkeypatch, 45.0)
     admission = spawn_gate._cpu_axis((_reading(2.1, 7.2, gap), None))
     assert admission.verdict == "undecidable"
     assert "17.5%" in admission.reason and "60.0%" in admission.reason
     assert gap in admission.reason
 
 
-def test_hold_names_the_top_holder(monkeypatch):
+def test_hold_names_the_top_holder():
     """The hold names who holds the cores, from the same rows the
     number was summed from. The specimen is the measured 2026-09-11 refusal:
     16 yes rows summing 513.0 %cpu out of one worktree's repro loop."""
-    _pin_load15(monkeypatch, 45.0)
     top = [(32.0625, "yes > .fno/worktrees/x-b1ee/repro.out")] * 16
     admission = spawn_gate._cpu_axis((_reading(7.5, 7.5, top=top), None))
     assert admission.verdict == "hold"
@@ -121,10 +95,9 @@ def test_hold_names_the_top_holder(monkeypatch):
     assert admission.top_holder == holder
 
 
-def test_hold_with_empty_top_names_no_holder(monkeypatch):
+def test_hold_with_empty_top_names_no_holder():
     """No rows in hand, no clause: the sentence is exactly what it was
     before, with no empty bracket and no doubled separator."""
-    _pin_load15(monkeypatch, 45.0)
     admission = spawn_gate._cpu_axis((_reading(7.5, 7.5), None))
     assert admission.verdict == "hold"
     assert admission.top_holder is None
@@ -132,10 +105,9 @@ def test_hold_with_empty_top_names_no_holder(monkeypatch):
     assert ";;" not in admission.reason and " ;" not in admission.reason
 
 
-def test_holder_names_a_partial_tree_only_when_it_owns_the_load(monkeypatch):
+def test_holder_names_a_partial_tree_only_when_it_owns_the_load():
     """The totals span worktrees; the tree is named only when every proc in
     the cluster ran there. A mixed cluster names no place at all."""
-    _pin_load15(monkeypatch, 45.0)
     mixed = [(32.0625, "yes > .fno/worktrees/x-b1ee/out")] * 2 + [
         (32.0625, "yes > .fno/worktrees/other/out")
     ]
@@ -145,10 +117,9 @@ def test_holder_names_a_partial_tree_only_when_it_owns_the_load(monkeypatch):
     assert " in " not in admission.reason
 
 
-def test_admit_reason_stays_holder_free(monkeypatch):
+def test_admit_reason_stays_holder_free():
     """An admission needs no action, so it needs no holder; the field may
     still carry what the rows said."""
-    _pin_load15(monkeypatch, 45.0)
     admission = spawn_gate._cpu_axis((_reading(0.1, 6.9, top=[(500.0, "yes")]), None))
     assert admission.verdict == "admit"
     assert "top holder" not in admission.reason

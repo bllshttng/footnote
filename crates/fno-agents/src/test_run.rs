@@ -26,6 +26,11 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SUITE_CLAIM_KEY: &str = "test:suite";
+const BUILD_CLAIM_KEY: &str = "build:cargo";
+/// How often a held build repeats its holding line on stderr.
+const BUILD_HOLD_NOTICE: Duration = Duration::from_secs(30);
+/// How often a held build scans for a cargo nested under the holder.
+const NESTED_SCAN_INTERVAL: Duration = Duration::from_secs(5);
 /// Grace window for a SIGTERM to land before escalating to SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(3);
 /// Poll interval while waiting on a held admission claim or the child.
@@ -204,51 +209,319 @@ pub fn spawn_owner_watchdog(
     }
 }
 
-/// Block until the claim is ours or `deadline` passes. A contender spawns
-/// ZERO workers while waiting: the loop returns before any `Command` is
-/// built.
-fn acquire_suite_claim(
-    run_id: &str,
+/// What a blocking claim wait does after one refused poll.
+enum OnHeld {
+    Wait,
+    /// Proceed without the claim (a nested build under the holder).
+    Admit,
+    Stop(i32),
+}
+
+/// Block until `key` is ours, or `on_held` admits or stops. A contender
+/// spawns ZERO workers while waiting: the loop returns before any `Command`
+/// is built.
+fn acquire_claim_blocking(
+    key: &str,
     holder: &str,
-    root: Option<&Path>,
-    deadline: Instant,
+    opts: impl Fn() -> crate::claims::AcquireOpts,
+    mut on_held: impl FnMut(String, Option<i32>, String) -> OnHeld,
 ) -> Result<(), i32> {
     loop {
-        let opts = crate::claims::AcquireOpts {
-            pid: Some(std::process::id()),
-            ttl_ms: Some(3_600_000),
-            reason: Some("test-run".to_string()),
-            root: root.map(PathBuf::from),
-            ..Default::default()
-        };
-        match crate::claims::acquire(SUITE_CLAIM_KEY, holder, opts) {
+        match crate::claims::acquire(key, holder, opts()) {
             crate::claims::AcquireOutcome::Acquired(_) => return Ok(()),
             crate::claims::AcquireOutcome::HeldByOther {
                 holder: h,
                 pid,
                 host,
-            } => {
-                if Instant::now() >= deadline {
-                    emit(
-                        run_id,
-                        "suite_wait_timeout",
-                        &[("holder", h), ("pid", format!("{pid:?}")), ("host", host)],
-                    );
-                    return Err(124);
-                }
-                emit(
-                    run_id,
-                    "suite_waiting",
-                    &[("holder", h), ("pid", format!("{pid:?}")), ("host", host)],
-                );
-                std::thread::sleep(POLL_INTERVAL.max(Duration::from_millis(500)));
-            }
+            } => match on_held(h, pid, host) {
+                OnHeld::Wait => std::thread::sleep(POLL_INTERVAL.max(Duration::from_millis(500))),
+                OnHeld::Admit => return Ok(()),
+                OnHeld::Stop(code) => return Err(code),
+            },
             crate::claims::AcquireOutcome::Error(e) => {
                 eprintln!("fno-agents test-run: claim error: {e}");
                 return Err(2);
             }
         }
     }
+}
+
+fn acquire_suite_claim(
+    run_id: &str,
+    holder: &str,
+    root: Option<&Path>,
+    deadline: Instant,
+) -> Result<(), i32> {
+    let opts = || crate::claims::AcquireOpts {
+        pid: Some(std::process::id()),
+        ttl_ms: Some(3_600_000),
+        reason: Some("test-run".to_string()),
+        root: root.map(PathBuf::from),
+        ..Default::default()
+    };
+    acquire_claim_blocking(SUITE_CLAIM_KEY, holder, opts, |h, pid, host| {
+        let fields = [("holder", h), ("pid", format!("{pid:?}")), ("host", host)];
+        if Instant::now() >= deadline {
+            emit(run_id, "suite_wait_timeout", &fields);
+            return OnHeld::Stop(124);
+        }
+        emit(run_id, "suite_waiting", &fields);
+        OnHeld::Wait
+    })
+}
+
+/// `test-run build-admit --cargo-pid PID --worktree PATH`: the rustc wrapper
+/// calls this before every compile. One cargo per machine holds
+/// `build:cargo`; the claim carries the cargo pid and no TTL, so it frees
+/// itself the moment that cargo exits. A TTL would keep a dead cargo's claim
+/// Suspect, and so refused, until the TTL ran out.
+fn run_build_admit(args: &[String]) -> i32 {
+    install_signal_handlers();
+    let (cargo_pid, worktree) = match parse_build_admit_args(args) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!("fno-agents test-run build-admit: {e}");
+            return 2;
+        }
+    };
+    let worktree = std::fs::canonicalize(&worktree).unwrap_or(worktree);
+    let holder = format!("cargo:{}:{cargo_pid}", worktree.display());
+
+    // Cargo calls the wrapper once per crate. Once admitted, a read answers
+    // every later call without a claim write or an audit event.
+    if let (crate::claims::ClaimState::Live, Some(rec)) =
+        crate::claims::status(BUILD_CLAIM_KEY, None)
+    {
+        if rec.holder == holder {
+            return 0;
+        }
+    }
+
+    let marker = crate::claims::build_waiters_dir().map(|dir| {
+        dir.join(format!(
+            "{}.json",
+            crate::claims::encode_key(&worktree.to_string_lossy())
+        ))
+    });
+    let started = Instant::now();
+    let mut last_notice: Option<Instant> = None;
+    let mut last_nested_scan: Option<Instant> = None;
+    let mut marked = false;
+    let opts = || crate::claims::AcquireOpts {
+        pid: Some(cargo_pid),
+        reason: Some("cargo build".to_string()),
+        events_dir: Some(worktree.clone()),
+        ..Default::default()
+    };
+    let result = acquire_claim_blocking(BUILD_CLAIM_KEY, &holder, opts, |h, pid, _host| {
+        if pid.is_some_and(|p| p > 0 && is_self_or_ancestor(p as u32, cargo_pid)) {
+            return OnHeld::Admit;
+        }
+        // Cargo takes its build-dir lock before it calls the wrapper. A cargo
+        // under the holder can wait on the lock this cargo holds, and then
+        // each waits on the other forever. The waiter yields instead, and the
+        // two builds overlap only while the holder runs its nested cargo.
+        if last_nested_scan.is_none_or(|t| t.elapsed() >= NESTED_SCAN_INTERVAL) {
+            last_nested_scan = Some(Instant::now());
+            if pid.is_some_and(|p| {
+                p > 0 && runs_nested_cargo(&crate::census::process_table().0, p as u32)
+            }) {
+                return OnHeld::Admit;
+            }
+        }
+        if let Some(sig) = received_signal() {
+            return OnHeld::Stop(128 + sig);
+        }
+        if !marked {
+            if let Some(path) = &marker {
+                write_waiter_marker(path, cargo_pid, &worktree, &h);
+            }
+            marked = true;
+        }
+        if last_notice.is_none_or(|t| t.elapsed() >= BUILD_HOLD_NOTICE) {
+            eprintln!(
+                "cargo admission: holding; {h} is building (pid {}, waited {}s)",
+                pid.map_or("?".to_string(), |p| p.to_string()),
+                started.elapsed().as_secs()
+            );
+            last_notice = Some(Instant::now());
+        }
+        OnHeld::Wait
+    });
+    if marked {
+        if let Some(path) = &marker {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    match result {
+        Ok(()) => 0,
+        Err(code) => code,
+    }
+}
+
+fn parse_build_admit_args(args: &[String]) -> Result<(u32, PathBuf), String> {
+    let mut cargo_pid = None;
+    let mut worktree = None;
+    let mut i = 0;
+    while i < args.len() {
+        let value = args
+            .get(i + 1)
+            .ok_or_else(|| format!("{} needs a value", args[i]))?;
+        match args[i].as_str() {
+            "--cargo-pid" => {
+                cargo_pid = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|_| format!("--cargo-pid: not a pid: {value}"))?,
+                )
+            }
+            "--worktree" => worktree = Some(PathBuf::from(value)),
+            other => return Err(format!("unrecognized argument: {other}")),
+        }
+        i += 2;
+    }
+    Ok((
+        cargo_pid.ok_or("--cargo-pid is required")?,
+        worktree.ok_or("--worktree is required")?,
+    ))
+}
+
+fn write_waiter_marker(path: &Path, cargo_pid: u32, worktree: &Path, holder: &str) {
+    let body = serde_json::json!({
+        "pid": std::process::id(),
+        "cargo_pid": cargo_pid,
+        "worktree": worktree,
+        "holder": holder,
+        "since_ms": crate::claims::now_ms(),
+    });
+    let Some(dir) = path.parent() else { return };
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let written = std::fs::create_dir_all(dir)
+        .and_then(|()| std::fs::write(&tmp, body.to_string()))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// The stop hook's read: `Some` when a live `build-admit` is holding a cargo
+/// build for the checkout that holds `cwd`. The walk stops at the first
+/// `.git`, so a worktree nested under another checkout never reads that
+/// checkout's hold. The marker is a courtesy signal, never a gate, so an
+/// unreadable one reads as no hold.
+pub fn build_hold_message(cwd: &Path) -> Option<String> {
+    build_hold_message_in(&crate::claims::build_waiters_dir()?, cwd)
+}
+
+fn build_hold_message_in(dir: &Path, cwd: &Path) -> Option<String> {
+    let start = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    for path in start.ancestors() {
+        if let Some(message) = live_waiter_hold(dir, path) {
+            return Some(message);
+        }
+        if path.join(".git").exists() {
+            break;
+        }
+    }
+    None
+}
+
+fn live_waiter_hold(dir: &Path, checkout: &Path) -> Option<String> {
+    let marker = dir.join(format!(
+        "{}.json",
+        crate::claims::encode_key(&checkout.to_string_lossy())
+    ));
+    let raw = std::fs::read_to_string(&marker).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    let pid = value["pid"].as_u64().unwrap_or(0) as i32;
+    let since_ms = value["since_ms"].as_i64().unwrap_or(i64::MAX);
+    let alive = pid > 0
+        && match crate::claims::probe_pid(pid) {
+            crate::claims::PidProbe::Created(create_ms) => create_ms <= since_ms,
+            crate::claims::PidProbe::Refused => true,
+            crate::claims::PidProbe::Absent => false,
+        };
+    if !alive {
+        let _ = std::fs::remove_file(&marker);
+        return None;
+    }
+    let holder = value["holder"].as_str().unwrap_or("another cargo");
+    Some(format!(
+        "held for cargo build admission: {holder} is building"
+    ))
+}
+
+/// True when a `cargo` process other than `holder_pid` runs under it.
+fn runs_nested_cargo(rows: &[crate::census::ProcRow], holder_pid: u32) -> bool {
+    let parent: std::collections::HashMap<u32, u32> =
+        rows.iter().map(|row| (row.pid, row.ppid)).collect();
+    rows.iter()
+        .filter(|row| row.pid != holder_pid)
+        .filter(|row| {
+            let argv0 = row.command.split_whitespace().next().unwrap_or("");
+            Path::new(argv0)
+                .file_name()
+                .is_some_and(|name| name == "cargo")
+        })
+        .any(|row| {
+            let mut current = row.ppid;
+            for _ in 0..64 {
+                if current == holder_pid {
+                    return true;
+                }
+                match parent.get(&current) {
+                    Some(&next) if current > 1 => current = next,
+                    _ => return false,
+                }
+            }
+            false
+        })
+}
+
+/// True when `holder_pid` is `pid` or one of its process ancestors: a cargo
+/// run under the holding cargo (a test that shells out to cargo) must not
+/// wait on its own parent.
+fn is_self_or_ancestor(holder_pid: u32, pid: u32) -> bool {
+    let mut current = pid;
+    for _ in 0..64 {
+        if current == holder_pid {
+            return true;
+        }
+        if current <= 1 {
+            return false;
+        }
+        match parent_pid(current) {
+            Some(parent) => current = parent,
+            None => return false,
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn parent_pid(pid: u32) -> Option<u32> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: `info` is a zeroed proc_bsdinfo of exactly `size` bytes.
+    let got = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    (got == size).then_some(info.pbi_ppid)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn parent_pid(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name may hold spaces and parens; fields resume after the
+    // last `)`: state, then ppid.
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// Spawn `argv` as the leader of a brand-new session (so it, and everything
@@ -335,6 +608,9 @@ fn cleanup_group(pgid: i32) -> bool {
 }
 
 pub fn run_test_run(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("build-admit") {
+        return run_build_admit(&args[1..]);
+    }
     install_signal_handlers();
     let opts = match parse_args(args) {
         Ok(o) => o,
@@ -596,5 +872,108 @@ mod tests {
         std::env::remove_var("FNO_TEST_OWNER_BIRTH");
         assert_eq!(declared, Some((1, 424242424242)));
         assert_eq!(live, None);
+    }
+
+    fn marker_for(dir: &Path, worktree: &Path, pid: u32) -> PathBuf {
+        let marker = dir.join(format!(
+            "{}.json",
+            crate::claims::encode_key(&worktree.to_string_lossy())
+        ));
+        std::fs::create_dir_all(dir).unwrap();
+        let body = serde_json::json!({
+            "pid": pid,
+            "cargo_pid": pid,
+            "worktree": worktree,
+            "holder": "cargo:/other:42",
+            "since_ms": crate::claims::now_ms(),
+        });
+        std::fs::write(&marker, body.to_string()).unwrap();
+        marker
+    }
+
+    #[test]
+    fn a_live_waiter_marker_holds_every_path_under_its_worktree() {
+        let td = tempfile::TempDir::new().unwrap();
+        let worktree = std::fs::canonicalize(td.path()).unwrap();
+        let nested = worktree.join("crates/fno-agents");
+        std::fs::create_dir_all(&nested).unwrap();
+        let dir = worktree.join("waiters");
+        marker_for(&dir, &worktree, std::process::id());
+        let message = build_hold_message_in(&dir, &nested).expect("a live waiter holds");
+        assert!(message.contains("cargo:/other:42"), "{message}");
+    }
+
+    #[test]
+    fn a_nested_checkout_never_reads_its_parent_checkouts_hold() {
+        let td = tempfile::TempDir::new().unwrap();
+        let outer = std::fs::canonicalize(td.path()).unwrap();
+        let inner = outer.join(".claude/worktrees/x");
+        std::fs::create_dir_all(inner.join(".git")).unwrap();
+        let dir = outer.join("waiters");
+        marker_for(&dir, &outer, std::process::id());
+        assert_eq!(build_hold_message_in(&dir, &inner.join("crates")), None);
+    }
+
+    #[test]
+    fn a_dead_waiter_marker_reads_no_hold_and_is_removed() {
+        let td = tempfile::TempDir::new().unwrap();
+        let worktree = std::fs::canonicalize(td.path()).unwrap();
+        let dir = worktree.join("waiters");
+        let mut child = Command::new("/usr/bin/true").spawn().unwrap();
+        let dead = child.id();
+        child.wait().unwrap();
+        let marker = marker_for(&dir, &worktree, dead);
+        assert_eq!(build_hold_message_in(&dir, &worktree), None);
+        assert!(!marker.exists(), "a dead waiter's marker must be removed");
+    }
+
+    #[test]
+    fn a_process_is_its_own_ancestor_and_its_parent_is_one() {
+        let me = std::process::id();
+        assert!(is_self_or_ancestor(me, me));
+        let parent = parent_pid(me).expect("this process has a parent");
+        assert!(is_self_or_ancestor(parent, me));
+        assert!(!is_self_or_ancestor(me, parent));
+    }
+
+    #[test]
+    fn a_cargo_under_the_holder_is_found_through_intermediate_processes() {
+        let row = |pid, ppid, command: &str| crate::census::ProcRow {
+            pid,
+            ppid,
+            state: 'S',
+            elapsed_s: 0,
+            cpu_pct: 0.0,
+            rss_kb: 0,
+            command: command.to_string(),
+        };
+        let mut rows = vec![
+            row(100, 1, "/Users/x/.cargo/bin/cargo test -p fno"),
+            row(200, 100, "/tmp/deps/cross_door_property-abc"),
+            row(300, 1, "cargo build"),
+        ];
+        assert!(
+            !runs_nested_cargo(&rows, 100),
+            "an unrelated cargo is not nested"
+        );
+        rows.push(row(400, 200, "cargo build --bin fno-agents"));
+        assert!(runs_nested_cargo(&rows, 100));
+    }
+
+    #[test]
+    fn build_admit_requires_both_flags() {
+        let args: Vec<String> = ["--cargo-pid", "12"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(parse_build_admit_args(&args).is_err());
+        let args: Vec<String> = ["--cargo-pid", "12", "--worktree", "/tmp/x"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            parse_build_admit_args(&args),
+            Ok((12, PathBuf::from("/tmp/x")))
+        );
     }
 }

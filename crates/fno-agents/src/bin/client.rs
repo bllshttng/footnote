@@ -626,6 +626,22 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::spawn_axes::run_spawn_axes(&args[1..]);
     }
 
+    // `permission-tokens`: the one permission vocabulary and mappability
+    // answer (see codex_posture.rs). Direct dispatch; no daemon RPC. Python's
+    // pane mapper, the spawn seam's mappability read and both front doors
+    // call this so the tree holds ONE table, not three disagreeing copies.
+    if verb == "permission-tokens" {
+        return fno_agents::codex_posture::run_permission_tokens(&args[1..]);
+    }
+
+    // `sandbox-probe`: the pre-seating sandbox verdict (see sandbox_probe.rs).
+    // Direct dispatch; no daemon RPC. Python's spawn gate (rust_runtime.py)
+    // calls it and owns the exit-85 refusal; the verb never refuses on its
+    // own - it answers, the caller judges.
+    if verb == "sandbox-probe" {
+        return fno_agents::sandbox_probe::run_sandbox_probe(&args[1..]);
+    }
+
     // `fallback-chain`: the failover chain walk (see fallback_chain.rs doc).
     // Python resolves config and paths and serializes the candidate links;
     // this verb reads the provider runtime-state file, derives headroom
@@ -2131,7 +2147,19 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // THREAD lane (substrate "bg" after the thread normalization) is exempt:
     // the shared app-server resolves the posture server-side
     // (resolve_thread_posture), so a mapped mode is native there.
-    let codex_thread_lane = provider == "codex" && substrate == "bg";
+    let codex_thread_lane = provider == "codex"
+        && permission_mode
+            .map(|mode| {
+                // The capability table decides, through the one vocabulary
+                // (see codex_posture.rs); a resolution problem answers
+                // false, which degrades to the refusal below, never a
+                // guessed yes. codex only: the shared app-server is the one
+                // served thread destination, so a declared-thread harness
+                // without one still refuses here, at the clearer gate.
+                fno_agents::codex_posture::permission_mappable(provider, mode, substrate)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
     if permission_mode.is_some() && provider != "claude" && !codex_thread_lane {
         let remedy = if provider == "codex" {
             "drop --permission-mode and pass -Y/--yolo"

@@ -564,3 +564,73 @@ def test_spawn_sh_forwards_permission_mode(tmp_path):
     assert "--permission-mode" in forwarded
     i = forwarded.index("--permission-mode")
     assert forwarded[i + 1] == "acceptEdits"
+
+
+# --- x-6863: one vocabulary, in Rust; the Python holds no second table ------
+
+
+def _rust_answer(provider: str, mode: str, substrate: str | None) -> dict:
+    from fno.rust_binary import verb_call
+
+    payload = {"provider": provider, "mode": mode}
+    if substrate:
+        payload["substrate"] = substrate
+    return verb_call("permission-tokens", payload, Exception)
+
+
+@pytest.mark.parametrize(
+    "provider,mode,substrate,expected",
+    [
+        # AC4-HP: the codex thread lane carries the axis, declared by
+        # harness.codex.thread.carries, resolved in codex's own words.
+        ("codex", "workspace-write:on-request", "thread", True),
+        ("codex", "full-auto", "thread", True),
+        ("codex", "yolo", "bg", True),
+        ("claude", "bypassPermissions", "thread", True),
+        ("claude", "bypassPermissions", "headless", True),
+        # Undeclared or unmappable lanes answer false, named, not guessed.
+        ("opencode", "auto", "thread", False),
+        ("pi", "yolo", "thread", False),
+        ("codex", "acceptEdits", "thread", False),
+        ("codex", "yolo", "headless", False),
+    ],
+)
+def test_mappability_matches_the_rust_owner(provider, mode, substrate, expected):
+    from fno.agents.spawn_defaults import _permission_mappable
+
+    assert _permission_mappable(provider, mode, substrate) is expected
+
+
+@pytest.mark.parametrize(
+    "provider,mode",
+    [
+        ("claude", "bypassPermissions"),
+        ("codex", "full-auto"),
+        ("codex", "workspace-write:on-request"),
+        ("gemini", "yolo"),
+        ("opencode", "auto"),
+        ("agy", "skip"),
+        ("cursor-agent", "force"),
+        ("grok", "dontAsk"),
+    ],
+)
+def test_python_bridge_matches_the_rust_vocabulary(provider, mode):
+    """AC4-EDGE: the bridge and the owner answer identically, so the tree
+    holds ONE table. The refusal messages compare byte-for-byte too."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    py_refusal = None
+    py_tokens = None
+    try:
+        py_tokens = permission_pane_tokens(provider, mode)
+    except DispatchAskError as exc:
+        py_refusal = str(exc)
+    rust = _rust_answer(provider, mode, None)
+    if rust.get("refusal"):
+        assert py_refusal is not None, f"python accepted what rust refused: {rust}"
+        assert py_refusal == rust["refusal"]
+        with pytest.raises(DispatchAskError):
+            permission_pane_tokens(provider, mode)
+    else:
+        assert py_refusal is None
+        assert py_tokens == [str(t) for t in rust["tokens"]]

@@ -1135,7 +1135,7 @@ fn pre_v19_row_without_posture_parses_with_the_safe_default() {
     let entry: RegistryEntry = serde_json::from_value(raw).expect("pre-v19 row parses");
     assert_eq!(entry.sandbox_posture, None);
     assert!(
-        !entry_posture_is_full_access(&entry),
+        !crate::codex_posture::entry_posture_is_full_access(&entry),
         "an unrecorded posture reads the safe default, never full access"
     );
 }

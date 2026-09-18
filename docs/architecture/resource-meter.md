@@ -28,7 +28,7 @@ Swap is the pressure signal, but only for a machine that has a swap file. On the
 
 ## The two verdicts are different alarms
 
-`fno doctor footprint` prints two readings and they must never share one exit code. "Unexplained processes" is a leak alarm: processes the roster cannot explain, exit 5. "Admission" is a planning alarm: the fleet's CPU share against its ceiling, exit 3 on a hold, an undecidable band, or the fifteen-minute backstop. When both fire, admission takes the exit and the leak still prints. Conflating the two already caused a competent reader to misread the leak detector as a capacity ceiling repeatedly in a single session.
+`fno doctor footprint` prints two readings and they must never share one exit code. "Unexplained processes" is a leak alarm: processes the roster cannot explain, exit 5. "Admission" is a planning alarm: the fleet's CPU share against its ceiling, exit 3 on a hold or an undecidable band. When both fire, admission takes the exit and the leak still prints. Conflating the two already caused a competent reader to misread the leak detector as a capacity ceiling repeatedly in a single session.
 
 ## The court panel
 

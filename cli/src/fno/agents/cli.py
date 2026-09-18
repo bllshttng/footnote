@@ -1639,7 +1639,14 @@ def cmd_spawn(
     # substrate maps every provider, so it's exempt here. The codex
     # thread lane is exempt too: the shared app-server resolves the posture
     # (resolve_thread_posture), so a mapped mode rides it natively.
-    codex_thread_lane = harness == "codex" and substrate in ("thread", "bg") and not once
+    # The capability table decides, through the one Rust vocabulary (see
+    # codex_posture.rs): a codex thread lane carries a mapped mode when the
+    # table declares the lane AND the mode resolves in codex's own words. An
+    # unavailable owner reads false, which degrades to the refusal below -
+    # never a guessed yes.
+    from fno.agents.permission_axis import codex_thread_lane_carries
+
+    codex_thread_lane = codex_thread_lane_carries(harness, substrate, once, permission_mode)
     if (
         permission_mode is not None
         and harness != "claude"

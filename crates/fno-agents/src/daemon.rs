@@ -226,13 +226,6 @@ fn codex_thread_resume_identity(
     Ok(Some((session_id.to_string(), PathBuf::from(cwd))))
 }
 
-/// Whether the row was launched with the danger-full-access posture (
-/// v19): the resume lane applies it so a daemon restart cannot silently demote
-/// a yolo worker to workspace-write. `None` (pre-v19 rows) reads safe.
-fn entry_posture_is_full_access(entry: &RegistryEntry) -> bool {
-    entry.sandbox_posture.as_deref() == Some("danger-full-access")
-}
-
 pub(crate) fn is_codex_thread_entry(entry: &RegistryEntry) -> bool {
     entry.harness_name() == "codex"
         && entry.host_mode_or_default() == crate::state::HOST_MODE_INTERACTIVE
@@ -1792,16 +1785,22 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     });
     schedule_codex_thread_recovery(Arc::clone(&ctx));
 
-    // Active-backlog drain supervisor (node). Opt-in via
-    // config.active_backlog; the supervisor resolves its own enabled targets and
-    // stays dormant (live=false) when none, so this is byte-for-byte today's
-    // behavior unless an operator turns it on. Started AFTER the Serving
-    // transition (recovery is already complete here). `ab_live` keeps the daemon
-    // out of idle-exit while >=1 project is enabled; `ab_shutdown` winds the task
-    // down between ticks on daemon shutdown.
+    // Active-backlog drain supervisor, opt-in via config.active_backlog.
+    // `ab_live` keeps the daemon out of idle-exit while work is enabled;
+    // `ab_shutdown` winds the task down on daemon shutdown.
     let ab_live = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let ab_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let ab_handle = {
+    let sandbox = ctx.home.is_sandbox();
+    let _ = ctx.emitter.emit(
+        "daemon_fleet_scope",
+        &json!({"scope": if sandbox { "sandbox" } else { "shared" }, "home": ctx.home.root()}),
+    );
+    // A sandbox home starts no supervisor: its targets resolve from the real
+    // cwd and real graph, so it would work the operator's board from a
+    // tempdir and pin ab_live true forever.
+    let ab_handle = if sandbox {
+        tokio::spawn(std::future::ready(()))
+    } else {
         let fno_bin = std::env::var("FNO_BIN").unwrap_or_else(|_| "fno".to_string());
         let ab_emitter = EventEmitter::new(ctx.home.events_jsonl(), "active-backlog");
         let live = Arc::clone(&ab_live);
@@ -1816,15 +1815,12 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let mut idle_check = tokio::time::interval(Duration::from_secs(5));
     idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_activity = Instant::now();
-    // Screen-manifest scrape gate: at most one sweep in flight (a slow mux
-    // stalls its own sweep, never the loop or a pile-up of sweeps).
+    // Screen-manifest scrape gate: a slow mux stalls only its own sweep.
     let scrape_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Terminal-stop sweep gate: same one-in-flight discipline; a large
-    // marker set must never serialize inline and starve accept()/SIGTERM.
+    // Terminal-stop gate: a large marker set never serializes inline.
     let terminal_stop_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worktree_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Orphaned-test-binary reap gate: same one-in-flight discipline. The verb
-    // it shells to runs ps + a kill, so it never runs on the core loop.
+    // Orphaned-test-binary reap gate: shells ps + a kill, off the core loop.
     let orphan_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut last_orphan_sweep = Instant::now();
     let liveness_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2078,19 +2074,15 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     });
                 }
                 crate::question_sweep::daemon_tick(&ctx.home, now_epoch_secs());
-                // An enabled active-backlog project keeps the daemon resident even
-                // when the board is drained (OQ1 Option A): idle-exit must never
-                // kill a live drain supervisor.
+                // An enabled active-backlog project keeps the daemon resident
+                // (OQ1 Option A): idle-exit must never kill a live supervisor.
                 let ab_active = ab_live.load(std::sync::atomic::Ordering::SeqCst);
                 if !ab_active && last_activity.elapsed() >= ctx.opts.idle_exit {
-                    // The liveness read (a CONNECT probe per socket candidate)
-                    // is blocking I/O, so it runs OFF the select arm like the
-                    // sweeps above, never inline: an in-arm probe against a
-                    // wedged worker's filling backlog is the
-                    // unreachable-AND-unstoppable shape this loop's rule
-                    // exists to prevent. One probe in flight; the exit fires
-                    // on the tick that reads a completed no-live-worker
-                    // verdict, so the worst case is one extra 5s tick.
+                    // The liveness read (blocking CONNECT probes) runs OFF the
+                    // select arm: an in-arm probe against a wedged worker's
+                    // filling backlog is the unreachable-AND-unstoppable shape
+                    // this loop's rule exists to prevent. One probe in flight;
+                    // exit fires on its verdict: worst case one extra 5s tick.
                     if !idle_probe_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
                         let flag = Arc::clone(&idle_probe_in_flight);
                         let home = ctx.home.clone();

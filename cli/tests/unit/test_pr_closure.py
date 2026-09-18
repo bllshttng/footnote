@@ -15,7 +15,9 @@ from fno.pr.closure import (
     ClosureQueryError,
     bind_closure_claims,
     contained_descendant_ids,
+    ensure_closure_trailer,
     fetch_pr_closure_context,
+    known_node_ids,
     parse_closure_trailer,
     render_closure_trailer,
     render_pr_closure_trailer,
@@ -27,6 +29,49 @@ def _node(**kw) -> dict:
     base = {"id": "x-0001", "status": "ready"}
     base.update(kw)
     return base
+
+
+# --- known_node_ids: a dead reader never reads as an empty graph (x-6d44) ---
+
+
+def test_known_node_ids_propagates_a_failed_graph_read(monkeypatch):
+    """AC4-HP: a read that raises propagates. This used to return an empty
+    set with one stderr line, so `gh pr create` opened an untrailered PR and
+    three of them sat red on the closure gate with no named cause."""
+
+    def _dead(**kwargs):
+        raise RuntimeError("keeper exited immediately with code -9")
+
+    monkeypatch.setattr("fno.graph.api.nodes", _dead)
+
+    with pytest.raises(RuntimeError, match="keeper exited"):
+        known_node_ids()
+
+
+def test_known_node_ids_external_backend_is_empty_without_a_read(monkeypatch):
+    """AC4-EDGE: an external tracker returns an empty set with no exception -
+    graph.json is not the delivery record there, so nothing is claimed."""
+    monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "linear")
+
+    def _boom(**kwargs):
+        raise AssertionError("the graph must not be read under an external backend")
+
+    monkeypatch.setattr("fno.graph.api.nodes", _boom)
+
+    assert known_node_ids() == frozenset()
+
+
+def test_ensure_closure_trailer_lets_a_dead_reader_stop_the_pr(monkeypatch):
+    """AC4-HP through the producer: the exception a `gh pr create` path sees
+    names the read, and no PR body is returned."""
+
+    def _dead(**kwargs):
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setattr("fno.graph.api.nodes", _dead)
+
+    with pytest.raises(RuntimeError, match="store unavailable"):
+        ensure_closure_trailer("Some summary.", "feature/x-49ec")
 
 
 def test_bind_created_pr_maps_one_real_branch_node_and_owner():

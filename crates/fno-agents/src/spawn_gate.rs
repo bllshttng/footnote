@@ -1268,7 +1268,7 @@ pub fn run_gate(
                 return Err(blueprint_refusal(&receipt));
             }
         }
-        eprintln!("spawn-gate: forced past cap, RAM floor, and load ceiling (--force)");
+        eprintln!("spawn-gate: forced past cap, RAM floor, and CPU share ceiling (--force)");
         if substrate == "headless" {
             // fail_closed=false: this arm cannot fault, only warn.
             acquire_worker_slot(&mut guard, name, &holder, route_provider, false).ok();
@@ -1434,7 +1434,7 @@ pub fn run_gate(
                 // Byte-twin with the Python gate: force also bypasses the king
                 // share here; the provider cap above stays enforced.
                 eprintln!(
-                    "spawn-gate: forced past cap, RAM floor, and load ceiling \
+                    "spawn-gate: forced past cap, RAM floor, and CPU share ceiling \
                      (--force); provider cap remains enforced"
                 );
                 if substrate == "headless" {
@@ -1457,20 +1457,7 @@ pub fn run_gate(
             // backstop behind it (LD1).
             let cpu = check_cpu_axis(prefetched.as_deref(), probe_err.as_deref());
             let admission = &cpu.payload;
-            if admission.axis == "load_15m" && admission.verdict == "refuse" {
-                axes_read.insert("load_15m".into(), serde_json::json!("over"));
-                axes_read.insert("cpu".into(), serde_json::json!("not-read"));
-            } else {
-                axes_read.insert(
-                    "load_15m".into(),
-                    serde_json::json!(if admission.load_15m.is_some() {
-                        "ok"
-                    } else {
-                        "unavailable"
-                    }),
-                );
-                axes_read.insert("cpu".into(), serde_json::json!(admission.verdict));
-            }
+            axes_read.insert("cpu".into(), serde_json::json!(admission.verdict));
             let figures = receipt_fields(admission);
             match admission.verdict.as_str() {
                 "refuse" | "undecidable" => {
@@ -1940,10 +1927,6 @@ pub(crate) struct AdmissionPayload {
     #[serde(default)]
     #[allow(dead_code)]
     pub(crate) gap: Option<String>,
-    #[serde(default)]
-    pub(crate) load_15m: Option<f64>,
-    #[serde(default)]
-    pub(crate) backstop: f64,
     /// The Python decider's short form of the fleet's largest program; absent
     /// on an older wheel and whenever no attributed row exists.
     #[serde(default)]
@@ -1972,8 +1955,6 @@ fn receipt_fields(admission: &AdmissionPayload) -> serde_json::Value {
         "machine_cores": fig(admission.machine_cores),
         "capacity_cores": fig(admission.capacity_cores),
         "ceiling": fig(admission.ceiling),
-        "load_15m": admission.load_15m,
-        "backstop": fig(admission.backstop),
     })
 }
 
@@ -2093,7 +2074,7 @@ pub struct MachinePressurePayload {
 /// refusal is built when the payload carries no decidable admission.
 pub(crate) struct CpuAdmission {
     pub(crate) payload: AdmissionPayload,
-    /// refuse|undecidable -> load_backstop | cpu_share_undecidable |
+    /// refuse|undecidable -> cpu_share_undecidable |
     /// cpu_instrument_unreadable. Empty for admit/hold (they never refuse).
     pub(crate) token: &'static str,
 }
@@ -2125,8 +2106,6 @@ pub(crate) fn check_cpu_axis(prefetched: Option<&str>, probe_err: Option<&str>) 
                 capacity_cores: 0.0,
                 ceiling: 0.0,
                 gap: None,
-                load_15m: None,
-                backstop: 0.0,
                 top_holder: None,
             },
             token: "cpu_instrument_unreadable",
@@ -2156,7 +2135,6 @@ pub(crate) fn check_cpu_axis(prefetched: Option<&str>, probe_err: Option<&str>) 
         Some(admission) => {
             let token = match (admission.verdict.as_str(), admission.axis.as_str()) {
                 ("undecidable", _) => "cpu_share_undecidable",
-                ("refuse", "load_15m") => "load_backstop",
                 ("refuse", _) => "cpu_instrument_unreadable",
                 _ => "",
             };
@@ -3044,7 +3022,6 @@ MemAvailable:    8000000 kB\n";
             "machine_cores",
             "capacity_cores",
             "ceiling",
-            "backstop",
         ] {
             assert!(fields[key].is_null(), "{key} must be null");
         }
@@ -3056,7 +3033,7 @@ MemAvailable:    8000000 kB\n";
     /// verbatim; an absent holder leaves the line exactly as before.
     #[test]
     fn held_progress_line_prints_the_payloads_holder_verbatim() {
-        let raw = r#"{"verdict":"hold","axis":"fleet_cpu_share","reason":"r","share_low":0.625,"share_high":0.625,"bound":"exact","fleet_cores":7.5,"machine_cores":7.5,"capacity_cores":12.0,"ceiling":0.5,"gap":null,"load_15m":45.0,"backstop":480.0}"#;
+        let raw = r#"{"verdict":"hold","axis":"fleet_cpu_share","reason":"r","share_low":0.625,"share_high":0.625,"bound":"exact","fleet_cores":7.5,"machine_cores":7.5,"capacity_cores":12.0,"ceiling":0.5,"gap":null}"#;
         let mut admission: AdmissionPayload = serde_json::from_str(raw).unwrap();
         assert_eq!(
             held_progress_line(&admission, 40),
