@@ -20,6 +20,7 @@ def _driver():
     return kimi
 
 
+@pytest.mark.smoke
 @pytest.mark.skipif(KIMI is None, reason="kimi binary is not on PATH")
 def test_AC5_HP_real_initialize_and_session_list_are_positive_markers(tmp_path):
     """The real binary completes the ACP handshake and answers session/list.
@@ -42,6 +43,7 @@ def test_AC5_HP_real_initialize_and_session_list_are_positive_markers(tmp_path):
         assert listed["nextCursor"] is None
 
 
+@pytest.mark.smoke
 @pytest.mark.skipif(KIMI is None, reason="kimi binary is not on PATH")
 def test_AC4_STDERR_session_new_refusal_carries_both_halves_and_names_the_action(tmp_path):
     """The typed refusal carries the JSON-RPC half AND the stderr condition.
@@ -117,6 +119,7 @@ def test_review_P1_stderr_settle_cannot_turn_into_a_second_hang(monkeypatch):
     assert "Authentication required" in str(refused.value)
 
 
+@pytest.mark.smoke
 @pytest.mark.skipif(KIMI is None, reason="kimi binary is not on PATH")
 def test_AC5_AUTH_stream_lane_emits_the_version_frame_before_failing():
     """`kimi -p` emits the system.version frame, then exits 1 without a model.

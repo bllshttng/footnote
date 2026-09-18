@@ -24,6 +24,7 @@ def _driver():
     return grok
 
 
+@pytest.mark.smoke
 @pytest.mark.skipif(GROK is None, reason="grok binary is not on PATH")
 def test_AC4_HP_real_initialize_and_session_list_are_positive_markers(tmp_path):
     """The real binary completes the ACP handshake and answers session/list.
@@ -121,6 +122,7 @@ def test_AC7_EVIDENCE_grok_paste_fixture_records_measured_submit_trials():
     assert "trial 3 SUBMITTED" in text
 
 
+@pytest.mark.smoke
 @pytest.mark.skipif(
     not (LIVE and GROK),
     reason="live Grok ACP journey requires FNO_GROK_LIVE=1 and grok on PATH",

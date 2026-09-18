@@ -233,6 +233,9 @@ _RUNNER_PASSTHROUGH = (
     # live test restores real HOME because kimi's credential lives under
     # ~/.kimi-code, while its cwd remains an isolated fixture.
     "FNO_KIMI_LIVE",
+    # opt-in live dsh journey. The live test restores real HOME because a key
+    # stored through the dsh credentials service lives there.
+    "FNO_DSH_LIVE",
     # opt-in live agy journey. Real HOME is restored because agy's credential,
     # its conversation store and its Stop hooks.json all live there.
     "FNO_AGY_LIVE",

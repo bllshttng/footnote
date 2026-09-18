@@ -1,10 +1,11 @@
-"""The shared ACP-over-stdio session core for the grok and kimi drivers.
+"""The shared ACP-over-stdio session core for the grok, kimi and dsh drivers.
 
-Two harnesses speak the same Agent Client Protocol over a held stdin pipe, so
-one protocol loop lives here: bounded reads, correlated request ids, the
-server-to-client refusal, and the typed broken pipe. A fix to the core cannot
-drift away from the other driver. The drivers keep their identity layer:
-argv, auth vocabulary, positive markers, per-harness params and timeouts.
+Three harnesses speak the same Agent Client Protocol over a held stdin pipe,
+so one protocol loop lives here: bounded reads, correlated request ids, the
+server-to-client refusal, the typed broken pipe, and the shared session verbs.
+A fix to the core cannot drift away from another driver. The drivers keep
+their identity layer: argv, auth vocabulary, positive markers, per-harness
+params and timeouts.
 
 The subprocess owns a held stdin pipe for the life of the session. ACP uses
 JSON-RPC response ids for correlation, and notifications can arrive between a
@@ -42,13 +43,16 @@ def error_detail(error: dict[str, Any], sep: str = " ") -> str:
 class AcpStdioSession:
     """A live ACP process with correlated requests over a held stdin pipe.
 
-    Subclasses name the tool and answer two hooks: ``_request_timeout`` for
-    the bounded-read deadline (resolved at call time, so tests can shorten it
-    through the driver module's constant) and, where a driver needs one,
-    ``_session_list_params`` for its own session/list shape.
+    Subclasses name the tool and answer ``_request_timeout`` for the
+    bounded-read deadline (resolved at call time, so tests can shorten it
+    through the driver module's constant). Where a driver needs them, it sets
+    ``agent_name`` for the initialize marker, answers ``_session_list_params``,
+    and pairs ``_is_auth_error`` with ``_auth_refusal`` so every verb raises
+    the same typed refusal.
     """
 
     tool = "acp"
+    agent_name: Optional[str] = None
 
     def __init__(self, cwd: Path | str, *, argv: Sequence[str], env: Optional[dict[str, str]] = None) -> None:
         self.cwd = Path(cwd)
@@ -68,6 +72,12 @@ class AcpStdioSession:
 
     def _session_list_params(self) -> dict[str, Any]:
         return {"cwd": str(self.cwd)}
+
+    def _is_auth_error(self, detail: str) -> bool:
+        return False
+
+    def _auth_refusal(self, detail: str) -> DispatchAskError:
+        raise NotImplementedError("a driver with an auth predicate names its refusal")
 
     def __enter__(self) -> "AcpStdioSession":
         self.start()
@@ -201,6 +211,8 @@ class AcpStdioSession:
         error = response.get("error")
         if isinstance(error, dict):
             detail = error_detail(error, " ")
+            if self._is_auth_error(detail):
+                raise self._auth_refusal(detail)
             raise RuntimeError(f"{self.tool} ACP {method} failed: {detail}")
         result = response.get("result")
         if not isinstance(result, dict):
@@ -210,12 +222,55 @@ class AcpStdioSession:
     def initialize(self) -> dict[str, Any]:
         response = self.request("initialize", initialize_params())
         result = self.result(response, "initialize")
-        if result.get("protocolVersion") != 1:
+        if self.agent_name is None:
+            if result.get("protocolVersion") != 1:
+                raise RuntimeError(
+                    f"{self.tool} ACP initialize did not return the positive "
+                    "protocolVersion 1 marker"
+                )
+            return result
+        agent_info = result.get("agentInfo")
+        agent_name = agent_info.get("name") if isinstance(agent_info, dict) else None
+        if result.get("protocolVersion") != 1 or agent_name != self.agent_name:
             raise RuntimeError(
-                f"{self.tool} ACP initialize did not return the positive "
-                "protocolVersion 1 marker"
+                f"{self.tool} ACP initialize did not return the positive protocolVersion 1 "
+                f"and agentInfo.name {self.agent_name!r} markers (got "
+                f"protocolVersion={result.get('protocolVersion')!r}, "
+                f"agentInfo.name={agent_name!r})"
             )
         return result
+
+    def session_new(self, params: Optional[dict[str, Any]] = None) -> str:
+        """Create a session and return the id the harness MINTED.
+
+        The id comes back on the correlated response, so it is provable rather
+        than scraped. The caller records it.
+        """
+        if params is None:
+            params = {"cwd": str(self.cwd), "mcpServers": []}
+        result = self.result(self.request("session/new", params), "session/new")
+        session_id = result.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            raise RuntimeError(f"{self.tool} ACP session/new returned no positive sessionId marker")
+        self.session_id = session_id
+        return session_id
+
+    def session_resume(self, session_id: str) -> dict[str, Any]:
+        """Resume a minted session by the id the harness itself handed back."""
+        response = self.request(
+            "session/resume",
+            {"sessionId": session_id, "cwd": str(self.cwd), "mcpServers": []},
+        )
+        result = self.result(response, "session/resume")
+        self.session_id = session_id
+        return result
+
+    def session_close(self, session_id: str) -> dict[str, Any]:
+        # Measured 2026-08-31 against kimi 0.38.0 unauthenticated: closing an
+        # unknown id answers an empty success rather than an error, so this
+        # call never proves the id existed.
+        response = self.request("session/close", {"sessionId": session_id})
+        return self.result(response, "session/close")
 
     def session_list(self) -> dict[str, Any]:
         response = self.request("session/list", self._session_list_params())
