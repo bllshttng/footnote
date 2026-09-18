@@ -1759,6 +1759,12 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
                     continue;
                 }
             }
+        } else {
+            chain.push(json!(format!(
+                "slot note {} uncapped ({})",
+                lane_label(rung, row_name),
+                vendor.as_deref().unwrap_or("no vendor declared"),
+            )));
         }
         let harness_detail = capacity.get(&harness);
         let evidence = harness_detail
@@ -3695,10 +3701,9 @@ mod tests {
         let out = resolve_slot_payload(&payload(json!({})));
         assert_eq!(out["status"], "pick");
         assert_eq!(out["candidate"]["model"], "glm");
-        assert_eq!(
-            chain_of(&out)[1],
-            "slot agents.profiles.target.lanes[0] flash-x capacity=ok window=w"
-        );
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l == "slot agents.profiles.target.lanes[0] flash-x capacity=ok window=w"));
     }
 
     #[test]
@@ -3722,10 +3727,10 @@ mod tests {
         })));
         assert_eq!(out["status"], "pick");
         let chain = chain_of(&out);
-        assert!(
-            chain[1].starts_with("slot agents.profiles.target.lanes[0] ")
-                && !chain[1].contains("lanes[0] agents.profiles")
-        );
+        assert!(chain
+            .iter()
+            .any(|l| l.starts_with("slot agents.profiles.target.lanes[0] ")));
+        assert!(!chain.iter().any(|l| l.contains("lanes[0] agents.profiles")));
     }
 
     #[test]
@@ -3847,6 +3852,42 @@ mod tests {
         assert_eq!(out["status"], "pick");
         let chain = chain_of(&out);
         assert!(chain.iter().any(|l| l.contains("provider zai at 2 of 2")));
+    }
+
+    #[test]
+    fn a_capped_lane_draining_names_the_uncapped_lane_it_falls_to() {
+        // The cap block once skipped a no-vendor lane with no line at all:
+        // a capped-and-full lane drained onto the uncapped tail silently
+        // (the receipt could not answer "why THIS model"). Both lines must
+        // now appear, and the pick must still be the uncapped lane.
+        let out = resolve_slot_payload(&payload(json!({
+            "vendor_counts": {"zai": 20}, "vendor_caps": {"zai": 20},
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["lane"], "sonnet-x");
+        let chain = chain_of(&out);
+        assert!(chain.iter().any(|l| l.contains(
+            "slot skip agents.profiles.target.lanes[0] flash-x provider zai at 20 of 20"
+        )));
+        assert!(chain.iter().any(|l| l.contains(
+            "slot note agents.profiles.target.lanes[1] sonnet-x uncapped (no vendor declared)"
+        )));
+    }
+
+    #[test]
+    fn fully_capped_lanes_print_no_uncapped_note() {
+        let out = resolve_slot_payload(&payload(json!({
+            "declared_rows": {
+                "flash-x": {"name": "flash-x", "harness": "claude", "model": "glm",
+                            "band": "low", "account": "zai-main", "route": "zai/glm"},
+                "sonnet-x": {"name": "sonnet-x", "harness": "claude", "model": "sonnet",
+                             "route": "anthropic/sonnet"},
+            },
+            "vendor_counts": {"zai": 1, "anthropic": 1},
+            "vendor_caps": {"zai": 2, "anthropic": 2},
+        })));
+        assert_eq!(out["status"], "pick");
+        assert!(!chain_of(&out).iter().any(|l| l.contains("uncapped")));
     }
 
     // -------------------------------------------------------------------

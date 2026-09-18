@@ -827,3 +827,19 @@ def test_strict_routing_names_a_scalar_lanes(tmp_path):
     _payload, chain, _verdict = rr.resolve_slot("target", None, {}, settings=settings)
     assert any("must be a list" in step for step in chain)
     assert not any("declares no lanes" in step for step in chain)
+
+
+@requires_rust
+def test_an_unrouted_verb_still_walks_the_resolver_and_names_the_grid():
+    """A verb whose profile declares no lanes used to return early with an
+    empty chain: the harness default applied with no receipt naming why.
+    Every spawn now walks the ONE resolver, the walk answers with the grid's
+    own vocabulary, and the candidate is still None, so the built argv (which
+    injects a model only from a candidate) is byte-identical to before."""
+    candidate, chain, verdict = rr.resolve_slot(
+        "no-such-profile-verb", None, {}, inventory=rr.Inventory()
+    )
+    assert candidate is None
+    assert chain, "the walk must leave a receipt for an unrouted verb"
+    assert chain[-1] == "grid=no-inventory-declared"
+    assert verdict == "armed"
