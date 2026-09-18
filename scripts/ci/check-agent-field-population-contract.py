@@ -92,7 +92,7 @@ def check(
             return _fail(f"report has no {reading} reading")
     if not expectations:
         return _fail("schema population_contract is missing, malformed, or drifted")
-    for field, declared in FIELDS.items():
+    for field in FIELDS:
         mode, surface = expectations[field]
         for reading in READINGS:
             if not _covered(surface, reading):
