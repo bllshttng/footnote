@@ -13,6 +13,8 @@ import json
 import shutil
 import subprocess
 
+import pytest
+
 from fno.setup import integration as I
 from fno.setup.integration import (
     IntegrationAdapter,
@@ -426,19 +428,37 @@ def test_pi_adapter_registered_and_gated_on_path():
     assert I._pi_extension_src().is_file(), "the shipped artifact must exist"
 
 
-# --- agy (native Stop-hook registration, x-bcfb) ----------------------------
+# --- agy (native Stop-hook registration) -------------------------------------
+
+@pytest.fixture
+def agy_rust_door(monkeypatch):
+    """Pin the agy hooks door to THIS checkout's fno-agents build.
+
+    call_binary_json resolves through $FNO_AGENTS_BIN first, so the tests
+    exercise the dev binary, and skip where this checkout has none (the same
+    contract the native_backlog_door fixture implements)."""
+    from fno.rust_binary import find_dev_binary
+
+    binary = find_dev_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
+
 
 def _fake_agy_adapter(tmp_path, monkeypatch):
     """Point _agy_adapter_path at a real tmp file so install is deterministic
-    (independent of whether the test env can resolve the real plugin root)."""
+    (independent of whether the test env can resolve the real plugin root).
+    The crown adapter resolves to None for the same reason: no test may
+    depend on what the machine's plugin stage happens to ship."""
     adapter = tmp_path / "plugin" / "hooks" / "agy-target-stop-hook.sh"
     adapter.parent.mkdir(parents=True, exist_ok=True)
     adapter.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     monkeypatch.setattr(I, "_agy_adapter_path", lambda: adapter)
+    monkeypatch.setattr(I, "_agy_crown_adapter_path", lambda: None)
     return adapter
 
 
-def test_agy_install_registers_stop_hook_and_is_installed(tmp_path, monkeypatch):
+def test_agy_install_registers_stop_hook_and_is_installed(tmp_path, monkeypatch, agy_rust_door):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)  # keep any workspace writes inside the tmp tree
     adapter = _fake_agy_adapter(tmp_path, monkeypatch)
@@ -459,7 +479,7 @@ def test_agy_install_registers_stop_hook_and_is_installed(tmp_path, monkeypatch)
     assert not (tmp_path / ".agent").exists()
 
 
-def test_agy_install_preserves_other_namespace_keys(tmp_path, monkeypatch):
+def test_agy_install_preserves_other_namespace_keys(tmp_path, monkeypatch, agy_rust_door):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     _fake_agy_adapter(tmp_path, monkeypatch)
@@ -482,7 +502,7 @@ def test_agy_install_manual_when_adapter_absent(tmp_path, monkeypatch):
     assert res.status == "manual" and not res.ok
 
 
-def test_agy_is_installed_false_on_malformed_json(tmp_path, monkeypatch):
+def test_agy_is_installed_false_on_malformed_json(tmp_path, monkeypatch, agy_rust_door):
     monkeypatch.setenv("HOME", str(tmp_path))
     _fake_agy_adapter(tmp_path, monkeypatch)
     hooks = I._agy_hooks_json()
@@ -491,13 +511,74 @@ def test_agy_is_installed_false_on_malformed_json(tmp_path, monkeypatch):
     assert I._agy_is_installed() is False
 
 
-def test_agy_is_installed_false_on_null_stop(tmp_path, monkeypatch):
+def test_agy_is_installed_false_on_null_stop(tmp_path, monkeypatch, agy_rust_door):
     # {"footnote": {"Stop": null}} must not TypeError on the any() iteration.
     monkeypatch.setenv("HOME", str(tmp_path))
     _fake_agy_adapter(tmp_path, monkeypatch)
     hooks = I._agy_hooks_json()
     hooks.parent.mkdir(parents=True, exist_ok=True)
     hooks.write_text(json.dumps({"footnote": {"Stop": None}}), encoding="utf-8")
+    assert I._agy_is_installed() is False
+
+
+def test_agy_install_refuses_malformed_and_preserves_bytes(tmp_path, monkeypatch, agy_rust_door):
+    # A malformed FOREIGN file is refused, never overwritten: the bytes the
+    # user (or another tool) owns survive an install attempt byte for byte.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _fake_agy_adapter(tmp_path, monkeypatch)
+    hooks = I._agy_hooks_json()
+    hooks.parent.mkdir(parents=True, exist_ok=True)
+    broken = '{"other-plugin":BROKEN USER CONFIG'
+    hooks.write_text(broken, encoding="utf-8")
+    before = hooks.read_bytes()
+
+    res = I._agy_install()
+
+    assert res.status == "failed"
+    assert "parse error" in res.note
+    assert hooks.read_bytes() == before, "malformed bytes must be preserved"
+
+
+def test_agy_install_keeps_disabled_disabled(tmp_path, monkeypatch, agy_rust_door):
+    # footnote.enabled = false is the operator's decision: install refreshes
+    # the handler and reports it, and never flips enabled back on.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    adapter = _fake_agy_adapter(tmp_path, monkeypatch)
+    hooks = I._agy_hooks_json()
+    hooks.parent.mkdir(parents=True, exist_ok=True)
+    hooks.write_text(
+        json.dumps(
+            {
+                "footnote": {
+                    "enabled": False,
+                    "Stop": [{"type": "command", "command": str(adapter), "timeout": 60}],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert I._agy_is_installed() is True  # disabled is configured, not absent
+
+    res = I._agy_install()
+    assert res.ok
+    assert "disabled" in res.note
+    data = json.loads(hooks.read_text(encoding="utf-8"))
+    assert data["footnote"]["enabled"] is False
+    assert data["footnote"]["Stop"][0]["command"] == str(adapter)
+
+
+def test_agy_is_installed_honest_without_adapter(tmp_path, monkeypatch, agy_rust_door):
+    # A footnote Stop entry with no resolvable adapter is unverifiable, and
+    # unverifiable is not installed.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(I, "_agy_adapter_path", lambda: None)
+    hooks = I._agy_hooks_json()
+    hooks.parent.mkdir(parents=True, exist_ok=True)
+    hooks.write_text(
+        json.dumps({"footnote": {"Stop": [{"command": "/anywhere"}]}}),
+        encoding="utf-8",
+    )
     assert I._agy_is_installed() is False
 
 

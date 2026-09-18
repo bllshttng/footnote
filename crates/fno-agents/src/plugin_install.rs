@@ -723,6 +723,14 @@ fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
                 parsed.quick = true;
                 i += 1;
             }
+            "--hooks" => {
+                parsed.hooks = true;
+                i += 1;
+            }
+            "--hooks-status" => {
+                parsed.hooks_status = true;
+                i += 1;
+            }
             "--check" | "--restage" | "--stage-only" | "--env-only" => {
                 if parsed.mode.is_none() {
                     parsed.mode = Some(args[i].clone());
@@ -1126,7 +1134,7 @@ fn install_agy(stage: &Path, force: bool) -> Result<String, String> {
 /// non-agy harness).
 fn run_agy_hooks(
     harness: Option<&str>,
-    hooks: bool,
+    _hooks: bool,
     status_flag: bool,
     adapter: Option<&str>,
     crown: Option<&str>,

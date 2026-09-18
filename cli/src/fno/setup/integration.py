@@ -338,39 +338,25 @@ def _agy_crown_adapter_path() -> "Optional[Path]":
 
 
 def _agy_is_installed() -> bool:
-    hooks = _agy_hooks_json()
-    if not hooks.is_file():
-        return False
-    try:
-        data = json.loads(hooks.read_text(encoding="utf-8"))
-    except (ValueError, OSError):
-        return False
-    if not isinstance(data, dict):
-        return False
-    fn = data.get("footnote")
-    if not isinstance(fn, dict):
-        return False
-    stop = fn.get("Stop")
-    if not isinstance(stop, list):
-        # Absent or malformed (e.g. {"Stop": null}); not a TypeError on iteration.
-        return False
+    from fno.rust_binary import call_binary_json
+
     adapter = _agy_adapter_path()
-    if adapter is None:
-        # Can't verify the command targets the live adapter; installed iff ANY
-        # footnote Stop handler is registered.
-        return bool(stop)
-    if not any(
-        isinstance(h, dict) and h.get("command") == str(adapter) for h in stop
-    ):
-        return False
-    # The crown adapter is part of the install when it ships in this install.
     crown = _agy_crown_adapter_path()
-    if crown is None:
-        return True
-    pre = fn.get("PreInvocation")
-    if not isinstance(pre, list):
+    args = [
+        "agy",
+        "--hooks-status",
+        "--hooks-file",
+        str(_agy_hooks_json()),
+        "--json",
+    ]
+    if adapter is not None:
+        args += ["--adapter", str(adapter)]
+    if crown is not None:
+        args += ["--crown", str(crown)]
+    error, payload = call_binary_json("plugin-install", args)
+    if error is not None or not isinstance(payload, dict):
         return False
-    return any(isinstance(h, dict) and h.get("command") == str(crown) for h in pre)
+    return bool(payload.get("installed"))
 
 
 def _agy_install() -> IntegrationResult:
@@ -384,42 +370,47 @@ def _agy_install() -> IntegrationResult:
             note="adapter ships in the plugin (not this CLI-only install); wire "
             "hooks/agy-target-stop-hook.sh into ~/.gemini/config/hooks.json by hand",
         )
-    hooks = _agy_hooks_json()
-    # Merge the footnote Stop handler into hooks.json, preserving any other tool's
-    # namespace key. A corrupt/non-dict file is overwritten (we can't safely merge
-    # into garbage); only the parseable-dict case is preserved.
-    data: "dict[str, object]" = {}
-    if hooks.is_file():
-        try:
-            loaded = json.loads(hooks.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except (ValueError, OSError):
-            data = {}
-    fn = data.get("footnote")
-    if not isinstance(fn, dict):
-        fn = {}
-    fn["Stop"] = [{"type": "command", "command": str(adapter), "timeout": 60}]
+    from fno.rust_binary import call_binary_json
+
+    # Probe the door before any install: a stale fno-agents binary IGNORES
+    # unknown flags and would fall through to the old full plugin install.
+    # A current binary answers --hooks-status with a JSON status object.
+    hooks_file = _agy_hooks_json()
+    error, probe = call_binary_json(
+        "plugin-install",
+        ["agy", "--hooks-status", "--hooks-file", str(hooks_file), "--json"],
+    )
+    if error is not None or not isinstance(probe, dict) or "file" not in probe:
+        return IntegrationResult(
+            "agy",
+            label,
+            "failed",
+            note="the fno-agents binary does not answer --hooks-status; run "
+            "`fno doctor update --rust`",
+        )
+    args = [
+        "agy",
+        "--hooks",
+        "--adapter",
+        str(adapter),
+        "--hooks-file",
+        str(hooks_file),
+        "--json",
+    ]
     crown = _agy_crown_adapter_path()
     if crown is not None:
-        # PreInvocation takes handlers directly under the event key; the matcher
-        # is ignored per agy's schema. The adapter self-gates on invocationNum
-        # == 0, so later invocations inject nothing.
-        fn.setdefault("PreInvocation", [])
-        if not any(
-            isinstance(h, dict) and h.get("command") == str(crown)
-            for h in fn["PreInvocation"]
-        ):
-            fn["PreInvocation"].append(
-                {"type": "command", "command": str(crown), "timeout": 30}
-            )
-    data["footnote"] = fn
-    try:
-        hooks.parent.mkdir(parents=True, exist_ok=True)
-        hooks.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    except OSError as exc:
-        return IntegrationResult("agy", label, "failed", note=str(exc))
-    return IntegrationResult("agy", label, "installed", note=f"Stop hook -> {hooks}")
+        args += ["--crown", str(crown)]
+    error, payload = call_binary_json("plugin-install", args)
+    if error is not None:
+        if "not found" in error:
+            note = "fno-agents binary not found; run `fno doctor update --rust`"
+        else:
+            note = error
+        return IntegrationResult("agy", label, "failed", note=note)
+    note = "Stop hook installed"
+    if isinstance(payload, dict):
+        note = payload.get("note") or note
+    return IntegrationResult("agy", label, "installed", note=note)
 
 
 def build_adapters(run: Runner = _run) -> "list[IntegrationAdapter]":
