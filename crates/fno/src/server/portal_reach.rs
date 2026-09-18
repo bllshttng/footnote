@@ -1211,7 +1211,10 @@ impl Core {
                     return None;
                 }
                 let title = title_session_name(entry.vt.osc_title()?);
-                (!title.is_empty()).then(|| (*idx, portal.seat, title.to_string()))
+                // A glyph-only frame ("◐", mid-spinner) names no session; a
+                // seat must not unclaim onto it.
+                (!title.is_empty() && title.chars().any(char::is_alphanumeric))
+                    .then(|| (*idx, portal.seat, title.to_string()))
             })
             .collect();
         let mut changed = false;

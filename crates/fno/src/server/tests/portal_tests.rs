@@ -2629,6 +2629,32 @@ fn a_title_naming_no_single_row_drops_the_claim() {
 }
 
 #[test]
+fn a_glyph_only_title_leaves_the_seat_alone() {
+    // AC2-EDGE: a bare spinner frame names no session. The seat keeps its
+    // row instead of unclaiming onto the glyph.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    drain_notices(&mut rx);
+    feed_seat_title(&mut core, seat, "◐");
+
+    core.follow_portal_viewer_titles();
+
+    assert_eq!(core.portals[&0].row_key, "deadbee1", "the row is kept");
+    assert_eq!(core.attached.get("deadbee1"), Some(&seat));
+    assert_eq!(core.panes[&seat].name.as_deref(), Some("target-a"));
+    assert!(
+        !drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("now shows")),
+        "a glyph-only title is silent"
+    );
+    core.reap_pane(seat);
+}
+
+#[test]
 fn a_portal_whose_title_names_its_own_row_is_left_alone() {
     // AC2-EDGE: the seated row named by `name`, by `harness_title`, an
     // unset title, a held stand-in seat and a non-claude viewer seat all
