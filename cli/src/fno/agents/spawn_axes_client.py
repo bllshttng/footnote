@@ -19,8 +19,8 @@ def spawn_axes_call(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _answer_or_raise(answer: dict[str, Any], field: str) -> Any:
-    """One ask's answer, a named owner refusal, or unavailable when the
-    binary predates the field (a stale answer must never read as empty)."""
+    """One ask's answer, a named refusal, or unavailable when the binary
+    predates the field (a stale answer must never read as empty)."""
     if answer.get("refused"):
         from fno.agents.dispatch import DispatchAskError
 
@@ -41,7 +41,7 @@ def keeper_posture(
     yolo: bool,
 ) -> list[str]:
     """The launch permission tokens for one harness lane, from the Rust
-    owner. A non-empty note prints once to stderr as ``agy posture:
+    owner; a non-empty note prints once to stderr as ``agy posture:
     <effective> (<source>) - <note>``."""
     ask = {
         "harness": harness,
