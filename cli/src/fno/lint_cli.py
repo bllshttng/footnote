@@ -1783,10 +1783,6 @@ def _is_populated(value: Any) -> bool:
     return value is not None and value != "" and value != [] and value != {}
 
 
-_POPULATION_MODES = ("conditional", "transient")
-_POPULATION_SURFACES = ("persisted", "projected", "persisted_and_projected")
-
-
 def _population_contract(repo_root: Path) -> tuple[dict[str, dict[str, str]], list[str]]:
     """Read the schema's population_contract block.
 
@@ -1816,7 +1812,11 @@ def _population_contract(repo_root: Path) -> tuple[dict[str, dict[str, str]], li
         surface = entry.get("surface")
         writer = entry.get("writer")
         test = entry.get("test")
-        if mode not in _POPULATION_MODES or surface not in _POPULATION_SURFACES:
+        if mode not in ("conditional", "transient") or surface not in (
+            "persisted",
+            "projected",
+            "persisted_and_projected",
+        ):
             errors.append(
                 f"{name}: mode must be conditional or transient; surface must "
                 "be persisted, projected, or persisted_and_projected"
@@ -1830,12 +1830,8 @@ def _population_contract(repo_root: Path) -> tuple[dict[str, dict[str, str]], li
         ):
             errors.append(f"{name}: writer and test evidence are required")
             continue
-        contract[name] = {
-            "mode": mode,
-            "surface": surface,
-            "writer": writer,
-            "test": test,
-        }
+        contract[name] = {"mode": mode, "surface": surface,
+                          "writer": writer, "test": test}
     return contract, errors
 
 
@@ -1845,8 +1841,7 @@ def _partition_zeroes(
     contract: dict[str, dict[str, str]],
     reading: str,
 ) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    """Split zero-population fields into real dead fields and the
-    contract-covered conditional/transient reports."""
+    """Split zero-population fields into real dead fields and contract reports."""
     conditional: dict[str, dict[str, Any]] = {}
     transient: dict[str, dict[str, Any]] = {}
     real_dead: list[str] = []
