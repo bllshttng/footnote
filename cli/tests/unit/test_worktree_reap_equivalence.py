@@ -16,6 +16,7 @@ The Rust probe is covered by parsing contract rather than by running the
 daemon: it consumes the same receipt, so the assertion that matters is that
 the receipt grammar it parses is what the verb emits.
 """
+import json
 import os
 import subprocess
 import time
@@ -26,11 +27,9 @@ import pytest
 from fno.rust_binary import resolve_binary
 
 
-def _gate_verdict(path: Path) -> bool:
-    """The gate binary's answer, parsed from its one-line receipt."""
-    # THIS checkout's build first: a deployed fno-agents on PATH may predate
-    # the verb and answer nothing, which would read as a code defect.
-    binary = None
+def _gate_binary():
+    """THIS checkout's build first: a deployed fno-agents on PATH may predate
+    the verb and answer nothing, which would read as a code defect."""
     for cand in (
         REPO_ROOT / "crates" / "fno-agents" / "target" / "release" / "fno-agents",
         REPO_ROOT / "target" / "release" / "fno-agents",
@@ -38,22 +37,31 @@ def _gate_verdict(path: Path) -> bool:
         REPO_ROOT / "target" / "debug" / "fno-agents",
     ):
         if cand.is_file():
-            binary = cand
-            break
-    if binary is None:
-        binary = resolve_binary()
-    if binary is None:
+            return cand
+    found = resolve_binary()
+    if found is None:
         pytest.skip(
             "no fno-agents binary resolves; the gate corpus runs in the cargo "
             "suite, this lane only pins bash/binary agreement"
         )
+    return found
+
+
+def _gate_receipt(path: Path, done_node: bool = False) -> str:
+    """The gate's one-line receipt."""
+    flags = ["--done-node"] if done_node else []
     r = subprocess.run(
-        [str(binary), "worktree-reapable", str(path)],
+        [str(_gate_binary()), "worktree-reapable", *flags, str(path)],
         capture_output=True, text=True, timeout=60,
     )
     line = (r.stdout or "").strip().splitlines()
     assert line, f"gate emitted no receipt: {r.stderr}"
-    return line[0].startswith("reapable=yes")
+    return line[0]
+
+
+def _gate_verdict(path: Path) -> bool:
+    """The gate binary's answer, parsed from its one-line receipt."""
+    return _gate_receipt(path).startswith("reapable=yes")
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 REAPABLE_LIB = REPO_ROOT / "scripts" / "lib" / "worktree-reapable.sh"
@@ -278,3 +286,53 @@ def test_gate_binary_emits_the_grammar_the_callers_parse(tmp_path: Path) -> None
     assert 'reapable={}' in gate_src or "reapable=" in gate_src
     sh_src = REAPABLE_LIB.read_text()
     assert 'reapable=yes' in sh_src and 'reapable=no' in sh_src
+
+
+# -- the node-token scanners agree across languages ---------------------------
+#
+# The done-node arm resolves branch tokens in Rust (scan_node_tokens); the PR
+# closure produces them in Python (closure.branch_node_ids). The port copied
+# the shape, so a future edit to one copy would drift the two silently. Each
+# case builds a tree whose branch names the tokens and asserts the gate's
+# evidence equals exactly what the Python producer lists.
+
+TOKEN_CASES = [
+    # non-overlap: once x-cccc is consumed, "-1234" is not letter-led
+    ("feature/x-cccc-1234", ["x-cccc"]),
+    # delimiter-bounded neighbors
+    ("feature/x-aaaa-x-bbbb", ["x-aaaa", "x-bbbb"]),
+    # greedy hex takes the longest valid id
+    ("repro/x-ab123-repro", ["x-ab123"]),
+]
+
+
+@pytest.mark.parametrize("branch,expected", TOKEN_CASES, ids=[c[0] for c in TOKEN_CASES])
+def test_rust_token_scanner_matches_the_python_producer(tmp_path, branch, expected):
+    from fno.pr.closure import branch_node_ids
+
+    assert branch_node_ids(branch) == expected, "the Python producer moved under the corpus"
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-qm", "seed")
+    wt = tmp_path / "wt"
+    _git(repo, "worktree", "add", "-q", str(wt), "-b", branch)
+    old = time.time() - 49 * 3600
+    os.utime(wt / ".git", (old, old))
+    (wt / "scratch.py").write_text("nope\n")
+
+    home = tmp_path / "graph-home" / "agents"
+    home.mkdir(parents=True)
+    rows = [{"id": tok, "status": "done"} for tok in expected]
+    (home.parent / "graph-archive.json").write_text(json.dumps({"entries": rows}))
+    env = dict(os.environ, FNO_AGENTS_HOME=str(home))
+
+    r = subprocess.run(
+        [str(_gate_binary()), "worktree-reapable", "--done-node", str(wt)],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    receipt = (r.stdout or "").strip().splitlines()
+    assert receipt, f"gate emitted no receipt: {r.stderr}"
+    evidence = [f for f in receipt[0].split() if f.startswith("evidence=")]
+    assert evidence == [f"evidence=node:{','.join(expected)}"], receipt[0]
