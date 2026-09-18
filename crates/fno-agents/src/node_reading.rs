@@ -4,7 +4,7 @@
 //! the document that owns the file list once a plan exists. A reader that
 //! sees only the first of those reaches a confident wrong answer.
 
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 pub const READING_KEY: &str = "_reading";
 
@@ -45,16 +45,9 @@ pub fn reading_for(row: &Value) -> Option<String> {
 /// Read-only callers only: the marker is derived and must never be persisted.
 pub fn attach_reading(rows: &mut [Value]) {
     for row in rows.iter_mut() {
-        let Some(reading) = reading_for(row) else {
-            continue;
-        };
-        let Some(obj) = row.as_object_mut() else {
-            continue;
-        };
-        let mut front = Map::new();
-        front.insert(READING_KEY.to_string(), Value::String(reading));
-        front.extend(std::mem::take(obj));
-        *obj = front;
+        if let (Some(reading), Some(obj)) = (reading_for(row), row.as_object_mut()) {
+            obj.shift_insert(0, READING_KEY.to_string(), Value::String(reading));
+        }
     }
 }
 
