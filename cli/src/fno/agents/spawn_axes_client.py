@@ -49,7 +49,8 @@ def keeper_posture(
         "permission_mode": permission_mode or "",
         "yolo": bool(yolo),
     }
-    tokens = _answer_or_raise(spawn_axes_call({"keeper_posture": ask}), "tokens")
+    answer = spawn_axes_call({"keeper_posture": ask})
+    tokens = _answer_or_raise(answer, "tokens")
     note = answer.get("note") or ""
     if note:
         import sys
