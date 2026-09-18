@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::paths::{dirs_home, worktree_repo_root};
@@ -242,7 +242,7 @@ fn build_entries(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
     Ok(entries)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct InstallReceipt {
     pub action: &'static str,
     /// "installed", or "partial" when user files were kept and named.
@@ -286,6 +286,7 @@ pub fn install(cwd: &Path) -> Result<InstallReceipt, String> {
     let entries = build_entries(&root)?;
     let conf = config_dir();
     let mut manifest: Manifest = read_manifest().unwrap_or_default();
+    manifest.version = version.clone();
     let mut written = 0;
     let mut skipped = 0;
     let mut removed = 0;
@@ -348,7 +349,7 @@ pub fn install(cwd: &Path) -> Result<InstallReceipt, String> {
     })
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct UninstallReceipt {
     pub action: &'static str,
     /// "uninstalled", or "partial" when edited files were kept and named.
@@ -530,6 +531,7 @@ pub fn status_json() -> serde_json::Value {
     let (missing_agents, stale_agents) = diff(&agents, &loaded.agents);
     let (missing_skills, stale_skills) = diff(&skills, &loaded.skills);
     let missing: Vec<String> = [missing_commands, missing_agents, missing_skills].concat();
+    let stale: Vec<String> = [stale_commands, stale_agents, stale_skills].concat();
     let status = match &manifest {
         None => "absent",
         Some(_) => {
@@ -554,7 +556,7 @@ pub fn status_json() -> serde_json::Value {
             "skills": loaded.skills.as_ref().map(|s| serde_json::Value::Array(s.iter().cloned().map(serde_json::Value::String).collect())).unwrap_or_else(|| json!("unknown")),
         },
         "missing": missing,
-        "stale": [stale_commands, stale_agents, stale_skills].concat(),
+        "stale": stale,
     })
 }
 

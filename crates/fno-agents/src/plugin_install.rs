@@ -650,56 +650,84 @@ fn print_check(report: &StageCheck, json: bool) {
     }
 }
 
-pub fn run_plugin_install(args: &[String]) -> i32 {
-    let mut mode: Option<String> = None;
-    let mut source: Option<String> = None;
-    let mut stage: Option<String> = None;
-    let mut json = false;
-    let mut uninstall = false;
-    let mut status = false;
-    let mut quick = false;
+struct PluginInstallArgs {
+    mode: Option<String>,
+    source: Option<String>,
+    stage: Option<String>,
+    json: bool,
+    force: bool,
+    uninstall: bool,
+    status: bool,
+    quick: bool,
+}
+
+fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
+    let mut parsed = PluginInstallArgs {
+        mode: None,
+        source: None,
+        stage: None,
+        json: false,
+        force: false,
+        uninstall: false,
+        status: false,
+        quick: false,
+    };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--source" => {
-                source = args.get(i + 1).cloned();
+                parsed.source = args.get(i + 1).cloned();
                 i += 2;
             }
             "--stage" => {
-                stage = args.get(i + 1).cloned();
+                parsed.stage = args.get(i + 1).cloned();
                 i += 2;
             }
             "--json" | "-J" => {
-                json = true;
+                parsed.json = true;
                 i += 1;
             }
-            "--force" => i += 1,
+            "--force" => parsed.force = true,
             "--uninstall" => {
-                uninstall = true;
+                parsed.uninstall = true;
                 i += 1;
             }
             "--status" => {
-                status = true;
+                parsed.status = true;
                 i += 1;
             }
             "--installed" => {
-                quick = true;
+                parsed.quick = true;
                 i += 1;
             }
             "--check" | "--restage" | "--stage-only" | "--env-only" => {
-                if mode.is_none() {
-                    mode = Some(args[i].clone());
+                if parsed.mode.is_none() {
+                    parsed.mode = Some(args[i].clone());
                 }
                 i += 1;
             }
             other => {
-                if mode.is_none() && !other.starts_with('-') {
-                    mode = Some(other.to_string());
+                if parsed.mode.is_none() && !other.starts_with('-') {
+                    parsed.mode = Some(other.to_string());
                 }
                 i += 1;
             }
         }
     }
+    parsed
+}
+
+pub fn run_plugin_install(args: &[String]) -> i32 {
+    let PluginInstallArgs {
+        mode,
+        source,
+        stage,
+        json,
+        force,
+        uninstall,
+        status,
+        quick,
+    } = parse_plugin_install_args(args);
     match mode.as_deref() {
         // Byte verdict for the stage; doctor's plugin_cache leg calls this.
         Some("--check") => {
@@ -776,7 +804,6 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
                 );
                 return 2;
             }
-            let force = args.iter().any(|a| a == "--force");
             let outcome = install_harness(harness, force);
             match outcome {
                 Ok(detail) => {
@@ -1226,5 +1253,35 @@ mod tests {
         }
         assert!(!stage_parent.join("fno").exists());
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The uninstall mode word must parse into the opencode arm's flag: a
+    /// swallowed --uninstall would run an INSTALL where the user asked for
+    /// the opposite, so the wiring is pinned at the parser, env-free.
+    #[test]
+    fn opencode_mode_words_parse() {
+        let args: Vec<String> = ["opencode", "--uninstall", "--json"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let parsed = parse_plugin_install_args(&args);
+        assert_eq!(parsed.mode.as_deref(), Some("opencode"));
+        assert!(parsed.uninstall);
+        assert!(parsed.json);
+
+        let args: Vec<String> = ["opencode", "--status", "--installed"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let parsed = parse_plugin_install_args(&args);
+        assert_eq!(parsed.mode.as_deref(), Some("opencode"));
+        assert!(parsed.status);
+        assert!(parsed.quick);
+        assert!(!parsed.uninstall);
+
+        let args: Vec<String> = ["claude"].iter().map(|s| (*s).to_string()).collect();
+        let parsed = parse_plugin_install_args(&args);
+        assert_eq!(parsed.mode.as_deref(), Some("claude"));
+        assert!(!parsed.uninstall && !parsed.status && !parsed.quick);
     }
 }

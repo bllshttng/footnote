@@ -14,15 +14,11 @@ for task delegation, identity, and agent registration.
 | `skills/` | Symlink farm: `<name> -> ../../skills/<name>` for every shipped skill. opencode scans `.opencode/skills/`, never the repo-root `skills/`, so these tracked links are what makes footnote's skills discoverable on a fresh clone (and in any worktree - the links are relative). |
 | `tests/fno.test.ts` | `bun test` unit coverage for the pure helpers + task tool. |
 
-The repository used to carry its own `.opencode/commands/` directory: five
-bare-named stubs (`target`, `think`, `review`, `fix`, `pr`) that existed in no
-other project and disagreed with every renderer (`/fno:target` was asked for,
-`target` was what existed). The global install now generates the correct
-`fno:<verb>.md` names everywhere, this repository included.
+The repository used to carry its own `.opencode/commands/` directory: five bare-named stubs (`target`, `think`, `review`, `fix`, `pr`). They existed in no other project and disagreed with every renderer. `/fno:target` was asked for, and `target` was what existed. The global install now generates the correct `fno:<verb>.md` names everywhere, this repository included.
 
 ## What it does (and what opencode does natively)
 
-The plugin only supplies what opencode can't infer on its own:
+The plugin only supplies what opencode cannot infer on its own:
 
 - **`config` hook** — registers footnote's existing `agents/*.md` (translated to
   opencode's agent shape) so `task({ subagent_type: "fno:archer" })` resolves.
@@ -54,26 +50,19 @@ With `FNO_OPENCODE` unset, the plugin registers nothing.
 
 ## Global install (every project)
 
-The command, agent and skill catalogs come from one supported install, not from
-this repository: `fno config plugin install opencode` writes generated
-`fno:<verb>` commands, `fno:<name>` agents, the skill trees, and the stop
-bridge into `~/.config/opencode/` (or `$OPENCODE_CONFIG_DIR`), records every
-path in a manifest, and refuses to overwrite a file footnote did not write.
-Uninstall is `fno-agents plugin-install opencode --uninstall`; it removes only
-manifest paths whose bytes still match, keeps and names anything you edited,
-and exits 3 when the uninstall was partial. `fno doctor` reports what is
-installed versus what the catalogs actually load, by name.
+The command, agent and skill catalogs come from one supported install, not from this repository: `fno config plugin install opencode` writes generated `fno:<verb>` commands, `fno:<name>` agents, the skill trees, and the stop bridge into `~/.config/opencode/` (or `$OPENCODE_CONFIG_DIR`), records every path in a manifest, and refuses to overwrite a file footnote did not write.
+
+Uninstall is `fno-agents plugin-install opencode --uninstall`. Only manifest paths whose bytes still match are removed. Anything you edited is kept and named. A partial uninstall exits 3.
+
+`fno doctor` reports what is installed versus what the catalogs actually load, by name.
 
 ## Full cutover (make fno the sole orchestration plugin)
 
-When you're ready to make fno the sole orchestration plugin, edit your global
-`~/.config/opencode/opencode.json` and drop any other orchestration plugin entry
-from the `plugin` array. footnote's plugin auto-loads from this repo's
-`.opencode/plugins/` for sessions in this project; for other projects, add a
-`file:` entry pointing at `plugins/fno.ts` or publish the plugin to npm. Once no
-other orchestration plugin is loaded you can also run without the `FNO_OPENCODE`
-gate if you edit `isActivated` to default on. This is a local-machine change and
-is deliberately not automated.
+When you are ready to make fno the sole orchestration plugin, edit your global `~/.config/opencode/opencode.json`. Drop any other orchestration plugin entry from the `plugin` array.
+
+footnote's plugin auto-loads from this repo's `.opencode/plugins/` for sessions in this project. For other projects, add a `file:` entry pointing at `plugins/fno.ts` or publish the plugin to npm.
+
+If no other orchestration plugin is loaded, you can also run without the `FNO_OPENCODE` gate once you edit `isActivated` to default on. This is a local-machine change and is deliberately not automated.
 
 ## Model routing
 
