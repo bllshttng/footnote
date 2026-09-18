@@ -60,7 +60,7 @@ Liveness is counted from `panes`, not from `portals.len()`. An entry left stale-
 
 ## A portal follows the session its viewer shows
 
-A claude viewer can switch sessions inside its own TUI, and fno is never told. The server reads the seat's OSC title once a second. A title that names one free row moves the row key, the attach mapping and the pane name to that row. A title that names no single free row drops the claim, so no row wears a seat that shows something else.
+A claude viewer can switch sessions inside its own TUI, and fno is never told. The server reads the seat's OSC title once a second. A title that names one free row moves the row key, the attach mapping and the pane name to that row. A title that names no single free row drops the claim, so no row wears a seat that shows something else. A seat whose key names no single row also wears no `◫` marker, so the picker does not list it.
 
 Only claude viewer seats are followed, gated on the attach program in the seat's `cmd`. Plain attach panes and other harnesses are not, and a title naming a row another portal shows never steals it.
 

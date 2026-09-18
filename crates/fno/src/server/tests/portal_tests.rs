@@ -2556,6 +2556,12 @@ fn a_portal_follows_the_session_its_viewer_title_names() {
     assert_eq!(b.portal, Some(0), "B carries the marker");
     let a = rows.iter().find(|r| r.name == "target-a").expect("row A");
     assert_eq!(a.pane_id, None, "A is paneless");
+    assert!(
+        drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("portal 0 now shows target-b")),
+        "the follow says so"
+    );
 
     core.follow_portal_viewer_titles();
     assert!(
@@ -2592,8 +2598,14 @@ fn a_title_naming_no_single_row_drops_the_claim() {
     assert_eq!(core.portals[&0].row_key, "twin", "the key is the title");
     assert_eq!(core.panes[&seat].name.as_deref(), Some("twin"));
     assert!(
-        core.agent_rows().iter().all(|r| r.pane_id != Some(seat)),
-        "no row wears the seat"
+        core.agent_rows().iter().all(|r| r.portal != Some(0)),
+        "no row carries the portal marker"
+    );
+    assert!(
+        drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("portal 0 now shows twin")),
+        "the drop says so"
     );
 
     core.follow_portal_viewer_titles();

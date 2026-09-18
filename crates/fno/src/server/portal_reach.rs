@@ -1149,6 +1149,22 @@ impl Core {
             .map(|(idx, _)| *idx)
     }
 
+    /// The portal index a seat's row may wear: `None` unless the seat's key
+    /// answers exactly one live row. A held seat (its row is gone) or a
+    /// dropped one (the key names two, or the viewer title names no row)
+    /// wears no marker, so the sideline band and the portal picker tell the
+    /// truth instead of guessing.
+    pub(super) fn portal_marker(&self, pane: Option<u64>) -> Option<u8> {
+        let idx = self.portal_of(pane)?;
+        let key = self.portals.get(&idx)?.row_key.as_str();
+        let named = self
+            .agents
+            .iter()
+            .filter(|a| row_answers_key(a, key))
+            .count();
+        (named == 1).then_some(idx)
+    }
+
     /// The lowest portal index nothing LIVE holds.
     ///
     /// Server-side on purpose. A client computing this from the rows it last
@@ -1194,7 +1210,7 @@ impl Core {
                 if entry.cmd != viewer_cmd {
                     return None;
                 }
-                let title = title_session_name(entry.vt.osc_title()?)?;
+                let title = title_session_name(entry.vt.osc_title()?);
                 (!title.is_empty()).then(|| (*idx, portal.seat, title.to_string()))
             })
             .collect();
