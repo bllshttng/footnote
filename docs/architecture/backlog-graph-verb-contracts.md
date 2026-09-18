@@ -239,7 +239,7 @@ Exit codes: 0 success (node closed) 1 validation error (bad id, node not found) 
 
 Clear a node's completion, returning it to its underlying state.
 
-Every other lifecycle transition had an inverse (``defer``/``undefer``, ``supersede``/``unsupersede``, ``queue``/``unqueue``); ``done`` was terminal with none, so a node closed in error was corrected by hand-editing ``graph.json``, which a PreToolUse hook forbids for good reason.
+Every other lifecycle transition had an inverse (``defer``/``undefer``, ``supersede``/``unsupersede``, ``queue``/``unqueue``); ``done`` was terminal with none, so a node closed in error was corrected by hand-editing the graph store, which a PreToolUse hook forbids for good reason.
 
 Refuses when a referenced PR is MERGED. That is ``done``'s gate inverted: the work is in main, and clearing the completion would make the graph assert that shipped work did not ship. The remedy is almost always to file the remaining work as its own node (``fno backlog idea``) rather than to reopen the record of the part that landed. ``--force`` records a deliberate reopen of shipped work, and is journaled as such.
 

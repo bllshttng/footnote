@@ -141,7 +141,7 @@ so it is safe to call even when uncertain whether all repos have shipped.
 
 ## Correlating with the Feature Graph
 
-The feature graph at `~/.fno/graph.json` tracks plan nodes by `ab-`
+The feature graph (the graph.db backlog store) tracks plan nodes by `ab-`
 prefixed ID. When a plan ships, `register-task.py` syncs the graph node to
 `completed`. The stamp adds `status: done` to the plan file. Both should
 agree for any plan that went through the full target pipeline.

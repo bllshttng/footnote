@@ -67,7 +67,7 @@ lands in `messaged_peers:` and the /ship recap step skips that peer.
 
 The system rides on two storage layers that already existed for related but distinct purposes:
 
-**graph.json** stays the source of truth for *work*. A new graph entry represents a feature that should ship. The plan adds four nullable provenance fields to every entry so the work can carry a "where did this come from" trail:
+**graph.db** stays the source of truth for *work*. A new graph entry represents a feature that should ship. The plan adds four nullable provenance fields to every entry so the work can carry a "where did this come from" trail:
 
 ```yaml
 source_kind: organic | from_inbox | from_observation | from_supervisor | operator_request

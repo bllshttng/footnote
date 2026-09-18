@@ -9,7 +9,7 @@ Several stores hold one timeline and nothing joined them. The feed is one projec
 | Store | Holds | Contributes |
 |---|---|---|
 | `~/.fno/questions.jsonl` | `operator_question`, `operator_question_closed`, `operator_decision` rows | `question_asked`, `question_closed`, `decision_recorded` |
-| `~/.fno/graph.json` | node lifecycle as fields: `created_at`, `sessions[].started_at`, a ship-phase row beside `pr_number`, `completed_at` | `node_created`, `node_started`, `pr_created`, `node_ended` |
+| `~/.fno/graph.db` | node lifecycle as fields: `created_at`, `sessions[].started_at`, a ship-phase row beside `pr_number`, `completed_at` | `node_created`, `node_started`, `pr_created`, `node_ended` |
 | `~/.fno/agents/reap-receipts/` | one durable receipt per removed registry row, each carrying the verbatim resume line | `session_reaped` |
 | `~/.fno/events.jsonl` | telemetry (72% ticks) | nothing - deliberately not read |
 

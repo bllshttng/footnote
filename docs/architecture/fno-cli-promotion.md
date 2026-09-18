@@ -104,7 +104,7 @@ The wrapper pattern documented here is the migration target for PR 2's sweep. A 
 ## Related Work
 
 - **The gate-honesty followups** locked in the three-factor gate verification model: state bool + session-scoped artifact + provenance event. The `fno gate set` wrapper makes the canonical helper that flips all three discoverable.
-- **The gate-honesty work** introduced the HARD-GATE skill preambles that block direct edits to gate artifacts and graph.json. The wrappers do not bypass those guards; they invoke the canonical helpers that the guards expect.
+- **The gate-honesty work** introduced the HARD-GATE skill preambles that block direct edits to gate artifacts and the graph store. The wrappers do not bypass those guards; they invoke the canonical helpers that the guards expect.
 - **PR 2 (cli-promotion-sweep, planned)** migrates every direct `bash scripts/lib/X.sh` call to `fno <verb>`. Until that lands the drift lint stays advisory.
 
 ## Files

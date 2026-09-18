@@ -2,7 +2,7 @@
 
 ## Problem
 
-graph.json stores two fields that encode the same fact - which repo owns this work: `project` (a name) and `cwd` (a path). No invariant ties them together. Every filing site resolves them through independent chains, so `fno backlog idea --project X` run from repo Y stores X as project and Y's root as cwd. Launchers then trusted `cwd`.
+The backlog graph stores two fields that encode the same fact - which repo owns this work: `project` (a name) and `cwd` (a path). No invariant ties them together. Every filing site resolves them through independent chains, so `fno backlog idea --project X` run from repo Y stores X as project and Y's root as cwd. Launchers then trusted `cwd`.
 
 Incident: a node filed with `project=footnote` from a session whose PWD was a sibling repo recorded that foreign cwd. `dispatch-node.sh` booted its target worker there - the session grouped under the wrong project and early `.fno/` state writes landed in the foreign repo. Same misscope class as the 2026-06-02/04 backfills; this fixes the consumer of that bad data plus the remaining explicit-`--project` producer.
 
@@ -25,7 +25,7 @@ root = project_root_from_settings(e["project"]) if e.get("project") else None
 e["_resolved_cwd"] = root or e.get("cwd")
 ```
 
-Underscore prefix = derived, matching `status`. Unlike `status` it is **never persisted** to graph.json - a persisted copy would go stale when the work-map changes; read-time derivation stays current forever.
+Underscore prefix = derived, matching `status`. Unlike `status` it is **never persisted** to the graph store - a persisted copy would go stale when the work-map changes; read-time derivation stays current forever.
 
 ### 2. Launch consumers
 

@@ -24,7 +24,7 @@ Both surfaces are now built from the same shell variables (`$no_external`, `$no_
 
 ### Reload trigger
 
-At the top of every walker tick (after the resume / pause-sentinel / budget checks), the walker stats `graph.json`. If `st_mtime_ns` differs from the cached baseline, `load_graph` is called. The new entry list replaces the cached one and the baseline advances. Id-based comparisons mean the existing `completed_ids` / `blocked_ids` overlay sets continue to match correctly against the fresh dicts. (The sha256 sidecar this section once tracked is retired. The store keeper's gated read publishes consistent bytes.)
+At the top of every walker tick (after the resume / pause-sentinel / budget checks), the walker stats the graph store. If `st_mtime_ns` differs from the cached baseline, `load_graph` is called. The new entry list replaces the cached one and the baseline advances. Id-based comparisons mean the existing `completed_ids` / `blocked_ids` overlay sets continue to match correctly against the fresh dicts. (The sha256 sidecar this section once tracked is retired. The store keeper's gated read publishes consistent bytes.)
 
 ### Failure handling
 
@@ -44,9 +44,9 @@ Step 3 is the no-retry-storm contract. A slow concurrent writer (say an `fno bac
 
 The seed-time `os.stat` is also wrapped in `except OSError` (per [memory note on FileNotFoundError ⊂ OSError](../../README.md)) so a permission flap or NFS hiccup at startup falls through to `_graph_mtime_ns = None` rather than crashing the walker.
 
-### Late-appearing graph.json
+### Late-appearing graph store
 
-If `graph.json` does not exist when the walker starts, both seed mtimes stay `None`. The reload trigger is gated only on `graph_path is not None` (not on the seed mtime), so a later stat that returns a real mtime satisfies the `current_mtime_ns != _graph_mtime_ns` check (`int != None` is True) and triggers reload. The walker recovers when the file appears.
+If the graph store does not exist when the walker starts, both seed mtimes stay `None`. The reload trigger is gated only on `graph_path is not None` (not on the seed mtime), so a later stat that returns a real mtime satisfies the `current_mtime_ns != _graph_mtime_ns` check (`int != None` is True) and triggers reload. The walker recovers when the file appears.
 
 ### Events
 

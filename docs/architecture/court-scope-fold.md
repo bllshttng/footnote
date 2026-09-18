@@ -33,7 +33,7 @@ caller (hooks, or the operator).
 
 ## The fold lives in the native binary
 
-`fno-agents court-fold` reads graph.json and the claims dir itself,
+`fno-agents court-fold` reads the backlog graph and the claims dir itself,
 compiles each crown's scope with the rules `king_board/scope.rs` applies,
 and names workers through the same native claim verdicts `claim sweep`
 uses, so a fold and the claims surface cannot disagree about who holds a
