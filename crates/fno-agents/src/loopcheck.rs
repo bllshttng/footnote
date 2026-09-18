@@ -6789,6 +6789,16 @@ fn make_fingerprint(
     ci_conclusion: &str,
     latest_ts: &str,
 ) -> String {
+    // An absent latest-review time renders "none", matching the pre-done
+    // pre-read's no-PR form. Left empty, the done-fingerprint could never
+    // match the pre-fingerprint in a no-PR world (pre says "none", done
+    // says ""), the streak reset to 1 on every fire, and the NoProgress
+    // backstop could never trip - a stuck session looped forever.
+    let latest_ts = if latest_ts.is_empty() {
+        "none"
+    } else {
+        latest_ts
+    };
     format!("{head_sha}|{pr_state}|{ci_conclusion}|{latest_ts}")
 }
 
