@@ -113,7 +113,7 @@ def test_labels_yaml_controls_are_wellformed():
     rows = yaml.safe_load(
         (repo / "evals/blueprint-judge/labels.yaml").read_text(encoding="utf-8")
     )
-    assert len(rows) == 9 and all(r["control"] for r in rows)
+    assert len(rows) == 11 and all(r["control"] for r in rows)
     dims = {d for r in rows for d in r["labels"]}
     schema = yaml.safe_load(
         (repo / "cli/src/fno/events/schema.yaml").read_text(encoding="utf-8")
