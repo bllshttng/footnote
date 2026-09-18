@@ -54,6 +54,28 @@ impl Freshness {
     pub fn counts(&self) -> bool {
         !matches!(self, Freshness::Stale)
     }
+
+    /// Whether a verdict recorded at another sha covers the WHOLE of
+    /// `merge_base..head` here, which is the tiling question rather than the
+    /// coverage question.
+    ///
+    /// `counts()` answers "did a reviewer read this PR". This answers the
+    /// stronger "was every line still shipping read", so it is deliberately
+    /// narrower: `CarriedInterdiff { lines: n }` with `n > 0` counts as a
+    /// review under law d-608344c1 and still does, but `n` lines nobody read
+    /// are `n` lines nobody read, and a tile may not assert otherwise. A zero
+    /// interdiff is the same proof `CarriedBaseSync` carries by another route
+    /// (PR 2137 measured one), so it tiles.
+    pub fn tiles_whole_range(&self) -> bool {
+        match self {
+            Freshness::Fresh
+            | Freshness::CarriedBaseSync
+            | Freshness::CarriedDocsOnly
+            | Freshness::CarriedSubset => true,
+            Freshness::CarriedInterdiff { lines, .. } => *lines == 0,
+            Freshness::Stale => false,
+        }
+    }
 }
 
 impl Freshness {
@@ -522,6 +544,20 @@ mod tests {
             interdiff_lines: interdiff,
             carry_interdiff_lines: cap,
         }
+    }
+
+    #[test]
+    fn tiles_whole_range_grants_only_whole_range_proofs() {
+        // The tiling question is stronger than the coverage question: a tile
+        // asserts every shipping line was read, so the interdiff arm tiles
+        // only at zero, and Stale never tiles whatever counts() says.
+        assert!(Freshness::Fresh.tiles_whole_range());
+        assert!(Freshness::CarriedBaseSync.tiles_whole_range());
+        assert!(Freshness::CarriedDocsOnly.tiles_whole_range());
+        assert!(Freshness::CarriedSubset.tiles_whole_range());
+        assert!(Freshness::CarriedInterdiff { lines: 0, cap: 100 }.tiles_whole_range());
+        assert!(!Freshness::CarriedInterdiff { lines: 1, cap: 100 }.tiles_whole_range());
+        assert!(!Freshness::Stale.tiles_whole_range());
     }
 
     #[test]
