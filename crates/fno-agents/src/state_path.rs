@@ -44,7 +44,9 @@ pub fn run(args: &[String]) -> i32 {
 /// (which the hooks previously called). `events` honors `FNO_EVENTS_PATH` and
 /// migrates the legacy checkout journal so a hook append never splits the
 /// file; `target-state` falls back to the pre-space checkout manifest.
-fn resolve(name: &str, cwd: &std::path::Path) -> Option<PathBuf> {
+/// `pub(crate)`: the route-slot verb resolves its refusal-journal path here,
+/// so the pin and the space fallback have one owner.
+pub(crate) fn resolve(name: &str, cwd: &std::path::Path) -> Option<PathBuf> {
     let space = space_dir(cwd);
     let wt = worktree_space_dir(cwd);
     match name {
