@@ -86,13 +86,14 @@ pub mod cli_args;
 pub mod client;
 pub mod client_verbs;
 pub mod codex_ask;
+pub mod codex_daemon_readiness;
+pub mod codex_daemon_upgrade;
 /// Test support: a fake shared codex app-server daemon. Public because the
 /// in-crate daemon tests and the integration tests both need one fake, and
 /// only a library item reaches both.
 #[doc(hidden)]
 pub mod codex_fake_daemon;
 pub mod codex_inject;
-pub mod codex_daemon_readiness;
 /// Public because `codex_resume` (pub, exercised by the parity test) names
 /// [`CodexRoute`] in its signature.
 pub mod codex_posture;

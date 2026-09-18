@@ -8,8 +8,8 @@ use crate::client::{
     check_daemon_drift, resolve_daemon_bin, restart_daemon, RestartError, RestartOutcome,
 };
 use crate::drift::DriftState;
-use crate::AgentStatus;
 use crate::paths::AgentsHome;
+use crate::AgentStatus;
 
 /// One live thread row, read from the registry before and after the daemon
 /// swap: the preserved/lost comparison keys on the FULL harness session id,
@@ -33,7 +33,12 @@ pub(crate) fn read_thread_rows(home: &AgentsHome) -> Vec<ThreadRow> {
     registry
         .entries
         .iter()
-        .filter(|row| matches!(row.status, AgentStatus::Ready | AgentStatus::Idle | AgentStatus::Spawning | AgentStatus::Live))
+        .filter(|row| {
+            matches!(
+                row.status,
+                AgentStatus::Ready | AgentStatus::Idle | AgentStatus::Spawning | AgentStatus::Live
+            )
+        })
         .filter(|row| row.harness_session_id.is_some() || row.keeper_child_pid.is_some())
         .map(|row| ThreadRow {
             name: row.name.clone(),
@@ -51,11 +56,85 @@ fn restart_gate(state: &DriftState) -> bool {
     matches!(state, DriftState::Drifted { .. })
 }
 
-/// The verdict fold: a failed daemon leg, a failed mux leg, or a spared
-/// store keeper each mean the fleet is NOT healed. Pure so the contract
-/// "every unhealed leg fails the verb" is unit-testable.
-fn verdict(code: i32, mux_failed: bool, spared_keeper: bool) -> (bool, &'static str) {
-    let ok = code == 0 && !mux_failed && !spared_keeper;
+/// Render the codex upgrade outcome into (stdout lines, stderr lines,
+/// failed). Pure and unit-tested: `failed` ONLY on [`UpgradeOutcome::Failed`]
+/// - a held or refused upgrade is reported and NOT failed, because the
+/// transaction refused BEFORE mutating and the fleet is otherwise healed.
+pub(crate) fn render_upgrade(
+    outcome: &crate::codex_daemon_upgrade::UpgradeOutcome,
+) -> (Vec<String>, Vec<String>, bool) {
+    use crate::codex_daemon_upgrade::UpgradeOutcome;
+    match outcome {
+        UpgradeOutcome::ReusedCurrent { installed, live } => {
+            let say = format!(
+                "fno agents restart: codex app-server reused (installed {}, live {}).",
+                installed.as_deref().unwrap_or("unreadable"),
+                live.as_deref().unwrap_or("unreadable"),
+            );
+            (vec![say], Vec::new(), false)
+        }
+        UpgradeOutcome::Held {
+            kind: _,
+            reason,
+            installed,
+            live,
+            pid,
+        } => {
+            let say = format!(
+                "fno agents restart: codex app-server held ({reason}; installed {}, live {}, pid {}).",
+                installed.as_deref().unwrap_or("unreadable"),
+                live.as_deref().unwrap_or("unreadable"),
+                pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string()),
+            );
+            (Vec::new(), vec![say], false)
+        }
+        UpgradeOutcome::Refused { reason, threads } => {
+            let say = format!(
+                "fno agents restart: codex upgrade refused before mutation ({reason}); {} thread(s) hold the daemon as-is.",
+                threads.len()
+            );
+            (Vec::new(), vec![say], false)
+        }
+        UpgradeOutcome::Failed {
+            reason,
+            threads,
+            missing_ids,
+        } => {
+            let say = format!(
+                "fno agents restart: codex upgrade FAILED ({reason}); snapshot {} thread(s), missing after restart: [{}]. NO success is claimed.",
+                threads.len(),
+                missing_ids.join(", "),
+            );
+            (Vec::new(), vec![say], true)
+        }
+        UpgradeOutcome::Upgraded {
+            before,
+            after,
+            threads,
+            config_unchanged,
+        } => {
+            let say = format!(
+                "fno agents restart: codex app-server upgraded ({} -> {}, {} thread(s) re-read; config {}).",
+                before.get("live").and_then(|v| v.as_str()).unwrap_or("?"),
+                after.get("live").and_then(|v| v.as_str()).unwrap_or("?"),
+                threads.len(),
+                if *config_unchanged { "unchanged" } else { "CHANGED" },
+            );
+            (vec![say], Vec::new(), false)
+        }
+    }
+}
+
+/// The verdict fold: a failed daemon leg, a failed mux leg, a failed codex
+/// upgrade leg, or a spared store keeper each mean the fleet is NOT healed.
+/// Pure so the contract "every unhealed leg fails the verb" is unit-testable.
+fn verdict(
+    code: i32,
+    mux_failed: bool,
+    spared_keeper: bool,
+    upgrade_failed: bool,
+) -> (bool, &'static str) {
+    let ok = code == 0 && !mux_failed && !spared_keeper && !upgrade_failed;
     (ok, if ok { "ok" } else { "FAILED" })
 }
 
@@ -208,6 +287,18 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
             "fno agents restart: {stale_panes} pane keeper(s) run an older build; kept with their panes, current when each pane ends."
         ));
     }
+    // The codex shared-daemon leg: the session-preserving upgrade
+    // transaction, riding the SAME restart receipt as every other
+    // component. Reused-current, held, refused, upgraded, or failed - and
+    // ONLY a post-restart verification failure fails the verb.
+    let upgrade_outcome = crate::codex_daemon_upgrade::codex_daemon_upgrade_transaction().await;
+    let (up_out, up_err, upgrade_failed) = render_upgrade(&upgrade_outcome);
+    for line in &up_out {
+        say(line);
+    }
+    for line in &up_err {
+        eprintln!("{line}");
+    }
     // The pr-watch LaunchAgent embeds an absolute binary path that a daemon
     // swap never re-renders (`fno agents restart` reaches no launchd job);
     // re-render and bounce it, the same tail `fno doctor update` appends.
@@ -277,6 +368,10 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
         "old_pid": old_pid,
         "new_pid": new_pid,
     })];
+    components.push(json!({
+        "kind": "codex-app-server",
+        "outcome": serde_json::to_value(&upgrade_outcome).unwrap_or(serde_json::Value::Null),
+    }));
     let mut preserved: Vec<serde_json::Value> = Vec::new();
     for row in &after {
         if let Some(sid) = &row.session_id {
@@ -320,36 +415,41 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
         })).collect::<Vec<_>>(),
         "pane_keepers_stale": stale_panes,
         "mux": mux_summary,
-        "ok": verdict(code, mux_failed, cycled.iter().any(|c| c.result != "cycled")).0,
-        "verdict": verdict(code, mux_failed, cycled.iter().any(|c| c.result != "cycled")).1,
+        "ok": verdict(code, mux_failed, cycled.iter().any(|c| c.result != "cycled"), upgrade_failed).0,
+        "verdict": verdict(code, mux_failed, cycled.iter().any(|c| c.result != "cycled"), upgrade_failed).1,
     });
     println!("fno agents restart: keepers {summary}");
-    u8::from(cycled.iter().any(|c| c.result != "cycled") || mux_failed) as i32
+    u8::from(cycled.iter().any(|c| c.result != "cycled") || mux_failed || upgrade_failed) as i32
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{render_restart, restart_gate, verdict};
+    use super::{render_restart, render_upgrade, restart_gate, verdict};
     use crate::drift::{classify, ExeFingerprint};
     use std::path::PathBuf;
 
     #[test]
     fn every_unhealed_leg_fails_the_verdict() {
-        assert_eq!(verdict(0, false, false), (true, "ok"));
+        assert_eq!(verdict(0, false, false, false), (true, "ok"));
         assert_eq!(
-            verdict(1, false, false),
+            verdict(1, false, false, false),
             (false, "FAILED"),
             "a failed daemon leg"
         );
         assert_eq!(
-            verdict(0, true, false),
+            verdict(0, true, false, false),
             (false, "FAILED"),
             "a failed mux leg"
         );
         assert_eq!(
-            verdict(0, false, true),
+            verdict(0, false, true, false),
             (false, "FAILED"),
             "a spared store keeper"
+        );
+        assert_eq!(
+            verdict(0, false, false, true),
+            (false, "FAILED"),
+            "a failed codex upgrade leg"
         );
     }
 
@@ -411,6 +511,64 @@ mod tests {
             Some("note: declining recycled pid"),
             "the note rides once, on stderr"
         );
+    }
+
+    #[test]
+    fn render_upgrade_says_reused_when_current() {
+        use crate::codex_daemon_upgrade::UpgradeOutcome;
+        let (out, err, failed) = render_upgrade(&UpgradeOutcome::ReusedCurrent {
+            installed: Some("0.154.0".into()),
+            live: Some("0.154.0".into()),
+        });
+        assert!(out[0].contains("reused"));
+        assert!(out[0].contains("0.154.0"));
+        assert!(err.is_empty());
+        assert!(!failed);
+    }
+
+    #[test]
+    fn render_upgrade_refusal_is_loud_but_not_failed() {
+        use crate::codex_daemon_upgrade::{HoldKind, UpgradeOutcome};
+        let thread = crate::codex_daemon_upgrade::SnapshotThread {
+            id: "thr-1".into(),
+            cwd: "/w".into(),
+            status: Some("active".into()),
+            fno_row: None,
+        };
+        let refused = UpgradeOutcome::Refused {
+            reason: "thread thr-1 has an active turn".into(),
+            threads: vec![thread],
+        };
+        let (out, err, failed) = render_upgrade(&refused);
+        assert!(out.is_empty());
+        assert!(err[0].contains("refused before mutation"));
+        assert!(!failed, "refusal is a hold, not a failure");
+        let held = UpgradeOutcome::Held {
+            kind: HoldKind::NotStale,
+            reason: "readiness unreadable".into(),
+            installed: None,
+            live: None,
+            pid: Some(9),
+        };
+        let (out, err, failed) = render_upgrade(&held);
+        assert!(out.is_empty());
+        assert!(err[0].contains("held"));
+        assert!(!failed, "a hold is reported, not failed");
+    }
+
+    #[test]
+    fn render_upgrade_failed_claims_no_success() {
+        use crate::codex_daemon_upgrade::UpgradeOutcome;
+        let failed = UpgradeOutcome::Failed {
+            reason: "threads missing after the restart".into(),
+            threads: vec![],
+            missing_ids: vec!["thr-9".into()],
+        };
+        let (out, err, failed) = render_upgrade(&failed);
+        assert!(out.is_empty());
+        assert!(err[0].contains("FAILED"));
+        assert!(err[0].contains("thr-9"));
+        assert!(failed, "only a failed upgrade fails the verb");
     }
 
     #[test]
