@@ -882,64 +882,64 @@ fn readers_follow_store_rows_reflect_mutations() {
         assert_eq!(after[1]["id"], "ab-two");
         assert_eq!(after[1]["title"], "Two renamed");
     }
+}
 
-    #[test]
-    fn api_session_end_writes_an_explicit_instant_on_both_fill_branches() {
-        let (_d1, _d2, json_store, _sqlite_store) = both_stores();
-        let store = &json_store;
-        session_append(store, "ab-one", session_row("s-explicit")).unwrap();
-        let payload = session_end(
-            store,
-            "ab-one",
-            "s-explicit",
-            "reap-sweep",
-            Some("do"),
-            Some("claude"),
-            Some("2026-08-02T07:00:00Z"),
-        )
+#[test]
+fn api_session_end_writes_an_explicit_instant_on_both_fill_branches() {
+    let (_d1, _d2, json_store, _sqlite_store) = both_stores();
+    let store = &json_store;
+    session_append(store, "ab-one", session_row("s-explicit")).unwrap();
+    let payload = session_end(
+        store,
+        "ab-one",
+        "s-explicit",
+        "reap-sweep",
+        Some("do"),
+        Some("claude"),
+        Some("2026-08-02T07:00:00Z"),
+    )
+    .unwrap();
+    assert!(payload.success);
+    let one = node(store, "ab-one").unwrap().unwrap();
+    let typed = one
+        .sessions
+        .unwrap()
+        .into_iter()
+        .find(|row| row.session_id == "s-explicit")
         .unwrap();
-        assert!(payload.success);
-        let one = node(store, "ab-one").unwrap().unwrap();
-        let typed = one
-            .sessions
-            .unwrap()
-            .into_iter()
-            .find(|row| row.session_id == "s-explicit")
-            .unwrap();
-        assert_eq!(typed.ended_at.as_deref(), Some("2026-08-02T07:00:00Z"));
+    assert_eq!(typed.ended_at.as_deref(), Some("2026-08-02T07:00:00Z"));
 
-        // Raw branch: a row the typed model cannot represent still owes its
-        // close, and reads the same explicit instant through the raw fill.
-        mutate(store, "seed-raw", |entries| {
-            entries.push(json!({
-                "id": "ab-raw1", "slug": "ab-raw1", "title": "Raw", "type": "feature",
-                "status": "in_progress", "priority": "p2",
-                "created_at": "2026-08-01T00:00:00+00:00",
-                "sessions": [
-                    {"session_id": "s-raw", "phase": "do", "harness": "claude",
-                     "started_at": 123}
-                ]
-            }));
-            Ok(true)
-        })
+    // Raw branch: a row the typed model cannot represent still owes its
+    // close, and reads the same explicit instant through the raw fill.
+    mutate(store, "seed-raw", |entries| {
+        entries.push(json!({
+            "id": "ab-raw1", "slug": "ab-raw1", "title": "Raw", "type": "feature",
+            "status": "in_progress", "priority": "p2",
+            "created_at": "2026-08-01T00:00:00+00:00",
+            "sessions": [
+                {"session_id": "s-raw", "phase": "do", "harness": "claude",
+                 "started_at": 123}
+            ]
+        }));
+        Ok(true)
+    })
+    .unwrap();
+    let payload = session_end(
+        store,
+        "ab-raw1",
+        "s-raw",
+        "reap-sweep",
+        Some("do"),
+        Some("claude"),
+        Some("2026-08-02T08:30:00Z"),
+    )
+    .unwrap();
+    assert!(payload.success);
+    let entries = rows(store).unwrap();
+    let raw = entries
+        .iter()
+        .find(|e| crate::graph_store::entry_id(e) == Some("ab-raw1"))
         .unwrap();
-        let payload = session_end(
-            store,
-            "ab-raw1",
-            "s-raw",
-            "reap-sweep",
-            Some("do"),
-            Some("claude"),
-            Some("2026-08-02T08:30:00Z"),
-        )
-        .unwrap();
-        assert!(payload.success);
-        let entries = rows(store).unwrap();
-        let raw = entries
-            .iter()
-            .find(|e| crate::graph_store::entry_id(e) == Some("ab-raw1"))
-            .unwrap();
-        assert_eq!(raw["sessions"][0]["ended_at"], "2026-08-02T08:30:00Z");
-        assert_eq!(raw["sessions"][0]["ended_by"], "reap-sweep");
-    }
+    assert_eq!(raw["sessions"][0]["ended_at"], "2026-08-02T08:30:00Z");
+    assert_eq!(raw["sessions"][0]["ended_by"], "reap-sweep");
 }
