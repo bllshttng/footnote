@@ -899,7 +899,8 @@ def test_backlog_note_cli_verb(tmp_graph, monkeypatch):
     state = node["current_state"]
     assert state["body"] == "shipped wave 1"
     assert state["source_session_id"] == session_id
-    assert state["source_harness"] is None
+    # A null harness exports as an absent key (the store strips nulls).
+    assert state.get("source_harness") is None
 
 
 def test_backlog_note_is_visible_and_preserves_details_and_prior_notes(tmp_graph):
