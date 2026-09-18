@@ -309,6 +309,21 @@ impl Core {
         Some(a.pane)
     }
 
+    /// Bind one stored SHELL slot to its re-adopted pane by birth pane id:
+    /// the slot recorded the pane id that lived in the leaf at capture, and
+    /// the keeper re-adopts at the birth id, so the id is a safe join. Only
+    /// an unplaced adoptee joins; a fresh-id adoption (unreconciled) never
+    /// matches and lands in its own tab with today's notice.
+    pub(crate) fn take_adopted_for_slot(&mut self, birth: u64) -> Option<u64> {
+        let hit = self
+            .keeper_adopted
+            .iter_mut()
+            .find(|a| !a.placed && a.pane == birth);
+        let a = hit?;
+        a.placed = true;
+        Some(a.pane)
+    }
+
     /// Place any adopted pane restore's member walk did not bind (its stored
     /// member is gone, or the store held no squads at all). A live pane must
     /// never be left dangling without a tab: one tab each, named from the

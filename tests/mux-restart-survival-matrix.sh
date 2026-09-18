@@ -142,6 +142,20 @@ trap cleanup EXIT
 
 alive() { kill -0 "$1" 2>/dev/null; }
 ppid_of() { ps -o ppid= -p "$1" | tr -d '[:space:]'; }
+# A control call can land while the server is still re-initializing after a
+# kill: the read then resets. Retry the call instead of racing it.
+retry_ctl() {
+    local tries="$1"
+    shift
+    local i=1
+    until "$@" 2>/dev/null; do
+        i=$((i + 1))
+        if [ "$i" -gt "$tries" ]; then
+            return 1
+        fi
+        sleep 0.5
+    done
+}
 counter_lines() {
     if [[ -f "$1" ]]; then wc -l <"$1" | tr -d '[:space:]'; else echo 0; fi
 }
@@ -381,6 +395,10 @@ kill_server_hard
 echo "[restart 1] mux server $KILLED_SERVER SIGKILLed"
 
 start_server
+# The stored workspace restore runs after every fresh server: the slot join
+# (a re-adopted pane returns to its own leaf by birth pane id) is exactly
+# what this verb drives.
+retry_ctl 10 "$MUX_BIN" mux workspace restore --session "$SESSION" --json >/dev/null 2>&1 || true
 
 for row in a b c d; do
     eval "pane=\$PANE_$(printf %s "$row" | tr a-z A-Z)"
@@ -454,6 +472,7 @@ sleep 1
 echo "[restart 3] server $KILLED_SERVER and daemon $KILLED_DAEMON SIGKILLed together"
 
 start_server
+retry_ctl 10 "$MUX_BIN" mux workspace restore --session "$SESSION" --json >/dev/null 2>&1 || true
 "$AGENTS_CLIENT_BIN" list >/dev/null 2>&1 || true
 for _ in {1..100}; do
     DAEMON_PID="$(head -1 "$AGENTS_HOME/supervisor.sock.lock" 2>/dev/null | awk '{print $1}')"

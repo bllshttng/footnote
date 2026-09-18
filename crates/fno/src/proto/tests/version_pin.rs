@@ -112,7 +112,10 @@ fn layout_slot_portal_field_is_additive() {
         portal: Some(PortalSlot {
             index: 1,
             row: "deadbee1".into(),
+            harness: None,
+            session_id: None,
         }),
+        pane_id: None,
     };
     let back: LayoutSlot = serde_json::from_str(&serde_json::to_string(&seated).unwrap()).unwrap();
     assert_eq!(seated, back);

@@ -2222,6 +2222,12 @@ pub(crate) struct Core {
     /// references at server exit. Removed on pane close; re-owned by
     /// re-adoption.
     shell_rc_dirs: HashMap<u64, std::path::PathBuf>,
+    /// Per-portal fill guards recorded at capture: `portal index -> FULL
+    /// harness session id`. A held seat whose key later resolves to a
+    /// different session id is a DIFFERENT thread under a familiar label;
+    /// the fill refuses and names both. Cleared when the seat fills live
+    /// (ownership is then the reach's, not the store's).
+    portal_session_guards: BTreeMap<u8, String>,
 }
 
 /// At most one `human_touch(inject)` per pane per window: the first keystroke
@@ -2326,6 +2332,11 @@ struct SlotCapture<'a> {
     /// the tab loop. A seated leaf names its slot after the portal instead of
     /// an ordinal, so the capture keeps what restore needs to hold it again.
     portal_seats: &'a HashMap<u64, (u8, String)>,
+    /// The live portals map and the registry snapshot, read once: a seated
+    /// leaf's `PortalSlot` carries the row's harness and FULL session id (the
+    /// fill guard) resolved through the same join the reach uses.
+    portals: &'a BTreeMap<u8, Portal>,
+    agents: &'a [crate::agents_view::RegistryAgent],
     slots: Vec<LayoutSlot>,
     by_pane: HashMap<u64, String>,
     ordinal: usize,
@@ -2336,11 +2347,15 @@ impl<'a> SlotCapture<'a> {
         pane_owner: &'a HashMap<u64, &str>,
         pane_cwd: &'a HashMap<u64, String>,
         portal_seats: &'a HashMap<u64, (u8, String)>,
+        portals: &'a BTreeMap<u8, Portal>,
+        agents: &'a [crate::agents_view::RegistryAgent],
     ) -> Self {
         SlotCapture {
             pane_owner,
             pane_cwd,
             portal_seats,
+            portals,
+            agents,
             slots: Vec::new(),
             by_pane: HashMap::new(),
             ordinal: 0,
@@ -2405,15 +2420,30 @@ impl<'a> SlotCapture<'a> {
                 None => LayoutBinding::Shell,
             }
         };
-        let portal = self.portal_seats.get(&pane).map(|(index, row)| PortalSlot {
-            index: *index,
-            row: row.clone(),
+        let portal = self.portal_seats.get(&pane).map(|(index, row)| {
+            // The row facts the fill guard reads back after a restart:
+            // harness + FULL session id of the row the seat showed at
+            // capture, resolved through the same agents snapshot the reach
+            // itself used. A row that no longer resolves captures as None
+            // and fills unguarded.
+            let row_facts = crate::thread_viewer::row_for_pane(self.portals, pane, self.agents)
+                .map(|agent| (agent.harness.clone(), agent.harness_session_id.clone()))
+                .unwrap_or((None, None));
+            PortalSlot {
+                index: *index,
+                row: row.clone(),
+                harness: row_facts.0,
+                session_id: row_facts.1,
+            }
         });
         self.slots.push(LayoutSlot {
             name: name.clone(),
             binding,
             cwd: self.pane_cwd.get(&pane).cloned(),
             portal,
+            // The restart join: the leaf remembers the pane id that lived
+            // here, so restore can bind its re-adopted keeper twin.
+            pane_id: Some(pane),
         });
         self.by_pane.insert(pane, name.clone());
         name
@@ -6971,7 +7001,13 @@ impl Core {
                     .map(|e| (e.pty.child_pid(), e.cwd.as_str()))
             };
             crate::pane_cwd::fill_leaf_cwds(tree::leaves(root), cwd_of, &mut pane_cwd);
-            let mut capture = SlotCapture::new(&pane_owner, &pane_cwd, &portal_seats);
+            let mut capture = SlotCapture::new(
+                &pane_owner,
+                &pane_cwd,
+                &portal_seats,
+                &self.portals,
+                &self.agents,
+            );
             let tree = capture.node_to_spec(root);
             let focus = capture.slot_of(t.focus);
             trees.push(StoredTabTree {
@@ -7701,6 +7737,7 @@ impl Core {
         let mut held_workers_total = 0usize;
         // Portal seats held idle across every restored squad.
         let mut held_portals_total = 0usize;
+        let mut live_portals_total = 0usize;
         let mut refused_workers_total = 0usize;
         // Worker members whose work the graph says is DONE. They are
         // history, not garbage: kept as members, never held, never refused-
@@ -7778,7 +7815,7 @@ impl Core {
             // Portal slots held idle by this restore: (index, row,
             // pane, tab id). Filled in the tree lane once the tab id exists,
             // inserted into `portals` after the squad lands.
-            let mut held_portal_seats: Vec<(u8, String, u64, TabId)> = Vec::new();
+            let mut held_portal_seats: Vec<(u8, String, u64, TabId, Option<String>)> = Vec::new();
             // Live member panes spawned but not yet placed in a tab:
             // (attach_id, pane, stored tab name). The tree lane places them by
             // slot; the legacy lane gives each its own tab.
@@ -8429,8 +8466,11 @@ impl Core {
             // Re-arm every held portal seat (in portal_reach): the
             // entry goes back in the map, the seat pane gets its name and its
             // held message, and the reach or a focus fills it on first demand.
-            held_portals_total +=
+            // A seat whose re-adopted viewer joined its slot re-arms LIVE.
+            let (this_held, this_live) =
                 portal_reach::rearm_held_portal_seats(self, std::mem::take(&mut held_portal_seats));
+            held_portals_total += this_held;
+            live_portals_total += this_live;
             // Persist the reconciled membership (members dead at restore are now
             // tombstoned in the store) plus the just-restored tree capture, so a
             // second restart restores the same shape.
@@ -8464,8 +8504,13 @@ impl Core {
         }
         if hold_workers && worker_members_total == 0 && held_portals_total == 0 {
             self.notice_all("restore: 0 worker member(s) recorded; held 0 worker pane(s)");
-        } else if hold_workers || held_portals_total > 0 {
-            portal_reach::notify_held_receipt(self, held_workers_total, held_portals_total);
+        } else if hold_workers || held_portals_total > 0 || live_portals_total > 0 {
+            portal_reach::notify_held_receipt(
+                self,
+                held_workers_total,
+                held_portals_total,
+                live_portals_total,
+            );
         }
         if hold_workers && refused_workers_total > 0 {
             self.notice_all(format!(
@@ -13685,6 +13730,7 @@ async fn serve(
         pending_thread_reply: None,
         keeper_adopted: Vec::new(),
         shell_rc_dirs: HashMap::new(),
+        portal_session_guards: BTreeMap::new(),
     };
 
     // The off-loop registry reader (4a-G2): a 1s interval task stats/reads
