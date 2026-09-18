@@ -850,8 +850,9 @@ def test_cut_sweep_hands_back_scan_progress(monkeypatch, _no_global_tick_events)
     app = typer.Typer()
     app.command()(prcli.tick)
     result = CliRunner().invoke(app, [])
-    # A cut tick exits 75 (the launchd timeout verdict), not 0.
-    assert result.exit_code == prcli._TICK_TIMEOUT_EXIT, result.output
+    # A cut tick completes; the slice it spent lives on cut/saturated, and
+    # the sweep cut itself reads as error without a watermark, not timeout.
+    assert result.exit_code == 0, result.output
     rows = [d for _t, d in _no_global_tick_events
             if d.get("arm") == "pr_watch_sweep"]
     assert rows, "a cut sweep must mint its arm row"
@@ -886,7 +887,7 @@ def test_cut_before_body_reports_zero_progress(monkeypatch, _no_global_tick_even
     app = typer.Typer()
     app.command()(prcli.tick)
     result = CliRunner().invoke(app, [])
-    assert result.exit_code == prcli._TICK_TIMEOUT_EXIT, result.output
+    assert result.exit_code == 0, result.output
     rows = [d for _t, d in _no_global_tick_events
             if d.get("arm") == "pr_watch_sweep"]
     assert rows
@@ -894,6 +895,60 @@ def test_cut_before_body_reports_zero_progress(monkeypatch, _no_global_tick_even
     # stale pre-seeded note is gone.
     assert "scanned" not in rows[0]["detail"]
     assert "999" not in rows[0]["detail"]
+
+
+def test_slice_saturated_tick_mints_its_watermark(monkeypatch, _no_global_tick_events):
+    """A phase that saturates its own p90 cap does not make the tick a
+    timeout: every phase runs, the tick ends ok, cut/saturated name the
+    overrun, and the sweep's watermark still mints - so no arm reads
+    tick_overdue on a tick that finished its work."""
+    import time as _time
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch._dispatch import TickResult
+
+    settings = _cadence_settings()
+    settings.king = SimpleNamespace(wake_enabled=True, wake_debounce_seconds=900)
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+    monkeypatch.setattr("time.time", lambda: 1.0)  # stranded's slot; others skip
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_kw: (
+            _kw["emit"]("pr_watch_tick", {"open_prs": 0, "acted": 0}),
+            TickResult(open_prs=0, acted=0),
+        )[1],
+    )
+    monkeypatch.setitem(prcli._PHASE_CAP_S, "king_wake", 1)
+
+    def _saturate(_settings, emit, **_kw):
+        _time.sleep(1.5)
+        return {"woke": [], "crowns": 0}
+
+    monkeypatch.setattr(
+        "fno.pr_watch._king_wake.run_king_wake", _saturate, raising=True,
+    )
+    monkeypatch.setattr(prcli, "_run_notify_watch_phase",
+                        lambda _roots=None, timeout_s=None: None, raising=True)
+    monkeypatch.setattr(prcli, "_catchup_roots", lambda: [], raising=True)
+    monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [], raising=True)
+    monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
+    monkeypatch.setattr(prcli, "_ROSTER_FLOOR_S", 10_000.0, raising=True)
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    result = CliRunner().invoke(app, [])
+
+    assert result.exit_code == 0, result.output
+    ends = [d for t, d in _no_global_tick_events if t == "pr_watch_tick_end"]
+    assert ends and ends[-1]["outcome"] == "ok"
+    assert "why" not in ends[-1]
+    assert ends[-1].get("cut") == ["king_wake"]
+    assert ends[-1].get("saturated") == ["king_wake"]
+    assert "king_wake" in ends[-1].get("phase_s", {})
+    # The completed sweep minted the liveness watermark inside this tick.
+    assert any(t == "pr_watch_tick" for t, _d in _no_global_tick_events)
 
 
 def test_notify_timeout_falls_back_to_the_phase_deadline(monkeypatch):

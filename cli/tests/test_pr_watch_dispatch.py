@@ -2486,8 +2486,11 @@ class TestTickRecordsAndDeadline:
         assert ends[0]["phase"] == "settings"
         assert res.exit_code != 0
 
-    def test_deadline_timeout_writes_end_record_and_exits_75(self, monkeypatch):
-        """AC7-HP: a tick stalled past its deadline ends with outcome timeout."""
+    def test_wall_spent_by_one_phase_is_not_a_tick_timeout(self, monkeypatch):
+        """A phase that spends the whole wall ceiling is cut and the phases
+        behind it starve, but the tick still runs to its end record: outcome
+        error without a watermark (the sweep never finished), never timeout.
+        Only a wall abort between phases reads timeout."""
         import time as _time
 
         def _stall(**_kw):
@@ -2497,15 +2500,19 @@ class TestTickRecordsAndDeadline:
         monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "1")
         res, events = self._invoke_tick(monkeypatch, _stall)
 
-        assert res.exit_code == 75, f"expected exit 75, got {res.exit_code}: {res.output!r}"
+        assert res.exit_code == 0, f"expected exit 0, got {res.exit_code}: {res.output!r}"
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
         assert len(ends) == 1
-        assert ends[0]["outcome"] == "timeout"
-        assert ends[0]["phase"] == "sweep"
+        assert ends[0]["outcome"] == "error"
+        assert "why" not in ends[0]
+        assert "sweep" in ends[0]["cut"]
         assert ends[0]["duration_s"] >= 1.0
-        # x-d211: the env ceiling (1s) is below the sweep cap (150s), so the
-        # wall fired - the why says deadline, never "phase slice spent".
-        assert ends[0]["why"] == "deadline_exceeded"
+        rows = [d for t, d in events if t == "control_plane_tick"
+                and d.get("arm") == "pr_watch_sweep"]
+        assert rows
+        # The wall wording, not the slice wording: the env ceiling (1s) is
+        # below the sweep cap (150s), so the alarm budget was the wall.
+        assert "deadline exceeded in phase sweep" in rows[-1]["detail"]
 
     def test_sigterm_during_a_tick_writes_its_death_record(self, monkeypatch):
         """A bootout's SIGTERM cannot unwind the tick, so the handler writes
@@ -2629,7 +2636,7 @@ class TestTickRecordsAndDeadline:
 
         res, events = self._invoke_tick(monkeypatch, _stall)
 
-        assert res.exit_code == 75, f"expected 75, got {res.exit_code}: {res.output!r}"
+        assert res.exit_code == 0, f"expected 0, got {res.exit_code}: {res.output!r}"
         rows = [d for t, d in events if t == "control_plane_tick"]
         king_rows = [d for d in rows if d.get("arm") == "king_wake"]
         notify_rows = [d for d in rows if d.get("arm") == "notify_watch"]
@@ -2640,9 +2647,12 @@ class TestTickRecordsAndDeadline:
         assert merge_rows[-1]["detail"].startswith("merge sweep=cut candidates=0")
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
         assert ends and ends[-1].get("cut") == ["sweep"]
-        # x-d211: the 1s cap is below the 30s wall, so this cut is slice
-        # starvation - one arm lost its turn, the tick carried on.
-        assert ends[-1].get("why") == "slice_starved"
+        # The 1s cap is below the 30s wall, so this cut is slice starvation -
+        # one arm lost its turn and the tick carried on to its end record.
+        # The cut sweep left no TickResult, so the honest outcome is error
+        # without a watermark, never timeout.
+        assert ends[-1].get("outcome") == "error"
+        assert "why" not in ends[-1]
         assert "sweep" in ends[-1].get("phase_s", {})
         assert "king_wake" in ends[-1].get("phase_s", {})
         # Saturated = the phase spent its whole slice: the cut sweep did,
@@ -2703,7 +2713,7 @@ class TestTickRecordsAndDeadline:
         }
         res, events = self._invoke_tick(monkeypatch, _stall, grant_queue=grant_queue)
 
-        assert res.exit_code == 75, res.output
+        assert res.exit_code == 0, res.output
         assert len(drained) == 1 and len(drained[0]) == 1
         cand, key, grant = drained[0][0]
         assert cand.pr_number == 1
@@ -2738,7 +2748,7 @@ class TestTickRecordsAndDeadline:
             monkeypatch, _stall, grant_queue=None, verb_error="boom"
         )
 
-        assert res.exit_code == 75, res.output
+        assert res.exit_code == 0, res.output
         rows = [d for t, d in events if t == "control_plane_tick"]
         merge_rows = [d for d in rows if d.get("arm") == "pr_watch_merge"]
         assert merge_rows and merge_rows[-1].get("skip_reason") == "error"
@@ -2797,7 +2807,7 @@ class TestTickRecordsAndDeadline:
 
         res, events = self._invoke_tick(monkeypatch, _stall)
 
-        assert res.exit_code == 75, f"expected 75, got {res.exit_code}: {res.output!r}"
+        assert res.exit_code == 0, f"expected 0, got {res.exit_code}: {res.output!r}"
         rows = [d for t, d in events if t == "control_plane_tick"]
         king_rows = [d for d in rows if d.get("arm") == "king_wake"]
         assert king_rows and king_rows[-1].get("skip_reason") == "timeout"
@@ -3726,8 +3736,8 @@ class TestFleetLegRunsAfterACutPRLeg:
         monkeypatch.setitem(prcli._PHASE_CAP_S, "sweep", 1)
         res, events, hb = self._invoke(monkeypatch, tmp_path, _stall, _sweep)
 
-        # The sweep was cut at its own slice; the tick still exits 75.
-        assert res.exit_code == 75, res.output
+        # The sweep was cut at its own slice; the tick still completes.
+        assert res.exit_code == 0, res.output
         assert ran == ["fleet"], "recovery must run on its own slice after a cut sweep"
         assert hb.exists(), "the fleet heartbeat must survive a cut sweep"
         payload = _json.loads(hb.read_text(encoding="utf-8"))
@@ -3763,7 +3773,7 @@ class TestFleetLegRunsAfterACutPRLeg:
             king_wake_fn=_stall_in_king_wake,
         )
 
-        assert res.exit_code == 75, res.output
+        assert res.exit_code == 0, res.output
         assert swept == [1], "recovery must run on its own slice after a cut king_wake"
         assert hb.exists(), "the fleet heartbeat must survive a cut king_wake"
         ends = [d for t, d in events if t == "pr_watch_tick_end"]

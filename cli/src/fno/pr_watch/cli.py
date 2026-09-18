@@ -552,7 +552,6 @@ def tick() -> None:
     sweep_started = False
     alarm_ok = True
     cut: list[str] = []
-    cut_whys: dict[str, str] = {}
     phase_s: dict[str, float] = {}
     # Per-phase partial-work notes a body writes as it goes; the runner
     # clears one per phase run and emits it on the cut path, so a cut phase
@@ -646,7 +645,6 @@ def tick() -> None:
                 left = ceiling_box["v"] - (time.monotonic() - started)
             if left is not None and left <= 0:
                 cut.append(name)
-                cut_whys[name] = "deadline_exceeded"
                 phase_s[name] = 0.0
                 if arm is not None:
                     _emit_tick_row(arm, interval_s=arm_interval.get(arm, 600),
@@ -679,7 +677,6 @@ def tick() -> None:
                 body(slice_s)
             except TickDeadlineExceeded:
                 cut.append(name)
-                cut_whys[name] = "deadline_exceeded" if wall_limited else "slice_starved"
                 if arm is not None:
                     # Name the sub-step the alarm caught: a phase that reports
                     # its halves reads as one stall, not a black box. And hand
@@ -1431,9 +1428,9 @@ def tick() -> None:
         _run_phase("watchdog", _phase_watchdog, arm="watchdog", cadence=3, slot=2)
     except TickDeadlineExceeded:
         # Backstop: the per-phase runner catches its own cuts. Reaching here
-        # means a cut escaped between phases; phase names where.
+        # means a cut escaped between phases; phase names where. This is the
+        # one remaining timeout: the wall ceiling aborting the tick.
         timed_out = True
-        cut_whys[current_tick_phase()] = "deadline_exceeded"
         typer.echo(
             f"pr-watch tick: deadline exceeded in phase {current_tick_phase()} - aborted",
             err=True,
@@ -1443,10 +1440,11 @@ def tick() -> None:
             signal.alarm(0)
         except ValueError:
             pass
-        # A cut phase no longer aborts the tick, but a slice still overran:
-        # report timeout and exit 75 so launchd logs it without suppressing
-        # the successor.
-        timed_out = timed_out or bool(cut)
+        # A cut phase no longer aborts the tick and no longer reads timeout:
+        # its own row names the slice it spent, and a tick that ran to this
+        # finally is not a timeout whatever a cap spent. Only the backstop
+        # above - the wall ceiling firing between phases - is, and it still
+        # exits 75 so launchd logs it without suppressing the successor.
         outcome = _tick_outcome(result, tick_failed, timed_out)
         end_data: dict[str, Any] = {
             "outcome": outcome,
@@ -1454,12 +1452,10 @@ def tick() -> None:
             "phase": cut[0] if cut else current_tick_phase(),
             "pid": os.getpid(),
         }
-        # Name which timeout mechanism fired: wall outranks slice.
+        # timed_out is the wall backstop now; slice overruns stay on the
+        # cut/saturated fields and never reach why.
         if timed_out:
-            if "deadline_exceeded" in cut_whys.values():
-                end_data["why"] = "deadline_exceeded"
-            elif cut:
-                end_data["why"] = "slice_starved"
+            end_data["why"] = "deadline_exceeded"
         if cut:
             end_data["cut"] = list(cut)
         if phase_s:
