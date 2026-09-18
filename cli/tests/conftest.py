@@ -121,6 +121,28 @@ def _sandbox_project_spaces(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_SPACES_DIR", str(tmp_path / "spaces"))
 
 
+@pytest.fixture(autouse=True)
+def _sandbox_graph_store(tmp_path, monkeypatch):
+    """Keep every test off the live ``~/.fno`` graph store.
+
+    ``paths.graph_json()`` with no settings resolves the operator's real
+    store, and a store touch three layers under a test (a new
+    ``commit_rows_via_store`` call site, a stray keeper spawn) then imports,
+    stamps, or writes the real graph through this checkout's binary.
+    Measured 2026-09-18: a worktree status verb resolved a branch-built
+    worker against the live path and stamped it. The pin rides ``FNO_CONFIG``
+    at the settings layer, so a test that installs its own settings (the
+    paths-machinery tests) overrides this one cleanly, and autouse because
+    the touch happens below any test that triggers it.
+    """
+    settings_file = tmp_path / ".fno-sandbox-settings.yaml"
+    settings_file.write_text(
+        f'schema_version: 1\nconfig:\n  state_dir: "{tmp_path / ".fno"}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
+
+
 @pytest.fixture
 def _no_global_tick_events(monkeypatch):
     """Capture pr-watch tick emissions instead of hitting the live events log.
@@ -1041,3 +1063,19 @@ def _door_binary_from_this_checkout(monkeypatch):
         if candidate.is_file() and os.access(candidate, os.X_OK):
             monkeypatch.setenv("FNO_AGENTS_BIN", str(candidate))
             return
+    # No local build: the door silently resolved the installed binary and
+    # store-door tests fail with refusals that look like product bugs.
+    # Measured 2026-09-18: a swept target dir cost a store suite an hour of
+    # false reds. Say so, once, at the point of the decision.
+    global _door_binary_pin_warned
+    if not _door_binary_pin_warned:
+        _door_binary_pin_warned = True
+        print(
+            "WARNING: no fno-agents binary under crates/fno-agents/target; "
+            "door-routed tests run the installed binary and may read stale "
+            "store rows. Build with: cargo build --bin fno-agents",
+            file=__import__("sys").stderr,
+        )
+
+
+_door_binary_pin_warned = False
