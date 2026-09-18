@@ -1748,10 +1748,17 @@ async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), ReviewSt
             .await
             {
                 if let Some(sandbox) = crate::codex_thread::parse_resolved_sandbox(&raw) {
-                    policy = Some(crate::codex_thread::sandbox_policy_with_roots(
-                        Some(&sandbox),
-                        &roots,
-                    ));
+                    // This lane never narrows: only a resolved workspaceWrite
+                    // posture is widened. A dangerFullAccess or readOnly
+                    // posture goes policy-less, which leaves the thread on
+                    // whatever the server already had.
+                    if sandbox.get("type").and_then(serde_json::Value::as_str)
+                        == Some("workspaceWrite")
+                    {
+                        policy = Some(crate::codex_thread::sandbox_policy_with_roots(
+                            &sandbox, &roots,
+                        ));
+                    }
                 }
             }
         }

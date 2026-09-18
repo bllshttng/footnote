@@ -36,13 +36,16 @@ pub(crate) fn build_codex_thread_entry(
     driver: &crate::codex_thread::CodexThread,
     model: Option<&str>,
     effort: Option<&str>,
-    yolo: bool,
     node: Option<&str>,
     account: Option<&str>,
     harness_args: &[String],
     spawn_params: &serde_json::Value,
     provenance: Option<&crate::spawn_contract::SpawnProvenance>,
 ) -> RegistryEntry {
+    // The typed posture the lane resolved and the driver carries. Reading it
+    // off the driver (not a parallel param) means the row can never disagree
+    // with the frame the thread was started with.
+    let posture = driver.requested_posture();
     let cwd_s = cwd.to_string_lossy().into_owned();
     let session_id = driver.thread_id().to_string();
     // The daemon's env is scrubbed, so the parent edge rides the spawn
@@ -125,17 +128,19 @@ pub(crate) fn build_codex_thread_entry(
         fno_id: Some(session_id.clone()),
         delivery_policy: None,
         // v19: the posture the spawn REQUESTED, which is what `thread/resume`
-        // re-applies across a daemon restart. Derived from `yolo` on purpose:
-        // it answers "what did we ask for", and the resume lane needs the
-        // request, not the outcome.
-        sandbox_posture: Some(
-            if yolo {
-                "danger-full-access"
-            } else {
-                "workspace-write"
-            }
-            .to_string(),
-        ),
+        // re-applies across a daemon restart. Read off the typed posture the
+        // lane resolved: both halves survive, so a read-only row can no longer
+        // be minted from a bool that read write access into everything.
+        sandbox_posture: Some(posture.sandbox.as_scalar().to_string()),
+        // v35: the operator's exact mode string, verbatim, beside the name
+        // above - the name loses the approval half, and the resume replays
+        // this. Empty when the spawn named no mode (the bare yolo bool or the
+        // bounded default).
+        requested_permission_mode: Some(posture.requested.clone()).filter(|r| !r.is_empty()),
+        // v35: where the current turn's policy came from - the server's
+        // resolved posture, or this row's own request replayed because the
+        // server named no sandbox.
+        turn_policy_source: Some(driver.turn_policy_source().to_string()),
         // v29: the posture the server RESOLVED, beside the request above. The
         // two disagree and that is the whole reason this column exists: a
         // `yolo` thread asks for full access and the app-server can keep its
