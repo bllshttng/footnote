@@ -99,6 +99,11 @@ pub(crate) enum Remedy {
     /// none. Issued at most once per (head sha, run id); a second red verdict
     /// on the same pair escalates.
     Rerun { run_id: String },
+    /// `gh run rerun <id> --failed` for a rerunnable escalation (a
+    /// test-shaped or unknown red): only the failed jobs rerun. Same
+    /// once-per-(sha, run id) guard, and the printed command is the applied
+    /// one.
+    RerunFailed { run_id: String },
     /// Not mechanically fixable. `repro` is the command that reproduces it
     /// locally, which is the whole value of the row.
     Escalate { repro: String },
@@ -124,7 +129,7 @@ impl Finding {
         match self.remedy {
             Remedy::Auto { .. } => "auto",
             Remedy::EditBody { .. } => "edit-body",
-            Remedy::Rerun { .. } => "rerun",
+            Remedy::Rerun { .. } | Remedy::RerunFailed { .. } => "rerun",
             Remedy::Escalate { .. } => "escalate",
             Remedy::Inherited => "inherited",
         }
@@ -140,6 +145,7 @@ impl Finding {
                 format!("fno do pr closure-trailer {}", nodes.join(" "))
             }
             Remedy::Rerun { run_id } => format!("gh run rerun {run_id}"),
+            Remedy::RerunFailed { run_id } => format!("gh run rerun {run_id} --failed"),
             Remedy::Escalate { repro } => repro.clone(),
             // Matched by CHECK NAME, which is all the main-HEAD read gives.
             // Measured: the same check was red on both, and the failing TEST
@@ -1701,7 +1707,12 @@ fn journal_rerun_keys(path: &std::path::Path) -> Vec<String> {
 /// same observation never lands twice; the key is the failing test when the
 /// log named one, else the check name. A key's third row files one node, so
 /// a flake that reruns green forever is visible by construction.
-fn detect_flakes(a: &Args, head: &str, rerun_keys_ever: &[String]) {
+fn detect_flakes(
+    a: &Args,
+    head: &str,
+    rerun_keys_ever: &[String],
+    flake_guards: &std::collections::HashSet<String>,
+) {
     let mut run_ids: Vec<String> = Vec::new();
     for k in rerun_keys_ever {
         if let Some((sha, run)) = k.split_once(':') {
@@ -1714,7 +1725,7 @@ fn detect_flakes(a: &Args, head: &str, rerun_keys_ever: &[String]) {
         return;
     }
     // An empty or unreadable checks read is never a green: a run GitHub has
-    // not registered (or an API fault) is not evidence of anything.
+    // not registered (or another API fault) is not evidence of anything.
     let Ok(rows) = crate::pr_push::read_checks_rows(&a.gh_bin, &a.cwd, head) else {
         return;
     };
@@ -1736,7 +1747,7 @@ fn detect_flakes(a: &Args, head: &str, rerun_keys_ever: &[String]) {
                 continue;
             }
             let key_guard = format!("{head}:{run}:{check}");
-            if journal_flake_row_exists(&journal_path(a), &key_guard) {
+            if flake_guards.contains(&key_guard) {
                 continue;
             }
             // Where the log named a failing test, the key is the test; else
@@ -1773,22 +1784,22 @@ fn detect_flakes(a: &Args, head: &str, rerun_keys_ever: &[String]) {
     }
 }
 
-/// One best-effort scan: does a `pr_heal_flake` row already name this
-/// (sha, run id, check)?
-fn journal_flake_row_exists(path: &std::path::Path, key_guard: &str) -> bool {
+/// Every `(sha, run id, check)` the flake ledger already recorded, read once
+/// per drive-loop run and consulted in memory.
+fn journal_flake_guards(path: &std::path::Path) -> std::collections::HashSet<String> {
     let Ok(text) = std::fs::read_to_string(path) else {
-        return false;
+        return Default::default();
     };
-    text.lines().any(|l| {
-        serde_json::from_str::<Value>(l).ok().is_some_and(|row| {
-            row.get("type").and_then(Value::as_str) == Some("pr_heal_flake")
-                && row
-                    .get("data")
-                    .and_then(|d| d.get("key_guard"))
-                    .and_then(Value::as_str)
-                    == Some(key_guard)
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|row| row.get("type").and_then(Value::as_str) == Some("pr_heal_flake"))
+        .filter_map(|row| {
+            row.get("data")
+                .and_then(|d| d.get("key_guard"))
+                .and_then(Value::as_str)
+                .map(|s| s.to_string())
         })
-    })
+        .collect()
 }
 
 /// The node ids already filed for a flake key, and how many rows carry it.
@@ -1868,11 +1879,13 @@ fn emit_flake_row(
 /// demotes the row to Escalate, so the report never reads the PR as clean
 /// while the run is still red. Returns the keys issued this run.
 fn apply_rerun(a: &Args, findings: &mut [Finding], head: &str) -> Vec<String> {
-    let path = journal_path(a);
     let mut issued: Vec<String> = Vec::new();
+    // One journal read per call: every (sha, run id) any tick ever reran.
+    let known: std::collections::HashSet<String> =
+        journal_rerun_keys(&journal_path(a)).into_iter().collect();
     for f in findings.iter_mut() {
         let run_id = match &f.remedy {
-            Remedy::Rerun { run_id } => Some(run_id.clone()),
+            Remedy::Rerun { run_id } | Remedy::RerunFailed { run_id } => Some(run_id.clone()),
             // A real failure reruns only its failed jobs. A cancelled run has
             // no failures to name, so `--failed` would rerun nothing.
             Remedy::Escalate { .. } if rerunnable_class(f.signature) => run_id(&f.link),
@@ -1888,7 +1901,7 @@ fn apply_rerun(a: &Args, findings: &mut [Finding], head: &str) -> Vec<String> {
         } else {
             vec!["run", "rerun", &run_id, "--failed"]
         };
-        if journal_has_rerun(&path, &key) || issued.iter().any(|k| k == &key) {
+        if known.contains(&key) || issued.iter().any(|k| k == &key) {
             let short = &head[..head.len().min(12)];
             f.remedy = match f.remedy.clone() {
                 Remedy::Rerun { .. } => Remedy::Escalate {
@@ -1897,11 +1910,17 @@ fn apply_rerun(a: &Args, findings: &mut [Finding], head: &str) -> Vec<String> {
                          if it is still red it reached a real verdict: fix it or rerun by hand"
                     ),
                 },
-                Remedy::Escalate { repro } => Remedy::Escalate {
-                    repro: format!(
-                        "failed twice on the same sha {short}; a rerun already ran. {repro}"
-                    ),
-                },
+                Remedy::RerunFailed { .. } | Remedy::Escalate { .. } => {
+                    let prior_repro = match f.remedy.clone() {
+                        Remedy::Escalate { repro } => repro,
+                        _ => String::new(),
+                    };
+                    Remedy::Escalate {
+                        repro: format!(
+                            "failed twice on the same sha {short}; a rerun already ran. {prior_repro}"
+                        ),
+                    }
+                }
                 other => other,
             };
             continue;
@@ -1909,9 +1928,13 @@ fn apply_rerun(a: &Args, findings: &mut [Finding], head: &str) -> Vec<String> {
         match run(&a.gh_bin, &rerun_args, &a.cwd, REMEDY_TIMEOUT) {
             Ok((true, _, _)) => {
                 issued.push(key);
-                // The report names the rerun as the action taken; the demotion
-                // above has the second-red wording on the next sighting.
-                f.remedy = Remedy::Rerun { run_id };
+                // The report names the rerun as the action taken, and the
+                // printed command matches the applied argv.
+                f.remedy = if was_cancelled {
+                    Remedy::Rerun { run_id }
+                } else {
+                    Remedy::RerunFailed { run_id }
+                };
             }
             Ok((false, _, err)) => {
                 f.remedy = Remedy::Escalate {
@@ -2039,9 +2062,10 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
             eprintln!("pr-heal: the pr_heal_pr row for PR {pr} did not land: {e}");
         }
     };
-    // One journal read per run: every (sha, run id) any tick ever reran, the
-    // flake ledger's input.
+    // One journal read per run for each ledger: every (sha, run id) any tick
+    // ever reran, and every (sha, run id, check) already recorded as a flake.
     let rerun_keys_ever = journal_rerun_keys(&journal_path(a));
+    let flake_guards = journal_flake_guards(&journal_path(a));
     let mut worst = EXIT_CLEAN;
     for pr in open_pr_numbers(&pages) {
         bump(&mut counts, "seen");
@@ -2168,7 +2192,7 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
         // A green rerun is a flake observation, not a silence. Runs before
         // the findings read: it fires even when nothing is red anymore.
         if !dry_run {
-            detect_flakes(a, &head, &rerun_keys_ever);
+            detect_flakes(a, &head, &rerun_keys_ever, &flake_guards);
         }
         let findings = match findings_for(
             a,
@@ -2207,7 +2231,10 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
             unknown.push((pr.clone(), f.check.clone(), head_ref.clone(), key));
         }
         let healable = own.iter().any(|f| match &f.remedy {
-            Remedy::Auto { .. } | Remedy::EditBody { .. } | Remedy::Rerun { .. } => true,
+            Remedy::Auto { .. }
+            | Remedy::EditBody { .. }
+            | Remedy::Rerun { .. }
+            | Remedy::RerunFailed { .. } => true,
             // A rerunnable escalation (pytest, smoke, an unknown) reruns
             // before its repro is spent, when the run id is readable.
             Remedy::Escalate { .. } => rerunnable_class(f.signature) && run_id(&f.link).is_some(),
@@ -3943,6 +3970,8 @@ echo '[]'
         let args = parse_args(&args_for(d, &["--apply"])).unwrap();
         let issued = apply_rerun(&args, &mut findings, "aaa1");
         assert_eq!(issued, vec!["aaa1:777".to_string()]);
+        // The printed command is the applied one, flag included.
+        assert_eq!(findings[0].detail(), "gh run rerun 777 --failed");
         let gh = log_of(d, "gh.log");
         assert_eq!(
             gh.matches("run rerun 777 --failed").count(),
