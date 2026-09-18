@@ -114,13 +114,11 @@ def _mint_thread_session_id(
     permission_mode: Optional[str] = None,
     yolo: bool = False,
 ) -> str:
-    """The harness session id a keeper thread launches on, fixed BEFORE launch.
-
-    The per-harness shapes live in :func:`mint_session_id`; the caller-assigned
-    default (a UUIDv4) is not a harness fact, so it wraps that verb here. The
-    launch axes ride along because a harness whose mint is a real model turn
-    (agy) launches it on the spawn's selected model, effort and posture.
-    """
+    """The harness session id a keeper thread launches on, fixed BEFORE
+    launch. Wraps :func:`mint_session_id` (the per-harness shapes) with the
+    caller-assigned UUIDv4 default; the launch axes ride along because a
+    harness whose mint is a real model turn (agy) launches it on the
+    spawn's selected axes."""
     minted = mint_session_id(
         harness,
         cwd,
@@ -168,8 +166,8 @@ def complete_launch_argv(
     if arm is None:
         return argv
     # The bypass/mode decision is the Rust owner's (agy_launch.keeper_posture):
-    # an explicit mode REPLACES an always-on bypass instead of stacking, the
-    # lane default is the row's bypass posture, and the answer names what ran.
+    # an explicit mode REPLACES an always-on bypass, the lane default is the
+    # row's bypass posture, and the answer names what ran.
     from fno.agents.spawn_axes_client import keeper_posture
 
     argv = [*argv, *keeper_posture(harness, "thread", permission_mode, yolo)]

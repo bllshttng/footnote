@@ -1149,15 +1149,12 @@ def build_pane_argv(
         return argv
     if provider == "agy":
         effort_argv = effort_tokens("agy", effort) if effort else []
-        # agy (Antigravity) interactive pane (US1). The posture tokens are the
+        # agy (Antigravity) interactive pane (US1). Posture tokens are the
         # Rust owner's answer (agy_launch.keeper_posture, lane pane): the lane
-        # default is --dangerously-skip-permissions (the never-prompt lane, so
-        # an unattended pane can't wedge on its first approval), and an
-        # explicit --permission-mode REPLACES it. This LANE mints no session id
-        # (the thread lane does), so no --session-id pin; `-p`/`--print` is
-        # agy's HEADLESS form (exits after printing) and must NOT be used for
-        # a pane. The shared readiness gate submits the seed after trust and
-        # the composer are ready.
+        # default is the never-prompt bypass and an explicit mode REPLACES it.
+        # This LANE mints no session id (the thread lane does); `-p`/`--print`
+        # is agy's HEADLESS form and must NOT be used for a pane. The shared
+        # readiness gate submits the seed after trust and the composer ready.
         from fno.agents.spawn_axes_client import keeper_posture
 
         argv = ["agy", *keeper_posture("agy", "pane", permission_mode, yolo)]

@@ -372,9 +372,9 @@ def _agy_install() -> IntegrationResult:
         )
     from fno.rust_binary import call_binary_json
 
-    # Probe the door before any install: a stale fno-agents binary IGNORES
-    # unknown flags and would fall through to the old full plugin install.
-    # A current binary answers --hooks-status with a JSON status object.
+    # Probe first: a stale fno-agents binary IGNORES unknown flags and would
+    # fall through to the old full plugin install. A current one answers
+    # --hooks-status with a JSON status object.
     hooks_file = _agy_hooks_json()
     error, probe = call_binary_json(
         "plugin-install",
