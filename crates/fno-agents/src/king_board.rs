@@ -1136,7 +1136,7 @@ fn graph_session_nodes(entries: Option<&[Value]>) -> HashMap<String, String> {
     // session that closed its do row on one node and opened one on another
     // must land on the open node, so open rows join first and the closed-row
     // inference only fills sessions no open row claims.
-    let mut admissions = |want_open: bool, map: &mut HashMap<String, String>| {
+    let admissions = |want_open: bool, map: &mut HashMap<String, String>| {
         for node in entries {
             if TERMINAL_RUNGS.contains(&s_str(node, "status").unwrap_or("")) {
                 continue;
