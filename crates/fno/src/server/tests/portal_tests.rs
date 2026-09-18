@@ -2513,3 +2513,183 @@ fn collect_until_portal_closed(rx: &mut mpsc::Receiver<ServerMsg>, needle: &str)
     }
     None
 }
+
+// ---- (x-3cea) a portal seat follows the session its claude viewer shows --
+
+/// Feed the seat pane an OSC title like a live claude viewer emits.
+fn feed_seat_title(core: &mut Core, seat: u64, title: &str) {
+    core.panes
+        .get_mut(&seat)
+        .unwrap()
+        .vt
+        .feed(format!("\x1b]0;{title}\x07").as_bytes());
+}
+
+#[test]
+fn a_portal_follows_the_session_its_viewer_title_names() {
+    // AC2-HP: a claude viewer switches from A to B inside its own TUI; the
+    // 1s follow repoints the slot, the attach mapping and the pane name to
+    // B, and a second tick is a no-op.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![
+        bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+        bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+    ];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    drain_notices(&mut rx);
+    feed_seat_title(&mut core, seat, "◐ target-b");
+
+    core.follow_portal_viewer_titles();
+
+    assert_eq!(core.portals[&0].row_key, "deadbee2", "the slot claims B");
+    assert_eq!(core.attached.get("deadbee2"), Some(&seat), "B maps it");
+    assert!(
+        !core.attached.contains_key("deadbee1"),
+        "A holds no mapping"
+    );
+    assert_eq!(core.panes[&seat].name.as_deref(), Some("target-b"));
+    let rows = core.agent_rows();
+    let b = rows.iter().find(|r| r.name == "target-b").expect("row B");
+    assert_eq!(b.pane_id, Some(seat), "B wears the seat");
+    assert_eq!(b.portal, Some(0), "B carries the marker");
+    let a = rows.iter().find(|r| r.name == "target-a").expect("row A");
+    assert_eq!(a.pane_id, None, "A is paneless");
+
+    core.follow_portal_viewer_titles();
+    assert!(
+        !drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("now shows")),
+        "the second tick emits no notice"
+    );
+    core.reap_pane(seat);
+}
+
+#[test]
+fn a_title_naming_no_single_row_drops_the_claim() {
+    // AC2-ERR: a title naming two rows drops the claim instead of guessing;
+    // the seat keeps the title text as its key with nothing wearing it, a
+    // second tick is silent, and a later unambiguous title claims its row.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![
+        bg_row("twin", "/tmp/seen", Some("deadbee1")),
+        bg_row("twin", "/tmp/seen", Some("deadbee3")),
+    ];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    drain_notices(&mut rx);
+    feed_seat_title(&mut core, seat, "✳ twin");
+
+    core.follow_portal_viewer_titles();
+
+    assert!(
+        !core.attached.values().any(|p| *p == seat),
+        "no row claims the seat"
+    );
+    assert_eq!(core.portals[&0].row_key, "twin", "the key is the title");
+    assert_eq!(core.panes[&seat].name.as_deref(), Some("twin"));
+    assert!(
+        core.agent_rows().iter().all(|r| r.pane_id != Some(seat)),
+        "no row wears the seat"
+    );
+
+    core.follow_portal_viewer_titles();
+    assert!(
+        !drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("now shows")),
+        "the second tick is silent"
+    );
+
+    core.agents
+        .push(bg_row("solo", "/tmp/seen", Some("deadbee4")));
+    feed_seat_title(&mut core, seat, "solo");
+    core.follow_portal_viewer_titles();
+    assert_eq!(
+        core.attached.get("deadbee4"),
+        Some(&seat),
+        "an unclaimed seat is not stuck"
+    );
+    core.reap_pane(seat);
+}
+
+#[test]
+fn a_portal_whose_title_names_its_own_row_is_left_alone() {
+    // AC2-EDGE: the seated row named by `name`, by `harness_title`, an
+    // unset title, a held stand-in seat and a non-claude viewer seat all
+    // leave the slot, the mapping and the pane name untouched, with no
+    // notice.
+    fn undisturbed(core: &Core, seat: u64) {
+        assert_eq!(core.portals[&0].row_key, "deadbee1");
+        assert_eq!(core.attached.get("deadbee1"), Some(&seat));
+        assert_eq!(core.panes[&seat].name.as_deref(), Some("target-a"));
+    }
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    let mut aliased = bg_row("target-a", "/tmp/seen", Some("deadbee1"));
+    aliased.harness_title = Some("alias-a".to_string());
+    core.agents = vec![aliased];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    drain_notices(&mut rx);
+
+    core.follow_portal_viewer_titles(); // no title at all
+    undisturbed(&core, seat);
+    feed_seat_title(&mut core, seat, "◐ target-a"); // the seated row by name
+    core.follow_portal_viewer_titles();
+    undisturbed(&core, seat);
+    feed_seat_title(&mut core, seat, "alias-a"); // the seated row by harness title
+    core.follow_portal_viewer_titles();
+    undisturbed(&core, seat);
+    core.panes.get_mut(&seat).unwrap().cmd = None; // a held stand-in
+    feed_seat_title(&mut core, seat, "◐ target-b");
+    core.follow_portal_viewer_titles();
+    undisturbed(&core, seat);
+    core.panes.get_mut(&seat).unwrap().cmd = Some("sh".into()); // not the attach program
+    core.follow_portal_viewer_titles();
+    undisturbed(&core, seat);
+    assert!(
+        !drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("now shows")),
+        "an agreeing seat is silent"
+    );
+    core.reap_pane(seat);
+}
+
+#[test]
+fn a_title_naming_a_row_another_portal_shows_does_not_steal_it() {
+    // AC2-EDGE: portal 1 already shows B; portal 0's viewer switches to B.
+    // Portal 1 keeps its row, its mapping and its pane name; portal 0 drops
+    // its claim rather than minting a second viewer.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, _rx) = thread_core();
+    core.agents = vec![
+        bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+        bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+    ];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    core.command(client_id, portal_reach_cmd("deadbee2", 1));
+    let seat0 = core.portals.get(&0).expect("portal 0 open").seat;
+    let seat1 = core.portals.get(&1).expect("portal 1 open").seat;
+    feed_seat_title(&mut core, seat0, "◐ target-b");
+
+    core.follow_portal_viewer_titles();
+
+    assert_eq!(core.portals[&1].row_key, "deadbee2", "portal 1 keeps B");
+    assert_eq!(core.attached.get("deadbee2"), Some(&seat1));
+    assert_eq!(core.panes[&seat1].name.as_deref(), Some("target-b"));
+    assert_eq!(
+        core.portals[&0].row_key, "target-b",
+        "portal 0 drops its claim"
+    );
+    assert!(
+        !core.attached.values().any(|p| *p == seat0),
+        "portal 0's seat is unclaimed"
+    );
+    core.reap_pane(seat0);
+    core.reap_pane(seat1);
+}
