@@ -659,6 +659,10 @@ jobs:
 
       - name: cargo test --test '*' --test-threads=1 (fno-agents real-process integration)
         working-directory: crates/fno-agents
+        # A lib red must not hide the integration shard: this leg still runs
+        # when the lib step fails, so the grok and stop-hook tests report on
+        # every round instead of only on green rounds.
+        if: ${{ !cancelled() }}
         run: cargo test --test '*' -- --test-threads=1
 
       - name: Build fno-agents binary (for parity check)
