@@ -569,6 +569,7 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
     let mut decisions: Vec<Decision> = Vec::with_capacity(rows.len());
     let mut planned: Vec<usize> = Vec::new();
     let mut planned_bytes: u64 = 0;
+    let mut refusal_of: BTreeMap<usize, &'static str> = BTreeMap::new();
     for (i, row) in rows.iter().enumerate() {
         let decision = if row.quiet < Duration::from_secs(FRESH_SECS) {
             Decision::Keep("fresh")
@@ -629,6 +630,7 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
                 }
             }
             Err(reason) => {
+                refusal_of.insert(i, reason);
                 let line = format!(
                     "cargo-build-dir kept lane={reason} bytes={} quiet_h={:.1} path={}",
                     row.bytes,
@@ -692,6 +694,7 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
                     }
                 }
                 Err(reason) => {
+                    refusal_of.insert(i, reason);
                     let line = format!(
                         "cargo-build-dir kept lane={reason} bytes={} quiet_h={:.1} path={}",
                         row.bytes,
@@ -700,7 +703,6 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
                     );
                     println!("{line}");
                     rep.lines.push(line);
-                    *rep.cap_held.entry(reason).or_insert(0) += 1;
                 }
             }
         }
@@ -754,6 +756,21 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
         None => "on".to_string(),
         Some(manifest) => format!("disabled:{manifest}"),
     };
+    // cap_held answers "why are bytes still over the cap": counted only when
+    // the sweep ended over it, with every standing row's reason - refusals
+    // named by the reason they were refused, keeps by their lane.
+    if rep.after_bytes > rep.effective_cap_bytes {
+        for i in 0..rows.len() {
+            if matches!(decisions[i], Decision::Reap(_)) {
+                continue;
+            }
+            let reason = refusal_of.get(&i).copied().unwrap_or(match &decisions[i] {
+                Decision::Keep(lane) => *lane,
+                Decision::Reap(_) => unreachable!("reap rows are skipped above"),
+            });
+            *rep.cap_held.entry(reason).or_insert(0) += 1;
+        }
+    }
     let cap_held = if rep.cap_held.is_empty() {
         "-".to_string()
     } else {
@@ -1166,13 +1183,14 @@ mod tests {
     /// AC1-ERR: two owned fresh rows over the cap, the older one's
     /// `.cargo-lock` flock-held - the locked row stays build-in-progress, the
     /// loop continues, the unlocked row goes lane=cap, and the summary names
-    /// why bytes are still over the cap.
+    /// every standing row's reason (AC3-ERR: a refusal and a foreign keep).
     #[test]
     fn cap_keeps_a_locked_row_and_says_so() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let env = setup("caplock", "never-broken");
         let older = plant(&env.fno_base, "00", "cafe0001", 2 * 3600, false);
         let younger = plant(&env.fno_base, "00", "cafe0002", 1 * 3600, false);
+        let foreign = plant(&env.fb_base, "00", "cafe0004", seven_h(), false);
         std::fs::create_dir_all(older.join("debug")).unwrap();
         let lock_path = older.join("debug/.cargo-lock");
         std::fs::write(&lock_path, b"").unwrap();
@@ -1192,6 +1210,7 @@ mod tests {
         let rep = sweep(&env.root, true, SystemTime::now());
 
         assert!(older.exists(), "a held cargo lock protects the row");
+        assert!(foreign.exists(), "a foreign row is never a candidate");
         assert!(!younger.exists(), "the unlocked row is reaped lane=cap");
         assert_eq!(rep.reaped, 1, "{rep:?}");
         assert!(rep.lines.iter().any(|l| l.contains("reaped lane=cap")));
@@ -1202,7 +1221,7 @@ mod tests {
         let summary = rep.lines.last().unwrap();
         assert!(summary.contains("cap_exceeded=true"), "{summary}");
         assert!(
-            summary.contains("cap_held=build-in-progress:1"),
+            summary.contains("cap_held=build-in-progress:1,foreign:1"),
             "{summary}"
         );
         drop(lock);
