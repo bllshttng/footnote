@@ -270,7 +270,7 @@ impl HarnessKind {
 
 /// The provenance of one user-shaped transcript row. Operator is the residual
 /// after every injected shape is named; claude records no positive typed-turn
-/// marker (the mux `operator_submit` event is the close, x-0e09).
+/// marker (the mux `operator_submit` event is the close).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub(crate) enum Provenance {
     Operator,

@@ -774,10 +774,10 @@ mod tests {
         ];
         write_lines(&dir.join("bus").join("messages.jsonl"), &bus_rows);
 
-        // Ledger: the claude session joins to x-62b9 / PR 1234.
+        // Ledger: the claude session joins to test-node / PR 1234.
         let ledger = serde_json::json!({"entries": [{
             "session_id": "20260916T120000Z-fno-run",
-            "graph_node_id": "x-62b9", "pr_number": 1234,
+            "graph_node_id": "test-node", "pr_number": 1234,
             "sessions": [CLAUDE_SID, "20260916T120000Z-fno-run"]
         }]});
         write_lines(&dir.join("ledger.json"), &[ledger]);
@@ -847,7 +847,7 @@ mod tests {
         assert_eq!(claude.counters.get("relay_fno_mail"), Some(&1));
         assert_eq!(claude.counters.get("keepalive"), Some(&1));
         assert_eq!(claude.tool_use, 1);
-        assert_eq!(claude.node.as_deref(), Some("x-62b9"));
+        assert_eq!(claude.node.as_deref(), Some("test-node"));
         assert_eq!(claude.pr_number, Some(1234));
         assert_eq!(claude.commits, 1);
         assert_eq!(codex.counters.get("operator"), Some(&0));
