@@ -452,12 +452,14 @@ def _dispatch_walk(
 #: being cut mid-read and losing every crown before it.
 _KING_STEP_FLOOR_S = 15.0
 
-_WAKE_ENTRIES_MEMO: dict = {"ident": None, "entries": None}
+_GRAPH_ENTRIES_MEMO: dict = {"ident": None, "entries": None}
 
 
-def _graph_entries_for_wake() -> list:
-    """The wake's graph read, one real read per graph identity: an unchanged
-    graph is byte-identical, so the memo is not staleness."""
+def graph_entries(path: Optional[Path] = None) -> list:
+    """The tick's graph read, one real read per graph identity: an unchanged
+    graph is byte-identical, so the memo is not staleness. Serves every
+    phase that needs entries - sweep discovery and the wake alike - so the
+    15 MB store is read once per tick, not once per phase."""
     from fno.graph.api import wire_rows
     from fno.king import drain_cache
     from fno.paths import graph_json
@@ -466,12 +468,13 @@ def _graph_entries_for_wake() -> list:
     try:
         if active_backend_name() != "graph":
             return []
-        ident = drain_cache.graph_ident(graph_json())
-        if ident is not None and _WAKE_ENTRIES_MEMO["ident"] == ident:
-            return _WAKE_ENTRIES_MEMO["entries"]
-        entries = wire_rows(path=graph_json())
+        gpath = path or graph_json()
+        ident = drain_cache.graph_ident(gpath)
+        if ident is not None and _GRAPH_ENTRIES_MEMO["ident"] == ident:
+            return _GRAPH_ENTRIES_MEMO["entries"]
+        entries = wire_rows(path=gpath)
         if ident is not None:
-            _WAKE_ENTRIES_MEMO.update(ident=ident, entries=entries)
+            _GRAPH_ENTRIES_MEMO.update(ident=ident, entries=entries)
         return entries
     except Exception:  # noqa: BLE001 - an unreadable graph is no signal
         return []
@@ -521,7 +524,7 @@ def run_king_wake(
 
         answered_fn = read_answered_questions
     if entries_fn is None:
-        entries_fn = _graph_entries_for_wake
+        entries_fn = graph_entries
 
     entries: Optional[list] = None
     if admit_fn is None:

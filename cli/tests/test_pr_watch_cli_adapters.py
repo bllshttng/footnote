@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -644,6 +645,9 @@ def test_watchdog_sweep_exception_is_nonfatal_and_runs_each_tick(
     # it would never run. This test's subject is the leg order and the
     # non-fatal exception, not the roster.
     monkeypatch.setattr(watchdog, "fleet_rows", lambda **kw: ([], []))
+    # Fleet-tail cadence: watchdog runs on the interval bucket's slot 2, so
+    # pin the bucket or this single-tick invocation skips it.
+    monkeypatch.setattr("time.time", lambda: 1201.0)
     recovery_calls = []
     monkeypatch.setattr(
         "fno.recovery.run_recovery_sweep",
@@ -699,3 +703,217 @@ def test_derived_deadline_stays_below_the_interval(monkeypatch):
     # would suppress up to five successor ticks.
     explicit = SimpleNamespace(tick_timeout_seconds=3600, interval_seconds=600)
     assert _resolve_tick_deadline(explicit) == 595
+
+
+def test_phase_caps_fit_ceiling():
+    """Every-tick caps plus the largest fleet cap must clear the derived
+    ceiling with the unwind reserve. The cap table's old hand-written prose
+    sum claimed 550s while the table summed to 730 against the 480s ceiling,
+    so the fit is computed here, never restated: a cap edit that breaks it
+    fails the suite and names the arithmetic."""
+    from types import SimpleNamespace
+
+    from fno.pr_watch.cli import (
+        _EVERY_TICK_CAP_S,
+        _FLEET_CAP_S,
+        _PHASE_CAP_S,
+        _resolve_tick_deadline,
+    )
+
+    cfg = SimpleNamespace(tick_timeout_seconds=None, interval_seconds=600)
+    ceiling = _resolve_tick_deadline(cfg)
+    every_tick = sum(_EVERY_TICK_CAP_S.values())
+    fleet_max = max(_FLEET_CAP_S.values())
+    total = every_tick + fleet_max + 35
+    assert total <= ceiling, (
+        f"phase caps no longer fit the tick: every-tick {every_tick}s + largest "
+        f"fleet cap {fleet_max}s (phase "
+        f"{max(_FLEET_CAP_S, key=_FLEET_CAP_S.get)}) + 35s unwind reserve = "
+        f"{total}s against the {ceiling}s ceiling; shrink a cap in "
+        f"_EVERY_TICK_CAP_S/_FLEET_CAP_S or re-measure"
+    )
+    assert set(_PHASE_CAP_S) == set(_EVERY_TICK_CAP_S) | set(_FLEET_CAP_S)
+
+
+def _cadence_settings() -> SimpleNamespace:
+    return SimpleNamespace(
+        autonomy=SimpleNamespace(enabled=True),
+        recovery=SimpleNamespace(
+            enabled=False, watchdog=SimpleNamespace(
+                enabled=False, mode="report", mail_to="", reap=False),
+        ),
+        pr_watch=SimpleNamespace(
+            enabled=False, interval_seconds=600, tick_timeout_seconds=500,
+            max_age_days=30, retries=3, graphql_min_remaining=0,
+            wedged_after_ticks=3,
+        ),
+    )
+
+
+def test_fleet_tail_phases_stagger_across_three_ticks(monkeypatch, _no_global_tick_events):
+    """Stranded, recovery and watchdog each run on exactly one of three
+    consecutive ticks; each skipped one mints an off_cadence arm row naming
+    the tick it next runs on, so the readout says why it went quiet."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch._dispatch import TickResult
+
+    monkeypatch.setattr(prcli, "load_settings", lambda: _cadence_settings())
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_k: TickResult(open_prs=0, acted=0),
+    )
+    monkeypatch.setattr("fno.agents.watchdog.lane_armed", lambda _s: False)
+    monkeypatch.setattr(
+        "fno.agents.watchdog.lane_off_detail", lambda _s: "off for the test")
+    monkeypatch.setattr(prcli, "_catchup_roots", lambda: [])
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    runner = CliRunner()
+
+    def off_cadence_arms(start: int) -> set:
+        return {
+            d["arm"]
+            for _t, d in _no_global_tick_events[start:]
+            if d.get("skip_reason") == "off_cadence"
+        }
+
+    expected = {
+        0: ({"recovery", "watchdog"}, "stranded sweep"),
+        1: ({"stranded", "watchdog"}, None),
+        2: ({"stranded", "recovery"}, None),
+    }
+    for bucket, (skipped, echo) in expected.items():
+        monkeypatch.setattr("time.time", lambda b=bucket: b * 600 + 1.0)
+        before = len(_no_global_tick_events)
+        result = runner.invoke(app, [])
+        assert result.exit_code == 0, result.output
+        # The set equality IS the stagger proof: the one phase absent from
+        # the off_cadence set is the one whose body ran this tick.
+        assert off_cadence_arms(before) == skipped, f"bucket {bucket}"
+        if echo is not None:
+            assert echo in result.output, f"bucket {bucket}"
+        rows = [d for _t, d in _no_global_tick_events[before:]
+                if d.get("arm") == "watchdog" and d.get("skip_reason") == "watchdog_off"]
+        if bucket == 2:
+            assert rows, "watchdog runs on its slot"
+        off_rows = [d for _t, d in _no_global_tick_events[before:]
+                    if d.get("skip_reason") == "off_cadence"]
+        assert all("next tick" in (d.get("detail") or "") for d in off_rows)
+
+
+def test_cut_sweep_hands_back_scan_progress(monkeypatch, _no_global_tick_events):
+    """A sweep cut at its slice emits its arm row with the scan counter the
+    dispatch loop wrote, not a bare timeout."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch.cli import TickDeadlineExceeded
+    from fno.pr_watch._dispatch import SCAN_PROGRESS
+
+    settings = _cadence_settings()
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+    monkeypatch.setattr("time.time", lambda: 1.0)  # stranded's slot; others skip
+
+    def _cut(**_k):
+        SCAN_PROGRESS["sweep"] = "scanned=21 of 39"
+        raise TickDeadlineExceeded()
+
+    monkeypatch.setattr("fno.pr_watch._dispatch.tick", _cut)
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    result = CliRunner().invoke(app, [])
+    # A cut tick exits 75 (the launchd timeout verdict), not 0.
+    assert result.exit_code == prcli._TICK_TIMEOUT_EXIT, result.output
+    rows = [d for _t, d in _no_global_tick_events
+            if d.get("arm") == "pr_watch_sweep"]
+    assert rows, "a cut sweep must mint its arm row"
+    assert rows[0]["skip_reason"] == "timeout"
+    # The sweep cap is below the remaining wall, so the slice wording fires;
+    # the load-bearing half is the handed-back scan counter.
+    assert "phase slice" in rows[0]["detail"]
+    assert "scanned=21 of 39" in rows[0]["detail"]
+
+
+def test_cut_before_body_reports_zero_progress(monkeypatch, _no_global_tick_events):
+    """A stale counter from a previous tick must never ride a fresh cut: the
+    runner clears the note before the body runs, so a phase cut before it did
+    anything reads as zero progress, not last tick's number."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch.cli import TickDeadlineExceeded
+    from fno.pr_watch._dispatch import SCAN_PROGRESS
+
+    settings = _cadence_settings()
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+    monkeypatch.setattr("time.time", lambda: 1.0)
+    SCAN_PROGRESS["sweep"] = "scanned=999 of 999"
+
+    def _cut(**_k):
+        raise TickDeadlineExceeded()
+
+    monkeypatch.setattr("fno.pr_watch._dispatch.tick", _cut)
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    result = CliRunner().invoke(app, [])
+    assert result.exit_code == prcli._TICK_TIMEOUT_EXIT, result.output
+    rows = [d for _t, d in _no_global_tick_events
+            if d.get("arm") == "pr_watch_sweep"]
+    assert rows
+    # Zero progress: the bare slice wording, no counter appended, and the
+    # stale pre-seeded note is gone.
+    assert "scanned" not in rows[0]["detail"]
+    assert "999" not in rows[0]["detail"]
+
+
+def test_notify_timeout_falls_back_to_the_phase_deadline(monkeypatch):
+    """No explicit bound and an armed phase: the notify subprocess expires
+    off the phase deadline (minus its 2s reserve), never off a literal."""
+    import time as _time
+    from types import SimpleNamespace
+
+    from fno.pr_watch import _dispatch
+    from fno.pr_watch import cli as prcli
+
+    monkeypatch.setattr(
+        _dispatch, "_phase_deadline", _time.monotonic() + 42.0)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: "/bin/true")
+    captured = {}
+
+    def _fake_run(*_a, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return SimpleNamespace(returncode=0, stdout="{}")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    prcli._run_notify_watch_phase([])
+    left = _dispatch.phase_seconds_left()
+    assert captured["timeout"] is not None
+    assert 38.0 <= captured["timeout"] <= max(1.0, (left or 0.0) - 2.0) + 0.5
+
+
+def test_heal_spawn_belt_is_five_seconds(tmp_path, monkeypatch):
+    """The heal belt dropped 30 -> 5: at 30 it equaled the heal cap, so one
+    wedged --detach spawn spent the whole phase."""
+    from types import SimpleNamespace
+
+    from fno.pr_watch import _heal_phase
+    from fno.pr_watch._heal_phase import run_heal_phase
+
+    captured = {}
+    settings = SimpleNamespace(auto_heal=SimpleNamespace(enabled=True))
+    answer = run_heal_phase(
+        settings, [tmp_path],
+        resolve_binary=lambda: "/bin/true",
+        run=lambda *_a, **kwargs: captured.update(timeout=kwargs.get("timeout"))
+        or SimpleNamespace(returncode=0),
+    )
+    assert answer == "ran"
+    assert captured["timeout"] == _heal_phase._DRIVE_TIMEOUT_S == 5

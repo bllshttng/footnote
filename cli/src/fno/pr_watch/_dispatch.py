@@ -508,6 +508,14 @@ def _ritual_timeout() -> float:
     return min(300.0, left - 10)
 
 
+#: Partial-work notes a phase body writes as it runs (the scan loop writes
+#: "scanned=N of M" per rich read), so a deadline cut hands back what the
+#: phase did instead of evaporating with its locals. The tick's _run_phase
+#: clears the phase's entry before each run and reads it on the cut path;
+#: module-level because the alarm can fire anywhere inside a body.
+SCAN_PROGRESS: dict[str, str] = {}
+
+
 def tick(
     *,
     # Graph / discovery
@@ -679,22 +687,23 @@ def _run_tick(
 ) -> TickResult:
     """Inner tick body (called once tick lock is held)."""
     from fno.graph._reconcile import ReconcileError
-    from fno.graph.api import wire_rows
     from fno.paths import graph_json as default_graph_json
     from fno.pr_watch import decide
+    from fno.pr_watch._king_wake import graph_entries
     from fno.pr_watch._state import WatermarkStore, make_watermark_key
 
     gpath = graph_path or default_graph_json()
     set_tick_phase("discover")
-    from fno.tracker import active_backend_name
 
     # PR discovery needs the done-at-PR-green grace window (recently closed
     # nodes still watched through merge), which list_open() cannot serve -
     # closed items are outside its contract by design. An external tracker
     # backend has no equivalent yet, so this tick degrades to "nothing to
     # sweep" rather than reading the wrong store (mirrors _catchup_roots'
-    # existing no-graph degrade for the same daemon).
-    entries = wire_rows(path=gpath) if active_backend_name() == "graph" and gpath.exists() else []
+    # existing no-graph degrade for the same daemon). graph_entries is the
+    # tick's one ident-keyed memo: sweep discovery and king_wake share a
+    # single real read of the 15 MB store instead of queueing on it twice.
+    entries = graph_entries(gpath) if gpath.exists() else []
     candidates = discover_fn(entries)
 
     store = WatermarkStore(path=store_path)
@@ -929,6 +938,9 @@ def _run_tick(
                 obs = read_pr_state_fn(cand, reviewers=reviewers)
                 swept.add(key)
                 merge_scan_scanned += 1
+                SCAN_PROGRESS["sweep"] = (
+                    f"scanned={merge_scan_scanned} of {len(candidates)}"
+                )
                 failed.discard(key)
             except ReconcileError as exc:
                 log.warning("pr-watch: gh query failed for PR #%d: %s", pr, exc)

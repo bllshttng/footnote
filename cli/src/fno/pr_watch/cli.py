@@ -189,7 +189,11 @@ def _catchup_roots() -> list[Path]:
     return [p for p in roots.values() if p.is_dir()]
 
 
-def _run_notify_watch_phase(roots: "Optional[list[Path]]" = None) -> None:
+def _run_notify_watch_phase(
+    roots: "Optional[list[Path]]" = None,
+    *,
+    timeout_s: Optional[float] = None,
+) -> None:
     """Run the Rust notify_watch arm and turn its receipt into the tick row.
 
     The arm lives in fno-agents (``notify-watch``); the sampler, the signal
@@ -199,9 +203,12 @@ def _run_notify_watch_phase(roots: "Optional[list[Path]]" = None) -> None:
     an empty world. An absent binary, a non-zero run and an unparseable
     receipt all land as ``notify_failed`` - a dead notice lane never raises
     out of the tick. ``roots`` rides the tick's one-scan memo; the two tick
-    phases are named apart so a cut says which half stalled.
+    phases are named apart so a cut says which half stalled. The subprocess
+    bound comes from the phase slice (minus a 2s reserve) when the caller
+    passes it, else from the armed phase deadline, and only falls back to a
+    literal when no phase is armed at all.
     """
-    from fno.pr_watch._dispatch import set_tick_phase
+    from fno.pr_watch._dispatch import phase_seconds_left, set_tick_phase
 
     set_tick_phase("notify_watch")
     if roots is None:
@@ -221,8 +228,11 @@ def _run_notify_watch_phase(roots: "Optional[list[Path]]" = None) -> None:
         argv = [str(binary), "notify-watch", "--json"]
         for root in roots:
             argv += ["--root", str(root)]
+        if timeout_s is None:
+            left = phase_seconds_left()
+            timeout_s = max(1.0, left - 2.0) if left is not None else 240.0
         proc = subprocess.run(
-            argv, capture_output=True, text=True, check=False, timeout=240,
+            argv, capture_output=True, text=True, check=False, timeout=timeout_s,
             cwd=str(roots[0]) if roots else None,
         )
         payload = json.loads(proc.stdout or "{}")
@@ -407,21 +417,30 @@ _STRANDED_FLOOR_S = 10.0
 _RECOVERY_ROOT_FLOOR_S = 3.0
 
 #: Per-phase alarm caps : each phase runs under its own slice,
-#: min(cap, seconds left before the tick ceiling). watchdog is the one
-#: uncapped phase and stops itself at _WAKE_APPLY_FLOOR_S, because one
-#: unit of its work is long. The capped slices sum to 550s against the
-#: 480s ceiling, so under stress the tail is cut first.
-_PHASE_CAP_S: dict[str, float] = {
-    "settings": 60,
+#: min(cap, seconds left before the tick ceiling). Every-tick caps are p90s
+#: of 50 measured ticks (2026-09-17, events.jsonl), rounded up; sweep and
+#: merge are the epic's core work and keep their measured room. The fleet
+#: tail (stranded, recovery, watchdog) runs one phase per tick - the
+#: _run_phase cadence - so the worst tick is the every-tick sum plus the
+#: largest fleet cap. The fit is computed, never restated:
+#: test_phase_caps_fit_ceiling fails the suite when an edit breaks it (the
+#: hand-written sum this table replaced claimed 550s; the table itself
+#: summed to 730 against the 480s ceiling).
+_EVERY_TICK_CAP_S: dict[str, float] = {
+    "settings": 10,
     "sweep": 150,
-    "merge": 150,
-    "king_wake": 100,
-    "notify_watch": 30,
-    "heal": 30,
-    "evals": 30,
-    "stranded": 60,
-    "recovery": 120,
+    "merge": 120,
+    "king_wake": 45,
+    "notify_watch": 10,
+    "heal": 10,
+    "evals": 10,
 }
+_FLEET_CAP_S: dict[str, float] = {
+    "stranded": 60,
+    "recovery": 90,
+    "watchdog": 30,
+}
+_PHASE_CAP_S: dict[str, float] = {**_EVERY_TICK_CAP_S, **_FLEET_CAP_S}
 
 
 class TickDeadlineExceeded(BaseException):
@@ -494,6 +513,7 @@ def tick() -> None:
         set_phase_deadline,
         set_tick_phase,
     )
+    from fno.pr_watch._dispatch import SCAN_PROGRESS as sweep_progress
     from fno.pr_watch._dispatch import tick as _tick
     from fno.pr_watch._install import tick_end_bits
 
@@ -534,6 +554,11 @@ def tick() -> None:
     cut: list[str] = []
     cut_whys: dict[str, str] = {}
     phase_s: dict[str, float] = {}
+    # Per-phase partial-work notes a body writes as it goes; the runner
+    # clears one per phase run and emits it on the cut path, so a cut phase
+    # hands back what it did. The sweep's note lives across the _dispatch
+    # boundary (SCAN_PROGRESS); this dict holds the rest.
+    progress: dict[str, str] = {}
     ceiling_box: dict[str, Optional[int]] = {"v": None}
     arm_interval: dict[str, int] = {"king_wake": 900, "notify_watch": 300, "watchdog": 600}
     roots_box: dict[str, Optional[list]] = {"v": None}
@@ -589,7 +614,33 @@ def tick() -> None:
             body: Callable[[float], None],
             *,
             arm: Optional[str] = None,
+            cadence: int = 1,
+            slot: int = 0,
         ) -> bool:
+            # Fleet-tail cadence: a phase on a cadence above 1 runs one tick
+            # in `cadence`, on its slot of the interval bucket. A skipped
+            # phase is not a failure: it mints an off_cadence arm row naming
+            # the tick it next runs on, and its phase_s reads 0.0 without a
+            # cut entry, so the tick outcome never reads timeout for a phase
+            # that never ran.
+            if cadence > 1 and cfg is not None:
+                interval = max(1, int(getattr(cfg, "interval_seconds", 600)))
+                tick_no = int(time.time() // interval)
+                if tick_no % cadence != slot:
+                    phase_s[name] = 0.0
+                    progress.pop(name, None)
+                    sweep_progress.pop(name, None)
+                    if arm is not None:
+                        next_tick = tick_no + (slot - tick_no) % cadence
+                        _emit_tick_row(arm, interval_s=arm_interval.get(arm, interval),
+                                       skip_reason="off_cadence",
+                                       detail=(f"fleet-tail cadence {cadence}: "
+                                               f"next tick {next_tick}"))
+                    return False
+            # A stale note from a previous tick must never ride this run's
+            # receipt: a cut before the body ran reports zero progress.
+            progress.pop(name, None)
+            sweep_progress.pop(name, None)
             left: Optional[float] = None
             if ceiling_box["v"] is not None:
                 left = ceiling_box["v"] - (time.monotonic() - started)
@@ -603,9 +654,9 @@ def tick() -> None:
                                    detail=f"deadline exceeded before phase {name}")
                 return False
             if ceiling_box["v"] is None:
-                # The settings phase runs before a ceiling exists: its slice is
-                # min(60, the env seam) when the seam is set, else 60.
-                slice_s = 60.0
+                # The settings phase runs before a ceiling exists: its slice
+                # is its measured cap, min(the env seam) when the seam is set.
+                slice_s = float(_PHASE_CAP_S.get("settings", 60.0))
                 env = (os.environ.get(_ENV_TICK_TIMEOUT) or "").strip()
                 if env.isdigit() and int(env) > 0:
                     slice_s = min(slice_s, float(env))
@@ -631,14 +682,19 @@ def tick() -> None:
                 cut_whys[name] = "deadline_exceeded" if wall_limited else "slice_starved"
                 if arm is not None:
                     # Name the sub-step the alarm caught: a phase that reports
-                    # its halves reads as one stall, not a black box.
+                    # its halves reads as one stall, not a black box. And hand
+                    # back what the phase did before the cut - the body's
+                    # progress note or the sweep's scan counter - so the row
+                    # says "scanned 21 of 39", never a bare timeout.
                     step = current_tick_phase()
                     at = f" at {step}" if step.startswith(name + ":") else ""
+                    base = (f"deadline exceeded in phase {name} at "
+                            f"{int(slice_s)}s" if wall_limited else
+                            f"phase slice {int(slice_s)}s spent") + at
+                    note = progress.get(name) or sweep_progress.get(name) or ""
                     _emit_tick_row(arm, interval_s=arm_interval.get(arm, 600),
                                    skip_reason="timeout",
-                                   detail=(f"deadline exceeded in phase {name} at "
-                                           f"{int(slice_s)}s" if wall_limited else
-                                           f"phase slice {int(slice_s)}s spent") + at)
+                                   detail=f"{base} {note}" if note else base)
             finally:
                 if alarm_ok:
                     try:
@@ -1126,7 +1182,7 @@ def tick() -> None:
                         f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
                     )
 
-        def _phase_merge(_slice_s: float) -> None:
+        def _phase_merge(slice_s: float) -> None:
             assert cfg is not None
             set_tick_phase("merge")
             interval = int(getattr(cfg, "interval_seconds", 600))
@@ -1144,9 +1200,14 @@ def tick() -> None:
             try:
                 # Durable grants, never the sweep's result: a cut sweep leaves
                 # no result, and a completed one reads few PRs under load.
+                # Slice-derived, minus the same 10s reserve _ritual_timeout
+                # keeps: the read expires as a recorded failure BEFORE the
+                # phase alarm. The old 60s literal spent a third of the slice
+                # learning only that the store was contended.
                 out = verb_call("authorized-merge", {"op": "grant-queue",
                                 "rotate": int(time.time() // interval),
-                                "cwd": str(roots[0] if roots else Path.cwd())}, timeout=60)
+                                "cwd": str(roots[0] if roots else Path.cwd())},
+                                timeout=max(1.0, slice_s - 10.0))
                 if out.get("error"):
                     raise VerbUnavailable(str(out["error"]))
                 queue = [
@@ -1156,6 +1217,7 @@ def tick() -> None:
                      r.get("grant") or {})
                     for r in out.get("queue") or []
                 ]
+                progress["merge"] = f"queue={len(queue)}"
             except (VerbUnavailable, KeyError, TypeError, ValueError) as exc:
                 _emit_tick_row("pr_watch_merge", interval_s=interval, skip_reason="error",
                                detail=f"{head} grant queue unreadable ({exc})")
@@ -1246,8 +1308,8 @@ def tick() -> None:
         # The operator-notice sampler: one phase, always run; the
         # Rust arm answers notify_off itself when the [notify] signals list
         # is empty, so the readout shows the arm whether or not it is armed.
-        def _phase_notify(_slice_s: float) -> None:
-            _run_notify_watch_phase(_tick_roots())
+        def _phase_notify(slice_s: float) -> None:
+            _run_notify_watch_phase(_tick_roots(), timeout_s=max(1.0, slice_s - 2.0))
 
         # The heal drive loop: nothing called the healer on a timer, so every
         # red open PR waited for a hand. The loop lives in Rust; this phase is
@@ -1300,11 +1362,14 @@ def tick() -> None:
 
                 wake = lane_armed and _wd_wake_armed(settings)
                 changed, stranded_n, unknown_n, acted_n, failed_n, roots_done = False, 0, 0, 0, 0, 0
-                # Rotate the starting root by interval bucket: a cap cut no
-                # longer replays the same prefix forever.
+                # Rotate the starting root by run: one stranded run every
+                # three interval buckets (the fleet-tail cadence), so
+                # consecutive runs - not buckets - start at consecutive
+                # roots and a cap cut never replays the same prefix.
                 roots = _tick_roots()
                 if roots:
-                    k = int(time.time() // max(1, int(cfg.interval_seconds))) % len(roots)
+                    k = (int(time.time() // max(1, int(cfg.interval_seconds)))
+                         // 3) % len(roots)
                     roots = roots[k:] + roots[:k]
                 for root in roots:
                     # Re-check per root, not just once before the loop: a
@@ -1352,15 +1417,18 @@ def tick() -> None:
         # where ticks died. Reconcile owns the outcome-keyed leg and surfaces
         # a proven-stale canonical through its SessionStart hook.
         sweep_started = True
-        _run_phase("sweep", _phase_sweep)
+        _run_phase("sweep", _phase_sweep, arm="pr_watch_sweep")
         _run_phase("merge", _phase_merge, arm="pr_watch_merge")
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
         _run_phase("notify_watch", _phase_notify, arm="notify_watch")
         _run_phase("heal", _phase_heal)
         _run_phase("evals", _phase_evals)
-        _run_phase("stranded", _phase_stranded)
-        _run_phase("recovery", _phase_recovery)
-        _run_phase("watchdog", _phase_watchdog, arm="watchdog")
+        # The fleet tail: each runs one tick in three, on its slot of the
+        # interval bucket (the same rotation _phase_stranded uses for its
+        # root start), so the PR lane never pays all three p90s in one tick.
+        _run_phase("stranded", _phase_stranded, arm="stranded", cadence=3, slot=0)
+        _run_phase("recovery", _phase_recovery, arm="recovery", cadence=3, slot=1)
+        _run_phase("watchdog", _phase_watchdog, arm="watchdog", cadence=3, slot=2)
     except TickDeadlineExceeded:
         # Backstop: the per-phase runner catches its own cuts. Reaching here
         # means a cut escaped between phases; phase names where.

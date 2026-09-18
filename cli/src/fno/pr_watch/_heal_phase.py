@@ -14,8 +14,11 @@ log = logging.getLogger(__name__)
 
 #: Belt over a wedged spawn, not a run bound: the phase passes ``--detach``,
 #: the binary answers in milliseconds and the drive loop bounds each remedy
-#: itself; the tick's own SIGALRM deadline bounds the phase.
-_DRIVE_TIMEOUT_S = 30
+#: itself; the tick's own SIGALRM deadline bounds the phase. 5s, not the old
+#: 30: at 30 the belt equaled the heal cap, so one wedged root spent the
+#: whole phase (18 of 50 measured ticks saturated at 30.1s against a 0.3s
+#: median).
+_DRIVE_TIMEOUT_S = 5
 
 
 def run_heal_phase(

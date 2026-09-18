@@ -201,10 +201,10 @@ def test_external_backend_never_serves_the_cache(graph, monkeypatch):
     assert "999" not in result.output  # the poisoned cache row never surfaced
 
 
-def test_wake_entries_read_once_per_graph_identity(graph, monkeypatch):
+def test_graph_memo_read_once_per_graph_identity(graph, monkeypatch):
     import fno.pr_watch._king_wake as wake
 
-    wake._WAKE_ENTRIES_MEMO.update(ident=None, entries=None)
+    wake._GRAPH_ENTRIES_MEMO.update(ident=None, entries=None)
     calls: list[int] = []
 
     from fno.graph.api import wire_rows as _real_wire_rows
@@ -214,17 +214,40 @@ def test_wake_entries_read_once_per_graph_identity(graph, monkeypatch):
         return _real_wire_rows(*args, **kwargs)
 
     monkeypatch.setattr("fno.graph.api.wire_rows", _counting_read)
-    first = wake._graph_entries_for_wake()
-    second = wake._graph_entries_for_wake()
+    first = wake.graph_entries()
+    second = wake.graph_entries()
     assert len(first) == FILLER + CHILDREN + 1
     assert first == second
     assert len(calls) == 1  # the unchanged graph is served, not re-read
 
     _write_graph(graph, done_children=CHILDREN, done_epic=True)
-    third = wake._graph_entries_for_wake()
+    third = wake.graph_entries()
     assert len(calls) == 2  # the write moved the identity: one real re-read
     epic = next(row for row in third if row.get("id") == SCOPE)
     assert epic["status"] == "done"  # the fresh row, not the memo
+
+
+def test_graph_memo_none_ident_reads_and_never_caches(graph, monkeypatch):
+    import fno.pr_watch._king_wake as wake
+
+    wake._GRAPH_ENTRIES_MEMO.update(ident=None, entries=None)
+    calls: list[int] = []
+
+    from fno.graph.api import wire_rows as _real_wire_rows
+
+    def _counting_read(*args, **kwargs):
+        calls.append(1)
+        return _real_wire_rows(*args, **kwargs)
+
+    monkeypatch.setattr("fno.graph.api.wire_rows", _counting_read)
+    # An unreadable identity is a store with no keeper: both calls read, and
+    # nothing lands in the memo to serve a later, different graph.
+    monkeypatch.setattr("fno.king.drain_cache.graph_ident", lambda _p: None)
+    first = wake.graph_entries()
+    second = wake.graph_entries()
+    assert first == second
+    assert len(calls) == 2
+    assert wake._GRAPH_ENTRIES_MEMO["ident"] is None
 
 
 def test_sqlite_backend_keys_on_the_store_version(graph, monkeypatch):
