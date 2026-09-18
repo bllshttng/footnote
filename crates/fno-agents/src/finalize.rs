@@ -343,15 +343,21 @@ fn canonical_session_id(m: &ManifestFields) -> Option<String> {
 /// first and then ships within the same session still runs its ship
 /// side-effects on the ship fire (the lockout bug, sigma-review HIGH).
 fn prior_finalize_ship(project_events: &Path, session_id: &str) -> Option<bool> {
-    let content = fs::read_to_string(project_events).ok()?;
+    fno_event_store::import_all(project_events).ok()?;
+    let rows = fno_event_store::query_events(
+        project_events,
+        &fno_event_store::EventQuery {
+            types: vec!["session_finalized".to_string()],
+            ..Default::default()
+        },
+    )
+    .ok()?;
     let mut seen = None;
-    for line in content.lines() {
-        let Ok(val) = serde_json::from_str::<Value>(line) else {
+    for row in rows {
+        let Ok(val) = serde_json::from_str::<Value>(&row.line) else {
             continue;
         };
-        if val.get("type").and_then(|v| v.as_str()) != Some("session_finalized")
-            || val.pointer("/data/session_id").and_then(|v| v.as_str()) != Some(session_id)
-        {
+        if val.pointer("/data/session_id").and_then(|v| v.as_str()) != Some(session_id) {
             continue;
         }
         let ship = val
@@ -374,34 +380,41 @@ fn prior_finalize_ship(project_events: &Path, session_id: &str) -> Option<bool> 
 /// path's behavior identical to the emitter.
 const RUN_SUMMARY_DATA_CAP: usize = 500;
 
-/// Count the run's task ticks in events.jsonl. Correlates on the envelope-level
-/// `run` (the target-run id), so a co-located second run's events never mix in.
-/// tasks_failed counts task_done events whose outcome is FAILED - the gap
-/// (tasks_started > tasks_done) is what exposes a crashed executor (AC2-FR).
+/// Count the run's task ticks from committed store rows. Correlates on the
+/// envelope-level `run` (the target-run id), so a co-located second run's
+/// events never mix in. tasks_failed counts task_done events whose outcome is
+/// FAILED - the gap (tasks_started > tasks_done) is what exposes a crashed
+/// executor (AC2-FR).
 fn count_run_tasks(project_events: &Path, run: &str) -> (u64, u64, u64) {
-    use std::io::BufRead;
     let (mut started, mut done, mut failed) = (0u64, 0u64, 0u64);
-    // Stream line-by-line and reuse one buffer: events.jsonl grows to the
-    // rotation cap, so reading it whole would balloon memory (gemini review).
-    if let Ok(file) = fs::File::open(project_events) {
-        let mut reader = std::io::BufReader::new(file);
-        let mut line = String::new();
-        while reader.read_line(&mut line).unwrap_or(0) > 0 {
-            if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                if v.get("run").and_then(|r| r.as_str()) == Some(run) {
-                    match v.get("type").and_then(|t| t.as_str()) {
-                        Some("task_started") => started += 1,
-                        Some("task_done") => {
-                            done += 1;
-                            if v.get("outcome").and_then(|o| o.as_str()) == Some("FAILED") {
-                                failed += 1;
-                            }
-                        }
-                        _ => {}
+    if fno_event_store::import_all(project_events).is_err() {
+        return (0, 0, 0);
+    }
+    let rows = match fno_event_store::query_events(
+        project_events,
+        &fno_event_store::EventQuery {
+            types: vec!["task_started".to_string(), "task_done".to_string()],
+            ..Default::default()
+        },
+    ) {
+        Ok(rows) => rows,
+        Err(_) => return (0, 0, 0),
+    };
+    for row in rows {
+        let Ok(v) = serde_json::from_str::<Value>(&row.line) else {
+            continue;
+        };
+        if v.get("run").and_then(|r| r.as_str()) == Some(run) {
+            match v.get("type").and_then(|t| t.as_str()) {
+                Some("task_started") => started += 1,
+                Some("task_done") => {
+                    done += 1;
+                    if v.get("outcome").and_then(|o| o.as_str()) == Some("FAILED") {
+                        failed += 1;
                     }
                 }
+                _ => {}
             }
-            line.clear();
         }
     }
     (started, done, failed)
@@ -4081,9 +4094,9 @@ mod tests {
         // S1: a non-ship finalize (Budget); S2: a ship finalize.
         fs::write(
             &log,
-            "{\"ts\":\"t\",\"type\":\"loop_check\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\"}}\n\
-             {\"ts\":\"t\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\",\"ship\":false}}\n\
-             {\"ts\":\"t\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"S2\",\"ship\":true}}\n",
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"loop_check\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\"}}\n\
+             {\"ts\":\"2026-01-01T00:00:01Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\",\"ship\":false}}\n\
+             {\"ts\":\"2026-01-01T00:00:02Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"S2\",\"ship\":true}}\n",
         )
         .unwrap();
         assert_eq!(
@@ -4102,6 +4115,35 @@ mod tests {
     }
 
     #[test]
+    fn prior_finalize_ship_finds_a_store_committed_ship() {
+        // The cutover stopped journal appends: a ship recorded by the new
+        // writer lands only in the store, so the reader must answer from
+        // committed rows even though the journal file holds stale bytes only.
+        let dir = std::env::temp_dir().join(format!("finalize-store-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let log = dir.join("events.jsonl");
+        fs::write(
+            &log,
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"OLD\",\"ship\":true}}\n",
+        )
+        .unwrap();
+        let line = "{\"ts\":\"2026-01-01T00:00:05Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"NEW\",\"ship\":true}}";
+        let receipt = fno_event_store::append_envelope(&log, line, None).unwrap();
+        assert!(receipt.inserted);
+        assert_eq!(
+            prior_finalize_ship(&log, "NEW"),
+            Some(true),
+            "store-committed ship found"
+        );
+        assert_eq!(
+            prior_finalize_ship(&log, "OLD"),
+            Some(true),
+            "imported legacy ship still found"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn ship_flag_wins_regardless_of_event_order() {
         // A non-ship finalize followed by a ship finalize for the SAME session
         // must report Some(true) (the lockout-bug fix: a ship is terminal-complete).
@@ -4110,8 +4152,8 @@ mod tests {
         let log = dir.join("events.jsonl");
         fs::write(
             &log,
-            "{\"ts\":\"t\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\",\"ship\":false}}\n\
-             {\"ts\":\"t\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\",\"ship\":true}}\n",
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\",\"ship\":false}}\n\
+             {\"ts\":\"2026-01-01T00:00:01Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\",\"ship\":true}}\n",
         )
         .unwrap();
         assert_eq!(prior_finalize_ship(&log, "S1"), Some(true));
@@ -4127,7 +4169,7 @@ mod tests {
         let log = dir.join("events.jsonl");
         fs::write(
             &log,
-            "{\"ts\":\"t\",\"type\":\"session_finalize_failed\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\"}}\n",
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"session_finalize_failed\",\"source\":\"hook\",\"data\":{\"session_id\":\"S1\"}}\n",
         )
         .unwrap();
         assert_eq!(prior_finalize_ship(&log, "S1"), None);
@@ -4886,16 +4928,16 @@ mod tests {
         let events = tmp.path().join("events.jsonl");
         fs::write(
             &events,
-            "{\"type\":\"task_started\",\"run\":\"R1\",\"data\":{}}\n\
-             {\"type\":\"task_started\",\"run\":\"R1\",\"data\":{}}\n\
-             {\"type\":\"task_done\",\"run\":\"R1\",\"outcome\":\"SUCCESS\",\"data\":{}}\n\
-             {\"type\":\"task_done\",\"run\":\"R1\",\"outcome\":\"FAILED\",\"data\":{}}\n\
-             {\"type\":\"task_started\",\"run\":\"OTHER\",\"data\":{}}\n\
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"task_started\",\"source\":\"target\",\"run\":\"R1\",\"data\":{}}\n\
+             {\"ts\":\"2026-01-01T00:00:01Z\",\"type\":\"task_started\",\"source\":\"target\",\"run\":\"R1\",\"data\":{}}\n\
+             {\"ts\":\"2026-01-01T00:00:02Z\",\"type\":\"task_done\",\"source\":\"target\",\"run\":\"R1\",\"outcome\":\"SUCCESS\",\"data\":{}}\n\
+             {\"ts\":\"2026-01-01T00:00:03Z\",\"type\":\"task_done\",\"source\":\"target\",\"run\":\"R1\",\"outcome\":\"FAILED\",\"data\":{}}\n\
+             {\"ts\":\"2026-01-01T00:00:04Z\",\"type\":\"task_started\",\"source\":\"target\",\"run\":\"OTHER\",\"data\":{}}\n\
              not json\n",
         )
         .unwrap();
-        // R1: 2 started, 2 done, 1 failed; the OTHER-run line and the junk line
-        // are ignored.
+        // R1: 2 started, 2 done, 1 failed; the OTHER-run row and the rejected
+        // junk row are ignored.
         assert_eq!(count_run_tasks(&events, "R1"), (2, 2, 1));
     }
 
@@ -4906,7 +4948,7 @@ mod tests {
         // pre-seed one started with no matching done -> exposes the gap (AC2-FR).
         fs::write(
             &events,
-            "{\"type\":\"task_started\",\"run\":\"R9\",\"data\":{}}\n",
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"task_started\",\"source\":\"target\",\"run\":\"R9\",\"data\":{}}\n",
         )
         .unwrap();
         emit_run_summary(
@@ -4918,8 +4960,16 @@ mod tests {
             "DonePRGreen",
             None,
         );
-        let content = fs::read_to_string(&events).unwrap();
-        let last: Value = serde_json::from_str(content.lines().last().unwrap()).unwrap();
+        let rows = fno_event_store::query_events(
+            &events,
+            &fno_event_store::EventQuery {
+                types: vec!["run_summary".to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1, "one committed run_summary");
+        let last: Value = serde_json::from_str(&rows[0].line).unwrap();
         assert_eq!(last["type"], "run_summary");
         assert_eq!(last["v"], 1);
         assert_eq!(last["run"], "R9");
@@ -4935,8 +4985,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let events = tmp.path().join("events.jsonl");
         emit_run_summary(&events, &events, "R2", None, false, "NoProgress", None);
-        let content = fs::read_to_string(&events).unwrap();
-        let ev: Value = serde_json::from_str(content.lines().last().unwrap()).unwrap();
+        let rows = fno_event_store::query_events(
+            &events,
+            &fno_event_store::EventQuery {
+                types: vec!["run_summary".to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let ev: Value = serde_json::from_str(&rows[0].line).unwrap();
         assert_eq!(ev["outcome"], "FAILED");
         assert!(ev.get("node").is_none(), "no node -> omitted, not null");
     }
