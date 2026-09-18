@@ -505,9 +505,8 @@ def permission_pane_tokens(provider: str, mode: str) -> list[str]:
     downgrade. The vocabulary lives in Rust (crates/fno-agents/src/codex_posture.rs),
     so this is a transport bridge: one subprocess round-trip.
     agy ``skip`` maps to ``[]`` because its argv already carries
-    ``--dangerously-skip-permissions`` unconditionally."""
-    if not mode:
-        raise DispatchAskError("--permission-mode requires a value", exit_code=2)
+    ``--dangerously-skip-permissions`` unconditionally. An empty mode is
+    refused by the owner (the same literal, one source)."""
     from fno.rust_binary import VerbUnavailable, verb_call
 
     try:
