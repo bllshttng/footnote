@@ -913,7 +913,7 @@ fn run_rows_oracle(repo: &Path, dir: &Path, case: &Case) -> (i32, String, String
 
 fn rust_rows(ctx: &Ctx, case: &Case, dir: &Path) -> Value {
     let graph = dir.join("graph.json");
-    let entries = fno_agents::graph_store::read_defaulted(&graph, false).expect("rust read");
+    let entries = fno_agents::backlog::read_entries(&graph).expect("rust read");
     let mut claimed = std::collections::BTreeSet::new();
     if !case.claims.is_empty() {
         let dirs = vec![dir.join("claims-root/.fno/claims")];

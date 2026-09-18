@@ -49,9 +49,6 @@ pub fn run_claim(args: &[String]) -> i32 {
     if op == "reap" {
         return run_claim_reap(&args[1..]);
     }
-    if op == "export-lockfiles" {
-        return run_claim_export_lockfiles(&args[1..]);
-    }
     if op == "long-holds" {
         return crate::claims::run_claim_long_holds(&args[1..]);
     }
@@ -403,37 +400,6 @@ fn run_claim_reap(args: &[String]) -> i32 {
         }
         Err(error) => {
             eprintln!("fno-agents: claim reap failed: {error}");
-            1
-        }
-    }
-}
-
-fn run_claim_export_lockfiles(args: &[String]) -> i32 {
-    let mut root: Option<PathBuf> = None;
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--root" => match it.next() {
-                Some(value) => root = Some(PathBuf::from(value)),
-                None => {
-                    eprintln!("fno-agents: claim export-lockfiles: --root requires a value");
-                    return 2;
-                }
-            },
-            "--json" | "-J" => {}
-            other => {
-                eprintln!("fno-agents: claim export-lockfiles: unknown flag {other}");
-                return 2;
-            }
-        }
-    }
-    match crate::claim_store::export_lockfiles(root.as_deref()) {
-        Ok(payload) => {
-            println!("{payload}");
-            0
-        }
-        Err(error) => {
-            eprintln!("fno-agents: claim export-lockfiles failed: {error}");
             1
         }
     }

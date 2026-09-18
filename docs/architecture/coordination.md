@@ -36,9 +36,7 @@ One primitive, flat key namespace, atomic claim rows, append-only audit trail.
 
 The native `fno-agents claim` verbs use the `claims` table in `graph.db` as
 their current store, with `node_claims` as its node-key view. An existing
-`.fno/claims` directory imports once when the store opens. The compatibility
-rollback is explicit: `fno-agents claim export-lockfiles --root <root>` writes
-the current rows back to lockfiles for an older reader.
+`.fno/claims` directory imports once when the store opens.
 
 ### Key namespace
 
