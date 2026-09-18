@@ -827,6 +827,142 @@ def test_fleet_tail_phases_stagger_across_three_ticks(monkeypatch, _no_global_ti
         assert all("next tick" in (d.get("detail") or "") for d in off_rows)
 
 
+_ARMED_RECORD = {
+    "version": 1,
+    "state": "stopped",
+    "generation": 11,
+    "changed_at": "2026-09-18T00:00:00Z",
+    "changed_by": "op",
+    "reason": "28 open PRs, zero merge scans",
+    "source": "file",
+}
+
+
+def _arm_incident(monkeypatch, tmp_path) -> None:
+    import json as _json
+
+    agents = tmp_path / "agents-home"
+    agents.mkdir()
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(agents))
+    (agents / "fleet-stop.json").write_text(_json.dumps(_ARMED_RECORD), encoding="utf-8")
+
+
+def test_armed_breaker_completes_the_tick(monkeypatch, _no_global_tick_events, tmp_path):
+    """With the fleet incident armed, the tick runs its legs, mints the
+    watermark and ends ok - never paused: the entry gate is gone, the merge
+    leg reports its grant-queue scan, and each spawning leg answers to the
+    admission gate on its own row."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch._dispatch import TickResult
+
+    _arm_incident(monkeypatch, tmp_path)
+
+    settings = _cadence_settings()
+    settings.pr_watch.enabled = True
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+    monkeypatch.setattr("time.time", lambda: 1.0)  # stranded's slot; others skip
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_kw: (
+            _kw["emit"]("pr_watch_tick", {"open_prs": 0, "acted": 0}),
+            TickResult(open_prs=0, acted=0),
+        )[1],
+    )
+    # The merge leg's queue read: an empty grant queue still reports its scan.
+    monkeypatch.setattr(
+        "fno.rust_binary.verb_call",
+        lambda verb, payload, **kw: {"candidates": 0, "verdicts": {}, "queue": []},
+    )
+    monkeypatch.setattr(prcli, "_run_notify_watch_phase",
+                        lambda _roots=None, timeout_s=None: None, raising=True)
+    monkeypatch.setattr(prcli, "_catchup_roots", lambda: [], raising=True)
+    monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [], raising=True)
+    monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
+    monkeypatch.setattr(prcli, "_ROSTER_FLOOR_S", 10_000.0, raising=True)
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    result = CliRunner().invoke(app, [])
+
+    assert result.exit_code == 0, result.output
+    ticks = [d for t, d in _no_global_tick_events if t == "pr_watch_tick"]
+    assert len(ticks) == 1, "the watermark minted"
+    ends = [d for t, d in _no_global_tick_events if t == "pr_watch_tick_end"]
+    assert ends and ends[-1]["outcome"] == "ok"
+    assert not any(
+        d.get("outcome") == "paused" for t, d in _no_global_tick_events
+    )
+    rows = [d for t, d in _no_global_tick_events
+            if t == "control_plane_tick" and d.get("arm") == "pr_watch_merge"]
+    assert rows and "candidates=" in rows[-1].get("detail", ""), rows
+
+
+def test_armed_breaker_leaves_the_report_legs_alone(
+    monkeypatch, _no_global_tick_events, tmp_path
+):
+    """On the recovery and watchdog slots the heartbeat is written and the
+    unfinished-work report is published, and neither leg's row carries a
+    fleet_stop token: a read-plus-report leg is worth more during an
+    incident than its refused spawn costs, and the admission gate owns the
+    refusal."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno import fleet_state as fs
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch._dispatch import TickResult
+
+    _arm_incident(monkeypatch, tmp_path)
+
+    settings = _cadence_settings()
+    settings.pr_watch.enabled = True
+    settings.recovery.enabled = True
+    settings.autonomy.enabled = True
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_kw: (
+            _kw["emit"]("pr_watch_tick", {"open_prs": 0, "acted": 0}),
+            TickResult(open_prs=0, acted=0),
+        )[1],
+    )
+    monkeypatch.setattr(
+        "fno.rust_binary.verb_call",
+        lambda verb, payload, **kw: {"candidates": 0, "verdicts": {}, "queue": []},
+    )
+    monkeypatch.setattr(prcli, "_run_notify_watch_phase",
+                        lambda _roots=None, timeout_s=None: None, raising=True)
+    monkeypatch.setattr(prcli, "_catchup_roots", lambda: [], raising=True)
+    monkeypatch.setattr("fno.recovery.run_recovery_sweep", lambda _cfg, **_kw: 3)
+    monkeypatch.setattr("fno.agents.sweep.run_sweep", lambda **_kw: ([], 0))
+    hb = tmp_path / "fleet-sweep-state.json"
+    monkeypatch.setattr(fs, "fleet_state_path", lambda: hb)
+    monkeypatch.setattr("fno.agents.watchdog.lane_armed", lambda _s: True)
+    published: list[int] = []
+    monkeypatch.setattr("fno.agents.unfinished_work.build_report",
+                        lambda roots, **_kw: {"roots": len(list(roots))})
+    monkeypatch.setattr("fno.agents.unfinished_work.publish_report",
+                        lambda *a, **_kw: published.append(1))
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    for bucket in (1, 2):
+        monkeypatch.setattr("time.time", lambda b=bucket: b * 600 + 1.0)
+        start = len(_no_global_tick_events)
+        result = CliRunner().invoke(app, [])
+        assert result.exit_code == 0, result.output
+        rows = [d for t, d in _no_global_tick_events[start:]
+                if t == "control_plane_tick"]
+        holds = [d for d in rows if d.get("skip_reason") == "fleet_stop"]
+        assert not holds, rows
+
+    assert hb.exists(), "the fleet heartbeat is written on the recovery slot"
+    assert published, "the unfinished-work report is published on the watchdog slot"
+
+
 def test_cut_sweep_hands_back_scan_progress(monkeypatch, _no_global_tick_events):
     """A sweep cut at its slice emits its arm row with the scan counter the
     dispatch loop wrote, not a bare timeout."""

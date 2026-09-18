@@ -299,6 +299,10 @@ _SPAWN_TIMEOUT_GRACE = 30.0
 # the dispatch (never the scan) and let the next tick re-decide.
 _READ_FLOOR_S = 15.0
 _FIRE_FLOOR_S = 30.0
+#: The admission gate's own refusal codes (spawn_gate.rs EXIT_FLEET_STOP*).
+#: A refusal is not a failed attempt: is_error=False carries that upstream so
+#: the caller never burns a retry on a fire that never started.
+_ADMISSION_REFUSED_RCS = (82, 83)
 
 
 def fire_skill(
@@ -393,6 +397,11 @@ def fire_skill(
         return DispatchResult(ok=False, rc=-1, is_error=True, raw="")
 
     raw = result.stdout or ""
+
+    # The admission gate's own refusal codes: a durable stop answered the
+    # fire, not a failed attempt.
+    if result.returncode in _ADMISSION_REFUSED_RCS:
+        return DispatchResult(ok=False, rc=result.returncode, is_error=False, raw=raw)
 
     if result.returncode != 0:
         log.warning(
@@ -1052,6 +1061,7 @@ def _run_tick(
 
             elif decision.kind in ("merge", "review") and _ritual_timeout() >= _FIRE_FLOOR_S:
                 dispatch_ok = False
+                refused = False
                 dispatch_extra: dict[str, Any] = {}
                 if decision.kind == "merge":
                     _finish_queue_merge(cand.repo_dir, pr, emit)
@@ -1115,6 +1125,7 @@ def _run_tick(
                 else:
                     result = fire_skill_fn("check", pr, cand.repo_dir, node_id=cand.node_id)
                     dispatch_ok = result.ok
+                    refused = not result.ok and not result.is_error
 
                 if dispatch_ok:
                     acted += 1
@@ -1128,6 +1139,12 @@ def _run_tick(
                     else:
                         store.set(key, entry)
                     emit("pr_watch_dispatched", {"kind": decision.kind, "pr": pr, **dispatch_extra})
+                elif refused:
+                    # The admission gate refused the fire: not an attempt, so
+                    # no retry is burned and the park ledger stays untouched.
+                    # The next clear tick re-fires.
+                    emit("pr_watch_skipped", {"pr": pr, "reason": "admission-refused"})
+                    skipped += 1
                 else:
                     # Dispatch failed: bump retry counter (safe with None/non-int stored value)
                     try:

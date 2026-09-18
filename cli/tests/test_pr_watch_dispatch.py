@@ -412,6 +412,22 @@ class TestFireSkill:
         assert result.is_error is True
         assert result.rc == 0
 
+    def test_admission_refusal_rc_is_not_an_error(self, tmp_path):
+        """Exit 82 is the admission gate's own refusal: not ok, and not an
+        error - the caller must not burn a retry on a fire that never
+        started."""
+        from fno.pr_watch._dispatch import fire_skill
+
+        def stub_runner(cmd, **kw):
+            proc = _claude_ok_response()
+            proc.returncode = 82
+            return proc
+
+        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
+        assert result.ok is False
+        assert result.is_error is False
+        assert result.rc == 82
+
     def test_nonzero_rc_is_failure(self, tmp_path):
         """AC-ERR: non-zero rc -> DispatchResult.ok False."""
         from fno.pr_watch._dispatch import fire_skill
@@ -526,6 +542,7 @@ def _make_tick_deps(
     candidates=None,
     obs_map: Optional[dict] = None,
     fire_ok: bool = True,
+    fire_rc: int = 0,
     claim_held: bool = False,
     node_claimed: bool = False,
     merge_ready: bool = True,
@@ -566,7 +583,9 @@ def _make_tick_deps(
         from fno.pr_watch._dispatch import DispatchResult
 
         fired.append({"verb": verb, "pr": pr_number, "model": model})
-        if fire_ok:
+        if fire_rc:
+            return DispatchResult(ok=False, rc=fire_rc, is_error=False, raw="")
+        elif fire_ok:
             return DispatchResult(ok=True, rc=0, is_error=False, raw='{"is_error":false}')
         else:
             return DispatchResult(ok=False, rc=0, is_error=True, raw='{"is_error":true}')
@@ -1532,6 +1551,50 @@ class TestTickOrchestrator:
         fresh_store = _WS(path=store_path)
         entry = fresh_store.get("owner/repo#1")
         assert entry["parked"] == "retries-exhausted"
+
+    def test_admission_refusal_does_not_burn_a_retry(self, tmp_path):
+        """An exit-82 refusal is not an attempt: the skip names
+        admission-refused, retries stay put, and nothing parks - so an armed
+        breaker held across three ticks cannot park every open PR."""
+        from fno.pr_watch._dispatch import tick
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        store = WatermarkStore(path=store_path)
+        store.set("owner/repo#1", {
+            "last_review_ts": "2026-06-10T00:00:00Z",
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 1,
+            "parked": None,
+        })
+
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        obs_map = {1: _make_obs(1, "OPEN", latest_review_ts="2026-06-12T00:00:00Z")}
+        deps = _make_tick_deps(tmp_path, candidates=[candidate], obs_map=obs_map,
+                               fire_rc=82)
+
+        tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+        )
+
+        skipped = [e for e in deps["events"] if e["type"] == "pr_watch_skipped"]
+        assert any(e["data"].get("reason") == "admission-refused" for e in skipped)
+        assert [e for e in deps["events"] if e["type"] == "pr_watch_dispatch_failed"] == []
+        assert deps["notifications"] == []
+        entry = WatermarkStore(path=store_path).get("owner/repo#1")
+        assert entry["retries"] == 1
+        assert not entry.get("parked")
 
     def test_corrupt_store_baseline_no_mass_fire(self, tmp_path):
         """AC-ERR: corrupt store -> first tick baselines (no fire) not mass-fires."""
