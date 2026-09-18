@@ -389,7 +389,7 @@ pub struct Supersession {
 /// One cost_sessions[] item (a node_costs row).
 #[derive(Clone, Debug)]
 pub struct CostRecord {
-    pub session_id: String,
+    pub session_id: Option<String>,
     pub cost_usd: f64,
     pub timestamp: Option<String>,
     pub extras: Map<String, Value>,
@@ -1474,8 +1474,10 @@ obj_list!(
     CostRecord,
     |o: &Map<String, Value>| -> Result<CostRecord, ModelError> {
         Ok(CostRecord {
-            session_id: sub_opt_str(o, "session_id")
-                .ok_or_else(|| ModelError("cost_sessions item needs session_id".into()))?,
+            // The json leg carried a null session_id for cost rows the
+            // ledger could not attribute; dropping the row dropped the
+            // cost, so the field is nullable like every other attribution.
+            session_id: sub_opt_str(o, "session_id"),
             cost_usd: o
                 .get("cost_usd")
                 .and_then(Value::as_f64)
@@ -1631,7 +1633,9 @@ fn decision_to_json(d: &DecisionRef) -> Value {
 
 fn cost_to_json(c: &CostRecord) -> Value {
     let mut obj = Map::new();
-    obj.insert("session_id".into(), json!(c.session_id));
+    if let Some(v) = &c.session_id {
+        obj.insert("session_id".into(), json!(v));
+    }
     obj.insert("cost_usd".into(), json!(c.cost_usd));
     if let Some(v) = &c.timestamp {
         obj.insert("timestamp".into(), json!(v));
