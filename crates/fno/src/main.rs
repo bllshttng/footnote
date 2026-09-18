@@ -315,7 +315,11 @@ fn main() {
             } else {
                 let session =
                     mux_cli::resolve_session(kill_req.name.as_deref(), env_session.as_deref());
-                exit_mux(mux_cli::kill_server(&session, kill_req.json, kill_req.end_unkept));
+                exit_mux(mux_cli::kill_server(
+                    &session,
+                    kill_req.json,
+                    kill_req.end_unkept,
+                ));
             }
         }
         Role::MuxShellInit(shell, json) => {

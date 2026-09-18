@@ -239,7 +239,7 @@ fn take_adopted_for_slot_binds_by_birth_pane_id_once_only() {
     std::fs::create_dir_all(&dir).unwrap();
     let sock = dir.join("kt-5.sock");
     let _ = std::fs::remove_file(&sock);
-    let keeper = spawn_keeper_for_test(&bin, &sock, &["sleep", "300"]);
+    let _keeper = spawn_keeper_for_test(&bin, &sock, &["sleep", "300"]);
     let bound = Instant::now();
     while !sock.exists() {
         assert!(

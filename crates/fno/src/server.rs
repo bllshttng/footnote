@@ -1151,7 +1151,6 @@ mod argv_facts;
 
 use argv_facts::*;
 
-
 /// A tab's display label, from spawn-time facts only - no I/O, no
 /// subprocess on the layout path (squad.rs's origin-freeze discipline).
 /// Chain: explicit rename > registered name (`FNO_AGENT_SELF`) >

@@ -4207,7 +4207,6 @@ mod tests {
         assert_eq!(resume_session_id(&bare, "pi"), "");
     }
 
-
     #[test]
     fn is_uuid_shaped_accepts_only_lowercase_8_4_4_4_12_hex() {
         assert!(is_uuid_shaped("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"));

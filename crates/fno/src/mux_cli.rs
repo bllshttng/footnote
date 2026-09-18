@@ -796,7 +796,6 @@ const SIGTERM_GRACE: Duration = Duration::from_secs(3);
 /// Unrecoverable. SIGKILL is immediate; this only bounds a slow reap.
 const SIGKILL_GRACE: Duration = Duration::from_secs(1);
 
-
 fn kill_server_inner(session: &str, sock: &Path) -> KillOutcome {
     let stream = match proto::connect_unix_timeout(sock, PROBE_TIMEOUT) {
         Ok(s) => s,
