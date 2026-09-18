@@ -427,6 +427,9 @@ def fetch_pr_info_rest(
     auto_merge = pr_data.get("auto_merge")
     if auto_merge is not None and not isinstance(auto_merge, dict):
         return None, "gh api pulls/<n> carried a malformed auto_merge object"
+    merge_state = pr_data.get("mergeable_state")
+    if merge_state is not None and not isinstance(merge_state, str):
+        return None, "gh api pulls/<n> carried malformed mergeable_state"
     return (
         {
             "pr": int(pr),
@@ -440,9 +443,10 @@ def fetch_pr_info_rest(
             "head_ref": head_ref,
             "base_ref": base_ref,
             "mergeable": _map_mergeable(pr_data.get("mergeable")),
-            # The same payload GitHub's GraphQL mergeStateStatus carries; the
-            # Rust stop gate asks for either spelling on one pr view read.
-            "merge_state_status": pr_data.get("mergeable_state"),
+            # The REST spelling of GraphQL mergeStateStatus: same states,
+            # lowercase values ("behind", not "BEHIND"). The Rust stop gate
+            # reads either spelling on one pr view read, case-insensitively.
+            "merge_state_status": merge_state,
             "merged_at": merged_at,
             "merge_sha": merge_sha,
             "author": author,

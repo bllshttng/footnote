@@ -14,6 +14,7 @@ PULL = {
     "state": "open",
     "merged": False,
     "mergeable": True,
+    "mergeable_state": "behind",
     "head": {"sha": "abc123", "ref": "feature/test"},
     "base": {"ref": "main"},
 }
@@ -99,7 +100,7 @@ def test_the_stop_gate_read_with_merge_state_status_still_routes_rest(monkeypatc
     )
     assert result.returncode == 0
     payload = json.loads(result.stdout)
-    assert payload["mergeStateStatus"] == ""
+    assert payload["mergeStateStatus"] == "behind"
     assert payload["headRefOid"] == "abc123"
     assert calls == [["/real/gh", "api", "repos/o/r/pulls/930"]]
 
