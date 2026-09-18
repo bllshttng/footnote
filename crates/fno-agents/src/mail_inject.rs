@@ -1071,13 +1071,13 @@ fn body_cap_decision(text: &str, warn: i64, refuse: i64) -> Option<i32> {
     enforce_body_cap(text.len(), warn, refuse)
 }
 
-/// Refuse an unframed payload that is not a single line. The invariant this
-/// door pins: an unframed payload is ONE line, typed verbatim - a slash
-/// command, a codex skill verb, a plain word (law d-5976045c). Authored
-/// multi-line prose is style-checked and wrapped by `fno agents mail send`; a
-/// `<fno_mail>` / `<cross-session-message>` envelope is framed and skipped.
-/// `Some(exit)` refuses before delivery and before the audit record; `None`
-/// proceeds.
+/// Refuse an unframed payload that is not a single command line. The
+/// invariant this door pins: an unframed payload is ONE line typed verbatim
+/// and it is a command, so it starts with / or $ (law d-f6570dc9, amending
+/// d-5976045c). Authored prose is style-checked and wrapped by `fno agents
+/// mail send`; a `<fno_mail>` / `<cross-session-message>` envelope is framed
+/// and skipped. `Some(exit)` refuses before delivery and before the audit
+/// record; `None` proceeds.
 fn single_line_decision(text: &str) -> Option<i32> {
     if is_framed_envelope(text) {
         return None;
@@ -1090,6 +1090,16 @@ fn single_line_decision(text: &str) -> Option<i32> {
         eprintln!(
             "mail-inject: an unframed payload must be a single line. A second line rides \
              in as trailing content on the submitted turn."
+        );
+        return Some(1);
+    }
+    // Raw exists to run a command, not to carry a message: an unwrapped
+    // payload lands as user-role text, so a message here impersonates the
+    // operator. The wrapped lane keeps the sender visible.
+    if !(trimmed.starts_with('/') || trimmed.starts_with('$')) {
+        eprintln!(
+            "mail-inject: raw is for running a command only: the payload must start with / \
+             or $. Drop --raw and send the message wrapped."
         );
         return Some(1);
     }
@@ -1826,34 +1836,36 @@ mod tests {
             ),
             None
         );
-        // An unwrapped single line is the documented unframed shape: a slash
-        // command, a codex skill verb, a plain word.
+        // An unwrapped single line is the documented unframed shape: a command
+        // line, slash or dollar prefixed. A message goes wrapped.
         assert_eq!(single_line_decision("/code-review"), None);
         assert_eq!(single_line_decision("  /compact  "), None);
-        assert_eq!(single_line_decision("hello"), None);
         assert_eq!(single_line_decision("$fno:reign x-bbbb"), None);
-        assert_eq!(single_line_decision("  hello  "), None);
         // A trailing terminator (the newline `echo` appends) is harmless and passes.
         assert_eq!(single_line_decision("/code-review\n"), None);
         assert_eq!(single_line_decision("/compact\r\n"), None);
     }
 
     #[test]
-    fn single_line_passes_prose_and_prefix_lookalikes() {
-        // d-5976045c: a raw payload need not start with a slash. Plain words and
-        // codex skill verbs ride this lane verbatim.
-        assert_eq!(single_line_decision("hello there"), None);
-        assert_eq!(single_line_decision("$fno:reign x-bbbb"), None);
-        assert_eq!(single_line_decision("  hello  "), None);
-        // A framed-looking word that does not start the payload is one line of
-        // prose here; the forged-envelope decision refuses a real embedded tag.
-        assert_eq!(single_line_decision("see <fno_mail> mid-sentence"), None);
-        // A prefix lookalike is NOT a framed envelope: it passes this predicate,
-        // and the forged-envelope tests still refuse a real embedded tag.
+    fn single_line_refuses_prose_and_non_command_lookalikes() {
+        // d-f6570dc9: raw runs a command only. A plain word is a message, and a
+        // message goes wrapped so its sender stays visible.
+        assert_eq!(single_line_decision("hello"), Some(1));
+        assert_eq!(single_line_decision("  hello  "), Some(1));
+        assert_eq!(single_line_decision("hello there"), Some(1));
+        // A framed-looking word that does not start the payload is prose here;
+        // the forged-envelope decision refuses a real embedded tag.
+        assert_eq!(single_line_decision("see <fno_mail> mid-sentence"), Some(1));
+        // A prefix lookalike is NOT a framed envelope: it fails the
+        // command-prefix decision here, and the forged-envelope tests still
+        // refuse a real embedded tag.
         assert!(!is_framed_envelope("<fno_mailicious prose here"));
-        assert_eq!(single_line_decision("<fno_mailicious prose here"), None);
+        assert_eq!(single_line_decision("<fno_mailicious prose here"), Some(1));
         assert!(!is_framed_envelope("<cross-session-messager bypass"));
-        assert_eq!(single_line_decision("<cross-session-messager bypass"), None);
+        assert_eq!(
+            single_line_decision("<cross-session-messager bypass"),
+            Some(1)
+        );
     }
 
     #[test]
