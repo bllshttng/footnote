@@ -205,13 +205,13 @@ pub fn install(
             ))
         }
         Root::Malformed(e) => {
+            // {e} already carries the line/column; prefixing it again only
+            // pushes the remedy past the transport's message cap.
             return Err(format!(
-                "{}: parse error at line {} column {}: {e}; fix the JSON or \
-                 move the file aside, then rerun `fno config setup`",
-                hooks_file.display(),
-                e.line(),
-                e.column()
-            ))
+                "{}: {e}; fix the JSON or move the file aside, then rerun \
+                 `fno config setup`",
+                hooks_file.display()
+            ));
         }
     };
     let fn_value = root
@@ -333,7 +333,7 @@ mod tests {
         std::fs::write(
             &path,
             r#"{
-  "orca-status": {"Stop": [{"type": "command", "command": "/x/orca.sh", "timeout": 5}]},
+  "some-other-tool": {"Stop": [{"type": "command", "command": "/x/other.sh", "timeout": 5}]},
   "footnote": {
     "enabled": false,
     "Stop": [{"type": "command", "command": "/old/adapter.sh", "timeout": 60}]
@@ -347,7 +347,7 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         let data: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(
-            data["orca-status"]["Stop"][0]["command"], "/x/orca.sh",
+            data["some-other-tool"]["Stop"][0]["command"], "/x/other.sh",
             "foreign namespace unchanged"
         );
         assert_eq!(data["footnote"]["enabled"], false, "enabled untouched");
