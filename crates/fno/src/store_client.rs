@@ -8,21 +8,21 @@
 //! (`cli/src/fno/graph/store.py store_socket_for`) resolves it - a
 //! `<graph>.store.sock` sibling, or a hashed short name under the platform
 //! temp dir when the sibling would overrun the unix-socket address limit -
-//! and a missing keeper is spawned on demand, the same rule the Python
-//! client follows. A refused store is a REFUSAL, never an empty answer: the
-//! verbs surface the failure as the card's notice line.
+//! and a missing keeper is never spawned: the request rides the one-shot
+//! `--store-exec` lane instead, because a resident keeper's memory grows
+//! with the requests it serves. A refused store is a REFUSAL,
+//! never an empty answer: the verbs surface the failure as the card's
+//! notice line.
 
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const TAG_REQUEST: u8 = 1;
 const TAG_RESPONSE: u8 = 4;
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
-/// Bounded wait for a keeper this call spawned to bind its socket.
-const SPAWN_WAIT: Duration = Duration::from_secs(10);
 const SOCK_PATH_LIMIT: usize = 96;
 
 /// The store keeper socket for a graph file. Mirrors the Python client's
@@ -98,28 +98,6 @@ fn which_worker() -> Option<PathBuf> {
     crate::product_boundary::find_on_path("fno-agents-worker")
 }
 
-fn spawn_keeper(graph: &Path) -> Result<(), String> {
-    let binary = worker_binary().ok_or_else(crate::product_boundary::graph_worker_missing_error)?;
-    let sock = store_socket_for(graph);
-    let session = format!("mux-{}", std::process::id());
-    std::process::Command::new(&binary)
-        .args([
-            "--store-keeper",
-            "--sock",
-            sock.to_str().unwrap_or_default(),
-            "--graph",
-            graph.to_str().unwrap_or_default(),
-            "--session",
-            session.as_str(),
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| crate::product_boundary::graph_worker_spawn_error(&binary, e))?;
-    Ok(())
-}
-
 fn connect(sock: &Path) -> Result<UnixStream, String> {
     match UnixStream::connect(sock) {
         Ok(s) => Ok(s),
@@ -190,27 +168,69 @@ fn dead_socket(err: &str) -> bool {
     err == "absent" || err == "no_listener"
 }
 
-/// One keeper request against `graph`, spawning the keeper when the socket
-/// is positively dead and waiting a bounded time for it to bind.
+/// One request through the `--store-exec` one-shot lane. The child serves it
+/// through the keeper's own dispatch and exits, so a store with no resident
+/// keeper never grows one (a keeper's memory grows with requests
+/// served, ~3.6 GB/hour on the operator machine). Writer safety keeps the
+/// bounded file flock the publish takes, which is cross-process; the
+/// optimistic version/digest transaction is unchanged. The child reads
+/// stdin to EOF before replying, so write-then-read cannot deadlock.
+fn exec_call(graph: &Path, method: &str, params: Value) -> Result<Value, String> {
+    use std::io::Write as _;
+
+    let binary = worker_binary().ok_or_else(crate::product_boundary::graph_worker_missing_error)?;
+    let request = json!({"id": 1, "method": method, "params": params});
+    let mut child = std::process::Command::new(&binary)
+        .args([
+            "--store-exec",
+            "--graph",
+            graph.to_str().unwrap_or_default(),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| crate::product_boundary::graph_worker_spawn_error(&binary, e))?;
+    child
+        .stdin
+        .take()
+        .ok_or("cannot open the store-exec stdin")?
+        .write_all(request.to_string().as_bytes())
+        .map_err(|e| format!("cannot send the store request: {e}"))?;
+    // stdin dropped here: the child sees EOF and answers.
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("store-exec failed: {e}"))?;
+    if out.stdout.is_empty() {
+        return Err(format!(
+            "store-exec exited with code {} and no reply",
+            out.status.code().unwrap_or(-1)
+        ));
+    }
+    let reply: Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("store-exec reply is not JSON: {e}"))?;
+    if reply.get("ok").and_then(Value::as_bool) == Some(true) {
+        return Ok(reply.get("result").cloned().unwrap_or(Value::Null));
+    }
+    let error = reply.get("error").cloned().unwrap_or(Value::Null);
+    Err(error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("store refused")
+        .to_string())
+}
+
+/// One store request against `graph`: a live keeper's socket is preferred;
+/// when the socket is positively dead, the request rides the one-shot exec
+/// lane and no resident keeper is spawned.
 pub fn call(graph: &Path, method: &str, params: Value) -> Result<Value, String> {
     let sock = store_socket_for(graph);
-    let mut attempt = connect(&sock);
-    if attempt.as_ref().is_err_and(|e| dead_socket(e)) {
-        spawn_keeper(graph)?;
-        let deadline = Instant::now() + SPAWN_WAIT;
-        loop {
-            attempt = connect(&sock);
-            if !attempt.as_ref().is_err_and(|e| dead_socket(e)) {
-                break;
-            }
-            if Instant::now() >= deadline {
-                return Err("the store keeper never bound its socket".into());
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+    let attempt = connect(&sock);
+    match attempt {
+        Ok(mut stream) => round_trip(&mut stream, method, params),
+        Err(e) if dead_socket(&e) => exec_call(graph, method, params),
+        Err(e) => Err(e),
     }
-    let mut stream = attempt?;
-    round_trip(&mut stream, method, params)
 }
 
 /// A finite, non-huge rank value (render._rank_band's rule): a poisoned
@@ -427,4 +447,72 @@ pub fn version(graph: &Path) -> Result<i64, String> {
         .get("version")
         .and_then(Value::as_i64)
         .ok_or_else(|| "the store returned no version".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// A stub `fno-agents-worker` script: swallows stdin, answers a fixed
+    /// reply envelope. Enough to prove the dead-socket route execs instead
+    /// of spawning a resident keeper; the lane's serving half is proven in
+    /// graph_keeper's own suite.
+    fn stub_worker(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let script = dir.join(name);
+        std::fs::write(&script, format!("#!/bin/sh\ncat >/dev/null\n{body}\n")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[test]
+    fn a_dead_socket_routes_through_exec_and_never_spawns() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-store-exec-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let graph = dir.join("graph.json");
+        std::fs::write(&graph, b"{\"entries\": []}").unwrap();
+        std::env::set_var(
+            "FNO_AGENTS_WORKER",
+            stub_worker(
+                &dir,
+                "worker-ok",
+                "printf '{\"ok\":true,\"result\":{\"store_backend\":\"sqlite\"}}\n'",
+            ),
+        );
+        let reply = call(&graph, "backend_status", json!({})).unwrap();
+        assert_eq!(reply["store_backend"], json!("sqlite"));
+        assert!(
+            !dir.join("graph.json.store.sock").exists(),
+            "no resident keeper was minted, so no socket exists"
+        );
+        std::env::remove_var("FNO_AGENTS_WORKER");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_exec_refusal_surfaces_the_replys_error_message() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-store-exec-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let graph = dir.join("graph.json");
+        std::fs::write(&graph, b"{\"entries\": []}").unwrap();
+        std::env::set_var(
+            "FNO_AGENTS_WORKER",
+            stub_worker(
+                &dir,
+                "worker-refuse",
+                "printf '{\"ok\":false,\"error\":{\"kind\":\"conflict\",\"message\":\"version conflict on x\"}}\n'",
+            ),
+        );
+        let err = call(&graph, "commit", json!({})).unwrap_err();
+        assert!(err.contains("version conflict"), "{err}");
+        std::env::remove_var("FNO_AGENTS_WORKER");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
