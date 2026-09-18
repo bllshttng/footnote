@@ -740,7 +740,12 @@ enum KeeperConfirm {
         baseline: u64,
     },
     /// The file does not exist yet; every line it ever has is new signal.
-    PendingStore,
+    /// The variant carries the hosted harness, so the confirm closure
+    /// re-looks the store up in THAT harness's session store instead of
+    /// hard-coding pi.
+    PendingStore {
+        harness: String,
+    },
     /// The hosted harness keeps no locally greppable accepted-turn record
     /// (cursor-agent: the chat store lives server-side; agy: a sqlite db,
     /// not a per-turn transcript). The pty stream was once grepped for a
@@ -755,20 +760,42 @@ enum KeeperConfirm {
     Refused(&'static str),
 }
 
-fn resolve_keeper_confirm(target: &KeeperTarget, session: &str, pi_root: &Path) -> KeeperConfirm {
+fn resolve_keeper_confirm(
+    target: &KeeperTarget,
+    session: &str,
+    pi_root: &Path,
+    grok_root: &Path,
+) -> KeeperConfirm {
     match target.hosted_harness.as_str() {
         // cursor-agent's chat store is remote (measured: the id appears in no
         // file under its state root after two live turns) and agy keeps its
         // conversations in a sqlite db - neither has a per-turn transcript a
-        // confirm could grep, and pty paint is not acceptance evidence
-        //. Both type and stay unconfirmed.
+        // confirm could grep, and pty paint is not acceptance evidence.
+        // Both type and stay unconfirmed.
         "cursor-agent" | "agy" => KeeperConfirm::Unconfirmable,
         "pi" => match crate::pi::lookup_sessions_under(pi_root, &target.cwd, session) {
             crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
                 baseline: transcript_len(&file),
                 path: file,
             },
-            crate::pi::SessionLookup::None => KeeperConfirm::PendingStore,
+            crate::pi::SessionLookup::None => KeeperConfirm::PendingStore {
+                harness: "pi".to_string(),
+            },
+            crate::pi::SessionLookup::Duplicate { .. } => {
+                KeeperConfirm::Refused("duplicate-session-store")
+            }
+            crate::pi::SessionLookup::Unknown { .. } => {
+                KeeperConfirm::Refused("session-store-unreadable")
+            }
+        },
+        "grok" => match crate::grok_store::lookup_session(grok_root, session) {
+            crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
+                baseline: transcript_len(&file),
+                path: file,
+            },
+            crate::pi::SessionLookup::None => KeeperConfirm::PendingStore {
+                harness: "grok".to_string(),
+            },
             crate::pi::SessionLookup::Duplicate { .. } => {
                 KeeperConfirm::Refused("duplicate-session-store")
             }
@@ -799,6 +826,7 @@ pub fn deliver_via_keeper_socket(
     deliver_via_keeper_socket_in(
         &crate::paths::AgentsHome::from_env(),
         &crate::pi::pi_sessions_root(),
+        &crate::grok_store::grok_sessions_root(),
         session,
         text,
         attempts,
@@ -807,12 +835,14 @@ pub fn deliver_via_keeper_socket(
     )
 }
 
-/// Deliver `text` to a keeper-hosted lane-B thread against an explicit agents
-/// home and pi sessions root: the seam the keeper journey test drives, so the
-/// fixtures resolve rows and confirm targets exactly as the verb does.
+/// Deliver `text` to a keeper-hosted lane-B thread against an explicit
+/// agents home, pi sessions root, and grok sessions root: the seam the
+/// keeper journey test drives, so the fixtures resolve rows and confirm
+/// targets exactly as the verb does.
 pub fn deliver_via_keeper_socket_in(
     home: &crate::paths::AgentsHome,
     pi_root: &Path,
+    grok_root: &Path,
     session: &str,
     text: &str,
     attempts: u32,
@@ -820,13 +850,9 @@ pub fn deliver_via_keeper_socket_in(
     enter_delay_ms: u64,
 ) -> Result<(), &'static str> {
     let target = resolve_keeper_target_in(home, session)?;
-    // Connect BEFORE resolving the confirm (the claude lane's ordering: a
-    // failed connect is a transport miss, never a not-confirmed turn, and the
-    // transcript baseline that confirm resolution takes must postdate the
-    // connect).
     let stream =
         std::os::unix::net::UnixStream::connect(&target.sock).map_err(|_| "no-keeper-listener")?;
-    let confirm = resolve_keeper_confirm(&target, session, pi_root);
+    let confirm = resolve_keeper_confirm(&target, session, pi_root, grok_root);
     if let KeeperConfirm::Refused(reason) = confirm {
         // Connected but never typed into: closing without a keystroke is the
         // honest outcome, and the reason names why nothing was pasted.
@@ -869,8 +895,12 @@ pub fn deliver_via_keeper_socket_in(
             KeeperConfirm::Transcript { path, baseline } => {
                 confirm_content_after(path, marker, *baseline).unwrap_or(false)
             }
-            KeeperConfirm::PendingStore => {
-                match crate::pi::lookup_sessions_under(pi_root, &target.cwd, session) {
+            KeeperConfirm::PendingStore { harness } => {
+                let hit = match harness.as_str() {
+                    "pi" => crate::pi::lookup_sessions_under(pi_root, &target.cwd, session),
+                    _ => crate::grok_store::lookup_session(grok_root, session),
+                };
+                match hit {
                     crate::pi::SessionLookup::One { file } => {
                         confirm_content_after(&file, marker, 0).unwrap_or(false)
                     }
@@ -2903,6 +2933,172 @@ mod tests {
         assert!(parse_args(&argv(&["--session", "s1", "--harness", "notaharness"])).is_err());
     }
 
+    /// A fake keeper that records the submitted turn the way grok does: a
+    /// JSON-escaped line appended to
+    /// `<grok_root>/<group>/<session>/chat_history.jsonl` on the wire CR.
+    fn spawn_grok_recording_keeper_handle(
+        sock: &Path,
+        text: &str,
+        grok_root: &Path,
+        session: &str,
+    ) -> std::thread::JoinHandle<()> {
+        use crate::pane_keeper::{decode, Decode, Frame};
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(sock).unwrap();
+        let text = text.to_string();
+        let grok_root = grok_root.to_path_buf();
+        let session = session.to_string();
+        std::thread::Builder::new()
+            .name("fake-grok-keeper".into())
+            .spawn(move || {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 8192];
+                'outer: loop {
+                    loop {
+                        match decode(&buf) {
+                            Decode::NeedMore => break,
+                            Decode::Violation(_) => break 'outer,
+                            Decode::Frame(frame, used) => {
+                                buf.drain(..used);
+                                let is_cr =
+                                    matches!(&frame, Frame::Input(b) if b.as_slice() == b"\r");
+                                if is_cr {
+                                    let dir = grok_root.join("%2Fcwd").join(&session);
+                                    std::fs::create_dir_all(&dir).unwrap();
+                                    let line = serde_json::json!({ "text": text }).to_string();
+                                    let mut f = std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(dir.join("chat_history.jsonl"))
+                                        .unwrap();
+                                    writeln!(f, "{line}").unwrap();
+                                }
+                            }
+                        }
+                    }
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break 'outer,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn mail_inject_grok_keeper_confirms_from_the_session_store() {
+        // AC5-HP pending shape: the store does not exist at resolve time and
+        // materializes once the keeper records the CR'd turn; the confirm
+        // closure re-looks the grok store and greps the marker from byte 0.
+        let (home, base) = keeper_mail_home("grokok");
+        let cwd = base.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let pi_root = base.join("pistore");
+        std::fs::create_dir_all(&pi_root).unwrap();
+        // The store ROOT exists with no session in it yet: the pending shape.
+        let grok_root = base.join("grokstore");
+        std::fs::create_dir_all(&grok_root).unwrap();
+        let sock = base.join("mux/threads/wk-grok-ok.sock");
+        let text = "<fno_mail from=\"g\">grok body\n</fno_mail>";
+        keeper_mail_row(&home, "wk-grok-ok", "grok", "sess-grok-ok", &cwd, &sock);
+        let _keeper = spawn_grok_recording_keeper_handle(&sock, text, &grok_root, "sess-grok-ok");
+
+        let outcome = deliver_via_keeper_socket_in(
+            &home,
+            &pi_root,
+            &grok_root,
+            "sess-grok-ok",
+            text,
+            12,
+            25,
+            0,
+        );
+        assert_eq!(outcome, Ok(()), "grok store confirm");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn mail_inject_grok_keeper_confirms_after_the_baseline() {
+        // AC5-HP baseline shape: the store exists BEFORE the send, so the
+        // confirm polls only lines appended after the baseline byte.
+        let (home, base) = keeper_mail_home("grokbas");
+        let cwd = base.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let pi_root = base.join("pistore");
+        std::fs::create_dir_all(&pi_root).unwrap();
+        let grok_root = base.join("grokstore");
+        let pre = grok_root.join("%2Fcwd").join("sess-grok-bas");
+        std::fs::create_dir_all(&pre).unwrap();
+        std::fs::write(
+            pre.join("chat_history.jsonl"),
+            "{\"text\":\"earlier turn\"}\n",
+        )
+        .unwrap();
+        let sock = base.join("mux/threads/wk-grok-bas.sock");
+        let text = "<fno_mail from=\"g\">grok body\n</fno_mail>";
+        keeper_mail_row(&home, "wk-grok-bas", "grok", "sess-grok-bas", &cwd, &sock);
+        let _keeper = spawn_grok_recording_keeper_handle(&sock, text, &grok_root, "sess-grok-bas");
+
+        let outcome = deliver_via_keeper_socket_in(
+            &home,
+            &pi_root,
+            &grok_root,
+            "sess-grok-bas",
+            text,
+            12,
+            25,
+            0,
+        );
+        assert_eq!(outcome, Ok(()), "grok baseline confirm");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn mail_inject_grok_keeper_refuses_a_duplicate_session_store() {
+        // AC5-ERR: two store directories for one grok session id refuse the
+        // send before any keystroke.
+        let (home, base) = keeper_mail_home("grokdup");
+        let cwd = base.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let pi_root = base.join("pistore");
+        std::fs::create_dir_all(&pi_root).unwrap();
+        let grok_root = base.join("grokstore");
+        for group in ["%2Frepo-a", "%2Frepo-b"] {
+            let dir = grok_root.join(group).join("sess-grok-dup");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("chat_history.jsonl"), "{}\n").unwrap();
+        }
+        let sock = base.join("mux/threads/wk-grok-dup.sock");
+        keeper_mail_row(&home, "wk-grok-dup", "grok", "sess-grok-dup", &cwd, &sock);
+        // A live listener is required: the lane connects first, and only a
+        // connected socket gets the before-typing refusal.
+        let _parked = spawn_recording_keeper_handle(
+            &sock,
+            "<fno_mail>ping</fno_mail>",
+            &pi_root,
+            &cwd,
+            "sess-grok-dup",
+        );
+
+        let outcome = deliver_via_keeper_socket_in(
+            &home,
+            &pi_root,
+            &grok_root,
+            "sess-grok-dup",
+            "<fno_mail>ping</fno_mail>",
+            2,
+            10,
+            0,
+        );
+        assert_eq!(outcome, Err("duplicate-session-store"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     #[test]
     fn mail_inject_keeper_delivers_input_frames_and_confirms_by_content() {
         use crate::pane_keeper::Frame;
@@ -2919,7 +3115,16 @@ mod tests {
         let text = "<fno_mail from=\"t\">body line\n</fno_mail>";
         let handle = spawn_recording_keeper_handle(&sock, text, &pi_root, &cwd, session);
 
-        let outcome = deliver_via_keeper_socket_in(&home, &pi_root, session, text, 12, 25, 0);
+        let outcome = deliver_via_keeper_socket_in(
+            &home,
+            &pi_root,
+            &base.join("grokstore"),
+            session,
+            text,
+            12,
+            25,
+            0,
+        );
         assert_eq!(outcome, Ok(()), "the envelope lands and confirms");
 
         let frames = handle.join().unwrap();
@@ -2954,6 +3159,7 @@ mod tests {
         let outcome = deliver_via_keeper_socket_in(
             &home,
             &pi_root,
+            &base.join("grokstore"),
             "sess-dead",
             "<fno_mail>ping</fno_mail>",
             2,
@@ -2966,14 +3172,15 @@ mod tests {
 
     #[test]
     fn mail_inject_keeper_refuses_before_typing_without_a_confirm_source() {
-        // A hosted harness with no transcript resolver here refuses BEFORE any
-        // frame is typed: an honest durable demotion beats an unverifiable
-        // delivered.
+        // An UNREADABLE grok session store refuses BEFORE any frame is typed:
+        // an honest durable demotion beats an unverifiable delivered. The
+        // no-confirm-source token is left for harnesses with no arm at all.
         let (home, base) = keeper_mail_home("nosrc");
         let cwd = base.join("cwd");
         std::fs::create_dir_all(&cwd).unwrap();
         let pi_root = base.join("pistore");
         std::fs::create_dir_all(&pi_root).unwrap();
+        let grok_root = base.join("grokstore").join("absent");
         let sock = base.join("mux/threads/wk-grok.sock");
         keeper_mail_row(&home, "wk-grok", "grok", "sess-grok", &cwd, &sock);
         let _parked = spawn_recording_keeper_handle(
@@ -2987,13 +3194,14 @@ mod tests {
         let outcome = deliver_via_keeper_socket_in(
             &home,
             &pi_root,
+            &grok_root,
             "sess-grok",
             "<fno_mail>ping</fno_mail>",
             2,
             10,
             0,
         );
-        assert_eq!(outcome, Err("no-confirm-source"));
+        assert_eq!(outcome, Err("session-store-unreadable"));
         // The parked fake keeper thread never receives a connection (the lane
         // refused before connecting) and ends with the test process.
         std::fs::remove_dir_all(&base).ok();
