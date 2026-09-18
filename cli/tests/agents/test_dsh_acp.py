@@ -66,6 +66,28 @@ def test_AC4_LIVE_gate_is_explicitly_preserved_by_hermetic_runner():
     assert "FNO_DSH_LIVE" in _RUNNER_PASSTHROUGH
 
 
+def test_session_resume_selects_the_session_for_the_next_prompt(monkeypatch):
+    driver = _driver()
+    session = driver.DshAcpSession(cwd=".")
+    calls = []
+
+    def request(method, params):
+        calls.append((method, params))
+        return {"result": {}}
+
+    monkeypatch.setattr(session, "request", request)
+    session.session_resume("resumed-session")
+    session.prompt("hello")
+
+    assert calls[-1] == (
+        "session/prompt",
+        {
+            "sessionId": "resumed-session",
+            "prompt": [{"type": "text", "text": "hello"}],
+        },
+    )
+
+
 @pytest.mark.smoke
 @pytest.mark.skipif(DSH is None, reason="dsh binary is not on PATH")
 def test_AC3_HP_real_session_is_minted_and_listed_after_close(tmp_path):

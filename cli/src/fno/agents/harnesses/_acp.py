@@ -261,7 +261,9 @@ class AcpStdioSession:
             "session/resume",
             {"sessionId": session_id, "cwd": str(self.cwd), "mcpServers": []},
         )
-        return self.result(response, "session/resume")
+        result = self.result(response, "session/resume")
+        self.session_id = session_id
+        return result
 
     def session_close(self, session_id: str) -> dict[str, Any]:
         # Measured 2026-08-31 against kimi 0.38.0 unauthenticated: closing an
