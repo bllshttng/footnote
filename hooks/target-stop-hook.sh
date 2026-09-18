@@ -5,8 +5,10 @@
 # Never exec a candidate: a worktree build older than the hook verb answers
 # "unknown verb" and the failing hook re-invokes the session on every stop.
 # Run each candidate instead and relay only a real answer, falling through
-# otherwise. A nonzero exit that is NOT the unknown-verb signature is a real
-# decision (the continue block exits 2) and must reach the harness verbatim.
+# otherwise. The native handler answers 0 (allow / JSON) or 2 (continue
+# block, stderr carries it); those reach the harness verbatim. Any other
+# nonzero is a crash, not a decision - the codex Stop contract fails a hook
+# on exit 1, so relaying it would re-invoke the session on every stop.
 # The deployed binary leads the order: policy must come from the installed
 # release, not a half-built branch.
 stdin=$(cat)
@@ -23,12 +25,12 @@ for bin in "$(command -v fno-agents 2>/dev/null)" \
         cat "$errfile" >&2
         printf '%s\n' "$out"
         exit 0
-    elif grep -q "unknown verb" "$errfile"; then
-        continue
-    else
+    elif [[ $rc -eq 2 ]]; then
         cat "$errfile" >&2
         [[ -n "$out" ]] && printf '%s\n' "$out"
-        exit "$rc"
+        exit 2
+    else
+        continue
     fi
 done
 rm -f "$errfile"
