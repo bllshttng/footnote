@@ -52,3 +52,38 @@ pub(crate) fn paused_output(driver: &str, message: &str) -> String {
     }
     allow_output("allow", None, message, 0, None)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::loopcheck::TerminationReason;
+
+    #[test]
+    fn allow_output_serializes_correctly() {
+        let json = allow_output(
+            "allow",
+            Some(TerminationReason::DonePRGreen),
+            "done",
+            3,
+            Some("fp".into()),
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["decision"], "allow");
+        // Verify variant names serialize byte-identically to the spec strings.
+        assert_eq!(v["termination_reason"], "DonePRGreen");
+        assert_eq!(v["fires"], 3);
+        assert_eq!(v["fingerprint"], "fp");
+        // An allow carries no continuation: only a block names its re-drive.
+        assert!(v.get("continuation").is_none());
+    }
+
+    #[test]
+    fn allow_output_null_termination_reason() {
+        let json = allow_output("block", None, "continue", 1, None);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["termination_reason"].is_null());
+        assert!(v["fingerprint"].is_null());
+        // A block names the continuation the gate directs.
+        assert_eq!(v["continuation"], "/target --resume");
+    }
+}

@@ -7723,48 +7723,9 @@ pub(crate) fn decide_with_payload(
 
     // Session binding: when the caller names the harness session that asked,
     // the registry answers who may drive this target before any progress
-    // logic runs. A refusal exits 0 with decision "refuse" so a plugin
-    // reading the JSON never crashes on it; a crown routes to the king path,
-    // which evaluates its own evidence; an owner falls through unchanged.
-    if parsed.harness.is_some() && parsed.harness_session.is_some() {
-        match session_binding::gate(&parsed) {
-            session_binding::Gate::Refuse(r) => {
-                let project_events = parsed
-                    .events_path
-                    .clone()
-                    .unwrap_or_else(|| crate::paths::events_path(&parsed.cwd));
-                let global_events = parsed
-                    .global_events_path
-                    .clone()
-                    .unwrap_or_else(|| project_events.clone());
-                emit_to_both(
-                    &project_events,
-                    &global_events,
-                    "loop_check",
-                    serde_json::json!({
-                        "decision": "refuse",
-                        "harness": parsed.harness,
-                        "asked_session": r.asked,
-                        "bound_session": if r.bound.is_empty() { serde_json::Value::Null } else { serde_json::json!(r.bound) },
-                        "reason": r.reason,
-                    }),
-                );
-                return (
-                    0,
-                    serde_json::json!({
-                        "decision": "refuse",
-                        "termination_reason": null,
-                        "message": r.reason,
-                        "asked_session": r.asked,
-                        "bound_session": if r.bound.is_empty() { serde_json::Value::Null } else { serde_json::json!(r.bound) },
-                        "reason": r.reason,
-                    })
-                    .to_string(),
-                );
-            }
-            session_binding::Gate::Crown => return king_decide::king_decide(&parsed),
-            session_binding::Gate::Owner => {}
-        }
+    // logic runs. Body, refusal and crown routing: loopcheck/session_binding.rs.
+    if let Some(out) = session_binding::gate_output(&parsed) {
+        return out;
     }
 
     let state_path = parsed.state_path.clone();
@@ -16726,31 +16687,6 @@ git_bounded();";
     fn session_cost_missing_ledger_returns_zero() {
         let cost = session_cost_from_ledger(Path::new("/nonexistent/l.json"), "s");
         assert_eq!(cost, 0.0);
-    }
-
-    #[test]
-    fn allow_output_serializes_correctly() {
-        let json = allow_output(
-            "allow",
-            Some(TerminationReason::DonePRGreen),
-            "done",
-            3,
-            Some("fp".into()),
-        );
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["decision"], "allow");
-        // Verify variant names serialize byte-identically to the spec strings.
-        assert_eq!(v["termination_reason"], "DonePRGreen");
-        assert_eq!(v["fires"], 3);
-        assert_eq!(v["fingerprint"], "fp");
-    }
-
-    #[test]
-    fn allow_output_null_termination_reason() {
-        let json = allow_output("block", None, "continue", 1, None);
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(v["termination_reason"].is_null());
-        assert!(v["fingerprint"].is_null());
     }
 
     #[test]

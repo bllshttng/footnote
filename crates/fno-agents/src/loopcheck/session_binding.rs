@@ -31,6 +31,59 @@ pub(super) enum Gate {
     Refuse(Refusal),
 }
 
+/// The whole identity gate, as a decision-or-proceed. `None` when the caller
+/// passed no binding flags (the engine answers exactly as before) or when the
+/// asking session is the owner; `Some` carries the refusal or the crown
+/// routing, each of which answers instead of the engine.
+pub(super) fn gate_output(parsed: &LoopCheckArgs) -> Option<(i32, String)> {
+    if parsed.harness.is_none() || parsed.harness_session.is_none() {
+        return None;
+    }
+    match gate(parsed) {
+        Gate::Refuse(r) => Some(refusal_output(parsed, r)),
+        Gate::Crown => Some(super::king_decide::king_decide(parsed)),
+        Gate::Owner => None,
+    }
+}
+
+/// The typed refusal: exit 0 so a plugin reading the JSON never crashes on
+/// it, one loop_check telemetry row, both session ids and the reason on the
+/// wire.
+fn refusal_output(parsed: &LoopCheckArgs, r: Refusal) -> (i32, String) {
+    let project_events = parsed
+        .events_path
+        .clone()
+        .unwrap_or_else(|| crate::paths::events_path(&parsed.cwd));
+    let global_events = parsed
+        .global_events_path
+        .clone()
+        .unwrap_or_else(|| project_events.clone());
+    super::emit_to_both(
+        &project_events,
+        &global_events,
+        "loop_check",
+        serde_json::json!({
+            "decision": "refuse",
+            "harness": parsed.harness,
+            "asked_session": r.asked,
+            "bound_session": if r.bound.is_empty() { serde_json::Value::Null } else { serde_json::json!(r.bound) },
+            "reason": r.reason,
+        }),
+    );
+    (
+        0,
+        serde_json::json!({
+            "decision": "refuse",
+            "termination_reason": null,
+            "message": r.reason,
+            "asked_session": r.asked,
+            "bound_session": if r.bound.is_empty() { serde_json::Value::Null } else { serde_json::json!(r.bound) },
+            "reason": r.reason,
+        })
+        .to_string(),
+    )
+}
+
 pub(super) fn gate(parsed: &LoopCheckArgs) -> Gate {
     let harness = parsed.harness.as_deref().unwrap_or("");
     let asked = parsed.harness_session.clone().unwrap_or_default();
@@ -92,23 +145,6 @@ pub(super) fn gate(parsed: &LoopCheckArgs) -> Gate {
             String::new(),
         );
     };
-    if let Some(owner) = owner {
-        let bound = owner.harness_session_id.clone().unwrap_or_default();
-        if bound != asked {
-            let reason = format!("wrong session: target bound to {bound}, asked {asked}");
-            return Gate::Refuse(Refusal {
-                bound,
-                asked,
-                reason,
-            });
-        }
-        // The asking session IS the owner; the crown disposition still gives
-        // a crowned owner a path that does not depend on a target manifest.
-        if owner.crown_level.is_some() && owner.node.is_none() {
-            return Gate::Crown;
-        }
-        return Gate::Owner;
-    }
     if !cwd_matches(&row.cwd, &parsed.cwd) {
         return refuse(
             format!(
@@ -165,9 +201,9 @@ fn manifest_node(state_path: &Path) -> Option<String> {
     }
 }
 
-/// `<prefix>-<hex>` backlog node shape (e.g. `x-511e`, `fno-a3f9`): one
-/// lowercase prefix, a dash, at least four hex characters. Deliberately
-/// shape-only: resolution stays the backlog's job.
+/// `<prefix>-<hex>` backlog node shape: a lowercase prefix, a dash,
+/// at least four hex characters. Deliberately shape-only: resolution stays
+/// the backlog's job.
 fn is_node_shaped(value: &str) -> bool {
     let Some((prefix, hex)) = value.split_once('-') else {
         return false;
