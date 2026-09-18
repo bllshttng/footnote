@@ -671,7 +671,17 @@ def test_watchdog_sweep_exception_is_nonfatal_and_runs_each_tick(
     app.command()(prcli.tick)
     result = CliRunner().invoke(app, [])
 
-    assert result.exit_code == 0, result.output
+    # The failure payload carries the three places a 75 can come from: the
+    # cut phase's stderr line, the escaped exception, and the deadline env
+    # seam a sibling test could have left set in this worker.
+    import os as _os
+
+    assert result.exit_code == 0, (
+        f"{result.output}\nstderr: {result.stderr}\n"
+        f"exception: {result.exception!r}\n"
+        f"env FNO_PR_WATCH_TICK_TIMEOUT="
+        f"{_os.environ.get('FNO_PR_WATCH_TICK_TIMEOUT')}"
+    )
     # x-c79d phase order: the PR legs (sweep) run first, the watchdog phase
     # follows on its own slice. The load-bearing half is the non-fatal
     # exception, not the ordering.
