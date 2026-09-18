@@ -1704,6 +1704,10 @@ fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> 
     // Both backends through the cache; keep_malformed reads stay fresh
     // (cached_entries), and strictness only changes the json parse.
     let entries = cached_entries(state, keep_malformed, strict)?;
+    // The cached rows are shared (Arc), so the reply carries a private copy:
+    // the marker is reply-only and must never reach a write snapshot.
+    let mut entries = (*entries).clone();
+    crate::node_reading::attach_reading(&mut entries);
     Ok(json!({ "entries": entries }))
 }
 
@@ -1743,6 +1747,7 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
             None => missing.push(token.clone()),
         }
     }
+    crate::node_reading::attach_reading(&mut out);
     Ok(json!({"entries": out, "missing": missing}))
 }
 
@@ -3339,10 +3344,14 @@ fn api_read_op(
                 "version": api::version(store)?,
             }))
         }
-        "rows" => Ok(json!({
-            "rows": rows,
-            "version": api::version(store)?,
-        })),
+        "rows" => {
+            let mut served = rows.to_vec();
+            crate::node_reading::attach_reading(&mut served);
+            Ok(json!({
+                "rows": served,
+                "version": api::version(store)?,
+            }))
+        }
         _ => unreachable!("handle_api routes node/nodes/rows here"),
     }
 }
@@ -3928,6 +3937,95 @@ mod tests {
         let reply = handle_read_archive(&state, &json!({"path": archive.display().to_string()}));
         assert!(reply.is_ok(), "{reply:?}");
         assert!(reply.unwrap().to_string().contains("x-arch"));
+    }
+
+    fn reading_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            serde_json::to_string(&json!({
+                "entries": [
+                    {
+                        "id": "x-1",
+                        "slug": "with-plan",
+                        "status": "ready",
+                        "details": "stale fix path",
+                        "plan_path": "plans/one.md",
+                    },
+                    {"id": "x-2", "slug": "plain", "status": "ready", "details": "plain filing"},
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        (dir, graph)
+    }
+
+    #[test]
+    fn a_graph_read_serves_the_reading_marker_first() {
+        let (_dir, graph) = reading_fixture();
+        let state = read_state(&graph);
+        let reply = handle_read(&state, &json!({})).unwrap();
+        let entries = reply["entries"].as_array().unwrap();
+        assert_eq!(
+            entries[0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .map(String::as_str),
+            Some("_reading")
+        );
+        assert_eq!(
+            entries[0]["_reading"],
+            "plan_path is authoritative for the file list; \
+             details is the original filing and may be stale"
+        );
+        assert!(
+            entries[1].get("_reading").is_none(),
+            "a plain row is served unchanged"
+        );
+    }
+
+    #[test]
+    fn a_read_ids_reply_serves_the_reading_marker_first() {
+        let (_dir, graph) = reading_fixture();
+        let state = read_state(&graph);
+        let reply = handle_read_ids(&state, &json!({"ids": ["x-1"]})).unwrap();
+        assert_eq!(reply["missing"].as_array().unwrap().len(), 0);
+        let entries = reply["entries"].as_array().unwrap();
+        assert_eq!(
+            entries[0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .map(String::as_str),
+            Some("_reading")
+        );
+    }
+
+    #[test]
+    fn the_api_rows_reply_serves_the_reading_marker_first() {
+        let (_dir, graph) = reading_fixture();
+        let store = crate::backlog::api::Store::new(&graph);
+        let rows = crate::backlog::api::rows(&store).unwrap();
+        let reply = api_read_op(&store, "rows", &json!({}), &rows).unwrap();
+        let served = reply["rows"].as_array().unwrap();
+        assert_eq!(
+            served[0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .map(String::as_str),
+            Some("_reading")
+        );
+        assert!(
+            served[1].get("_reading").is_none(),
+            "a plain row is served unchanged"
+        );
     }
 
     #[test]
