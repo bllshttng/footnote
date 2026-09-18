@@ -421,7 +421,7 @@ def test_style_gate_reports_no_violations_for_a_pure_rename(tmp_path: Path) -> N
     os.chdir(repo)
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
-        violations, inspected, changed, unexplained, _exempted = _style_added_lines("base", None)
+        violations, inspected, changed, unexplained = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
         os.chdir(cwd)
@@ -550,7 +550,7 @@ def test_a_scope_naming_a_path_the_branch_renamed_away_is_allowed(
     os.chdir(repo)
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
-        violations, inspected, changed, unexplained, _exempted = _style_added_lines(
+        violations, inspected, changed, unexplained = _style_added_lines(
             "base", [Path(old)]
         )
     finally:
@@ -600,7 +600,7 @@ def test_the_guard_reaches_renamed_files(tmp_path: Path, monkeypatch) -> None:
     os.chdir(repo)
     monkeypatch.setenv("FNO_REPO_ROOT", str(repo))
     try:
-        _v, _inspected, _changed, unexplained, _exempted = _style_added_lines("base", None)
+        _v, _inspected, _changed, unexplained = _style_added_lines("base", None)
     finally:
         os.chdir(cwd)
 
@@ -642,7 +642,7 @@ def test_a_deletion_only_edit_is_an_explained_zero(tmp_path: Path) -> None:
     os.chdir(repo)
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
-        _v, inspected, changed, unexplained, _exempted = _style_added_lines("base", None)
+        _v, inspected, changed, unexplained = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
         os.chdir(cwd)
@@ -687,7 +687,7 @@ def test_style_gate_still_fails_when_the_parser_loses_added_lines(
     os.chdir(repo)
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
-        _v, inspected, changed, unexplained, _exempted = _style_added_lines("base", None)
+        _v, inspected, changed, unexplained = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
         os.chdir(cwd)
@@ -734,7 +734,7 @@ def test_the_guard_catches_a_partial_parser_loss_not_only_a_total_one(
     os.chdir(repo)
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
-        _v, inspected, _changed, unexplained, _exempted = _style_added_lines("base", None)
+        _v, inspected, _changed, unexplained = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
         os.chdir(cwd)
@@ -904,58 +904,89 @@ def test_every_check_parameter_is_declared_on_the_dispatcher() -> None:
         )
 
 
-def test_a_file_skipped_by_its_exception_marker_is_named_not_just_uncounted(
-    tmp_path: Path,
-) -> None:
-    """A skip and a clean scan must not print the same receipt.
-
-    An exempted file still counts as CHANGED while adding nothing to
-    INSPECTED, so "0 added line(s) across 1 changed file(s)" reads identically
-    whether the file had nothing to inspect or was never read. A reader cannot
-    judge an exception that the receipt does not mention.
-    """
-    import os
-
-    from fno.lint_cli import _style_added_lines
-
+def _style_fixture_repo(tmp_path: Path, base: dict, head: dict) -> Path:
+    """A repo whose branch ``base`` holds ``base`` and whose HEAD adds ``head``."""
     repo = tmp_path / "repo"
-    (repo / "docs").mkdir(parents=True)
+    repo.mkdir()
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "t@t")
     _git(repo, "config", "user.name", "t")
-    exempt = repo / "docs" / "exempt.md"
-    exempt.write_text(
-        "<!-- style-exception: fixture -->\nOne line.\n", encoding="utf-8"
-    )
-    (repo / "docs" / "plain.md").write_text("Alpha.\n", encoding="utf-8")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-qm", "base")
-    _git(repo, "branch", "-f", "base")
-    exempt.write_text(
-        "<!-- style-exception: fixture -->\nOne line.\nA second line added here.\n",
-        encoding="utf-8",
-    )
-    (repo / "docs" / "plain.md").write_text("Alpha.\nBeta.\n", encoding="utf-8")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-qm", "add a line to each")
+    for files in (base, head):
+        for rel, text in files.items():
+            (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            (repo / rel).write_text(text, encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "commit")
+        if files is base:
+            _git(repo, "branch", "-f", "base")
+    return repo
 
-    cwd = os.getcwd()
-    os.chdir(repo)
-    os.environ["FNO_REPO_ROOT"] = str(repo)
-    try:
-        _v, inspected, changed, _unexplained, exempted = _style_added_lines("base", None)
-    finally:
-        os.environ.pop("FNO_REPO_ROOT", None)
-        os.chdir(cwd)
 
-    assert exempted == ["docs/exempt.md"], (
-        "the marker-skipped path must be named, since the counts alone cannot "
-        "distinguish a skipped file from one with nothing to inspect"
+def _run_added_lines(repo: Path, monkeypatch):
+    from fno.lint_cli import _style_added_lines
+
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(repo))
+    return _style_added_lines("base", None)
+
+
+def test_a_diff_base_run_reads_added_lines_in_a_marked_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A marker at the top of a file must not hide a line added below it."""
+    marker = "<!-- style-exception: fixture -->\nOne line.\n"
+    repo = _style_fixture_repo(
+        tmp_path,
+        {"docs/exempt.md": marker, "docs/plain.md": "Alpha.\n"},
+        {
+            "docs/exempt.md": marker + "\nA second line; added here.\n",
+            "docs/plain.md": "Alpha.\n\nBeta.\n",
+        },
     )
-    # Positive control: the un-exempted sibling really was scanned, so a zero
-    # from the exempted file is a skip rather than a scan that read nothing.
-    assert inspected == 1, "the plain file's one added line must still be read"
-    assert changed == 2, "both files changed; only one of them was read"
+    violations, inspected, changed, unexplained = _run_added_lines(repo, monkeypatch)
+    assert (inspected, changed, unexplained) == (4, 2, [])
+    assert [v.rule for v in violations] == [2], violations
+
+
+def test_an_unchanged_marked_file_adds_nothing_to_a_diff_base_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Only added lines are read, so old prose in a marked file stays out."""
+    repo = _style_fixture_repo(
+        tmp_path,
+        {
+            "docs/exempt.md": "<!-- style-exception: fixture -->\nOld; prose.\n",
+            "docs/plain.md": "Alpha.\n",
+        },
+        {"docs/plain.md": "Alpha.\n\nBeta.\n"},
+    )
+    violations, inspected, changed, _u = _run_added_lines(repo, monkeypatch)
+    assert (violations, inspected, changed) == ([], 2, 1)
+
+
+def test_the_default_scope_reads_a_changed_rules_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """With no --files the scan covers every changed markdown file in the diff."""
+    repo = _style_fixture_repo(
+        tmp_path,
+        {".claude/rules/r.md": "Alpha.\n", "docs/d.md": "Alpha.\n"},
+        {".claude/rules/r.md": "Alpha.\nBeta.\n", "docs/d.md": "Alpha.\nBeta.\n"},
+    )
+    _v, inspected, changed, _u = _run_added_lines(repo, monkeypatch)
+    assert (inspected, changed) == (2, 2)
+
+
+def test_a_diff_with_no_markdown_reads_zero_and_exits_clean(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A real zero, with no marker involved, is still a clean exit."""
+    repo = _style_fixture_repo(tmp_path, {"cli/x.py": ""}, {"cli/x.py": "x = 1\n"})
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(repo))
+    result = runner.invoke(app, ["style", "--surface", "markdown", "--diff-base", "base"])
+    assert result.exit_code == 0, result.output
+    assert "inspected 0 added line(s) across 0 changed file(s)." in result.output
 
 
 def test_a_file_git_says_added_lines_to_but_gone_from_the_tree_is_flagged(
@@ -991,7 +1022,7 @@ def test_a_file_git_says_added_lines_to_but_gone_from_the_tree_is_flagged(
     os.chdir(repo)
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
-        _v, _inspected, _changed, unexplained, _exempted = _style_added_lines("base", None)
+        _v, _inspected, _changed, unexplained = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
         os.chdir(cwd)
@@ -1031,7 +1062,7 @@ def test_a_deleted_file_stays_a_silent_legitimate_zero(tmp_path: Path) -> None:
     os.chdir(repo)
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
-        _v, inspected, _changed, unexplained, _exempted = _style_added_lines("base", None)
+        _v, inspected, _changed, unexplained = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
         os.chdir(cwd)
@@ -1041,52 +1072,61 @@ def test_a_deleted_file_stays_a_silent_legitimate_zero(tmp_path: Path) -> None:
 
 
 def test_the_skip_receipt_fires_on_the_files_branch_too(tmp_path: Path) -> None:
-    """The guarantee must hold on every branch that can skip.
-
-    `--files` without `--diff-base` used to `continue` past an exempted file and
-    print nothing, so the command exited 0 and silent for a file it never read.
-    """
+    """A --files run that read nothing names the skip and exits 2, never 0."""
     exempt = tmp_path / "exempt.md"
     exempt.write_text("<!-- style-exception: fixture -->\nOne line.\n", encoding="utf-8")
     result = runner.invoke(
         app, ["style", "--surface", "markdown", "--files", str(exempt)]
     )
-    assert result.exit_code == 0, result.output
-    assert "style-exception" in result.output and "exempt.md" in result.output, (
-        "a --files run that read nothing must say so, not exit 0 in silence"
-    )
+    assert result.exit_code == 2, result.output
+    assert "style-exception" in result.output and "exempt.md" in result.output
+    assert "nothing was checked" in result.stderr
 
 
 def test_the_skip_receipt_fires_on_the_stdin_branch_too(tmp_path: Path) -> None:
-    """Same guarantee on the hand-run ``fno doctor lint style --stdin`` path.
-
-    A body carrying the marker used to pass with an empty log.
-    """
+    """Same guarantee on the hand-run ``fno doctor lint style --stdin`` path."""
     result = runner.invoke(
         app,
         ["style", "--surface", "pr-body", "--stdin"],
         input="<!-- style-exception: fixture -->\nOne line.\n",
     )
-    assert result.exit_code == 0, result.output
-    assert "style-exception" in result.output and "<stdin>" in result.output, (
-        "a --stdin run that read nothing must say so"
-    )
+    assert result.exit_code == 2, result.output
+    assert "style-exception" in result.stderr and "<stdin>" in result.stderr
+    assert "nothing was checked" in result.stderr
 
 
 def test_a_normal_files_run_prints_no_skip_receipt(tmp_path: Path) -> None:
-    """Positive control: the receipt must fire only on an actual skip.
-
-    Without this, a receipt printed unconditionally passes both tests above
-    while telling every clean run it skipped something.
-    """
+    """Positive control: the receipt fires only on an actual skip, and coverage always prints."""
     plain = tmp_path / "plain.md"
     plain.write_text("One line.\n", encoding="utf-8")
     result = runner.invoke(
         app, ["style", "--surface", "markdown", "--files", str(plain)]
     )
+    assert result.exit_code == 0, result.output
     assert "style-exception" not in result.output, (
         "a file that was actually read must not be reported as skipped"
     )
+    assert "style: inspected 1 line(s) across 1 input(s)." in result.stdout
+
+
+def test_a_clean_stdin_run_prints_its_coverage_line() -> None:
+    result = runner.invoke(
+        app, ["style", "--surface", "pr-body", "--stdin"], input="One clean line.\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert "style: inspected 1 line(s) across 1 input(s)." in result.stderr
+    assert result.stdout == ""
+
+
+def test_stdin_fix_on_a_marked_body_keeps_stdout_byte_exact() -> None:
+    """--fix hands the body back on stdout, so no receipt may land there."""
+    body = "<!-- style-exception: fixture -->\nOne line; kept.\n"
+    result = runner.invoke(
+        app, ["style", "--surface", "pr-body", "--stdin", "--fix"], input=body
+    )
+    assert result.exit_code == 2, result.output
+    assert result.stdout == body
+    assert "<stdin>" in result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -1493,7 +1533,7 @@ def test_preamble_budget_check_is_dispatchable(monkeypatch) -> None:
 
 def test_preamble_budget_wrapper_propagates_the_gate_verdict(tmp_path, monkeypatch) -> None:
     """Exit 1 from the gate exits 1 here; a missing gate script is exit 2."""
-    from fno import lint_cli, paths
+    from fno import paths
 
     monkeypatch.setattr(paths, "resolve_repo_root", lambda: tmp_path)
     script = tmp_path / "scripts" / "ci" / "check-preamble-budget.sh"
@@ -1525,7 +1565,7 @@ def test_internal_refs_check_is_dispatchable(monkeypatch) -> None:
 
 def test_internal_refs_wrapper_propagates_the_gate_verdict(tmp_path, monkeypatch) -> None:
     """Exit 1 from the gate exits 1 here; a missing gate script is exit 2."""
-    from fno import lint_cli, paths
+    from fno import paths
 
     monkeypatch.setattr(paths, "resolve_repo_root", lambda: tmp_path)
     script = tmp_path / "scripts" / "ci" / "check-no-internal-refs.sh"
