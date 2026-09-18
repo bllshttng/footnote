@@ -91,10 +91,13 @@ pub(crate) struct PrStamp {
     pub(crate) merge_status: &'static str,
 }
 
-/// A GitHub PR url's REST path: `https://github.com/<owner>/<repo>/pull/<n>`
-/// gives `repos/<owner>/<repo>/pulls/<n>`. Any other shape falls back to
-/// the caller's `{owner}/{repo}` placeholders.
-fn rest_path(url: &str) -> Option<String> {
+/// A GitHub PR url's REST path and its number:
+/// `https://github.com/<owner>/<repo>/pull/<n>` gives
+/// `repos/<owner>/<repo>/pulls/<n>` with that n. Any other shape falls
+/// back to the caller's `{owner}/{repo}` placeholders and entry number.
+/// The url is the read's authority, so the stamp names the PR the read
+/// actually answered, never a diverging `number` field.
+fn rest_path_and_number(url: &str) -> Option<(String, i64)> {
     let normalized = normalize_url(url);
     let rest = normalized.strip_prefix("https://github.com/")?;
     let mut segs = rest.split('/');
@@ -102,10 +105,11 @@ fn rest_path(url: &str) -> Option<String> {
     let repo = segs.next()?;
     let kind = segs.next()?;
     let n = segs.next()?;
-    if kind != "pull" || n.is_empty() {
+    if kind != "pull" {
         return None;
     }
-    Some(format!("repos/{owner}/{repo}/pulls/{n}"))
+    let n: i64 = n.parse().ok()?;
+    Some((format!("repos/{owner}/{repo}/pulls/{n}"), n))
 }
 
 /// One GitHub read per unsettled extra on a held node, planned ahead of the
@@ -148,12 +152,17 @@ pub(crate) fn plan_stamps(
             if !additional_pr_open(extra, node_id, &primaries) {
                 continue;
             }
-            let Some(number) = extra.get("number").and_then(Value::as_i64) else {
-                continue;
-            };
             let url = extra.get("url").and_then(Value::as_str);
-            let path = url
-                .and_then(rest_path)
+            let from_url = url.and_then(rest_path_and_number);
+            let number = match from_url {
+                Some((_, n)) => n,
+                None => match extra.get("number").and_then(Value::as_i64) {
+                    Some(n) => n,
+                    None => continue,
+                },
+            };
+            let path = from_url
+                .map(|(p, _)| p)
                 .unwrap_or_else(|| format!("repos/{{owner}}/{{repo}}/pulls/{number}"));
             let Some(state) = read(&path, cwd) else {
                 continue;
@@ -475,6 +484,26 @@ mod tests {
         let stamps = plan_stamps(&entries, &mut read);
         assert!(stamps.is_empty());
         assert_eq!(calls, 0, "no cwd or no number, no read");
+    }
+
+    #[test]
+    fn plan_names_the_read_pr_never_a_diverging_number_field() {
+        let entries = vec![json!({
+            "id": "x-diverge", "status": "done", "merge_status": "merged",
+            "cwd": "/repo/wt",
+            "sessions": [{"phase": "do", "harness": "claude", "session_id": "s1",
+                          "started_at": "2026-09-01T01:00:00Z"}],
+            "additional_prs": [
+                {"number": 1523, "url": "https://github.com/o/r/pull/999"}
+            ]
+        })];
+        let mut read = |path: &str, _cwd: &str| {
+            assert_eq!(path, "repos/o/r/pulls/999");
+            Some(PrState::Merged)
+        };
+        let stamps = plan_stamps(&entries, &mut read);
+        assert_eq!(stamps.len(), 1);
+        assert_eq!(stamps[0].number, 999, "the stamp names the read PR");
     }
 
     #[test]
