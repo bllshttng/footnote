@@ -627,7 +627,8 @@ class _ExecClient(_Keeper):
 
     def __init__(self, path: Path):
         self.path = Path(path)
-        self.sock: Path | None = None  # unused on this transport; helpers read it
+        # No `sock`: nothing on this transport connects, and the inherited
+        # helpers answer through `request` alone.
 
     def request(self, method: str, params: dict) -> Any:
         is_write = method in {"commit", "commit_rows", "op", "api"}
