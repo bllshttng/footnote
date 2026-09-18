@@ -1816,20 +1816,19 @@ def _population_contract(repo_root: Path) -> tuple[dict[str, dict[str, str]], li
         surface = entry.get("surface")
         writer = entry.get("writer")
         test = entry.get("test")
-        if mode not in _POPULATION_MODES:
-            errors.append(f"{name}: mode must be conditional or transient")
-            continue
-        if surface not in _POPULATION_SURFACES:
+        if mode not in _POPULATION_MODES or surface not in _POPULATION_SURFACES:
             errors.append(
-                f"{name}: surface must be persisted, projected, "
-                "or persisted_and_projected"
+                f"{name}: mode must be conditional or transient; surface must "
+                "be persisted, projected, or persisted_and_projected"
             )
             continue
-        if not isinstance(writer, str) or not writer.strip():
-            errors.append(f"{name}: writer missing")
-            continue
-        if not isinstance(test, str) or not test.strip():
-            errors.append(f"{name}: test missing")
+        if not (
+            isinstance(writer, str)
+            and writer.strip()
+            and isinstance(test, str)
+            and test.strip()
+        ):
+            errors.append(f"{name}: writer and test evidence are required")
             continue
         contract[name] = {
             "mode": mode,
@@ -1838,10 +1837,6 @@ def _population_contract(repo_root: Path) -> tuple[dict[str, dict[str, str]], li
             "test": test,
         }
     return contract, errors
-
-
-def _population_covers(surface: str, reading: str) -> bool:
-    return surface == "persisted_and_projected" or surface == reading
 
 
 def _partition_zeroes(
@@ -1857,7 +1852,10 @@ def _partition_zeroes(
     real_dead: list[str] = []
     for name in dead:
         entry = contract.get(name)
-        if entry is None or not _population_covers(entry["surface"], reading):
+        surface = entry.get("surface") if entry else None
+        if entry is None or not (
+            surface == "persisted_and_projected" or surface == reading
+        ):
             real_dead.append(name)
             continue
         report: dict[str, Any] = dict(entry)
@@ -2009,16 +2007,10 @@ def field_coverage(live: bool = False, as_json: bool = False) -> None:
                         + ", ".join(section["dead_fields"])
                     )
                     for bucket in ("conditional_zero", "transient_zero"):
-                        entries_ = section[bucket]
                         typer.echo(
                             f"{reading} {bucket.replace('_', ' ')}: "
-                            + ", ".join(sorted(entries_))
+                            + ", ".join(sorted(section[bucket]))
                         )
-                        for name, report in sorted(entries_.items()):
-                            typer.echo(
-                                f"  {name}: mode={report['mode']} "
-                                f"writer={report['writer']} test={report['test']}"
-                            )
 
     if exit_code:
         raise typer.Exit(code=exit_code)
