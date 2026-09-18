@@ -1992,6 +1992,11 @@ def test_status_prints_the_unarmed_heal_line_with_the_arm_command(
         lambda: SimpleNamespace(
             auto_heal=SimpleNamespace(enabled=False),
             pr_watch=SimpleNamespace(interval_seconds=600, enabled=True),
+            # state_dir() reads this field off the settings object whenever
+            # the parked-PR read needs a path; a stub without it fails only
+            # when no earlier test warmed the paths cache, which is why it
+            # passed on some shard orders and not others.
+            state_dir=str(tmp_path / "fno"),
         ),
     )
     argv_log = tmp_path / "stub-argv.log"
@@ -2034,6 +2039,7 @@ def test_status_shells_pr_heal_status_when_armed(
         lambda: SimpleNamespace(
             auto_heal=SimpleNamespace(enabled=True),
             pr_watch=SimpleNamespace(interval_seconds=600, enabled=True),
+            state_dir=str(tmp_path / "fno"),
         ),
     )
     argv_log = tmp_path / "stub-argv.log"
