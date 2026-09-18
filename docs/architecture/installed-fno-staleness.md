@@ -128,6 +128,16 @@ Whenever the stage directory exists, `fno doctor update` now restages it after a
 
 `fno-agents plugin-install --check [--json]` is the drift verdict: one byte comparison of the stage against the source checkout's HEAD. Exit 0 is fresh or absent, 3 is stale, 4 is unknown. When the install registry carries no `gitCommitSha`, `fno doctor` runs that check and exits 1 on a stale stage. The report names the differing and missing counts with a sample. The repair is `cd <source root> && fno config plugin install claude`, or wait for `fno doctor update` on the next merge.
 
+## Which copy a running session loads
+
+The question behind every freshness question: a machine can host several full copies of the footnote plugin tree, and they drift apart silently. The copy a running Claude session loads is the marketplace root, recorded in `~/.claude/plugins/known_marketplaces.json` under `footnote`, whose `source.source` reads `directory` (or `file`). A local marketplace is loaded in place, where it sits, so that recorded path IS the live root. In the standard install it is `~/.fno/plugin-stage/fno`. `fno-agents plugin-install --check` with no `--stage` enumerates every copy (marketplace, registry, orphan), byte-checks each against source HEAD, names the live root as live, and exits on the worst status across roots.
+
+The strongest contradicting evidence, and why a stored record loses: `installed_plugins.json` records an `installPath` under `~/.claude/plugins/cache/footnote`, and `claude plugin list --json` echoes it. That record is stale metadata, not the load path. The reproducible probe settles it on any machine: from a directory outside any footnote checkout, run `claude -p 'list your fno: subagent types'`. A fresh headless session then lists an agent that exists in only one of the candidate trees (at time of writing, `fno:architect`, defined in `agents/architect.md`), so the tree that carries that file is the one the harness loaded.
+
+The removal guard reads the marketplace shape, not the harness version. A future Claude Code that loads a directory marketplace by copying it into the cache would make the guard wrong: the removal could delete the tree the harness loads. The doctor lane survives that change, because it reports every root whatever the shape. The ceiling is stated here rather than hidden.
+
+`fno config plugin install claude` removes a second copy at `~/.claude/plugins/cache/footnote` when the install succeeds and the marketplace shape is local and that path is not the live root. The removal is reversible: the install verb recreates the cache from the stage when the marketplace shape changes back.
+
 ## Locked decisions
 
 1. `fno doctor` is the primary mechanism, not reinstall-on-ship. Detection plus explicit repair beats implicit mutation that races a running pipeline.
