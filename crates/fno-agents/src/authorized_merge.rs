@@ -918,21 +918,7 @@ impl Probes for RealProbes {
     }
 
     fn slot_holder(&self, cwd: &Path, base_ref: &str) -> Result<Option<u64>, String> {
-        let root = canonical_repo_root(cwd);
-        let key = slot_key(base_ref);
-        let (state, record) = claims::status(&key, root.as_deref());
-        match state {
-            ClaimState::Free | ClaimState::Stale => Ok(None),
-            ClaimState::Live | ClaimState::Suspect => {
-                let record = record.ok_or_else(|| {
-                    format!("merge slot claim {key} read {state:?} with no record")
-                })?;
-                parse_slot_holder(&record.holder)
-                    .map(Some)
-                    .ok_or_else(|| format!("merge slot holder unparseable: {}", record.holder))
-            }
-            ClaimState::Corrupted => Err(format!("merge slot claim corrupted: {key}")),
-        }
+        slot_holder_read(cwd, base_ref)
     }
 
     fn take_slot(&self, cwd: &Path, base_ref: &str, pr: u64) -> Result<(), String> {
@@ -1023,6 +1009,36 @@ fn slot_holder_key(pr: u64) -> String {
 
 fn parse_slot_holder(holder: &str) -> Option<u64> {
     holder.strip_prefix("pr:")?.parse::<u64>().ok()
+}
+
+/// The one merge-slot claim read. Strict polarity: a corrupted claim or an
+/// unparseable holder is an Err, because the merge path must refuse on an
+/// unreadable slot rather than merge past it. The fail-open consumer
+/// ([`merge_slot_holder`]) maps the Err to None at its own boundary.
+fn slot_holder_read(cwd: &Path, base_ref: &str) -> Result<Option<u64>, String> {
+    let root = canonical_repo_root(cwd);
+    let key = slot_key(base_ref);
+    let (state, record) = claims::status(&key, root.as_deref());
+    match state {
+        ClaimState::Free | ClaimState::Stale => Ok(None),
+        ClaimState::Live | ClaimState::Suspect => {
+            let record = record
+                .ok_or_else(|| format!("merge slot claim {key} read {state:?} with no record"))?;
+            parse_slot_holder(&record.holder)
+                .map(Some)
+                .ok_or_else(|| format!("merge slot holder unparseable: {}", record.holder))
+        }
+        ClaimState::Corrupted => Err(format!("merge slot claim corrupted: {key}")),
+    }
+}
+
+/// The live merge-slot holder for `base_ref`, fail-open: any claims fault
+/// reads as None so a consumer that only decides whether idling is safe (the
+/// loopcheck classifier) never blocks on a claims io error. Some(pr) only for
+/// a LIVE or SUSPECT slot whose holder parses; a self-held slot stays
+/// Some(self) and the caller filters it.
+pub(crate) fn merge_slot_holder(cwd: &Path, base_ref: &str) -> Option<u64> {
+    slot_holder_read(cwd, base_ref).ok().flatten()
 }
 
 fn probe_detail(stdout: &[u8], stderr: &[u8]) -> String {

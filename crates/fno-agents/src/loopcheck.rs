@@ -1091,12 +1091,13 @@ fn detect_intent_full(transcript_path: &Path) -> Intent {
 /// PR state vocabulary (fu-4faa3d). Parsed once at the read_pr_info boundary.
 /// `as_str()` reproduces the exact legacy strings so the fingerprint (which
 /// persists across fires in events.jsonl) stays byte-identical.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum PrState {
     Open,
     Merged,
     Closed,
     /// No PR, or an unrecognized gh state string (fail-closed, AC5-EDGE).
+    #[default]
     None,
 }
 
@@ -1126,7 +1127,7 @@ impl PrState {
 
 /// CI conclusion vocabulary (fu-4faa3d). `render()` reproduces the exact
 /// legacy strings ("FAILURE:{name}" carries the failing check name).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 enum CiConclusion {
     Success,
     /// Failing check name when one was identified.
@@ -1135,6 +1136,7 @@ enum CiConclusion {
     /// CI read skipped via ci.declared_none.
     Skipped,
     /// No checks found (fail-closed unless declared_none).
+    #[default]
     None,
 }
 
@@ -1155,7 +1157,7 @@ impl CiConclusion {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct PrInfo {
     state: PrState,
     number: i64,
@@ -1177,6 +1179,15 @@ struct PrInfo {
     /// cannot merge past main-red until the branch is rebased, and the terminal
     /// would drop the node from retry circulation while it is un-mergeable.
     mergeable: String,
+    /// Live merge-slot holder for this PR's base ref when ANOTHER PR holds it.
+    /// A fail-open read of the local claims store - no GitHub spend.
+    /// None on no hold, a self-held slot, or an unreadable store.
+    merge_slot_holder: Option<u64>,
+    /// GitHub `mergeStateStatus` == BEHIND (REST `mergeable_state` == behind):
+    /// the base moved past this PR's head, so a rebase is work to do now and a
+    /// merge-slot hold must not idle: the refusal stays for a hold the
+    /// session can act on. Absent on either payload reads as false.
+    base_behind: bool,
     /// Newest review/comment/inline-comment activity (ISO8601 or "none");
     /// folded into the fingerprint's 4th component on done() fires.
     latest_review_ts: String,
@@ -1551,7 +1562,7 @@ mod review_state;
 use attestation_journal::missing_global_attestations;
 pub use attestation_journal::unattested_reviewers_scan_text;
 mod watch_lease;
-use async_wait::{arm_watch_hint, async_wait_class, conflicting_reason};
+use async_wait::{arm_watch_hint, async_wait_class, conflicting_reason, merge_slot_reason};
 use authorship::carry_author_session_forward;
 pub use authorship::AttestationOrigin;
 use authorship::{classify_attestation_origin, default_attestation_origin};
@@ -1732,7 +1743,8 @@ fn stderr_tail(bytes: &[u8]) -> String {
     }
 }
 
-const PR_VIEW_FIELDS: &str = "state,number,headRefName,headRefOid,mergeable,baseRefName,author";
+const PR_VIEW_FIELDS: &str =
+    "state,number,headRefName,headRefOid,mergeable,mergeStateStatus,baseRefName,author";
 
 fn pr_head_oid(pr_json: &Value) -> Option<String> {
     pr_json
@@ -2197,31 +2209,11 @@ fn read_pr_info(
         None => read_pr_view(gh_bin, cwd, pr_selector)?,
     }) else {
         // No PR yet: world-state, not an error. done() is simply false, and
-        // the backstop can resolve a stuck no-PR session as NoProgress.
+        // the backstop can resolve a stuck no-PR session as NoProgress. Every
+        // omitted field is PrInfo's no-information default.
         return Ok(PrInfo {
-            range_tiling: RangeTiling::default(),
-            state: PrState::None,
-            number: 0,
-            head_oid: String::new(),
-            ci_conclusion: CiConclusion::None,
-            failing_checks: Vec::new(),
-            ci_has_pending: false,
             mergeable: "UNKNOWN".to_string(),
-            latest_review_ts: "none".to_string(),
-            reviewed: false,
-            missing_bots: Vec::new(),
-            bot_nudges: Vec::new(),
-            stale_bots: Vec::new(),
-            unaddressed_findings: Vec::new(),
-            review_skipped: false,
-            unattested_reviewers: Vec::new(),
-            malformed_attestations: 0,
-            posture: None,
-            coverage: CoverageReport {
-                github_approval_satisfies: false,
-                coverage: Coverage::Covered(0),
-                verdicts: Vec::new(),
-            },
+            ..PrInfo::default()
         });
     };
 
@@ -2259,6 +2251,16 @@ fn read_pr_info(
         .and_then(|v| v.as_str())
         .unwrap_or("UNKNOWN")
         .to_string();
+    // BEHIND on either payload spelling (GraphQL `mergeStateStatus`, REST
+    // `mergeable_state`): the base moved past this head, so a rebase is work
+    // to do now. Absent on both reads as false (fail-open to idlable).
+    let base_behind = ["mergeStateStatus", "mergeable_state"].iter().any(|k| {
+        pr_json
+            .get(*k)
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("behind"))
+            .unwrap_or(false)
+    });
 
     // One freshness resolver for every reviewer on this PR.
     // Both producers and both presence scans read it, so there is one rule
@@ -2316,29 +2318,14 @@ fn read_pr_info(
     // unshipped work.
     if state == PrState::Merged {
         return Ok(PrInfo {
-            range_tiling: RangeTiling::default(),
             state,
             number,
             head_oid,
             ci_conclusion: CiConclusion::Skipped,
-            failing_checks: Vec::new(),
-            ci_has_pending: false,
             mergeable,
-            latest_review_ts: "none".to_string(),
             reviewed: true,
-            missing_bots: Vec::new(),
-            bot_nudges: Vec::new(),
-            stale_bots: Vec::new(),
-            unaddressed_findings: Vec::new(),
             review_skipped: true,
-            unattested_reviewers: Vec::new(),
-            malformed_attestations: 0,
-            posture: None,
-            coverage: CoverageReport {
-                github_approval_satisfies: false,
-                coverage: Coverage::Covered(0),
-                verdicts: Vec::new(),
-            },
+            ..PrInfo::default()
         });
     }
 
@@ -2850,6 +2837,19 @@ fn read_pr_info(
         );
     }
 
+    // The merge-slot hold: a local claims read keyed to this PR's
+    // base ref, so idling on a slot held by another PR costs no GitHub spend.
+    // A slot this PR holds itself is not a hold on THIS session. The read is
+    // gated on the classifier's cheap preconditions (green CI, review gate
+    // satisfied): every consumer of this field sits behind both, so a red or
+    // unreviewed PR pays no `git worktree list` subprocess for a value it
+    // never reads.
+    let merge_slot_holder = if ci_conclusion.is_ok() && reviewed {
+        crate::authorized_merge::merge_slot_holder(cwd, base_ref)
+            .filter(|m| *m != number.unsigned_abs())
+    } else {
+        None
+    };
     Ok(PrInfo {
         range_tiling: tiling,
         state,
@@ -2859,6 +2859,8 @@ fn read_pr_info(
         failing_checks,
         ci_has_pending,
         mergeable,
+        merge_slot_holder,
+        base_behind,
         latest_review_ts,
         reviewed,
         missing_bots,
@@ -5113,6 +5115,13 @@ impl Coverage {
     }
 }
 
+/// A known zero: the same value every no-information site already wrote.
+impl Default for Coverage {
+    fn default() -> Self {
+        Coverage::Covered(0)
+    }
+}
+
 /// Authorship of a local attestation lives in [`authorship`]: the enum, its
 /// classifier, and the manifest fallback all answer one question.
 ///
@@ -5228,7 +5237,7 @@ fn human_approval_counts(v: &ReviewerVerdict, flag: bool) -> bool {
 }
 
 /// The coverage over a PR plus the per-reviewer verdicts that produced it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CoverageReport {
     pub coverage: Coverage,
     pub verdicts: Vec<ReviewerVerdict>,
@@ -8355,6 +8364,7 @@ pub(crate) fn decide_with_payload(
             let blocker = match reason.as_str() {
                 "ci" => "ci",
                 "review" => "review",
+                "merge_slot" => "merge_slot",
                 _ => "unknown",
             };
             emit(
@@ -10673,6 +10683,13 @@ fn build_block_reason(
     // axis) keeps the read remedy here, outside the block.
     if matches!(pr.coverage.coverage, Coverage::Unknown) {
         return coverage_unavailable_description(&pr.head_oid);
+    }
+
+    // A merge-slot hold renders beside the other hold remedies
+    // (conflicting_reason), so both hold arms teach one voice and the
+    // classifier's hint rides by construction.
+    if let Some(r) = merge_slot_reason(pr, open_findings_empty, head_shipped) {
+        return r;
     }
 
     format!("PR #{} done() returned false (unknown reason)", pr.number)
@@ -13938,29 +13955,12 @@ mod tests {
         // flight; a Pending conclusion must read as "still running", never
         // as the misleading "CI red ... failed" (observed live on PR #455).
         let pr = PrInfo {
-            range_tiling: RangeTiling::default(),
             state: PrState::Open,
             number: 455,
             head_oid: "abc".to_string(),
             ci_conclusion: CiConclusion::Pending,
-            failing_checks: vec![],
-            ci_has_pending: false,
             mergeable: "UNKNOWN".to_string(),
-            latest_review_ts: "none".to_string(),
-            reviewed: false,
-            missing_bots: vec![],
-            bot_nudges: vec![],
-            stale_bots: vec![],
-            unaddressed_findings: vec![],
-            review_skipped: false,
-            unattested_reviewers: vec![],
-            malformed_attestations: 0,
-            posture: None,
-            coverage: CoverageReport {
-                github_approval_satisfies: false,
-                coverage: Coverage::Covered(0),
-                verdicts: vec![],
-            },
+            ..PrInfo::default()
         };
         let reason = build_block_reason(&pr, "abc", true, true);
         assert!(
@@ -14155,29 +14155,13 @@ git_bounded();";
     /// An open PR whose head matches local HEAD, CI still pending, no findings.
     fn watch_pr() -> PrInfo {
         PrInfo {
-            range_tiling: RangeTiling::default(),
             state: PrState::Open,
             number: 404,
             head_oid: "abc".to_string(),
             ci_conclusion: CiConclusion::Pending,
-            failing_checks: vec![],
             ci_has_pending: true,
             mergeable: "UNKNOWN".to_string(),
-            latest_review_ts: "none".to_string(),
-            reviewed: false,
-            missing_bots: vec![],
-            bot_nudges: vec![],
-            stale_bots: vec![],
-            unaddressed_findings: vec![],
-            review_skipped: false,
-            unattested_reviewers: vec![],
-            malformed_attestations: 0,
-            posture: None,
-            coverage: CoverageReport {
-                github_approval_satisfies: false,
-                coverage: Coverage::Covered(0),
-                verdicts: vec![],
-            },
+            ..PrInfo::default()
         }
     }
 
