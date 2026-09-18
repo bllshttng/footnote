@@ -98,9 +98,69 @@ def test_a_different_scope_does_not_answer(env):
     assert resolve_to_king("fno") == []
 
 
+def test_a_set_crown_answers_to_each_member_epic(env):
+    from fno.agents.crown import resolve_to_king
+
+    _register("king-set", scope="x-119e,x-4d9b", level=2)
+
+    assert resolve_to_king("x-4d9b") == ["king-set"]
+    assert resolve_to_king("x-119e") == ["king-set"]
+    assert resolve_to_king("x-4d9b,x-119e") == ["king-set"]
+    assert resolve_to_king("x-aaaa") == []
+    assert resolve_to_king("x-4d9b,x-aaaa") == []
+
+
+def test_an_epic_king_and_a_set_king_over_it_both_answer(env):
+    from fno.agents.crown import resolve_to_king
+
+    _register("king-set", scope="x-119e,x-4d9b", level=2)
+    _register("king-one", scope="x-4d9b", level=2)
+
+    assert resolve_to_king("x-4d9b") == ["king-one", "king-set"]
+
+
+def test_a_portfolio_crown_does_not_answer_for_one_of_its_projects(env, monkeypatch):
+    """Projects go through the real resolver, never a stub."""
+    from fno.agents.crown import resolve_to_king
+    from fno.projects import resolve as proj_resolve
+
+    cfg = env / "config.toml"
+    cfg.write_text(
+        '[work.workspaces.ws1]\n'
+        'projects = [{ name = "alpha" }, { name = "beta" }]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(proj_resolve, "SETTINGS_PATH", cfg)
+    proj_resolve._clear_cache()
+    try:
+        _register("king-portfolio", scope="alpha,beta", level=0)
+        _register("king-alpha", scope="alpha", level=1)
+
+        assert resolve_to_king("alpha") == ["king-alpha"]
+        assert resolve_to_king("alpha,beta") == ["king-portfolio"]
+    finally:
+        proj_resolve._clear_cache()
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
+def test_cli_to_king_resolves_one_member_of_a_set_crown(env, monkeypatch):
+    import fno.agents.dispatch as dispatch
+    from fno.mail.cli import mail_app
+
+    _register("king-set", scope="x-119e,x-4d9b", level=2)
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_send",
+        lambda **_kw: dispatch.DispatchSendResult(msg_id="msg-1", delivery="hosted"),
+    )
+    res = CliRunner().invoke(mail_app, ["send", "--to-king", "x-4d9b", "ping"])
+
+    assert res.exit_code == 0, res.output
+    assert "--to-king x-4d9b: resolved to king-set" in res.output
+
 
 def test_cli_to_king_refuses_when_the_crown_is_vacant(env):
     from fno.mail.cli import mail_app

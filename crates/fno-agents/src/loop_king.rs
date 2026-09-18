@@ -593,6 +593,22 @@ pub(crate) fn same_territory(a: &str, b: &str, projects: &HashMap<String, String
     !left.is_empty() && left == canonical_members(b, projects)
 }
 
+/// `crown_answers_to`'s Rust twin: territory equality, or a rung-2 epic set
+/// answering for a subset of its members. Never a portfolio for its projects.
+pub(crate) fn crown_answers_to(
+    held: &str,
+    requested: &str,
+    projects: &HashMap<String, String>,
+) -> bool {
+    if same_territory(held, requested, projects) {
+        return true;
+    }
+    let asked = canonical_members(requested, projects);
+    !asked.is_empty()
+        && derived_scope_level(held, projects) == Some(2)
+        && asked.is_subset(&canonical_members(held, projects))
+}
+
 /// `crown_rivals` for sibling modules (`reign`'s multiple-holders warning).
 pub(crate) fn crown_rivals_pub(
     held: &str,
@@ -1388,6 +1404,20 @@ mod tests {
             Some("reigning-king".to_string())
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn crown_answers_to_admits_a_set_member_and_refuses_a_portfolio_member() {
+        let none = HashMap::new();
+        assert!(crown_answers_to("x-bbbb,x-cccc", "x-cccc", &none));
+        assert!(crown_answers_to("x-bbbb,x-cccc", "x-cccc,x-bbbb", &none));
+        assert!(!crown_answers_to("x-bbbb,x-cccc", "x-cccc,x-aaaa", &none));
+        let projects: HashMap<String, String> = [("alpha", "alpha"), ("beta", "beta")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        assert!(!crown_answers_to("alpha,beta", "alpha", &projects));
+        assert!(crown_answers_to("alpha,beta", "beta,alpha", &projects));
     }
 
     #[test]
