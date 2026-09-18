@@ -1522,8 +1522,10 @@ def _silent_switch_report(
         if armed.get("unknown"):
             cache = plugin_cache if plugin_cache is not None else _plugin_cache_report()
             # A stale STAGE is a different artifact with its own fix; this
-            # cause line is about the git-cached claude plugin only.
-            if cache.get("status") == "stale" and cache.get("kind") != "stage":
+            # cause line is about the legacy sha-pinned cache shape only (a
+            # report with roots names each stale root in its own line, and a
+            # byte-stale installPath tree has no sha pin to refresh).
+            if cache.get("status") == "stale" and not cache.get("roots"):
                 sha = str(cache.get("sha") or "")[:12]
                 when = str(cache.get("installed_at") or "")[:10] or "?"
                 finding["cause"] = (
