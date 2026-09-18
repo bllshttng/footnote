@@ -89,6 +89,12 @@ expect "AC6: codex apply_patch header blocks" block \
 expect "AC7: installed plugin copy blocks" block \
     "$(edit "/tmp/x" "/tmp/x/.fno/plugin-stage/fno/hooks/a.sh")" "hooks/a.sh" "fno doctor update"
 
+PLUGIN_COPY="$TMP/stage/plugin-stage/fno"
+mkdir -p "$PLUGIN_COPY/hooks"
+ln -s "$PLUGIN_COPY" "$TMP/plugin-alias"
+expect "AC7: symlink alias to installed plugin copy blocks" block \
+    "$(edit "$TMP" "$TMP/plugin-alias/hooks/a.sh")" "hooks/a.sh" "fno doctor update"
+
 expect "AC8: repo without manifests approves" approve \
     "$(edit "$BARE" "$BARE/docs/gen.md")"
 

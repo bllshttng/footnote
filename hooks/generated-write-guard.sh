@@ -112,12 +112,12 @@ for t in "${TARGETS[@]}"; do
         *)  [[ -n "$CWD" ]] || continue; abs="$CWD/$t" ;;
     esac
 
+    abs="$(_physical "$abs")"
     if [[ "$abs" == */plugin-stage/fno/* ]]; then
         inner="${abs#*/plugin-stage/fno/}"
         _block "$abs is the installed plugin copy. \`fno doctor update\` restages it from the footnote source checkout and discards this edit. Edit $inner in a feature worktree of the source checkout, then run \`fno doctor update\`."
     fi
 
-    abs="$(_physical "$abs")"
     dir="${abs%/*}"
     while [[ -n "$dir" && ! -d "$dir" ]]; do dir="${dir%/*}"; done
     root="$(git -C "${dir:-/}" rev-parse --show-toplevel 2>/dev/null)" || continue
