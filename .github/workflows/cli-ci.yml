@@ -786,8 +786,14 @@ jobs:
 
       - name: Clean cached Rust package artifacts
         # Same stale-mtime guard as the fno-agents shard, scoped to the
-        # package this shard tests.
-        run: cargo clean -p fno --manifest-path crates/fno/Cargo.toml
+        # packages this shard touches. fno-agents is cleaned too: the
+        # cross-door test spawns the SIBLING crate's build-dir binary as a
+        # removal door, and the cache key follows Cargo.lock, so a restored
+        # artifact whose mtimes read fresh would put a weeks-old sweep
+        # behind the door.
+        run: |
+          cargo clean -p fno --manifest-path crates/fno/Cargo.toml
+          cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml
 
       - name: Build fno-agents binaries (mux tests spawn the worker)
         working-directory: crates/fno-agents
