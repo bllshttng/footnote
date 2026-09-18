@@ -207,7 +207,8 @@ pub(super) fn ruling_hold(node_id: &str) -> Option<String> {
 }
 
 fn ruling_hold_at(node_id: &str, graph_path: &Path) -> Option<String> {
-    let entries = crate::backlog::api::rows(&crate::backlog::api::Store::new(graph_path)).ok()?;
+    let entries =
+        crate::backlog::api::rows(&crate::backlog::api::Store::new(graph_path), true).ok()?;
     let entry = crate::graph_get::find_entry(&entries, node_id)?.clone();
     let by_id: std::collections::BTreeMap<String, Value> = entries
         .iter()

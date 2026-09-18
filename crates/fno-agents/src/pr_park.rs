@@ -124,7 +124,8 @@ impl Ctx {
 
 fn graph_rows(cwd: &Path) -> Vec<Value> {
     let graph_path = graph_json_path(cwd);
-    crate::backlog::api::rows(&crate::backlog::api::Store::new(&graph_path)).unwrap_or_default()
+    crate::backlog::api::rows(&crate::backlog::api::Store::new(&graph_path), true)
+        .unwrap_or_default()
 }
 
 /// One parked row as listed.

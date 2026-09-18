@@ -1550,7 +1550,6 @@ def _journal_events(paths: "list[Path]") -> "list[dict]":
 
 def reindex(sources: "list[Path] | None" = None) -> dict[str, int]:
     """Backfill the compatibility JSONL index without minting new ids."""
-    from fno import paths
     from fno.events import append_event, validate
 
     if sources is None:

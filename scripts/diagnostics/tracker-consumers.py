@@ -459,7 +459,7 @@ def self_test() -> int:
 
     # Reads modality: an injected forbidden consumer must be detected.
     bad = "# read_graph()\nx = read_graph_strict(path)"
-    pattern = re.compile(r"\bread_graph\b")
+    pattern = re.compile(r"\bread_graph(_strict)?\b")
     hits = [
         (i + 1, bad_line.strip())
         for i, bad_line in enumerate(bad.splitlines())
