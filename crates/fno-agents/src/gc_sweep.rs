@@ -433,10 +433,10 @@ pub struct GraphRead {
     /// against, so no second id read exists.
     pub statuses: HashMap<String, String>,
     /// Node id -> (merge_status, additional_prs total, additional_prs still
-    /// open by recorded state) (change 7). The confirm step
-    /// reads positive PR-state evidence from it; a missing merge_status is
-    /// recorded as unrecorded, never asserted unmerged, and an additional PR
-    /// whose state is unrecorded still counts as open.
+    /// open under the three settle rules in [`crate::additional_prs`]). The
+    /// confirm step reads positive PR-state evidence from it; a missing
+    /// merge_status is recorded as unrecorded, never asserted unmerged, and
+    /// an additional PR no rule settles still counts as open.
     pub pr_state: HashMap<String, (Option<String>, usize, usize)>,
     /// Node id -> recorded `pr_number` (Locked Decision 1). `None` when the
     /// node carries no PR; absent when the node itself is unknown.
@@ -631,6 +631,7 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     let mut pr_state: HashMap<String, (Option<String>, usize, usize)> = HashMap::new();
     let mut pr_number: HashMap<String, Option<u64>> = HashMap::new();
     let mut do_nodes: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    let primaries = crate::additional_prs::primary_index(&entries);
     for entry in &entries {
         let Some(node_id) = graph_store::entry_id(entry) else {
             continue;
@@ -654,7 +655,7 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
             .unwrap_or_default();
         let additional_open = additional
             .iter()
-            .filter(|extra| additional_pr_recorded_open(extra))
+            .filter(|extra| crate::additional_prs::additional_pr_open(extra, node_id, &primaries))
             .count();
         pr_state.insert(
             node_id.to_string(),
@@ -791,16 +792,6 @@ pub struct StaleDoRow {
     pub session_id: String,
 }
 
-/// Whether an `additional_prs` entry is still open by RECORDED state alone
-/// (change 7). Only an entry whose own `merge_status` reads `merged`
-/// has settled; an entry with no recorded state is still open - absence is
-/// never read as merged, the same fail-closed direction the node-level
-/// confirm takes. Nothing here queries a live tracker: recording the state
-/// at merge time is `fno do pr merge`'s job (`_sync_graph_merge_status`).
-pub(crate) fn additional_pr_recorded_open(extra: &Value) -> bool {
-    extra.get("merge_status").and_then(Value::as_str) != Some("merged")
-}
-
 /// Locked Decision 2's one REST read: `gh api repos/{owner}/{repo}/pulls/<n>`
 /// in the row's cwd. `Some(true)` open, `Some(false)` merged or closed,
 /// `None` unreadable - and an unreadable answer keeps the row. Bounded 30s;
@@ -833,11 +824,11 @@ pub(crate) fn gh_pr_is_open(pr: u64, cwd: &str) -> Option<bool> {
 /// marker: `status == "done"`; `merge_status == "merged"`, a field written
 /// only when a caller resolved MERGED from `gh`, so its absence has two
 /// explanations and neither is asserted here; and no `additional_prs` entry
-/// still open by recorded state - presence alone never holds the row, an
-/// entry whose recorded merge state says merged does not either, and an
-/// UNRECORDED entry does (change 7).
+/// still open under the three settle rules ([`crate::additional_prs`]) -
+/// presence alone never holds the row, and an entry no rule settles does.
 pub(crate) fn stale_open_do_rows(entries: &[Value]) -> Vec<StaleDoRow> {
     let mut stale = Vec::new();
+    let primaries = crate::additional_prs::primary_index(entries);
     for entry in entries {
         let Some(node_id) = graph_store::entry_id(entry) else {
             continue;
@@ -851,7 +842,11 @@ pub(crate) fn stale_open_do_rows(entries: &[Value]) -> Vec<StaleDoRow> {
         let holds_pr = entry
             .get("additional_prs")
             .and_then(Value::as_array)
-            .is_some_and(|a| a.iter().any(|extra| additional_pr_recorded_open(extra)));
+            .is_some_and(|a| {
+                a.iter().any(|extra| {
+                    crate::additional_prs::additional_pr_open(extra, node_id, &primaries)
+                })
+            });
         if holds_pr {
             continue;
         }
@@ -1074,6 +1069,7 @@ pub(crate) fn read_graph_node_states(
     home: &AgentsHome,
 ) -> Option<HashMap<String, (String, Option<String>, usize)>> {
     let entries = read_graph_rows(home)?;
+    let primaries = crate::additional_prs::primary_index(&entries);
     let mut states = HashMap::new();
     for entry in entries {
         let Some(id) = graph_store::entry_id(&entry) else {
@@ -1086,7 +1082,7 @@ pub(crate) fn read_graph_node_states(
             .unwrap_or_default();
         let additional_open = additional
             .iter()
-            .filter(|extra| additional_pr_recorded_open(extra))
+            .filter(|extra| crate::additional_prs::additional_pr_open(extra, id, &primaries))
             .count();
         states.insert(
             id.to_string(),
