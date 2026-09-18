@@ -96,45 +96,93 @@ export function inferCategory(subagentType?: string): string | undefined {
  * (tool arrays, nested skills) is ignored, not parsed. A full YAML dependency
  * would be over-engineering for three fields.
  */
-export function parseFrontmatter(raw: string): { data: Record<string, string>; body: string } {
+export function parseFrontmatter(
+  raw: string,
+): { data: Record<string, string | string[]>; body: string } {
   const m = raw.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?([\s\S]*)$/)
   if (!m) return { data: {}, body: raw }
-  const data: Record<string, string> = {}
+  const data: Record<string, string | string[]> = {}
+  const unquote = (v: string) => v.replace(/^["']/, "").replace(/["']$/, "")
   for (const line of m[1].split(/\r?\n/)) {
     const kv = line.match(/^([A-Za-z0-9_]+):\s*(.*)$/)
     if (!kv) continue // skips list items, nested keys, blanks
-    let value = kv[2].trim()
+    const value = kv[2].trim()
     if (
       (value.startsWith('"') && value.endsWith('"')) ||
       (value.startsWith("'") && value.endsWith("'"))
     ) {
-      value = value.slice(1, -1)
+      data[kv[1]] = value.slice(1, -1)
+      continue
     }
-    if (value === "" || value.startsWith("[") || value.startsWith("{")) continue
+    // Inline list values (`tools: ["Read", "Write"]`) survive as arrays - the
+    // restriction fields die one call before the translator when dropped here.
+    if (value.startsWith("[") && value.endsWith("]")) {
+      const items = value
+        .slice(1, -1)
+        .split(",")
+        .map((x) => unquote(x.trim()))
+        .filter(Boolean)
+      if (items.length) data[kv[1]] = items
+      continue
+    }
+    if (value === "" || value.startsWith("{")) continue
     data[kv[1]] = value
   }
   return { data, body: m[2].trimStart() }
 }
 
-/** opencode AgentConfig-shaped object. `model` is a "provider/model" string. */
+/** opencode AgentConfig-shaped object. `model` is a "provider/model" string;
+ * `tools` is opencode's disable-only record: a key present with false is
+ * withheld from the agent. */
 export type AgentDef = {
   description?: string
   mode: "subagent"
   prompt: string
   model?: string
+  tools?: Record<string, boolean>
 }
+
+/**
+ * The translation of one footnote agent: either an opencode definition or a
+ * named refusal. A refusal means the definition declares a restriction this
+ * vocabulary cannot express; the agent is NOT registered and no unrestricted
+ * fallback is registered in its place.
+ */
+export type AgentTranslation =
+  | { ok: true; def: AgentDef }
+  | { ok: false; agent: string; field: string; value: string }
 
 /**
  * Translate a footnote (Claude Code format) agent markdown into an opencode
  * agent definition. Bare CC short model names (sonnet/haiku/opus) are dropped
  * so the child falls back to opencode's default — forcing an unmapped name
  * would fail agent resolution. A "provider/model" string is passed through.
+ *
+ * Restrictions: `disallowedTools` carries into opencode's disable-only tools
+ * record (`{ name: false }`). An allowlist `tools` CANNOT be expressed there
+ * — the record withholds only what it names false, everything unlisted stays
+ * enabled — so a definition carrying one is refused outright rather than
+ * registered as though it had asked for no restriction at all.
  */
-export function toOpencodeAgent(data: Record<string, string>, body: string): AgentDef {
+export function toOpencodeAgent(
+  data: Record<string, string | string[]>,
+  body: string,
+  name = "agent",
+): AgentTranslation {
   const def: AgentDef = { mode: "subagent", prompt: body }
-  if (data.description) def.description = data.description
-  if (data.model && data.model.includes("/")) def.model = data.model
-  return def
+  if (typeof data.description === "string") def.description = data.description
+  if (typeof data.model === "string" && data.model.includes("/")) def.model = data.model
+  if (Array.isArray(data.tools)) {
+    return { ok: false, agent: name, field: "tools", value: JSON.stringify(data.tools) }
+  }
+  if (Array.isArray(data.disallowedTools)) {
+    const tools: Record<string, boolean> = {}
+    for (const t of data.disallowedTools) {
+      if (typeof t === "string" && t) tools[t.toLowerCase()] = false
+    }
+    def.tools = tools
+  }
+  return { ok: true, def }
 }
 
 /** Extract the assistant's COMPLETED text from a message's parts. Reasoning
@@ -190,23 +238,32 @@ export function collectModels(
 // Agent loading
 // ---------------------------------------------------------------------------
 
-/** Read + translate every `agents/*.md` under the project into opencode defs. */
-export function loadFootnoteAgents(projectDir: string): Record<string, AgentDef> {
+/** Read + translate every `agents/*.md` under the project. Returns the
+ * registerable defs and, separately, the named refusals the config hook
+ * prints - registration is where a restriction would be lost, so the refusal
+ * is decided before it. */
+export function loadFootnoteAgents(projectDir: string): {
+  agents: Record<string, AgentDef>
+  refusals: AgentTranslation[]
+} {
   const dir = join(projectDir, "agents")
-  const out: Record<string, AgentDef> = {}
-  if (!existsSync(dir)) return out
+  const agents: Record<string, AgentDef> = {}
+  const refusals: AgentTranslation[] = []
+  if (!existsSync(dir)) return { agents, refusals }
   for (const file of readdirSync(dir)) {
     if (!file.endsWith(".md")) continue
     const name = basename(file, ".md")
     try {
       const { data, body } = parseFrontmatter(readFileSync(join(dir, file), "utf8"))
       // footnote agents are addressed as `fno:<name>` in the pipeline.
-      out[`fno:${name}`] = toOpencodeAgent(data, body)
+      const t = toOpencodeAgent(data, body, `fno:${name}`)
+      if (t.ok) agents[`fno:${name}`] = t.def
+      else refusals.push(t)
     } catch {
       // A malformed agent file must not abort registration of the rest.
     }
   }
-  return out
+  return { agents, refusals }
 }
 
 // ---------------------------------------------------------------------------
@@ -592,7 +649,7 @@ const plugin: Plugin = async (input: PluginInput) => {
   const projectDir = input.directory
 
   const orchestratorPrompt = loadOrchestratorPrompt(projectDir)
-  const footnoteAgents = loadFootnoteAgents(projectDir)
+  const { agents: footnoteAgents, refusals } = loadFootnoteAgents(projectDir)
 
   // Available models, populated fire-and-forget for best-effort category
   // routing (AC5-ERR). NEVER await a client.* SDK call in plugin init: plugins
@@ -632,6 +689,18 @@ const plugin: Plugin = async (input: PluginInput) => {
 
   return {
     async config(config: Record<string, unknown>) {
+      // A refused definition is printed once, by name, and nothing is
+      // registered in its place - an unexpressible restriction never
+      // degrades into an unrestricted agent.
+      for (const r of refusals) {
+        if (!("agent" in r)) continue
+        console.error(
+          `[footnote] agent "${r.agent}" NOT registered: field ${r.field} = ${r.value} ` +
+            `cannot be expressed in opencode's agent vocabulary ` +
+            `(the tools record is disable-only). Convert the allowlist to ` +
+            `disallowedTools, or narrow the definition.`,
+        )
+      }
       const agent = (config.agent ?? {}) as Record<string, unknown>
       for (const [name, def] of Object.entries(footnoteAgents)) {
         if (!(name in agent)) agent[name] = def

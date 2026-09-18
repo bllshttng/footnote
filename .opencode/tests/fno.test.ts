@@ -42,12 +42,13 @@ test("inferCategory maps known agents, undefined otherwise", () => {
   expect(inferCategory(undefined)).toBeUndefined()
 })
 
-test("parseFrontmatter reads scalars, ignores arrays/nested, returns body", () => {
+test("parseFrontmatter reads scalars and inline lists, skips nested, returns body", () => {
   const raw = `---
 name: archer
 description: "TDD executor"
 model: sonnet
 tools: ["Read", "Write"]
+disallowedTools: ["Task", "WebSearch"]
 skills:
   - fno:tdd
 ---
@@ -57,8 +58,9 @@ Body line two.`
   expect(data.name).toBe("archer")
   expect(data.description).toBe("TDD executor")
   expect(data.model).toBe("sonnet")
-  expect(data.tools).toBeUndefined() // array skipped
-  expect(data.skills).toBeUndefined() // nested skipped
+  expect(data.tools).toEqual(["Read", "Write"]) // inline lists survive
+  expect(data.disallowedTools).toEqual(["Task", "WebSearch"])
+  expect(data.skills).toBeUndefined() // block/nested lists still skipped
   expect(body).toBe("Body line one.\nBody line two.")
 })
 
@@ -68,17 +70,42 @@ test("parseFrontmatter with no frontmatter returns raw body", () => {
   expect(body).toBe("just text")
 })
 
-test("toOpencodeAgent drops bare model names, keeps provider/model", () => {
-  expect(toOpencodeAgent({ description: "d", model: "sonnet" }, "prompt")).toEqual({
-    mode: "subagent",
-    prompt: "prompt",
-    description: "d",
-  })
-  expect(toOpencodeAgent({ model: "anthropic/claude-sonnet-4-5" }, "p")).toEqual({
-    mode: "subagent",
-    prompt: "p",
-    model: "anthropic/claude-sonnet-4-5",
-  })
+test("toOpencodeAgent drops bare model names, keeps provider/model (AC6-HP)", () => {
+  expect(toOpencodeAgent({ description: "d", model: "sonnet" }, "prompt").ok).toBe(true)
+  if (toOpencodeAgent({ description: "d", model: "sonnet" }, "prompt").ok) {
+    expect(toOpencodeAgent({ description: "d", model: "sonnet" }, "prompt").def).toEqual({
+      mode: "subagent",
+      prompt: "prompt",
+      description: "d",
+    })
+  }
+  expect(toOpencodeAgent({ model: "anthropic/claude-sonnet-4-5" }, "p").ok).toBe(true)
+  const t = toOpencodeAgent({ model: "anthropic/claude-sonnet-4-5" }, "p")
+  if (t.ok) expect(t.def.model).toBe("anthropic/claude-sonnet-4-5")
+})
+
+test("disallowedTools carries into opencode's disable-only tools record (AC6-HP)", () => {
+  const t = toOpencodeAgent(
+    { disallowedTools: ["Task", "WebSearch", "Write"] },
+    "prompt",
+    "fno:reviewer",
+  )
+  expect(t.ok).toBe(true)
+  if (t.ok) expect(t.def.tools).toEqual({ task: false, websearch: false, write: false })
+})
+
+test("an allowlist tools field refuses the definition by name, field and value (AC6-ERR)", () => {
+  const t = toOpencodeAgent(
+    { tools: ["Read", "Grep", "Glob", "Bash"] },
+    "prompt",
+    "fno:archer",
+  )
+  expect(t.ok).toBe(false)
+  if (!t.ok) {
+    expect(t.agent).toBe("fno:archer")
+    expect(t.field).toBe("tools")
+    expect(t.value).toBe(JSON.stringify(["Read", "Grep", "Glob", "Bash"]))
+  }
 })
 
 test("extractAssistantText returns completed text only, reasoning never joins (AC5-ERR)", () => {
@@ -102,16 +129,22 @@ test("resolveModel returns model only when available", () => {
   expect(resolveModel(undefined, available)).toBeUndefined()
 })
 
-test("loadFootnoteAgents reads real agents/ dir and namespaces as fno:*", () => {
-  const agents = loadFootnoteAgents(`${import.meta.dir}/../..`)
-  expect(agents["fno:archer"]).toBeDefined()
-  expect(agents["fno:archer"].mode).toBe("subagent")
-  expect(agents["fno:archer"].prompt.length).toBeGreaterThan(0)
-  expect(agents["fno:archer"].description).toContain("TDD")
+test("loadFootnoteAgents registers restriction-free defs and refuses allowlists by name", () => {
+  const { agents, refusals } = loadFootnoteAgents(`${import.meta.dir}/../..`)
+  // Restriction-free definitions register.
+  expect(agents["fno:architect"]).toBeDefined()
+  expect(agents["fno:architect"].mode).toBe("subagent")
+  expect(agents["fno:architect"].prompt.length).toBeGreaterThan(0)
+  // The repo's allowlist-carrying definitions refuse, naming agent+field.
+  const archer = refusals.find((r) => !r.ok && r.agent === "fno:archer")
+  expect(archer).toBeDefined()
+  if (archer && !archer.ok) expect(archer.field).toBe("tools")
 })
 
-test("loadFootnoteAgents on a missing dir returns empty", () => {
-  expect(loadFootnoteAgents("/nonexistent-xyz")).toEqual({})
+test("loadFootnoteAgents on a missing dir returns empty agents and refusals", () => {
+  const { agents, refusals } = loadFootnoteAgents("/nonexistent-xyz")
+  expect(agents).toEqual({})
+  expect(refusals).toEqual([])
 })
 
 // ---- task tool (mocked client) -------------------------------------------
