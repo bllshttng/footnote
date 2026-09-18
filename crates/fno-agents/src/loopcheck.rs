@@ -2306,6 +2306,10 @@ fn read_pr_info(
         &head_branch,
         head_sha,
         max_rounds,
+        // The same resolver the per-verdict axis built above, same base_ref
+        // and head_sha: the carry costs no git call the per-verdict axis was
+        // not already making.
+        Some(&resolver),
     );
 
     // (E): a MERGED PR is terminal. A PR merged out-of-band (GitHub
@@ -6542,6 +6546,9 @@ fn coverage_event_data_full(
             "gaps": gaps,
             "dropped": t.dropped,
             "chain_heads": t.chain_heads,
+            "carried": t.carried.iter().map(|(head, freshness)| {
+                serde_json::json!({ "head": head, "freshness": freshness })
+            }).collect::<Vec<_>>(),
         });
         // The round budget, same chain, same scoping. Emitted beside the
         // tiling (not inside it) because it is a property of the review

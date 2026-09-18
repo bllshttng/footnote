@@ -588,6 +588,18 @@ event_types:
               items:
                 type: string
               description: "reviewed_head_sha of every range that participated in the chain. A local_attestation verdict whose reviewed_sha is here counts as Reviewed when tiled is true, whatever its single-sha freshness says."
+            carried:
+              type: array
+              items:
+                type: object
+                properties:
+                  head:
+                    type: string
+                    description: "The attestation's pinned data.head_sha, which the rebase removed from the branch's ancestry."
+                  freshness:
+                    type: string
+                    description: "The review_freshness label that granted the carry (fresh, carried_base_sync, carried_docs_only, carried_subset, or carried_interdiff(n=0, cap))."
+              description: "Attestation heads whose tiles survived a head move on content identity, each with the review_freshness label that granted it: the three-dot code-diff identity (base divided out on both sides) proved the whole merge_base..head delta unchanged, so the recorded review still covers every shipping line. Fail-closed: granted only on a whole-range proof, never on Stale, a failure, or an interdiff above zero; a carried head also appears in chain_heads, and dropped still names the ranges the rebase removed."
         rounds_used:
           type: integer
           description: "Review rounds across the whole life of the PR (a round is one reviewed HEAD, so two verdicts at one unchanged head are one round; CI failures, lint failures and rebases are not rounds; a pass is one round like any verdict and refunds nothing). Computed by the Rust producer from the same chain, same scoping as the tiling walk, as the max of BOTH axes where both were read (attestation rounds and distinct GitHub-App reviewed commits); a healthy covered PR may carry the events axis alone, because the reviews read is paid only where it can change the answer. Re-derived by every gate surface before it refuses or blocks - never trusted off this row for a gate decision."

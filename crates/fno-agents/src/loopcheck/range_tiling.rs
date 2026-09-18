@@ -7,6 +7,7 @@
 use std::path::Path;
 
 use super::{git_bounded, in_scope_chain, rounds_since_last_pass};
+use crate::review_freshness::FreshnessResolver;
 
 /// The union-of-ranges coverage answer over a branch's attestations: whether
 /// the `reviewed_base_sha..reviewed_head_sha` ranges on the branch's
@@ -36,6 +37,11 @@ pub struct RangeTiling {
     /// A local attestation whose head is in this list counts as Reviewed
     /// when the whole chain tiles, whatever its single-sha freshness says.
     pub chain_heads: Vec<String>,
+    /// Attestation heads whose tiles survived a head move on content
+    /// identity, each with the `review_freshness` label that granted it.
+    /// A carried head also sits in [`RangeTiling::chain_heads`], and a carry
+    /// that cannot name its reason is not a carry: the label is the audit.
+    pub carried: Vec<(String, String)>,
     /// Review rounds across the whole life of the PR, one per reviewed head
     /// (see [`rounds_since_last_pass`]). Carried on the chain analysis because it
     /// reads the same events with the same scoping; computed even on the
@@ -86,6 +92,11 @@ fn git_rev_list(git_bin: &str, cwd: &Path, args: &[&str]) -> Option<Vec<String>>
 /// walk commit covered by some in-scope attestation's range, and read the
 /// gap set off the marking. A merge commit from main into the branch is
 /// covered when a range spans it; it is not special-cased.
+///
+/// When no range tiles the walk, a `resolver` (the same `FreshnessResolver`
+/// the per-verdict axis already built) is asked whether an in-scope
+/// attestation's own pinned head still IS `head_sha` by content identity;
+/// a whole-range proof carries the tile and names itself in `carried`.
 pub fn compute_range_tiling(
     git_bin: &str,
     cwd: &Path,
@@ -94,6 +105,7 @@ pub fn compute_range_tiling(
     head_branch: &str,
     head_sha: &str,
     max_rounds: i64,
+    resolver: Option<&FreshnessResolver>,
 ) -> RangeTiling {
     let mut tiling = RangeTiling::default();
     // Rounds do not depend on the git walk, so they are computed before the
@@ -194,6 +206,45 @@ pub fn compute_range_tiling(
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
+
+    // The carry pass: a rebase replaces every sha on the branch, so a chain
+    // that tiled the pre-rebase history reads dropped above even though the
+    // content it covered still ships. The walk asks `review_freshness` the
+    // question it already answers instead of asking git for a sha the rebase
+    // deleted: an in-scope attestation's PINNED head (`data.head_sha`, not
+    // `reviewed_head_sha` - an event that predates the range fields still
+    // pins the head it read) is compared by content identity against this
+    // head, base divided out on both sides. The first whole-range proof
+    // covers the walk - the identity compared IS the whole merge_base..head
+    // delta, so there is no smaller claim to make. A head already on the
+    // walk is skipped: it either tiled by sha or was dropped for a reason
+    // `dropped` already names. `dropped` is never rewritten: the sha path
+    // really did leave the walk, and the carry is a second, independent
+    // answer beside it. Fail-closed: `None`, a `Stale` verdict, or any
+    // failure keeps today's not-tiled.
+    if !tiling.tiled {
+        if let Some(resolver) = resolver {
+            for val in in_scope_chain(events_text, head_branch, head_sha) {
+                let Some(pinned) = val.pointer("/data/head_sha").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if pinned.is_empty() || position.contains_key(pinned) {
+                    continue;
+                }
+                let freshness = resolver.freshness(pinned);
+                if !freshness.tiles_whole_range() {
+                    continue;
+                }
+                covered.iter_mut().for_each(|c| *c = true);
+                tiling.tiled = true;
+                tiling.chain_heads.push(pinned.to_string());
+                tiling
+                    .carried
+                    .push((pinned.to_string(), freshness.as_label()));
+                break;
+            }
+        }
+    }
 
     // Name each maximal uncovered run `parent-of-first..last` so the remedy
     // is a range to review, never the head-loops "run the review verb at
