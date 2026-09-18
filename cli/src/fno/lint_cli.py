@@ -1783,11 +1783,102 @@ def _is_populated(value: Any) -> bool:
     return value is not None and value != "" and value != [] and value != {}
 
 
-def _live_field_coverage(entries: list[Any]) -> dict[str, Any]:
+_POPULATION_MODES = ("conditional", "transient")
+_POPULATION_SURFACES = ("persisted", "projected", "persisted_and_projected")
+
+
+def _population_contract(repo_root: Path) -> tuple[dict[str, dict[str, str]], list[str]]:
+    """Read the schema's population_contract block.
+
+    Returns the valid entries and one error per malformed or incomplete one.
+    An entry with an error is never coverage: its field stays a dead-field
+    finding, and the errors themselves are findings.
+    """
+    schema_path = repo_root / "schemas" / "agents-list-row.json"
+    errors: list[str] = []
+    try:
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, [f"population contract unreadable: {exc}"]
+    block = schema.get("population_contract") if isinstance(schema, dict) else None
+    if block is None:
+        return {}, []
+    if not isinstance(block, dict):
+        return {}, ["population_contract is not an object"]
+    contract: dict[str, dict[str, str]] = {}
+    for name, entry in block.items():
+        if name.startswith("$"):
+            continue
+        if not isinstance(entry, dict):
+            errors.append(f"{name}: entry is not an object")
+            continue
+        mode = entry.get("mode")
+        surface = entry.get("surface")
+        writer = entry.get("writer")
+        test = entry.get("test")
+        if mode not in _POPULATION_MODES:
+            errors.append(f"{name}: mode must be conditional or transient")
+            continue
+        if surface not in _POPULATION_SURFACES:
+            errors.append(
+                f"{name}: surface must be persisted, projected, "
+                "or persisted_and_projected"
+            )
+            continue
+        if not isinstance(writer, str) or not writer.strip():
+            errors.append(f"{name}: writer missing")
+            continue
+        if not isinstance(test, str) or not test.strip():
+            errors.append(f"{name}: test missing")
+            continue
+        contract[name] = {
+            "mode": mode,
+            "surface": surface,
+            "writer": writer,
+            "test": test,
+        }
+    return contract, errors
+
+
+def _population_covers(surface: str, reading: str) -> bool:
+    return surface == "persisted_and_projected" or surface == reading
+
+
+def _partition_zeroes(
+    dead: list[str],
+    counts: dict[str, int],
+    contract: dict[str, dict[str, str]],
+    reading: str,
+) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Split zero-population fields into real dead fields and the
+    contract-covered conditional/transient reports."""
+    conditional: dict[str, dict[str, Any]] = {}
+    transient: dict[str, dict[str, Any]] = {}
+    real_dead: list[str] = []
+    for name in dead:
+        entry = contract.get(name)
+        if entry is None or not _population_covers(entry["surface"], reading):
+            real_dead.append(name)
+            continue
+        report: dict[str, Any] = dict(entry)
+        report["count"] = counts.get(name, 0)
+        bucket = conditional if entry["mode"] == "conditional" else transient
+        bucket[name] = report
+    return real_dead, conditional, transient
+
+
+def _live_field_coverage(
+    entries: list[Any],
+    population_contract: dict[str, dict[str, str]] | None = None,
+    contract_errors: list[str] | None = None,
+) -> dict[str, Any]:
     from dataclasses import asdict, fields
 
     from fno.agents.format import serialize_entry
     from fno.agents.registry import AgentEntry
+
+    contract = population_contract or {}
+    errors = sorted(contract_errors or [])
 
     if not entries:
         return {"status": "unmeasured", "detail": "zero persisted rows"}
@@ -1818,24 +1909,39 @@ def _live_field_coverage(entries: list[Any]) -> dict[str, Any]:
         name: sum(_is_populated(row.get(name)) for row in projected_rows)
         for name in projected_fields
     }
-    persisted_dead = sorted(
+    persisted_zeroes = sorted(
         name for name, count in persisted_counts.items() if count == 0
     )
-    projected_dead = sorted(
+    projected_zeroes = sorted(
         name for name, count in projected_counts.items() if count == 0
     )
+    persisted_dead, persisted_conditional, persisted_transient = _partition_zeroes(
+        persisted_zeroes, persisted_counts, contract, "persisted"
+    )
+    projected_dead, projected_conditional, projected_transient = _partition_zeroes(
+        projected_zeroes, projected_counts, contract, "projected"
+    )
     return {
-        "status": "findings" if persisted_dead or projected_dead else "ok",
+        "status": (
+            "findings"
+            if persisted_dead or projected_dead or errors
+            else "ok"
+        ),
         "anchors": anchors,
+        "contract_errors": errors,
         "persisted": {
             "total": len(persisted_rows),
             "counts": persisted_counts,
             "dead_fields": persisted_dead,
+            "conditional_zero": persisted_conditional,
+            "transient_zero": persisted_transient,
         },
         "projected": {
             "total": len(projected_rows),
             "counts": projected_counts,
             "dead_fields": projected_dead,
+            "conditional_zero": projected_conditional,
+            "transient_zero": projected_transient,
         },
     }
 
@@ -1861,8 +1967,9 @@ def field_coverage(live: bool = False, as_json: bool = False) -> None:
     if live and exit_code != 2:
         from fno.agents.registry import RegistryVersionError, load_registry
 
+        contract, contract_errors = _population_contract(Path(resolve_repo_root()))
         try:
-            live_result = _live_field_coverage(load_registry())
+            live_result = _live_field_coverage(load_registry(), contract, contract_errors)
         except (OSError, ValueError, RegistryVersionError) as exc:
             live_result = {"status": "unmeasured", "detail": str(exc)}
         payload.update(live_result)
@@ -1893,14 +2000,25 @@ def field_coverage(live: bool = False, as_json: bool = False) -> None:
             if payload["status"] == "unmeasured":
                 typer.echo(f"live field coverage: UNMEASURED: {payload['detail']}")
             elif "persisted" in payload:
-                typer.echo(
-                    "persisted dead fields: "
-                    + ", ".join(payload["persisted"]["dead_fields"])
-                )
-                typer.echo(
-                    "projected dead fields: "
-                    + ", ".join(payload["projected"]["dead_fields"])
-                )
+                for error in payload.get("contract_errors", []):
+                    typer.echo(f"population contract error: {error}")
+                for reading in ("persisted", "projected"):
+                    section = payload[reading]
+                    typer.echo(
+                        f"{reading} dead fields: "
+                        + ", ".join(section["dead_fields"])
+                    )
+                    for bucket in ("conditional_zero", "transient_zero"):
+                        entries_ = section[bucket]
+                        typer.echo(
+                            f"{reading} {bucket.replace('_', ' ')}: "
+                            + ", ".join(sorted(entries_))
+                        )
+                        for name, report in sorted(entries_.items()):
+                            typer.echo(
+                                f"  {name}: mode={report['mode']} "
+                                f"writer={report['writer']} test={report['test']}"
+                            )
 
     if exit_code:
         raise typer.Exit(code=exit_code)
