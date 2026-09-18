@@ -4226,14 +4226,16 @@ mod tests {
             "119e3c52-62bf-43b4-b3c4-3c7ce659f802"
         );
 
-        // A row carrying neither still resolves to empty, so the callers'
-        // is_empty refusals keep firing.
+        // A row carrying neither resolves to empty; callers' is_empty refusals keep firing.
         let bare = serde_json::json!({ "harness": "pi", "short_id": "" });
         assert_eq!(resume_session_id(&bare, "pi"), "");
     }
 
     #[test]
     fn session_id_field_and_resume_argv_match_python() {
+        // Pin ambient dispatch dirs empty; they fold into the codex grant and
+        // break the byte-identity argv pinned below.
+        std::env::remove_var("FNO_WORKER_ADD_DIRS");
         assert_eq!(session_id_field("claude"), Some("short_id"));
         assert_eq!(session_id_field("codex"), Some("harness_session_id"));
         assert_eq!(session_id_field("gemini"), Some("harness_session_id"));
@@ -4242,11 +4244,9 @@ mod tests {
         assert_eq!(session_id_field("cursor-agent"), Some("harness_session_id"));
         assert_eq!(session_id_field("unknown"), None);
 
-        // --cd lands the resume in the row's own tree instead of the session
-        // directory codex defaults to. It sits with the -c grant BEFORE the
-        // subcommand, where codex's globals go. Kept byte-identical to Python
-        // `_build_resume_argv`; `test_rust_verb_parity.py` fails on drift, so
-        // token ORDER is load-bearing here, not just membership.
+        // --cd lands the resume in the row's own tree, beside the -c grant
+        // BEFORE the subcommand where codex's globals go; token ORDER is
+        // load-bearing (byte-identical to Python `_build_resume_argv`).
         assert_eq!(
             build_resume_argv("codex", "uuid-1", Some("/path/that/does/not/exist")),
             Some(vec![
