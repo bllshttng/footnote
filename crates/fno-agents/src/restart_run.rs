@@ -8,7 +8,41 @@ use crate::client::{
     check_daemon_drift, resolve_daemon_bin, restart_daemon, RestartError, RestartOutcome,
 };
 use crate::drift::DriftState;
+use crate::AgentStatus;
 use crate::paths::AgentsHome;
+
+/// One live thread row, read from the registry before and after the daemon
+/// swap: the preserved/lost comparison keys on the FULL harness session id,
+/// never the name (a row that comes back under the same name with a
+/// different session id is lost, and the receipt says so).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ThreadRow {
+    pub(crate) name: String,
+    pub(crate) harness: Option<String>,
+    pub(crate) session_id: Option<String>,
+    pub(crate) keeper_child_pid: Option<u32>,
+}
+
+/// Read the registry's live thread rows from disk (the same shared-lock
+/// read every other reader takes). Best-effort: an unreadable registry is
+/// an empty snapshot, and the preserved/lost receipt names that.
+pub(crate) fn read_thread_rows(home: &AgentsHome) -> Vec<ThreadRow> {
+    let Ok(registry) = crate::state::load_registry(&home.registry_json()) else {
+        return Vec::new();
+    };
+    registry
+        .entries
+        .iter()
+        .filter(|row| matches!(row.status, AgentStatus::Ready | AgentStatus::Idle | AgentStatus::Spawning | AgentStatus::Live))
+        .filter(|row| row.harness_session_id.is_some() || row.keeper_child_pid.is_some())
+        .map(|row| ThreadRow {
+            name: row.name.clone(),
+            harness: row.harness.clone(),
+            session_id: row.harness_session_id.clone(),
+            keeper_child_pid: row.keeper_child_pid,
+        })
+        .collect()
+}
 
 /// The `--if-drifted` gate: only a measured `Drifted` daemon earns a swap. A
 /// down daemon runs no old build, and `Unknown` never swaps on a guess; the
@@ -98,6 +132,10 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
         return 0;
     }
     let daemon_bin = resolve_daemon_bin();
+    // The thread snapshot: taken BEFORE the swap, compared after by FULL
+    // session id - a row that comes back under the same name with a
+    // different id is lost, and the receipt says so.
+    let before = read_thread_rows(&home);
     let outcome = restart_daemon(&home, &daemon_bin, force).await;
     let old_pid = outcome.as_ref().ok().and_then(|o| o.old_pid);
     let new_pid = outcome.as_ref().ok().map(|o| o.new_pid);
@@ -119,6 +157,30 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
     }
     if code != 0 {
         return code;
+    }
+    // The preserved/lost read: after the fresh daemon answers, re-read the
+    // registry and compare by full session id. Every before-row that is
+    // still present with the same id prints as preserved; one that is gone
+    // or changed prints as lost with what the row now carries.
+    let after = read_thread_rows(&home);
+    for row in &before {
+        let kept = after.iter().find(|candidate| {
+            candidate.session_id.is_some() && candidate.session_id == row.session_id
+        });
+        match kept {
+            Some(_) => say(&format!(
+                "fno agents restart: thread {} ({}) preserved with session {}.",
+                row.name,
+                row.harness.as_deref().unwrap_or("unknown"),
+                row.session_id.clone().unwrap_or_default(),
+            )),
+            None => say(&format!(
+                "fno agents restart: thread {} ({}) LOST across the restart (session {:?}).",
+                row.name,
+                row.harness.as_deref().unwrap_or("unknown"),
+                row.session_id,
+            )),
+        }
     }
     // change 6: cycle the stale store keepers. A store cycle ends
     // nothing a person can see (the graph on disk survives; the next read
@@ -216,6 +278,15 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
         "new_pid": new_pid,
     })];
     let mut preserved: Vec<serde_json::Value> = Vec::new();
+    for row in &after {
+        if let Some(sid) = &row.session_id {
+            preserved.push(json!({
+                "kind": "thread",
+                "name": row.name,
+                "session_id": sid,
+            }));
+        }
+    }
     if let Some(mux) = &mux_summary {
         if let Some(sessions) = mux.get("sessions").and_then(serde_json::Value::as_array) {
             for session in sessions {

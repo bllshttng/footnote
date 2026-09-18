@@ -1570,7 +1570,14 @@ impl ActorCtx {
         if let Some(driving) = self.driving.take() {
             self.shared.set_turn_id(None);
             for waiter in driving.waiters {
-                let _ = waiter.send(Err(message.to_string()));
+                // The error names the turn and reads as a RESTART of the
+                // daemon-owned thread, never as a failed turn: the thread
+                // and its transcript survive, and a sender that believed
+                // the turn itself failed would report a lie upstream.
+                let _ = waiter.send(Err(format!(
+                    "{message} (turn {turn}; the daemon-owned thread and its transcript survive)",
+                    turn = driving.turn_id,
+                )));
             }
         }
     }
