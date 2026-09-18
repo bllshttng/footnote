@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from fno.company.contracts import CompanyWorkRefs, FunctionRef, RoleRef, WorkOrderRef
-from fno.graph.types import Entry
+from fno.graph.types import Node as Entry
 from fno.plan.cli import plan_app
 from fno.plan.schema import PlanFrontmatter
 

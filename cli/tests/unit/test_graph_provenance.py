@@ -272,7 +272,7 @@ def test_ac_edge_parent_edge_survives_save_reload(tmp_path, monkeypatch):
 
 def test_ac_entry_model_declares_parent_edge_fields():
     """AC (x-30f6): the Entry model carries the new fields as first-class (typed, default None)."""
-    from fno.graph.types import Entry
+    from fno.graph.types import Node as Entry
 
     e = Entry(id="ab-model001", title="m")
     dumped = e.model_dump()
@@ -676,7 +676,7 @@ def test_sessions_existing_list_preserved():
 
 def test_entry_model_declares_sessions_field():
     """AC (x-b6e4): Entry carries `sessions` as a first-class list, default empty."""
-    from fno.graph.types import Entry
+    from fno.graph.types import Node as Entry
 
     dumped = Entry(id="ab-model002", title="m").model_dump()
     assert dumped["sessions"] == []

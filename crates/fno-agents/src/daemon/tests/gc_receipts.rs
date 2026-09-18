@@ -3451,9 +3451,10 @@ pub(super) fn stage_graph(dir: &std::path::Path, entries: Value) {
     .unwrap();
 }
 
-/// The first-open import drops rows the model cannot represent, and the
-/// daemon fixtures carry only the fields a sweep reads. Fill the required
-/// minimum so every staged row survives the import.
+/// The first-open import fills slug/type/priority but still requires a
+/// title and a parseable status, and the daemon fixtures carry only the
+/// fields a sweep reads. Fill exactly those two so every staged row
+/// survives the import; the production derivation owns the rest.
 pub(super) fn importable_row(mut row: Value) -> Value {
     if !row.is_object() {
         return row;
@@ -3464,10 +3465,8 @@ pub(super) fn importable_row(mut row: Value) -> Value {
         .unwrap_or_default()
         .to_string();
     let obj = row.as_object_mut().unwrap();
-    obj.entry("slug".to_string()).or_insert(json!(&id));
     obj.entry("title".to_string()).or_insert(json!(&id));
-    obj.entry("type".to_string()).or_insert(json!("feature"));
-    obj.entry("priority".to_string()).or_insert(json!("p2"));
+    obj.entry("status".to_string()).or_insert(json!("ready"));
     row
 }
 
