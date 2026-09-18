@@ -1085,6 +1085,72 @@ fn daemon_idle_exits_over_terminal_rows_and_says_why() {
 }
 
 #[test]
+fn daemon_on_sandbox_home_starts_no_active_backlog_supervisor() {
+    // The leak shape this guards: a daemon on a throwaway home must not start
+    // the active-backlog supervisor, whose targets resolve from the real cwd
+    // and real graph - it would work the operator's board from a tempdir and
+    // pin ab_live true forever, so the daemon never idle-exits. One
+    // fleet_scope row names the scope; zero arm rows say the supervisor never
+    // ran; the daemon then exits idle.
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let cwd = std::env::temp_dir().join(format!("fnoe-sandbox-cwd-{}", std::process::id()));
+    std::fs::create_dir_all(cwd.join(".fno")).unwrap();
+    std::fs::write(
+        cwd.join(".fno/config.toml"),
+        "[active_backlog]\nenabled = true\n",
+    )
+    .unwrap();
+
+    let seen = common::count_events(&home, "daemon_started");
+    let stderr =
+        std::fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
+    let mut cmd = Command::new(DAEMON_BIN);
+    cmd.env("FNO_AGENTS_HOME", home.root())
+        .envs(fno_agents::test_run::self_owner_env())
+        .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
+        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3")
+        .env("FNO_EVENTS_PATH", home.root().join(".fno/events.jsonl"))
+        .current_dir(&cwd)
+        .stderr(std::process::Stdio::from(stderr));
+    let mut daemon = DaemonChild(cmd.spawn().expect("daemon spawns"));
+    let pid = daemon.id();
+    common::wait_for_path(&home.supervisor_sock(), Duration::from_secs(10));
+    common::wait_for_event_count(&home, "daemon_started", seen + 1, Duration::from_secs(10));
+
+    // Exactly one scope row, naming its home: a missing row is never read as
+    // evidence of scope.
+    common::wait_for_event(&home, "daemon_fleet_scope", Duration::from_secs(10));
+    let scope = last_event_of(&home, "daemon_fleet_scope").expect("fleet_scope row");
+    assert_eq!(scope["data"]["scope"], json!("sandbox"));
+    assert_eq!(common::count_events(&home, "daemon_fleet_scope"), 1);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while last_event_of(&home, "daemon_shutting_down")
+        .and_then(|e| e["data"]["reason"].as_str().map(str::to_string))
+        != Some("idle".to_string())
+    {
+        assert!(
+            Instant::now() < deadline,
+            "sandbox daemon never idle-exited"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let _ = daemon.wait();
+    assert!(!pid_alive(pid), "the daemon is gone");
+    // On the unguarded tree the supervisor's first tick row lands within ~3s
+    // of start, long before the 5s idle tick; process death closes the window
+    // for more.
+    assert_eq!(
+        common::count_events(&home, "\"arm\":\"active_backlog\""),
+        0,
+        "a sandbox home starts no active-backlog supervisor"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+    std::fs::remove_dir_all(&cwd).ok();
+}
+
+#[test]
 fn daemon_stays_resident_while_a_worker_socket_is_live() {
     // The pin side: one live worker socket (a short_id dir holding a
     // worker.sock) must hold the daemon open past the idle window, with NO

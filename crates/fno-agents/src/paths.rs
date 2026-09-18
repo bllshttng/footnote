@@ -183,12 +183,34 @@ impl AgentsHome {
         if let Some(v) = std::env::var_os(HOME_ENV) {
             return PathBuf::from(v).join("registry.json");
         }
+        Self::ambient_shared_root().join("registry.json")
+    }
+
+    /// The ambient `$HOME/.fno/agents` - the one root every real session
+    /// shares. Deliberately NOT [`HOME_ENV`]-aware: `HOME_ENV` names a
+    /// declared root, and the question [`Self::is_sandbox`] answers is
+    /// whether the declared root IS this ambient one. [`HOME_ENV`]-aware
+    /// callers want [`Self::shared_registry_json`].
+    fn ambient_shared_root() -> PathBuf {
         std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".fno")
             .join("agents")
-            .join("registry.json")
+    }
+
+    /// Whether this home is a throwaway one (a test tempdir, a probe scratch
+    /// dir) rather than the shared `$HOME/.fno/agents` every real session
+    /// uses.
+    ///
+    /// A throwaway home gets a daemon on purpose: tests and repro scripts ask
+    /// for one. What it must not get is fleet work, because every fleet arm
+    /// resolves its targets from the real cwd and the real graph, not from
+    /// this home. Compared canonicalized, so a symlinked `$HOME` is not a
+    /// sandbox.
+    pub fn is_sandbox(&self) -> bool {
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        canon(&self.root) != canon(&Self::ambient_shared_root())
     }
 
     /// The agents root directory.
@@ -901,6 +923,59 @@ mod tests {
         let home = AgentsHome::from_env();
         assert_eq!(home.root(), root.as_path());
         std::env::remove_var(HOME_ENV);
+    }
+
+    // ── is_sandbox ─────────────────────────────────────────────────
+
+    #[test]
+    fn is_sandbox_true_for_a_tempdir_home() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = tmp("sandbox-true");
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var(HOME_ENV, &root);
+        assert!(AgentsHome::from_env().is_sandbox());
+        std::env::remove_var(HOME_ENV);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn is_sandbox_false_for_the_ambient_shared_home() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = tmp("sandbox-shared");
+        let agents = root.join(".fno").join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let held_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &root);
+        assert!(!AgentsHome::at(&agents).is_sandbox());
+        match held_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn is_sandbox_false_through_a_symlink_to_the_shared_root() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = tmp("sandbox-symlink");
+        let agents = root.join(".fno").join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let link = root.join("linked");
+        std::os::unix::fs::symlink(&agents, &link).unwrap();
+        let held_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &root);
+        assert!(!AgentsHome::at(&link).is_sandbox());
+        match held_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        std::fs::remove_dir_all(&root).ok();
     }
 
     // ── supervisor_lock_holder ─────────────────────────────────────
