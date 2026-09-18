@@ -35,7 +35,9 @@ def _write_graph(path: Path, entries: list[dict]) -> None:
 
 
 def _read_graph(path: Path) -> list[dict]:
-    return json.loads(path.read_text(encoding="utf-8"))["entries"]
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(path)
 
 
 def _entry(eid: str, **kwargs) -> dict:

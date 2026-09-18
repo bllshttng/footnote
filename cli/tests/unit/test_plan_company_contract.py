@@ -11,6 +11,7 @@ from fno.company.contracts import CompanyWorkRefs, FunctionRef, RoleRef, WorkOrd
 from fno.graph.types import Node as Entry
 from fno.plan.cli import plan_app
 from fno.plan.schema import PlanFrontmatter
+from fno.graph.store import read_graph_strict
 
 
 runner = CliRunner()
@@ -225,7 +226,7 @@ def test_graph_store_persists_valid_company_work_and_unknown_fields(tmp_path: Pa
 
     commit_rows_via_store(graph, lambda entries: entries)
 
-    saved = json.loads(graph.read_text())["entries"][0]
+    saved = read_graph_strict(graph)[0]
     assert saved["company_work"]["work_order"]["node_id"] == "x-e9a3"
     assert saved["future_graph_field"] == {"kept": True}
 
@@ -244,7 +245,7 @@ def test_graph_store_persists_normalized_company_work(tmp_path: Path) -> None:
 
     commit_rows_via_store(graph, lambda entries: entries)
 
-    saved = json.loads(graph.read_text())["entries"][0]["company_work"]
+    saved = read_graph_strict(graph)[0]["company_work"]
     assert saved["work_order"]["node_id"] == "x-e9a3"
     assert saved["work_order"]["attempt_id"] == "attempt-1"
 

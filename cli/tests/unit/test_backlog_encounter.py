@@ -135,7 +135,9 @@ def _node(node_id: str = "zz-0001", **over) -> dict:
 
 
 def _entries(probe) -> list[dict]:
-    return json.loads(probe.graph.read_text(encoding="utf-8"))["entries"]
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(probe.graph)
 
 
 def _encounters(probe, node_id: str = "zz-0001") -> list[dict]:
@@ -561,8 +563,8 @@ def test_a_non_claude_harness_does_not_inherit_the_claude_model_env(probe):
 def test_encounters_live_only_in_the_graph_store_and_export(probe):
     """The single-store rule.
 
-    SQLite is the store and graph.json its serialized export. This walks every
-    byte the verb wrote and fails if evidence escapes those two declared legs.
+    SQLite is the store and graph.json only a frozen export, so the evidence
+    must land in the db and in nothing else the verb writes.
     """
     _seed(probe, _node())
     evidence = "cost one full rebase and a wrong diagnosis."
@@ -577,7 +579,7 @@ def test_encounters_live_only_in_the_graph_store_and_export(probe):
         for path in probe.state.rglob("*")
         if path.is_file() and evidence.encode() in path.read_bytes()
     ]
-    assert carriers == ["graph.json", "graph.db"]
+    assert carriers == ["graph.db"]
 
 
 
@@ -627,7 +629,9 @@ def test_append_encounter_names_the_existing_timestamp(tmp_path, monkeypatch):
     assert error is not None
     assert "2026-08-29T05:00:00+00:00" in error
 
-    stored = json.loads(graph.read_text(encoding="utf-8"))["entries"][0]["encounters"]
+    from fno.graph.store import read_graph_strict
+
+    stored = read_graph_strict(graph)[0]["encounters"]
     assert len(stored) == 1
     assert stored[0]["evidence"] == "one."
 

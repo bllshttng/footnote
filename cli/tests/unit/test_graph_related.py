@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from fno.rust_binary import find_dev_binary
+from fno.graph.store import read_graph_strict
 
 # Since the store port every test here rides the keeper, so the module needs
 # the compiled runtime and skips whole where the smoke harness deleted the
@@ -65,7 +66,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 
 def _related(g: Path, node_id: str) -> list[str]:
-    entries = json.loads(g.read_text())["entries"]
+    entries = read_graph_strict(g)
     return next(e for e in entries if e["id"] == node_id).get("related", [])
 
 
@@ -206,7 +207,7 @@ def test_related_is_non_blocking(tmp_graph):
     def _statuses() -> dict[str, tuple]:
         # Read back the CANONICAL key: the writer migrates the legacy `_status`
         # to `status` and deletes it, so a round-tripped entry has only `status`.
-        entries = json.loads(tmp_graph.read_text())["entries"]
+        entries = read_graph_strict(tmp_graph)
         return {e["id"]: (e["status"], tuple(e["blocked_by"])) for e in entries}
 
     # A no-op write first, so the baseline reflects derivation, not the seed.
@@ -234,12 +235,12 @@ def test_ac7_hp_related_at_filing_time(tmp_graph):
 
 
 def test_filing_time_dangling_peer_refuses_the_whole_filing(tmp_graph):
-    before = len(json.loads(tmp_graph.read_text())["entries"])
+    before = len(read_graph_strict(tmp_graph))
     result = runner.invoke(
         app, ["backlog", "add", "co-delivered work", "--related", "x-zzzz", "--difficulty", "medium"]
     )
     assert result.exit_code != 0
-    assert len(json.loads(tmp_graph.read_text())["entries"]) == before
+    assert len(read_graph_strict(tmp_graph)) == before
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +366,7 @@ def test_removing_an_origin_clears_its_dependents_reference(tmp_graph):
     assert runner.invoke(
         app, ["backlog", "remove", "x-aaaa", "--force"]
     ).exit_code == 0
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries = read_graph_strict(tmp_graph)
     node = next(e for e in entries if e["id"] == new_id)
     assert node["source_node_id"] is None
 

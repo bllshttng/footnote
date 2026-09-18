@@ -110,10 +110,14 @@ def test_ac1_commit_creates_no_file_outside_graph_and_kanban(tmp_path: Path) -> 
     graph = tmp_path / "graph.json"
     commit(proposal, graph_path=graph, project="fno", now=NOW)
     created = {p.name for p in tmp_path.iterdir()}
-    # graph.json plus its Kanban projection; a backup/lock may also exist.
-    assert "graph.json" in created
+    # graph.db plus its Kanban/html projections (the render may also create a
+    # spaces/ sibling dir); a backup/lock may also exist.
+    assert "graph.db" in created
     assert all(
-        name.startswith("graph") or name.endswith(".lock") or name.endswith(".bak")
+        name.startswith("graph")
+        or name == "spaces"
+        or name.endswith(".lock")
+        or name.endswith(".bak")
         for name in created
     )
 

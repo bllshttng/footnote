@@ -9,6 +9,7 @@ Filter: ``fno doctor test cli/tests/unit/test_backlog_update_status.py``
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -236,27 +237,32 @@ def test_two_sets_land_in_one_write_with_two_receipt_lines(tmp_graph):
 # ---------------------------------------------------------------------------
 
 
-def test_a_slug_resolves_and_an_ambiguous_token_refuses_naming_candidates(tmp_graph):
-    """AC11-HP: the door resolves exact slugs; two nodes sharing one slug
-    refuse with the candidate ids."""
-    _seed(
-        tmp_graph,
+def test_same_slug_import_dedups_and_each_token_resolves_one_row(tmp_graph):
+    """AC11-HP under the store: slug collisions cannot exist. The import
+    suffixes the second same-slug row (-2), so the unsuffixed token resolves
+    the ORIGINAL row deterministically and the suffixed slug resolves its own
+    row. The door's ambiguity refusal stays an id-hit defense only."""
+    tmp_graph.write_text(json.dumps({"entries": [
         _node("x-0001", slug="same-slug"),
         _node("x-0002", slug="same-slug"),
         _node("x-0003", slug="only-slug", priority="p1"),
-    )
+    ]}), encoding="utf-8")
 
     # A unique slug resolves: the priority write lands on x-0003.
     r = _invoke("update", "only-slug", "--set", "priority=p0")
     assert r.exit_code == 0, r.output
     assert _entry(tmp_graph, "x-0003")["priority"] == "p0"
 
-    # An ambiguous slug refuses with the candidates, writing nothing.
+    # The unsuffixed slug token resolves the ORIGINAL row deterministically.
     r = _invoke("update", "same-slug", "--set", "priority=p1")
-    assert r.exit_code == 2, r.output
-    assert "x-0001" in r.output and "x-0002" in r.output
-    for nid in ("x-0001", "x-0002"):
-        assert _entry(tmp_graph, nid)["priority"] == "p2"
+    assert r.exit_code == 0, r.output
+    assert _entry(tmp_graph, "x-0001")["priority"] == "p1"
+    assert _entry(tmp_graph, "x-0002")["priority"] == "p2"
+
+    # The suffixed slug resolves its own row.
+    r = _invoke("update", "same-slug-2", "--set", "priority=p3")
+    assert r.exit_code == 0, r.output
+    assert _entry(tmp_graph, "x-0002")["priority"] == "p3"
 
 
 # ---------------------------------------------------------------------------

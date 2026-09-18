@@ -11,6 +11,7 @@ sets FNO_EVENTS_PATH to a per-test tmp journal anyway, so a future emitter
 cannot reach the live file from here.
 """
 from __future__ import annotations
+from fno.graph.store import read_graph_strict
 
 # ---------------------------------------------------------------------------
 # --explain --epic: the daemon's lane-fill cascade (task 5.1, LD5)
@@ -493,7 +494,7 @@ def test_abandoned_arm_row_settles_and_advance_names_the_node_a_candidate(
     assert "row_closed true" in result.output
     assert "status_after idea" in result.output
 
-    entries = _json.loads(g.read_text())["entries"]
+    entries = read_graph_strict(g)
     assert len(entries[0]["sessions"]) == 1
     assert entries[0]["sessions"][0]["ended_at"]
     assert entries[0]["status"] == "idea"
@@ -519,11 +520,11 @@ def test_held_arm_fresh_transcript_keeps_the_row_open(tmp_path, monkeypatch):
     assert "held" in result.output
     assert "transcript active" in result.output
 
-    entries = _json.loads(g.read_text())["entries"]
+    entries = read_graph_strict(g)
     rows = entries[0]["sessions"]
     assert len(rows) == 1
     assert rows[0]["session_id"] == _AB_SID_LIVE
-    assert "ended_at" not in rows[0]
+    assert rows[0].get("ended_at") is None
     assert entries[0]["status"] == "in_progress"
 
 
