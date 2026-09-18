@@ -509,6 +509,10 @@ STUBEOF
 run_handoff() {
   # run_handoff <sandbox> <boundary> [extra-args...]
   # Runs script from sandbox cwd so relative PLAN_PATH resolves correctly.
+  # A hard wall-clock bound wraps every case: the script's own poll loops are
+  # timeout-bounded, but a case that wedges anywhere else (a stub that blocks,
+  # a binary that never answers) once ran away unbounded and grew a 20 GB
+  # set -x trace. 180s covers the slowest legitimate case many times over.
   local sbx="$1" boundary="$2"
   shift 2
 
@@ -528,7 +532,7 @@ run_handoff() {
       CLAUDE_CODE_SESSION_ID="test-claude-sid" \
       CODEX_THREAD_ID="" CODEX_SESSION_ID="" GEMINI_SESSION_ID="" \
       PATH="$sbx/stub-bin:$PATH" \
-      bash "$SCRIPT" --harness claude --model opus "$@" 2>&1
+      timeout 180 bash "$SCRIPT" --harness claude --model opus "$@" 2>&1
     )
   else
     output=$(
@@ -545,7 +549,7 @@ run_handoff() {
       CLAUDE_CODE_SESSION_ID="test-claude-sid" \
       CODEX_THREAD_ID="" CODEX_SESSION_ID="" GEMINI_SESSION_ID="" \
       PATH="$sbx/stub-bin:$PATH" \
-      bash "$SCRIPT" --harness claude --model opus 2>&1
+      timeout 180 bash "$SCRIPT" --harness claude --model opus 2>&1
     )
   fi
   handoff_rc=$?
