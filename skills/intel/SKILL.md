@@ -5,7 +5,7 @@ description: Session-provenance report for the operator - who typed, what was sa
 
 # intel
 
-The fold counts. You judge. `fno-agents intel` classifies every user-shaped turn in this machine's transcripts by provenance (operator, relay, harness, keepalive), joins sessions to nodes, PRs, and mail, and computes the relay facets. No model runs there. This skill is the judgment layer: you read the fold's operator turns and write the narrative.
+The fold counts. You judge. `fno-agents intel` classifies every user-shaped turn in this machine's transcripts by provenance (operator, relay, harness, keepalive). It joins sessions to nodes, PRs, and mail, and computes the relay facets. No model runs there. This skill is the judgment layer: you read the fold's operator turns and write the narrative.
 
 The one rule the whole report stands on: **operator turns only**. Relay, harness, and keepalive turns are other agents and machinery talking. They never inform satisfaction, friction, or corrections. The fold's counters tell you exactly what to ignore.
 
