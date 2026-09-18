@@ -31,6 +31,11 @@ pub fn grok_sessions_root() -> PathBuf {
 /// scan is encoding-agnostic. The `One`/`None`/`Duplicate`/`Unknown`
 /// vocabulary and its discipline are pi's, reused verbatim.
 pub fn lookup_session(root: &Path, session_id: &str) -> SessionLookup {
+    // An empty id can never name a session, and PathBuf::join("") would turn
+    // each group path into its own candidate root, matching a stray file.
+    if session_id.is_empty() {
+        return SessionLookup::None;
+    }
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) => {
@@ -89,6 +94,9 @@ mod tests {
             lookup_session(&base, "sid-1"),
             SessionLookup::None
         ));
+        // The empty id reads None even with files present: join("") would
+        // otherwise match a group-root chat_history.jsonl.
+        assert!(matches!(lookup_session(&base, ""), SessionLookup::None));
         let missing = base.join("absent");
         assert!(matches!(
             lookup_session(&missing, "sid-1"),

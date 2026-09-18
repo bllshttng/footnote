@@ -251,7 +251,11 @@ fn grok_session_end_stop_is_skipped() {
         serde_json::json!({ "promptId": serde_json::Value::Null }),
         "text",
     );
-    let payload = payload.replace("\"promptId\":null,", "");
+    // Remove the key structurally: a string replace would silently depend on
+    // where serde happens to serialize it.
+    let mut v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    v.as_object_mut().unwrap().remove("promptId");
+    let payload = v.to_string();
     let (code, stdout, stderr) = fire(&fx, &payload);
     assert_eq!(code, 0, "{stdout} {stderr}");
     assert!(stdout.trim().is_empty(), "{stdout}");
