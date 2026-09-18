@@ -179,8 +179,7 @@ def status(
         "ridden out rather than hammered, and the gh-call count prints at "
         "exit. --timeout (30m default) exits with the last observed code and "
         "a still-unsettled note. A CONFLICTING PR refuses with exit 5 and a "
-        "rebase receipt: GitHub starts no checks on a conflicting head, so "
-        "none will arrive. Use this instead of a hand-rolled "
+        "rebase receipt. Use this instead of a hand-rolled "
         "`while/sleep/grep` loop - every such loop is an uncoordinated poll "
         "against a quota the whole machine shares."
     ),

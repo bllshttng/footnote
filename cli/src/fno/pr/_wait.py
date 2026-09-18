@@ -13,8 +13,7 @@ spender.
 
 Exit codes are `fno do pr status`'s alphabet, answering the condition asked:
 0 green, 1 red (settled-red under ``--until settled``), 2 pending or
-timeout-without-settling, 3 unknown, 4 fetch error, 5 conflicting (no checks
-will arrive; rebase), 127 gh-missing. A timeout
+timeout-without-settling, 3 unknown, 4 fetch error, 5 conflicting (rebase), 127 gh-missing. A timeout
 exits with the LAST observed code and a note - a caller re-arms, exactly as
 it re-armed a bounded hand-rolled loop. A persistent fetch error waits out
 the timeout rather than flapping: one blip recovers, and the cache's backoff
@@ -145,10 +144,7 @@ def wait_status(
     while True:
         ticks += 1
         rc, payload, out_text, err_text = _poll(pr, cwd)
-        # A CONFLICTING head never settles: GitHub starts no `pull_request`
-        # workflow on it, so `checks.total` stays 0 and `settled` below can
-        # never flip - the wait would sleep out its whole timeout for a green
-        # that cannot arrive. The payload already names the conflict, so
+        # The payload already names the conflict, so
         # refuse instead. A degraded backoff serve (`stale_reason`) cannot
         # prove the head is still the conflicting one, so it rides out as
         # today; a non-open PR is not a rebase errand either.
@@ -160,7 +156,6 @@ def wait_status(
             _emit(out_text, err_text, ticks)
             sys.stderr.write(
                 f"wait: PR {pr} is CONFLICTING at {str(payload.get('head') or '')[:8]}. "
-                "GitHub starts no checks on a conflicting PR, so none will arrive. "
                 "Rebase onto the base (`fno do pr rebase`), push, then re-arm the wait.\n"
             )
             return 5

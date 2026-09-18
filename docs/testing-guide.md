@@ -725,6 +725,14 @@ exit $FAILURES
 - The hook detected a build/start command without a recent `.fno/.last-test-run` marker
 - Run your test suite first, then retry the build command
 
+### A `Timeout (>300.0s) from pytest-timeout` failure
+
+A test exceeded the 300-second per-test ceiling in `cli/pyproject.toml`'s pytest ini table, and pytest-timeout raised inside it. The failure IS the hang being named. Before the ceiling existed, a blocked test stalled its smoke shard until the CI cap killed it with no test name in the log.
+
+The stack in the failure report (the `~~ Stack of MainThread ~~` block) is the evidence. It points at the call the test was blocked in, usually a wait on a subprocess, a lock, or a keeper process. Read the stack before touching the test. A rerun tells you nothing the hang did not.
+
+File what the stack shows as its own finding. Two known consumers wait on exactly this evidence. One is the open node about a leaked `fno-agents-worker` keeper process surviving job cleanup. The other is the pr-watch work that classifies a pytest red as rerunnable. A named pytest failure is an input that classifier already parses. The ceiling itself is guarded by `cli/tests/unit/test_pytest_timeout_configured.py`, so a `uv sync` cannot quietly drop it.
+
 ### Debug Mode
 
 Most test scripts respect `set -x` for verbose output:
