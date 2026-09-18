@@ -144,6 +144,7 @@ pub mod heal;
 pub mod honesty_sweep;
 pub mod hook;
 mod identity;
+pub mod install_verify;
 pub mod interrupt_classify;
 pub mod json_output;
 pub mod kill_criteria;

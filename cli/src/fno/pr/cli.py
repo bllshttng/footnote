@@ -952,10 +952,12 @@ def ritual(
         "`gh pr create` so every node the PR ships gets bound at merge, not "
         "just the one stamped by --pr-number. Prints nothing (exit 0) when "
         "NODE is unresolvable or nothing well-formed remains, so a caller "
-        "can append the output to a body unconditionally. Omit NODE to "
-        "resolve it from the current branch instead: exactly one real graph "
-        "node must be named, and any failure exits NONZERO with the reason - "
-        "a producer that cannot verify must not read as empty."
+        "can append the output to a body unconditionally. Exit 4 means the "
+        "graph read itself failed - a dead reader is not an unresolvable "
+        "node, and a caller must not append empty output on it. Omit NODE "
+        "to resolve it from the current branch instead: exactly one real "
+        "graph node must be named, and any failure exits NONZERO with the "
+        "reason - a producer that cannot verify must not read as empty."
     ),
 )
 def closure_trailer(
@@ -974,26 +976,37 @@ def closure_trailer(
 
     from fno.graph._constants import is_wellformed_node_id
 
+    external = active_backend_name() != "graph"
     if node is None:
         # Bare mode is LOUD on every failure: silent empty is how a
         # trailer-less PR ships. It never takes the legacy early returns.
-        if active_backend_name() != "graph":
+        if external:
             typer.echo(
                 "closure-trailer: branch resolution needs the graph backend; "
                 "pass the node explicitly instead",
                 err=True,
             )
             raise typer.Exit(code=1)
-        try:
-            entries = wire_rows(path=graph_json())
-        except Exception as exc:  # noqa: BLE001 - the read failure IS the message
-            typer.echo(
-                f"closure-trailer: branch resolution cannot read the graph ({exc}); "
-                "pass the node explicitly instead",
-                err=True,
-            )
-            raise typer.Exit(code=1)
+    elif external:
+        # graph.json is not the delivery record of truth under an external
+        # tracker backend - nothing to render from, matching this command's
+        # own contract (prints nothing, exit 0, on any unresolvable input).
+        return
 
+    # One read for both modes, loud on failure: a dead keeper used to answer
+    # exactly like an unresolvable node here (bare except, print nothing,
+    # exit 0) and three PRs sat red on the closure gate with no cause.
+    try:
+        entries = wire_rows(path=graph_json())
+    except Exception as exc:  # noqa: BLE001 - the read failure IS the message
+        typer.echo(
+            f"closure-trailer: the graph read failed ({exc}); "
+            "exit 4 names a dead reader, not an unresolvable node",
+            err=True,
+        )
+        raise typer.Exit(code=4)
+
+    if node is None:
         from fno.pr.closure import BranchResolutionError, resolve_branch_node_id
 
         known_ids = frozenset(
@@ -1007,16 +1020,6 @@ def closure_trailer(
             typer.echo(f"closure-trailer: {exc}", err=True)
             raise typer.Exit(code=1)
     else:
-        if active_backend_name() != "graph":
-            # graph.json is not the delivery record of truth under an external
-            # tracker backend - nothing to render from, matching this command's
-            # own contract (prints nothing, exit 0, on any unresolvable input).
-            return
-
-        try:
-            entries = wire_rows(path=graph_json())
-        except Exception:
-            return
         node_id = node
     # render_pr_closure_trailer silently drops a malformed id with no other
     # signal - a bare-hex or slug typo in --extra would otherwise ship with
