@@ -659,7 +659,7 @@ jobs:
 
       - name: cargo test --lib --bins (fno-agents)
         working-directory: crates/fno-agents
-        run: cargo test --lib --bins
+        run: cargo test --lib --bins --no-fail-fast
 
       - name: cargo test --test '*' --test-threads=1 (fno-agents real-process integration)
         working-directory: crates/fno-agents
