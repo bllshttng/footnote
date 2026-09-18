@@ -2147,15 +2147,19 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // THREAD lane (substrate "bg" after the thread normalization) is exempt:
     // the shared app-server resolves the posture server-side
     // (resolve_thread_posture), so a mapped mode is native there.
-    let codex_thread_lane = permission_mode
-        .map(|mode| {
-            // The capability table decides, through the one vocabulary (see
-            // codex_posture.rs); a resolution problem answers false, which
-            // degrades to the refusal below, never a guessed yes.
-            fno_agents::codex_posture::permission_mappable(provider, mode, substrate)
-                .unwrap_or(false)
-        })
-        .unwrap_or(false);
+    let codex_thread_lane = provider == "codex"
+        && permission_mode
+            .map(|mode| {
+                // The capability table decides, through the one vocabulary
+                // (see codex_posture.rs); a resolution problem answers
+                // false, which degrades to the refusal below, never a
+                // guessed yes. codex only: the shared app-server is the one
+                // served thread destination, so a declared-thread harness
+                // without one still refuses here, at the clearer gate.
+                fno_agents::codex_posture::permission_mappable(provider, mode, substrate)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
     if permission_mode.is_some() && provider != "claude" && !codex_thread_lane {
         let remedy = if provider == "codex" {
             "drop --permission-mode and pass -Y/--yolo"

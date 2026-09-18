@@ -63,6 +63,31 @@ fn probe_roots(cwd: &Path, state_dirs: &[String]) -> Vec<String> {
     roots
 }
 
+/// The nearest ancestor of `cwd` that NO granted root contains: the dir a
+/// negative-control write must target. Ascending from the parent, the first
+/// directory outside every root is genuinely outside the sandbox's grants;
+/// `cwd` itself sits inside the workspace. Falls back to the temp dir when
+/// every ancestor is granted.
+fn outside_probe_dir(cwd: &Path, state_dirs: &[String]) -> PathBuf {
+    let roots = probe_roots(cwd, state_dirs);
+    let mut dir = cwd.to_path_buf();
+    loop {
+        match dir.parent() {
+            Some(parent) => dir = parent.to_path_buf(),
+            None => return std::env::temp_dir(),
+        }
+        if dir.as_os_str().is_empty() || dir == Path::new("/") {
+            return std::env::temp_dir();
+        }
+        let granted = roots
+            .iter()
+            .any(|root| dir.starts_with(root) || Path::new(root).starts_with(&dir));
+        if !granted {
+            return dir;
+        }
+    }
+}
+
 /// One wrapped call: inside runs under the worker's sandbox argv, outside
 /// runs bare (the negative-control seat). An OSError-shaped failure becomes a
 /// failed CompletedProcess equivalent, like the Python `_why` did.
@@ -240,14 +265,16 @@ pub fn probe_codex_sandbox(
         };
     }
     // AC7-HP canary: a harmless write INSIDE the granted roots must succeed.
+    // The subshell removes the file whatever the write did, so a blocked or
+    // partial write never litters the worker's cwd (observed live: the plain
+    // `printf > f; rm f` form left the file behind when the write failed).
     let canary = cwd.join(format!("fno-probe-canary-{nonce}"));
     let canary_argv = [
         "/bin/sh".to_string(),
         "-c".to_string(),
         format!(
-            "printf x > {}; rm -f {}",
-            canary.display(),
-            canary.display()
+            "printf x > {p}; c=$?; rm -f {p}; exit $c",
+            p = canary.display()
         ),
     ];
     let canary_refs: Vec<&str> = canary_argv.iter().map(String::as_str).collect();
@@ -262,24 +289,21 @@ pub fn probe_codex_sandbox(
         ));
     }
     // AC7-EDGE negative control: a write OUTSIDE the granted roots must
-    // fail. The target is the workspace's PARENT, not $TMPDIR: the tmp
-    // exclusions make temp dirs writable under workspace-write, so a temp
-    // target would "fail" the control on every healthy sandbox. When the
-    // control succeeds anyway, the detector cannot fail and the verdict is
-    // `unknown`, never `reachable`.
-    let outside_dir = cwd
-        .parent()
-        .map(Path::to_path_buf)
-        .filter(|p| !p.as_os_str().is_empty() && p != Path::new("/"))
-        .unwrap_or_else(std::env::temp_dir);
+    // fail. The target is the nearest ancestor of cwd that no granted root
+    // contains - the immediate parent is often INSIDE the state root (fno
+    // worktrees live under ~/.fno), where the control would "fail" on a
+    // healthy sandbox for the wrong reason, and $TMPDIR is excluded from
+    // the workspace-write sandbox entirely. Same always-cleanup shape as
+    // the canary. When the control succeeds anyway, the detector cannot
+    // fail and the verdict is `unknown`, never `reachable`.
+    let outside_dir = outside_probe_dir(cwd, state_dirs);
     let outside_target = outside_dir.join(format!("fno-probe-outside-{nonce}"));
     let outside_argv = [
         "/bin/sh".to_string(),
         "-c".to_string(),
         format!(
-            "printf x > {}; rm -f {}",
-            outside_target.display(),
-            outside_target.display()
+            "printf x > {p}; c=$?; rm -f {p}; exit $c",
+            p = outside_target.display()
         ),
     ];
     let outside_refs: Vec<&str> = outside_argv.iter().map(String::as_str).collect();
