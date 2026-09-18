@@ -507,6 +507,70 @@ def test_reconcile_dry_run_never_syncs(tmp_graph, monkeypatch):  # AC6-EDGE
     assert json.loads(res.stdout)["sync_catchup"]["outcome"] == "not-run"
 
 
+def test_catchup_progress_goes_to_stderr_not_stdout(tmp_path, capsys):
+    """A --json caller parses stdout; the sync's progress echoes must not ride
+    along with the document."""
+    import typer
+
+    rows = [_merged(52, "ccc", 30)]
+
+    def sync(pr, shell_runner=None, **_kw):
+        typer.echo(f"post-merge sync: running in {tmp_path} for ccc")
+        shell_runner("git pull", str(tmp_path))
+        _stamp(tmp_path, "ccc")
+        return 0
+
+    res = sc.run_sync_catchup(
+        settings=_pm(), canonical_root=tmp_path, check=_check(),
+        gh_list=_gh(rows), sync=sync,
+    )
+    captured = capsys.readouterr()
+    assert res.outcome == "synced"
+    assert captured.out == ""
+    assert f"running in {tmp_path} for ccc" in captured.err
+
+
+def test_reconcile_json_stdout_is_parseable_with_catchup_firing(tmp_graph, monkeypatch, tmp_path):
+    """The daemon's merge_close arm parses reconcile --json stdout; a progress
+    line printed there made every merged node read as an unparseable failure."""
+    import json
+
+    import typer
+    from typer.testing import CliRunner
+
+    import fno.config as config_mod
+    import fno.paths as paths_mod
+    from fno.graph import cli as gcli
+    from fno.pr import _sync_canonical as sc_mod
+
+    real_load = config_mod.load_settings
+
+    def fake_load(*a, **kw):
+        s = real_load(*a, **kw)
+        pm = s.post_merge.model_copy(update={"auto_run": True})
+        return s.model_copy(update={"post_merge": pm})
+
+    monkeypatch.setattr(config_mod, "load_settings", fake_load)
+    monkeypatch.setattr(paths_mod, "resolve_canonical_repo_root", lambda: tmp_path)
+    st = sc.SyncStaleness("stale", ({"number": 52, "sha": "abc123def456"},), 0, "window")
+    monkeypatch.setattr(sc_mod, "sync_staleness", lambda **_kw: st)
+
+    def fake_sync_canonical(number, settings=None, canonical_root=None, shell_runner=None, **_kw):
+        typer.echo(f"post-merge sync: running in {canonical_root} for abc123def456")
+        if shell_runner is not None:
+            shell_runner("git pull", str(canonical_root))
+        _stamp(tmp_path, "abc123def456")
+        return 0
+
+    monkeypatch.setattr(sc_mod, "run_sync_canonical", fake_sync_canonical)
+
+    res = CliRunner().invoke(gcli.cli, ["reconcile", "--json"])
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["sync_catchup"]["outcome"] == "synced"
+    assert payload["sync_catchup"]["pr_number"] == 52
+
+
 def test_doctor_reports_staleness(monkeypatch):  # AC2-HP
     from fno import doctor
     from fno.pr import _sync_canonical as sc_mod
