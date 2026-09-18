@@ -1,6 +1,6 @@
 # Report shape
 
-One markdown report per run: `<vault>/fno/intel/<date>.md`. The section skeleton mirrors Claude's `/insights` narrative plus the two sections Claude cannot write (relay, corrections). Numbers come from the fold (`fno-agents intel --json`); judgments come from the operator-turn facets only.
+One markdown report per run: `<vault>/fno/intel/<date>.md`. The section skeleton mirrors Claude's `/insights` narrative plus the two sections Claude cannot write (relay, corrections). Numbers come from the fold (`fno-agents intel --json`). Judgments come from the operator-turn facets only.
 
 ```markdown
 # Intel <date>
@@ -46,6 +46,6 @@ transcript source). Counted, never guessed.
 
 Rules the renderer holds to:
 
-- Every number in the report traces to the fold's JSON. If it is not in the JSON, it is not a number, it is a claim - and it does not get digits.
-- Unattended sessions (zero operator and zero relay turns) stay out of every section except the fold counters; they are machinery runs.
+- Every number in the report traces to the fold's JSON. If a number is not in the JSON, it is a claim, and it does not get digits.
+- Unattended sessions (zero operator and zero relay turns) stay out of every section except the fold counters. They are machinery runs.
 - The corrections lines must survive `bash scripts/corrections-insights-tag.sh --insights-file <report>` untouched: the tag is ` #agent-correction` at end of line, the `signal=` pair inside it.

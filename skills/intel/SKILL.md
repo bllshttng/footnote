@@ -5,7 +5,7 @@ description: Session-provenance report for the operator - who typed, what was sa
 
 # intel
 
-The fold counts; you judge. `fno-agents intel` classifies every user-shaped turn in this machine's transcripts by provenance (operator, relay, harness, keepalive), joins sessions to nodes, PRs, and mail, and computes the relay facets. No model runs there. This skill is the judgment layer: you read the fold's operator turns and write the narrative.
+The fold counts. You judge. `fno-agents intel` classifies every user-shaped turn in this machine's transcripts by provenance (operator, relay, harness, keepalive), joins sessions to nodes, PRs, and mail, and computes the relay facets. No model runs there. This skill is the judgment layer: you read the fold's operator turns and write the narrative.
 
 The one rule the whole report stands on: **operator turns only**. Relay, harness, and keepalive turns are other agents and machinery talking. They never inform satisfaction, friction, or corrections. The fold's counters tell you exactly what to ignore.
 
@@ -19,9 +19,9 @@ The one rule the whole report stands on: **operator turns only**. Relay, harness
    fno-agents intel --json --node <id>
    ```
 
-   (`fno doctor intel` is the same fold with the same flags.) Exit 3 means no sessions in the window; report that and stop.
+   (`fno doctor intel` is the same fold with the same flags.) Exit 3 means no sessions in the window. Report that and stop.
 
-2. Judge the attended sessions and write one facet file each: `~/.fno/intel/facets/<session>.json`, mode 0600. Key the facet by session id + mtime + size (all three are on the fold's session row); a session whose key matches an existing facet is not re-judged - skip it, so a resumed session re-enters the report instead of stranding on a stale cache:
+2. Judge the attended sessions and write one facet file each: `~/.fno/intel/facets/<session>.json`, mode 0600. Key the facet by session id + mtime + size (all three are on the fold's session row). A session whose key matches an existing facet is not re-judged - skip it, so a resumed session re-enters the report instead of stranding on a stale cache:
 
    ```json
    {
@@ -39,7 +39,7 @@ The one rule the whole report stands on: **operator turns only**. Relay, harness
 
 3. Write the report: `<vault>/fno/intel/<date>.md`, where `<vault>/fno/` is the directory `fno do plan path` resolves beside `plans/`. Sections: [references/report-shape.md](references/report-shape.md).
 
-4. Corrections section: quote operator corrections verbatim, dedupe across sessions, rank by repeat count, each on its own line ending with ` #agent-correction` and carrying `signal=<friction category>`. Each one is a candidate AGENTS.md line or law; say which in the report.
+4. Corrections section: quote operator corrections verbatim, dedupe across sessions, rank by repeat count, each on its own line ending with ` #agent-correction` and carrying `signal=<friction category>`. Each one is a candidate AGENTS.md line or law. Say which in the report.
 
 5. Feed the S2 writer so the rows land in `~/.fno/corrections.log`:
 
