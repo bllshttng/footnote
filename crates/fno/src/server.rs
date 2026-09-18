@@ -1125,6 +1125,11 @@ struct PaneEntry {
     /// only at keeper re-adoption; a send to an unreconciled pane is refused
     /// rather than delivered to whatever the number now names.
     unreconciled: bool,
+    /// True when the keeper could not host this pane and the inline pty
+    /// fell back instead: the pane is LIVE but will die with the server.
+    /// Set only at spawn (never at re-adoption, whose panes are keeper-hosted
+    /// by construction); `kill-server` refuses while an unkept pane is live.
+    unkept: bool,
     /// When this pane last produced PTY output, stamped on the drain
     /// path itself so a pane with no `pane wait` watcher still records activity
     /// (`note_pane_output` returns early with zero subscribers, which is why
@@ -2211,6 +2216,12 @@ pub(crate) struct Core {
     /// Keeper-hosted panes adopted at startup, awaiting their stored-member
     /// binding at restore. Empty once every adoptee is placed.
     keeper_adopted: Vec<AdoptedKeeper>,
+    /// Shell-integration rc dirs of KEEPER shells, `pane id -> dir`. A keeper
+    /// child outlives this server, so the dir must too: never a dropping
+    /// `pty::ShellRc`, which would remove the dir a live shell still
+    /// references at server exit. Removed on pane close; re-owned by
+    /// re-adoption.
+    shell_rc_dirs: HashMap<u64, std::path::PathBuf>,
 }
 
 /// At most one `human_touch(inject)` per pane per window: the first keystroke
@@ -3077,6 +3088,15 @@ impl Core {
     pub(crate) fn spawn_pane(&mut self, rows: u16, cols: u16, cwd: &str) -> Result<u64, String> {
         let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
+        // Production shells are keeper-hosted like every other pane (the
+        // survival contract); the shell candidate loop and the integration
+        // prefix live in `spawn_pane_kept`. Unit fixtures keep the inline
+        // pty: they spawn short-lived shells that can exit before a keeper
+        // answers Identify.
+        #[cfg(not(test))]
+        if let Some(pid) = self.spawn_pane_kept(rows, cols, cwd, id, dir)? {
+            return Ok(pid);
+        }
         let pty = PtyShell::spawn(
             &self.shells,
             rows,
@@ -3128,15 +3148,24 @@ impl Core {
         cwd: &str,
         permit: crate::process_admission::AdmissionPermit,
     ) -> Result<u64, String> {
-        self.spawn_pane_shell_with_permit(argv, rows, cols, cwd, permit, false)
+        // Unit fixtures keep the inline pty (short-lived /bin/cat children
+        // can exit before a keeper answers Identify); production panes are
+        // keeper-hosted.
+        #[cfg(test)]
+        let keeper = false;
+        #[cfg(not(test))]
+        let keeper = true;
+        self.spawn_pane_shell_with_permit(argv, rows, cols, cwd, permit, keeper)
     }
 
-    /// The one spawn fork in the road: `keeper = true` routes a worker pane
-    /// through a `fno-agents-worker --pane` process that owns the pty master
+    /// The one spawn fork in the road: `keeper = true` routes a pane through
+    /// a `fno-agents-worker --pane` process that owns the pty master
     /// out-of-process, so the pane child outlives this server and a fresh
-    /// server re-adopts it. Plain shells and ad-hoc panes keep the inline
-    /// master: dying with the server is correct for them, and keeper-per-pane
-    /// would double the fleet process count.
+    /// server re-adopts it. EVERY pane takes this road now; the inline pty is
+    /// the named fallback for a keeper that cannot start, and the pane entry
+    /// is then marked `unkept` (kill-server refuses while one is live). A
+    /// deliberate close is unchanged: `reap_pane` sends Kill, the keeper
+    /// kills its child, unlinks its socket and exits.
     fn spawn_pane_shell_with_permit(
         &mut self,
         argv: &[String],
@@ -3156,8 +3185,13 @@ impl Core {
         let resume_target = resume_target_from_argv(argv);
         let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
+        // A keeper that cannot start (missing binary, failed handshake, held
+        // seat) must not cost the pane: fall back to the inline pty, say so,
+        // and mark the entry `unkept` - the pane is live but will die with
+        // the server.
+        let mut fell_back: Option<String> = None;
         let (pty, keeper_ring) = if keeper {
-            PtyShell::spawn_cmd_keeper_with_permit(
+            match PtyShell::spawn_cmd_keeper_with_permit(
                 &keeper_worker_bin(),
                 argv,
                 rows,
@@ -3168,7 +3202,27 @@ impl Core {
                 self.out_tx.clone(),
                 self.exit_tx.clone(),
                 permit,
-            )
+            ) {
+                Ok(ok) => ok,
+                Err(keeper_err) => {
+                    let fallback_permit =
+                        crate::process_admission::admit_fleet().map_err(|e| e.to_string())?;
+                    let shell = PtyShell::spawn_cmd_with_permit(
+                        argv,
+                        rows,
+                        cols,
+                        dir,
+                        &self.session_name,
+                        id,
+                        self.out_tx.clone(),
+                        self.exit_tx.clone(),
+                        fallback_permit,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    fell_back = Some(keeper_err.to_string());
+                    (shell, Vec::new())
+                }
+            }
         } else {
             PtyShell::spawn_cmd_with_permit(
                 argv,
@@ -3182,8 +3236,8 @@ impl Core {
                 permit,
             )
             .map(|shell| (shell, Vec::new()))
-        }
-        .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+        };
         self.register_pane(
             id,
             pty,
@@ -3197,6 +3251,14 @@ impl Core {
             resume_target,
             refused_worker_from_argv(argv),
         )?;
+        if let Some(keeper_err) = fell_back {
+            if let Some(entry) = self.panes.get_mut(&id) {
+                entry.unkept = true;
+            }
+            self.notice_all(format!(
+                "keeper unavailable for pane {id} ({keeper_err}); running unkept inline"
+            ));
+        }
         // The keeper's handshake replay carries everything the child printed
         // before the reader thread existed; the VT only now exists, so feed
         // it here (the re-adopt path feeds its ring the same way).
@@ -3289,6 +3351,7 @@ impl Core {
                 resume_target,
                 refused_worker,
                 unreconciled: false,
+                unkept: false,
                 last_output: Instant::now(),
                 stats: Arc::clone(&stats),
                 nudge_due: None,
@@ -3319,6 +3382,12 @@ impl Core {
             } else {
                 entry.pty.kill();
             }
+        }
+        // A keeper shell's rc dir is this server's to clean: the pane is
+        // closing, so the dir its shell still references goes with it. (An
+        // inline pane's dir dies with its own `ShellRc`.)
+        if let Some(dir) = self.shell_rc_dirs.remove(&pid) {
+            let _ = std::fs::remove_dir_all(&dir);
         }
         // Pane exit releases the writer claim UNCONDITIONALLY (Locked 5): a
         // held claim never blocks the close cascade.
@@ -3714,8 +3783,15 @@ impl Core {
                 spawn_argv = wrapped;
             }
         }
+        // Every spawned pane takes the keeper road in production, worker or
+        // not; unit fixtures keep today's split (short-lived fixtures can
+        // exit before a keeper answers Identify).
+        #[cfg(test)]
+        let keeper = worker.is_some();
+        #[cfg(not(test))]
+        let keeper = true;
         let pid = self
-            .spawn_pane_shell_with_permit(&spawn_argv, rows, cols, &cwd, permit, worker.is_some())
+            .spawn_pane_shell_with_permit(&spawn_argv, rows, cols, &cwd, permit, keeper)
             .map_err(|e| (err_code::SPAWN_FAILED, e))?;
         if claim {
             // Writer-claim ELIGIBILITY, set only at agent spawn (Locked 5).
@@ -13608,6 +13684,7 @@ async fn serve(
         batch_plans: HashMap::new(),
         pending_thread_reply: None,
         keeper_adopted: Vec::new(),
+        shell_rc_dirs: HashMap::new(),
     };
 
     // The off-loop registry reader (4a-G2): a 1s interval task stats/reads

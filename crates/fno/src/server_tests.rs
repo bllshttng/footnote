@@ -8929,6 +8929,7 @@ pub(super) fn empty_core() -> Core {
         batch_plans: HashMap::new(),
         pending_thread_reply: None,
         keeper_adopted: Vec::new(),
+        shell_rc_dirs: std::collections::HashMap::new(),
     }
 }
 

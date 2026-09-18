@@ -5,8 +5,8 @@ set -euo pipefail
 # server, SIGKILLed; that exact pid, still alive with parent 1; a fresh
 # server, re-adopting the SAME pid; and the pane, ANSWERING a prompt after
 # all of it. No assertion here trusts an exit code or a survivor count.
-# A plain (non-worker) pane is carried along as the control: it must die
-# with the server, exactly as it always has.
+# A plain (non-worker) pane is carried along as the control: it is
+# keeper-hosted too now, so it must survive the kill by the same road.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MUX_BIN="${FNO_MUX_BIN:-$REPO_ROOT/crates/fno/target/debug/fno}"
@@ -151,10 +151,10 @@ else
     exit 1
 fi
 if alive "$PLAIN_PID"; then
-    echo "FAIL: plain pane child $PLAIN_PID survived the server kill; plain panes must die with it (AC4)" >&2
-    exit 1
+    echo "[after kill] plain pane child $PLAIN_PID is ALIVE (keeper-held, like every pane)"
 else
-    echo "[after kill] plain pane child $PLAIN_PID is dead, as it always was"
+    echo "FAIL: plain pane child $PLAIN_PID died with the server; every pane is kept now" >&2
+    exit 1
 fi
 
 # The re-adoption: a fresh server on the same session binds the SAME child.
@@ -214,4 +214,4 @@ else
     exit 1
 fi
 
-echo "PASS: worker child $CHILD_PID outlived the killed server $SESSION, was re-adopted by a fresh server, and answered a prompt; the plain pane died with it"
+echo "PASS: worker child $CHILD_PID outlived the killed server $SESSION, was re-adopted by a fresh server, and answered a prompt; the plain pane survived by the same road"

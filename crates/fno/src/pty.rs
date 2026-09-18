@@ -1695,6 +1695,7 @@ fn base_command(
 }
 
 /// A shell the mux knows how to inject OSC 133 block markers into.
+#[derive(Clone, Copy)]
 enum ShellKind {
     Zsh,
     Bash,
@@ -1755,6 +1756,70 @@ impl Drop for ShellRc {
     }
 }
 
+/// The per-pane shell-integration rc dir: under the private mux dir, 0700,
+/// unique per (session, pane id). Shared by the inline pty (`apply_shell_integration`)
+/// and the keeper spawn (`keeper_shell_argv`).
+pub fn shell_rc_dir(session: &str, pane_id: u64) -> PathBuf {
+    crate::proto::mux_dir()
+        .join("shell-rc")
+        .join(format!("fno-mux-{session}-{pane_id}"))
+}
+
+/// Write the rc files for `kind` into a fresh per-pane dir and return it.
+/// The caller owns the dir's lifetime: an inline pty wraps it in a
+/// [`ShellRc`] (removed with the pane); a keeper shell carries the path in
+/// its argv instead and the SERVER cleans it up on pane close, because a
+/// keeper child outlives the server that spawned it.
+fn write_shell_rc(kind: ShellKind, session: &str, pane_id: u64) -> Option<PathBuf> {
+    let dir = shell_rc_dir(session, pane_id);
+    let _ = fs::remove_dir_all(&dir);
+    crate::proto::ensure_private_dir(&dir).ok()?;
+    match kind {
+        ShellKind::Zsh => {
+            fs::write(dir.join(".zshenv"), ZSH_ZSHENV).ok()?;
+            fs::write(dir.join(".zshrc"), zsh_zshrc()).ok()?;
+        }
+        ShellKind::Bash => {
+            fs::write(dir.join("bashrc"), bash_rcfile_body()).ok()?;
+        }
+    }
+    Some(dir)
+}
+
+/// The keeper-shell spawn argv for one shell candidate: the same shell
+/// integration [`apply_shell_integration`] gives an inline pty, carried as an
+/// `env NAME=VALUE` argv prefix (the wrapper shape `run_pane` uses for
+/// `FNO_AGENT_SELF`), because the argv runs inside a keeper process the
+/// server cannot reach into. bash keeps `--rcfile` as an argv tail - no env
+/// var redirects bash's rc the way `ZDOTDIR` does zsh's. `None` when the
+/// candidate is not a shell or the knob is off or the rc write failed: the
+/// caller falls back to an inline spawn (fail-open, no integration).
+pub fn keeper_shell_argv(
+    cand: &OsStr,
+    session: &str,
+    pane_id: u64,
+) -> Option<(Vec<String>, PathBuf)> {
+    if integration_disabled(std::env::var_os("FNO_MUX_SHELL_INTEGRATION").as_deref()) {
+        return None;
+    }
+    let kind = shell_kind(cand)?;
+    let cand_str = cand.to_str()?.to_string();
+    let dir = write_shell_rc(kind, session, pane_id)?;
+    let mut argv = vec!["env".to_string()];
+    if matches!(kind, ShellKind::Zsh) {
+        argv.push(format!("ZDOTDIR={}", dir.display()));
+        if let Some(z) = std::env::var_os("ZDOTDIR") {
+            argv.push(format!("USER_ZDOTDIR={}", z.to_string_lossy()));
+        }
+    }
+    argv.push(cand_str);
+    if matches!(kind, ShellKind::Bash) {
+        argv.push("--rcfile".to_string());
+        argv.push(dir.join("bashrc").to_string_lossy().into_owned());
+    }
+    Some((argv, dir))
+}
+
 /// Inject the OSC 133 snippet into a mux-spawned shell, and ONLY that shell -
 /// never the user's global rc. zsh: a temp `ZDOTDIR` whose `.zshenv` /
 /// `.zshrc` source the user's real files (`USER_ZDOTDIR`, or `$HOME` when
@@ -1779,23 +1844,18 @@ fn apply_shell_integration(
         return None;
     }
     let kind = shell_kind(program)?;
-    // Under the per-user 0700 mux dir, NOT world-writable /tmp: a shell that
-    // sources these rc files is an RCE surface, so a predictable path in a
-    // shared temp dir (where an attacker could pre-create the dir and swap the
-    // rc) is CWE-377. `ensure_private_dir` forces 0700 on both levels, and no
-    // other uid can enter the parent, so the per-pane name being predictable is
-    // safe. Unique per pane (session + id); a crashed server's leftover of the
-    // same name is removed first, never appended to.
-    let dir = crate::proto::mux_dir()
-        .join("shell-rc")
-        .join(format!("fno-mux-{session}-{pane_id}"));
-    let _ = fs::remove_dir_all(&dir);
-    crate::proto::ensure_private_dir(&dir).ok()?;
+    // The rc dir lives under the per-user 0700 mux dir, NOT world-writable
+    // /tmp: a shell that sources these rc files is an RCE surface, so a
+    // predictable path in a shared temp dir (where an attacker could
+    // pre-create the dir and swap the rc) is CWE-377. `ensure_private_dir`
+    // forces 0700 on both levels, and no other uid can enter the parent, so
+    // the per-pane name being predictable is safe. Unique per pane (session
+    // + id); a crashed server's leftover of the same name is removed first,
+    // never appended to.
+    let dir = write_shell_rc(kind, session, pane_id)?;
     let rc = ShellRc { dir };
     match kind {
         ShellKind::Zsh => {
-            fs::write(rc.dir.join(".zshenv"), ZSH_ZSHENV).ok()?;
-            fs::write(rc.dir.join(".zshrc"), zsh_zshrc()).ok()?;
             cmd.env("ZDOTDIR", &rc.dir);
             // Preserve the user's real ZDOTDIR for the temp rc to source; unset
             // -> the in-shell `${USER_ZDOTDIR:-$HOME}` falls back to $HOME.
@@ -1805,7 +1865,6 @@ fn apply_shell_integration(
         }
         ShellKind::Bash => {
             let rcfile = rc.dir.join("bashrc");
-            fs::write(&rcfile, bash_rcfile_body()).ok()?;
             cmd.arg("--rcfile");
             cmd.arg(rcfile);
         }
@@ -2170,6 +2229,50 @@ mod tests {
             shell_candidates(Some(OsStr::new("/bin/sh"))),
             vec![OsString::from("/bin/sh")]
         );
+    }
+
+    #[test]
+    fn keeper_shell_argv_zsh_carries_the_rc_dir_as_env() {
+        let Some((argv, dir)) = keeper_shell_argv(OsStr::new("/bin/zsh"), "sess", 7) else {
+            panic!("zsh candidate must produce a keeper argv");
+        };
+        assert_eq!(argv[0], "env");
+        let z = argv
+            .iter()
+            .find(|a| a.starts_with("ZDOTDIR="))
+            .expect("zsh argv carries a ZDOTDIR prefix");
+        assert_eq!(
+            z,
+            &format!("ZDOTDIR={}", dir.display()),
+            "ZDOTDIR prefix names the written rc dir: {argv:?}"
+        );
+        assert_eq!(
+            std::path::Path::new(argv.last().unwrap()).file_name(),
+            Some(std::ffi::OsStr::new("zsh")),
+            "the shell itself is the command: {argv:?}"
+        );
+        assert!(dir.join(".zshenv").exists(), "the rc dir carries .zshenv");
+        assert!(dir.join(".zshrc").exists(), "the rc dir carries .zshrc");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keeper_shell_argv_bash_carries_rcfile_tail() {
+        let Some((argv, dir)) = keeper_shell_argv(OsStr::new("/bin/bash"), "sess", 8) else {
+            panic!("bash candidate must produce a keeper argv");
+        };
+        let rcfile = argv
+            .iter()
+            .position(|a| a == "--rcfile")
+            .map(|i| argv[i + 1].clone())
+            .expect("bash argv names its rcfile");
+        assert!(std::path::Path::new(&rcfile).exists(), "the rcfile exists: {rcfile}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keeper_shell_argv_skips_non_shell_candidates() {
+        assert!(keeper_shell_argv(OsStr::new("/usr/bin/htop"), "sess", 9).is_none());
     }
 
     #[test]

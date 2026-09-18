@@ -168,17 +168,16 @@ print(got[0])
 ' "$1" "$2"
 }
 
-# Count processes whose argv carries the viewer marker. The needle rides in
-# this python's own argv and in ps's argv, so both are excluded: a counter
-# that counts itself is the ps-argv self-match lie.
+# The portal row's viewer process, counted by server truth: exactly one
+# pane row carries the child pid. A whole-table ps scan is refused on
+# purpose: it counts self-matches.
 viewer_count() {
-    ps -axo command= | python3 -c '
-import sys
-needles = sys.argv[1:]
-print(sum(1 for ln in sys.stdin
-          if any(n in ln for n in needles)
-          and "ps -axo" not in ln and "python3 -c" not in ln))
-' "$STUB_DIR/fno" "stub-responder"
+    "$MUX_BIN" mux pane ls --session "$SESSION" --json | python3 -c '
+import json, sys
+rows = json.load(sys.stdin)
+child = int(sys.argv[1])
+print(len([r for r in rows if r.get("child_pid") == child]))
+' "$CHILD_D"
 }
 
 RED_ROWS=""
@@ -368,14 +367,9 @@ print(hits[0]["pane_id"])
 CHILD_D="$(pane_field child_pid "$PANE_D")"
 FILE_D="none"
 LINES_D="none"
-VIEWER_BEFORE="$(ps -axo command= | python3 -c '
-import sys
-needle = sys.argv[1]
-print(sum(1 for ln in sys.stdin if needle in ln and "ps -axo command=" not in ln))
-' "stub-responder")"
 SURVIVOR_PIDS="$SURVIVOR_PIDS $CHILD_D"
 
-echo "[before] a: pane $PANE_A child $CHILD_A; b: pane $PANE_B child $CHILD_B; c: pane $PANE_C child $CHILD_C keeper $KEEPER_C; d: pane $PANE_D child $CHILD_D viewers $VIEWER_BEFORE"
+echo "[before] a: pane $PANE_A child $CHILD_A; b: pane $PANE_B child $CHILD_B; c: pane $PANE_C child $CHILD_C keeper $KEEPER_C; d: pane $PANE_D child $CHILD_D argv: $(ps -o command= -p "$CHILD_D" 2>/dev/null | head -c 100)"
 
 LINES_A="$(counter_lines "$FILE_A")"
 LINES_B="$(counter_lines "$FILE_B")"
@@ -396,15 +390,23 @@ for row in a b c d; do
     verify_row "restart 1" "$row" "$pane" "$child" "$file" "$lines" || true
 done
 
-if [[ "${FNO_MATRIX_LIVE:-0}" != "1" && "$(viewer_count)" -ne "$VIEWER_BEFORE" ]]; then
-    echo "FAIL: portal viewer count changed across restart 1"
+if [[ "$(viewer_count)" -ne 1 ]]; then
+    echo "FAIL: the portal row does not hold exactly one viewer pane row"
     RED_ROWS="$RED_ROWS [restart 1]d-viewer"
+fi
+if [[ "${FNO_MATRIX_LIVE:-0}" != "1" ]]; then
+    NOW_ARGV="$(ps -o command= -p "$CHILD_D" 2>/dev/null || true)"
+    case "$NOW_ARGV" in
+        *stubbin/fno*|*stub-responder*) ;;
+        *) echo "FAIL: the process at viewer pid $CHILD_D lost its stub argv: $NOW_ARGV"
+           RED_ROWS="$RED_ROWS [restart 1]d-argv" ;;
+    esac
 fi
 if grep -q "placed in its own tab" "$TMP_DIR/server.log" 2>/dev/null; then
     echo "FAIL: a re-adopted pane lost its seat (placed in its own tab)"
     RED_ROWS="$RED_ROWS [restart 1]seat"
 fi
-echo "[restart 1] portal still held by exactly $VIEWER_BEFORE viewer process(es)"
+echo "[restart 1] portal still held by exactly one viewer pane at pid $CHILD_D"
 
 # ── restart 2: the agents daemon alone ───────────────────────────────────
 # The real daemon, private home: lazy-start it, read its pid from the
