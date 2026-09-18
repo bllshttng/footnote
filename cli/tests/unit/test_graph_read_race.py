@@ -20,7 +20,7 @@ from fno.graph.fuzzy import resolve_node
 from fno.graph.store import (
     GraphUnreadableError,
     commit_rows_via_store,
-    read_graph,
+    read_graph_strict,
     read_graph_strict,
 )
 
