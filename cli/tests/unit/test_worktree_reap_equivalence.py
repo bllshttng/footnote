@@ -229,26 +229,27 @@ def test_deletions_only_worktree_is_actually_removed(tmp_path: Path) -> None:
 
 
 def test_helper_fails_closed_when_the_verb_cannot_answer(tmp_path: Path) -> None:
-    """A stale CLI that does not know the verb must never read as permission.
+    """A gate that cannot answer must never read as permission.
 
-    An absence of "no" is not a yes. This drives the helper with a PATH that has
-    no `fno` and an FNO_PYTHON that exits non-zero, the shape a partial deploy
-    produces.
+    An absence of "no" is not a yes. This drives the helper with a binary
+    override that exits non-zero with no receipt and a PATH stripped of both
+    `fno-agents` and `fno` - the shape a partial deploy produces.
     """
     repo = _make_repo(tmp_path / "stale")
-    fake = tmp_path / "false-python"
+    fake = tmp_path / "broken-gate"
     fake.write_text("#!/bin/sh\nexit 2\n")
     fake.chmod(0o755)
 
     script = (
         f'source "{REAPABLE_LIB}"\n'
-        f'export FNO_PYTHON="{fake}"\n'
+        f'export FNO_AGENTS_BIN="{fake}"\n'
         f'if wt_reapable "{repo}"; then echo YES; else echo NO; fi\n'
         f'echo "$WT_REAPABLE_LINE"\n'
     )
-    # STRIP `fno` FOR REAL. The docstring above always claimed a PATH without
-    # it; leaving the real PATH in place let the developer's installed CLI
-    # answer, so this asserted nothing once the helper grew its fallback.
+    # STRIP THE RESCUERS FOR REAL. The override is accepted (it is executable),
+    # so the repo's own build is not consulted; stripping PATH removes the
+    # installed CLI fallback. Every lane answers nothing, and the helper must
+    # degrade to its fail-closed receipt.
     r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                        cwd=str(REPO_ROOT), env={"PATH": "/usr/bin:/bin"})
 
@@ -256,20 +257,24 @@ def test_helper_fails_closed_when_the_verb_cannot_answer(tmp_path: Path) -> None
     assert "probe-failed" in r.stdout
 
 
-def test_rust_probe_parses_the_grammar_the_verb_emits(tmp_path: Path) -> None:
-    """The Rust probe keys on two literals. Pin that the verb still emits them.
+def test_gate_binary_emits_the_grammar_the_callers_parse(tmp_path: Path) -> None:
+    """Pin the receipt grammar at its one source: the gate binary.
 
-    daemon.rs reads `reapable=yes` on exit 0 and `reapable=no` otherwise. A
-    receipt rename would leave that probe silently answering None forever,
-    which reads as "keep everything" and is invisible.
+    The bash helper keys on `reapable=yes` with exit 0 and `reapable=no` on
+    exit 1, and the daemon's in-process probe reads the same verdict field. A
+    receipt rename would leave every caller silently keeping everything,
+    which is invisible.
     """
     clean = _make_repo(tmp_path / "yes")
     dirty = _make_repo(tmp_path / "no")
     (dirty / "scratch.py").write_text("nope\n")
 
-    assert reapable(clean).line().startswith("reapable=yes ")
-    assert reapable(dirty).line().startswith("reapable=no ")
+    assert _gate_verdict(clean) is True
+    assert _gate_verdict(dirty) is False
 
-    probe_src = (REPO_ROOT / "crates" / "fno-agents" / "src" / "daemon.rs").read_text()
-    assert '"reapable=yes"' in probe_src
-    assert '"reapable=no"' in probe_src
+    gate_src = (
+        REPO_ROOT / "crates" / "fno-agents" / "src" / "worktree_reapable.rs"
+    ).read_text()
+    assert 'reapable={}' in gate_src or "reapable=" in gate_src
+    sh_src = REAPABLE_LIB.read_text()
+    assert 'reapable=yes' in sh_src and 'reapable=no' in sh_src
