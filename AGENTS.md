@@ -69,7 +69,7 @@ footnote/
 - **Worktrees:** worktree-first for all repo work. `claude --worktree <name>` is intercepted by `hooks/worktree-setup.sh`; after creation run `bash scripts/setup/setup-worktree.sh`. Full contract: [.claude/rules/worktrees.md](.claude/rules/worktrees.md).
 - **Search:** prefer `rg` / Grep over `grep -r` (descends into nested worktrees). Scope any `grep -r` to a path. Load-bearing sweep: `RIPGREP_CONFIG_PATH= rg -uu`, never a bare `rg -uu` (`-u` ignores files, not globs).
 - **Prose style:** a paragraph is ONE physical line. A newline starts the next block. House style, and the gate: [docs/style-rules.md](docs/style-rules.md).
-- **File budget:** a source file over 5,000 lines is shrink-only. No new Python in `cli/src/fno`: new code lands in `crates/`, and a Python edit is a port or a deletion. One exception, king-approved: a blocking-bug repair to existing Python, no new verb, flag or feature, within the thirty-added-line budget. `scripts/ci/check-file-budget.sh` is the push-time backstop.
+- **File budget:** a source file over 5,000 lines is shrink-only. No new Python in `cli/src/fno`: new code lands in `crates/`, and a Python edit is a port or a deletion. Exception: a king-approved blocking-bug repair to existing Python, no new surface, in the added-line budget. `scripts/ci/check-file-budget.sh` is the push-time backstop.
 - **Large files:** a source file over 1,000 lines gets read the exact range, edit, re-read, and a test count proved with `rg -c '#\[test\]'` (or `def test_`) before and after.
 - **Multi-CLI:** skills are portable. Orchestration needs per-CLI hook config. See `docs/HARNESSES.md`, `docs/architecture/multi-cli-hooks.md`, `docs/SKILL-COMPAT-MATRIX.md`.
 
