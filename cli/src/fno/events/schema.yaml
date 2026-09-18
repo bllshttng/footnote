@@ -2958,6 +2958,19 @@ event_types:
         error:
           type: string
 
+  - name: question_sweep
+    description: "The daemon's question sweep ran on its interval floor and closed the node-closed questions it found, appending one empty-answer row per question to the provider cap (a non-empty answer would arm the unrecorded-decision gate against the asking session for a decision nobody made). Emitted for every run including outcome none, so a quiet run is never mistaken for a sweep that did not run."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        closed:
+          type: integer
+        outcome:
+          type: string
+        ids:
+          type: array
+
   - name: bg_worker_terminal_stopped
     description: "A fire-and-forget `claude --bg` /target|/think worker that finalize marked terminal was `claude stop`ped by the daemon terminal-stop sweep, so its slot frees instead of parking at an idle prompt forever."
     sources: [daemon]

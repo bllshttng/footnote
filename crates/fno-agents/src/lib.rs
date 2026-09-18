@@ -1048,6 +1048,13 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Emitted even on outcome none/duplicate, so a quiet run cannot be
     // mistaken for a sweep that never ran.
     "stale_sweep",
+    // Question sweep (daemon-emitted): `fno agents question-sweep` ran on
+    // its interval floor and closed the node-closed questions it found,
+    // appending one empty-answer row per question (a non-empty answer would
+    // arm the unrecorded-decision gate against the asking session). Emitted
+    // even on outcome none, so a quiet run cannot be mistaken for a sweep
+    // that never ran.
+    "question_sweep",
     // Park sweep (daemon-emitted): `fno-agents pr-park sweep` ran on its 6h
     // floor and un-parked open rows whose head moved or whose park passed
     // 24h, marking finished rows handled. Emitted even on a quiet or skipped
