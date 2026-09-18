@@ -423,3 +423,60 @@ def is_design_stage(entry: object) -> bool:
     now comes from :func:`plan_rung`.
     """
     return plan_rung(entry) is Rung.DESIGN
+
+
+#: The frontmatter keys that carry a document kind. `type` is overloaded
+#: (see _intake.normalize_type): it holds a node type in most plans and a
+#: document kind in the rest, so both keys feed one value set.
+DOC_KIND_KEYS = ("kind", "type")
+BLUEPRINT_KINDS = frozenset({"quick-plan", "plan", "implementation-plan", "blueprint"})
+NOT_BLUEPRINT_KINDS = frozenset({"research", "findings", "think", "stub"})
+
+
+def is_blueprint_doc(entry: object) -> bool:
+    """Does the node's linked plan doc declare itself a blueprint?
+
+    Answers the question :func:`plan_rung` cannot: the rung reads ``status``
+    alone (the rung-authority guard keeps that read in one place), so a
+    research doc with no status reads READY and a dispatcher would build from
+    it. This predicate reads the doc KIND instead, in this order:
+
+    1. A declared kind in ``NOT_BLUEPRINT_KINDS`` returns False. A declared
+       kind outranks every body marker - a doc that says ``kind: research``
+       stays research even when it carries a ``## Execution Strategy`` heading.
+    2. A declared kind in ``BLUEPRINT_KINDS`` returns True.
+    3. A ``## Execution Strategy`` body heading returns True. Kept subordinate
+       to the declared kind: live build-rung plans declare no kind at all and
+       must not re-blueprint, and the heading is what they carry instead.
+    4. Otherwise False.
+
+    Values compare lowercased and stripped. Never raises: no ``plan_path``, an
+    unresolvable probe, a missing file or unreadable frontmatter all return
+    False. Never reads ``status``.
+    """
+    if not isinstance(entry, dict):
+        return False
+    probe = resolve_plan_probe(entry)
+    if not probe:
+        return False
+    fm, readable = _read_frontmatter(probe)
+    if not readable:
+        return False
+    if isinstance(fm, dict):
+        kinds = [
+            value.strip().lower()
+            for key in DOC_KIND_KEYS
+            if isinstance(value := fm.get(key), str)
+        ]
+        if any(kind in NOT_BLUEPRINT_KINDS for kind in kinds):
+            return False
+        if any(kind in BLUEPRINT_KINDS for kind in kinds):
+            return True
+    try:
+        with open(probe, encoding="utf-8") as fh:
+            for line in fh:
+                if line.strip() == "## Execution Strategy":
+                    return True
+    except (OSError, UnicodeDecodeError):
+        return False
+    return False

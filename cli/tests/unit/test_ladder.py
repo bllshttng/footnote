@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from fno.graph.ladder import is_design_stage
+from fno.graph.ladder import is_blueprint_doc, is_design_stage
 
 
 DESIGN_FM = "---\nstatus: design\n---\n\n# Doc\n"
@@ -923,3 +923,58 @@ def test_an_empty_plan_file_is_unreadable_not_ready(tmp_path):
     entry = {"id": "x-empty01", "plan_path": str(empty)}
     assert plan_rung(entry) is Rung.UNREADABLE
     assert is_dispatchable(entry) is False
+
+
+# -- is_blueprint_doc: the declared kind outranks every body marker --
+
+
+def test_kind_quick_plan_is_a_blueprint_doc(tmp_path):
+    assert is_blueprint_doc(
+        _plan(tmp_path, "---\nstatus: ready\nkind: quick-plan\n---\n# doc\n")
+    )
+
+
+def test_type_quick_plan_is_a_blueprint_doc(tmp_path):
+    # `kind` is the canonical key; `type` feeds the same value set (migrated
+    # plans spell it `type: quick-plan`).
+    assert is_blueprint_doc(
+        _plan(tmp_path, "---\nstatus: ready\ntype: quick-plan\n---\n# doc\n")
+    )
+
+
+def test_declared_research_kind_outranks_the_strategy_heading(tmp_path):
+    # x-e1c6: `kind: research` AND a `## Execution Strategy` heading. The
+    # heading readmits the exact bug if it outranked the declared kind.
+    assert not is_blueprint_doc(
+        _plan(
+            tmp_path,
+            "---\nstatus: ready\nkind: research\n---\n# doc\n## Execution Strategy\n",
+        )
+    )
+
+
+def test_not_blueprint_kind_on_any_key_outranks_a_blueprint_kind(tmp_path):
+    assert not is_blueprint_doc(
+        _plan(tmp_path, "---\nkind: plan\ntype: research\n---\n# doc\n")
+    )
+
+
+def test_node_type_feature_with_strategy_heading_is_a_blueprint_doc(tmp_path):
+    # `type: feature` is a node kind in the doc-kind slot's eyes: it names
+    # neither value set, so the body marker decides.
+    assert is_blueprint_doc(
+        _plan(
+            tmp_path,
+            "---\nstatus: ready\ntype: feature\n---\n# doc\n## Execution Strategy\n",
+        )
+    )
+
+
+def test_blueprint_doc_fails_open_closed_and_never_raises(tmp_path):
+    # No frontmatter, a missing file, an unresolvable probe, a non-dict:
+    # every one answers False.
+    assert not is_blueprint_doc(_plan(tmp_path, "# doc, no frontmatter\n"))
+    entry = {"id": "x-missing", "plan_path": str(tmp_path / "nope.md")}
+    assert not is_blueprint_doc(entry)
+    assert not is_blueprint_doc({"id": "x-nopath"})
+    assert not is_blueprint_doc("not-a-dict")
