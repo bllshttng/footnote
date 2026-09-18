@@ -944,6 +944,15 @@ pub fn kill_selector(selector: kill_policy::Selector, json: bool) -> i32 {
     let partition = kill_policy::partition(&rows);
     let wedged: Vec<(String, Option<String>)> = partition.wedged.clone();
     let targets = kill_policy::selector_targets(selector, &partition);
+    let spared: Vec<(String, u64)> = partition
+        .stale_with_panes
+        .iter()
+        .filter_map(|name| {
+            rows.iter()
+                .find(|r| r.session == *name)
+                .map(|r| (name.clone(), r.panes))
+        })
+        .collect();
     let mut summary = serde_json::json!({
         "restarted": [],
         "spared": partition.stale_with_panes,
@@ -953,6 +962,12 @@ pub fn kill_selector(selector: kill_policy::Selector, json: bool) -> i32 {
         "sessions": [],
     });
     let mut exit = EXIT_OK;
+    if !spared.is_empty() {
+        // A spared stale-wire server with live panes is an unrestored
+        // fleet: the selector reports it and FAILS, exactly like the
+        // restart verb's floor always did.
+        exit = EXIT_ERROR;
+    }
     for session in &targets {
         let sock = match proto::socket_path(session) {
             Ok(p) => p,
@@ -1017,6 +1032,15 @@ pub fn kill_selector(selector: kill_policy::Selector, json: bool) -> i32 {
                 "preserved": preserved,
                 "ended": ended,
             }));
+    }
+    // The human narratives ride stderr in BOTH modes: --json keeps stdout
+    // to one object, and the spared/wedged/refused lines are exactly what
+    // an operator (or the restart verb relaying) must see.
+    for (name, panes) in &spared {
+        eprintln!(
+            "fno: mux session '{name}' has {panes} live pane(s); its stale-wire server \
+is spared. Use `fno agents restart --mux` (or kill-server --all) to force-kill it."
+        );
     }
     if json {
         println!("{summary}");
@@ -6530,7 +6554,11 @@ mod tests {
         // session uses resolves to a socket that does not exist -> exit 1.
         // The full live/stale matrix runs e2e against FNO_MUX_DIR-scoped
         // servers in 3.6.
-        let code = kill_server(&format!("fno-test-absent-{}", std::process::id()), false, false);
+        let code = kill_server(
+            &format!("fno-test-absent-{}", std::process::id()),
+            false,
+            false,
+        );
         assert_eq!(code, EXIT_ERROR, "missing socket must exit 1");
     }
 

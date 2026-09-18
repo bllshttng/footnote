@@ -738,16 +738,50 @@ fn mux_rows(table: &[ProcRow]) -> Vec<Value> {
             verdict,
             evidence,
         );
-        row["on_restart"] = json!(if panes > 0 {
-            format!("kept; only `--mux` replaces it, ending {panes} shell(s)")
-        } else {
-            "kept; auto-restarts (pane-less)".to_string()
-        });
-        row["survives"] = json!(if panes > 0 {
-            format!("{panes} panes")
-        } else {
-            "no panes".to_string()
-        });
+        // The kept/unkept split: kept panes survive the server (their keeper
+        // re-adopts them); unkept ones end with it. The wording names both
+        // counts so an operator sees exactly who a restart would cost.
+        let mut kept = 0u64;
+        let mut unkept = 0u64;
+        if let Ok(pane_out) = std::process::Command::new(&fno)
+            .args(["mux", "pane", "ls", "--session", session, "--json"])
+            .output()
+        {
+            if let Ok(keeper_out) = std::process::Command::new(&fno)
+                .args(["mux", "pane", "keeper", "list", "--json"])
+                .output()
+            {
+                let keeper_rows: Vec<Value> =
+                    serde_json::from_slice(&keeper_out.stdout).unwrap_or_default();
+                let live_keepers: Vec<u64> = keeper_rows
+                    .iter()
+                    .filter(|k| k.get("session").and_then(Value::as_str) == Some(session))
+                    .filter(|k| k.get("stale").is_none())
+                    .filter_map(|k| k.get("child_pid").and_then(Value::as_u64))
+                    .collect();
+                if let Ok(pane_rows) = serde_json::from_slice::<Vec<Value>>(&pane_out.stdout) {
+                    for pane in &pane_rows {
+                        let child = pane.get("child_pid").and_then(Value::as_u64);
+                        if child.is_some_and(|c| live_keepers.contains(&c)) {
+                            kept += 1;
+                        } else {
+                            unkept += 1;
+                        }
+                    }
+                }
+            }
+        }
+        row["on_restart"] = json!(format!(
+            "ending {unkept} unkept shell(s); keeps {kept} kept pane(s)"
+        ));
+        row["survives"] = json!(format!(
+            "{kept} kept pane(s){}; {unkept} unkept",
+            if kept + unkept == 0 {
+                " (no panes)"
+            } else {
+                ""
+            }
+        ));
         out.push(row);
     }
     out
