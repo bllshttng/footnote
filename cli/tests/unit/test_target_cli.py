@@ -1689,7 +1689,7 @@ def test_worktree_occupancy_defers_to_finished_with_the_tree(monkeypatch, tmp_pa
     row = SimpleNamespace(cwd=str(wt), harness_session_id="s-1", harness="claude")
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
     monkeypatch.setattr(
-        "fno.worktree_reapable.reapable",
+        "fno.worktree_gate.reapable_receipt",
         lambda p: SimpleNamespace(reapable=False, reason="dirty", detail=""),
     )
     facts = SimpleNamespace(last_event_epoch=1.0, last_role="assistant", last_text="x")

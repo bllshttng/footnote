@@ -131,7 +131,8 @@
 #      scripts/setup/setup-worktree.sh symlinks .claude/{agents,commands,
 #      skills,settings.local.json,scheduled_tasks.*,...} from the canonical
 #      checkout into a worktree per that same documented contract.
-#      worktree_reapable.py reads the OTHER end of that contract: to decide
+#      the Rust gate (worktree_reapable.rs) reads the OTHER end of that
+#      contract: to decide
 #      whether an untracked path is one of those links, it has to name the
 #      `.claude` segment setup wrote. It never constructs a path to store
 #      anything - the only `.claude` it forms is a link target it compares.
@@ -274,7 +275,6 @@ cli/src/fno/wake/detect.py
 cli/src/fno/worker/review.py
 cli/src/fno/worktree_cli/cli.py
 cli/src/fno/worktree_paths.py
-cli/src/fno/worktree_reapable.py
 cli/src/fno/worktree.py
 crates/fno-agents/src/claude_adopt.rs
 crates/fno-agents/src/claude_ask.rs

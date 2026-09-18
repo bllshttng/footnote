@@ -13,8 +13,8 @@ one classifier only helps while they STAY converged, so this test drives the
 real bash entry points over a fixture corpus and fails when any two disagree.
 
 The Rust probe is covered by parsing contract rather than by running the
-daemon: it consumes the same `fno worktree reapable` receipt, so the assertion
-that matters is that the receipt grammar it parses is what the verb emits.
+daemon: it consumes the same receipt, so the assertion that matters is that
+the receipt grammar it parses is what the verb emits.
 """
 import os
 import subprocess
@@ -23,7 +23,37 @@ from pathlib import Path
 
 import pytest
 
-from fno.worktree_reapable import reapable
+from fno.rust_binary import resolve_binary
+
+
+def _gate_verdict(path: Path) -> bool:
+    """The gate binary's answer, parsed from its one-line receipt."""
+    # THIS checkout's build first: a deployed fno-agents on PATH may predate
+    # the verb and answer nothing, which would read as a code defect.
+    binary = None
+    for cand in (
+        REPO_ROOT / "crates" / "fno-agents" / "target" / "release" / "fno-agents",
+        REPO_ROOT / "target" / "release" / "fno-agents",
+        REPO_ROOT / "crates" / "fno-agents" / "target" / "debug" / "fno-agents",
+        REPO_ROOT / "target" / "debug" / "fno-agents",
+    ):
+        if cand.is_file():
+            binary = cand
+            break
+    if binary is None:
+        binary = resolve_binary()
+    if binary is None:
+        pytest.skip(
+            "no fno-agents binary resolves; the gate corpus runs in the cargo "
+            "suite, this lane only pins bash/binary agreement"
+        )
+    r = subprocess.run(
+        [str(binary), "worktree-reapable", str(path)],
+        capture_output=True, text=True, timeout=60,
+    )
+    line = (r.stdout or "").strip().splitlines()
+    assert line, f"gate emitted no receipt: {r.stderr}"
+    return line[0].startswith("reapable=yes")
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 REAPABLE_LIB = REPO_ROOT / "scripts" / "lib" / "worktree-reapable.sh"
@@ -150,15 +180,15 @@ def _archive_script_verdict(path: Path) -> bool:
 
 
 @pytest.mark.parametrize("name,mutate,expected", CORPUS, ids=[c[0] for c in CORPUS])
-def test_python_and_bash_agree(tmp_path: Path, name: str, mutate, expected: bool) -> None:
+def test_gate_binary_and_bash_agree(tmp_path: Path, name: str, mutate, expected: bool) -> None:
     repo = _make_repo(tmp_path / name)
     mutate(repo)
 
-    py = reapable(repo).reapable
+    gate = _gate_verdict(repo)
     sh = _bash_verdict(repo)
 
-    assert py == expected, f"{name}: python said {py}, corpus says {expected}"
-    assert sh == py, f"{name}: bash helper said {sh}, python said {py}"
+    assert gate == expected, f"{name}: gate said {gate}, corpus says {expected}"
+    assert sh == gate, f"{name}: bash helper said {sh}, gate said {gate}"
 
 
 @pytest.mark.parametrize("name,mutate,expected", CORPUS, ids=[c[0] for c in CORPUS])
