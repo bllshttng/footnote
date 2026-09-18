@@ -105,8 +105,7 @@ wt_reapable() {
     if [[ "$verdict" -eq 2 ]] && command -v fno >/dev/null 2>&1; then
         rc=0
         # shellcheck disable=SC2086
-        out="$(fno agents workspace worktree reapable $flags "$target" 2>/dev/null \
-            || fno workspace worktree reapable $flags "$target" 2>/dev/null)" || rc=$?
+        out="$(fno agents workspace worktree reapable $flags "$target" 2>/dev/null)" || rc=$?
         verdict=0; _wt_reapable_verdict "$rc" "$out" || verdict=$?
     fi
 

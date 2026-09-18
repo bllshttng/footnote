@@ -11,8 +11,6 @@ crossing	crates/fno-agents/src/bin/client.rs	4607	let mut cmd = Command::new(fno
 crossing	crates/fno-agents/src/blueprint_judge.rs	104	return match Command::new("fno").args(["help", "--all"]).output() {
 crossing	crates/fno-agents/src/blueprint_judge.rs	220	let out = Command::new("fno")
 crossing	crates/fno-agents/src/client_verbs.rs	2535	let mut command = std::process::Command::new("fno");
-crossing	crates/fno-agents/src/daemon.rs	1060	let out = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/daemon.rs	1174	let mut cmd = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/daemon.rs	2266	let mut cmd = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/daemon.rs	2355	std::process::Command::new("fno")
 crossing	crates/fno-agents/src/daemon.rs	5988	let mut child = match std::process::Command::new("fno")
