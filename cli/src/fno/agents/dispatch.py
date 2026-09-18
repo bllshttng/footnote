@@ -67,11 +67,7 @@ from fno.config._dispatch_verbs import is_verb_seed
 from fno.agents.lane_heal import lane_heal as _lane_heal
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
-from fno.agents.keeper_thread import (
-    _mint_thread_session_id,
-    complete_launch_argv,
-    mint_session_id,
-)
+from fno.agents.keeper_thread import _mint_thread_session_id, complete_launch_argv
 from fno.harness_names import unknown_thread_harness_message
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.reachability import mux_ref_names_a_pane

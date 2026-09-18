@@ -74,14 +74,10 @@ def mint_session_id(
     yolo: bool = False,
 ) -> Optional[str]:
     """The harness-minted id for a keeper thread, or ``None`` for the
-    caller-assigned default.
-
-    The row's ``session_binding.strategy`` says whether a mint is REQUIRED and
-    the mint itself is per-harness code, so the two are checked against each
-    other below. Either way the id exists before any worker starts. A requested
-    id (``spawn --resume``) is VALIDATED, never minted: a truncated one names a
-    rival conversation. The agy mint is a real turn, so it carries the spawn's
-    axes.
+    caller-assigned default. The row's ``session_binding.strategy`` says
+    whether a mint is REQUIRED and the mint itself is per-harness code. A
+    requested id is VALIDATED, never minted. The agy mint is a real turn,
+    so it carries the spawn's axes.
     """
     if harness == "cursor-agent":
         from fno.agents.harnesses.cursor_agent import _require_chat_id, create_chat
@@ -129,10 +125,9 @@ def _mint_thread_session_id(
     yolo: bool = False,
 ) -> str:
     """The harness session id a keeper thread launches on, fixed BEFORE
-    launch. Wraps :func:`mint_session_id` (the per-harness shapes) with the
-    caller-assigned UUIDv4 default; the launch axes ride along because a
-    harness whose mint is a real model turn (agy) launches it on the
-    spawn's selected axes."""
+    launch: :func:`mint_session_id` plus the caller-assigned UUIDv4 default.
+    The launch axes ride along because a harness whose mint is a real model
+    turn (agy) launches it on the spawn's selected axes."""
     minted = mint_session_id(
         harness,
         cwd,
@@ -179,9 +174,8 @@ def complete_launch_argv(
     arm = keeper_arm(harness)
     if arm is None:
         return argv
-    # The bypass/mode decision is the Rust owner's (agy_launch.keeper_posture):
-    # an explicit mode REPLACES an always-on bypass, the lane default is the
-    # row's bypass posture, and the answer names what ran.
+    # The bypass/mode decision is the Rust owner's: an explicit mode REPLACES
+    # an always-on bypass; the lane default is the row's bypass posture.
     from fno.agents.spawn_axes_client import keeper_posture
 
     argv = [*argv, *keeper_posture(harness, "thread", permission_mode, yolo)]
