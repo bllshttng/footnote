@@ -4354,11 +4354,11 @@ event_types:
           description: "The dispatched message exactly as sent, with {id} substituted and spelled for the resolved harness (`/target ...` on claude/opencode, `$fno:target ...` on codex)."
         verb:
           type: string
-          description: "The verb this dispatch resolved. Since x-eeee this is the DERIVED canonical verb - difficulty decides at intake (plan rung none), the plan's rung decides at re-dispatch, and the node's stored dispatch_verb only reconciles through the same table - so a planless medium node records /blueprint with no declaration anywhere. The literal 'builtin' survives only where no node context existed to derive from. Before x-eeee this named the raw declaration or 'builtin'."
+          description: "The declared verb, else the derived verb. With no declaration, difficulty decides at intake (plan rung none) and the plan's rung decides at re-dispatch, a build rung advancing to /target only for a proven blueprint doc. A declared target-family verb wins over the table and the decision trail names the disagreement. The literal 'builtin' survives only where no node context existed to derive from."
         verb_source:
           type: string
           enum: [declared, none-declared, field-absent]
-          description: "The RAW declaration state, distinct from the resolved `verb` beside it. declared = the node dict carried a non-empty dispatch_verb (it may have been reconciled to a different phase; the decision trail names both). none-declared = the key was present and empty/null. field-absent = the key was NOT in the dict at all, a lossy projection - the dispatch REFUSES on it now instead of warning and proceeding, except for a caller that passed no node dict at all."
+          description: "The RAW declaration state, distinct from the resolved `verb` beside it. declared = the node dict carried a non-empty dispatch_verb (the decision trail names any disagreement with the lifecycle table). none-declared = the key was present and empty/null. field-absent = the key was NOT in the dict at all, a lossy projection - the dispatch REFUSES on it now instead of warning and proceeding, except for a caller that passed no node dict at all."
         cwd:
           type: string
           description: "The --cwd the worker was launched into; empty means --fresh."

@@ -323,8 +323,9 @@ fi
    NODE_READBACK="$(mktemp)"
    test -s "${CLOSE_RECEIPT:-}" || { echo "Blueprint close refused: no close receipt." >&2; exit 2; }
    fno backlog get "$NODE_ID" >"$NODE_READBACK"
-   python3 - "$CLOSE_RECEIPT" "$NODE_READBACK" <<'PY'
+   python3 - "$CLOSE_RECEIPT" "$NODE_READBACK" "$PLAN_PATH" <<'PY'
    import json
+   import re
    import sys
 
    receipt = json.load(open(sys.argv[1]))
@@ -341,6 +342,45 @@ fi
    )
    if entry is None:
        print("Blueprint close refused: exact blueprint session entry was not read back.", file=sys.stderr)
+       raise SystemExit(2)
+
+   # Blocker projection: every id the plan declares as a blocker must have
+   # reached the node's blocked_by. Intake itself warns-and-skips an unknown
+   # sibling (a bulk intake of historical plans must not fail on one), so the
+   # close readback is the one place the author hears it at once.
+   declared = []
+   fences = 0
+   in_block = False
+   for line in open(sys.argv[3]):
+       if line.strip() == "---":
+           fences += 1
+           if fences == 2:
+               break
+           continue
+       if fences != 1:
+           continue
+       s = line.rstrip()
+       if re.match(r"^\s*blocked_by:\s*\S", s):
+           val = s.split(":", 1)[1].strip()
+           if val != "[]":
+               declared.append(val.strip("[]\"'"))
+           in_block = False
+       elif re.match(r"^\s*blocked_by:\s*$", s):
+           in_block = True
+       elif in_block and re.match(r"^\s*-\s+\S", s):
+           declared.append(s.strip().lstrip("- ").strip("\"'"))
+       elif in_block:
+           in_block = False
+   missing = [d for d in declared if d and d not in (node.get("blocked_by") or [])]
+   if missing:
+       print(
+           "Blueprint close refused: declared blocker(s) never reached the node: "
+           + ", ".join(missing)
+           + ". Repair with `fno backlog update "
+           + str(node.get("id") or "$NODE_ID")
+           + " --set blocked_by=<ids>` or fix the plan frontmatter.",
+           file=sys.stderr,
+       )
        raise SystemExit(2)
    print("blueprint close readback: matched")
    PY
