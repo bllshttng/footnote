@@ -60,7 +60,7 @@ enum Role {
     /// `mux ls [--json]`: list sessions (no TTY needed). The bool is `--json`.
     MuxLs(bool),
     /// `mux kill-server [<name>] [--json]`: shut a session down (no TTY needed).
-    MuxKill(Option<String>, bool),
+    MuxKill(crate::cli_args::KillRequest),
     /// `mux doctor [--json]`: read-only environment diagnostics (US6). The bool
     /// is `--json`.
     MuxDoctor(bool),
@@ -218,7 +218,19 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             cli_args::MuxCmd::Ls { json } => Role::MuxLs(json.json),
             cli_args::MuxCmd::Doctor { json } => Role::MuxDoctor(json.json),
             cli_args::MuxCmd::Stats { json } => Role::MuxStats(json.json),
-            cli_args::MuxCmd::KillServer { name, json } => Role::MuxKill(name, json.json),
+            cli_args::MuxCmd::KillServer {
+                name,
+                json,
+                end_unkept,
+                stale_idle,
+                all,
+            } => Role::MuxKill(cli_args::KillRequest {
+                name,
+                json: json.json,
+                end_unkept,
+                stale_idle,
+                all,
+            }),
             cli_args::MuxCmd::ShellInit { shell, json } => Role::MuxShellInit(shell, json.json),
             cli_args::MuxCmd::Attach { name } => {
                 if is_tty {
@@ -292,9 +304,19 @@ fn main() {
         }
         Role::MuxVersion(json) => fno::version::print_version(json),
         Role::MuxLs(json) => exit_mux(mux_cli::ls(json)),
-        Role::MuxKill(name, json) => {
-            let session = mux_cli::resolve_session(name.as_deref(), env_session.as_deref());
-            exit_mux(mux_cli::kill_server(&session, json));
+        Role::MuxKill(kill_req) => {
+            if kill_req.stale_idle || kill_req.all {
+                let selector = if kill_req.all {
+                    mux_cli::kill_policy::Selector::All
+                } else {
+                    mux_cli::kill_policy::Selector::StaleIdle
+                };
+                exit_mux(mux_cli::kill_selector(selector, kill_req.json));
+            } else {
+                let session =
+                    mux_cli::resolve_session(kill_req.name.as_deref(), env_session.as_deref());
+                exit_mux(mux_cli::kill_server(&session, kill_req.json, kill_req.end_unkept));
+            }
         }
         Role::MuxShellInit(shell, json) => {
             std::process::exit(mux_cli::shell_init(shell.as_deref(), json))
@@ -495,11 +517,11 @@ mod tests {
         assert_eq!(decide_role(&os(&["mux", "ls"]), false), Role::MuxLs(false));
         assert_eq!(
             decide_role(&os(&["mux", "kill-server"]), false),
-            Role::MuxKill(None, false)
+            Role::MuxKill(cli_args::KillRequest::simple(None, false))
         );
         assert_eq!(
             decide_role(&os(&["mux", "kill-server", "work"]), false),
-            Role::MuxKill(Some("work".into()), false)
+            Role::MuxKill(cli_args::KillRequest::simple(Some("work"), false))
         );
         assert!(matches!(
             decide_role(&os(&["mux", "kill-server", "a", "b"]), false),
@@ -520,11 +542,11 @@ mod tests {
         );
         assert_eq!(
             decide_role(&os(&["mux", "kill-server", "--json", "work"]), false),
-            Role::MuxKill(Some("work".into()), true)
+            Role::MuxKill(cli_args::KillRequest::simple(Some("work"), true))
         );
         assert_eq!(
             decide_role(&os(&["mux", "kill-server", "work", "--json"]), false),
-            Role::MuxKill(Some("work".into()), true)
+            Role::MuxKill(cli_args::KillRequest::simple(Some("work"), true))
         );
         assert_eq!(
             decide_role(&os(&["mux", "doctor"]), false),
@@ -546,14 +568,14 @@ mod tests {
         // `--` ends flag parsing: a dashed session name passes as a positional.
         assert_eq!(
             decide_role(&os(&["mux", "kill-server", "--", "--weird"]), false),
-            Role::MuxKill(Some("--weird".into()), false)
+            Role::MuxKill(cli_args::KillRequest::simple(Some("--weird"), false))
         );
         assert_eq!(
             decide_role(
                 &os(&["mux", "kill-server", "--json", "--", "--weird"]),
                 false
             ),
-            Role::MuxKill(Some("--weird".into()), true)
+            Role::MuxKill(cli_args::KillRequest::simple(Some("--weird"), true))
         );
     }
 

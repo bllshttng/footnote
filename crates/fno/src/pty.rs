@@ -1756,6 +1756,37 @@ impl Drop for ShellRc {
     }
 }
 
+/// Probe one keeper socket with a short timeout and return its Identify
+/// reply (keeper pid, child pid, argv, cwd). `None` = nothing lives behind
+/// the socket, or it never answered inside the bound. Shared by
+/// `pane keeper list` and the kill policy's kept/unkept measurement.
+pub fn keeper_identify(sock: &std::path::Path) -> Option<serde_json::Value> {
+    use std::io::{Read as _, Write as _};
+    let mut stream = std::os::unix::net::UnixStream::connect(sock).ok()?;
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(750)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(750)));
+    stream.write_all(&keeper_frame_identify()).ok()?;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut read_buf = [0u8; 4096];
+    loop {
+        loop {
+            match keeper_decode(&buf) {
+                KeeperRead::NeedMore => break,
+                KeeperRead::Frame(tag, payload, used) => {
+                    buf.drain(..used);
+                    if tag == KEEPER_TAG_IDENTIFY_REPLY {
+                        return serde_json::from_slice(&payload).ok();
+                    }
+                }
+            }
+        }
+        match stream.read(&mut read_buf) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => buf.extend_from_slice(&read_buf[..n]),
+        }
+    }
+}
+
 /// The per-pane shell-integration rc dir: under the private mux dir, 0700,
 /// unique per (session, pane id). Shared by the inline pty (`apply_shell_integration`)
 /// and the keeper spawn (`keeper_shell_argv`).
@@ -2266,7 +2297,10 @@ mod tests {
             .position(|a| a == "--rcfile")
             .map(|i| argv[i + 1].clone())
             .expect("bash argv names its rcfile");
-        assert!(std::path::Path::new(&rcfile).exists(), "the rcfile exists: {rcfile}");
+        assert!(
+            std::path::Path::new(&rcfile).exists(),
+            "the rcfile exists: {rcfile}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

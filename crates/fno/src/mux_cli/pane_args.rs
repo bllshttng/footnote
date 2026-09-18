@@ -37,10 +37,11 @@ invocation reads unattributed:<pid>).";
 /// `pane run` stays byte-identical.
 pub const PANE_RUN_WORKER_HELP: &str = "pane run --worker <registry-name> records the pane as a \
 squad member joined to that registry row: after a mux restart the member stays as an idle row in \
-the agent panel, and selecting it resumes the session through its own harness. A keeper-hosted \
-worker pane outlives the server outright and a fresh server re-adopts it in place (`fno mux pane \
-keeper list` reads them); startup restore holds (default) or idles it by policy; `fno mux \
-workspace restore` respawns it on demand. A run without --worker records no member.";
+the agent panel, and selecting it resumes the session through its own harness. Every pane now \
+runs keeper-hosted, so any pane outlives its server and a fresh server re-adopts it in place \
+(`fno mux pane keeper list` reads them); a keeper that cannot start falls back to an inline pane \
+marked unkept, and `fno mux kill-server` refuses while one is live. A run without --worker \
+records no member.";
 
 /// What the `fno_id` column answers, stated where the listing is
 /// read: identity, never idleness or reusability. The dash is reserved for
