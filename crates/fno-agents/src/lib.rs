@@ -127,6 +127,7 @@ pub mod evidence;
 pub mod fallback_chain;
 pub mod feed;
 pub mod finalize;
+pub mod finalize_run_summary;
 pub mod fleet_incident;
 pub mod flight_gate;
 pub mod gc;
