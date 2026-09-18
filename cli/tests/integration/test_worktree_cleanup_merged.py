@@ -8,8 +8,10 @@ The two scripts are copied into the fixture so the sweep's hardcoded
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -26,6 +28,33 @@ TARGET_GUARD_SRC = REPO_ROOT / "scripts" / "lib" / "target-guard.sh"
 REMOVAL_EVENT_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-removal-event.sh"
 SETUP_SRC = REPO_ROOT / "scripts" / "setup" / "setup-worktree.sh"
 runner = CliRunner()
+
+
+def _gate_binary() -> Path | None:
+    """The gate binary under test: override, then this checkout's cargo build.
+
+    The classifier is Rust since x-7b9c (the Python leg is deleted), so every
+    test that wires the real lib needs a binary. cli-ci builds none; those
+    tests skip there and run wherever one is built.
+    """
+    env_bin = os.environ.get("FNO_AGENTS_BIN")
+    if env_bin and Path(env_bin).is_file():
+        return Path(env_bin)
+    for cand in (
+        REPO_ROOT / "crates" / "fno-agents" / "target" / "release" / "fno-agents",
+        REPO_ROOT / "target" / "release" / "fno-agents",
+        REPO_ROOT / "crates" / "fno-agents" / "target" / "debug" / "fno-agents",
+        REPO_ROOT / "target" / "debug" / "fno-agents",
+    ):
+        if cand.is_file():
+            return cand
+    return None
+
+
+GATE_BIN = _gate_binary()
+requires_gate = pytest.mark.skipif(
+    GATE_BIN is None, reason="no fno-agents gate binary built (cargo build -p fno-agents)"
+)
 
 
 def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -70,11 +99,16 @@ def repo(tmp_path: Path) -> Path:
     return canon
 
 
-def _sweep(canon: Path, *flags: str) -> subprocess.CompletedProcess:
+def _sweep(
+    canon: Path, *flags: str, env_extra: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
     script = canon / "scripts" / "lib" / "worktree-lifecycle.sh"
+    env = os.environ.copy()
+    if env_extra:
+        env.update(env_extra)
     return subprocess.run(
         ["bash", str(script), "cleanup", "--merged", *flags],
-        cwd=str(canon), capture_output=True, text=True,
+        cwd=str(canon), capture_output=True, text=True, env=env,
     )
 
 
@@ -1208,24 +1242,45 @@ def test_deleted_upstream_archives_without_origin_head(repo: Path):
 def _wire_real_reapable(canon: Path) -> None:
     """Give the fixture the real classifier, not the lifecycle stub.
 
-    The stub answers `dirty` for any non-empty porcelain, which is the answer
-    under test. `wt_reapable` anchors on its own file, so the two libs and a
-    `cli/` carrying src plus the venv have to sit under the fixture root.
+    The classifier is the fno-agents gate binary since x-7b9c (the Python leg
+    the old venv arm ran is deleted). The vendored lib execs it; the env
+    override points the fixture copy at THIS checkout's build, because the
+    copy anchors its own search under the fixture root, which has none.
     """
-    venv = REPO_ROOT / "cli" / ".venv" / "bin" / "python3"
-    if not venv.exists():
-        # A linked worktree carries cli/src but no cli/.venv; the canonical
-        # checkout is what fno-python.sh resolves in the same spot. The
-        # interpreter is only the runner: canon/cli/src stays symlinked to
-        # THIS checkout, so PYTHONPATH pins the source under test either way.
-        first = _git(REPO_ROOT, "worktree", "list", "--porcelain").stdout.splitlines()[0]
-        canonical = Path(first.removeprefix("worktree "))
-        venv = canonical / "cli" / ".venv" / "bin" / "python3"
-    # Named, because without it wt_reapable falls through to whatever `fno` is
-    # installed, which may predate this change and answers `reapable=no`. The
-    # test would then fail as "kept (dirty)" and read as a code defect.
-    assert venv.exists(), f"this test needs the checkout venv at {venv}"
+    if GATE_BIN is None:
+        pytest.skip("no fno-agents gate binary; build one (cargo build -p fno-agents)")
+    # Named, because without it wt_reapable falls through to whatever
+    # `fno-agents` is on PATH or installed, which may predate the verb and
+    # answers nothing. The test would then fail as "kept (dirty)" and read as
+    # a code defect.
+    os.environ["FNO_AGENTS_BIN"] = str(GATE_BIN)
     shutil.copy2(REAPABLE_SRC, canon / "scripts" / "lib" / "worktree-reapable.sh")
+
+
+def _graph_home(tmp_path: Path, rows: list[dict]) -> dict[str, str]:
+    """A throwaway graph store the gate's node reader accepts.
+
+    The working graph is absent (an empty graph), so the rows land in the
+    advisory archive the same reader folds in - exactly where done nodes
+    live once their files retire.
+    """
+    home = tmp_path / "graph-home" / "agents"
+    home.mkdir(parents=True, exist_ok=True)
+    (home.parent / "graph-archive.json").write_text(json.dumps({"entries": rows}))
+    return {"FNO_AGENTS_HOME": str(home)}
+
+
+def _add_done_node_wt(canon: Path, name: str, node_id: str) -> Path:
+    """A linked tree whose manifest names `node_id`, aged past the 48h grace,
+    holding one untracked file the sweep must salvage."""
+    wt = canon / name
+    _git(canon, "worktree", "add", str(wt), "-b", f"feature/{name}", "main")
+    (wt / ".fno").mkdir()
+    (wt / ".fno" / "target-state.md").write_text(f"graph_node_id: {node_id}\n")
+    (wt / "scratch.txt").write_text("salvage me\n")
+    old = time.time() - 49 * 3600
+    os.utime(wt / ".git", (old, old))
+    return wt
     shutil.copy2(FNO_PYTHON_SRC, canon / "scripts" / "lib" / "fno-python.sh")
     (canon / "cli").symlink_to(REPO_ROOT / "cli")
 
@@ -1320,3 +1375,115 @@ def test_summary_names_enumerated_and_judged_counts(repo: Path):
     r = _sweep(repo, "--prefix", "feature/enum-a")
     assert r.returncode == 0, diag
     assert "enumerated 2 judged 1" in r.stdout, diag
+
+
+# ── The done-node bucket (x-7b9c): salvage first, then remove, branch kept ──
+
+
+@requires_gate
+def test_done_node_dry_run_labels_the_row_and_removes_nothing(repo: Path, tmp_path: Path):
+    _wire_real_reapable(repo)
+    env = _graph_home(tmp_path, [{"id": "x-dryr1", "status": "done"}])
+    wt = _add_done_node_wt(repo, "wt-dryr", "x-dryr1")
+
+    r = _sweep(repo, env_extra=env)
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "would-archive (done-node)" in r.stdout, diag
+    assert wt.exists(), "a dry run removed a tree"
+
+
+@requires_gate
+def test_done_node_apply_salvages_untracked_and_keeps_branch(repo: Path, tmp_path: Path):
+    """AC6-HP: tree gone, branch at the same sha, untracked file salvaged,
+    and the removal row names the done-node reason."""
+    if not (REPO_ROOT / "cli" / ".venv" / "bin" / "fno-py").exists():
+        pytest.skip("cli venv absent; the emit falls back to deployed fno")
+    _wire_real_reapable(repo)
+    env = _graph_home(tmp_path, [{"id": "x-d0ne1", "status": "done"}])
+    # The removal row mirrors to the machine-global journal, which follows
+    # config state_dir: sandbox it the same way the event-row test does.
+    sandbox_state = tmp_path / "fno-state"
+    sandbox_state.mkdir()
+    sandbox_cfg = tmp_path / "fno-config.toml"
+    sandbox_cfg.write_text(f'state_dir = "{sandbox_state}"\n')
+    env["FNO_CONFIG"] = str(sandbox_cfg)
+    wt = _add_done_node_wt(repo, "wt-done", "x-d0ne1")
+    _commit(wt, "u.txt")  # unmerged commit: today's sweep keeps this tree
+    sha = _git(wt, "rev-parse", "HEAD").stdout.strip()
+
+    r = _sweep(repo, "--apply", env_extra=env)
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "archived" in r.stdout, diag
+    assert not wt.exists(), "the done-node tree was not removed" + diag
+    # The branch (with its unpushed commit) survives at the same sha.
+    assert _git(repo, "rev-parse", "--verify", "feature/wt-done").stdout.strip() == sha
+    salvaged = list((repo / ".fno" / "salvage").glob("*-x-d0ne1/untracked/scratch.txt"))
+    assert salvaged, "the untracked file was not salvaged" + diag
+    assert salvaged[0].read_text() == "salvage me\n"
+    journal = sandbox_state / "events.jsonl"
+    assert journal.exists(), f"no removal row was emitted; stderr had: {r.stderr[-400:]}"
+    assert any(
+        "done-node; tree removed, branch kept" in line for line in journal.read_text().splitlines()
+    ), "the removal row does not name the done-node reason"
+
+
+@requires_gate
+def test_done_node_salvage_failure_keeps_tree(repo: Path, tmp_path: Path):
+    """AC6-ERR: an unwritable salvage destination keeps the worktree."""
+    _wire_real_reapable(repo)
+    env = _graph_home(tmp_path, [{"id": "x-sa1v1", "status": "done"}])
+    wt = _add_done_node_wt(repo, "wt-salv", "x-sa1v1")
+    (repo / ".fno").mkdir(exist_ok=True)
+    os.chmod(repo / ".fno", 0o500)
+    try:
+        r = _sweep(repo, "--apply", env_extra=env)
+        diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+        assert r.returncode == 0, diag
+        assert "kept (salvage-failed)" in r.stdout, diag
+        assert wt.exists(), "a salvage failure removed the tree" + diag
+        assert (wt / "scratch.txt").exists(), "salvage lost the untracked file"
+    finally:
+        os.chmod(repo / ".fno", 0o755)
+
+
+@requires_gate
+def test_done_node_detached_head_pinned_to_salvage_branch(repo: Path, tmp_path: Path):
+    """AC7-HP: a detached commit no branch names is pinned before removal."""
+    _wire_real_reapable(repo)
+    env = _graph_home(tmp_path, [{"id": "x-de7a1", "status": "done"}])
+    wt = _add_done_node_wt(repo, "wt-det", "x-de7a1")
+    _git(wt, "checkout", "-q", "--detach")
+    _commit(wt, "d.txt")  # one commit on no branch and no remote
+    sha = _git(wt, "rev-parse", "HEAD").stdout.strip()
+
+    r = _sweep(repo, "--apply", env_extra=env)
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "archived" in r.stdout, diag
+    assert not wt.exists(), "the detached done-node tree was not removed" + diag
+    pinned = _git(repo, "rev-parse", "--verify", "salvage/wt-det").stdout.strip()
+    assert pinned == sha, "the pinned branch does not hold the detached commit" + diag
+    assert _git(repo, "cat-file", "-e", sha), "the detached commit is unreachable"
+
+
+@requires_gate
+def test_done_node_process_inside_keeps_tree(repo: Path, tmp_path: Path):
+    """AC8-HP: a rooted process keeps the tree, done node or not."""
+    _wire_real_reapable(repo)
+    env = _graph_home(tmp_path, [{"id": "x-pr0c1", "status": "done"}])
+    wt = _add_done_node_wt(repo, "wt-proc", "x-pr0c1")
+    proc = subprocess.Popen(["sleep", "60"], cwd=str(wt))
+    try:
+        r = _sweep(repo, "--apply", env_extra=env)
+        diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+        assert r.returncode == 0, diag
+        assert "kept (processes:" in r.stdout, diag
+        assert wt.exists(), "a live process's tree was removed" + diag
+    finally:
+        proc.kill()
+        proc.wait()
