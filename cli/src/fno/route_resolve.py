@@ -539,7 +539,7 @@ def _slot_profiles_table(settings: object) -> dict[str, Any]:
             out[verb] = {
                 "rung_base": f"agents.profiles.{verb}",
                 "profile": _profile_fields(prof),
-                "lanes_raw": _lanes_payload(lns) if isinstance(lns, (list, tuple)) else [],
+                "lanes_raw": _lanes_payload(lns) if isinstance(lns, (list, tuple)) else lns,
                 "has_overlay": isinstance(by_diff, Mapping) and bool(by_diff),
             }
     except Exception:  # noqa: BLE001 - an unreadable table leaves slots unnamed

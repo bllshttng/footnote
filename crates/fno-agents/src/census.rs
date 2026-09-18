@@ -857,6 +857,7 @@ mod process_table_tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     // The parser it pins compiles only beside its Linux caller.
     #[cfg(not(target_os = "macos"))]

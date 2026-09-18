@@ -800,3 +800,30 @@ def test_strict_routing_arms_a_configured_verb_outside_the_tuple(tmp_path):
     assert any("agents.profiles.fix.lanes[0]" in step for step in chain)
     _payload, _chain, verdict = rr.resolve_slot("tdd", None, {}, settings=settings)
     assert verdict == "policy-held"
+
+
+@requires_rust
+def test_strict_routing_names_a_scalar_lanes(tmp_path):
+    """A scalar lanes is a shape fault, not an absent one.
+
+    Twice a config write stored 'zai-flash,codex-luna' where the routing
+    code requires a list, and each time strict routing refused every spawn
+    for hours with 'declares no lanes': text that sends the reader hunting
+    for a missing key. The table passes the scalar through and the Rust
+    guard names it in both legs.
+    """
+    from fno.config import settings_from_files
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[routing]\n"
+        "enforce_inventory = true\n"
+        "\n"
+        "[agents.profiles.target]\n"
+        'lanes = "zai-flash,codex-luna"\n',
+        encoding="utf-8",
+    )
+    settings = settings_from_files([cfg])
+    _payload, chain, _verdict = rr.resolve_slot("target", None, {}, settings=settings)
+    assert any("must be a list" in step for step in chain)
+    assert not any("declares no lanes" in step for step in chain)

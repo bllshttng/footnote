@@ -798,6 +798,17 @@ fn tier_none(chain: Vec<Value>) -> Value {
     json!({"status": "none", "model": Value::Null, "chain": chain})
 }
 
+/// The lanes shape guard both legs share: a scalar lanes is named the same
+/// way everywhere, so no feed can turn it into a false "declares no lanes".
+fn lanes_list_fault(rung_base: &str, lanes_raw: &Value) -> Option<String> {
+    if lanes_raw.is_array() || lanes_raw.is_null() {
+        return None;
+    }
+    Some(format!(
+        "slot=config {rung_base}.lanes must be a list; got {lanes_raw}"
+    ))
+}
+
 /// The readout leg: every planned lane's live capacity state, for display.
 /// No selection, no terminal; a lane naming no row reads no-such-row.
 fn states_leg(payload: &Value) -> Value {
@@ -997,6 +1008,15 @@ fn states_leg(payload: &Value) -> Value {
                 }
             }
         }
+    }
+    if let Some(fault) = lanes_list_fault(rung_base, &lanes_raw) {
+        chain.push(json!(fault));
+        return with_facts(json!({
+            "status": "states", "lane_states": [], "chain": chain,
+            "on_exhausted": on_exhausted, "on_low": on_low,
+            "on_unknown": on_unknown,
+            "would_take": would_take, "routing": routing,
+        }));
     }
     let lanes_arr = lanes_raw.as_array().cloned().unwrap_or_default();
     if lanes_arr.is_empty() {
@@ -1321,14 +1341,11 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
         }
     }
 
-    let lanes_arr = lanes_raw.as_array().cloned().unwrap_or_default();
-    let lanes_is_list = lanes_raw.is_array() || lanes_raw.is_null();
-    if !lanes_is_list {
-        chain.push(json!(format!(
-            "slot=config {rung_base}.lanes must be a list; got {lanes_raw}"
-        )));
+    if let Some(fault) = lanes_list_fault(&rung_base, &lanes_raw) {
+        chain.push(json!(fault));
         return none(chain);
     }
+    let lanes_arr = lanes_raw.as_array().cloned().unwrap_or_default();
 
     chain.extend(prefix);
 
@@ -3464,6 +3481,16 @@ mod tests {
             "lanes_raw": "flash-x",
         })));
         assert_eq!(out["status"], "none");
+        assert!(chain_of(&out)[0].contains("must be a list"));
+    }
+
+    #[test]
+    fn states_non_list_lanes_is_a_config_fault() {
+        let out = resolve_slot_payload(&payload(json!({
+            "mode": "states",
+            "lanes_raw": "flash-x",
+        })));
+        assert_eq!(out["status"], "states");
         assert!(chain_of(&out)[0].contains("must be a list"));
     }
 
