@@ -347,6 +347,7 @@ def serialize_entry(
         # is dead on the very path `fno agents list` serves.
         "pid": entry.pid,
         "pid_start_time": entry.pid_start_time,
+        "exited_at": entry.exited_at,
     }
     row = project_row(row)
     row.pop("pid_start_time", None)

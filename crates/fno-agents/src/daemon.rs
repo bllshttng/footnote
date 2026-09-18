@@ -4805,7 +4805,7 @@ where
                     // The rule's one live carrier is Python's
                     // `spawn_gate.census` (`fno agents top`), which measures
                     // liveness itself and renders the stored token.
-                    apply_row_contradiction(object, chrono::Utc::now());
+                    apply_row_contradiction(object, e.exited_at.as_deref(), chrono::Utc::now());
                     object.remove("pid_start_time");
                 }
                 row

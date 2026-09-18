@@ -13,6 +13,7 @@ def test_shared_row_contradiction_fixture() -> None:
     fixture = json.loads(_FIXTURE.read_text())
     for case in fixture["cases"]:
         actual = project_row(case["row"], now=fixture["now"])
+        assert "exited_at" not in actual, case["name"]
         for key, expected in case["expected"].items():
             assert actual[key] == expected, case["name"]
 
