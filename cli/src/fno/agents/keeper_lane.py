@@ -238,12 +238,14 @@ def keeper_verdict(obs: KeeperObs, *, grace_s: Optional[float] = None) -> tuple[
         return LEAVE, "registry unreadable, so the claim arm cannot read - no reap"
     if obs.claimed_by is not None:
         return LEAVE, f"registry row {obs.claimed_by} claims this keeper"
-    if obs.rss_kb is not None and obs.rss_kb > keeper_rss_bound_kb():
-        gb = obs.rss_kb / (1024 * 1024)
-        return REAP, (
-            f"rss {gb:.2f} GB exceeds the {keeper_rss_bound_kb() // 1024} MiB "
-            "bound - growth with requests served is the leak shape"
-        )
+    if obs.rss_kb is not None:
+        bound_kb = keeper_rss_bound_kb()
+        if obs.rss_kb > bound_kb:
+            gb = obs.rss_kb / (1024 * 1024)
+            return REAP, (
+                f"rss {gb:.2f} GB exceeds the {bound_kb // 1024} MiB "
+                "bound - growth with requests served is the leak shape"
+            )
     if (
         obs.lane == "store"
         and obs.graph is not None

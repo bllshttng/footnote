@@ -196,7 +196,13 @@ fn exec_call(graph: &Path, method: &str, params: Value) -> Result<Value, String>
         .take()
         .ok_or("cannot open the store-exec stdin")?
         .write_all(request.to_string().as_bytes())
-        .map_err(|e| format!("cannot send the store request: {e}"))?;
+        .map_err(|e| {
+            // The child died mid-write: reap it, or a long-lived mux server
+            // accumulates one zombie per failed send.
+            let _ = child.kill();
+            let _ = child.wait();
+            format!("cannot send the store request: {e}")
+        })?;
     // stdin dropped here: the child sees EOF and answers.
     let out = child
         .wait_with_output()

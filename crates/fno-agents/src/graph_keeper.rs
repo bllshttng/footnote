@@ -216,12 +216,6 @@ fn fresh_store_state(
     }
 }
 
-/// `--store-exec` lifecycle: read ONE request JSON (the same
-/// `{"id","method","params"}` envelope the framed clients send) from stdin,
-/// serve it through `handle_request` on a fresh state, print the reply
-/// envelope on stdout, exit. Exit 0 on an ok reply, 1 otherwise; the reply
-/// is the completion record, so a lost reply means the process died - the
-/// same terminal state the socket path's `write_status` resolution reaches.
 /// The serving half of the exec lane, split from stdin/stdout so tests drive
 /// it with an in-memory payload.
 ///
@@ -251,6 +245,12 @@ fn exec_reply(cfg: &ExecConfig, payload: &[u8]) -> Value {
     handle_request(&state, payload)
 }
 
+/// `--store-exec` lifecycle: read ONE request JSON (the same
+/// `{"id","method","params"}` envelope the framed clients send) from stdin,
+/// serve it through `handle_request` on a fresh state, print the reply
+/// envelope on stdout, exit. Exit 0 on an ok reply, 1 otherwise; the reply
+/// is the completion record, so a lost reply means the process died - the
+/// same terminal state the socket path's `write_status` resolution reaches.
 pub fn run_exec(cfg: ExecConfig) -> Result<(), String> {
     use std::io::Read as _;
 
