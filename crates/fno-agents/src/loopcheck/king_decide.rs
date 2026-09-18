@@ -448,14 +448,12 @@ fn stale_crown_doc_gate(
         Ok(doc) => doc,
         Err(_) => return Some(stale_doc_block(scope, ceiling, boundaries, None)),
     };
-    let age_secs = std::fs::metadata(&doc)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|mtime| now.duration_since(mtime).ok())
-        .map(|d| d.as_secs())
+    let age_secs = match std::fs::metadata(&doc).and_then(|m| m.modified()) {
+        Ok(mtime) => now.duration_since(mtime).map(|d| d.as_secs()).unwrap_or(0),
         // An unstattable doc cannot prove itself fresh; treat it as ancient,
         // the same direction the resolver's own UNIX_EPOCH floor takes.
-        .unwrap_or(u64::MAX);
+        Err(_) => u64::MAX,
+    };
     if age_secs <= crate::king_term::STALE_CROWN_DOC_MAX_AGE_SECS as u64 {
         return None;
     }
@@ -614,6 +612,29 @@ mod stale_crown_doc_tests {
         seed_doc(&handoffs);
         let fno = stub_fno(&tmp.path().join("bin"), &handoffs);
         let now = std::time::SystemTime::now() + Duration::from_secs(30 * 3600);
+        assert!(
+            stale_crown_doc_gate(&manifest("claude"), &transcript, tmp.path(), &fno, now).is_none()
+        );
+    }
+
+    #[test]
+    fn future_mtime_reads_as_fresh_not_ancient() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript = write_transcript(tmp.path(), "t.jsonl", 4);
+        let handoffs = tmp.path().join("handoffs");
+        seed_doc(&handoffs);
+        // A clock stepped back after the doc's write leaves its mtime in the
+        // future; the doc IS fresh, so the gate must not read it as ancient.
+        let future = std::time::SystemTime::now() + Duration::from_secs(3600);
+        let doc = handoffs.join("20260916-crown-footnote.md");
+        let mut f = std::fs::File::options().write(true).open(&doc).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(future))
+            .unwrap();
+        f.flush().unwrap();
+        drop(f);
+        let fno = stub_fno(&tmp.path().join("bin"), &handoffs);
+        let now = std::time::SystemTime::now();
         assert!(
             stale_crown_doc_gate(&manifest("claude"), &transcript, tmp.path(), &fno, now).is_none()
         );

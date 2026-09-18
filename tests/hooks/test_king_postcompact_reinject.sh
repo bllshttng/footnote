@@ -295,10 +295,10 @@ SUMMARY_TX="$TMP/summary-transcript.jsonl"
 cat > "$SUMMARY_TX" <<'EOF'
 {"type":"user","message":"older context"}
 {"type":"system","subtype":"compact_boundary","timestamp":"2026-09-17T14:58:05.496Z"}
-{"type":"summary","isCompactSummary":true,"summary":"older beat cites aa-99998888 which must not win"}
+{"type":"user","isCompactSummary":true,"summary":"older beat cites aa-99998888 which must not win"}
 {"type":"assistant","message":"work continues"}
 {"type":"system","subtype":"compact_boundary","timestamp":"2026-09-17T15:58:05.496Z"}
-{"type":"summary","isCompactSummary":true,"summary":"newest beat: ab-11112222 running, cd-33334444 claimed, ee-77778888 gone, uuid 12345678-abcd-1234-abcd-123456789012 is not an id"}
+{"type":"user","isCompactSummary":true,"summary":"newest beat: ab-11112222 running, cd-33334444 claimed, ee-77778888 gone, uuid 12345678-abcd-1234-abcd-123456789012 is not an id"}
 EOF
 OUT="$(run_king "{\"source\":\"compact\",\"session_id\":\"$SID\",\"transcript_path\":\"$SUMMARY_TX\"}")"
 RC=$?

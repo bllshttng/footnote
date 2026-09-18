@@ -201,7 +201,9 @@ fi
 # (empty stdout) means no section, never a failed hook.
 ID_MAX_BYTES=2000
 if [[ -n "$TRANSCRIPT" && -f "$TRANSCRIPT" ]] && command -v python3 >/dev/null 2>&1; then
-    SUMMARY_LINE="$(grep '"isCompactSummary":true' "$TRANSCRIPT" 2>/dev/null | tail -1 || true)"
+    # Two literals, not one: a tool result echoing a transcript line (this
+    # hook greps its own needle) must not shadow the real summary entry.
+    SUMMARY_LINE="$(grep '"isCompactSummary":true' "$TRANSCRIPT" 2>/dev/null | grep '"type":"user"' | tail -1 || true)"
     CANDIDATES="$(printf '%s' "$SUMMARY_LINE" | python3 -c "
 import re, sys
 text = sys.stdin.buffer.read().decode('utf-8', errors='replace')
