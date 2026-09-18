@@ -281,10 +281,6 @@ def resolve_slot(
 
     settings, profile, lanes = _slot_entry(settings, verb)
     rung_base = f"agents.profiles.{verb}" if verb else "agents.profiles"
-    by_diff = getattr(profile, "by_difficulty", None)
-    has_overlay = isinstance(by_diff, Mapping) and bool(by_diff)
-    if not lanes and not has_overlay and node is None and not _routing_enforced(settings):
-        return None, [], "unarmed"
 
     gate_bypassed = os.environ.get("FNO_SPAWN_GATE") == "0"
     from fno.route_slot_client import RouteSlotUnavailable, route_slot_call

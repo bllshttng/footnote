@@ -659,10 +659,6 @@ pub const DEFAULT_MAX_SWAP_PCT: f64 = 90.0;
 /// an attribution gap widens the share to an interval bounded above
 /// by the machine's measured CPU. Matches the Pydantic default.
 pub const DEFAULT_MAX_FLEET_CPU_SHARE: f64 = 0.5;
-/// Default absolute machine backstop: refuse above this times the CPU count no
-/// matter whose load it is, because pure fleet-share admits onto a box already
-/// thrashing from foreign work. `<= 0` disables. Matches the Pydantic default.
-pub const DEFAULT_HARD_MAX_LOAD_PER_CPU: f64 = 40.0;
 /// Default freshness window for a single-flight answer. Matches the Pydantic
 /// default.
 pub const DEFAULT_SINGLE_FLIGHT_TTL_S: u64 = 10;
@@ -764,13 +760,6 @@ pub fn max_fleet_cpu_share(cwd: &Path) -> f64 {
     resolve_agents_value(cwd, "max_fleet_cpu_share")
         .and_then(|raw| raw.parse::<f64>().ok())
         .unwrap_or(DEFAULT_MAX_FLEET_CPU_SHARE)
-}
-
-/// Resolve `agents.hard_max_load_per_cpu`. Unparseable coerces to the default.
-pub fn hard_max_load_per_cpu(cwd: &Path) -> f64 {
-    resolve_agents_value(cwd, "hard_max_load_per_cpu")
-        .and_then(|raw| raw.parse::<f64>().ok())
-        .unwrap_or(DEFAULT_HARD_MAX_LOAD_PER_CPU)
 }
 
 /// Resolve `agents.single_flight_ttl_seconds`: how long one child's written

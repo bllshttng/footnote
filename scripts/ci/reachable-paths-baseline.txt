@@ -125,7 +125,6 @@ A	{lane} drops its attach id	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-
 A	{ts} {kind} {sender} -> {recipient} rid={rid} caller={ck}	py=cli/src/fno/agents/trace_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	fleet_percent_measured_cpu	py=cli/src/fno/doctor_footprint.py;rs=crates/fno-agents/src/spawn_gate.rs	# protocol
 A	fno_cursor_agent_provider	py=cli/src/fno/agents/harnesses/cursor_agent.py;rs=crates/fno-agents/src/cursor_agent.rs	# protocol: both runtimes read the same Cursor provider environment key
-A	agents.hard_max_load_per_cpu	py=cli/src/fno/config/registry.py;rs=crates/fno-agents/src/spawn_gate_verb.rs	# protocol: one `config.agents.*` key name, both trees must spell it identically - the Pydantic model declares it, the verb's probe reads it for the CPU ceiling row
 A	agents.max_fleet_cpu_share	py=cli/src/fno/config/registry.py;rs=crates/fno-agents/src/spawn_gate_verb.rs	# protocol: one `config.agents.*` key name, both trees must spell it identically - the Pydantic model declares it, the verb's probe reads it for the share row
 A	provider-runtime-state.json	py=cli/src/fno/paths.py;rs=crates/fno-agents/src/provider_cap.rs|crates/fno-agents/src/route_capacity.rs|crates/fno-agents/src/spawn_gate_lanes.rs	# protocol: the provider runtime-state file name; Python owns the path while the Rust actor, slot-capacity reader, and spawn gate read the same state
 R	status-derivation-helper:cli/src/fno/graph/cli.py::cmd_epic_status	# the epic surface reads stored status; the overlay routing lands with its fix

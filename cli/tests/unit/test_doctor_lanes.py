@@ -80,8 +80,6 @@ def _pin_admission(
         capacity_cores=12.0,
         ceiling=0.5,
         gap=None,
-        load_15m=load_15m,
-        backstop=480.0,
     )
     monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admission)
     monkeypatch.setattr(
@@ -451,8 +449,8 @@ def test_json_payload_carries_the_census(monkeypatch) -> None:
 
 def test_the_cpu_admission_arm_names_the_whole_vocabulary(monkeypatch) -> None:
     """x-7783 AC12 (carrying x-aeab's rule): the panel cannot label what the
-    arm never emits. The interval bounds, the ceiling, the backstop and its
-    15-minute figure, and the 1m/5m trend ride on the value object."""
+    arm never emits. The interval bounds, the ceiling, the 15-minute trend
+    figure, and the 1m/5m trend ride on the value object."""
     from fno.agents import spawn_gate
     from fno.footprint import Admission
 
@@ -468,8 +466,6 @@ def test_the_cpu_admission_arm_names_the_whole_vocabulary(monkeypatch) -> None:
         capacity_cores=12.0,
         ceiling=0.5,
         gap="3 pidless row(s)",
-        load_15m=143.8,
-        backstop=480.0,
     )
     monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admission)
     monkeypatch.setattr(dl.os, "getloadavg", lambda: (184.9, 122.3, 143.8))
@@ -483,7 +479,6 @@ def test_the_cpu_admission_arm_names_the_whole_vocabulary(monkeypatch) -> None:
     assert arm.value["ceiling"] == 0.5
     assert arm.value["verdict"] == "undecidable"
     assert arm.value["load_15m"] == 143.8
-    assert arm.value["backstop"] == 480.0
     assert arm.value["load_1m"] == 184.9
     assert arm.value["load_5m"] == 122.3
 
@@ -507,8 +502,6 @@ def _instrument_admission():
         capacity_cores=0.0,
         ceiling=0.0,
         gap=None,
-        load_15m=None,
-        backstop=0.0,
     )
 
 
