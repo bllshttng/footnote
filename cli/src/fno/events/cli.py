@@ -973,9 +973,9 @@ def _find_file_stats(
     if not path.exists() and not _ROTATED_SUFFIX.search(path.name):
         stats["status"] = "absent"
         return stats
-    timestamps: list[tuple[datetime, str]] = []
+    timestamps = []
     try:
-        rows: list[dict[str, Any]] = []
+        rows = []
         with path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 if not line.strip():
