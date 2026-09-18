@@ -964,6 +964,10 @@ fn settle_attempt(path: &std::path::Path) -> Result<Vec<StaleDoRow>, SettleRefus
     }
     let mut settled = Vec::new();
     for row in &stale {
+        // The instant comes from the transcript tail, not from now(): a sweep
+        // running hours late must not record a finish at the wrong time.
+        // None falls through to now() inside session_end, and ended_by still
+        // declares the stamp as inferred.
         match crate::backlog::api::session_end(
             &store,
             &row.node,
@@ -971,6 +975,7 @@ fn settle_attempt(path: &std::path::Path) -> Result<Vec<StaleDoRow>, SettleRefus
             "reap-sweep",
             Some("do"),
             Some(&row.harness),
+            crate::claude_adopt::transcript_stamp(&row.session_id).as_deref(),
         ) {
             Ok(payload) if payload.success => settled.push(row.clone()),
             Ok(_) => {}
@@ -998,6 +1003,8 @@ enum SettleRefusal {
 fn settle_one_do_row(home: &AgentsHome, node: &str, session_id: &str) -> Result<bool, String> {
     let store = crate::backlog::api::Store::new(&graph_path(home));
     const ATTEMPTS: usize = 5;
+    // The tail instant is stable across attempts; probe once, not per retry.
+    let tail = crate::claude_adopt::transcript_stamp(session_id);
     for attempt in 0..ATTEMPTS {
         // The same eligibility the batch settle applies: the pair must sit
         // in the current stale set, re-read fresh each attempt. The matching
@@ -1018,6 +1025,7 @@ fn settle_one_do_row(home: &AgentsHome, node: &str, session_id: &str) -> Result<
             "reap-release",
             Some("do"),
             Some(&harness),
+            tail.as_deref(),
         ) {
             Ok(payload) if payload.success => return Ok(true),
             Ok(_) => return Ok(false),
@@ -4838,7 +4846,19 @@ mod tests {
         seed_store(&home, vec![one_stale_do_entry("x-settle")]);
         assert_eq!(plan_stale_do_rows(&home).len(), 1);
 
+        // The settle now asks the transcript tail for the instant, which
+        // resolves the claims root and the projects dir; pin both so the
+        // hermetic guard holds and the lookup answers None (the fill falls
+        // through to now()).
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::paths::pin_test_claims_root(&base);
+        let projects = base.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, &projects);
         let (settled, refusals) = settle_stale_do_rows(&home);
+        std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
         assert!(refusals.is_empty(), "refusals: {refusals:?}");
         assert_eq!(settled.len(), 1);
         assert_eq!(settled[0].session_id, "s-open");
