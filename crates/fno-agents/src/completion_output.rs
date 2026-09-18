@@ -8,6 +8,11 @@ struct LoopCheckOutput {
     message: String,
     fires: u64,
     fingerprint: Option<String>,
+    /// On a block decision only: the re-drive the gate names. A sent
+    /// continuation carries what the gate said, not a literal the transport
+    /// picked, so a gate-directed re-drive is distinguishable from user text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    continuation: Option<String>,
 }
 
 pub(crate) fn allow_output(
@@ -23,6 +28,11 @@ pub(crate) fn allow_output(
         message: message.to_string(),
         fires,
         fingerprint,
+        continuation: if decision == "block" {
+            Some("/target --resume".to_string())
+        } else {
+            None
+        },
     };
     serde_json::to_string(&out).unwrap_or_else(|_| r#"{"decision":"allow","termination_reason":null,"message":"serialization error","fires":0,"fingerprint":null}"#.to_string())
 }

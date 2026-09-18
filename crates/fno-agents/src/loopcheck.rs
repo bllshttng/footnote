@@ -1558,6 +1558,7 @@ mod coverage_receipt;
 mod holds;
 mod king_decide;
 mod range_tiling;
+mod session_binding;
 pub use range_tiling::{compute_range_tiling, RangeTiling};
 mod review_count;
 mod review_state;
@@ -7284,6 +7285,12 @@ pub(crate) struct LoopCheckArgs {
     /// inject a small bound so a sleeping fake wedges for ~1s instead of 30;
     /// any value <= 0 keeps the default. Production never passes it.
     read_timeout_ms: Option<u64>,
+    /// The harness whose session asked (`--harness`), and that session's id
+    /// (`--harness-session`). Both must be present for the session-binding
+    /// gate to run; with either absent the engine answers as it always has,
+    /// so every existing caller keeps its exact behavior.
+    harness: Option<String>,
+    harness_session: Option<String>,
 }
 
 pub(crate) fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
@@ -7303,6 +7310,8 @@ pub(crate) fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
     let mut author_harness_override: Option<String> = None;
     let mut hook_input_stdin = false;
     let mut driver = "target".to_string();
+    let mut harness: Option<String> = None;
+    let mut harness_session: Option<String> = None;
     let mut fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
     // Env-as-default like the two bin overrides, so the real shell shim can be
     // driven end to end against a wedged child at a test bound without the
@@ -7359,6 +7368,10 @@ pub(crate) fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
             driver = val;
         } else if let Some(val) = try_flag_value(arg, "--fno-bin", args, &mut i) {
             fno_bin = val;
+        } else if let Some(val) = try_flag_value(arg, "--harness", args, &mut i) {
+            harness = Some(val);
+        } else if let Some(val) = try_flag_value(arg, "--harness-session", args, &mut i) {
+            harness_session = Some(val);
         } else if arg == "--hook-input-stdin" {
             // Bare boolean flag (no value): try_flag_value would consume the
             // next token as a value, so it is matched directly.
@@ -7399,6 +7412,8 @@ pub(crate) fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
         driver,
         fno_bin,
         read_timeout_ms,
+        harness,
+        harness_session,
     })
 }
 
@@ -7704,6 +7719,52 @@ pub(crate) fn decide_with_payload(
     // The king uses a separate manifest and decision path.
     if parsed.driver == "king" {
         return king_decide::king_decide(&parsed);
+    }
+
+    // Session binding: when the caller names the harness session that asked,
+    // the registry answers who may drive this target before any progress
+    // logic runs. A refusal exits 0 with decision "refuse" so a plugin
+    // reading the JSON never crashes on it; a crown routes to the king path,
+    // which evaluates its own evidence; an owner falls through unchanged.
+    if parsed.harness.is_some() && parsed.harness_session.is_some() {
+        match session_binding::gate(&parsed) {
+            session_binding::Gate::Refuse(r) => {
+                let project_events = parsed
+                    .events_path
+                    .clone()
+                    .unwrap_or_else(|| crate::paths::events_path(&parsed.cwd));
+                let global_events = parsed
+                    .global_events_path
+                    .clone()
+                    .unwrap_or_else(|| project_events.clone());
+                emit_to_both(
+                    &project_events,
+                    &global_events,
+                    "loop_check",
+                    serde_json::json!({
+                        "decision": "refuse",
+                        "harness": parsed.harness,
+                        "asked_session": r.asked,
+                        "bound_session": if r.bound.is_empty() { serde_json::Value::Null } else { serde_json::json!(r.bound) },
+                        "reason": r.reason,
+                    }),
+                );
+                return (
+                    0,
+                    serde_json::json!({
+                        "decision": "refuse",
+                        "termination_reason": null,
+                        "message": r.reason,
+                        "asked_session": r.asked,
+                        "bound_session": if r.bound.is_empty() { serde_json::Value::Null } else { serde_json::json!(r.bound) },
+                        "reason": r.reason,
+                    })
+                    .to_string(),
+                );
+            }
+            session_binding::Gate::Crown => return king_decide::king_decide(&parsed),
+            session_binding::Gate::Owner => {}
+        }
     }
 
     let state_path = parsed.state_path.clone();
