@@ -657,22 +657,13 @@ jobs:
         # The fno mux shard cleans its own package the same way.
         run: cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml
 
-      - name: cargo test --lib --bins (fno-agents)
-        working-directory: crates/fno-agents
-        run: cargo test --lib --bins --no-fail-fast
-
-      - name: cargo test --test '*' --test-threads=1 (fno-agents real-process integration)
-        working-directory: crates/fno-agents
-        # A lib red must not hide the integration shard: this leg still runs
-        # when the lib step fails, so the grok and stop-hook tests report on
-        # every round instead of only on green rounds.
-        if: ${{ !cancelled() }}
-        run: cargo test --test '*' --no-fail-fast -- --test-threads=1
-
       - name: Build fno-agents binary (for parity check)
         working-directory: crates/fno-agents
-        # The package clean before unit tests makes those tests and this parity
-        # binary share one fresh source build. Dependencies stay cached.
+        # Runs first, before the cargo test shards: every step from here to the
+        # static guards is a text scan or this one build, so a red shows in
+        # minutes, not after the 26-minute integration shard. The package clean
+        # above still makes this binary and the tests share one fresh source
+        # build. Dependencies stay cached.
         run: cargo build --bin fno-agents
 
       - name: Generated copies match their sources
@@ -759,6 +750,29 @@ jobs:
         # and the recorded duplicate-decision debt. Doc + gate + module move
         # together; the paths filter above carries all three.
         run: bash scripts/ci/check-product-boundaries.sh
+
+      - name: Static source guards (fno-agents)
+        # Guards that read source text and spawn nothing. They run before the
+        # long shards so a size or owner red shows in minutes. The integration
+        # shard runs them again; that costs under a second.
+        working-directory: crates/fno-agents
+        run: |
+          cargo test --test hook_latency hook_sources_stay_small
+          cargo test --test test_owned_keeper_reap every_triad_spawning_test_file_declares_its_owner
+
+      - name: cargo test --lib --bins (fno-agents)
+        id: lib
+        working-directory: crates/fno-agents
+        run: cargo test --lib --bins --no-fail-fast
+
+      - name: cargo test --test '*' --test-threads=1 (fno-agents real-process integration)
+        working-directory: crates/fno-agents
+        # A lib red must not hide the integration shard: this leg still runs
+        # when the lib step fails, so the grok and stop-hook tests report on
+        # every round instead of only on green rounds. A red in the build,
+        # parity or static-guard steps above skips it: those fail fast.
+        if: ${{ !cancelled() && (success() || steps.lib.outcome == 'failure') }}
+        run: cargo test --test '*' --no-fail-fast -- --test-threads=1
 
   test-mux:
     name: cargo test (fno mux)
