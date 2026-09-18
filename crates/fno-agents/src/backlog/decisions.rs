@@ -30,10 +30,10 @@ pub fn ensure_table(connection: &Connection) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-/// Import the durable machine-wide decision journal once, then validate every
+/// Import the durable machine-wide decision journal once, then attach every
 /// decision reference already present on a node. The journal is the event
-/// source; a node reference without its event is a hard error, not an empty
-/// decision list.
+/// source; a node reference without its event is skipped for decide-reindex
+/// to recover, never a refusal of the whole store.
 pub fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), String> {
     if super::meta(connection, "decisions_imported")?.is_some() {
         return Ok(());
@@ -334,7 +334,11 @@ mod tests {
     }
 
     #[test]
-    fn decisions_import_rejects_an_orphan_node_reference() {
+    fn decisions_import_skips_an_orphan_node_reference() {
+        // A projection row whose journal event is gone is what
+        // `fno backlog decide-reindex` recovers, so the import lands the
+        // store and skips the dangling reference instead of refusing the
+        // first open of a pre-flip store.
         let temp = TempDir::new().unwrap();
         let graph = temp.path().join("graph.json");
         std::fs::write(
@@ -355,12 +359,17 @@ mod tests {
         .unwrap();
         let mut connection = connection();
 
-        let error = import_if_needed(&mut connection, &graph).unwrap_err();
+        import_if_needed(&mut connection, &graph).unwrap();
 
-        assert!(error.contains("x-node"));
-        assert!(error.contains("d-missing"));
-        assert!(crate::backlog::meta(&connection, "decisions_imported")
-            .unwrap()
-            .is_none());
+        assert_eq!(
+            crate::backlog::meta(&connection, "decisions_imported")
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+        let attached: i64 = connection
+            .query_row("SELECT COUNT(*) FROM node_decisions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(attached, 0, "the orphan attached nothing");
     }
 }
