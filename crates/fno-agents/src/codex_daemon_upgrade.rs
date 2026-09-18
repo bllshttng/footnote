@@ -403,18 +403,21 @@ mod tests {
     #[test]
     fn missing_ids_names_only_threads_that_lost_id_or_cwd() {
         let snapshot = vec![thread("keep", Some("idle")), thread("lose", Some("idle"))];
-        let mut moved = thread("keep", Some("idle"));
-        moved.cwd = "/moved".to_string();
-        let post = vec![moved, thread("keep", Some("idle"))];
-        // "keep" survives with the SAME cwd it was snapshotted at; a thread
-        // whose cwd changed reads as missing, which is what the fold owes.
-        assert_eq!(missing_ids(&snapshot, &post), Vec::<String>::new());
-        let gone = vec![thread("lose", Some("idle"))];
+        // Same id, same cwd: present. Same id at a DIFFERENT cwd: the fold
+        // reads it missing, because the readable world changed under it.
+        let post = vec![thread("keep", Some("idle"))];
+        assert_eq!(missing_ids(&snapshot, &post), vec!["lose".to_string()]);
+        let moved = vec![{
+            let mut t = thread("keep", Some("idle"));
+            t.cwd = "/moved".to_string();
+            t
+        }];
         assert_eq!(
-            missing_ids(&snapshot, &gone),
+            missing_ids(&snapshot, &moved),
             vec!["keep".to_string(), "lose".to_string()],
-            "both snapshot ids are gone"
+            "a changed cwd is a missing thread"
         );
+        let _ = &snapshot;
     }
 
     /// AC23-EDGE: a second transaction behind the lock reads lock-busy and
