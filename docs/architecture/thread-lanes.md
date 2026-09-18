@@ -68,7 +68,7 @@ A row names the axes it CARRIES. Every other axis is refused by name rather than
 
 Two harnesses need a launch completion no field can express, so it lives in Python beside the loop (`keeper_thread._FINISH_ARGV`) rather than in the row. pi appends its provider/model pair, because bare `pi` defaults to provider google. agy upserts folder trust, because a folder agy does not trust puts a modal in front of the composer and in front of the mint.
 
-The mint is per row too. `cursor-agent` and `agy` are callee-minted-read-back: the harness makes the id and fno reads it back before the TUI launches. `pi` and `grok` take fno's own UUIDv4. Either way the id exists before any worker starts. A caller-supplied id is validated, never minted: a truncated id is a different conversation to the harness, not a resume.
+The mint is per row too. `cursor-agent` and `agy` are callee-minted-read-back: the harness makes the id and fno reads it back before the TUI launches. `pi` and `grok` take fno's own UUIDv4. Either way the id exists before any worker starts. A caller-supplied id is validated, never minted: a truncated id is a different conversation to the harness, not a resume. The agy mint is a real model turn, so it carries the spawn's selected model, effort and permission posture instead of the harness defaults. The posture itself is the agy arm of the one permission vocabulary in `crates/fno-agents/src/codex_posture.rs`, applied by `crates/fno-agents/src/agy_launch.rs`: the lane default is the bypass, an explicit `--permission-mode` replaces it, and every launch prints the posture it ran with.
 
 ## Row status
 
