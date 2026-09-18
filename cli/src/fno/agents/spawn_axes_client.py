@@ -55,11 +55,8 @@ def keeper_posture(
     if note:
         import sys
 
-        print(
-            f"agy posture: {answer.get('effective')} "
-            f"({answer.get('source')}) - {note}",
-            file=sys.stderr,
-        )
+        head = f"agy posture: {answer.get('effective')} ({answer.get('source')})"
+        print(f"{head} - {note}", file=sys.stderr)
     return [str(t) for t in tokens]
 
 
