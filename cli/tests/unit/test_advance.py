@@ -1052,6 +1052,60 @@ def _declare_grid_inventory(monkeypatch):
     monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
 
 
+def _pin_capacity(monkeypatch, claude=None, codex=None, extra=None, active=None):
+    """Pin the capacity readings the verb judges lanes with.
+
+    The Python capacity read was deleted (x-1c38): the verb computes it from
+    the runtime-state file, so a hermetic one rides in through env instead of
+    a monkeypatched Python function. claude/codex pin one account record each
+    (`cl-a` for claude, `cx-a` for codex); None leaves the harness with no
+    record, which reads unknown. `extra` adds per-account readings as
+    {harness: {account: state}} (a dict value may carry resets_at). `active`
+    writes identity stamps as {harness: account}. Returns (config, state)
+    paths so a test can move capacity mid-flight.
+    """
+    import tempfile
+    import time as _time
+
+    d = tempfile.mkdtemp(prefix="fno-cap-")
+    records = []
+    for harness, spec in (("claude", claude), ("codex", codex)):
+        if spec is not None:
+            records.append((f"{'cl' if harness == 'claude' else 'cx'}-a", harness, spec))
+    for harness, accounts in (extra or {}).items():
+        for account, spec in accounts.items():
+            records.append((account, harness, spec))
+    cfg = os.path.join(d, "config.toml")
+    with open(cfg, "w") as f:
+        f.write(f"state_dir = '{d}'\n")
+        for account, harness, _spec in records:
+            f.write(f'[[accounts.records]]\nid = "{account}"\nharness = "{harness}"\n')
+    now = _time.time()
+
+    def row(spec) -> dict:
+        if isinstance(spec, dict):
+            state, resets = spec.get("state", "ok"), spec.get("resets_at")
+        else:
+            state, resets = spec, None
+        pct = {"ok": 5.0, "low": 95.0}.get(state, 100.0)
+        return {
+            "probed_at": now,
+            "partial": False,
+            "windows": [{"label": "daily", "used_pct": pct, "resets_at": resets}],
+        }
+
+    state = os.path.join(d, "state.json")
+    with open(state, "w") as f:
+        f.write(json.dumps({"usage": {a: row(spec) for a, _h, spec in records}}))
+    for harness, account in (active or {}).items():
+        os.makedirs(os.path.join(d, "providers"), exist_ok=True)
+        with open(os.path.join(d, "providers", f".active-{harness}"), "w") as f:
+            f.write(account)
+    monkeypatch.setenv("FNO_CONFIG", cfg)
+    monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", state)
+    return cfg, state
+
+
 def _fake_spawn_run(short_id):
     """Fake only the SPAWN subprocess; the route-slot call rides the real
     binary (the grid selection it answers is exactly what these tests assert)."""
@@ -1077,10 +1131,7 @@ def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     _declare_grid_inventory(monkeypatch)
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": "exhausted", "codex": "ok"},
-    )
+    _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
     sid = adv._spawn_worker(
         "x-grid1",
         None,
@@ -1102,10 +1153,7 @@ def test_spawn_worker_explicit_pins_beat_grid(monkeypatch):
     captured, fake_run = _fake_spawn_run("sid-pin1")
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda: {"claude": "exhausted", "codex": "ok"},
-    )
+    _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
     adv._spawn_worker(
         "x-pin1", None, "pin-slug", provider="claude",
         node={"difficulty": "high", "priority": "p1", "dispatch_verb": "",
@@ -1158,10 +1206,7 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     _declare_grid_inventory(monkeypatch)
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": "exhausted", "codex": "ok"},
-    )
+    _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
 
     receipts = adv.dispatch_lanes(1, events_path=tmp_path / "e.jsonl")
     assert receipts and receipts[0]["status"] == "dispatched"
@@ -1182,7 +1227,7 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
         "id": "x-dec1", "slug": "decline-pin", "difficulty": "high",
         "priority": "p1", "dispatch_verb": "", "cwd": str(tmp_path),
     }
-    capacity = {"claude": "exhausted", "codex": "exhausted"}
+    _pin_state = _pin_capacity(monkeypatch, claude="exhausted", codex="exhausted")[1]
 
     monkeypatch.setattr(adv, "select_lane_fill", lambda *a, **k: [node])
     monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *a, **k: None)
@@ -1197,7 +1242,9 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
         captured["placement_harness"] = harness
         # Capacity changes AFTER the placement decision: codex frees up in the
         # window between _ensure_lane_worktree and _spawn_worker.
-        capacity["codex"] = "ok"
+        data = json.loads(Path(_pin_state).read_text())
+        data["usage"]["cx-a"]["windows"][0]["used_pct"] = 5.0
+        Path(_pin_state).write_text(json.dumps(data))
         return tmp_path
 
     def fake_run(cmd, **kwargs):
@@ -1214,7 +1261,6 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
     monkeypatch.setattr(adv._autobrief, "resolve_dispatch_brief", lambda n: ("", ""))
     monkeypatch.setattr(adv, "_emit", lambda *a, **k: None)
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: dict(capacity))
 
     receipts = adv.dispatch_lanes(1, events_path=tmp_path / "e.jsonl")
 
@@ -3608,9 +3654,6 @@ def test_grid_lane_for_and_resolve_slot_agree(monkeypatch):
 
     monkeypatch.setattr(route_resolve, "resolve_slot", _fake_slot)
     monkeypatch.setattr(
-        route_resolve, "runtime_capacity", lambda **kw: {"claude": "ok"}
-    )
-    monkeypatch.setattr(
         route_resolve, "resolve_inventory", lambda **kw: route_resolve.Inventory()
     )
     node = {"difficulty": "medium", "priority": "p1", "plan_path": "p.md"}
@@ -3638,9 +3681,6 @@ def test_grid_lane_for_returns_the_grid_candidates_route(monkeypatch):
     monkeypatch.setattr(
         route_resolve, "resolve_slot",
         lambda *a, **k: (candidate, ["grid candidate claude/flash capacity=ok"], "armed"),
-    )
-    monkeypatch.setattr(
-        route_resolve, "runtime_capacity", lambda **kw: {"claude": "ok"}
     )
     monkeypatch.setattr(
         route_resolve, "resolve_inventory", lambda **kw: route_resolve.Inventory()

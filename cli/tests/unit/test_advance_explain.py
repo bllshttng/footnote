@@ -349,7 +349,6 @@ def _slot_world(monkeypatch):
         )
 
     monkeypatch.setattr(route_resolve, "resolve_inventory", lambda: object())
-    monkeypatch.setattr(route_resolve, "runtime_capacity", lambda inventory=None: {})
     monkeypatch.setattr(route_resolve, "resolve_slot", _fake_slot)
     return calls
 

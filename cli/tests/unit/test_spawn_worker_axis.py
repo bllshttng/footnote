@@ -365,7 +365,6 @@ def test_grid_lane_for_pinned_model_takes_its_declared_row(monkeypatch):
     from fno import route_resolve as _rr
 
     monkeypatch.setattr(_rr, "resolve_inventory", lambda: {})
-    monkeypatch.setattr(_rr, "runtime_capacity", lambda **kw: {})
     seen: dict = {}
 
     def fake_resolve_slot(profile_verb, node, capacity, *, inventory=None,
@@ -393,7 +392,6 @@ def test_grid_lane_for_pinned_model_without_a_row_declines(monkeypatch):
     from fno import route_resolve as _rr
 
     monkeypatch.setattr(_rr, "resolve_inventory", lambda: {})
-    monkeypatch.setattr(_rr, "runtime_capacity", lambda **kw: {})
 
     def fake_resolve_slot(*a, **kw):
         return (

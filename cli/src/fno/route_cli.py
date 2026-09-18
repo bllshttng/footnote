@@ -317,11 +317,10 @@ def inventory_cmd(
     Then a ``slots`` section: each verb's lanes, live capacity, would_take.
     """
     from fno.agents.harnesses import READABLE_PROVIDERS
-    from fno.route_resolve import resolve_inventory, runtime_capacity, slot_states, slot_verbs
+    from fno.route_resolve import resolve_inventory, slot_states, slot_verbs
 
     inv = resolve_inventory()
-    capacity = runtime_capacity(inventory=inv)  # never raises
-    slots = [slot_states(verb, capacity, inventory=inv) for verb in slot_verbs()]
+    slots = [slot_states(verb, inventory=inv) for verb in slot_verbs()]
     rows: list[dict[str, str]] = []
     refusals: list[str] = []
     if not inv.rows:

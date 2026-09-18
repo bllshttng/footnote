@@ -45,11 +45,11 @@ _OBJECTIVES = ("cheapest-that-clears", "best-available", "prefer-harness")
 
 # Aggregation order for a harness's accounts: MAX over headroom. ok > low >
 # unknown > exhausted. Unknown outranks exhausted because exhaustion is only
-# true when EVERY account says so (M2/t2.1): one silent account never walls a
-# harness another account can still serve. The MAX aggregate is the
-# HARNESS-WIDE answer and is correct for a row that names no account; a row
-# that names an account gets that account's own answer from the detail map.
-_CAPACITY_RANK = {"ok": 3, "available": 3, "low": 2, "unknown": 1, "exhausted": 0, "blocked": 0}
+# true when EVERY account says so: one silent account never walls a harness
+# another account can still serve. The MAX aggregate is the HARNESS-WIDE
+# answer and is correct for a row that names no account; a row that names an
+# account gets that account's own answer from the detail map, computed in
+# the Rust verb now (crates/fno-agents/src/route_capacity.rs).
 
 
 @dataclasses.dataclass(frozen=True)
@@ -74,14 +74,6 @@ class InventoryRow:
     @property
     def rank(self) -> int:
         return _BAND_RANK.get(self.band, -1)
-
-    def accounts(self) -> list[str]:
-        """The account record id whose quota this row spends, if named.
-        ``route`` names a VENDOR lane, not an account: folding it in would
-        add a pseudo-account whose permanent UNKNOWN dilutes a real
-        account's live lock in the MAX aggregate.
-        """
-        return [self.account] if self.account else []
 
 
 @dataclasses.dataclass(frozen=True)
@@ -275,6 +267,7 @@ def resolve_slot(
     explicit_route_value: Optional[str] = None,
     explicit_vendor_value: Optional[str] = None,
     meta: Optional[dict[str, Any]] = None,
+    capacity_refresh: bool = False,
 ) -> tuple[Optional[dict[str, Any]], list[str], str]:
     """Which lane does this dispatch ride right now: the ONE slot resolver.
     Selection is Rust (``fno-agents route-slot``); chain strings come back
@@ -309,7 +302,8 @@ def resolve_slot(
             explicit_model_value=explicit_model_value,
             explicit_route_value=explicit_route_value,
             explicit_vendor_value=explicit_vendor_value,
-        ))
+            capacity_refresh=capacity_refresh,
+        ), timeout=90.0 if capacity_refresh else 30.0)
     except RouteSlotUnavailable as exc:
         # The transport fault never reaches the verb, so the Python side owns
         # this one refusal composition: same shape the verb answers with.
@@ -326,6 +320,8 @@ def resolve_slot(
         if isinstance(out.get("exhausted_payload"), dict):
             meta["exhausted"] = out["exhausted_payload"]
         meta["fingerprint"] = str(out.get("fingerprint") or "")
+        if isinstance(out.get("capacity"), dict):
+            meta["capacity"] = out["capacity"]
     return out.get("candidate"), chain, str(out.get("verdict") or "unarmed")
 
 
@@ -572,6 +568,7 @@ def _slot_payload(
     explicit_model_value: Optional[str] = None,
     explicit_route_value: Optional[str] = None,
     explicit_vendor_value: Optional[str] = None,
+    capacity_refresh: bool = False,
 ) -> dict[str, Any]:
     """The slot/grid payload: both legs' inputs plus the gather the verb cannot do."""
     rows = _declared_rows(settings)
@@ -584,7 +581,9 @@ def _slot_payload(
             "difficulty": node.get("difficulty"),
             "priority": node.get("priority"),
             # Audit evidence for the slot reader; the phase itself is decided
-            # by the derived verb, never re-derived here.
+            # by the derived verb, at the verb now: capacity is computed (and,
+            # under capacity_refresh, refreshed) in Rust, so an explicit map
+            # stays honored and an omitted one is the verb's to compute.
             "plan_path": str(node.get("plan_path") or ""),
         }
     payload: dict[str, Any] = {
@@ -593,7 +592,6 @@ def _slot_payload(
         "declared_rows": rows,
         "profile": _profile_fields(profile),
         "node": node_payload,
-        "capacity": dict(capacity or {}),
         "substrate": substrate,
         "permission_mode": permission_mode,
         "constrain_harness": constrain_harness,
@@ -617,6 +615,10 @@ def _slot_payload(
         "explicit_route_value": explicit_route_value,
         "explicit_vendor_value": explicit_vendor_value,
     }
+    if capacity is not None:
+        payload["capacity"] = dict(capacity)
+    if capacity_refresh:
+        payload["capacity_refresh"] = True
     try:
         payload["effort_ok"] = _effort_ok_table(inv_rows)
     except Exception:  # noqa: BLE001 - an unusable effort table omits nothing
@@ -655,7 +657,7 @@ def _slot_entry(
 
 def slot_states(
     verb: str,
-    capacity: Optional[Mapping[str, object]],
+    capacity: Optional[Mapping[str, object]] = None,
     *,
     inventory: Optional[Inventory] = None,
     settings: object = None,
@@ -710,113 +712,6 @@ def slot_states(
         for e in states.get("lane_states") or []
     ]
     return out
-
-
-def harness_accounts(
-    harness: str, *, settings: object = None, inventory: Optional[Inventory] = None
-) -> list[str]:
-    """Expand a harness to the ACCOUNT record ids reachable through it:
-    registered records plus inventory-row accounts."""
-    inv = inventory if inventory is not None else resolve_inventory(settings=settings)
-    accounts: list[str] = []
-    for row in inv.rows.values():
-        if row.harness != harness:
-            continue
-        accounts.extend(row.accounts())
-    try:
-        if settings is None:
-            from fno.config import load_settings
-
-            settings = load_settings()
-        records = getattr(getattr(settings, "accounts", None), "records", None) or []
-    except Exception:  # noqa: BLE001 - no config read is a dead spawn
-        records = []
-    for record in records:
-        if not isinstance(record, Mapping):
-            continue
-        rid = record.get("id")
-        bound = record.get("harness") or record.get("cli")
-        if rid and bound == harness:
-            accounts.append(str(rid))
-    return list(dict.fromkeys(accounts))
-
-
-def _identity_evidence(harness: str, accounts: list[str]) -> dict[str, str]:
-    """proven|mismatch per account, from the attribution owner alone: the
-    active slot's record id is ``proven``, any other named account on a proven
-    slot is ``mismatch``. No owner answer reads unknown. Never reads
-    credentials itself."""
-    try:
-        from fno.adapters.providers.managed import (
-            active_slot_id,
-            slot_tainted,
-            store_root,
-        )
-
-        active = active_slot_id(harness)
-        if not active or slot_tainted(harness, store_root()):
-            return {}
-        return {a: ("proven" if a == active else "mismatch") for a in accounts}
-    except Exception:  # noqa: BLE001 - an unreadable owner reads as unknown
-        return {}
-
-
-def runtime_capacity(
-    providers: tuple[str, ...] = ("claude", "codex", "gemini", "opencode"),
-    *,
-    settings: object = None,
-    inventory: Optional[Inventory] = None,
-) -> dict[str, object]:
-    """Harness capacity: per-account headroom aggregated MAX (exhausted only
-    if EVERY account is); a proven active slot account IS the aggregate. The
-    value is ``{state, window, accounts, sources, observed_at, evidence,
-    resets}``. Never probes, never touches the network.
-    """
-    try:
-        from fno.adapters.providers.runtime_state import headrooms
-
-        inv = inventory if inventory is not None else resolve_inventory(settings=settings)
-        harnesses = list(dict.fromkeys(
-            [*providers, *(r.harness for r in inv.rows.values() if r.harness)]
-        ))
-        out: dict[str, object] = {}
-        for harness in harnesses:
-            accounts = harness_accounts(harness, settings=settings, inventory=inv)
-            detail: dict[str, str] = {}
-            resets: dict[str, object] = {}
-            sources: dict[str, str] = {}
-            observed_at: dict[str, object] = {}
-            best: Optional[str] = None
-            window = "absent"
-            for account, verdict in headrooms(accounts).items():
-                state = verdict.state.value
-                detail[account] = state
-                resets[account] = verdict.resets_at
-                sources[account] = verdict.source or "unknown"
-                observed_at[account] = verdict.observed_at
-                if best is None or _CAPACITY_RANK.get(state, 1) > _CAPACITY_RANK.get(best, 1):
-                    best = state
-                    window = verdict.source or "unknown"
-            evidence = _identity_evidence(harness, accounts)
-            proven = [a for a, v in evidence.items() if v == "proven"]
-            if proven and detail.get(proven[0]):
-                best = detail[proven[0]]
-                window = f"identity:{proven[0]}"
-            elif evidence and not proven and any(v == "mismatch" for v in evidence.values()):
-                best = "unknown"
-                window = "identity-unproven"
-            out[harness] = {
-                "state": best or "unknown",
-                "window": window,
-                "accounts": detail,
-                "sources": sources,
-                "observed_at": observed_at,
-                "evidence": evidence,
-                "resets": resets,
-            }
-        return out
-    except Exception:  # noqa: BLE001 - unknown capacity never breaks dispatch
-        return {}
 
 
 def resolve_tier(
