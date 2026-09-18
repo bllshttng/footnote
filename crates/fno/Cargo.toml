@@ -39,7 +39,7 @@ regex = "1"
 # name; the same crate version fno-agents pins, so one build stack.
 sha2 = "0.10"
 # The shared event store: the native front door routes `fno doctor event`
-# onto this library (x-0915); the runtime binary links the same types.
+# onto this library; the runtime binary links the same types.
 fno-event-store = { version = "0.1.0", path = "../fno-event-store" }
 # Re-verify a picked answer's region fingerprint against the live grid before
 # injecting. Must match the daemon's hash byte-for-byte across

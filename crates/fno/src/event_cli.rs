@@ -1,4 +1,4 @@
-//! Native storage-level verbs under `fno doctor event` (x-0915).
+//! Native storage-level verbs under `fno doctor event`.
 //!
 //! The Python `fno doctor event emit` keeps its rich surface (validation,
 //! attestation stamping, mirrors, parent push) and delegates storage to

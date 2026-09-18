@@ -132,7 +132,7 @@ enum Role {
     /// command-qualified refusal line naming the bad token).
     MuxUsage(String),
     /// `fno doctor event emit-envelope|export ...`: the native storage verbs
-    /// (x-0915). Args from the subcommand name onward; Python keeps the rich
+    /// Args from the subcommand name onward; Python keeps the rich
     /// emit surface and the other event names until their cutover.
     DoctorEvent(Vec<OsString>),
     /// Any other args: the Python-CLI forwarding path.

@@ -29,7 +29,7 @@ One file per install. These belong at the root.
 | `ledger.json` | `paths.ledger_json()` | permanent |
 | `config.toml`, `.lock` | `paths.config_toml()` | permanent |
 | `settings.yaml`, `.lock` | `fno/config/__init__.py` loader | permanent |
-| `events.jsonl`, `.1` | `paths.global_events_json()`; LEGACY bytes only. Since the x-0915 cutover every writer commits to `events.db` and no reader treats the file as authoritative; retained generations are imported on first store open | legacy import source |
+| `events.jsonl`, `.1` | `paths.global_events_json()`; LEGACY bytes only. Since the event-store cutover every writer commits to `events.db` and no reader treats the file as authoritative; retained generations are imported on first store open | legacy import source |
 | `events.db`, `.db-wal`, `.db-shm` | the `fno-event-store` crate: the AUTHORITATIVE event store (schema v2: seq/event_id/retention_class/identity columns). Every writer commits here; every reader queries here | durable and gate rows forever, ephemeral rows 672 h |
 | `decisions.jsonl` | `paths.decisions_jsonl()`, written by `decide/__init__.py` | permanent |
 | `questions.jsonl` | `paths.questions_jsonl()`, written by `fno inbox outstanding` | permanent; a question does not expire |
@@ -218,7 +218,7 @@ Project state left the checkout. One space per repository, keyed on the CANONICA
 
 | Entry | Writer | Lifetime |
 |---|---|---|
-| `<space>/events.jsonl` | `paths.project_events_json()`; legacy bytes only since the x-0915 cutover | import source |
+| `<space>/events.jsonl` | `paths.project_events_json()`; legacy bytes only since the event-store cutover | import source |
 | `<space>/events.db`, `.db-wal`, `.db-shm` | the `fno-event-store` crate, the authoritative event store beside each journal | durable and gate rows forever, ephemeral 672 h |
 | `<space>/claims/` | `fno.claims` for repo-local keys (`walker:`, `review:`, `reap:`); global-id keys (`node:`, `dispatch:`, ...) stay at the global root | re-acquirable leases |
 | `<space>/kings/<scope>.md` | `cli/src/fno/king/state.py` via coronation or `fno agents king init` | one loop-state file per live crown scope; stale files are inert without a live registry crown and cleanup is best-effort (`fno agents king done` on abdication) |

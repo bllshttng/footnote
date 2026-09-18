@@ -45,7 +45,7 @@ pub(crate) fn scan_unrecorded_decisions(
     for path in journals {
         let Ok(content) = crate::loopcheck::event_lines(path).map(|l| l.join("\n")) else {
             continue;
-        }; // committed rows, commit order (x-0915)
+        }; // committed rows, commit order
         for line in content.lines() {
             if !(line.contains("operator_question") || line.contains("operator_decision")) {
                 continue;
@@ -132,7 +132,7 @@ pub(crate) fn scan_open_holds(
     for path in journals {
         let Ok(content) = crate::loopcheck::event_lines(path).map(|l| l.join("\n")) else {
             continue;
-        }; // committed rows, commit order (x-0915)
+        }; // committed rows, commit order
         for line in content.lines() {
             if !(line.contains("operator_question") || line.contains("held_on_question")) {
                 continue;
