@@ -801,12 +801,49 @@ fn r_control_plane(ctx: &Ctx) -> Result<Value, String> {
     let findings = crate::stuck_work::collect(&ctx.cwd)?;
     crate::arm_repair::annotate(&mut rows, &crate::arm_repair::RepairFacts::live(&findings));
     let threshold = crate::agents_config::notify_arm_failing_after_s(&ctx.cwd);
-    let mut attention: Vec<String> = crate::arm_watch::overdue_arms(&rows, threshold)
-        .iter()
-        .map(|row| row.line.trim().to_string())
-        .collect();
-    attention.extend(findings.iter().map(|f| f.line.clone()));
+    let attention = control_plane_attention(&rows, &trace, &findings, threshold);
     Ok(json!({ "attention": attention }))
+}
+
+/// The check-in's control-plane attention lines, pure so the summary and
+/// the row lines can never disagree. A deliberate hold (armed breaker or
+/// hand pause) leads with one summary naming it; the overdue arms and
+/// stuck-work findings follow unchanged. An unreadable breaker stays out
+/// of the summary: its rows remain overdue faults.
+fn control_plane_attention(
+    rows: &[crate::tick_ledger::ArmStatus],
+    trace: &crate::tick_ledger::TickTrace,
+    findings: &[crate::stuck_work::Finding],
+    threshold_s: u64,
+) -> Vec<String> {
+    let mut attention: Vec<String> = Vec::new();
+    let paused: Vec<&crate::tick_ledger::ArmStatus> = rows
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.cause.as_deref(),
+                Some("fleet_stop") | Some("loops_paused")
+            )
+        })
+        .collect();
+    if let (false, Some(p)) = (paused.is_empty(), trace.pause.as_ref()) {
+        let verb = match p {
+            crate::loops_pause::DispatchPause::Manual { .. } => "fno do loops status",
+            _ => "fno agents incident status",
+        };
+        attention.push(format!(
+            "{} arms paused on purpose: {}; merges and dispatch are held until the breaker clears ({verb})",
+            paused.len(),
+            p.detail()
+        ));
+    }
+    attention.extend(
+        crate::arm_watch::overdue_arms(rows, threshold_s)
+            .iter()
+            .map(|row| row.line.trim().to_string()),
+    );
+    attention.extend(findings.iter().map(|f| f.line.clone()));
+    attention
 }
 
 /// One territory row per scope: live against cap, the blueprinter
@@ -2810,5 +2847,109 @@ mod tests {
             chrono::Utc::now()
         ));
         assert!(!path.exists());
+    }
+
+    fn pause_row(arm: &str) -> crate::tick_ledger::ArmStatus {
+        let mut r = crate::tick_ledger::ArmStatus {
+            arm: arm.to_string(),
+            scheduler: Some(crate::tick_ledger::SCHED_LAUNCHD.to_string()),
+            last_ts: Some("2026-09-17T22:30:00Z".to_string()),
+            age_s: Some(600),
+            acted: Some(0),
+            skip_reason: None,
+            detail: None,
+            interval_s: 900,
+            producer_evidence: crate::tick_ledger::ProducerEvidence::Observed,
+            stale: false,
+            failing: false,
+            failing_for_s: None,
+            cause: None,
+            line: String::new(),
+            repair: None,
+            heal: None,
+            upstream: None,
+        };
+        r.cause = Some("fleet_stop".to_string());
+        r.line = format!(
+            "{} cause=fleet_stop (fleet incident stopped at generation 5: two cargo runs; \
+             held on purpose; wait for the breaker to clear)",
+            crate::tick_ledger::render_row(&r)
+        );
+        r
+    }
+
+    // AC9-HP: a paused tier leads the attention list with one breaker
+    // summary, and no line prescribes a refresh.
+    #[test]
+    fn a_paused_tier_leads_attention_with_the_breaker_summary() {
+        use crate::loops_pause::DispatchPause;
+        let rows: Vec<crate::tick_ledger::ArmStatus> =
+            ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"]
+                .iter()
+                .map(|a| pause_row(a))
+                .collect();
+        let trace = crate::tick_ledger::TickTrace {
+            pause: Some(DispatchPause::FleetIncident {
+                generation: 5,
+                reason: "two cargo runs".to_string(),
+            }),
+            ..crate::tick_ledger::TickTrace::default()
+        };
+        let out = control_plane_attention(&rows, &trace, &[], 1800);
+        assert_eq!(out.len(), 1, "lines: {out:?}");
+        assert!(out[0].contains("generation 5"), "line: {}", out[0]);
+        assert!(
+            out[0].contains("fno agents incident status"),
+            "line: {}",
+            out[0]
+        );
+        assert!(
+            out[0].starts_with("4 arms paused on purpose:"),
+            "line: {}",
+            out[0]
+        );
+        assert!(
+            out.iter().all(|l| !l.contains("tick_overdue")),
+            "lines: {out:?}"
+        );
+        assert!(
+            out.iter().all(|l| !l.contains("pr watch refresh")),
+            "lines: {out:?}"
+        );
+    }
+
+    // AC10-EDGE: no pause, the output is today's: the row lines only.
+    #[test]
+    fn without_a_pause_attention_is_the_overdue_rows_alone() {
+        let mut kw = crate::tick_ledger::ArmStatus {
+            arm: "king_wake".to_string(),
+            scheduler: Some(crate::tick_ledger::SCHED_LAUNCHD.to_string()),
+            last_ts: Some("2026-09-17T22:30:00Z".to_string()),
+            age_s: Some(2400),
+            acted: Some(0),
+            skip_reason: None,
+            detail: None,
+            interval_s: 900,
+            producer_evidence: crate::tick_ledger::ProducerEvidence::Observed,
+            stale: true,
+            failing: false,
+            failing_for_s: None,
+            cause: None,
+            line: String::new(),
+            repair: None,
+            heal: None,
+            upstream: None,
+        };
+        kw.cause = Some("tick_overdue".to_string());
+        kw.line = format!(
+            "{} cause=tick_overdue (no tick stamp inside 2x interval)",
+            crate::tick_ledger::render_row(&kw)
+        );
+        let rows = vec![kw];
+        let out =
+            control_plane_attention(&rows, &crate::tick_ledger::TickTrace::default(), &[], 1800);
+        assert_eq!(out.len(), 1, "lines: {out:?}");
+        assert!(out[0].starts_with("king_wake"), "line: {}", out[0]);
+        assert!(out[0].contains("tick_overdue"), "line: {}", out[0]);
     }
 }
