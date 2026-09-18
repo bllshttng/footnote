@@ -7,19 +7,23 @@
 //! env-independently: it resolves every workspace manifest both ways and
 //! classifies each tagged hash dir through four lanes (fresh, orphan, age,
 //! cap), guarded by an exclusive `flock` on each profile's `.cargo-lock`
-//! before any delete. Rows are matched by `CACHEDIR.TAG`, base, and member
-//! fingerprint - never by name.
+//! before any delete. Over the cap the lane reaps owned rows least recently
+//! used first, fresh rows included; only a live cargo holding that lock keeps
+//! a row. Rows are matched by `CACHEDIR.TAG`, base, and member fingerprint -
+//! never by name.
 //!
 //! Surfaced as the `cargo_build_dirs` lane of `fno doctor reclaim`, the
 //! `fno-agents reclaim cargo-build-dirs` / `remove-for` subcommands, and the
 //! in-process `remove_for` the merge reaper calls.
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-/// A build quieter than this is live: cargo touched it inside the window.
+/// A build quieter than this is live: it keeps a row out of the orphan and
+/// age lanes and orders the cap lane (quieter sorts last), but never vetoes
+/// a cap reap.
 const FRESH_SECS: u64 = 6 * 3600;
 /// An owned build quiet for 3 days is reaped by the age lane.
 const AGE_SECS: u64 = 3 * 24 * 3600;
@@ -401,18 +405,11 @@ fn has_membership(dir: &Path, names: &BTreeSet<String>) -> bool {
     false
 }
 
-/// Last gate before a delete. `recheck_quiet` (the sweep path: classification
-/// and deletion are separate walks, and a row touched in between is being
-/// written) refuses rows quiet under the fresh window; the tree-removal path
-/// (`remove_for`) skips it - a tree being removed was active until now, so
-/// the flock is the build-in-progress test there. `flock(LOCK_EX |
-/// LOCK_NB)` on every profile's `.cargo-lock`: any held lock keeps the row.
-/// Lock fds stay open until the removal returns so the guard cannot be
-/// released underneath it.
-fn guard_remove(dir: &Path, now: SystemTime, recheck_quiet: bool) -> Result<(), &'static str> {
-    if recheck_quiet && quiet_of(dir, now) < Duration::from_secs(FRESH_SECS) {
-        return Err("build-in-progress");
-    }
+/// The live-build test, shared by `guard_remove` and the cap lane's dry-run
+/// probe: `flock(LOCK_EX | LOCK_NB)` on every profile's `.cargo-lock`. Any
+/// held lock returns `Err("build-in-progress")`; otherwise the open lock
+/// files come back, and the locks last while they live.
+fn take_locks(dir: &Path) -> Result<Vec<std::fs::File>, &'static str> {
     let mut locks = Vec::new();
     if let Ok(profiles) = std::fs::read_dir(dir) {
         for profile in profiles.flatten() {
@@ -431,6 +428,20 @@ fn guard_remove(dir: &Path, now: SystemTime, recheck_quiet: bool) -> Result<(), 
             return Err("build-in-progress");
         }
     }
+    Ok(locks)
+}
+
+/// Last gate before a delete. `recheck_quiet` (the orphan and age lanes:
+/// classification and deletion are separate walks, and a row touched in
+/// between is being written) refuses rows quiet under the fresh window; the
+/// cap lane and the tree-removal path (`remove_for`) skip it - there the
+/// flock alone is the build-in-progress test. Lock fds stay open until the
+/// removal returns so the guard cannot be released underneath it.
+fn guard_remove(dir: &Path, now: SystemTime, recheck_quiet: bool) -> Result<(), &'static str> {
+    if recheck_quiet && quiet_of(dir, now) < Duration::from_secs(FRESH_SECS) {
+        return Err("build-in-progress");
+    }
+    let locks = take_locks(dir)?;
     std::fs::remove_dir_all(dir).map_err(|_| "delete-failed")
 }
 
@@ -481,6 +492,12 @@ pub struct SweepReport {
     pub projected_bytes: u64,
     pub after_bytes: u64,
     pub effective_cap_bytes: u64,
+    /// Bytes read across both bases before any lane ran.
+    pub before_bytes: u64,
+    /// `before_bytes` started over the effective cap.
+    pub cap_exceeded: bool,
+    /// Why bytes are still over the cap at the end: kept reason -> row count.
+    pub cap_held: BTreeMap<&'static str, usize>,
     /// `None` = the orphan lane ran; `Some(manifest)` = disabled, named.
     pub orphan_lane: Option<String>,
     pub shards_removed: usize,
@@ -540,6 +557,8 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
     }
     rep.rows = rows.len();
     let before_bytes: u64 = rows.iter().map(|r| r.bytes).sum();
+    rep.before_bytes = before_bytes;
+    rep.cap_exceeded = before_bytes > rep.effective_cap_bytes;
 
     // Lanes, first match wins: fresh, orphan, age. Cap runs after, over
     // whatever is still standing.
@@ -574,48 +593,6 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
             }
         };
         decisions.push(decision);
-    }
-
-    // Cap: while the total still exceeds the effective ceiling, reap owned
-    // rows quiet 6h or more, oldest quiet first. Fresh rows never qualify.
-    let mut remaining = before_bytes.saturating_sub(planned_bytes);
-    if remaining > rep.effective_cap_bytes {
-        let mut candidates: Vec<usize> = rows
-            .iter()
-            .enumerate()
-            .filter(|(i, r)| {
-                (r.under_fno || r.membership)
-                    && r.quiet >= Duration::from_secs(FRESH_SECS)
-                    && !planned.contains(i)
-            })
-            .map(|(i, _)| i)
-            .collect();
-        candidates.sort_by(|a, b| rows[*b].quiet.cmp(&rows[*a].quiet));
-        for i in candidates {
-            if remaining <= rep.effective_cap_bytes {
-                break;
-            }
-            planned.push(i);
-            planned_bytes += rows[i].bytes;
-            remaining -= rows[i].bytes;
-            decisions[i] = Decision::Reap("cap");
-        }
-    }
-
-    for (i, row) in rows.iter().enumerate() {
-        match &decisions[i] {
-            Decision::Keep(lane) => {
-                let line = format!(
-                    "cargo-build-dir kept lane={lane} bytes={} quiet_h={:.1} path={}",
-                    row.bytes,
-                    row.quiet.as_secs_f64() / 3600.0,
-                    row.path.display()
-                );
-                println!("{line}");
-                rep.lines.push(line);
-            }
-            Decision::Reap(_) => {}
-        }
     }
 
     for &i in &planned {
@@ -664,6 +641,86 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
         }
     }
 
+    // Cap: while the bytes actually left exceed the effective ceiling, reap
+    // owned rows least recently used first, fresh rows included. The flock
+    // is the only veto here (no quiet recheck), and a refused row never ends
+    // the loop - the next-oldest candidate still goes.
+    let mut remaining = if apply {
+        before_bytes.saturating_sub(rep.reclaimed_bytes)
+    } else {
+        before_bytes.saturating_sub(planned_bytes)
+    };
+    if remaining > rep.effective_cap_bytes {
+        let mut candidates: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(i, r)| (r.under_fno || r.membership) && !planned.contains(i))
+            .map(|(i, _)| i)
+            .collect();
+        candidates.sort_by(|a, b| rows[*b].quiet.cmp(&rows[*a].quiet));
+        for i in candidates {
+            if remaining <= rep.effective_cap_bytes {
+                break;
+            }
+            let row = &rows[i];
+            let outcome = if apply {
+                guard_remove(&row.path, SystemTime::now(), false)
+            } else {
+                take_locks(&row.path).map(|_| ())
+            };
+            match outcome {
+                Ok(()) => {
+                    planned.push(i);
+                    planned_bytes += row.bytes;
+                    remaining -= row.bytes;
+                    decisions[i] = Decision::Reap("cap");
+                    let verb = if apply { "reaped" } else { "would-reap" };
+                    let line = format!(
+                        "cargo-build-dir {verb} lane=cap bytes={} quiet_h={:.1} path={}",
+                        row.bytes,
+                        row.quiet.as_secs_f64() / 3600.0,
+                        row.path.display()
+                    );
+                    println!("{line}");
+                    rep.lines.push(line);
+                    if apply {
+                        rep.reaped += 1;
+                        rep.reclaimed_bytes += row.bytes;
+                        if remove_empty_shard(&row.path) {
+                            rep.shards_removed += 1;
+                        }
+                    }
+                }
+                Err(reason) => {
+                    let line = format!(
+                        "cargo-build-dir kept lane={reason} bytes={} quiet_h={:.1} path={}",
+                        row.bytes,
+                        row.quiet.as_secs_f64() / 3600.0,
+                        row.path.display()
+                    );
+                    println!("{line}");
+                    rep.lines.push(line);
+                    *rep.cap_held.entry(reason).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    // Keep lines print after the cap pass so a row the cap reaped never also
+    // reads as kept.
+    for (i, row) in rows.iter().enumerate() {
+        if let Decision::Keep(lane) = &decisions[i] {
+            let line = format!(
+                "cargo-build-dir kept lane={lane} bytes={} quiet_h={:.1} path={}",
+                row.bytes,
+                row.quiet.as_secs_f64() / 3600.0,
+                row.path.display()
+            );
+            println!("{line}");
+            rep.lines.push(line);
+        }
+    }
+
     // Shard dirs already empty: removed on apply, counted the same way.
     for base in &bases {
         let (_, empty_shards) = inventory(base);
@@ -690,15 +747,24 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
     rep.projected_bytes = if apply {
         rep.reclaimed_bytes
     } else {
-        before_bytes.saturating_sub(planned_bytes)
+        planned_bytes
     };
 
     let orphan_lane = match &rep.orphan_lane {
         None => "on".to_string(),
         Some(manifest) => format!("disabled:{manifest}"),
     };
+    let cap_held = if rep.cap_held.is_empty() {
+        "-".to_string()
+    } else {
+        rep.cap_held
+            .iter()
+            .map(|(reason, count)| format!("{reason}:{count}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     let summary = format!(
-        "cargo-build-dirs mode={} bases={} rows={} trees_resolved={} orphans={} reaped={} reclaimed_bytes={} after_bytes={} effective_cap_bytes={} orphan_lane={orphan_lane} shards_removed={}",
+        "cargo-build-dirs mode={} bases={} rows={} trees_resolved={} orphans={} reaped={} reclaimed_bytes={} after_bytes={} effective_cap_bytes={} orphan_lane={orphan_lane} shards_removed={} before_bytes={} cap_exceeded={} cap_held={cap_held}",
         if apply { "apply" } else { "dry-run" },
         rep.bases,
         rep.rows,
@@ -709,6 +775,8 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
         rep.after_bytes,
         rep.effective_cap_bytes,
         rep.shards_removed,
+        rep.before_bytes,
+        rep.cap_exceeded,
     );
     println!("{summary}");
     rep.lines.push(summary);
@@ -840,6 +908,10 @@ mod tests {
         std::env::set_var("CBD_FNO_ANSWER", fno_base.join("00").join("aaaa11"));
         std::env::set_var("CBD_FB_ANSWER", fb_base.join("00").join("bbbb22"));
         std::env::set_var("FNO_CARGO_TARGETS_BASE", &fno_base);
+        // Pin the free-space read: the cap lane now reaps fresh rows, so a
+        // nearly full host would shrink the cap to 1 byte and reap the very
+        // rows these tests mean to keep.
+        std::env::set_var("FNO_CARGO_FREE_BYTES", (1u64 << 50).to_string());
         Env {
             root,
             fno_base,
@@ -854,6 +926,7 @@ mod tests {
             std::env::remove_var("CBD_FNO_ANSWER");
             std::env::remove_var("CBD_FB_ANSWER");
             std::env::remove_var("FNO_CARGO_TARGETS_BASE");
+            std::env::remove_var("FNO_CARGO_FREE_BYTES");
             let _ = std::fs::remove_dir_all(&self.root);
             let _ = std::fs::remove_dir_all(&self.fb_parent);
         }
@@ -1040,5 +1113,114 @@ mod tests {
         std::env::remove_var("CBD_FB");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(found.as_deref(), Some(script.as_path()), "{found:?}");
+    }
+
+    /// AC1-HP: 18 owned rows all quiet under the fresh window, none locked,
+    /// total over the cap - the cap lane reaps exactly the oldest-quiet rows
+    /// needed to drop under the cap, and every survivor is younger than every
+    /// row reaped.
+    #[test]
+    fn cap_reaps_fresh_rows_least_recently_used_first_until_under_cap() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("caplru", "never-broken");
+        let mut rows = Vec::new();
+        for i in 0..18 {
+            let hash = format!("f{i:04x}");
+            let quiet = 1100 * (i + 1); // 0.3h..5.5h: every row under 6h
+            rows.push((quiet, plant(&env.fno_base, "00", &hash, quiet, false)));
+        }
+        // Each planted row carries its CACHEDIR.TAG too, so size one row the
+        // way the sweep does and set the cap to exactly 8 rows' bytes.
+        let unit = crate::reclaim::tree_bytes(&rows[0].1);
+        std::env::set_var("FNO_CARGO_FREE_BYTES", (unit * 16).to_string());
+
+        let rep = sweep(&env.root, true, SystemTime::now());
+
+        assert_eq!(rep.before_bytes, unit * 18, "{rep:?}");
+        assert_eq!(rep.effective_cap_bytes, unit * 8, "{rep:?}");
+        assert!(rep.cap_exceeded);
+        assert_eq!(rep.reaped, 10, "{rep:?}");
+        assert_eq!(rep.after_bytes, unit * 8, "{rep:?}");
+        assert!(rep.after_bytes <= rep.effective_cap_bytes, "{rep:?}");
+        let reaped: Vec<u64> = rows
+            .iter()
+            .filter(|(_, p)| !p.exists())
+            .map(|(q, _)| *q)
+            .collect();
+        let kept: Vec<u64> = rows
+            .iter()
+            .filter(|(_, p)| p.exists())
+            .map(|(q, _)| *q)
+            .collect();
+        assert_eq!(reaped.len(), 10);
+        assert_eq!(kept.len(), 8);
+        assert_eq!(*reaped.iter().min().unwrap(), 1100 * 9, "{reaped:?}");
+        assert_eq!(*kept.iter().max().unwrap(), 1100 * 8, "{kept:?}");
+        assert!(rep.lines.iter().any(|l| l.contains("reaped lane=cap")));
+        assert!(rep.lines.iter().any(|l| l.contains("kept lane=fresh")));
+        let summary = rep.lines.last().unwrap();
+        assert!(summary.contains("cap_exceeded=true"), "{summary}");
+        assert!(summary.contains("cap_held=-"), "{summary}");
+    }
+
+    /// AC1-ERR: two owned fresh rows over the cap, the older one's
+    /// `.cargo-lock` flock-held - the locked row stays build-in-progress, the
+    /// loop continues, the unlocked row goes lane=cap, and the summary names
+    /// why bytes are still over the cap.
+    #[test]
+    fn cap_keeps_a_locked_row_and_says_so() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("caplock", "never-broken");
+        let older = plant(&env.fno_base, "00", "cafe0001", 2 * 3600, false);
+        let younger = plant(&env.fno_base, "00", "cafe0002", 1 * 3600, false);
+        std::fs::create_dir_all(older.join("debug")).unwrap();
+        let lock_path = older.join("debug/.cargo-lock");
+        std::fs::write(&lock_path, b"").unwrap();
+        // A held lock file with a fresh mtime reads as an active build via the
+        // quiet guard alone; age it so this test exercises the flock itself.
+        age_every(&older, 2 * 3600);
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&lock_path)
+            .unwrap();
+        unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) };
+        // Cap at half a row's bytes: even after the younger row goes, the
+        // held row keeps the total over the cap, so cap_held must say why.
+        let unit = crate::reclaim::tree_bytes(&younger);
+        std::env::set_var("FNO_CARGO_FREE_BYTES", unit.to_string());
+
+        let rep = sweep(&env.root, true, SystemTime::now());
+
+        assert!(older.exists(), "a held cargo lock protects the row");
+        assert!(!younger.exists(), "the unlocked row is reaped lane=cap");
+        assert_eq!(rep.reaped, 1, "{rep:?}");
+        assert!(rep.lines.iter().any(|l| l.contains("reaped lane=cap")));
+        assert!(rep
+            .lines
+            .iter()
+            .any(|l| l.contains("kept lane=build-in-progress")));
+        let summary = rep.lines.last().unwrap();
+        assert!(summary.contains("cap_exceeded=true"), "{summary}");
+        assert!(
+            summary.contains("cap_held=build-in-progress:1"),
+            "{summary}"
+        );
+        drop(lock);
+    }
+
+    /// AC4-HP: a dry run that plans one age reap reports the bytes it WOULD
+    /// reclaim, not the bytes left behind.
+    #[test]
+    fn dry_run_projects_reclaimable_bytes() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("capproj", "never-broken");
+        let aged = plant(&env.fno_base, "00", "cafe0003", 4 * 24 * 3600, false);
+        let unit = crate::reclaim::tree_bytes(&aged);
+
+        let rep = sweep(&env.root, false, SystemTime::now());
+
+        assert!(aged.exists(), "a dry run deletes nothing");
+        assert_eq!(rep.projected_bytes, unit, "{rep:?}");
+        assert_eq!(rep.after_bytes, 0, "after_bytes is the bytes left");
     }
 }
