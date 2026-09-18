@@ -39,7 +39,7 @@ The one rule the whole report stands on: **operator turns only**. Relay, harness
 
 3. Write the report: `<vault>/fno/intel/<date>.md`, where `<vault>/fno/` is the directory `fno do plan path` resolves beside `plans/`. Sections: [references/report-shape.md](references/report-shape.md).
 
-4. Corrections section: quote operator corrections verbatim, dedupe across sessions, rank by repeat count, each on its own line ending with ` #agent-correction` and carrying `signal=<friction category>`. Each one is a candidate AGENTS.md line or law. Say which in the report.
+4. Corrections section: quote operator corrections verbatim, dedupe across sessions, rank by repeat count. Each correction sits on its own line ending with ` #agent-correction` and carrying `signal=<friction category>`. Each one is a candidate AGENTS.md line or law. Say which in the report.
 
 5. Feed the S2 writer so the rows land in `~/.fno/corrections.log`:
 
@@ -51,4 +51,4 @@ The one rule the whole report stands on: **operator turns only**. Relay, harness
 
 6. Relay section: computed from the fold's `relay` facets and `nodes` rows. No model judgment: delivery, answers, contract breaches, and silences are facts.
 
-Judgment runs on this session's own model. There is no profile, no spawned reviewer, no Python shim: the fold is Rust (`fno-agents intel`), the narrative is you, and the S2 writer is the script that already existed.
+Judgment runs on this session's own model. No profile, no spawned reviewer, no Python shim. The fold is Rust (`fno-agents intel`), the narrative is you, and the S2 writer is the script that already existed.
