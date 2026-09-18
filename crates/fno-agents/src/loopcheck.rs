@@ -1980,12 +1980,15 @@ pub struct UnattestedReviewer {
 }
 
 /// The committed event lines for one journal family: the store's rows in
-/// commit order, with any pre-cutover journal bytes imported first (hash
-/// dedupe makes a repeated import free).
+/// commit order, pre-cutover bytes imported first (hash-dedupe free).
 pub(crate) fn event_lines(journal: &Path) -> Result<Vec<String>, String> {
     fno_event_store::import_all(journal)?;
-    let q = fno_event_store::EventQuery { include_rejected: true, ..Default::default() };
-    Ok(fno_event_store::query_events(journal, &q)?.into_iter().map(|r| r.line).collect())
+    let q = fno_event_store::EventQuery {
+        include_rejected: true,
+        ..Default::default()
+    };
+    let rows = fno_event_store::query_events(journal, &q)?;
+    Ok(rows.into_iter().map(|r| r.line).collect())
 }
 
 /// The `config.review.reviewers` entries NOT satisfied by a head-pinned

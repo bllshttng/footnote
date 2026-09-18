@@ -29,8 +29,6 @@
 
 use serde::Serialize;
 use serde_json::{Map, Value};
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Sibling journal suffix for ephemeral-class rows. The Python
@@ -146,15 +144,6 @@ impl EventEmitter {
 pub(crate) fn rotated_path(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push(".1");
-    PathBuf::from(s)
-}
-
-/// The sibling journal an ephemeral-class row is routed to (same directory,
-/// same stem, the [`EPHEMERAL_SUFFIX`] tail). Shared with the claims audit
-/// writer so every Rust journal writer routes identically.
-pub(crate) fn ephemeral_path(path: &Path) -> PathBuf {
-    let mut s = path.as_os_str().to_os_string();
-    s.push(EPHEMERAL_SUFFIX);
     PathBuf::from(s)
 }
 
@@ -312,7 +301,14 @@ mod tests {
         assert_eq!(rows.len(), 1, "the gauge is stored");
         assert_eq!(rows[0].retention_class, "ephemeral");
         assert!(
-            !crate::events::ephemeral_path(&path).exists(),
+            !path
+                .with_name(
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                        + fno_event_store::EPHEMERAL_SUFFIX
+                )
+                .exists(),
             "the sibling journal is never created"
         );
     }
@@ -332,7 +328,14 @@ mod tests {
         assert_eq!(rows[0].r#type, "operator_decision");
         assert_eq!(rows[0].retention_class, "durable");
         assert!(
-            !crate::events::ephemeral_path(&path).exists(),
+            !path
+                .with_name(
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                        + fno_event_store::EPHEMERAL_SUFFIX
+                )
+                .exists(),
             "non-ephemeral emit created no sibling"
         );
     }

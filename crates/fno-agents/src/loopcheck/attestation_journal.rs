@@ -87,45 +87,6 @@ pub(super) fn missing_global_attestations(
     out
 }
 
-/// The global journal's tail, at most `cap` bytes, starting on a line
-/// boundary: a seek into the middle of a line drops that partial line, so
-/// every admitted row is whole. Evidence older than the window is invisible
-/// to the merge, which is acceptable by the same measure that makes the
-/// merge correct: the failure it fixes (a deleted fork's surviving mirror)
-/// is recent by construction, and the dedup keys on identity, not recency.
-pub(super) const GLOBAL_TAIL_BYTES: u64 = 8 * 1024 * 1024;
-
-pub(super) fn tail_text(path: &std::path::Path, cap: u64) -> String {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return String::new();
-    };
-    let len = match file.metadata() {
-        Ok(m) => m.len(),
-        Err(_) => return String::new(),
-    };
-    let start = len.saturating_sub(cap);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return String::new();
-    }
-    let mut buf = Vec::new();
-    if file.read_to_end(&mut buf).is_err() {
-        return String::new();
-    }
-    if start > 0 {
-        match buf.iter().position(|&b| b == b'\n') {
-            Some(p) => String::from_utf8_lossy(&buf[p + 1..]).into_owned(),
-            // No whole line inside the window: nothing to admit.
-            None => String::new(),
-        }
-    } else {
-        String::from_utf8_lossy(&buf).into_owned()
-    }
-}
-
-/// The text-taking body of [`unattested_reviewers_scan`], split so the
-/// producer can feed the merged project-plus-global attestation text without
-/// a temp file.
 pub fn unattested_reviewers_scan_text(
     content: &str,
     reviewers: &[String],
@@ -380,37 +341,5 @@ mod tests {
             .collect();
         assert_eq!(local.len(), 1);
         assert_eq!(local[0].scope, Some(AttestationScope::AttestedBranch));
-    }
-
-    #[test]
-    fn tail_text_starts_on_a_line_boundary_and_drops_no_whole_row() {
-        let dir = std::env::temp_dir().join(format!(
-            "fno-tail-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("events.jsonl");
-        let first = format!(
-            "{}\n",
-            global_attest_line("t1", "aaaaaaaaaa", "feature/x", "github.com/o/r")
-        );
-        let second = format!(
-            "{}\n",
-            global_attest_line("t2", "bbbbbbbbbb", "feature/y", "github.com/o/r")
-        );
-        let body = format!("{first}{second}");
-        std::fs::write(&path, &body).unwrap();
-        // A window that begins inside the FIRST line must drop that partial
-        // line and still return the whole second row.
-        let tail = tail_text(&path, (second.len() + 5) as u64);
-        assert_eq!(tail, second, "partial head line dropped, second row whole");
-        // A window covering everything returns everything.
-        let tail = tail_text(&path, body.len() as u64);
-        assert_eq!(tail, body);
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

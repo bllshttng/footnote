@@ -6,7 +6,6 @@ rust-version = "1.89"
 description = "The authoritative SQLite runtime event store: schema, migration, ingest, retention"
 license = "Apache-2.0"
 repository = "https://github.com/bllshttng/footnote"
-publish = false
 
 [dependencies]
 rusqlite = { version = "0.37", features = ["bundled"] }
