@@ -1342,10 +1342,10 @@ def resolve_effective_verb(
 ) -> tuple[Optional[str], str]:
     """The target/blueprint lifecycle conditional; full table:
     docs/architecture/backlog-graph-verb-contracts.md. Intake (rung "none"):
-    difficulty decides. Re-dispatch: the plan rung decides, and a build rung
-    answers ``/target`` only for a proven blueprint doc (``plan_blueprint``);
-    a declared target-family verb WINS over the table and the decision names
-    the disagreement; out-of-family abstains to declared precedence. Returns
+    difficulty decides. Re-dispatch: the plan rung decides - a build rung
+    answers ``/target`` only for a proven blueprint doc (``plan_blueprint``) -
+    and a declared target-family verb WINS, the decision naming the
+    disagreement; out-of-family abstains to declared precedence. Returns
     ``(canonical_verb, decision)``; ``None`` = abstain.
     Raises :class:`DispatchResolveError` on a refusal rung, or planless
     without low/medium/high difficulty. ``plan_rung`` is a Rung value. The

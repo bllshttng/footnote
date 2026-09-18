@@ -189,9 +189,6 @@ def _collect_frontmatter_depends(plan_path: str) -> tuple[list[str], Path]:
     states). When both keys carry values, `blocked_by` wins and the ignored
     key is named on stderr, so a half-migrated plan is loud rather than
     silently halved.
-
-    Value forms: block list, inline YAML list, bare scalar; complex inline
-    forms warn + empty rather than dropping edges.
     """
     p = Path(plan_path)
     if p.is_file():

@@ -232,8 +232,7 @@ def resolve_node_spawn(
                 resolve_kwargs["command"]
             )
     else:
-        # The node's lifecycle context AND its declared verb ride so the
-        # resolver owns declared precedence; the spawn path must not strip it.
+        # The declared verb rides: the resolver owns declared precedence.
         if isinstance(node, dict):
             resolve_kwargs.update(_lifecycle_kwargs(node))
             if str(node.get("dispatch_verb") or "").strip():
