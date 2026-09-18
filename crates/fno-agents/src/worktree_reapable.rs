@@ -492,11 +492,10 @@ fn done_node_arm(
         .filter(|l| l.len() >= 2 && &l[..2] == "??")
         .filter(|l| !discount(path_of(l)))
         .count() as u32;
-    let detached = {
-        let b = branch_show_current(target);
-        b.as_ref().map_or(true, |n| n.is_empty())
-    };
+    // One subprocess feeds both the receipt's detached flag and node-token
+    // resolution.
     let branch = branch_show_current(target);
+    let detached = branch.is_none();
 
     // Resolve the tree's nodes: manifest first (target-minted, exact), then
     // node-id tokens in the branch name, then in the directory basename.

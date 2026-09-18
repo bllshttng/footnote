@@ -133,7 +133,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "verify-evidence",
     "version",
     "wait",
-    "worktree-reapable",
 ];
 
 fn main() {
@@ -161,6 +160,14 @@ fn main() {
         std::process::exit(fno_agents::sync_canonical::run_sync_canonical_verb(
             &args[1..],
         ));
+    }
+    // `worktree-reapable`: the worktree-removal gate, daemon-free, a
+    // transport-only arm like surface-check - it registers NO client action
+    // (the shrink law allows none), because its callers exec the binary
+    // directly: the Python typer leaf, worktree_gate.py, and
+    // scripts/lib/worktree-reapable.sh.
+    if args.first().map(String::as_str) == Some("worktree-reapable") {
+        std::process::exit(fno_agents::worktree_reapable::run_client(&args[1..]));
     }
     // hooks/context-run.sh is the only caller.
     if args.first().map(String::as_str) == Some("context-run") {
@@ -785,13 +792,6 @@ async fn run(args: Vec<String>) -> i32 {
     // in-process.
     if verb == "reclaim" {
         return fno_agents::reclaim::run_reclaim(&args[1..], &AgentsHome::from_env());
-    }
-    // `worktree-reapable`: the worktree-removal gate, daemon-free. Not a
-    // routable `fno agents` verb; the Python surface `fno agents workspace
-    // worktree reapable` is a thin exec of THIS verb, and the sweeps exec the
-    // binary through worktree-reapable.sh. Same `==` treatment as reclaim.
-    if verb == "worktree-reapable" {
-        return fno_agents::worktree_reapable::run_client(&args[1..]);
     }
     // `plugin-install`: the filtered-stage installer for the plugin
     // harnesses, daemon-free. The Python surface `fno config plugin install`
