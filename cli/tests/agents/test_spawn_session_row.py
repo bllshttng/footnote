@@ -622,7 +622,7 @@ def test_reap_open_fills_review_row_and_keeps_it(graph_cli_home) -> None:
 
 def test_reap_open_all_closes_every_open_row(graph_cli_home) -> None:
     """The death-cascade spelling: one session holding a do window AND a review
-    window settles both - the do row removed, the review row filled."""
+    window settles both - each row filled and kept."""
     import fno.graph.cli as graph_cli
 
     for phase in ("do", "review"):
@@ -642,15 +642,16 @@ def test_reap_open_all_closes_every_open_row(graph_cli_home) -> None:
     )
     assert result.exit_code == 0, result.output
     receipt = json.loads(result.stdout)
-    assert receipt["row_removed"] is True and receipt["row_closed"] is True
+    assert receipt["row_removed"] is False and receipt["row_closed"] is True
 
     rows = _node_rows()
-    assert len(rows) == 1, f"the review row survives, got {rows!r}"
-    assert rows[0]["phase"] == "review" and rows[0]["ended_at"]
+    assert len(rows) == 2, f"both rows survive filled, got {rows!r}"
+    assert all(row["ended_at"] for row in rows)
 
 
-def test_reap_open_do_default_still_removes(graph_cli_home) -> None:
-    """The do flavor keeps its remove semantics (status unwedge), default phase."""
+def test_reap_open_do_fills_and_keeps(graph_cli_home) -> None:
+    """The do flavor fills ended_at and keeps the row (status unwedges either
+    way, and the provenance survives), default phase."""
     import fno.graph.cli as graph_cli
 
     CliRunner().invoke(
@@ -668,8 +669,11 @@ def test_reap_open_do_default_still_removes(graph_cli_home) -> None:
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["row_removed"] is True
-    assert _node_rows() == []
+    receipt = json.loads(result.stdout)
+    assert receipt["row_removed"] is False
+    assert receipt["row_closed"] is True
+    rows = _node_rows()
+    assert len(rows) == 1 and rows[0]["ended_at"]
 
 
 # ---------------------------------------------------------------------------
