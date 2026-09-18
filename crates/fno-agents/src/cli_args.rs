@@ -28,6 +28,9 @@ pub struct RestartArgs {
     /// Break-glass: SIGKILL the lockfile holder before any probe; plain restart drains gracefully
     #[arg(long)]
     pub force: bool,
+    /// Also restart live mux servers: --stale-idle (pane-less stale-wire ones) by default, every live one with --mux
+    #[arg(long)]
+    pub mux: bool,
     /// Chain-only: swap only when the running daemon measures drifted; quiet exit 0 on fresh, down, or unknown
     #[arg(long)]
     pub if_drifted: bool,

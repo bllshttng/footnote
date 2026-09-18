@@ -17,6 +17,14 @@ fn restart_gate(state: &DriftState) -> bool {
     matches!(state, DriftState::Drifted { .. })
 }
 
+/// The verdict fold: a failed daemon leg, a failed mux leg, or a spared
+/// store keeper each mean the fleet is NOT healed. Pure so the contract
+/// "every unhealed leg fails the verb" is unit-testable.
+fn verdict(code: i32, mux_failed: bool, spared_keeper: bool) -> (bool, &'static str) {
+    let ok = code == 0 && !mux_failed && !spared_keeper;
+    (ok, if ok { "ok" } else { "FAILED" })
+}
+
 /// Render a restart outcome into (stdout line, optional stderr line, exit code).
 /// Pure so the observable states (swapped / forced / was-down / failed) are unit
 /// testable without spawning a daemon. A failure always carries a stderr line
@@ -78,16 +86,21 @@ pub fn render_restart(
 /// Dispatch `fno-agents restart`: swap a (possibly stale) daemon for one built
 /// from the current binary. SIGTERM the running daemon (graceful drain; PTY
 /// workers survive), wait for the socket to clear, lazy-start fresh. With
-/// `force`, SIGKILL the lockfile holder first and lazy-start fresh.
-/// With `json`, stdout carries ONE machine line (the keepers summary the
+/// `force`, SIGKILL the lockfile holder first and lazy-start fresh. The mux
+/// leg (default `--stale-idle`; every live session with `mux`) rides the
+/// shared kill-selector in the fno crate, so the refusal and the preserved
+/// list reach the operator instead of being captured and dropped.
+/// With `json`, stdout carries ONE machine line (the summary object the
 /// Python adapter parses); every human receipt moves to stderr.
-pub async fn run_restart(force: bool, json: bool, if_drifted: bool) -> i32 {
+pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -> i32 {
     let home = AgentsHome::from_env();
     if if_drifted && !restart_gate(&check_daemon_drift(&home).await) {
         return 0;
     }
     let daemon_bin = resolve_daemon_bin();
     let outcome = restart_daemon(&home, &daemon_bin, force).await;
+    let old_pid = outcome.as_ref().ok().and_then(|o| o.old_pid);
+    let new_pid = outcome.as_ref().ok().map(|o| o.new_pid);
     let (out, err, code) = render_restart(&outcome);
     // In --json mode stdout stays parseable: the keepers line is the machine
     // surface, so human receipts land on stderr beside the errors.
@@ -162,20 +175,172 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool) -> i32 {
         ),
         Err(e) => eprintln!("fno agents restart: pr-watch refresh not run: {e}."),
     }
+    // The mux leg: pane-less stale-wire servers heal automatically; --mux
+    // adds stale-with-panes and every current-wire session. The shared
+    // kill-selector owns the session policy and its refusal - this verb
+    // holds none of its own. Its JSON object folds into the summary below,
+    // so the operator sees the preserved list the kill measured.
+    let selector = if mux { "--all" } else { "--stale-idle" };
+    let mux_out = std::process::Command::new(crate::scrape::fno_bin())
+        .args(["mux", "kill-server", selector, "--json"])
+        .output();
+    // The selector's stderr carries the human narratives (the spared line,
+    // the unkept refusal): relay them - capturing and dropping them is the
+    // exact gap that deleted this leg from the operator's view.
+    if let Ok(out) = &mux_out {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        for line in stderr.lines().filter(|l| !l.trim().is_empty()) {
+            eprintln!("{line}");
+        }
+    }
+    let mux_summary: Option<serde_json::Value> = match &mux_out {
+        Ok(out) => serde_json::from_slice(&out.stdout).ok().or(None),
+        Err(_) => None,
+    };
+    let mux_failed = match &mux_out {
+        Ok(out) => !out.status.success(),
+        Err(_) => true,
+    };
+    if mux_failed {
+        eprintln!("fno agents restart: the mux leg failed; its refusal is above.");
+    }
+
     // Machine-readable summary; the LAST stdout line, so an orchestrator
-    // parses it without guessing.
-    let summary = json!({"store_keepers": cycled.iter().map(|c| serde_json::json!({
+    // parses it without guessing. `components` names one row per component
+    // (old pid -> new pid, or unchanged); `preserved` folds every session's
+    // kept panes and threads into one list.
+    let mut components = vec![json!({
+        "kind": "daemon",
+        "name": "agents-daemon",
+        "old_pid": old_pid,
+        "new_pid": new_pid,
+    })];
+    let mut preserved: Vec<serde_json::Value> = Vec::new();
+    if let Some(mux) = &mux_summary {
+        if let Some(sessions) = mux.get("sessions").and_then(serde_json::Value::as_array) {
+            for session in sessions {
+                let name = session
+                    .get("session")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?");
+                if session.get("killed").and_then(serde_json::Value::as_bool) == Some(true) {
+                    components.push(json!({
+                        "kind": "mux-server",
+                        "name": name,
+                        "old_pid": serde_json::Value::Null,
+                        "new_pid": "unchanged",
+                    }));
+                }
+                if let Some(rows) = session
+                    .get("preserved")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    preserved.extend(rows.iter().cloned());
+                }
+            }
+        }
+    }
+    let summary = json!({
+        "daemon": if code == 0 { "restarted" } else { "failed" },
+        "components": components,
+        "preserved": preserved,
+        "store_keepers": cycled.iter().map(|c| serde_json::json!({
             "graph": c.graph, "old_pid": c.old_pid, "result": c.result,
-        })).collect::<Vec<_>>(), "pane_keepers_stale": stale_panes});
+        })).collect::<Vec<_>>(),
+        "pane_keepers_stale": stale_panes,
+        "mux": mux_summary,
+        "ok": verdict(code, mux_failed, cycled.iter().any(|c| c.result != "cycled")).0,
+        "verdict": verdict(code, mux_failed, cycled.iter().any(|c| c.result != "cycled")).1,
+    });
     println!("fno agents restart: keepers {summary}");
-    u8::from(cycled.iter().any(|c| c.result != "cycled")) as i32
+    u8::from(cycled.iter().any(|c| c.result != "cycled") || mux_failed) as i32
 }
 
 #[cfg(test)]
 mod tests {
-    use super::restart_gate;
+    use super::{render_restart, restart_gate, verdict};
     use crate::drift::{classify, ExeFingerprint};
     use std::path::PathBuf;
+
+    #[test]
+    fn every_unhealed_leg_fails_the_verdict() {
+        assert_eq!(verdict(0, false, false), (true, "ok"));
+        assert_eq!(
+            verdict(1, false, false),
+            (false, "FAILED"),
+            "a failed daemon leg"
+        );
+        assert_eq!(
+            verdict(0, true, false),
+            (false, "FAILED"),
+            "a failed mux leg"
+        );
+        assert_eq!(
+            verdict(0, false, true),
+            (false, "FAILED"),
+            "a spared store keeper"
+        );
+    }
+
+    #[test]
+    fn render_restart_names_both_pids_and_the_forced_path() {
+        use super::render_restart;
+        use crate::client::{RestartError, RestartOutcome};
+        let ok = Ok(RestartOutcome {
+            old_pid: Some(100),
+            new_pid: 200,
+            forced: false,
+            note: None,
+        });
+        let (out, err, code) = render_restart(&ok);
+        assert_eq!(out.as_deref(), Some("restarted: pid 100 -> 200"));
+        assert!(err.is_none());
+        assert_eq!(code, 0);
+
+        let was_down = Ok(RestartOutcome {
+            old_pid: None,
+            new_pid: 200,
+            forced: false,
+            note: None,
+        });
+        let (out, err, code) = render_restart(&was_down);
+        assert!(out
+            .unwrap()
+            .starts_with("daemon was not running; started fresh"));
+        assert!(err.is_none());
+        assert_eq!(code, 0);
+
+        let failed: Result<RestartOutcome, RestartError> = Err(RestartError::SigkillFailed {
+            pid: 5,
+            reason: "EPERM".into(),
+        });
+        let (out, err, code) = render_restart(&failed);
+        assert!(out.is_none());
+        assert!(err.unwrap().contains("fno-agents:"));
+        assert_eq!(
+            code, 1,
+            "a failed restart is loud, never a silent restarted"
+        );
+    }
+
+    #[test]
+    fn render_restart_relayed_the_note_once_on_success() {
+        use super::render_restart;
+        use crate::client::RestartOutcome;
+        let escalated = Ok(RestartOutcome {
+            old_pid: Some(1),
+            new_pid: 2,
+            forced: true,
+            note: Some("note: declining recycled pid".into()),
+        });
+        let (out, err, _code) = render_restart(&escalated);
+        assert!(out.unwrap().contains("restarted (escalated)"));
+        assert_eq!(
+            err.as_deref(),
+            Some("note: declining recycled pid"),
+            "the note rides once, on stderr"
+        );
+    }
 
     #[test]
     fn gate_swaps_only_on_measured_drift() {
