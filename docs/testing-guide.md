@@ -729,7 +729,7 @@ exit $FAILURES
 
 A test exceeded the 300-second per-test ceiling in `cli/pyproject.toml`'s pytest ini table, and pytest-timeout raised inside it. The failure IS the hang being named: before the ceiling existed, a blocked test instead stalled its smoke shard until the CI cap killed it with no test name anywhere in the log.
 
-The stack in the failure report (the `~~ Stack of MainThread ~~` block) is the evidence. It points at the call the test was blocked in, usually a wait on a subprocess, a lock, or a keeper process. Read the stack before touching the test; a rerun tells you nothing the hang did not.
+The stack in the failure report (the `~~ Stack of MainThread ~~` block) is the evidence. It points at the call the test was blocked in, usually a wait on a subprocess, a lock, or a keeper process. Read the stack before touching the test. A rerun tells you nothing the hang did not.
 
 File what the stack shows as its own finding. Two known consumers are waiting on exactly this evidence: the open node about a leaked `fno-agents-worker` keeper process surviving job cleanup, and the pr-watch work that classifies a pytest red as rerunnable, for which a named pytest failure is an input it already parses. The ceiling itself is guarded by `cli/tests/unit/test_pytest_timeout_configured.py`, so a `uv sync` cannot quietly drop it.
 
