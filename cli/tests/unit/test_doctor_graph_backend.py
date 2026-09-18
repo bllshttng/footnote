@@ -77,7 +77,7 @@ def world(tmp_path, monkeypatch):
         doctor_graph, "_keeper_gaps", lambda client: list(gaps)
     )
     monkeypatch.setattr(
-        doctor_graph, "_illegal_canonical_keepers", lambda: list(illegal_keepers)
+        doctor_graph, "_illegal_canonical_keepers", lambda *a: list(illegal_keepers)
     )
     return {
         "graph": graph,

@@ -80,29 +80,18 @@ def _flip(target: str) -> None:
     typer.echo(f"backend={target}")
 
 
-def _illegal_canonical_keepers() -> "list[tuple[int, int]]":
-    """Store keepers on the canonical graph while the store reads sqlite,
-    discovered through the watchdog's keeper lane; the status verb refuses
-    on a hit and names the collector."""
-    from pathlib import Path
+def _illegal_canonical_keepers(client, backend) -> "list[tuple[int, int]]":
+    """Store keepers on the canonical graph, read through the store's own
+    `keeper_scan` op; legality rides the backend this verb already fetched
+    plus the configured read_source. A hit is a stale binary or a
+    hand-spawn; the status verb refuses and names the collector."""
+    from fno.agents.keeper_lane import graph_read_source
 
-    from fno.agents import keeper_lane as kl
-
-    if kl.graph_read_source() != "sqlite":
-        return []
-    try:
-        from fno import paths
-
-        canonical = str(Path(paths.graph_json()).resolve())
-    except Exception:  # noqa: BLE001 - an unresolvable config owns no canonical graph
+    if graph_read_source() != "sqlite" or backend != "sqlite":
         return []
     return [
-        (obs.pid, obs.rss_kb or 0)
-        for obs in kl.discover().observations
-        if obs.lane == "store"
-        and obs.graph is not None
-        and obs.graph.resolve() == canonical
-        and kl.store_backend_of(obs.graph) == "sqlite"
+        (int(row["pid"]), int(row.get("rss_kb") or 0))
+        for row in client.request("keeper_scan", {}).get("keepers") or []
     ]
 
 
@@ -126,7 +115,7 @@ def graph_backend(
         typer.echo(
             f"backend={state.get('backend')} since={since_text} days={days}"
         )
-        illegal = _illegal_canonical_keepers()
+        illegal = _illegal_canonical_keepers(client, state.get("backend"))
         for pid, rss_kb in illegal:
             gb = rss_kb / (1024 * 1024)
             typer.echo(

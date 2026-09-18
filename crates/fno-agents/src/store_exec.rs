@@ -5,7 +5,7 @@
 //! resident), so the leak-proof shape is one process per request. Callers
 //! build this argv; humans never type it.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -86,9 +86,69 @@ pub(crate) fn fresh_store_state(
     }
 }
 
+/// Store keeper processes holding `graph`, from the process table:
+/// `(pid, rss_kb)` per hit. The comma form of the ps arguments is load-bearing
+/// (macOS rejects the space form with silently empty output); a scan that
+/// names no keeper is the caller's legality decision to make, never this
+/// walk's.
+pub(crate) fn keeper_processes_on(graph: &std::path::Path) -> Vec<(i32, i64)> {
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-Ao", "pid=,rss=,args="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let target: PathBuf = graph.canonicalize().unwrap_or_else(|_| graph.to_path_buf());
+    let mut hits = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut fields = line.trim_start().splitn(3, char::is_whitespace);
+        let (Some(pid), Some(rss), Some(args)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if !args.split_whitespace().any(|a| a == "--store-keeper") {
+            continue;
+        }
+        let argv: Vec<&str> = args.split_whitespace().collect();
+        let mut held = false;
+        let mut it = argv.iter();
+        while let Some(a) = it.next() {
+            if *a == "--graph" {
+                held = match it.next() {
+                    Some(p) => {
+                        let candidate = std::path::PathBuf::from(*p);
+                        candidate.canonicalize().unwrap_or_else(|_| candidate) == target
+                    }
+                    None => false,
+                };
+                break;
+            }
+        }
+        if !held {
+            continue;
+        }
+        if let (Ok(pid), Ok(rss)) = (pid.parse::<i32>(), rss.parse::<i64>()) {
+            hits.push((pid, rss));
+        }
+    }
+    hits
+}
+
+/// The `keeper_scan` store op: every resident keeper holding this store's
+/// graph, with pid and RSS. The doctor's status verb reads it through the
+/// same exec transport and decides legality from the backend it already has.
+pub(crate) fn handle_keeper_scan(
+    state: &StoreState,
+) -> Result<Value, crate::graph_store::StoreError> {
+    let keepers: Vec<Value> = keeper_processes_on(&state.graph)
+        .into_iter()
+        .map(|(pid, rss_kb)| json!({"pid": pid, "rss_kb": rss_kb}))
+        .collect();
+    Ok(json!({"keepers": keepers}))
+}
+
 /// The serving half of the lane, split from stdin/stdout so it stays
 /// testable without a process.
-///
 /// No render pass here, deliberately: the Python client already renders the
 /// canonical views after a landed publish (`_finish_mutation`), so an exec
 /// render would run the pass twice for every CLI write - and a synchronous

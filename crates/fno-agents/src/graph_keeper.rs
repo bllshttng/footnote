@@ -1441,6 +1441,7 @@ pub(crate) fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         "set_backend" => handle_set_backend(state, &params),
         "backend_gate" => handle_backend_gate(state),
         "backend_status" => handle_backend_status(state),
+        "keeper_scan" => crate::store_exec::handle_keeper_scan(state),
         "parity" => handle_parity(state),
         "op" => handle_op(state, &params),
         "api" => handle_api(state, &params),
