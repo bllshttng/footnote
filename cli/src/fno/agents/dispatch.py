@@ -959,15 +959,32 @@ def _keeper_identify(sock: Path, timeout_sec: float = 10.0) -> dict:
 
 
 def _mint_thread_session_id(
-    harness: str, cwd: Path, requested: Optional[str] = None
+    harness: str,
+    cwd: Path,
+    requested: Optional[str] = None,
+    *,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+    permission_mode: Optional[str] = None,
+    yolo: bool = False,
 ) -> str:
     """The harness session id a keeper thread launches on, fixed BEFORE launch.
 
     The per-harness shapes live in :func:`fno.agents.keeper_thread.
     mint_session_id`; the caller-assigned default is here because a UUIDv4 is
-    not a harness fact.
+    not a harness fact. The launch axes ride along because a harness whose
+    mint is a real model turn (agy) launches it on the spawn's selected
+    model, effort and permission posture.
     """
-    minted = mint_session_id(harness, cwd, requested)
+    minted = mint_session_id(
+        harness,
+        cwd,
+        requested,
+        model=model,
+        effort=effort,
+        permission_mode=permission_mode,
+        yolo=yolo,
+    )
     return minted if minted is not None else str(uuid.uuid4())
 
 
@@ -1063,7 +1080,13 @@ def _lane_b_thread_spawn(
             )
 
         session_id = _mint_thread_session_id(
-            harness, cwd, requested=resume_session_id
+            harness,
+            cwd,
+            requested=resume_session_id,
+            model=model,
+            effort=effort,
+            permission_mode=permission_mode,
+            yolo=yolo,
         )
         try:
             argv = render_session_argv(harness, "interactive_create", session_id)

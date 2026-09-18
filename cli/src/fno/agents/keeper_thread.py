@@ -62,7 +62,16 @@ def _trust_agy_folder(cwd: Path) -> bool:
     return _ensure_agy_folder_trusted(cwd)
 
 
-def mint_session_id(harness: str, cwd: Path, requested: Optional[str]) -> Optional[str]:
+def mint_session_id(
+    harness: str,
+    cwd: Path,
+    requested: Optional[str],
+    *,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+    permission_mode: Optional[str] = None,
+    yolo: bool = False,
+) -> Optional[str]:
     """The harness-minted id for a keeper thread, or ``None`` for the
     caller-assigned default.
 
@@ -70,7 +79,8 @@ def mint_session_id(harness: str, cwd: Path, requested: Optional[str]) -> Option
     the mint itself is per-harness code, so the two are checked against each
     other below. Either way the id exists before any worker starts. A requested
     id (``spawn --resume``) is VALIDATED, never minted: a truncated one names a
-    rival conversation.
+    rival conversation. The agy mint is a real model turn, so it carries the
+    spawn's selected launch axes rather than the harness defaults.
     """
     if harness == "cursor-agent":
         from fno.agents.harnesses.cursor_agent import _require_chat_id, create_chat
@@ -84,7 +94,13 @@ def mint_session_id(harness: str, cwd: Path, requested: Optional[str]) -> Option
         # The mint runs a real turn in the spawn's own cwd, so an untrusted
         # folder would put a modal in front of the mint too.
         _trust_agy_folder(Path(cwd))
-        return create_conversation(cwd)
+        return create_conversation(
+            cwd,
+            model=model,
+            effort=effort,
+            permission_mode=permission_mode,
+            yolo=yolo,
+        )
     from fno.agents.harness_map import capabilities
 
     binding = capabilities(harness).get("session_binding") or {}
@@ -115,19 +131,18 @@ def complete_launch_argv(
     """The declared create form plus the axes this harness's PANE arm appends.
     One ORDER serves every lane: flag order is not how a binary launches."""
     from fno.agents.dispatch import DispatchAskError
-    from fno.agents.mux_spawn import effort_tokens, permission_pane_tokens
+    from fno.agents.mux_spawn import effort_tokens
     from fno.agents.writable_dirs import add_dir_tokens, worker_writable_dirs
 
     arm = keeper_arm(harness)
     if arm is None:
         return argv
-    bypass = arm.get("bypass_flag")
-    if arm.get("bypass_always") and bypass:
-        argv = [*argv, bypass]
-    if permission_mode:
-        argv = [*argv, *permission_pane_tokens(harness, permission_mode)]
-    elif yolo and bypass and not arm.get("bypass_always"):
-        argv = [*argv, bypass]
+    # The bypass/mode decision is the Rust owner's (agy_launch.keeper_posture):
+    # an explicit mode REPLACES an always-on bypass instead of stacking, the
+    # lane default is the row's bypass posture, and the answer names what ran.
+    from fno.agents.spawn_axes_client import keeper_posture
+
+    argv = [*argv, *keeper_posture(harness, "thread", permission_mode, yolo)]
     if arm.get("takes_model") and model:
         argv = [*argv, "--model", model]
     if arm.get("takes_effort") and effort:
