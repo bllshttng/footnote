@@ -18,7 +18,6 @@ struct Scratch {
     _guard: MutexGuard<'static, ()>,
     root: PathBuf,
     conf: PathBuf,
-    state: PathBuf,
 }
 
 fn tmp(name: &str) -> PathBuf {
@@ -86,7 +85,6 @@ fn scratch(name: &str) -> Scratch {
         _guard: guard,
         root,
         conf,
-        state,
     }
 }
 

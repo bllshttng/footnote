@@ -92,6 +92,7 @@ resolver	crates/fno-agents/src/loopcheck.rs	3159	fn best_effort_notify(title: &s
 resolver	crates/fno-agents/src/loopcheck.rs	7567	pub(crate) fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
 resolver	crates/fno-agents/src/loopcheck.rs	7964	pub(crate) fn decide_with_payload(
 resolver	crates/fno-agents/src/loopcheck.rs	10245	fn build_block_reason(
+resolver	crates/fno-agents/src/opencode_install.rs	61	fn resolve_source(cwd: &Path) -> Result<PathBuf, String> {
 resolver	crates/fno-agents/src/operator_notice.rs	33	pub fn notify_operator(title: &str, body: &str, pointer: Option<&str>) -> bool {
 resolver	crates/fno-agents/src/operator_notice.rs	85	pub fn notify_operator_confirmed(title: &str, body: &str, pointer: Option<&str>) -> bool {
 resolver	crates/fno-agents/src/plugin_install.rs	158	fn build_stage(source_root: &Path, stage_parent: &Path) -> Result<(PathBuf, usize), String> {
