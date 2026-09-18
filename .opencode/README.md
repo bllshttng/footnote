@@ -12,8 +12,13 @@ for task delegation, identity, and agent registration.
 | `fno-orchestrator.md` | The orchestrator system prompt injected at session start. |
 | `agents/{explore,oracle,librarian}.md` | Three native opencode agents, auto-loaded from `.opencode/agents/`. |
 | `skills/` | Symlink farm: `<name> -> ../../skills/<name>` for every shipped skill. opencode scans `.opencode/skills/`, never the repo-root `skills/`, so these tracked links are what makes footnote's skills discoverable on a fresh clone (and in any worktree - the links are relative). |
-| `commands/{target,think,review,fix,pr}.md` | The five advertised verbs as opencode slash commands (`/target "add OAuth login"`). Each stub loads the matching skill and passes `$ARGUMENTS` through. `/target` is also what the stop-hook bridge's `/target --resume` re-drive resolves against. |
 | `tests/fno.test.ts` | `bun test` unit coverage for the pure helpers + task tool. |
+
+The repository used to carry its own `.opencode/commands/` directory: five
+bare-named stubs (`target`, `think`, `review`, `fix`, `pr`) that existed in no
+other project and disagreed with every renderer (`/fno:target` was asked for,
+`target` was what existed). The global install now generates the correct
+`fno:<verb>.md` names everywhere, this repository included.
 
 ## What it does (and what opencode does natively)
 
@@ -46,6 +51,18 @@ FNO_OPENCODE=1 opencode
 ```
 
 With `FNO_OPENCODE` unset, the plugin registers nothing.
+
+## Global install (every project)
+
+The command, agent and skill catalogs come from one supported install, not from
+this repository: `fno config plugin install opencode` writes generated
+`fno:<verb>` commands, `fno:<name>` agents, the skill trees, and the stop
+bridge into `~/.config/opencode/` (or `$OPENCODE_CONFIG_DIR`), records every
+path in a manifest, and refuses to overwrite a file footnote did not write.
+Uninstall is `fno-agents plugin-install opencode --uninstall`; it removes only
+manifest paths whose bytes still match, keeps and names anything you edited,
+and exits 3 when the uninstall was partial. `fno doctor` reports what is
+installed versus what the catalogs actually load, by name.
 
 ## Full cutover (make fno the sole orchestration plugin)
 

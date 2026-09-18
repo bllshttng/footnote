@@ -2564,23 +2564,8 @@ def _emit_human(
             "fno doctor: opencode is set up but its footnote plugin is missing; "
             "re-run `fno config setup` to install it."
         )
-    elif isinstance(oc, dict):
-        # The opencode leg's receipt: name the difference, not the word
-        # installed. Partial names what never loaded; a legacy bridge-only
-        # machine learns what the bridge never carried.
-        status = oc.get("status")
-        if status == "partial":
-            names = ", ".join(str(n) for n in (oc.get("missing") or []))
-            out(
-                "fno doctor: opencode surface is PARTIAL: installed but not loaded: "
-                f"{names}; re-run `fno config plugin install opencode`."
-            )
-        elif status == "absent" and oc.get("bridge_present"):
-            out(
-                "fno doctor: opencode carries only the legacy stop bridge; the "
-                "fno: commands, agents and skills are not installed; re-run "
-                "`fno config plugin install opencode`."
-            )
+    elif isinstance(oc, str):
+        out(f"fno doctor: opencode {oc}")
     _emit_codex_context_window(result, out=out)
 
     dupes = surf.get("codex_marketplace_duplicates") or []
@@ -3748,10 +3733,25 @@ def _harness_surface_report() -> dict[str, Any]:
             )
             if err is None and isinstance(receipt, dict):
                 status = receipt.get("status")
-                if status == "partial" or (status == "absent" and receipt.get("bridge_present")):
-                    report["opencode"] = receipt
+                # The message is built here so the printer stays string-only:
+                # partial names what never loaded; a legacy bridge-only
+                # machine learns what the bridge never carried.
+                if status == "partial":
+                    names = ", ".join(str(n) for n in (receipt.get("missing") or []))
+                    report["opencode"] = (
+                        "surface is PARTIAL: installed but not loaded: "
+                        + names
+                        + "; re-run `fno config plugin install opencode`."
+                    )
                 elif status == "absent":
-                    report["opencode"] = "missing"
+                    if receipt.get("bridge_present"):
+                        report["opencode"] = (
+                            "carries only the legacy stop bridge; the fno: "
+                            "commands, agents and skills are not installed; "
+                            "re-run `fno config plugin install opencode`."
+                        )
+                    else:
+                        report["opencode"] = "missing"
     except Exception:
         pass
 
