@@ -301,14 +301,12 @@ mod tests {
         assert_eq!(rows.len(), 1, "the gauge is stored");
         assert_eq!(rows[0].retention_class, "ephemeral");
         assert!(
-            !path
-                .with_name(
-                    path.file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default()
-                        + fno_event_store::EPHEMERAL_SUFFIX
-                )
-                .exists(),
+            !PathBuf::from(format!(
+                "{}{}",
+                path.display(),
+                fno_event_store::EPHEMERAL_SUFFIX
+            ))
+            .exists(),
             "the sibling journal is never created"
         );
     }
@@ -328,14 +326,12 @@ mod tests {
         assert_eq!(rows[0].r#type, "operator_decision");
         assert_eq!(rows[0].retention_class, "durable");
         assert!(
-            !path
-                .with_name(
-                    path.file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default()
-                        + fno_event_store::EPHEMERAL_SUFFIX
-                )
-                .exists(),
+            !PathBuf::from(format!(
+                "{}{}",
+                path.display(),
+                fno_event_store::EPHEMERAL_SUFFIX
+            ))
+            .exists(),
             "non-ephemeral emit created no sibling"
         );
     }
