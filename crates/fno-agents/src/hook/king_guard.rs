@@ -296,27 +296,13 @@ fn write_targets(command: &str) -> Vec<String> {
                 targets.push(tok.clone());
             }
         } else if is_redirect(tok) {
+            // `lex` emits redirects as their own tokens (`2>`, `>`, `>>`,
+            // `>&`, `&>`, `>|`, `>`!), so every shape here just arms `nxt`
+            // and the next word is judged as the redirect target.
             let rest = tok.trim_start_matches(|c: char| c.is_ascii_digit());
-            if let Some(stripped) = rest.strip_prefix("&>") {
-                if stripped.is_empty() {
-                    nxt = true;
-                } else {
-                    targets.push(stripped.to_string());
-                }
-            } else if rest == ">&" {
+            let plain = rest.strip_prefix('&').unwrap_or(rest);
+            if rest == "&>" || matches!(plain, ">" | ">>" | ">|" | ">!" | ">&") {
                 nxt = true;
-            } else {
-                let plain = rest.trim_start_matches('&');
-                if matches!(plain, ">" | ">>" | ">|" | ">!") {
-                    nxt = true;
-                } else {
-                    let body = plain
-                        .trim_start_matches('>')
-                        .trim_end_matches([';', '|', '&']);
-                    if !body.is_empty() && !is_fd(body) {
-                        targets.push(body.to_string());
-                    }
-                }
             }
         } else if val {
             val = false;
@@ -366,6 +352,10 @@ fn write_targets(command: &str) -> Vec<String> {
 fn lex(command: &str) -> Option<Vec<String>> {
     let mut toks: Vec<String> = Vec::new();
     let mut cur = String::new();
+    // Glued `(`/`)` inside a word: an open command substitution survives a
+    // whitespace split (`$(pick x)` lexes as `$(pick` + `x)`), so a depth
+    // counter, not the current word, decides whether `)` is literal.
+    let mut subst = 0usize;
     let mut chars = command.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
@@ -419,12 +409,14 @@ fn lex(command: &str) -> Option<Vec<String>> {
             }
             '(' | ')' => {
                 // Parens are operators at a word boundary; inside a word
-                // they are literal only while a `$(...)` substitution is
-                // open, so `$(mktemp)` stays one word.
+                // they are literal while a `$(...)` substitution is open,
+                // so `$(mktemp)` stays one word.
                 if c == '(' && !cur.is_empty() {
                     cur.push(c);
-                } else if c == ')' && cur.contains('(') {
+                    subst += 1;
+                } else if c == ')' && subst > 0 {
                     cur.push(c);
+                    subst -= 1;
                 } else {
                     if !cur.is_empty() {
                         toks.push(std::mem::take(&mut cur));
@@ -781,6 +773,10 @@ mod tests {
         assert_eq!(targets("(cd /tmp && mv a b)"), vec!["b"]);
         // Command substitution stays one word: no phantom operand.
         assert_eq!(targets("cp $(mktemp) /tmp/d"), vec!["/tmp/d"]);
+        // An open substitution survives a whitespace split: the real
+        // destination binds, never a fragment inside `$( )`.
+        assert_eq!(targets("mv $(pick_build x) /tmp/out"), vec!["/tmp/out"]);
+        assert_eq!(targets("mv $(a $(b) c) /tmp/z"), vec!["/tmp/z"]);
     }
 
     #[test]
