@@ -230,7 +230,7 @@ pub(super) async fn spawn_codex_thread_lane(
         "agent_spawned",
         &crate::spawn_edge::birth_event(
             name,
-            &crate::state::Lineage::from_request(&req.params),
+            &crate::codex_thread_entry::thread_lineage(&req.params, provenance),
             json!({
                 "provider": "codex",
                 "harness": "codex",
