@@ -222,3 +222,48 @@ fn keeper_readopt_unlinks_a_socket_with_no_live_keeper_and_names_it() {
         "no pane is minted for a stale socket"
     );
 }
+
+#[test]
+fn take_adopted_for_slot_binds_by_birth_pane_id_once_only() {
+    // The SHELL-slot restart join: the stored leaf's pane id (globally
+    // monotonic, re-adopted at birth) binds the adoptee to its own leaf.
+    // A stranger id never joins, and the join is once-only.
+    let Some(bin) = keeper_test_bin() else {
+        eprintln!(
+            "SKIPPING take_adopted_for_slot_binds_by_birth_pane_id_once_only: \
+                 build crates/fno-agents first (no sibling fno-agents-worker binary)"
+        );
+        return;
+    };
+    let dir = crate::proto::mux_dir().join("panes");
+    std::fs::create_dir_all(&dir).unwrap();
+    let sock = dir.join("kt-5.sock");
+    let _ = std::fs::remove_file(&sock);
+    let keeper = spawn_keeper_for_test(&bin, &sock, &["sleep", "300"]);
+    let bound = Instant::now();
+    while !sock.exists() {
+        assert!(
+            bound.elapsed() < Duration::from_secs(10),
+            "keeper never bound its socket"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let mut core = empty_core();
+    core.session_name = "kt".to_string();
+    core.keeper_readopt();
+    assert_eq!(core.keeper_adopted.len(), 1, "the keeper pane is staged");
+    assert_eq!(core.keeper_adopted[0].pane, 5, "adopted at the birth id");
+
+    assert_eq!(
+        core.take_adopted_for_slot(9),
+        None,
+        "a stranger birth id never joins"
+    );
+    assert_eq!(
+        core.take_adopted_for_slot(5),
+        Some(5),
+        "the stored leaf's birth id joins the adoptee"
+    );
+    assert_eq!(core.take_adopted_for_slot(5), None, "the join is once-only");
+}

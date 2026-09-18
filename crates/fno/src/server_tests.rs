@@ -8948,6 +8948,7 @@ fn empty_core() -> Core {
         pending_thread_reply: None,
         keeper_adopted: Vec::new(),
         shell_rc_dirs: std::collections::HashMap::new(),
+        portal_session_guards: std::collections::BTreeMap::new(),
     }
 }
 

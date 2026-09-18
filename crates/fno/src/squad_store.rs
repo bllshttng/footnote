@@ -2611,7 +2611,7 @@ mod tests {
                             children: vec![
                                 LayoutTreeChild {
                                     weight: 0.5,
-                                    tree: LayoutTreeSpec::Slot("p1".into()),
+                                    tree: crate::proto::LayoutTreeSpec::Slot("p1".into()),
                                 },
                                 LayoutTreeChild {
                                     weight: 0.5,
@@ -2628,18 +2628,21 @@ mod tests {
                     binding: LayoutBinding::Fno("aaaaaaaa".into()),
                     cwd: None,
                     portal: None,
+                    pane_id: None,
                 },
                 LayoutSlot {
                     name: "p1".into(),
                     binding: LayoutBinding::Shell,
                     cwd: None,
                     portal: None,
+                    pane_id: None,
                 },
                 LayoutSlot {
                     name: "p2".into(),
                     binding: LayoutBinding::Shell,
                     cwd: None,
                     portal: None,
+                    pane_id: None,
                 },
             ],
             focus: Some("p1".into()),
@@ -2715,12 +2718,13 @@ mod tests {
         let s = Scratch::new("no-slot-cwd");
         let tree = StoredTabTree {
             tab_name: None,
-            tree: LayoutTreeSpec::Slot("p1".into()),
-            slots: vec![LayoutSlot {
+            tree: crate::proto::LayoutTreeSpec::Slot("p1".into()),
+            slots: vec![crate::proto::LayoutSlot {
                 name: "p1".into(),
-                binding: LayoutBinding::Shell,
+                binding: crate::proto::LayoutBinding::Shell,
                 cwd: None,
                 portal: None,
+                pane_id: None,
             }],
             focus: None,
         };
@@ -2767,7 +2771,9 @@ mod tests {
             slot.portal,
             Some(PortalSlot {
                 index: 1,
-                row: "deadbee1".into()
+                row: "deadbee1".into(),
+                harness: None,
+                session_id: None
             }),
             "the portal slot decodes with its index and row"
         );
@@ -2779,12 +2785,13 @@ mod tests {
         // Reverse direction: a None-portal slot emits no "portal" key.
         let plain = StoredTabTree {
             tab_name: None,
-            tree: LayoutTreeSpec::Slot("p1".into()),
-            slots: vec![LayoutSlot {
+            tree: crate::proto::LayoutTreeSpec::Slot("p1".into()),
+            slots: vec![crate::proto::LayoutSlot {
                 name: "p1".into(),
-                binding: LayoutBinding::Shell,
+                binding: crate::proto::LayoutBinding::Shell,
                 cwd: None,
                 portal: None,
+                pane_id: None,
             }],
             focus: None,
         };
@@ -4996,5 +5003,32 @@ mod tests {
             "the squad row survives with zero members, not pruned in this pass"
         );
         assert!(after.squads[0].members.is_empty());
+    }
+
+    #[test]
+    fn slot_pane_id_and_portal_row_facts_roundtrip() {
+        // The restart join fields: a leaf's birth pane id and a portal
+        // slot's row harness + FULL session id ride the store additively
+        // (STORE_VERSION unchanged) and survive a write/load cycle whole.
+        let tree = StoredTabTree {
+            tab_name: Some("join".into()),
+            tree: crate::proto::LayoutTreeSpec::Slot("p1".into()),
+            slots: vec![crate::proto::LayoutSlot {
+                name: "p1".into(),
+                binding: crate::proto::LayoutBinding::Shell,
+                cwd: Some("/repo".into()),
+                portal: Some(crate::proto::PortalSlot {
+                    index: 2,
+                    row: "deadbee1".into(),
+                    harness: Some("codex".into()),
+                    session_id: Some("01a0f1ce-1111-4c1e-8a1c-2d3e4f5a6b7c".into()),
+                }),
+                pane_id: Some(42),
+            }],
+            focus: Some("p1".into()),
+        };
+        set_tab_trees("join-squad", "k-join", &["/repo".into()], &[tree.clone()], Some(0)).unwrap();
+        let loaded = load();
+        assert_eq!(loaded.squads[0].tab_trees, vec![tree], "round-trips whole");
     }
 }
