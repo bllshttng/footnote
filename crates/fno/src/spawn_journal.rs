@@ -629,7 +629,10 @@ pub(crate) fn read_journal_text_at(live: &std::path::Path) -> (String, Option<St
     let unreadable = |e: String| {
         (
             String::new(),
-            Some(format!("spawn receipt store unreadable at {}: {e}", live.display())),
+            Some(format!(
+                "spawn receipt store unreadable at {}: {e}",
+                live.display()
+            )),
         )
     };
     if let Err(e) = fno_event_store::import_all(live) {
