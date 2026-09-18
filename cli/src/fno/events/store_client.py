@@ -132,7 +132,11 @@ def query_rows(
 
 
 def gc_ephemeral(
-    events_path: Path, *, ttl_hours: Optional[int] = None, dry_run: bool = False
+    events_path: Path,
+    *,
+    ttl_hours: Optional[int] = None,
+    dry_run: bool = False,
+    now_ms: Optional[int] = None,
 ) -> dict[str, Any]:
     """Delete expired ephemeral rows from the store; every other class stays.
     With ``dry_run`` nothing is deleted and ``deleted`` reports what the
@@ -151,7 +155,7 @@ def gc_ephemeral(
             "malformed": 0,
             "ttl_hours": horizon,
         }
-    cutoff_ms = _now_ms() - horizon * 3_600_000
+    cutoff_ms = (now_ms if now_ms is not None else _now_ms()) - horizon * 3_600_000
     conn = sqlite3.connect(f"file:{db}?mode=rw", uri=True)
     try:
         scanned, malformed = conn.execute(
