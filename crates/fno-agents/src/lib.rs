@@ -215,6 +215,7 @@ pub mod pr_rebase;
 pub mod pr_status_facts;
 pub mod protocol;
 pub mod prove_it_verdicts;
+pub mod provenance;
 pub mod provider;
 pub mod provider_cap;
 pub mod provider_cap_verbs;
