@@ -12,6 +12,8 @@ The head is covered when the attestation chain's reviewed ranges tile `merge_bas
 
 Origin never gates. The author's own decline with a recorded reason is terminal exactly as a second session's is. The operator ruling is plain: a review is a review, two at most, and the recorded reason is the audit trail the event log already carries.
 
+A rebase rewrites every sha on the branch, and keyed to sha alone no chain can survive one. A carried tile closes that hole, and it is proved, never assumed: when no range tiles the walk, the producer asks `review_freshness` whether an in-scope attestation's pinned head is still this head by content identity, the three-dot code-diff hash with the base divided out on both sides. The verdicts that grant the carry are `fresh`, `carried_base_sync`, `carried_docs_only`, `carried_subset`, and `carried_interdiff` at zero lines. `carried_interdiff` above zero does not, because a tile asserts every shipping line was read and n lines nobody read are n lines nobody read. The row names each carry as `{head, freshness}` in `range_tiling.carried`, and `dropped` still records the sha-path loss beside it.
+
 ## The three verdict states
 
 `fno do pr coverage-check` (and the merge guard behind it) answers one of three states:
