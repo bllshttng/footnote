@@ -63,6 +63,7 @@ def world(tmp_path, monkeypatch):
     )
     config_sets: list[tuple[str, str]] = []
     gaps: list[str] = []
+    illegal_keepers: list[tuple[int, int]] = []
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
     monkeypatch.setattr(
@@ -75,11 +76,15 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(
         doctor_graph, "_keeper_gaps", lambda client: list(gaps)
     )
+    monkeypatch.setattr(
+        doctor_graph, "_illegal_canonical_keepers", lambda *a: list(illegal_keepers)
+    )
     return {
         "graph": graph,
         "tmp": tmp_path,
         "config_sets": config_sets,
         "gaps": gaps,
+        "illegal_keepers": illegal_keepers,
     }
 
 
@@ -155,6 +160,29 @@ def test_status_prints_one_gate_line_per_gap(world, capsys):
     doctor_graph.graph_backend("status")
     out = capsys.readouterr().out
     assert "gate: soak clean\n" in out, out
+
+
+def test_status_refuses_an_illegal_canonical_keeper(world, capsys):
+    """A resident store keeper on the canonical graph while the store reads
+    sqlite must refuse with the pid, its RSS, and the collector named -
+    never print a clean status line and exit 0 over a live leaker."""
+    world["illegal_keepers"].append((96904, 1_310_720))
+    with pytest.raises(typer.Exit) as excinfo:
+        doctor_graph.graph_backend("status")
+    assert excinfo.value.exit_code == 1
+    captured = capsys.readouterr()
+    assert "pid 96904" in captured.err
+    assert "1.25 GB RSS" in captured.err
+    assert "fno agents watchdog --only keeper --apply-all" in captured.err
+
+
+def test_status_exits_zero_when_no_keeper_is_illegal(world, capsys):
+    doctor_graph._flip("sqlite")
+    capsys.readouterr()
+    doctor_graph.graph_backend("status")
+    out = capsys.readouterr().out
+    assert out.startswith("backend=sqlite since=")
+    assert "refused:" not in out
 
 
 def test_gate_gaps_unions_keeper_and_negative_control_gaps(monkeypatch):

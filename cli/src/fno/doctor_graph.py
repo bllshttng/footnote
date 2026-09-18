@@ -80,6 +80,21 @@ def _flip(target: str) -> None:
     typer.echo(f"backend={target}")
 
 
+def _illegal_canonical_keepers(client, backend) -> "list[tuple[int, int]]":
+    """Store keepers on the canonical graph, read through the store's own
+    `keeper_scan` op; legality rides the backend this verb already fetched
+    plus the configured read_source. A hit is a stale binary or a
+    hand-spawn; the status verb refuses and names the collector."""
+    from fno.agents.keeper_lane import graph_read_source
+
+    if graph_read_source() != "sqlite" or backend != "sqlite":
+        return []
+    return [
+        (int(row["pid"]), int(row.get("rss_kb") or 0))
+        for row in client.request("keeper_scan", {}).get("keepers") or []
+    ]
+
+
 @graph_app.command("backend")
 def graph_backend(
     target: "str | None" = typer.Argument(None, help="sqlite, json, or status."),
@@ -100,6 +115,17 @@ def graph_backend(
         typer.echo(
             f"backend={state.get('backend')} since={since_text} days={days}"
         )
+        illegal = _illegal_canonical_keepers(client, state.get("backend"))
+        for pid, rss_kb in illegal:
+            gb = rss_kb / (1024 * 1024)
+            typer.echo(
+                f"refused: resident keeper pid {pid} holds the canonical graph "
+                f"({gb:.2f} GB RSS) while backend=sqlite; collect it: "
+                f"fno agents watchdog --only keeper --apply-all",
+                err=True,
+            )
+        if illegal:
+            raise typer.Exit(1)
         typer.echo("keepers: fno agents watchdog --only keeper")
         gaps = _keeper_gaps(client)
         if gaps:

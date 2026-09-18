@@ -169,6 +169,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_SPAWN_TRIGGER` | py | unclear: cli/src/fno/agents/dispatch.py:860 |
 | `FNO_STORE_KEEPER_DRIFT_CHECK_SECS` | rs | unclear: crates/fno-agents/src/graph_keeper.rs:654 |
 | `FNO_STORE_KEEPER_IDLE_SECS` | rs | unclear: crates/fno-agents/src/graph_keeper.rs:115 |
+| `FNO_STORE_KEEPER_RSS_KB` | py | Store keeper resident-memory bound in KiB for the watchdog's over-bound reap verdict; overrides the 2 GiB default. |
 | `FNO_STYLE_ENFORCE` | py | unclear: cli/src/fno/graph/cli.py:926 |
 | `FNO_TASK_CONTEXT_FILE` | py | Absolute path to the executing attempt's bound task-context binding; a declared value gates `fno do target init`, embeds into written handoff receipts, and rides spawn payloads (rendered natively). |
 | `FNO_TEST_FOOTPRINT_PAYLOAD` | rs | Test seam: when set, the spawn gate's footprint probe returns this payload verbatim, so gate tests pin the CPU axis instead of reading the live machine. |

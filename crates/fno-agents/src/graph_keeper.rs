@@ -59,7 +59,7 @@ pub(crate) const TAG_IDENTIFY_REPLY: u8 = 5;
 /// One request/response frame exchange bound. Sized for a large operator
 /// graph's entries array, not the daemon protocol's cap: a canonical
 /// graph.json of 11 MB answers a `read` with a same-order JSON array.
-const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 /// Parsed `--store-keeper` lane argv:
 /// `--store-keeper --sock <path> --graph <path> [--session <id>]
@@ -253,7 +253,7 @@ enum CacheKey {
 /// version token (begin's tx token), the parsed entries shared with every
 /// concurrent reader via one `Arc`, and the lazily serialized views the
 /// reply paths splice instead of re-copying the tree.
-struct CachedGraph {
+pub(crate) struct CachedGraph {
     key: CacheKey,
     version: String,
     entries: Arc<Vec<Value>>,
@@ -274,7 +274,7 @@ enum WriteLedgerState {
     Done(Value),
 }
 
-struct WriteLedgerEntry {
+pub(crate) struct WriteLedgerEntry {
     request_id: String,
     recorded_at: std::time::Instant,
     state: WriteLedgerState,
@@ -283,57 +283,57 @@ struct WriteLedgerEntry {
 /// The keeper's shared state. Writes exclude here; reads hold shared guards,
 /// so concurrent reads overlap and every read still waits out an in-flight
 /// publish rather than observing one.
-struct StoreState {
-    graph: PathBuf,
-    canonical: bool,
-    lock_timeout: Duration,
+pub(crate) struct StoreState {
+    pub(crate) graph: PathBuf,
+    pub(crate) canonical: bool,
+    pub(crate) lock_timeout: Duration,
     /// Readers share, writers exclude: read guards for handlers that only
     /// read the owned graph, write guards for the ones that publish.
-    gate: RwLock<()>,
+    pub(crate) gate: RwLock<()>,
     /// One read guard per in-flight REQUEST, held from handle_request through
     /// the reply write. Shutdown ladders on the write guard, so it cannot cut
     /// a request that is mid-publish or mid-reply (the old ladder
     /// dropped its guard before exit and a later request died mid-frame with
     /// its client reading a hangup for a write that answered ok).
-    inflight: RwLock<()>,
+    pub(crate) inflight: RwLock<()>,
     /// The parsed graph, validated by cache key on every hit. Seeded by the
     /// write path (commit/op) rather than invalidated, so a mutating fleet
     /// still hits. Never held for a corrupt/malformed/empty graph.
-    cache: RwLock<Option<Arc<CachedGraph>>>,
+    pub(crate) cache: RwLock<Option<Arc<CachedGraph>>>,
     /// The single-flight fill: one cache miss parses (or exports) while the
     /// rest re-check and hit, so a burst of concurrent cold readers costs
     /// one copy, not one copy per reader.
-    fill: Mutex<()>,
+    pub(crate) fill: Mutex<()>,
     /// Every cache-miss parse is one real file open (or db export); the
     /// counter is the cache's honest receipt (AC4's positive marker, and
     /// the PR's before/after evidence).
-    file_opens: AtomicU64,
-    snapshots: Mutex<std::collections::VecDeque<(String, Arc<Vec<Value>>)>>,
-    write_ledger: Mutex<std::collections::VecDeque<WriteLedgerEntry>>,
-    gate_metrics: Mutex<GateMetrics>,
+    pub(crate) file_opens: AtomicU64,
+    pub(crate) snapshots: Mutex<std::collections::VecDeque<(String, Arc<Vec<Value>>)>>,
+    pub(crate) write_ledger: Mutex<std::collections::VecDeque<WriteLedgerEntry>>,
+    pub(crate) gate_metrics: Mutex<GateMetrics>,
     /// The instant of the last successful publish. The render trigger reads
     /// it to debounce: the pass runs once the store has been quiet for the
     /// settle window, never per write.
-    last_write: Mutex<Option<std::time::Instant>>,
+    pub(crate) last_write: Mutex<Option<std::time::Instant>>,
     /// True while the render trigger's subprocess runs, so overlapping 1 s
     /// ticks never stack two passes.
-    render_in_flight: std::sync::atomic::AtomicBool,
+    pub(crate) render_in_flight: std::sync::atomic::AtomicBool,
     /// Consecutive render failures: drives the retry backoff, reset on the
     /// first success, so a keeper whose view pass can never run stops paying
     /// one spawn plus one durable event per second.
-    render_failures: std::sync::atomic::AtomicU32,
+    pub(crate) render_failures: std::sync::atomic::AtomicU32,
     /// The instant the trigger last RAN a pass (success or failure): the
     /// backoff measures quiet time against this, not the tick clock.
-    last_render_attempt: Mutex<Option<std::time::Instant>>,
-    events: Option<PathBuf>,
+    pub(crate) last_render_attempt: Mutex<Option<std::time::Instant>>,
+    pub(crate) events: Option<PathBuf>,
     /// The (dev, ino) of the socket path at bind time: the seat's proof.
     /// Unlinks are guarded by it, and an idle keeper whose path was rebound
     /// stands down (AC2-ERR).
-    sock_ino: Option<(u64, u64)>,
+    pub(crate) sock_ino: Option<(u64, u64)>,
     /// The build this keeper process launched from: drift is computed fresh
     /// at every Identify, and the WouldBlock arm self-retires when the
     /// binary under the keeper is rewritten while it idles.
-    startup_fp: Option<crate::drift::ExeFingerprint>,
+    pub(crate) startup_fp: Option<crate::drift::ExeFingerprint>,
 }
 
 impl StoreState {
@@ -362,7 +362,7 @@ const WAIT_BOUNDS_MS: [u64; 12] = [
     u64::MAX,
 ];
 
-struct GateMetrics {
+pub(crate) struct GateMetrics {
     started: std::time::Instant,
     started_epoch_ms: u128,
     counts: [u64; WAIT_BOUNDS_MS.len()],
@@ -372,7 +372,7 @@ struct GateMetrics {
 }
 
 impl GateMetrics {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             started: std::time::Instant::now(),
             started_epoch_ms: std::time::SystemTime::now()
@@ -815,26 +815,14 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         .map(|md| (md.dev(), md.ino()));
     let startup_fp = crate::drift::ExeFingerprint::current();
 
-    let state = Arc::new(StoreState {
-        graph: cfg.graph.clone(),
-        canonical: cfg.canonical,
-        lock_timeout: cfg.lock_timeout,
-        gate: RwLock::new(()),
-        inflight: RwLock::new(()),
-        cache: RwLock::new(None),
-        fill: Mutex::new(()),
-        file_opens: AtomicU64::new(0),
-        snapshots: Mutex::new(std::collections::VecDeque::new()),
-        write_ledger: Mutex::new(std::collections::VecDeque::new()),
-        gate_metrics: Mutex::new(GateMetrics::new()),
-        last_write: Mutex::new(None),
-        render_in_flight: std::sync::atomic::AtomicBool::new(false),
-        render_failures: std::sync::atomic::AtomicU32::new(0),
-        last_render_attempt: Mutex::new(None),
-        events: cfg.events.clone(),
+    let state = Arc::new(crate::store_exec::fresh_store_state(
+        cfg.graph.clone(),
+        cfg.canonical,
+        cfg.lock_timeout,
+        cfg.events.clone(),
         sock_ino,
         startup_fp,
-    });
+    ));
     let started_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1394,7 +1382,7 @@ fn serve_client(
     }
 }
 
-fn err_reply(id: u64, kind: &str, message: String) -> Value {
+pub(crate) fn err_reply(id: u64, kind: &str, message: String) -> Value {
     json!({"id": id, "ok": false, "error": {"kind": kind, "message": message}})
 }
 
@@ -1413,7 +1401,7 @@ fn store_err_kind(err: &StoreError) -> &'static str {
     }
 }
 
-fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
+pub(crate) fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
     let req: Value = match serde_json::from_slice(payload) {
         Ok(v) => v,
         Err(e) => return err_reply(0, "malformed_frame", format!("request is not JSON: {e}")),
@@ -1453,6 +1441,7 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         "set_backend" => handle_set_backend(state, &params),
         "backend_gate" => handle_backend_gate(state),
         "backend_status" => handle_backend_status(state),
+        "keeper_scan" => crate::store_exec::handle_keeper_scan(state),
         "parity" => handle_parity(state),
         "op" => handle_op(state, &params),
         "api" => handle_api(state, &params),

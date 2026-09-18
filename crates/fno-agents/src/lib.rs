@@ -257,6 +257,7 @@ pub mod spawn_payload;
 pub mod spawn_transaction;
 pub mod state;
 pub mod state_path;
+pub mod store_exec;
 pub mod stream_worker;
 pub mod stuck_work;
 pub mod subprocess_ask;

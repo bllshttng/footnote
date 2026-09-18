@@ -47,185 +47,6 @@ def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
 # -- tests --
 
 
-def test_the_reaper_reaps_a_keeper_it_can_name(tmp_path, monkeypatch):
-    """Positive control for the spawn ledger (the zero-filter rule).
-
-    A filter that reports zero proves nothing unless it can first name a
-    target it DID see. This test makes the ledger name a real keeper pid,
-    asserts that pid is alive before the reap, and asserts the same pid is
-    dead after it - by number, never by absence.
-    """
-    from fno.graph import store as store_mod
-
-    # Clear the field first: earlier tests in this worker process spawned
-    # keepers too, and the session's 5s idle bound (conftest) may already
-    # have reaped them. The control then names ITS OWN spawn - a dead pid
-    # left in the ledger is the clock's prior work, not a reaper miss.
-    assert store_mod.reap_spawned_keepers(timeout=15.0) == []
-    # Idle exit disabled for this control's keeper: the reaper, not the
-    # clock, must be what kills it.
-    monkeypatch.setenv("FNO_STORE_KEEPER_IDLE_SECS", "0")
-
-    graph = _make_graph(tmp_path, [{"id": "ab-reap", "title": "reap me"}])
-    _client = store_mod._client_for(graph)  # spawns the keeper on demand
-    keeper = _client.request("read", {"strict": False, "keep_malformed": False})
-    assert keeper["entries"], "keeper must answer before the reap control"
-
-    ledger = store_mod._SPAWNED_KEEPERS
-    assert ledger, "a spawned keeper must be addressable in the spawn ledger"
-    pid = next(iter(ledger))
-    proc, _sock = ledger[pid]
-    assert proc.poll() is None, "the named keeper must be alive before the reap"
-
-    survivors = store_mod.reap_spawned_keepers(timeout=15.0)
-    assert survivors == [], f"reaper left {len(survivors)} keeper(s) alive"
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
-    assert proc.poll() is not None, "the named keeper must be dead after the reap"
-
-
-# Pids the fixture-under-test pair leaves behind for its mid-run leg. Module
-# global because the assertion that matters spans a fixture boundary: xdist
-# workers are long-lived, so the pid list survives from one test to the next
-# inside the same worker process.
-_ZOMBIE_PROBE_PIDS: list[int] = []
-
-
-def _zombie_children_of_this_process() -> set[int]:
-    """Zombie pids among this process's direct children, read from psutil.
-
-    psutil, not a shell pipeline: a shell `ps | wc -l` gave three different
-    answers in four minutes on the machine that measured this defect,
-    including 31 when the truth was 1800.
-    """
-    import psutil
-
-    me = psutil.Process()
-    return {
-        child.pid
-        for child in me.children(recursive=False)
-        if child.status() == psutil.STATUS_ZOMBIE
-    }
-
-
-def _wait_until_zombies(pids: list[int], timeout: float = 15.0) -> set[int]:
-    """Wait (polling ps, never the Popen handles) until every pid is a zombie.
-
-    poll() would reap the child and erase the evidence, so the Popen handles
-    must stay untouched until the drain under test. Keepers read
-    FNO_STORE_KEEPER_IDLE_SECS at spawn, so the caller pins it short first.
-    """
-    deadline = time.monotonic() + timeout
-    zombies: set[int] = set()
-    wanted = set(pids)
-    while time.monotonic() < deadline:
-        zombies = _zombie_children_of_this_process() & wanted
-        if zombies == wanted:
-            return zombies
-        time.sleep(0.25)
-    return zombies
-
-
-def _spawn_idle_keepers(tmp_path: Path, count: int) -> list[int]:
-    from fno.graph import store as store_mod
-
-    pids = []
-    for i in range(count):
-        graph = tmp_path / f"drain-{i}.json"
-        graph.write_text('{"entries": []}\n')
-        pids.append(store_mod._spawn_keeper(graph).pid)
-    return pids
-
-
-def _assert_reaped_or_reused(pids: list[int]) -> None:
-    """Every pid must have LEFT the zombie state: collected out of the table,
-    or its pid number already reused by a live process on a fast-cycling host.
-    Either proves the drain reaped it - a pid still answering zombie IS the
-    unreaped child. (A bare NoSuchProcess assert would false-fail on reuse.)"""
-    import psutil
-
-    for pid in pids:
-        try:
-            status = psutil.Process(pid).status()
-        except psutil.NoSuchProcess:
-            continue
-        assert status != psutil.STATUS_ZOMBIE, (
-            f"pid {pid} still answers zombie; the drain did not reap it"
-        )
-
-
-def test_exited_keepers_are_zombies_until_drained(tmp_path, monkeypatch):
-    """Positive control for the mid-run zombie defect and its drain.
-
-    A keeper that self-exits stays in the process table as a zombie under
-    this worker's pid until someone collects its status; before the drain
-    existed, the only collector was the session-scoped teardown, so a run
-    accumulated ~52 zombies per minute under four xdist workers. Measured by
-    number, mid-run: three keepers must appear as zombies BEFORE any drain,
-    and drain_exited_keepers() must reap exactly those three.
-    """
-    from fno.graph import store as store_mod
-
-    monkeypatch.setenv("FNO_STORE_KEEPER_IDLE_SECS", "1")
-    pids = _spawn_idle_keepers(tmp_path, 3)
-    zombies = _wait_until_zombies(pids)
-    assert zombies == set(pids), (
-        f"exited keepers must appear as zombies under this pid before any "
-        f"drain; saw {sorted(zombies)} of {sorted(pids)}"
-    )
-
-    reaped = store_mod.drain_exited_keepers()
-    # >= not ==: the keeper ledger is shared with every earlier test on this
-    # worker, so the drain legitimately collects their exited stragglers too.
-    # The strong claim is the line below: THIS test's three are all collected.
-    assert reaped >= len(pids), f"drain must reap this test's keepers; reaped {reaped}"
-    _assert_reaped_or_reused(pids)
-
-
-@pytest.mark.xdist_group(name="keeper-zombie")
-def test_spawned_zombies_persist_into_next_test_without_drain(tmp_path, monkeypatch):
-    """Spawn leg of the mid-run pair: leave exited keepers behind, drain none.
-
-    The body deliberately does NOT reap; the autouse drain fixture under test
-    is what should collect these before the companion assertion runs. On code
-    without the fixture the companion fails naming these pids, which is the
-    defect reproduced live.
-    """
-    monkeypatch.setenv("FNO_STORE_KEEPER_IDLE_SECS", "1")
-    pids = _spawn_idle_keepers(tmp_path, 3)
-    zombies = _wait_until_zombies(pids)
-    assert zombies == set(pids), (
-        f"keepers must be exited zombies before this test ends; saw "
-        f"{sorted(zombies)} of {sorted(pids)}"
-    )
-    _ZOMBIE_PROBE_PIDS.clear()
-    _ZOMBIE_PROBE_PIDS.extend(pids)
-
-
-@pytest.mark.xdist_group(name="keeper-zombie")
-def test_drain_fixture_reaps_zombies_between_tests_midrun():
-    """Mid-run leg of the pair: the previous test's zombies must be gone.
-
-    The session-scoped reaper has NOT run yet - this assertion fires between
-    tests, exactly where the defect lived. No recorded pid may still answer
-    zombie (reaped, not merely SIGTERMed). Pair runs on one xdist worker via
-    the keeper-zombie group; alone it would assert nothing, so it skips.
-    """
-    if not _ZOMBIE_PROBE_PIDS:
-        pytest.skip("companion spawn leg did not run in this worker")
-    still_zombie = [
-        pid
-        for pid in _ZOMBIE_PROBE_PIDS
-        if pid in _zombie_children_of_this_process()
-    ]
-    assert not still_zombie, (
-        f"{len(still_zombie)} keeper zombie(s) survived past the test "
-        f"boundary mid-run (pids {still_zombie}); the autouse drain fixture "
-        f"must reap between tests, not only at session teardown"
-    )
-    _assert_reaped_or_reused(_ZOMBIE_PROBE_PIDS)
-
-
 def test_locked_by_normalized_from_legacy_session_id():
     """US3: a pre-rename node (session_id only) gets locked_by on load, mirrored."""
     e = {"id": "ab-11112222", "session_id": "sess-old", "plan_path": "p.md"}
@@ -1087,6 +908,7 @@ def test_read_nodes_by_ids_returns_none_when_the_keeper_predates_the_verb(tmp_pa
         raise RuntimeError("store error (invalid): unknown store method \"read_ids\"")
 
     monkeypatch.setattr(store_mod._Keeper, "request", stale_request)
+    monkeypatch.setattr(store_mod._ExecClient, "request", stale_request)
     path = _make_graph(tmp_path, [{"id": "ab-1", "title": "One"}])
     assert store_mod.read_nodes_by_ids(path, ["ab-1"]) is None
 
@@ -1115,6 +937,7 @@ def test_run_op_derives_the_rung_map_from_the_light_plan_refs_read(tmp_path, mon
         raise AssertionError(f"unexpected keeper method {method}")
 
     monkeypatch.setattr(store_mod._Keeper, "request", fake_request)
+    monkeypatch.setattr(store_mod._ExecClient, "request", fake_request)
     monkeypatch.setattr(store_mod, "_finish_mutation", lambda path, outcome: None)
     result = store_mod._run_op(
         tmp_path / "graph.json", "append_progress_note",
@@ -1144,6 +967,7 @@ def test_run_op_falls_back_to_begin_when_the_keeper_predates_the_verb(tmp_path, 
         raise AssertionError(f"unexpected keeper method {method}")
 
     monkeypatch.setattr(store_mod._Keeper, "request", stale_request)
+    monkeypatch.setattr(store_mod._ExecClient, "request", stale_request)
     monkeypatch.setattr(store_mod, "_finish_mutation", lambda path, outcome: None)
     result = store_mod._run_op(
         tmp_path / "graph.json", "append_progress_note",
@@ -1325,43 +1149,35 @@ def test_the_spent_budget_raises_the_existing_error_unchanged(tmp_path, monkeypa
     )
     assert len(delays) == 4, "the fifth conflict raises without a trailing sleep"
 
-def test_seat_owned_spawn_polls_for_the_incumbent(tmp_path, monkeypatch):
-    """x-f188 AC2-EDGE: the spawned keeper exits 3 (seat owned by an
-    incumbent); _client_for keeps polling and rides the incumbent instead of
-    raising spawn_failed."""
-    import socket as _socket
-    import threading
-    import time as _time
-
+def test_dead_socket_serves_by_exec_and_never_spawns(tmp_path, monkeypatch):
+    """The spawn-needed branch execs a one-shot lane: no resident keeper is
+    minted, so nothing holds the store to grow on. A live incumbent is still
+    preferred, and the exec client answers typed helpers."""
     graph = tmp_path / "graph.json"
     graph.write_text('{"entries": []}')
-    sock = store_mod.store_socket_for(graph)
+    monkeypatch.setattr(
+        store_mod,
+        "_worker_binary",
+        lambda: tmp_path / "absent-worker",
+    )
+    client = store_mod._client_for(graph)
+    assert isinstance(client, store_mod._ExecClient)
+    assert not hasattr(client, "sock"), "the exec transport opens no socket"
 
-    class _Exit3Proc:
-        returncode = 3
-        args = ("fno-agents-worker", "--store-keeper")
-
-        def poll(self):
-            return 3
-
-        def kill(self):
+    # A live incumbent still rides the socket: the connect probe answers, so
+    # _client_for returns the _Keeper without consulting the exec route.
+    class _FakeStream:
+        def close(self):
             pass
 
-    monkeypatch.setattr(store_mod, "_spawn_keeper", lambda _path: _Exit3Proc())
-
-    def incumbent():
-        _time.sleep(0.3)
-        srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-        srv.bind(str(sock))
-        srv.listen(1)
-        _time.sleep(3.0)
-        srv.close()
-
-    threading.Thread(target=incumbent, daemon=True).start()
+    monkeypatch.setattr(
+        store_mod._Keeper,
+        "_connect",
+        lambda self: _FakeStream(),
+    )
     keeper = store_mod._client_for(graph)
-    assert keeper.sock == sock
-    srv_sock = sock
-    assert srv_sock.exists()
+    assert isinstance(keeper, store_mod._Keeper)
+    assert keeper.sock == store_mod.store_socket_for(graph)
 
 
 _CHUNK_CAP = 8192
