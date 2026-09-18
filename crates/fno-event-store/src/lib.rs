@@ -509,7 +509,7 @@ pub fn extract_identity(line: &str) -> EventIdentity {
 /// source works here - rotated, live, ephemeral sibling, an agents lifecycle
 /// journal, or shell-writer fragments - because the `row_hash` key dedupes
 /// overlap and the class comes from the event type, never the file.
-pub fn import_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, String> {
+pub(crate) fn import_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, String> {
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(FileTally::default()),
@@ -1026,7 +1026,7 @@ pub fn export_jsonl(journal: &Path, out: &Path) -> Result<u64, String> {
 /// bypassing the daily gate. Returns the deleted count. `durable`, `gate`,
 /// rejected, and migration rows never leave.
 pub fn prune_ephemeral_now(journal: &Path, now_ms: i64) -> Result<u64, String> {
-    let mut conn = open_store(&store_path(journal))?;
+    let conn = open_store(&store_path(journal))?;
     let cutoff = now_ms.saturating_sub(MINIMUM_EPHEMERAL_TTL_HOURS * HOUR_MS);
     let n = conn
         .execute(

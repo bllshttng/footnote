@@ -43,10 +43,9 @@ pub(crate) fn scan_unrecorded_decisions(
         std::collections::HashSet::new();
     let mut recorded: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in journals {
-        // SQL authority: committed rows in commit order (x-0915 cutover).
         let Ok(content) = crate::loopcheck::event_lines(path).map(|l| l.join("\n")) else {
             continue;
-        };
+        }; // committed rows, commit order (x-0915)
         for line in content.lines() {
             if !(line.contains("operator_question") || line.contains("operator_decision")) {
                 continue;
@@ -131,10 +130,9 @@ pub(crate) fn scan_open_holds(
     let mut closed: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut blocked_once: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in journals {
-        // SQL authority: committed rows in commit order (x-0915 cutover).
         let Ok(content) = crate::loopcheck::event_lines(path).map(|l| l.join("\n")) else {
             continue;
-        };
+        }; // committed rows, commit order (x-0915)
         for line in content.lines() {
             if !(line.contains("operator_question") || line.contains("held_on_question")) {
                 continue;
