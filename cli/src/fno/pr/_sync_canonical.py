@@ -14,10 +14,10 @@ from typing import Any
 
 import typer
 
-# The sync runs a 600s shell plus gh probes; the door must outlast the verb's
-# worst case, not report it unreachable. The read-only actions are bounded by
-# their gh probes plus a fetch.
-_TIMEOUT_SYNC_S = 720.0
+# The sync runs a 600s shell plus gh probes; the door must outlast the
+# verb's worst case with headroom, not report it unreachable. The read-only
+# actions are bounded by their gh probes plus a fetch.
+_TIMEOUT_SYNC_S = 900.0
 _TIMEOUT_PROBE_S = 120.0
 
 

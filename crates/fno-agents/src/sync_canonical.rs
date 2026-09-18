@@ -229,9 +229,18 @@ fn push_marker_err(e: std::io::Error, stderr: &mut Vec<String>) {
 }
 
 fn parse_iso(raw: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(raw.trim())
+    let s = raw.trim();
+    DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|d| d.with_timezone(&Utc))
+        // An offset-less stamp would silently drop a merge from the sweep,
+        // the exact lie the markerless read exists to catch; read it as UTC
+        // the way the Python parser did.
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
+                .ok()
+                .map(|n| n.and_utc())
+        })
 }
 
 fn fmt_ts(ms: i64) -> String {
@@ -1763,6 +1772,14 @@ mod tests {
         assert_eq!(out.code, 7);
         assert!(out.stdout.contains("captured-out"));
         assert!(out.stderr.contains("captured-err"));
+    }
+
+    #[test]
+    fn parse_iso_reads_offset_less_stamps_as_utc() {
+        let t = parse_iso("2026-09-18T07:00:00").expect("naive stamp must parse");
+        assert_eq!(t, fixed_now() - chrono::Duration::hours(5));
+        let z = parse_iso("2026-09-18T07:00:00Z").expect("rfc3339 must parse");
+        assert_eq!(z, t);
     }
 
     #[test]
