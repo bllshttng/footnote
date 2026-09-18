@@ -573,14 +573,25 @@ class _ExecClient(_Keeper):
             argv.extend(["--events", str(_paths.project_events_json())])
             argv.append("--canonical")
         try:
-            proc = subprocess.run(
+            # Popen, not run(): the CLI test suites stub subprocess.run as
+            # their git/gh seam and would answer the store's own request with
+            # an empty rc-1 reply; Popen is the module's unstubbed primitive.
+            proc = subprocess.Popen(
                 argv,
-                input=json.dumps({"id": 1, "method": method, "params": request_params}).encode(),
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:  # the request was never sent
+            raise StoreUnavailable(STATE_SPAWN_FAILED, str(exc)) from None
+        try:
+            out, _ = proc.communicate(
+                json.dumps({"id": 1, "method": method, "params": request_params}).encode(),
                 timeout=_EXEC_TIMEOUT_S,
             )
         except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
             failure = StoreUnavailable(
                 STATE_UNREACHABLE, f"store-exec timed out after {_EXEC_TIMEOUT_S}s"
             )
@@ -589,9 +600,10 @@ class _ExecClient(_Keeper):
                     failure.state, f"{failure.detail}; the write was not confirmed"
                 ) from None
             raise failure from None
-        except OSError as exc:  # the request was never sent
+        except OSError as exc:  # the pipe broke mid-request
+            proc.kill()
+            proc.wait()
             raise StoreUnavailable(STATE_SPAWN_FAILED, str(exc)) from None
-        out = proc.stdout
         if not out:
             detail = f"store-exec exited with code {proc.returncode} and no reply"
             if is_write:
