@@ -524,6 +524,12 @@ pub struct TickTrace {
     /// installer's LaunchAgents path - the 2026-09-08 shape where a pytest
     /// tempdir registration displaced the real pr-watcher.
     pub foreign_plist: Option<String>,
+    /// The dispatch pause in force when the trace was read, `None` when
+    /// clear. Set by the live read only: a folded journal trace cannot
+    /// know whether a breaker is armed now. `DispatchPause` does not
+    /// serialize, and the trace never needs to.
+    #[serde(skip)]
+    pub pause: Option<crate::loops_pause::DispatchPause>,
 }
 
 /// Fold the newest `pr_watch_tick_attempt` / `pr_watch_tick_end` records out
@@ -626,6 +632,11 @@ pub fn foreign_plist_path(print_stdout: &str, home: &Path) -> Option<String> {
 /// untouched. A healthy tier runs no exec at all.
 pub fn read_tick_trace_live(journals: &[PathBuf], rows: &[ArmStatus], now_unix: u64) -> TickTrace {
     let mut trace = read_tick_trace(journals, now_unix);
+    // The one live pause read, taken before the tier check so a healthy
+    // tier carries the fact too (the king summary reads it there). A
+    // journal-folded trace stays pause-free.
+    trace.pause = Some(crate::loops_pause::dispatch_pause())
+        .filter(crate::loops_pause::DispatchPause::is_paused);
     let stale_launchd = rows
         .iter()
         .any(|r| r.stale && r.scheduler.as_deref() == Some(SCHED_LAUNCHD));
@@ -783,21 +794,57 @@ fn explain_inner(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: Option<&Ti
     let pm_last_ts = pm.and_then(|r| r.last_ts.clone());
     for (i, row) in rows.iter_mut().enumerate() {
         if row.stale {
-            let (cause, hint) = if pm_stale && row.scheduler.as_deref() == Some(SCHED_LAUNCHD) {
-                tick_overdue_cause(pm_last_ts.as_deref(), trace)
-            } else {
-                let cause =
-                    stale_cause(row, daemon, pm_fresh_failure, trace).unwrap_or_else(|| {
-                        if cross_arm[i] {
-                            "scheduler_down"
-                        } else {
-                            "unexplained"
+            let (mut cause, mut hint) =
+                if pm_stale && row.scheduler.as_deref() == Some(SCHED_LAUNCHD) {
+                    tick_overdue_cause(pm_last_ts.as_deref(), trace)
+                } else {
+                    let cause =
+                        stale_cause(row, daemon, pm_fresh_failure, trace).unwrap_or_else(|| {
+                            if cross_arm[i] {
+                                "scheduler_down"
+                            } else {
+                                "unexplained"
+                            }
+                            .to_string()
+                        });
+                    let hint = cause_hint(&cause, daemon);
+                    (cause, hint)
+                };
+            // An armed breaker or a hand-pause explains a whole silent
+            // tier by itself: the cause tokens that blame tick recency or
+            // a dead scheduler are wrong under it, and the pause outranks
+            // them. Real faults (foreign plist, dead daemon, timeouts)
+            // keep their cause, and an unreadable breaker stays a fault.
+            let pause = trace.and_then(|t| t.pause.as_ref());
+            if let Some(p) = pause {
+                if matches!(
+                    cause.as_str(),
+                    "tick_overdue" | "scheduler_down" | "unexplained"
+                ) {
+                    cause = p.skip_reason().to_string();
+                    hint = match p {
+                        crate::loops_pause::DispatchPause::FleetIncident { .. }
+                        | crate::loops_pause::DispatchPause::Manual { .. } => {
+                            format!(
+                                "{}; held on purpose; wait for the breaker to clear",
+                                p.detail()
+                            )
                         }
-                        .to_string()
-                    });
-                let hint = cause_hint(&cause, daemon);
-                (cause, hint)
-            };
+                        crate::loops_pause::DispatchPause::FleetIncidentUnavailable { .. } => {
+                            p.detail()
+                        }
+                        crate::loops_pause::DispatchPause::Clear => {
+                            unreachable!("a Clear pause never enters the trace")
+                        }
+                    };
+                    if !matches!(
+                        p,
+                        crate::loops_pause::DispatchPause::FleetIncidentUnavailable { .. }
+                    ) {
+                        row.stale = false;
+                    }
+                }
+            }
             if cause == "daemon_young" {
                 row.stale = false;
             }
@@ -953,6 +1000,11 @@ pub fn render_row(row: &ArmStatus) -> String {
         "FAIL"
     } else if row.cause.as_deref() == Some("daemon_young") {
         "pending"
+    } else if matches!(
+        row.cause.as_deref(),
+        Some("fleet_stop") | Some("loops_paused")
+    ) {
+        "PAUSED"
     } else {
         "ok"
     };
@@ -1040,10 +1092,15 @@ mod tests {
     use super::*;
 
     fn temp_dir() -> PathBuf {
+        // A counter joins pid+nanos: same-process tests can read the same
+        // coarse nanos on macOS, and a collided name made one test's
+        // remove_dir_all delete another test's journal mid-read.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let mut p = std::env::temp_dir();
         p.push(format!(
-            "fno-tick-ledger-{}-{}",
+            "fno-tick-ledger-{}-{}-{}",
             std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -2824,5 +2881,155 @@ mod tests {
             Some(1_788_523_200)
         );
         assert_eq!(parse_rfc3339_unix("not-a-ts"), None);
+    }
+
+    /// The AC1 shape, shared by the pause tests: four launchd arms past
+    /// 2x interval, a tick trace whose last end is phase entry, outcome
+    /// paused, and a pause fact set by hand. Tests never read or flip the
+    /// real breaker.
+    fn paused_tier_rows(now: &str) -> (PathBuf, Vec<ArmStatus>, TickTrace) {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-17T22:30:00Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    900,
+                ),
+                tick_envelope(
+                    "2026-09-17T22:30:00Z",
+                    "watchdog",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    900,
+                ),
+                tick_envelope(
+                    "2026-09-17T22:30:00Z",
+                    "pr_watch_merge",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-17T22:30:00Z",
+                    "notify_watch",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    300,
+                ),
+            ],
+        );
+        let now_unix = parse_rfc3339_unix(now).unwrap();
+        let rows = read_arms(&[journal.clone()], now_unix);
+        let trace = TickTrace {
+            end_ts_unix: Some(parse_rfc3339_unix("2026-09-17T23:34:07Z").unwrap()),
+            end_phase: Some("entry".to_string()),
+            end_outcome: Some("paused".to_string()),
+            pause: Some(crate::loops_pause::DispatchPause::FleetIncident {
+                generation: 5,
+                reason: "two cargo runs".to_string(),
+            }),
+            ..TickTrace::default()
+        };
+        (journal, rows, trace)
+    }
+
+    #[test]
+    fn an_armed_breaker_reads_paused_and_names_its_generation() {
+        let (dir, mut rows, trace) = paused_tier_rows("2026-09-17T23:40:00Z");
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        for arm in ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
+            let row = rows.iter().find(|r| r.arm == arm).unwrap();
+            assert!(!row.stale, "{arm} is held on purpose, line: {}", row.line);
+            assert_eq!(
+                row.cause.as_deref(),
+                Some("fleet_stop"),
+                "line: {}",
+                row.line
+            );
+            assert!(row.line.contains("PAUSED"), "line: {}", row.line);
+            assert!(row.line.contains("generation 5"), "line: {}", row.line);
+            assert!(row.line.contains("two cargo runs"), "line: {}", row.line);
+            assert!(
+                !row.line.contains("tick_overdue"),
+                "{arm} must not read tick_overdue, line: {}",
+                row.line
+            );
+            assert!(
+                !row.line.contains("pr watch refresh"),
+                "{arm} must not prescribe a refresh, line: {}",
+                row.line
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn without_a_pause_fact_the_tier_keeps_tick_overdue() {
+        let (dir, mut rows, trace) = paused_tier_rows("2026-09-17T23:40:00Z");
+        let trace = TickTrace {
+            pause: None,
+            ..trace
+        };
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.stale, "line: {}", kw.line);
+        assert_eq!(
+            kw.cause.as_deref(),
+            Some("tick_overdue"),
+            "line: {}",
+            kw.line
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_real_fault_outranks_the_pause() {
+        let (dir, mut rows, trace) = paused_tier_rows("2026-09-17T23:40:00Z");
+        let trace = TickTrace {
+            foreign_plist: Some("/tmp/pytest-xyz/sh.fno.pr-watcher.plist".to_string()),
+            ..trace
+        };
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert_eq!(
+            kw.cause.as_deref(),
+            Some("launchd_foreign_plist"),
+            "line: {}",
+            kw.line
+        );
+        assert!(kw.stale, "line: {}", kw.line);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unreadable_breaker_stays_a_fault() {
+        let (dir, mut rows, trace) = paused_tier_rows("2026-09-17T23:40:00Z");
+        let trace = TickTrace {
+            pause: Some(
+                crate::loops_pause::DispatchPause::FleetIncidentUnavailable {
+                    detail: "no fleet-stop record".to_string(),
+                },
+            ),
+            ..trace
+        };
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.stale, "line: {}", kw.line);
+        assert_eq!(
+            kw.cause.as_deref(),
+            Some("fleet_stop_unavailable"),
+            "line: {}",
+            kw.line
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
