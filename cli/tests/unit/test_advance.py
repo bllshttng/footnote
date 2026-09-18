@@ -3765,13 +3765,14 @@ def test_spawn_worker_grid_account_skips_on_a_non_claude_harness(monkeypatch):
 
 
 def test_spawn_worker_lifecycle_matrix_agrees_across_axes(iso, tmp_path, monkeypatch):
-    """x-ebd2 acceptance: for the four lifecycle shapes, command, worker-name
-    qualifier, and receipt verb all state the SAME derived verb, and a stale
-    stored verb reconciles through the table instead of winning."""
+    """For the six lifecycle shapes, command, worker-name qualifier, and
+    receipt verb all state the SAME verb: a declared target-family verb wins
+    over the table and the decision names the disagreement; a build rung
+    advances to /target only for a blueprint doc."""
     design_plan = tmp_path / "design-plan.md"
     design_plan.write_text("---\nstatus: design\n---\n# draft\n")
     ready_plan = tmp_path / "ready-plan.md"
-    ready_plan.write_text("---\nstatus: ready\n---\n# contract\n")
+    ready_plan.write_text("---\nstatus: ready\nkind: quick-plan\n---\n# contract\n")
     cfg = tmp_path / "config.toml"
     cfg.write_text("[auto_merge]\nenabled = false\n")
     monkeypatch.setenv("FNO_CONFIG", str(cfg))
@@ -3800,7 +3801,7 @@ def test_spawn_worker_lifecycle_matrix_agrees_across_axes(iso, tmp_path, monkeyp
                 "dispatch_verb": "/fno:target",
                 "plan_path": str(design_plan), "cwd": str(tmp_path),
             },
-            "/blueprint x-design", "bp", "/blueprint", "declared",
+            "/target --no-merge x-design", "t", "/target", "declared",
         ),
         (
             {
@@ -3808,7 +3809,25 @@ def test_spawn_worker_lifecycle_matrix_agrees_across_axes(iso, tmp_path, monkeyp
                 "dispatch_verb": "/fno:blueprint",
                 "plan_path": str(ready_plan), "cwd": str(tmp_path),
             },
-            "/target --no-merge x-ready", "t", "/target", "declared",
+            "/blueprint x-ready", "bp", "/blueprint", "declared",
+        ),
+        (
+            # Undeclared on a proven blueprint doc: the table advances /target.
+            {
+                "difficulty": "high", "priority": "p1", "dispatch_verb": "",
+                "plan_path": str(ready_plan), "cwd": str(tmp_path),
+            },
+            "/target --no-merge x-ready", "t", "/target", "none-declared",
+        ),
+        (
+            # x-c516 specimen: an out-of-family declared verb keeps declared
+            # precedence even against a ready blueprint doc.
+            {
+                "difficulty": "high", "priority": "p1",
+                "dispatch_verb": "/fno:think",
+                "plan_path": str(ready_plan), "cwd": str(tmp_path),
+            },
+            "/think x-ready", "th", "/think", "declared",
         ),
     ]
     for i, (fields, command, verb_code, verb, source) in enumerate(cases):

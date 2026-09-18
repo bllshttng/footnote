@@ -457,7 +457,9 @@ def test_derived_blueprint_renders_harness_native(harness, expected):
     assert out["command"] == expected
 
 
-def test_redispatch_design_rung_keeps_blueprint_despite_stored_target():
+def test_redispatch_design_rung_declared_target_wins_and_names_lifecycle():
+    # A declared target-family verb wins even where the table disagrees; the
+    # decision names the lifecycle answer so the disagreement is auditable.
     out = resolve_dispatch(
         harness="claude",
         node_id="x-abcd",
@@ -465,18 +467,54 @@ def test_redispatch_design_rung_keeps_blueprint_despite_stored_target():
         difficulty="low",
         plan_rung="design",
     )
-    assert out["command"] == "/blueprint x-abcd"
-    assert any("reconciled" in d for d in out["decision"])
+    assert out["command"] == "/target --no-merge x-abcd"
+    assert out["verb"] == "/target"
+    assert any(
+        "declared" in d and "lifecycle answers /blueprint" in d
+        for d in out["decision"]
+    )
 
 
 @pytest.mark.parametrize("rung", ["ready", "in_progress", "in_review"])
-def test_redispatch_build_rungs_advance_to_target_despite_stored_blueprint(rung):
+def test_redispatch_build_rungs_declared_blueprint_wins(rung):
+    # The declared blueprint dispatches as declared even though the table,
+    # given a proven blueprint doc, would advance that rung to /target.
     out = resolve_dispatch(
-        harness="claude", node_id="x-abcd", verb="/blueprint", plan_rung=rung
+        harness="claude",
+        node_id="x-abcd",
+        verb="/blueprint",
+        plan_rung=rung,
+        plan_blueprint=True,
+    )
+    assert out["command"] == "/blueprint x-abcd"
+    assert out["verb"] == "/blueprint"
+    assert any(
+        "declared" in d and f"lifecycle answers /target: plan {rung}" in d
+        for d in out["decision"]
+    )
+
+
+@pytest.mark.parametrize("plan_blueprint", [False, None])
+def test_build_rung_without_proven_blueprint_answers_blueprint(plan_blueprint):
+    # None means not proven; both park on /blueprint and say why.
+    out = resolve_dispatch(
+        harness="claude",
+        node_id="x-abcd",
+        plan_rung="ready",
+        plan_blueprint=plan_blueprint,
+    )
+    assert out["command"] == "/blueprint x-abcd"
+    assert out["verb"] == "/blueprint"
+    assert any("plan ready not a blueprint" in d for d in out["decision"])
+
+
+def test_build_rung_with_proven_blueprint_advances_to_target():
+    out = resolve_dispatch(
+        harness="claude", node_id="x-abcd", plan_rung="ready", plan_blueprint=True
     )
     assert out["command"] == "/target --no-merge x-abcd"
     assert out["verb"] == "/target"
-    assert any(f"plan {rung}" in d for d in out["decision"])
+    assert any("plan ready -> /target" in d for d in out["decision"])
 
 
 @pytest.mark.parametrize("rung", ["unreadable", "done", "superseded"])

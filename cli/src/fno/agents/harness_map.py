@@ -1326,19 +1326,27 @@ _RUNG_ANSWERS = {
     "in_review": "/target",
 }
 
+# A build rung advances to /target only when the linked doc is proven to be a
+# blueprint (ladder.is_blueprint_doc); None means not proven and parks the
+# answer on /blueprint, the same fail-safe direction as an unreadable plan.
+_BUILD_RUNGS = frozenset({"ready", "in_progress", "in_review"})
+
 
 def resolve_effective_verb(
     *,
     verb: Optional[str] = None,
     difficulty: Optional[str] = None,
     plan_rung: Optional[str] = None,
+    plan_blueprint: Optional[bool] = None,
     node_id: Optional[str] = None,
 ) -> tuple[Optional[str], str]:
     """The target/blueprint lifecycle conditional; full table:
     docs/architecture/backlog-graph-verb-contracts.md. Intake (rung "none"):
-    difficulty decides. Re-dispatch: the plan rung decides. The stored
-    ``verb`` reconciles through the table; out-of-family abstains to declared
-    precedence. Returns ``(canonical_verb, decision)``; ``None`` = abstain.
+    difficulty decides. Re-dispatch: the plan rung decides, and a build rung
+    answers ``/target`` only for a proven blueprint doc (``plan_blueprint``);
+    a declared target-family verb WINS over the table and the decision names
+    the disagreement; out-of-family abstains to declared precedence. Returns
+    ``(canonical_verb, decision)``; ``None`` = abstain.
     Raises :class:`DispatchResolveError` on a refusal rung, or planless
     without low/medium/high difficulty. ``plan_rung`` is a Rung value. The
     refusal leads with ``node_id`` when the caller holds one, so the subject
@@ -1354,10 +1362,12 @@ def resolve_effective_verb(
     d = (difficulty or "").strip().lower()
     if rung == "none" and d in _DIFFICULTY_ANSWERS:
         answer = _DIFFICULTY_ANSWERS[d]
-        note = f"verb=lifecycle(intake difficulty={d} -> {answer}"
+        why = f"intake difficulty={d}"
     elif rung in _RUNG_ANSWERS:
         answer = _RUNG_ANSWERS[rung]
-        note = f"verb=lifecycle(plan {rung} -> {answer}"
+        why = f"plan {rung}"
+        if rung in _BUILD_RUNGS and plan_blueprint is not True:
+            answer, why = "/blueprint", f"plan {rung} not a blueprint"
     else:
         who = f" for node {node_id}" if node_id else ""
         raise DispatchResolveError(
@@ -1365,8 +1375,8 @@ def resolve_effective_verb(
             f"difficulty {d!r} answers no lifecycle rung"
         )
     if raw_verb and raw_verb != answer:
-        note += f"; stored dispatch_verb {raw_verb} reconciled"
-    return answer, note + ")"
+        return raw_verb, f"verb=declared({raw_verb}; lifecycle answers {answer}: {why})"
+    return answer, f"verb=lifecycle({why} -> {answer})"
 
 
 def resolve_dispatch(
@@ -1378,6 +1388,7 @@ def resolve_dispatch(
     verb: Optional[str] = None,
     difficulty: Optional[str] = None,
     plan_rung: Optional[str] = None,
+    plan_blueprint: Optional[bool] = None,
     brief: Optional[str] = None,
     merge_posture: Optional[str] = None,
     trigger: str = "autonomous",
@@ -1391,8 +1402,9 @@ def resolve_dispatch(
     ``claude``; substrate explicit > config > per-harness default; command
     explicit > lifecycle derivation > node ``verb`` (allowlist-checked;
     a graph field is a trust boundary) > ``config.dispatch.command`` >
-    per-harness builtin. ``difficulty``/``plan_rung`` feed the lifecycle
-    derivation (see :func:`resolve_effective_verb`), which runs BEFORE the
+    per-harness builtin. ``difficulty``/``plan_rung``/``plan_blueprint`` feed
+    the lifecycle derivation (see :func:`resolve_effective_verb`), which runs
+    BEFORE the
     stage-table read so ``agents.profiles.<derived-verb>`` drives the harness;
     an explicit command bypasses it (reconcile and the other explicit doors
     spell their own verb). ``brief`` rides ``env['TARGET_BRIEF']`` only, capped
@@ -1414,7 +1426,11 @@ def resolve_dispatch(
     lifecycle_verb: Optional[str] = None
     if command is None or not command.strip():
         lifecycle_verb, lifecycle_note = resolve_effective_verb(
-            verb=verb, difficulty=difficulty, plan_rung=plan_rung, node_id=node_id
+            verb=verb,
+            difficulty=difficulty,
+            plan_rung=plan_rung,
+            plan_blueprint=plan_blueprint,
+            node_id=node_id,
         )
         decision.append(lifecycle_note)
     cfg = (
