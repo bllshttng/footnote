@@ -1,6 +1,6 @@
 # The pane keeper: every pane outlives the mux server
 
-A pane's pty master does not live in the mux server. It lives in a keeper process: `fno-agents-worker --pane`, spawned per pane by the server. When the server dies, the keeper and its child keep running. The next server on the same session re-adopts the same child instead of spawning a replacement. Every pane takes this road now: worker panes, resumed panes, portal viewers, ad-hoc `pane run`, and plain shells. A plain shell carries its shell integration into the keeper as an env prefix in its argv. The inline pty survives as a named fallback: when the keeper cannot start, the pane still opens, the server marks it `unkept`, and a later `kill-server` refuses while it is live unless `--end-unkept` is passed.
+A pane's pty master does not live in the mux server. It lives in a keeper process: `fno-agents-worker --pane`, spawned per pane by the server. When the server dies, the keeper and its child keep running. The next server on the same session re-adopts the same child instead of spawning a replacement. Every pane takes this road now: worker panes, resumed panes, portal viewers, ad-hoc `pane run`, and plain shells. A plain shell carries its shell integration into the keeper as an env prefix in its argv. When the keeper cannot start, the inline pty survives as the named fallback. The pane still opens, and the server marks it `unkept`. A later `kill-server` refuses while it is live unless `--end-unkept` is passed.
 
 ## Ownership rule
 
@@ -47,7 +47,7 @@ Re-adoption is not respawn. The proof below pins the SAME child pid across the s
 
 ## The reaper contract
 
-`kill_all_panes` (the server shutdown sweep) skips `PtyShell::Keeper` panes. Every pane is keeper-hosted now, so a server death keeps them all to re-adoption. A hangup must never become a close. The deliberate paths are unchanged. `reap_pane` (explicit pane close) still sends Kill. The keeper SIGKILLs its own child, unlinks its socket, and exits. And `fno mux kill-server` measures before it signals: a live pane with no live keeper at its id is unkept, the kill refuses while one is live, and `--end-unkept` is the deliberate override. Surviving a hangup never becomes surviving a close.
+`kill_all_panes` (the server shutdown sweep) skips `PtyShell::Keeper` panes. Every pane is keeper-hosted now, so a server death keeps them all to re-adoption. A hangup must never become a close. The deliberate paths are unchanged. `reap_pane` (explicit pane close) still sends Kill. The keeper SIGKILLs its own child, unlinks its socket, and exits. And `fno mux kill-server` measures before it signals. A live pane with no live keeper at its id is unkept. The kill refuses while one is live, and `--end-unkept` is the deliberate override. Surviving a hangup never becomes surviving a close.
 
 ## Two traps the implementation had to learn
 
@@ -57,7 +57,7 @@ Re-adoption is not respawn. The proof below pins the SAME child pid across the s
 
 ## The proof
 
-`tests/mux-restart-survival-matrix.sh` is the whole-contract proof. It drives a plain shell, an ad-hoc pane, a keeper worker, a portal viewer, and the daemon legs through three restarts (server alone, daemon alone, both SIGKILLed together) in one private root. It opens with a dead-canary positive control for its liveness reader, and asserts survival by named pids and a canary counter that must keep advancing across the gap. It fails on any row whose child pid changes or whose counter stops. `tests/mux-keeper-survives-server-kill.sh` remains the single-pane identity proof: the SAME child pid, re-adopted, still answering a prompt, with the plain pane surviving by the same road.
+`tests/mux-restart-survival-matrix.sh` is the whole-contract proof. It drives a plain shell, an ad-hoc pane, a keeper worker, a portal viewer, and the daemon legs in one private root. Each row crosses three restarts: the server alone, the daemon alone, and both SIGKILLed together. It opens with a dead-canary positive control for its liveness reader. It then asserts survival by named pids and a canary counter that must keep advancing across the gap. It fails on any row whose child pid changes or whose counter stops. `tests/mux-keeper-survives-server-kill.sh` remains the single-pane identity proof: the SAME child pid, re-adopted, still answering a prompt, with the plain pane surviving by the same road.
 
 ## The hard limit
 
