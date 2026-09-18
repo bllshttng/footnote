@@ -206,10 +206,15 @@ def _codex_install(run: Runner) -> IntegrationResult:
 
 
 def _opencode_status():
-    """One door round-trip: (error, receipt) from the fno-agents opencode arm."""
+    """One door round-trip: (error, receipt) from the fno-agents opencode arm.
+
+    The flags ride AHEAD of the harness word: a deployed binary older than
+    this change parses the first flag as the mode, lands on "unknown
+    harness", and refuses - so a stale binary can answer a PROBE with an
+    install, never the reverse."""
     from fno.rust_binary import call_binary_json
 
-    return call_binary_json("plugin-install", ["opencode", "--installed", "--json"])
+    return call_binary_json("plugin-install", ["--installed", "--json", "opencode"])
 
 
 def _opencode_is_installed() -> bool:
@@ -225,7 +230,7 @@ def _opencode_install() -> IntegrationResult:
     label = "OpenCode"
     from fno.rust_binary import call_binary_json
 
-    err, receipt = call_binary_json("plugin-install", ["opencode", "--json"])
+    err, receipt = call_binary_json("plugin-install", ["--json", "opencode"])
     if err is not None:
         return IntegrationResult("opencode", label, "failed", note=str(err))
     if not isinstance(receipt, dict):

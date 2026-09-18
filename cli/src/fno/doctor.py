@@ -3729,14 +3729,21 @@ def _harness_surface_report() -> dict[str, Any]:
             from fno.rust_binary import call_binary_json
 
             err, receipt = call_binary_json(
-                "plugin-install", ["opencode", "--status", "--json"]
+                "plugin-install", ["--status", "--json", "opencode"]
             )
             if err is None and isinstance(receipt, dict):
                 status = receipt.get("status")
                 # The message is built here so the printer stays string-only:
-                # partial names what never loaded; a legacy bridge-only
-                # machine learns what the bridge never carried.
-                if status == "partial":
+                # partial names what never loaded, stale names version drift,
+                # and a legacy bridge-only machine learns what the bridge
+                # never carried.
+                if status == "stale":
+                    report["opencode"] = (
+                        f"surface is STALE: installed at footnote {receipt.get('version')}, "
+                        f"footnote ships {receipt.get('source_version')}; re-run "
+                        "`fno config plugin install opencode`."
+                    )
+                elif status == "partial":
                     names = ", ".join(str(n) for n in (receipt.get("missing") or []))
                     report["opencode"] = (
                         "surface is PARTIAL: installed but not loaded: "

@@ -7,7 +7,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-use fno_agents::opencode_install::{command_file_name, install, uninstall};
+use fno_agents::opencode_install::{
+    command_file_name, install, installed_status, manifest_path, uninstall,
+};
 use fno_agents::provider::{opencode_run_tail, render_verb_seed};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -133,8 +135,7 @@ fn install_writes_the_full_surface() {
     assert!(read(&s.conf.join("skills/think/SKILL.md")).contains("skill body"));
     assert!(read(&s.conf.join("skills/think/patterns.md")).contains("patterns"));
     assert!(read(&s.conf.join("plugins/footnote.js")).contains("bridge v9"));
-    let manifest: serde_json::Value =
-        serde_json::from_str(&read(&s.state.join("opencode-install.json"))).unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&read(&manifest_path(&s.conf))).unwrap();
     assert_eq!(manifest["version"], "9.9.9");
     let files = manifest["files"].as_object().unwrap();
     assert!(files.contains_key("command/fno:target.md"));
@@ -147,15 +148,12 @@ fn install_writes_the_full_surface() {
 fn idempotent_install_changes_no_mtime_and_no_manifest() {
     let s = installed("idempotent");
     let before = mtime(&s.conf.join("command/fno:target.md"));
-    let manifest_before = read(&s.state.join("opencode-install.json"));
+    let manifest_before = read(&manifest_path(&s.conf));
     let receipt = install(Path::new("/nonexistent-repo")).unwrap();
     assert_eq!(receipt.written, 0);
     assert_eq!(receipt.skipped, 8);
     assert_eq!(mtime(&s.conf.join("command/fno:target.md")), before);
-    assert_eq!(
-        read(&s.state.join("opencode-install.json")),
-        manifest_before
-    );
+    assert_eq!(read(&manifest_path(&s.conf)), manifest_before);
 }
 
 #[test]
@@ -186,7 +184,7 @@ fn uninstall_keeps_user_edited_file_and_names_it() {
         "// user edit\n"
     );
     assert!(!s.conf.join("command/fno:pr.md").exists());
-    assert!(!s.state.join("opencode-install.json").exists());
+    assert!(!manifest_path(&s.conf).exists());
 }
 
 #[test]
@@ -235,7 +233,7 @@ fn bystanders_and_user_config_survive_the_full_cycle() {
     assert_eq!(read(&s.conf.join("skill/decoy/SKILL.md")), "decoy skill\n");
     assert_eq!(read(&s.conf.join("agent/decoy.md")), "decoy agent\n");
     assert_eq!(read(&s.conf.join("command/decoy.md")), "decoy command\n");
-    assert!(!s.state.join("opencode-install.json").exists());
+    assert!(!manifest_path(&s.conf).exists());
 }
 
 #[test]
@@ -254,7 +252,7 @@ fn install_refuses_when_no_source_resolves() {
         .expect_err("install must refuse without a footnote tree");
     assert!(err.contains("no footnote tree"), "{err}");
     assert!(!conf.join("plugins/footnote.js").exists());
-    assert!(!base.join("empty-state/opencode-install.json").exists());
+    assert!(!manifest_path(&base.join("conf")).exists());
 }
 
 #[test]
@@ -269,4 +267,21 @@ fn uninstall_refuses_without_manifest() {
 
 fn mtime(path: &Path) -> std::time::SystemTime {
     std::fs::metadata(path).unwrap().modified().unwrap()
+}
+
+#[test]
+fn stale_install_is_named_when_the_source_version_moves() {
+    let s = installed("stale");
+    assert_eq!(installed_status()["status"], "installed");
+    write_file(
+        &s.root.join(".claude-plugin/plugin.json"),
+        r#"{"name":"fno","version":"9.9.10"}"#,
+    );
+    let quick = installed_status();
+    assert_eq!(quick["status"], "stale", "version drift must be named");
+    assert_eq!(quick["source_version"], "9.9.10");
+    assert_eq!(quick["version"], "9.9.9");
+    // Reinstall converges on the new version.
+    install(Path::new("/nonexistent-repo")).unwrap();
+    assert_eq!(installed_status()["status"], "installed");
 }

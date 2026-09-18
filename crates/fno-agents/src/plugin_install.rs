@@ -838,7 +838,7 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
 /// `opencode_install`, plus the shared env exports and stale-copy sweep the
 /// other harness arms run. `--json` keeps stdout to the receipt alone (the
 /// Python door parses it), so the prose side lines move to stderr there.
-fn run_opencode_arm(harness: &str, json: bool, uninstall: bool, status: bool, quick: bool) -> i32 {
+fn run_opencode_arm(_harness: &str, json: bool, uninstall: bool, status: bool, quick: bool) -> i32 {
     let say = |line: String| {
         if json {
             eprintln!("{line}");

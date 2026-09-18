@@ -26,7 +26,16 @@ use crate::paths::{dirs_home, worktree_repo_root};
 /// reader that will be killed.
 const MAX_CATALOG_BYTES: usize = 32 * 1024 * 1024;
 
-const MANIFEST_FILE: &str = "opencode-install.json";
+const MANIFEST_FILE_PREFIX: &str = "opencode-install-";
+
+/// One manifest per config dir, keyed by a short hash of its canonical path:
+/// two `OPENCODE_CONFIG_DIR` values on one machine must never share install
+/// records, or uninstalling one config dir would orphan the other's files.
+pub fn manifest_path(conf: &Path) -> PathBuf {
+    let key = std::fs::canonicalize(conf).unwrap_or_else(|_| conf.to_path_buf());
+    let hash = blake3::hash(key.display().to_string().as_bytes()).to_hex();
+    crate::plugin_install::state_root().join(format!("{MANIFEST_FILE_PREFIX}{}.json", &hash[..12]))
+}
 
 /// OpenCode scans the config dir for commands (singular `command/`), agents
 /// (`agent/`) and skills (`skills/`); `OPENCODE_CONFIG_DIR` moves it, which
@@ -36,10 +45,6 @@ pub fn config_dir() -> PathBuf {
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| dirs_home().join(".config/opencode"))
-}
-
-pub fn manifest_path() -> PathBuf {
-    crate::plugin_install::state_root().join(MANIFEST_FILE)
 }
 
 fn is_footnote_tree(root: &Path) -> bool {
@@ -154,17 +159,19 @@ fn command_stub(verb: &str, description: &str) -> Vec<u8> {
 /// OpenCode's default; a `provider/model` string passes through.
 fn agent_file(stem: &str, md: &str) -> Vec<u8> {
     let (front, body) = split_frontmatter(md);
-    let description = frontmatter_value(md, "description").unwrap_or_else(|| stem.to_string());
+    let field = |key: &str| -> Option<String> {
+        front
+            .lines()
+            .find_map(|l| l.split_once(':').filter(|(k, _)| k.trim() == key))
+            .map(|(_, v)| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let description = field("description").unwrap_or_else(|| stem.to_string());
     let mut text = format!(
         "---\ndescription: {}\nmode: subagent\n",
         yaml_quote(&description)
     );
-    if let Some(model) = front
-        .lines()
-        .find_map(|l| l.strip_prefix("model:"))
-        .map(str::trim)
-        .filter(|m| m.contains('/'))
-    {
+    if let Some(model) = field("model").filter(|m| m.contains('/')) {
         text.push_str(&format!("model: {model}\n"));
     }
     text.push_str("---\n\n");
@@ -266,13 +273,14 @@ struct Manifest {
     files: BTreeMap<String, String>,
 }
 
-fn read_manifest() -> Option<Manifest> {
-    let text = std::fs::read_to_string(manifest_path()).ok()?;
+fn read_manifest(conf: &Path) -> Option<Manifest> {
+    let path = manifest_path(conf);
+    let text = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&text).ok()
 }
 
-fn write_manifest(manifest: &Manifest) -> Result<(), String> {
-    let path = manifest_path();
+fn write_manifest(conf: &Path, manifest: &Manifest) -> Result<(), String> {
+    let path = manifest_path(conf);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("opencode install: {e}"))?;
     }
@@ -285,7 +293,7 @@ pub fn install(cwd: &Path) -> Result<InstallReceipt, String> {
     let version = plugin_version(&root);
     let entries = build_entries(&root)?;
     let conf = config_dir();
-    let mut manifest: Manifest = read_manifest().unwrap_or_default();
+    let mut manifest: Manifest = read_manifest(&conf).unwrap_or_default();
     manifest.version = version.clone();
     let mut written = 0;
     let mut skipped = 0;
@@ -331,7 +339,7 @@ pub fn install(cwd: &Path) -> Result<InstallReceipt, String> {
         }
         manifest.files.remove(rel);
     }
-    write_manifest(&manifest)?;
+    write_manifest(&conf, &manifest)?;
     Ok(InstallReceipt {
         action: "install",
         status: if kept.is_empty() {
@@ -345,7 +353,7 @@ pub fn install(cwd: &Path) -> Result<InstallReceipt, String> {
         skipped,
         kept,
         removed,
-        manifest: manifest_path().display().to_string(),
+        manifest: manifest_path(&conf).display().to_string(),
     })
 }
 
@@ -360,14 +368,14 @@ pub struct UninstallReceipt {
 }
 
 pub fn uninstall() -> Result<UninstallReceipt, String> {
-    let manifest = read_manifest().ok_or_else(|| {
+    let conf = config_dir();
+    let manifest = read_manifest(&conf).ok_or_else(|| {
         format!(
             "opencode uninstall: no manifest at {}; footnote installed nothing \
              there, so nothing is removed",
-            manifest_path().display()
+            manifest_path(&conf).display()
         )
     })?;
-    let conf = config_dir();
     let mut removed = 0;
     let mut kept: Vec<String> = Vec::new();
     for (rel, hash) in &manifest.files {
@@ -385,7 +393,7 @@ pub fn uninstall() -> Result<UninstallReceipt, String> {
         prune_empty_parents(&dest, &conf);
     }
     // The manifest is removed last so an interrupted uninstall is resumable.
-    std::fs::remove_file(manifest_path()).map_err(|e| format!("opencode uninstall: {e}"))?;
+    std::fs::remove_file(manifest_path(&conf)).map_err(|e| format!("opencode uninstall: {e}"))?;
     Ok(UninstallReceipt {
         action: "uninstall",
         status: if kept.is_empty() {
@@ -505,12 +513,20 @@ fn read_loaded_catalog(conf: &Path) -> LoadedCatalog {
     }
 }
 
+/// The version the install WOULD write now, when a footnote tree resolves.
+/// A manifest whose version differs from this names a stale install.
+fn source_version() -> Option<String> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    resolve_source(&cwd).ok().map(|root| plugin_version(&root))
+}
+
 /// Installed (manifest) versus loaded (`--pure` catalogs), with the
 /// difference by name. A catalog read that fails or exceeds its bound
-/// reports unknown rather than a wrong answer.
+/// reports unknown rather than a wrong answer. A manifest whose version
+/// differs from the resolvable source names a stale install.
 pub fn status_json() -> serde_json::Value {
     let conf = config_dir();
-    let manifest = read_manifest();
+    let manifest = read_manifest(&conf);
     let (cmds, agents, skills) = match &manifest {
         Some(m) => installed_names(m),
         None => Default::default(),
@@ -532,13 +548,17 @@ pub fn status_json() -> serde_json::Value {
     let (missing_skills, stale_skills) = diff(&skills, &loaded.skills);
     let missing: Vec<String> = [missing_commands, missing_agents, missing_skills].concat();
     let stale: Vec<String> = [stale_commands, stale_agents, stale_skills].concat();
+    let source = source_version();
+    let behind = matches!((&manifest, &source), (Some(m), Some(sv)) if sv.as_str() != m.version);
     let status = match &manifest {
         None => "absent",
         Some(_) => {
-            if missing.is_empty() {
-                "installed"
-            } else {
+            if !missing.is_empty() {
                 "partial"
+            } else if behind {
+                "stale"
+            } else {
+                "installed"
             }
         }
     };
@@ -546,9 +566,10 @@ pub fn status_json() -> serde_json::Value {
         "action": "status",
         "status": status,
         "version": manifest.as_ref().map(|m| m.version.clone()),
+        "source_version": source,
         "config_dir": conf.display().to_string(),
         "bridge_present": conf.join("plugins/footnote.js").is_file(),
-        "manifest": manifest.as_ref().map(|m| json!({"path": manifest_path().display().to_string(), "files": m.files.len()})),
+        "manifest": manifest.as_ref().map(|m| json!({"path": manifest_path(&conf).display().to_string(), "files": m.files.len()})),
         "installed": {"commands": cmds, "agents": agents, "skills": skills},
         "loaded": {
             "commands": loaded.commands.as_ref().map(|s| serde_json::Value::Array(s.iter().cloned().map(serde_json::Value::String).collect())).unwrap_or_else(|| json!("unknown")),
@@ -556,7 +577,7 @@ pub fn status_json() -> serde_json::Value {
             "skills": loaded.skills.as_ref().map(|s| serde_json::Value::Array(s.iter().cloned().map(serde_json::Value::String).collect())).unwrap_or_else(|| json!("unknown")),
         },
         "missing": missing,
-        "stale": stale,
+        "stale_names": stale,
     })
 }
 
@@ -564,7 +585,8 @@ pub fn status_json() -> serde_json::Value {
 /// catalog read, so an adapter sweep never pays for two opencode spawns.
 pub fn installed_status() -> serde_json::Value {
     let conf = config_dir();
-    match read_manifest() {
+    let source = source_version();
+    match read_manifest(&conf) {
         None => json!({
             "action": "installed",
             "status": "absent",
@@ -573,11 +595,20 @@ pub fn installed_status() -> serde_json::Value {
         }),
         Some(m) => {
             let complete = m.files.keys().all(|rel| conf.join(rel).is_file());
+            let behind = source.as_deref().is_some_and(|sv| sv != m.version);
+            let stale = complete && behind;
             json!({
                 "action": "installed",
-                "status": if complete { "installed" } else { "partial" },
+                "status": if !complete {
+                    "partial"
+                } else if stale {
+                    "stale"
+                } else {
+                    "installed"
+                },
                 "config_dir": conf.display().to_string(),
                 "version": m.version,
+                "source_version": source,
                 "bridge_present": conf.join("plugins/footnote.js").is_file(),
             })
         }

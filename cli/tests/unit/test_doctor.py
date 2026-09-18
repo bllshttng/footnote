@@ -425,6 +425,27 @@ def test_doctor_reports_stale_opencode_plugin(monkeypatch: pytest.MonkeyPatch) -
     assert "fno config setup" in result.stdout
 
 
+def test_doctor_reports_stale_surface_via_door(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A stale receipt (version drift) becomes a named opencode advisory."""
+    (tmp_path / "oc" / "plugins").mkdir(parents=True)
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "oc"))
+    monkeypatch.setattr(
+        "fno.rust_binary.call_binary_json",
+        lambda verb, args, **kw: (
+            None,
+            {
+                "status": "stale",
+                "version": "0.3.1",
+                "source_version": "0.3.2",
+                "missing": [],
+            },
+        ),
+    )
+    report = doctor._harness_surface_report()
+    assert "STALE" in report["opencode"]
+    assert "0.3.2" in report["opencode"]
+
+
 def test_doctor_main_run_points_at_codex_hooks_dual(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
