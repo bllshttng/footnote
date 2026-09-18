@@ -9,6 +9,24 @@ use crate::AgentStatus;
 pub(crate) fn git_grant_for_cwd(cwd: &Path) -> Option<String> {
     crate::provider::git_common_dir(cwd)
 }
+/// The one lineage read for the codex thread door: a door-proved origin
+/// outranks the raw request edge; an edge-less request stamps the reason
+/// instead of a silent null. The row and the birth event both derive
+/// through here, so they can never name different parents.
+pub(crate) fn thread_lineage(
+    spawn_params: &serde_json::Value,
+    provenance: Option<&crate::spawn_contract::SpawnProvenance>,
+) -> Lineage {
+    match provenance {
+        Some(p) => match crate::spawn_contract::compatibility_parent(&p.origin) {
+            (Some(session), Some(harness), Some(cwd)) => {
+                Lineage::captured((Some(session), Some(harness), Some(cwd)))
+            }
+            _ => Lineage::from_request(spawn_params),
+        },
+        None => Lineage::from_request(spawn_params),
+    }
+}
 /// Build the registry row for a Codex app-server thread. Codex has no fno
 /// short id: the full harness session id is both the resume handle and the
 /// canonical registry identity.
@@ -29,18 +47,8 @@ pub(crate) fn build_codex_thread_entry(
     let session_id = driver.thread_id().to_string();
     // The daemon's env is scrubbed, so the parent edge rides the spawn
     // REQUEST the client stamped from its own ambient markers - the same
-    // trust the `node` field already gets. A door-proved origin outranks
-    // the raw edge; an edge-less request stamps the reason instead of a
-    // silent null.
-    let spawned_by = match provenance {
-        Some(p) => match crate::spawn_contract::compatibility_parent(&p.origin) {
-            (Some(session), Some(harness), Some(cwd)) => {
-                Lineage::captured((Some(session), Some(harness), Some(cwd)))
-            }
-            _ => Lineage::from_request(spawn_params),
-        },
-        None => Lineage::from_request(spawn_params),
-    };
+    // trust the `node` field already gets.
+    let spawned_by = thread_lineage(spawn_params, provenance);
     let mut entry = RegistryEntry {
         node: node.filter(|node| !node.is_empty()).map(str::to_string),
         // v25: the route axes this lane actually used. When the spawn request

@@ -40,6 +40,8 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         harness: None,
         model: None,
         route: None,
+        spawned_by_name: None,
+        lineage_reason: None,
         squad: Some(7),
         name: registry.name.clone(),
         pane_id: None,

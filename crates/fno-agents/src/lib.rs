@@ -57,6 +57,9 @@ pub mod authorized_merge;
 pub mod backlog;
 pub mod backlog_ready;
 pub mod bash_census;
+#[cfg(test)]
+#[path = "birth_guard_tests.rs"]
+mod birth_guard_tests;
 pub mod blueprint_judge;
 mod bounded_cmd;
 mod bounded_spawn;

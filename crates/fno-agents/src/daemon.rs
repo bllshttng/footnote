@@ -3136,17 +3136,12 @@ async fn spawn_claude_stream_lane(
     // Registered live: the worker now owns the claim (its own SessionClaimGuard
     // releases it on orphan/exit), so the daemon must not release on drop.
     claim_guard.disarm();
-    let _ = ctx.emitter.emit(
-        "agent_spawned",
-        &json!({
-            "name": name,
-            "provider": "claude",
-            "short_id": short_id,
-            "lane": "stream",
-            "session_uuid": uuid,
-            "node": req.params.get("node").and_then(Value::as_str),
-        }),
+    let birth = crate::spawn_edge::birth_event(
+        name,
+        &crate::state::Lineage::from_request(&req.params),
+        json!({"provider": "claude", "short_id": short_id, "lane": "stream", "session_uuid": uuid, "node": req.params.get("node").and_then(Value::as_str)}),
     );
+    let _ = ctx.emitter.emit("agent_spawned", &birth);
 
     Response::ok(
         req.id,

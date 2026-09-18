@@ -298,10 +298,10 @@ fn process_table_ps() -> (Vec<ProcRow>, usize) {
 }
 
 /// One `ps -Ao pid,ppid,state,etime,%cpu,rss,command` data line. Compiled
-/// for the Linux leg and under test everywhere: the test runs on every
-/// host, while a macOS non-test build has no caller and deny-warnings
-/// turns the dead code into a failure.
-#[cfg(any(not(target_os = "macos"), test))]
+/// only where it has a caller: the Linux leg and its tests, both of which
+/// are `not(target_os = "macos")`. A macOS test build otherwise compiles
+/// it with no caller and deny-warnings turns the dead code into a failure.
+#[cfg(not(target_os = "macos"))]
 fn parse_ps_row(line: &str) -> Option<ProcRow> {
     // ps right-aligns the numeric columns, so tokens must split on
     // whitespace RUNS - a per-char split yields empty fields and every
