@@ -6789,11 +6789,8 @@ fn make_fingerprint(
     ci_conclusion: &str,
     latest_ts: &str,
 ) -> String {
-    // An absent latest-review time renders "none", matching the pre-done
-    // pre-read's no-PR form. Left empty, the done-fingerprint could never
-    // match the pre-fingerprint in a no-PR world (pre says "none", done
-    // says ""), the streak reset to 1 on every fire, and the NoProgress
-    // backstop could never trip - a stuck session looped forever.
+    // An absent latest-review time renders "none", the pre-read's no-PR form;
+    // empty let the two shapes disagree and reset the backstop streak forever.
     let latest_ts = if latest_ts.is_empty() {
         "none"
     } else {
@@ -8063,19 +8060,17 @@ pub(crate) fn decide_with_payload(
         .clone()
         .unwrap_or_else(crate::gh_budget::ledger_path);
 
-    // The fire history is JOURNAL truth now : one local read
-    // answers how many fires this session served, how many trailing fires
-    // shared the newest recorded fingerprint, and what that fingerprint (plus
-    // its pr_state/ci components) was. No PR read happens to decide routing.
+    // The fire history is JOURNAL truth now: fires, the trailing shared
+    // fingerprint, and its pr_state/ci come from one local read; no PR read
+    // routes. A generic-delivery fire OBSERVED its world this fire, so its
+    // streak counts against the observed revision; every other fire compares
+    // journal rows against the journal's own newest fingerprint.
     let backstop_n: u64 = if manifest.attended { 5 } else { 3 };
     let min_fire_gap = min_fire_gap_secs();
-    // A generic-delivery fire OBSERVED its world this fire (the evaluator ran
-    // above), so the streak counts against the observed revision: progress
-    // resets the streak the same way a moved PR head does. Every other fire
-    // compares journal rows against the journal's own newest fingerprint.
     let generic_observed = generic.is_active();
-    let observed_fp =
-        generic.delivery_fingerprint(make_fingerprint(&head_sha, "none", "none", "none"));
+    let no_pr_fp =
+        || generic.delivery_fingerprint(make_fingerprint(&head_sha, "none", "none", "none"));
+    let observed_fp = no_pr_fp();
     let (prior_fires, journal_streak, last_recorded_fp, streak_window) = read_prior_fires(
         &project_events,
         &session_id,
@@ -8094,9 +8089,7 @@ pub(crate) fn decide_with_payload(
     let fingerprint = if generic_observed {
         observed_fp
     } else {
-        last_recorded_fp.clone().unwrap_or_else(|| {
-            generic.delivery_fingerprint(make_fingerprint(&head_sha, "none", "none", "none"))
-        })
+        last_recorded_fp.clone().unwrap_or_else(no_pr_fp)
     };
     let this_fire = prior_fires + 1;
     // consecutive_unchanged counts prior identical fires; adding this fire.
