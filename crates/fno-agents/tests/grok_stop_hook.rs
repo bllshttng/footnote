@@ -20,7 +20,7 @@ fn make_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
     let mut perms = fs::metadata(&path).unwrap().permissions();
     perms.set_mode(0o755);
-    fs::set_permissions(&path, perms);
+    let _ = fs::set_permissions(&path, perms);
     path
 }
 
@@ -45,7 +45,7 @@ struct GrokFixture {
     grok_home: PathBuf,
 }
 
-fn fixture(tag: &str, manifest_body: &str) -> GrokFixture {
+fn fixture(_tag: &str, manifest_body: &str) -> GrokFixture {
     let tmp = TempDir::new().unwrap();
     let repo = tmp.path().join("repo");
     fs::create_dir_all(repo.join(".fno")).unwrap();
@@ -89,6 +89,7 @@ fn fixture(tag: &str, manifest_body: &str) -> GrokFixture {
     let events = space.join("events.jsonl");
     let gh_dir = tmp.path().join("bin");
     fs::create_dir_all(&gh_dir).unwrap();
+    no_pr_gh(&gh_dir);
     let grok_home = tmp.path().join("grok");
     fs::create_dir_all(grok_home.join("sessions").join("%2Frepo")).unwrap();
     GrokFixture {
