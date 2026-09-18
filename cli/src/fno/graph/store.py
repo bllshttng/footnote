@@ -1214,8 +1214,8 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
     runs them after the keeper's publish lands, which is the same position
     relative to other writers."""
     path = Path(path)
-    dropped = outcome["dropped"]
-    backup = outcome["backup"]
+    dropped = outcome.get("dropped", 0)
+    backup = outcome.get("backup")
     if warning := outcome.get("shadow_warning"):
         print(f"Warning: {warning}", file=sys.stderr)
     if dropped > 0:
@@ -1233,7 +1233,7 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
 
     # Claim releases run AFTER the publish: root resolution and recovery
     # mutexes never belong inside the store's critical section.
-    for release in outcome["closure_releases"]:
+    for release in outcome.get("closure_releases", []):
         release_node_claim_at_closure(release["id"], rung=release["rung"])
 
     # The client renders in-call when the write landed on the configured
