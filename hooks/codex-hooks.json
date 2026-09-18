@@ -27,6 +27,16 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash ${PLUGIN_ROOT}/hooks/generated-write-guard.sh",
+            "statusMessage": "checking generated copies"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
             "command": "bash ${PLUGIN_ROOT}/hooks/plan-location-guard.sh",
             "statusMessage": "checking plan save location"
           }

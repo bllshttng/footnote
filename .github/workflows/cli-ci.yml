@@ -29,6 +29,8 @@ on:
       - schemas/**
       # The cargo job diffs this generated document against its source.
       - docs/harnesses/capability-matrix.md
+      # The cargo job reads its generated-copy path list from this manifest.
+      - generated-artifacts.tsv
       # The cargo job runs the gate that reads this boundary inventory.
       - docs/architecture/product-boundaries.md
       - scripts/**
@@ -510,6 +512,17 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y strace
       - name: Build release binary
         run: cargo build --release --manifest-path crates/fno-agents/Cargo.toml --bin fno-agents
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: Generated copies match their sources
+        run: |
+          (cd cli && uv run fno-py doctor harness-matrix --write)
+          awk -F'\t' '!/^#/ && ($3 ~ /^cargo build --manifest-path crates\/fno-agents/ || $3 ~ /harness-matrix --write/) && $1 != "docs/harnesses/verb-matrix.md" { print $1 }' \
+            generated-artifacts.tsv > "$RUNNER_TEMP/generated-paths.txt"
+          cat "$RUNNER_TEMP/generated-paths.txt"
+          xargs git diff --exit-code -- < "$RUNNER_TEMP/generated-paths.txt"
       - name: Run latency budgets
         env:
           FNO_AGENTS_BIN: ${{ github.workspace }}/crates/fno-agents/target/release/fno-agents

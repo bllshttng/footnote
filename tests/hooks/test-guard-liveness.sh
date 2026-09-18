@@ -99,6 +99,12 @@ expect_row "wwp allows a worktree edit" worktree-write-protect allow \
 expect_row "wwp blocks a canonical-checkout edit" worktree-write-protect block \
     '{"cwd":"'"$WWT_REPO"'","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Update File: README.md\n*** End Patch"}}'
 
+# ── generated-write-guard (Edit|Write) ────────────────────────────────────────
+expect_row "gwg allows an ordinary edit" generated-write-guard allow \
+    '{"cwd":"'"$TMP"'","tool_name":"Edit","tool_input":{"file_path":"'"$TMP"'/notes.md"}}'
+expect_row "gwg blocks an installed plugin copy" generated-write-guard block \
+    '{"cwd":"'"$TMP"'","tool_name":"Edit","tool_input":{"file_path":"'"$TMP"'/.fno/plugin-stage/fno/hooks/a.sh"}}'
+
 # ── join-partition-write-guard (Edit|Write, allow path only) ──────────────────
 expect_row "jpw allows a non-joined write" join-partition-write-guard allow \
     '{"cwd":"'"$TMP"'/elsewhere","tool_name":"Write","tool_input":{"file_path":"'"$TMP"'/elsewhere/x.py","content":"x"}}'
