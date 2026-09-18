@@ -896,6 +896,29 @@ mod tests {
     /// kind is dynamic and not statically checkable. The line number (1-based)
     /// is reported so a drift failure points straight at the offending call.
     fn scan_emit_kinds(src: &str) -> Vec<(String, usize)> {
+        // Comment lines are blanked (offsets preserved) first: a doc comment
+        // may SHOW an emit shape (`.emit("...")` in prose) and the scan reads
+        // bytes, not syntax.
+        let bytes = src.as_bytes();
+        let mut blanked = bytes.to_vec();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let line_end = bytes[i..]
+                .iter()
+                .position(|&c| c == b'\n')
+                .map(|p| i + p)
+                .unwrap_or(bytes.len());
+            let first = bytes[i..line_end]
+                .iter()
+                .find(|&&c| c != b' ' && c != b'\t');
+            if first == Some(&b'/') {
+                for b in &mut blanked[i..line_end] {
+                    *b = b' ';
+                }
+            }
+            i = line_end + 1;
+        }
+        let src = std::str::from_utf8(&blanked).unwrap_or(src);
         let bytes = src.as_bytes();
         let mut kinds = Vec::new();
         for needle in [".emit", ".emit_fields"] {
@@ -1215,6 +1238,12 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // fire row whose journal entries are the operator-notice rate bound.
     "evals_scheduled_run",
     "evals_stale",
+    // PR heal loop (daemon-emitted): the per-run verdict arms of
+    // `fno-agents heal` - a flake rerun and a real PR push - plus the
+    // fleet-scope readout the daemon prints on boot.
+    "pr_heal_flake",
+    "pr_heal_pr",
+    "daemon_fleet_scope",
     // Scratch-shape sweep (agents-emitted from the `scratch sweep`
     // stage of the daily eval-sweep ignition): one row per new (job, shape)
     // recurrence the jobs-dir walker found, and one row per node the sweep
