@@ -38,6 +38,10 @@ The Stop-hook gate (`loopcheck::king_decide`) reads the term before the board re
 
 A same-session re-crown (`fno agents king init --scope --force`) starts a fresh term: the re-crown is itself a grantor's receipt. `fno agents king verdict` prints the term as evidence (`term: span:96h (default) 101h of 96h, reached`). A reached term does not change the verdict word itself. Only the Stop-hook gate forces the handoff.
 
+## Compaction
+
+The crown survives a compact. Its evidence does not. After a compaction the session context holds a summary, and nothing forces that summary back against the store before the king acts on it. Two machines close the gap. The post-compact hook (`king-postcompact-reinject.sh`) reads the newest `isCompactSummary` entry from the transcript. It orders by line position, never by timestamp. It extracts the node ids the published grammar matches and resolves every candidate through one `fno backlog get` batch. The answer rides back as `unresolved:` and `resolved:` rows with one instruction: act on these rows, not on the summary. The stop gate adds a check beside the term gate. Past `king.compaction_ceiling` (default 3) compactions since the manifest's `created_at`, a crown handoff doc that is missing or more than 24 hours old blocks exit. The block names the refresh command, `precompact-canon-doc.sh`. The doc gate counts boundaries only on claude transcripts. It fails open on anything it cannot measure, because it blocks exit and a false block traps a session. One reader-authority rule covers both machines: a node's state comes from `fno backlog get`, never from a `graph.json` read. With the sqlite backend the file is the relational store's stale twin.
+
 ## Stop semantics
 
 Exit is blocked while actionable rows exist. The stop hook reads board truth. A clean board exits `NoWork`, and the loop re-enters on the next beat. `NoProgress` after three unshrinking fires escalates automatically and the session parks. The operator's answer wakes it through the wake arm. A reign never fights the hook. A reign never `/goal clear` on NoProgress.
