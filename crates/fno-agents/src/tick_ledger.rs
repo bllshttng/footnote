@@ -460,7 +460,8 @@ pub fn needs_attention(row: &ArmStatus) -> bool {
 /// Skip reasons that mean the arm ran and its run failed - not that it chose
 /// to skip. Sources: the pr-watch tick's outcome tokens (disabled, lock_held,
 /// quota_skip pass through; timeout/error fail), the king-wake and notify
-/// emitters' failure tokens, and auto_continue's `next-error` (a non-zero,
+/// emitters' failure tokens, merge_close's `failures` (a partial reconcile
+/// that left nodes unresolved), and auto_continue's `next-error` (a non-zero,
 /// malformed or timed-out `backlog next`), `spawn-failed` (the dispatch it
 /// fired exited non-zero), and active_backlog's `env_broken` (the resolver
 /// shelled out and failed: no usable `fno`, non-zero exit, unreadable
@@ -472,6 +473,7 @@ pub fn needs_attention(row: &ArmStatus) -> bool {
 const FAILURE_SKIPS: &[&str] = &[
     "timeout",
     "error",
+    "failures",
     "next-error",
     "spawn-failed",
     "env_broken",
@@ -1430,6 +1432,48 @@ mod tests {
         let line = render_row(ab);
         assert!(line.contains("FAIL"), "line: {line}");
         assert!(line.contains("skip=env_broken"), "line: {line}");
+        assert!(line.contains("failing_for=3600s"), "line: {line}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_partial_reconcile_failures_skip_fails_the_merge_close_arm() {
+        // failures is merge_close's partial-sweep token: the sweep ran and
+        // left nodes unresolved. It must read FAIL like error, never ok -
+        // a healthy read with nodes left open is the bug this closes.
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        // ok tick 3600s ago, failures tick 120s ago (interval 900: fresh).
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-04T11:00:00Z",
+                    "merge_close",
+                    SCHED_DAEMON,
+                    1,
+                    json!(null),
+                    900,
+                ),
+                tick_envelope(
+                    "2026-09-04T11:58:00Z",
+                    "merge_close",
+                    SCHED_DAEMON,
+                    0,
+                    json!("failures"),
+                    900,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let rows = read_arms(&[journal], now);
+        let mc = rows.iter().find(|r| r.arm == "merge_close").unwrap();
+        assert!(mc.failing, "failures must set failing");
+        assert_eq!(mc.failing_for_s, Some(3600));
+        let line = render_row(mc);
+        assert!(line.contains("FAIL"), "line: {line}");
+        assert!(line.contains("skip=failures"), "line: {line}");
         assert!(line.contains("failing_for=3600s"), "line: {line}");
         std::fs::remove_dir_all(&dir).ok();
     }
