@@ -687,16 +687,6 @@ def _component_convergence(
     ]
 
 
-def _plugin_registry_path() -> Path:
-    """The claude plugin install registry (module-level so tests can stub it)."""
-    return Path.home() / ".claude" / "plugins" / "installed_plugins.json"
-
-
-def _known_marketplaces_path() -> Path:
-    """Claude's marketplace registry (module-level so tests can stub it)."""
-    return Path.home() / ".claude" / "plugins" / "known_marketplaces.json"
-
-
 def _run_stage_check(argv: list[str]) -> tuple[int, str, str]:
     """One ``plugin-install --check`` probe (module-level so tests stub it).
     Transport failures come back as exit -1 with the reason, never raise."""
@@ -707,29 +697,23 @@ def _run_stage_check(argv: list[str]) -> tuple[int, str, str]:
         return -1, "", str(exc)
 
 
-def _stage_check_report(install_location: str = "") -> Optional[dict[str, Any]]:
-    """Stage-drift verdict when Claude runs the plugin from the fno stage.
-
-    A directory marketplace never mints a ``gitCommitSha``, so for that
-    install shape freshness is a byte comparison of the stage against source
-    HEAD. Returns None when this install is not a directory marketplace; any
-    transport failure maps to ``unknown`` in ``detail``, never ``fresh``.
-    ``install_location`` (where Claude actually execs) wins over the
-    marketplace path when both exist.
+def _stage_check_report() -> dict[str, Any]:
+    """Every-root drift verdict via ``plugin-install --check`` with no
+    ``--stage``: the Rust verb enumerates every fno plugin root on disk
+    (marketplace, registry, orphan copies) and byte-checks each against
+    source HEAD; Python is transport only. Any transport failure maps to
+    ``unknown`` in ``detail``, never ``fresh``.
     """
-    try:
-        data = json.loads(_known_marketplaces_path().read_text(encoding="utf-8"))
-        source = data["footnote"]["source"]
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-    if not isinstance(source, dict) or source.get("source") != "directory":
-        return None
-    stage_path = install_location or str(source.get("path") or "")
-    if not stage_path:
-        return None
-
     def unknown(detail: str) -> dict[str, Any]:
-        return {"status": "unknown", "sha": None, "installed_at": None, "detail": detail, "kind": "stage", "stage": stage_path}
+        return {
+            "status": "unknown",
+            "sha": None,
+            "installed_at": None,
+            "detail": detail,
+            "kind": "stage",
+            "stage": None,
+            "roots": [],
+        }
 
     binary = _cargo_bin_path()
     src = _resolve_source(None)
@@ -738,10 +722,9 @@ def _stage_check_report(install_location: str = "") -> Optional[dict[str, Any]]:
     if src is None:
         return unknown("no source checkout to compare against")
     code, out, err = _run_stage_check(
-        [binary, "plugin-install", "--check", "--json",
-         "--stage", stage_path, "--source", str(src)]
+        [binary, "plugin-install", "--check", "--json", "--source", str(src)]
     )
-    if code not in (0, 3):
+    if code not in (0, 3, 4):
         return unknown(f"plugin-install --check exited {code}: {(err or out).strip()}")
     try:
         verdict = json.loads(out)
@@ -749,115 +732,56 @@ def _stage_check_report(install_location: str = "") -> Optional[dict[str, Any]]:
         return unknown("plugin-install --check printed no JSON")
     if not isinstance(verdict, dict):
         return unknown("plugin-install --check printed a non-object")
-    verdict["kind"] = "stage"
-    verdict.setdefault("stage", stage_path)
-    verdict["sha"] = verdict.pop("source_head", None)
-    verdict.setdefault("remedy", f"cd {verdict.get('source') or src} && fno config plugin install claude")
-    return verdict
-
-
-def _plugin_cache_report() -> dict[str, Any]:
-    """Freshness of the deployed CLAUDE plugin cache the hooks run from.
-
-    ``fno doctor`` already owns source-vs-installed staleness for the wheel and
-    the cargo bins, but not for ``~/.claude/plugins/cache/footnote``: the copy
-    ``hooks/helpers/init-target-state.sh`` (resolved via CLAUDE_PLUGIN_ROOT)
-    actually executes in every Claude session. A cache pinned to a pre-feature
-    sha ships hooks that predate provenance writers while every Python-side
-    check reads green - the exact gap that left armed manifests reporting
-    ``auto_merge_source: unknown`` after.
-
-    Uses the module's staleness vocabulary: ``fresh`` when the pinned sha IS
-    the source HEAD, ``stale`` when the sha is a proven ancestor of HEAD (and
-    not HEAD), ``unknown`` when the installed-plugins file is missing, the sha
-    is unknown to this clone, or git is unavailable. Never asserts staleness on
-    absent evidence (same rule as the exit-code contract at module top).
-
-    When stale, the report also carries ``deleted_hook_scripts`` iff the
-    pinned..HEAD range deleted a script the pinned revision's hook config
-    referenced - the case that bricks live sessions rather than merely
-    lagging, and the only stale worth interrupting an operator for.
-    """
-    # Any, not Optional[str]: the stale branch adds deleted_hook_scripts,
-    # a list, beside the string fields.
-    report: dict[str, Any] = {
+    roots = verdict.get("roots")
+    if not isinstance(roots, list) or not roots:
+        return unknown("plugin-install --check named no plugin root")
+    for root in roots:
+        root["kind"] = "stage"
+        root["sha"] = root.pop("source_head", None)
+        root.setdefault(
+            "remedy",
+            f"cd {verdict.get('source') or src} && fno config plugin install claude",
+        )
+    return {
         "status": "unknown",
         "sha": None,
         "installed_at": None,
-        "detail": None,
+        "detail": "; ".join(verdict.get("detail") or []) or None,
+        "kind": "stage",
+        "stage": None,
+        "roots": roots,
     }
-    try:
-        registry = _plugin_registry_path()
-        data = json.loads(registry.read_text(encoding="utf-8"))
-        plugins = data.get("plugins") if isinstance(data, dict) else None
-        entries = (
-            plugins.get("fno@footnote") if isinstance(plugins, dict) else None
-        ) or []
-        entry = entries[0] if isinstance(entries, list) and entries else {}
-    except (OSError, ValueError, IndexError, AttributeError, TypeError, KeyError):
-        # A hand-edited, corrupted, or future-version registry is exactly the
-        # broken install this advisory leg exists to describe: any malformed
-        # shape degrades to unknown, never a traceback through doctor_command's
-        # unwrapped call sites.
-        report["detail"] = "no installed_plugins.json entry for fno@footnote"
-        return report
-    sha = entry.get("gitCommitSha")
-    if not sha:
-        # The stage is the artifact; Claude execs from the registry path.
-        return _stage_check_report(str(entry.get("installLocation") or "")) or report | {
-            "detail": "installed_plugins.json carries no gitCommitSha"
-        }
-    report["sha"] = sha
-    report["installed_at"] = entry.get("installedAt")
 
-    src = _resolve_source(None)
-    if src is None:
-        report["detail"] = "no source checkout to compare against"
-        return report
-    try:
-        head = subprocess.run(
-            ["git", "-C", str(src), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if head.returncode != 0:
-            report["detail"] = "git rev-parse failed in the source checkout"
-            return report
-        if head.stdout.strip() == sha:
-            report["status"] = "fresh"
-            return report
-        ancestor = subprocess.run(
-            ["git", "-C", str(src), "merge-base", "--is-ancestor", sha, "HEAD"],
-            capture_output=True,
-            timeout=15,
-        )
-        if ancestor.returncode == 0:
-            report["status"] = "stale"
-        else:
-            # Not HEAD and not an ancestor: a foreign sha. Unknown, never
-            # stale-on-absent-evidence.
-            report["detail"] = "pinned sha is not known as an ancestor of HEAD"
-    except (OSError, subprocess.SubprocessError):
-        report["detail"] = "git unavailable"
-        return report
 
-    # Stale fires after EVERY merge, so it cannot by itself separate benign
-    # lag from brick risk. The separator: did this range delete a hook script
-    # the pinned revision's config referenced? Only that case takes every
-    # pre-merge session's Bash away. Same never-assert-on-absent-evidence
-    # rule: a git failure adds no key rather than claiming the all-clear.
-    from fno.hook_config import stubless_deletions
+def _plugin_cache_report() -> dict[str, Any]:
+    """Freshness of every fno plugin root Claude could load or mistake for
+    the loaded one.
 
-    head_sha = head.stdout.strip()
-    deleted = (
-        stubless_deletions(src, sha, head_sha)
-        if report["status"] == "stale"
-        else None
-    )
-    if deleted:
-        report["deleted_hook_scripts"] = deleted
-    return report
+    ``fno doctor`` already owns source-vs-installed staleness for the wheel
+    and the cargo bins; this leg covers the plugin trees. The Rust verb
+    enumerates every root (the live marketplace stage plus any registry or
+    orphan copy) and byte-checks each against source HEAD. The fold keeps
+    the flat keys (status, sha, stage, kind, detail, remedy) pointed at the
+    live root so ``_silent_switch_report`` and the human printer keep
+    working unchanged, with the per-root detail under ``roots``. Status is
+    the WORST root's status, so one stale orphan never reads as a clean
+    bill of health.
+    """
+    verdict = _stage_check_report()
+    roots = verdict.get("roots") or []
+    live = next((r for r in roots if r.get("live")), None)
+    rank = {"fresh": 0, "absent": 0, "unknown": 1, "stale": 2}
+    worst = max(roots, key=lambda r: rank.get(r.get("status"), 1), default=None)
+    return {
+        "status": (worst or verdict).get("status", "unknown"),
+        "sha": (live or {}).get("sha"),
+        "installed_at": None,
+        "detail": verdict.get("detail"),
+        "kind": "stage" if (live or not roots) else None,
+        "stage": (live or {}).get("path"),
+        "remedy": (live or {}).get("remedy"),
+        "roots": roots,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2038,6 +1962,18 @@ def _blockers(result: dict[str, Any]) -> list[str]:
         blockers.append(f"{plugin_hooks['failed']} plugin hook(s) cannot launch.")
 
     plugin_cache = result.get("plugin_cache") or {}
+    for root in plugin_cache.get("roots") or []:
+        if root.get("status") != "stale":
+            continue
+        sample = root.get("sample") or []
+        drift = root.get("differing_count", 0) + root.get("missing_count", 0)
+        role = "live" if root.get("live") else "second copy"
+        blockers.append(
+            f"plugin root {root.get('path')} ({role}) differs from source HEAD in {drift} "
+            f"file(s) (e.g. {sample[0] if sample else '?'}). Fix: {root.get('remedy')}"
+        )
+    if plugin_cache.get("roots"):
+        return blockers
     if plugin_cache.get("kind") == "stage" and plugin_cache.get("status") == "stale":
         sample = plugin_cache.get("sample") or []
         drift = plugin_cache.get("differing_count", 0) + plugin_cache.get("missing_count", 0)
@@ -2736,10 +2672,29 @@ def _emit_human(
             f"run `{finding['command']}` or let the reaper restore it."
         )
 
-    # Deployed claude plugin cache: the hooks actually executed by
-    # Claude sessions. Advisory, same vocabulary as the wheel/rust legs.
+    # Deployed fno plugin roots: every copy Claude could load or mistake for
+    # the loaded one. One line per root; the live root is named as live, and
+    # a stale second copy names its removal.
     pc = result.get("plugin_cache") or {}
-    if pc.get("kind") == "stage" and pc.get("status") == "stale":
+    for root in pc.get("roots") or []:
+        role = "live" if root.get("live") else "second copy"
+        status = root.get("status")
+        drift = root.get("differing_count", 0) + root.get("missing_count", 0)
+        line = (
+            f"fno doctor: plugin root ({root.get('origin')}, {role}): "
+            f"{root.get('path')}: {status}"
+        )
+        if drift:
+            line += f" ({drift} file(s) differ from source HEAD)"
+        if status == "stale" and not root.get("live"):
+            line += (
+                f". Fix: {root.get('remedy') or 'fno config plugin install claude'}"
+                " removes the stale second copy"
+            )
+        out(line)
+    if pc.get("roots"):
+        pass
+    elif pc.get("kind") == "stage" and pc.get("status") == "stale":
         sample = pc.get("sample") or []
         out(
             f"fno doctor: plugin stage STALE ({pc.get('differing_count', 0)} differing, "
@@ -4612,7 +4567,7 @@ def doctor_command(
         # in silence. Advisory, like the two around it - the exit code is settled
         # by the blocker list, and the defect this closes is the silence.
         pc = result.get("plugin_cache") or {}
-        if pc.get("status") == "stale" and not json_out:
+        if pc.get("status") == "stale" and not pc.get("roots") and not json_out:
             typer.echo(
                 "fno doctor: --fix cannot refresh the claude plugin cache; that "
                 "registry belongs to claude. Run: `claude plugin update "
