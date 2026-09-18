@@ -43,7 +43,10 @@ skip() { SKIP_COUNT=$((SKIP_COUNT+1)); printf '[shim] SKIP: %s\n' "$*" >&2; }
 
 # ── pre-flight ───────────────────────────────────────────────────────────────
 [[ -f "$HOOK" ]] || { fail "hook not found at $HOOK"; exit 1; }
-[[ -x "$BIN" ]] || { fail "fno-agents binary not executable at $BIN (build it or set FNO_AGENTS_BIN)"; exit 1; }
+# A changed packet that also selects pytest deletes the debug binary before
+# this test runs; the smoke lane then owes a skip, not a red - the full smoke
+# job, which rebuilds the binary, stays the gate.
+[[ -x "$BIN" ]] || { skip "fno-agents binary not executable at $BIN (build it or set FNO_AGENTS_BIN)"; exit 77; }
 
 # ── fixture builders ─────────────────────────────────────────────────────────
 # Globals set: TMP_DIR HOME_DIR SPACE_DIR TRANSCRIPT_FILE STATE_FILE
