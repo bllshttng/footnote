@@ -54,4 +54,16 @@
 # readers that cannot link fno-agents render the edge without re-deriving
 # it. Absent on rows with no spawn edge. Rationale lives beside the column
 # in state.rs / registry.py.
-version = 34
+# v35: additive `requested_permission_mode` and `turn_policy_source` on the
+# codex thread posture record. `requested_permission_mode` is the operator's
+# exact permission_mode string, which a resume replays; `sandbox_posture`
+# alone could not tell `read-only:on-request` from `read-only:never`.
+# `turn_policy_source` names where the current turn's sandboxPolicy came
+# from - "resolved" (echoed server posture) or "requested" (replayed row
+# request) - so requested, resolved and current-turn stay three
+# distinguishable readings. Same additive-optional writer-protection
+# rationale as v22 through v34: a pre-v35 writer accepts the unknown keys
+# through serde and erases them on its next read-modify-write, so the bump
+# turns a silent erasure into a loud refusal. Rationale lives beside the
+# columns in state.rs / registry.py.
+version = 35

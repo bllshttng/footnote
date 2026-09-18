@@ -226,13 +226,6 @@ fn codex_thread_resume_identity(
     Ok(Some((session_id.to_string(), PathBuf::from(cwd))))
 }
 
-/// Whether the row was launched with the danger-full-access posture (
-/// v19): the resume lane applies it so a daemon restart cannot silently demote
-/// a yolo worker to workspace-write. `None` (pre-v19 rows) reads safe.
-fn entry_posture_is_full_access(entry: &RegistryEntry) -> bool {
-    entry.sandbox_posture.as_deref() == Some("danger-full-access")
-}
-
 pub(crate) fn is_codex_thread_entry(entry: &RegistryEntry) -> bool {
     entry.harness_name() == "codex"
         && entry.host_mode_or_default() == crate::state::HOST_MODE_INTERACTIVE

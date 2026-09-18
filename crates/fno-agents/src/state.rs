@@ -1133,6 +1133,24 @@ pub struct RegistryEntry {
     /// `workspaceWrite` alone are different workers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub granted_writable_roots: Vec<String>,
+    /// The permission_mode string the operator's spawn REQUESTED, verbatim
+    /// (schema v35): `read-only:on-request`, `yolo`, `full-auto`. `None` when
+    /// the spawn named no mode (the bare yolo bool or the bounded default).
+    /// Distinct from `sandbox_posture`, which records the resolved NAME of the
+    /// sandbox half only: the requested string is what a resume replays, and a
+    /// row without it cannot tell `read-only:on-request` from
+    /// `read-only:never`. Same X3 passthrough duty as the other posture
+    /// columns, and the same additive-optional writer-protection bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_permission_mode: Option<String>,
+    /// Where the current turn's sandboxPolicy came from (schema v35):
+    /// `resolved` when it echoes the server-reported posture, `requested`
+    /// when the server named no sandbox and the row's recorded request was
+    /// replayed instead. Stamped at spawn, refreshed by the resume
+    /// write-back. `None` on rows that predate the column; readers show
+    /// `unknown`, never a posture name and never a permission claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_policy_source: Option<String>,
     /// v9 backfill-only: the removed `claude_short_id`. Deserialized
     /// (under its old key) so a legacy row's jobId survives the read, but NEVER
     /// serialized -- [`RegistryEntry::backfill_short_id`] moves it into
