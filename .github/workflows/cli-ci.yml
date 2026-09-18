@@ -606,6 +606,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      - name: Install ripgrep (gather_context's sibling-caller grep)
+        # blueprint_judge::gather_context shells `rg` and degrades to an empty
+        # context when the tool is missing; the sibling_callers test pins that
+        # wiring with a real grep over a temp tree, so the runner needs the
+        # tool on PATH. The ubuntu image does not ship it.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
+
       - name: Set up Python (for flock_interop.rs cross-language test)
         # flock_interop.rs spawns a real python3 subprocess to verify that
         # Rust flock and Python fcntl.flock serialize correctly. ubuntu-latest
