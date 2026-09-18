@@ -1380,7 +1380,33 @@ mod verdict_tests {
     /// journal. Spaces and the agents home resolve through a `DeclaredRoot`
     /// pin, the config anchors on `--cwd`, and the graph path rides that
     /// config - no ambient resolution, so a parallel test's pins never race.
-    fn input_tree(king_config: &str) -> (crate::paths::DeclaredRoot, PathBuf, PathBuf, PathBuf) {
+    /// Restores FNO_CONFIG on drop: the fixture config must never outlive
+    /// the test that set it. Deliberately lock-free (save and restore only):
+    /// the shared env mutex wedged unrecoverably under extreme machine load,
+    /// and the leak, not the race, is what breaks sibling tests.
+    struct ConfigEnv {
+        saved: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for ConfigEnv {
+        fn drop(&mut self) {
+            match self.saved.take() {
+                Some(v) => std::env::set_var("FNO_CONFIG", v),
+                None => std::env::remove_var("FNO_CONFIG"),
+            }
+        }
+    }
+
+    fn input_tree(
+        king_config: &str,
+    ) -> (
+        ConfigEnv,
+        crate::paths::DeclaredRoot,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+    ) {
+        let saved = std::env::var_os("FNO_CONFIG");
         let root_pin = crate::paths::DeclaredRoot::declare("kvh");
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
@@ -1403,9 +1429,12 @@ mod verdict_tests {
         std::fs::write(
             &graph,
             json!({"entries": [
-                {"id": "x-bbbb", "type": "epic", "project": "fno", "created_at": "2026-09-01T00:00:00Z"},
-                {"id": "x-old", "parent": "x-bbbb", "created_at": "2026-09-05T00:00:00Z"},
-                {"id": "x-new", "parent": "x-bbbb", "created_at": "2026-09-12T00:00:00Z"}
+                {"id": "x-bbbb", "slug": "x-bbbb", "title": "x-bbbb", "type": "epic",
+                 "status": "in_progress", "priority": "p2", "project": "fno", "created_at": "2026-09-01T00:00:00Z"},
+                {"id": "x-old", "slug": "x-old", "title": "x-old", "type": "feature",
+                 "status": "done", "priority": "p2", "parent": "x-bbbb", "created_at": "2026-09-05T00:00:00Z"},
+                {"id": "x-new", "slug": "x-new", "title": "x-new", "type": "feature",
+                 "status": "ready", "priority": "p2", "parent": "x-bbbb", "created_at": "2026-09-12T00:00:00Z"}
             ]})
             .to_string(),
         )
@@ -1432,7 +1461,7 @@ mod verdict_tests {
         // Leak the tempdir: the config pin points inside it, so the tree must
         // outlive the test (a few KB per run, bounded by test count).
         let root = dir.keep();
-        (root_pin, root, manifest, journal)
+        (ConfigEnv { saved }, root_pin, root, manifest, journal)
     }
 
     fn verdict_args(root: &Path, manifest: &Path, journal: &Path) -> Vec<String> {
@@ -1451,7 +1480,7 @@ mod verdict_tests {
 
     #[test]
     fn run_end_to_end_degraded_from_inputs() {
-        let (_pin, root, manifest, journal) =
+        let (_env, _pin, root, manifest, journal) =
             input_tree("[king]\ncheckin_interval = \"30m\"\ncompaction_ceiling = 3\n");
         assert_eq!(
             run_king_verdict(&verdict_args(&root, &manifest, &journal)),
@@ -1500,7 +1529,8 @@ mod verdict_tests {
         // Same posture the count flags had: a mistyped ceiling must not
         // degrade into an absent bound that prints as a clean reading. The
         // refusal is a config refusal now, exit 1 naming the key.
-        let (_pin, root, manifest, journal) = input_tree("[king]\ncompaction_ceiling = \"1O\"\n");
+        let (_env, _pin, root, manifest, journal) =
+            input_tree("[king]\ncompaction_ceiling = \"1O\"\n");
         assert_eq!(
             run_king_verdict(&verdict_args(&root, &manifest, &journal)),
             1

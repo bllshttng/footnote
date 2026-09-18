@@ -96,9 +96,9 @@ def _seed_graph() -> None:
 
 def _node_rows() -> list[dict]:
     from fno import paths
-    from fno.graph.store import read_graph
+    from fno.graph.store import read_graph_strict
 
-    return next(e for e in read_graph(paths.graph_json()) if e["id"] == NODE).get(
+    return next(e for e in read_graph_strict(paths.graph_json()) if e["id"] == NODE).get(
         "sessions", []
     )
 

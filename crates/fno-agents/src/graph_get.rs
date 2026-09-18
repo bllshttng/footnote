@@ -181,7 +181,7 @@ mod tests {
     }
 
     fn node(id: &str, slug: &str) -> Value {
-        serde_json::json!({"id": id, "slug": slug, "status": "ready"})
+        serde_json::json!({"id": id, "slug": slug, "title": slug, "status": "ready"})
     }
 
     #[test]

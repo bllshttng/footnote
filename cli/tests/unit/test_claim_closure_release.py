@@ -20,7 +20,7 @@ from fno.claims.cli import RosterReading, _node_settlement
 from fno.claims.core import reap_dead_claims, sweep_verdict
 from fno.claims.io import claim_path, claims_dir, serialize_claim
 from fno.claims.types import Claim, now_ms
-from fno.graph.store import locked_mutate_graph, read_graph, release_node_claim_at_closure
+from fno.graph.store import commit_rows_via_store, read_graph_strict, release_node_claim_at_closure
 
 
 HOLDER = "target-session:sid-a"
@@ -112,9 +112,9 @@ class TestClosureReleaseHook:
                     e["completed_at"] = "2026-08-21T03:16:00Z"
             return entries
 
-        locked_mutate_graph(graph, _close)
-        assert read_graph(graph)[0]["status"] == "done"
-        assert read_graph(graph)[0]["locked_by"] is None
+        commit_rows_via_store(graph, _close)
+        assert read_graph_strict(graph)[0]["status"] == "done"
+        assert read_graph_strict(graph)[0]["locked_by"] is None
         assert claim_path("node:x-doen", root=global_root).exists()
 
     def test_done_releases_claim_and_clears_mirror(self, tmp_path, monkeypatch):
@@ -126,9 +126,9 @@ class TestClosureReleaseHook:
                     e["completed_at"] = "2026-08-21T03:16:00Z"
             return entries
 
-        locked_mutate_graph(graph, _close)
+        commit_rows_via_store(graph, _close)
 
-        out = read_graph(graph)[0]
+        out = read_graph_strict(graph)[0]
         assert out["status"] == "done"
         assert out["locked_by"] is None
         assert out["locked_at"] is None
@@ -147,9 +147,9 @@ class TestClosureReleaseHook:
                     e["superseded_by"] = "x-other"
             return entries
 
-        locked_mutate_graph(graph, _supersede)
+        commit_rows_via_store(graph, _supersede)
 
-        out = read_graph(graph)[0]
+        out = read_graph_strict(graph)[0]
         assert out["status"] == "superseded"
         assert out["locked_by"] is None
         assert not claim_path("node:x-doen", root=global_root).exists()
@@ -166,7 +166,7 @@ class TestClosureReleaseHook:
                     e["completed_at"] = "2026-08-21T03:16:00Z"
             return entries
 
-        locked_mutate_graph(graph, _already_done)
+        commit_rows_via_store(graph, _already_done)
         assert not claim_path("node:x-doen", root=global_root).exists()
 
         # Replant (the pre-fix leak shape) and mutate again: kept.
@@ -184,7 +184,7 @@ class TestClosureReleaseHook:
                     e["title"] = "retitled"
             return entries
 
-        locked_mutate_graph(graph, _retitle)
+        commit_rows_via_store(graph, _retitle)
         assert claim_path("node:x-doen", root=global_root).exists()
 
     def test_a_broken_claims_store_never_fails_the_mutation(self, tmp_path, monkeypatch):
@@ -202,8 +202,8 @@ class TestClosureReleaseHook:
             return entries
 
         # The closure lands; the release failure is a stderr line, not an exit.
-        locked_mutate_graph(graph, _close)
-        assert read_graph(graph)[0]["status"] == "done"
+        commit_rows_via_store(graph, _close)
+        assert read_graph_strict(graph)[0]["status"] == "done"
 
 
 # ---------------------------------------------------------------------------
@@ -517,7 +517,7 @@ class TestReapMirrorClear:
         summary = reap_dead_claims(apply=True)
         assert summary["reaped"] == 1
         assert summary["lock_mirror_cleared"] == 1
-        out = read_graph(graph)[0]
+        out = read_graph_strict(graph)[0]
         assert out["locked_by"] is None
         assert out["locked_at"] is None
 
@@ -528,7 +528,7 @@ class TestReapMirrorClear:
         summary = reap_dead_claims(roots=[claims_root], apply=True)
         assert summary["reaped"] == 1
         assert summary["lock_mirror_cleared"] == 0
-        out = read_graph(graph)[0]
+        out = read_graph_strict(graph)[0]
         assert out["locked_by"] == HOLDER
 
     def test_dry_run_never_touches_the_graph(self, tmp_path, monkeypatch):
@@ -536,5 +536,5 @@ class TestReapMirrorClear:
         summary = reap_dead_claims(apply=False)
         assert summary["would_reap"] == 1
         assert summary["lock_mirror_cleared"] == 0
-        out = read_graph(graph)[0]
+        out = read_graph_strict(graph)[0]
         assert out["locked_by"] == HOLDER

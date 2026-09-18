@@ -1,7 +1,7 @@
 """Type definitions for the fno graph module.
 
 Contains Status/Priority enums and the typed ``Node`` model (the Linear
-surface; ``Entry`` is its legacy alias until task 17.1).
+surface).
 """
 from __future__ import annotations
 
@@ -358,7 +358,7 @@ class Node(BaseModel):
         Live render/verb paths already guard these (``_rank_band`` finite-check
         + bool exclusion, ``_is_ranked`` bool exclusion) and the raw-dict path
         dominates, so this is defensive hardening for the cases that *do*
-        construct an ``Entry``: a non-finite or bool rank fails loudly here
+        construct a ``Node``: a non-finite or bool rank fails loudly here
         rather than silently degrading to "unranked" downstream. ``None``
         (unranked) and ordinary finite numbers pass through. Runs in
         ``before`` mode so a bool is caught before pydantic coerces it to 1.0.
@@ -434,7 +434,7 @@ class Node(BaseModel):
             "pr_number": self.pr_number,
             "blocked_by": self.blocked_by,
             # locked_by-first; fall back to the legacy session_id mirror in case
-            # this Entry was built from a pre-rename node not yet normalized.
+            # this row was built from a pre-rename node not yet normalized.
             "locked_by": self.locked_by or self.session_id,
             "plan_path": self.plan_path,
             # Needed to resolve a repo-relative plan_path for the design probe.
@@ -485,8 +485,6 @@ class Node(BaseModel):
 
 
 # The legacy name stays importable until task 17.1 deletes the adapters.
-Entry = Node
-
 
 class PageInfo(BaseModel):
     """Cursor pagination envelope (Linear-aligned)."""

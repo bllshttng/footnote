@@ -3094,7 +3094,7 @@ def test_adopt_under_a_superseded_group_child_names_the_supersession(graph_env):
 def test_a_refused_decompose_leaves_the_graph_byte_identical(graph_env):
     """AC5: read-and-raise inside the mutator, so nothing is written at all.
 
-    `locked_mutate_graph` calls `_create_backup` only after the mutator
+    `commit_rows_via_store` calls `_create_backup` only after the mutator
     returns, so a raise means no write, no `.bak`, and no re-rendered `.md`.
     """
     g, read_entries = graph_env

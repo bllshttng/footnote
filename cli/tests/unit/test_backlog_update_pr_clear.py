@@ -546,7 +546,7 @@ def test_derived_stamp_refused_when_it_contradicts_the_recorded_repo(tmp_graph, 
 def test_named_repo_overrides_a_disagreeing_recorded_url(tmp_graph, monkeypatch):
     """The repair flow: an asserted --repo may re-point a node whose recorded
     pr_url names a different repo. Refusing guesses is only safe because this
-    assertion path exists (the x-5764 repair needed locked_mutate_graph)."""
+    assertion path exists (the x-5764 repair needed commit_rows_via_store)."""
     import fno.graph._reconcile as rec
     monkeypatch.setattr(
         rec, "pr_url_for_repo", lambda pr, cwd=None: f"https://github.com/wrong/repo/pull/{pr}"

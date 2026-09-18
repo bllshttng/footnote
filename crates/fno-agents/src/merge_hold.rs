@@ -439,6 +439,10 @@ mod tests {
         let mut entry = json!({
             "id": "t-0001",
             "slug": "a-plan",
+            "title": "a-plan",
+            "type": "feature",
+            "status": "ready",
+            "priority": "p1",
             "plan_path": plan.display().to_string(),
             "cwd": dir.path().display().to_string(),
         });
@@ -630,8 +634,8 @@ mod tests {
         std::fs::write(
             &graph,
             serde_json::to_string(&json!({"entries": [
-                {"id": "t-parent", "slug": "parent", "plan_path": parent_plan.display().to_string(), "cwd": dir.path().display().to_string()},
-                {"id": "t-0001", "slug": "a-plan", "parent": "t-parent", "plan_path": child_plan.display().to_string(), "cwd": dir.path().display().to_string()},
+                {"id": "t-parent", "slug": "parent", "title": "parent", "type": "feature", "status": "ready", "priority": "p2", "plan_path": parent_plan.display().to_string(), "cwd": dir.path().display().to_string()},
+                {"id": "t-0001", "slug": "a-plan", "title": "a-plan", "type": "feature", "status": "ready", "priority": "p2", "parent": "t-parent", "plan_path": child_plan.display().to_string(), "cwd": dir.path().display().to_string()},
             ]}))
             .unwrap(),
         )

@@ -24,7 +24,7 @@ def _write_notes(
     errors,
     invocations,
 ) -> None:
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     invoked = 0
     for index in range(50):
@@ -44,7 +44,7 @@ def _write_notes(
             return entries
 
         try:
-            locked_mutate_graph(Path(graph), mutate)
+            commit_rows_via_store(Path(graph), mutate)
         except BaseException as exc:
             errors.put(f"{prefix}-{index}: {type(exc).__name__}: {exc}")
             return

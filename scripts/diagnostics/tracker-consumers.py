@@ -278,8 +278,8 @@ def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
         if not isinstance(node, ast.Call):
             return False
         f = node.func
-        return (isinstance(f, ast.Name) and f.id == "read_graph") or (
-            isinstance(f, ast.Attribute) and f.attr == "read_graph"
+        return (isinstance(f, ast.Name) and f.id == "read_graph_strict") or (
+            isinstance(f, ast.Attribute) and f.attr == "read_graph_strict"
         )
 
     py_root = REPO_ROOT / "cli" / "src"
@@ -458,7 +458,7 @@ def self_test() -> int:
         failures.append(f"injected unmarked verb not detected (marker={marker!r})")
 
     # Reads modality: an injected forbidden consumer must be detected.
-    bad = "# read_graph()\nx = read_graph(path)"
+    bad = "# read_graph()\nx = read_graph_strict(path)"
     pattern = re.compile(r"\bread_graph\b")
     hits = [
         (i + 1, bad_line.strip())

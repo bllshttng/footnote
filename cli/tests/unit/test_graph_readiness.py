@@ -17,7 +17,7 @@ import pytest
 
 from fno.rust_binary import find_dev_binary
 from fno.graph.statuses import recompute_statuses
-from fno.graph.store import _apply_graph_defaults, locked_mutate_graph, read_graph
+from fno.graph.store import _apply_graph_defaults, commit_rows_via_store, read_graph_strict
 
 # Since the store port every test here rides the keeper, so the module needs
 # the compiled runtime and skips whole where the smoke harness deleted the
@@ -111,7 +111,7 @@ def test_read_graph_overlays_blocked_for_an_open_blocker(tmp_path: Path):
             _entry("ab-jjjjjjjj", blocked_by=["ab-iiiiiiii"]),
         ],
     )
-    rows = {e["id"]: e for e in read_graph(p)}
+    rows = {e["id"]: e for e in read_graph_strict(p)}
     assert rows["ab-jjjjjjjj"]["status"] == "blocked"
     assert rows["ab-jjjjjjjj"]["blocked_reason"] == "blocked-by:ab-iiiiiiii"
     assert rows["ab-iiiiiiii"]["blocked_reason"] is None
@@ -119,7 +119,7 @@ def test_read_graph_overlays_blocked_for_an_open_blocker(tmp_path: Path):
 
 def test_read_graph_overlays_blocked_for_an_unknown_dependency(tmp_path: Path):
     p = _write(tmp_path, [_entry("ab-kkkkkkkk", blocked_by=["ab-nonexistent"])])
-    rows = {e["id"]: e for e in read_graph(p)}
+    rows = {e["id"]: e for e in read_graph_strict(p)}
     assert rows["ab-kkkkkkkk"]["status"] == "blocked"
     assert rows["ab-kkkkkkkk"]["blocked_reason"] == "unknown-dep:ab-nonexistent"
     assert rows["ab-kkkkkkkk"]["status"] != "ready"
@@ -137,7 +137,7 @@ def test_read_graph_overrides_a_stale_persisted_ready(tmp_path: Path):
             _entry("ab-mmmmmmmm", blocked_by=["ab-llllllll"], status="ready"),
         ],
     )
-    rows = {e["id"]: e for e in read_graph(p)}
+    rows = {e["id"]: e for e in read_graph_strict(p)}
     assert rows["ab-mmmmmmmm"]["status"] == "blocked"
     assert rows["ab-mmmmmmmm"]["blocked_reason"] == "blocked-by:ab-llllllll"
 
@@ -159,7 +159,7 @@ def test_deleting_the_persisted_flag_does_not_change_the_answer(tmp_path: Path):
             },
         ],
     )
-    rows = {e["id"]: e for e in read_graph(p)}
+    rows = {e["id"]: e for e in read_graph_strict(p)}
     assert rows["ab-oooooooo"]["status"] == "blocked"
     assert rows["ab-oooooooo"]["blocked_reason"] == "blocked-by:ab-nnnnnnnn"
 
@@ -199,7 +199,7 @@ def test_terminal_statuses_outrank_blocked(tmp_path: Path):
             _entry("ab-review0001", blocked_by=["ab-open0001"], pr_number=42, status="in_review"),
         ],
     )
-    rows = {e["id"]: e for e in read_graph(p)}
+    rows = {e["id"]: e for e in read_graph_strict(p)}
     assert rows["ab-done0001"]["status"] == "done"
     assert rows["ab-super0001"]["status"] == "superseded"
     assert rows["ab-defer0001"]["status"] == "deferred"
@@ -241,7 +241,7 @@ def test_superseded_by_edge_terminals_status_even_when_record_unverified(
         ],
     )
 
-    rows = {e["id"]: e for e in read_graph(p)}
+    rows = {e["id"]: e for e in read_graph_strict(p)}
 
     assert rows["ab-done-pending"]["status"] == "done"
     assert rows["ab-done-pending"]["blocked_reason"] is None
@@ -250,7 +250,7 @@ def test_superseded_by_edge_terminals_status_even_when_record_unverified(
 
 
 def test_recompute_statuses_never_round_trips_a_stale_blocked_reason():
-    """The write path (locked_mutate_graph) reads via _apply_graph_defaults
+    """The write path (commit_rows_via_store) reads via _apply_graph_defaults
     BEFORE handing entries to the mutator, so a dict can arrive at
     recompute_statuses already carrying a `blocked_reason` the read-time
     overlay set moments earlier. recompute_statuses must scrub it rather
@@ -294,7 +294,7 @@ def test_view_pass_renders_blocked_not_the_persisted_status(tmp_path, monkeypatc
         "fno.config_io.read_global_block", lambda *_a, **_k: {"render_targets": []}
     )
 
-    locked_mutate_graph(p, lambda entries: entries)
+    commit_rows_via_store(p, lambda entries: entries)
     render_canonical_views()
 
     text = md.read_text(encoding="utf-8")
@@ -319,7 +319,7 @@ def test_board_renders_derived_blocked_status_outside_in_progress(tmp_path: Path
         ],
     )
 
-    entries = read_graph(p)
+    entries = read_graph_strict(p)
     dependent = next(entry for entry in entries if entry["id"] == "dependent")
     assert dependent["status"] == "blocked"
 
@@ -350,7 +350,7 @@ def test_boards_name_status_only_done_blocker_until_completion(tmp_path: Path):
         ],
     )
 
-    entries = read_graph(p)
+    entries = read_graph_strict(p)
     dependent = next(entry for entry in entries if entry["id"] == "dependent")
     assert dependent["status"] == "blocked"
 
@@ -398,7 +398,7 @@ def test_read_graph_children_summary_derives_blocked(tmp_path: Path):
             ),
         ],
     )
-    rows = {e["id"]: e for e in read_graph(p)}
+    rows = {e["id"]: e for e in read_graph_strict(p)}
     assert rows["ab-child0002"]["status"] == "blocked"
     summary = rows["ab-epic00001"]["children"][0]
     assert summary["id"] == "ab-child0002"
@@ -422,7 +422,7 @@ def test_write_persists_derived_children_summary(tmp_path: Path):
             ),
         ],
     )
-    locked_mutate_graph(p, lambda entries: entries)
+    commit_rows_via_store(p, lambda entries: entries)
     raw = {e["id"]: e for e in _read_json(p)}
     # The child's own stored status stays cascade-derived (never `blocked`
     # on disk) while its summary in the parent reads blocked.
@@ -459,7 +459,7 @@ def test_children_summary_terminal_statuses_pass_through(tmp_path: Path):
             ),
         ],
     )
-    rows = {e["id"]: e for e in read_graph(p)}
+    rows = {e["id"]: e for e in read_graph_strict(p)}
     statuses = {c["id"]: c["status"] for c in rows["ab-epic00003"]["children"]}
     assert statuses == {"ab-child0004": "done", "ab-child0005": "in_review"}
 

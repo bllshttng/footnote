@@ -4899,7 +4899,11 @@ mod tests {
         assert_eq!(ids(&home), vec!["x-live".to_string()]);
 
         // An unreadable store reads None: every consumer keeps its rows.
-        std::fs::write(graph_path(&home), b"{broken").unwrap();
+        std::fs::write(
+            crate::backlog::database_path(&graph_path(&home)),
+            b"{broken",
+        )
+        .unwrap();
         assert!(read_graph_rows(&home).is_none());
         std::fs::remove_dir_all(&base).ok();
     }

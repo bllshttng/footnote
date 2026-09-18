@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from fno.graph.load import load_graph
-from fno.graph.store import read_graph
+from fno.graph.store import read_graph_strict
 from fno.scoreboard.fold import read_graph_nodes
 
 # One legacy row per shape the migration has to handle, plus a current-vocabulary
@@ -68,7 +68,7 @@ def test_every_reader_returns_identical_entries(graph: Path) -> None:
     `setdefault` block (and hands callers a row missing `domain` or `blocked_by`)
     fails here too.
     """
-    canonical = read_graph(graph)
+    canonical = read_graph_strict(graph)
     assert load_graph(graph) == canonical
     assert read_graph_nodes(graph) == canonical
 
@@ -99,7 +99,7 @@ def test_malformed_rows_are_evidence_for_one_caller_and_noise_for_the_rest(
 
     # Everything else, INCLUDING a plain load_graph, gets the filtered default:
     # preservation is requested per call site, never inherited by ~10 callers.
-    for reader in (read_graph, read_graph_strict, read_graph_nodes, load_graph):
+    for reader in (read_graph_strict, read_graph_strict, read_graph_nodes, load_graph):
         rows = reader(p)
         assert all(isinstance(e, dict) for e in rows), (
             f"{reader.__name__} handed a non-dict row to a caller that indexes dicts"
@@ -116,7 +116,7 @@ def test_ordinary_read_commands_survive_a_malformed_row(tmp_path: Path) -> None:
     p = tmp_path / "graph.json"
     p.write_text(json.dumps({"entries": [42, {"id": "x-0004"}]}), encoding="utf-8")
 
-    entries = read_graph(p)
+    entries = read_graph_strict(p)
     assert {e["id"]: e for e in entries}.keys() == {"x-0004"}   # cmd_tree's shape
     assert [e.get("id") for e in entries] == ["x-0004"]         # resolve_node's shape
 
@@ -161,11 +161,11 @@ def test_a_mutation_announces_what_it_drops_and_keeps_a_backup(
     file is the code that crashes on it). Dropping is correct; dropping quietly
     is not.
     """
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     p = _write(tmp_path, [{"id": "x-0005", "title": "real"}, 42])
 
-    locked_mutate_graph(p, lambda entries: entries)   # must not raise
+    commit_rows_via_store(p, lambda entries: entries)   # must not raise
 
     err = capsys.readouterr().err
     assert "malformed graph" in err, f"the write path dropped a row silently: {err!r}"
@@ -215,7 +215,7 @@ def test_unhashable_field_values_do_not_crash_the_readers(tmp_path: Path) -> Non
         {"id": "x-0006", "priority": [], "status": {"nope": 1}},
         {"id": "x-0007", "priority": "p1", "status": "claimed"},
     ])
-    for reader in (read_graph, load_graph, read_graph_nodes):
+    for reader in (read_graph_strict, load_graph, read_graph_nodes):
         rows = _by_id(reader(p))
         assert set(rows) == {"x-0006", "x-0007"}, f"{reader.__name__} dropped a valid row"
         assert rows["x-0006"]["priority"] == []      # unmigratable, left alone

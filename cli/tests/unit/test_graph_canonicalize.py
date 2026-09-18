@@ -1,7 +1,7 @@
 """Unit tests for graph entry canonicalization: status-forward key order +
 derived ``children`` summary index.
 
-Canonicalization runs inside ``locked_mutate_graph`` after ``recompute_statuses``
+Canonicalization runs inside ``commit_rows_via_store`` after ``recompute_statuses``
 so every write produces a consistent, status-near-top key order and a fresh
 inverse-of-``parent`` ``children`` index. The index entries are compact
 summaries ``{id, title, project, status}`` -- enough to scan a node's children
@@ -18,7 +18,7 @@ from fno.rust_binary import find_dev_binary
 from fno.graph.store import (
     canonical_field_order,
     canonicalize_entries,
-    locked_mutate_graph,
+    commit_rows_via_store,
     _read_json,
 )
 
@@ -56,7 +56,7 @@ def _noop(entries):
 def test_status_is_second_key_after_id(tmp_path):
     """After a mutation, every written entry has ``status`` as its 2nd key."""
     path = _make_graph(tmp_path, [{"id": "ab-aaaa0001", "title": "T"}])
-    locked_mutate_graph(path, _noop)
+    commit_rows_via_store(path, _noop)
     raw = _read_json(path)  # raw read preserves on-disk key order
     keys = list(raw[0].keys())
     assert keys[0] == "id"
@@ -66,7 +66,7 @@ def test_status_is_second_key_after_id(tmp_path):
 def test_canonical_order_is_applied(tmp_path):
     """The written key order matches CANONICAL_FIELD_ORDER for known keys."""
     path = _make_graph(tmp_path, [{"id": "ab-aaaa0002", "title": "T"}])
-    locked_mutate_graph(path, _noop)
+    commit_rows_via_store(path, _noop)
     raw = _read_json(path)
     keys = [k for k in raw[0].keys() if k in CANONICAL_FIELD_ORDER]
     expected = [k for k in CANONICAL_FIELD_ORDER if k in raw[0]]
@@ -79,7 +79,7 @@ def test_extra_keys_preserved_at_end(tmp_path):
     path = _make_graph(
         tmp_path, [{"id": "ab-aaaa0003", "title": "T", "points": 5}]
     )
-    locked_mutate_graph(path, _noop)
+    commit_rows_via_store(path, _noop)
     raw = _read_json(path)
     assert raw[0]["points"] == 5
     # appended after the canonical block
@@ -106,7 +106,7 @@ def test_children_summary_for_parent(tmp_path):
             },
         ],
     )
-    locked_mutate_graph(path, _noop)
+    commit_rows_via_store(path, _noop)
     raw = {e["id"]: e for e in _read_json(path)}
     kids = raw["ab-parent01"]["children"]
     assert kids == [
@@ -121,7 +121,7 @@ def test_children_summary_for_parent(tmp_path):
 
 def test_leaf_node_has_empty_children(tmp_path):
     path = _make_graph(tmp_path, [{"id": "ab-leaf0001", "title": "Leaf"}])
-    locked_mutate_graph(path, _noop)
+    commit_rows_via_store(path, _noop)
     raw = _read_json(path)
     assert raw[0]["children"] == []
 
@@ -135,7 +135,7 @@ def test_children_sorted_by_id(tmp_path):
             {"id": "ab-aaaa0009", "title": "A", "parent": "ab-parent02"},
         ],
     )
-    locked_mutate_graph(path, _noop)
+    commit_rows_via_store(path, _noop)
     raw = {e["id"]: e for e in _read_json(path)}
     ids = [c["id"] for c in raw["ab-parent02"]["children"]]
     assert ids == ["ab-aaaa0009", "ab-zzzz0001"]
@@ -150,7 +150,7 @@ def test_children_index_is_drift_free(tmp_path):
             {"id": "ab-child003", "title": "Old", "parent": "ab-parent03"},
         ],
     )
-    locked_mutate_graph(path, _noop)
+    commit_rows_via_store(path, _noop)
 
     def rename(entries):
         for e in entries:
@@ -158,7 +158,7 @@ def test_children_index_is_drift_free(tmp_path):
                 e["title"] = "New"
         return entries
 
-    locked_mutate_graph(path, rename)
+    commit_rows_via_store(path, rename)
     raw = {e["id"]: e for e in _read_json(path)}
     assert raw["ab-parent03"]["children"][0]["title"] == "New"
 
@@ -169,7 +169,7 @@ def test_children_ignores_dangling_parent(tmp_path):
         tmp_path,
         [{"id": "ab-orphan01", "title": "Orphan", "parent": "ab-nonexist"}],
     )
-    locked_mutate_graph(path, _noop)
+    commit_rows_via_store(path, _noop)
     raw = _read_json(path)
     # The orphan still serializes; just no parent summary is fabricated.
     assert raw[0]["children"] == []
@@ -181,7 +181,7 @@ def test_self_parent_is_not_its_own_child(tmp_path):
         tmp_path,
         [{"id": "ab-selfpar1", "title": "Self", "parent": "ab-selfpar1"}],
     )
-    locked_mutate_graph(path, _noop)
+    commit_rows_via_store(path, _noop)
     raw = _read_json(path)
     assert raw[0]["children"] == []
 
@@ -241,7 +241,7 @@ def test_legacy_graph_lock_timestamp_migrates_once_without_nested_rename(tmp_pat
         ],
     )
 
-    locked_mutate_graph(path, _noop)
+    commit_rows_via_store(path, _noop)
 
     raw = _read_json(path)[0]
     assert raw["locked_at"] == timestamp
@@ -265,7 +265,7 @@ def test_rank_backfilled_null_on_next_mutation(tmp_path):
     """A node with no ``rank`` key gets ``rank: null`` written on the next
     mutation -- self-healing backfill, like the status-forward migration."""
     path = _make_graph(tmp_path, [{"id": "ab-rank0001", "title": "T"}])
-    locked_mutate_graph(path, _noop)
+    commit_rows_via_store(path, _noop)
     raw = _read_json(path)
     assert "rank" in raw[0]
     assert raw[0]["rank"] is None
@@ -285,7 +285,7 @@ def test_rank_value_persists_across_column_change(tmp_path):
                 e["priority"] = "p1"  # Next -> Now, a column change
         return entries
 
-    locked_mutate_graph(path, bump_priority)
+    commit_rows_via_store(path, bump_priority)
     raw = _read_json(path)
     assert raw[0]["priority"] == "p1"
     assert raw[0]["rank"] == 3.5

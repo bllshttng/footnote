@@ -1513,7 +1513,7 @@ mod tests {
         // A tracked .py file: a flat copy of it is a repo blob; the walker
         // only takes .py/.sh candidates, so the tracked file must be .py.
         let tracked = std::fs::read_to_string(root.join("cli/src/fno/paths.py")).unwrap();
-        write(&tmp.join("jobs"), "joba/tmp/paths_copy.py", &tracked);
+        let flat_copy = write(&tmp.join("jobs"), "joba/tmp/paths_copy.py", &tracked);
         // The plan's copied-source fixture: a slice of paths.py whose blob
         // hash is injected into the set.
         let slice = std::fs::read_to_string(
@@ -1531,8 +1531,14 @@ mod tests {
         write(&tmp.join("jobs"), "jobc/tmp/checkout/__init__.py", "");
 
         let mut blob_set = repo_blob_set(&root);
-        let hashes = blob_hashes(&root, &[&flat_slice]);
+        // Inject both hashes: the tracked file's working-tree content is
+        // not an ODB object while the checkout carries uncommitted edits,
+        // and the slice never was one.
+        let hashes = blob_hashes(&root, &[&flat_slice, &flat_copy]);
         if let Some(sha) = hashes.get(&flat_slice) {
+            blob_set.insert(sha.clone());
+        }
+        if let Some(sha) = hashes.get(&flat_copy) {
             blob_set.insert(sha.clone());
         }
         assert!(!blob_set.is_empty(), "blob set empty; git unavailable?");

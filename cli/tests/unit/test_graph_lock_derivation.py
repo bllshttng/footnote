@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.graph.store import _graph_lock_path, locked_mutate_graph
+from fno.graph.store import _graph_lock_path, commit_rows_via_store
 
 
 # --- AC2: the lock sits beside graph.json, resolved, never in /tmp ---
@@ -66,7 +66,7 @@ def test_concurrent_writers_serialize(tmp_path):
         return mutator
 
     threads = [
-        threading.Thread(target=lambda i=i: locked_mutate_graph(g, append(f"x-{i}")))
+        threading.Thread(target=lambda i=i: commit_rows_via_store(g, append(f"x-{i}")))
         for i in range(2)
     ]
     for t in threads:

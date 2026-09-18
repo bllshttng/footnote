@@ -179,7 +179,7 @@ def test_find_filters_by_source_kind(tmp_graph):
         entries.append({"id": "ab-org000001", "title": "worker idea", "status": "idea"})
         return entries
 
-    gs.locked_mutate_graph(tmp_graph, seed)
+    gs.commit_rows_via_store(tmp_graph, seed)
 
     result = runner.invoke(
         app,

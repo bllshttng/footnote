@@ -1218,13 +1218,13 @@ def _mission_active_count() -> int:
     broke this function's own ``never crashes`` promise."""
     try:
         from fno import paths as _paths
-        from fno.graph.store import read_graph
+        from fno.graph.store import read_graph_strict
         from fno.tracker import active_backend_name
 
         if active_backend_name() != "graph":
             return 0
 
-        entries = read_graph(_paths.graph_json())
+        entries = read_graph_strict(_paths.graph_json())
         return sum(
             1
             for e in entries

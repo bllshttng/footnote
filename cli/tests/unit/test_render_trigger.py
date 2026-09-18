@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.graph.store import locked_mutate_graph, render_canonical_views
+from fno.graph.store import commit_rows_via_store, render_canonical_views
 
 
 @pytest.fixture
@@ -57,7 +57,7 @@ def _config(monkeypatch, target):
 
 def _seed(graph, title):
     """One store write: the node the later assertions look for."""
-    locked_mutate_graph(
+    commit_rows_via_store(
         graph,
         lambda entries: [
             {

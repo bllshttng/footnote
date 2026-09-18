@@ -111,7 +111,7 @@ def test_ac1edge_no_bak_written_for_a_file_that_parsed(tmp_path):
 
 def test_ac2err_soft_read_swallows_invalid_json_to_empty(tmp_path):
     g = _write(tmp_path / "graph.json", "{ not json")
-    assert read_graph(g) == []
+    assert read_graph_strict(g) == []
 
 
 def test_ac2err_soft_read_returns_empty_for_malformed_root(tmp_path):
@@ -119,12 +119,12 @@ def test_ac2err_soft_read_returns_empty_for_malformed_root(tmp_path):
     # its behavior before this change, so the malformed-root signal is reachable
     # only through the strict path.
     g = _write(tmp_path / "graph.json", json.dumps({}))
-    assert read_graph(g) == []
+    assert read_graph_strict(g) == []
 
 
 def test_ac2err_soft_read_returns_empty_for_empty_entries(tmp_path):
     g = _write(tmp_path / "graph.json", json.dumps({"entries": []}))
-    assert read_graph(g) == []
+    assert read_graph_strict(g) == []
 
 
 def test_soft_read_swallows_non_list_entries_instead_of_crashing(tmp_path):
@@ -132,15 +132,15 @@ def test_soft_read_swallows_non_list_entries_instead_of_crashing(tmp_path):
     # value must swallow to [] like other corruption, not raise AttributeError
     # from _apply_graph_defaults.
     g = _write(tmp_path / "graph.json", json.dumps({"entries": "oops"}))
-    assert read_graph(g) == []
+    assert read_graph_strict(g) == []
 
 
 def test_non_list_entries_writes_the_bak_locked_mutate_advertises(tmp_path):
-    # locked_mutate_graph tells the operator to "restore from backup at
+    # commit_rows_via_store tells the operator to "restore from backup at
     # <path>.json.bak" on a GraphCorruptError, so the non-list case must create
     # that .bak (an accurate recovery path, not a data-losing delete).
     g = _write(tmp_path / "graph.json", json.dumps({"entries": "oops"}))
-    read_graph(g)  # triggers the corrupt handling that writes the .bak
+    read_graph_strict(g)  # triggers the corrupt handling that writes the .bak
     assert (g.parent / "backups" / (g.name + ".bak")).exists()
 
 

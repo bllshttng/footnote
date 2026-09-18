@@ -463,9 +463,9 @@ class _Keeper:
                 if isinstance(outcome, dict):
                     targets.append(outcome)
                 if any(target.get("entries_elided") for target in targets):
-                    entries = status_client.request(
-                        "read", {"strict": True, "keep_malformed": False}
-                    )["entries"]
+                    body = status_client.request("read_file", {})
+                    doc = json.loads(_base64.b64decode(body["bytes_b64"]))
+                    entries = doc.get("entries", []) if isinstance(doc, dict) else []
                     for target in targets:
                         if target.get("entries_elided"):
                             target["entries"] = copy.deepcopy(entries)
@@ -487,21 +487,17 @@ class _Keeper:
     # read/read_file/begin carry no path.
 
     def read(self, path: Path, *, strict: bool = False, keep_malformed: bool = False) -> dict:
-        del path  # single-graph keeper: the bound graph IS the target
-        try:
-            return self.request(
-                "read" if not strict else "read_strict",
-                {"strict": strict, "keep_malformed": keep_malformed},
-            )
-        except GraphCorruptError as exc:
-            if not strict:
-                raise
-            # Taxonomy, not wording: the strict read's contract is that EVERY
-            # parse failure is a GraphUnreadableError (cli.py catches that
-            # class to tell "graph unreadable" from "node absent"), while the
-            # soft path's parse failure is the swallower's GraphCorruptError.
-            # The keeper carries one kind for both; the client splits it.
-            raise GraphUnreadableError(str(exc)) from None
+        """The store's entries, defaults applied, from the serialized read.
+
+        ``strict`` and ``keep_malformed`` remain in the signature for the
+        callers that pass them: the typed store has one row shape, so the
+        soft/strict parse split has no server-side lever any more.
+        """
+        del path, strict, keep_malformed
+        body = self.request("read_file", {})
+        doc = json.loads(_base64.b64decode(body["bytes_b64"]))
+        entries = doc.get("entries", []) if isinstance(doc, dict) else []
+        return {"entries": self.request("defaults", {"entries": entries})["entries"]}
 
     def read_file(self, path: Path) -> dict:
         del path
@@ -689,17 +685,6 @@ class _Conflict(Exception):
     """Internal: the commit's snapshot is stale; the tx loop retries."""
 
 
-_ROWS_FALLBACK_WARNED = False
-
-
-def _warn_rows_fallback(reason: str) -> None:
-    global _ROWS_FALLBACK_WARNED
-    if _ROWS_FALLBACK_WARNED:
-        return
-    _ROWS_FALLBACK_WARNED = True
-    print(f"Warning: commit_rows unavailable; using whole commit ({reason})", file=sys.stderr)
-
-
 def _row_index(entries: list[dict]) -> dict[str, dict] | None:
     indexed: dict[str, dict] = {}
     for row in entries:
@@ -722,48 +707,33 @@ def _row_diff(before: list[dict], after: list[dict]) -> tuple[list[dict], list[s
     return changed, removed
 
 
-def _graph_setting(name: str, default: str) -> str:
-    try:
-        from fno.config import load_settings
-
-        return str(getattr(load_settings().graph, name))
-    except Exception:
-        return default
-
-
-def _graph_commit_mode() -> str:
-    return _graph_setting("commit_mode", "rows")
+def _read_snapshot(client) -> tuple[str, list[dict]]:
+    """One consistent snapshot: the entries and the version their bytes
+    hash to, one gate-held read on the keeper. The version is the commit's
+    optimistic token."""
+    body = client.request("read_file", {})
+    doc = json.loads(_base64.b64decode(body["bytes_b64"]))
+    entries = doc.get("entries", []) if isinstance(doc, dict) else []
+    return body["sha256"], entries
 
 
-def _commit_snapshot(client, snap: dict, base_entries: list[dict], entries: list[dict],
-                     plan_rungs: dict, attempt: int) -> dict:
-    if _graph_commit_mode() == "rows":
-        diff = _row_diff(base_entries, entries)
-        digests = snap.get("base_digests")
-        if diff is not None and isinstance(digests, dict):
-            changed, removed = diff
-            try:
-                return client.request("commit_rows", {
-                    "base_version": snap["version"],
-                    "base_digests": digests,
-                    "base_plan_rungs": _plan_rung_map(base_entries),
-                    "changed": changed,
-                    "removed": removed,
-                    "plan_rungs": plan_rungs,
-                    "attempt": attempt,
-                })
-            except RuntimeError as exc:
-                marker = 'store error (invalid): unknown store method "commit_rows"'
-                if str(exc) != marker:
-                    raise
-                _warn_rows_fallback("running keeper predates commit_rows")
-        else:
-            _warn_rows_fallback("snapshot cannot be represented as row diff")
-    return client.request("commit", {
-        "version": snap["version"],
-        "entries": entries,
-        "plan_rungs": plan_rungs,
-        "attempt": attempt,
+def _commit_rows(client, base_version: str, base_entries: list[dict],
+                 entries: list[dict]) -> dict:
+    """Publish the diff against the snapshot through the keeper's raw row
+    commit. Raises `_Conflict` on a version mismatch so the tx loop retries
+    against the writer that landed first."""
+    diff = _row_diff(base_entries, entries)
+    if diff is None:
+        raise WriteUnconfirmed(
+            STATE_UNCONFIRMED,
+            "the mutation's snapshot cannot be represented as a row diff; "
+            "read the graph before retrying",
+        )
+    changed, removed = diff
+    return client.request("commit_rows", {
+        "base_version": base_version,
+        "changed": changed,
+        "removed": removed,
     })
 
 
@@ -1092,35 +1062,17 @@ def _graph_lock_path(path: Path) -> Path:
 # Reads
 # ---------------------------------------------------------------------------
 
-def read_graph(path: Path = GRAPH_JSON) -> list[dict]:
-    """Read graph.json through the keeper, defaults applied. No lock needed.
-
-    Swallows corruption on the read path -- commands like `status` and `ready`
-    should not crash a user's terminal when graph.json is wedged. An
-    UNREACHABLE store is different: it raises StoreUnavailable, never an
-    empty graph.
-    """
-    try:
-        result = _client_for(path).read(path)
-    except GraphCorruptError:
-        # Name the backup that exists: keepers pre-backups/ wrote the sibling.
-        backup = path.parent / "backups" / (path.name + ".bak")
-        print(f"Warning: {path} is corrupt, backup saved to "
-              f"{backup if backup.exists() else path.with_suffix('.json.bak')}", file=sys.stderr)
-        return []
-    return result["entries"]
-
-
 def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
-    """Failure-surfacing counterpart to :func:`read_graph`.
+    """The whole-graph read, defaults applied, through the typed api.
 
-    Returns entries (defaults applied) for a populated OR legitimately empty
-    graph, and for an absent file. RAISES instead of returning [] when the
-    graph cannot be read cleanly, so a resolution caller can tell "node
-    absent" apart from "graph unreadable". Diagnosis is read-only: no .bak
-    is written on this path.
+    Returns entries for a populated OR legitimately empty store, and for an
+    absent store. RAISES instead of returning [] when the store cannot be
+    read cleanly, so a resolution caller can tell "node absent" apart from
+    "graph unreadable".
     """
-    return _client_for(path).read(path, strict=True)["entries"]
+    from fno.graph.api import wire_rows
+
+    return wire_rows(path=path)
 
 
 def read_nodes_by_ids(path: Path, tokens: "list[str]") -> "dict | None":
@@ -1320,7 +1272,7 @@ def render_canonical_views() -> int:
 
     failures: list[str] = []
     graph = Path(_paths.graph_json())
-    entries = read_graph(graph)
+    entries = read_graph_strict(graph)
     try:
         entries = apply_readiness_overlay_via_store(entries)
     except Exception:  # noqa: BLE001 - a render-freshness pass never fails a landed publish
@@ -1405,10 +1357,9 @@ def _emit_graph_tx_event(**data: Any) -> None:
 
 
 def commit_rows_via_store(path: Path, mutator) -> list[dict]:
-    """The modern raw write: begin, mutate client-side, publish through the
-    keeper's row-commit with the bounded retry, return the committed rows.
-    The write seam for callers with no named op; `locked_mutate_graph` is
-    the legacy name the remaining (pre-wave-9) callers still use. The
+    """The raw write: read one snapshot, mutate it client-side, publish the
+    diff through the keeper's row commit with the bounded retry, return the
+    committed rows. The write seam for callers with no named op; the
     keeper re-derives the write pipeline and publishes under its lock.
     """
     path = Path(path)
@@ -1416,13 +1367,12 @@ def commit_rows_via_store(path: Path, mutator) -> list[dict]:
     client = _client_for(path)
 
     for attempt in range(_TX_ATTEMPTS):
-        snap = client.request("begin", {})
-        base_entries = copy.deepcopy(snap["entries"])
-        entries = mutator(snap["entries"])
+        base_version, base_entries = _read_snapshot(client)
+        base_entries = copy.deepcopy(base_entries)
+        entries = mutator(copy.deepcopy(base_entries))
         _validate_company_work(entries)
-        plan_rungs = _plan_rung_map(entries)
         try:
-            outcome = _commit_snapshot(client, snap, base_entries, entries, plan_rungs, attempt + 1)
+            outcome = _commit_rows(client, base_version, base_entries, entries)
             break
         except WriteUnconfirmed as exc:
             diff = _row_diff(base_entries, entries)
@@ -1463,12 +1413,6 @@ def commit_rows_via_store(path: Path, mutator) -> list[dict]:
     return _finish_mutation(path, outcome)
 
 
-def locked_mutate_graph(path: Path, mutator) -> list[dict]:
-    """The legacy name of `commit_rows_via_store`, kept for the callers
-    wave 9 has not moved yet."""
-    return commit_rows_via_store(path, mutator)
-
-
 # ---------------------------------------------------------------------------
 # Node resolution + the targeted helpers (typed ops over the keeper)
 # ---------------------------------------------------------------------------
@@ -1476,18 +1420,18 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
 def _resolve_node_id(
     client_keeper_path: Path, node_id: str, *, entries_out: "list | None" = None
 ) -> str | None:
-    """Resolve a (possibly partial) node id against the begin snapshot.
+    """Resolve a (possibly partial) node id against the current snapshot.
 
     The fuzzy resolver is surface: it stays Python (`_intake._find_node`),
-    reads the snapshot the mutation is keyed on, and the keeper op re-checks
-    the resolved id under the lock. ``entries_out``, when given, receives that
-    snapshot: it is already in hand, and a caller that needs it next would
-    otherwise read the whole graph again.
+    reads a fresh snapshot, and the keeper op re-checks the resolved id
+    under the lock. ``entries_out``, when given, receives that snapshot: it
+    is already in hand, and a caller that needs it next would otherwise read
+    the whole graph again.
     """
     from fno.graph._intake import _find_node
 
     if entries_out is None:
-        # The by-id fast path: one exact row instead of a whole-graph begin.
+        # The by-id fast path: one exact row instead of a whole-graph read.
         # The tier guard keeps resolution identical to _find_node's exact
         # tiers (exact id, exact slug); anything else falls through to the
         # snapshot so title-fuzzy and id-prefix never change.
@@ -1496,10 +1440,10 @@ def _resolve_node_id(
             row = fast["entries"][0]
             if row.get("id") == node_id or (row.get("slug") or "").lower() == node_id.lower():
                 return row.get("id")
-    snap = _client_for(client_keeper_path).request("begin", {})
+    _, snap_entries = _read_snapshot(_client_for(client_keeper_path))
     if entries_out is not None:
-        entries_out.extend(snap["entries"])
-    node = _find_node(snap["entries"], node_id)
+        entries_out.extend(snap_entries)
+    node = _find_node(snap_entries, node_id)
     return node.get("id") if node else None
 
 
@@ -1619,23 +1563,17 @@ def _readback_row(path: Path, node_id: str) -> "tuple[dict | None, bool]":
 def _run_op(path: Path, name: str, params: dict) -> dict:
     """One typed op through the keeper's full locked cycle, followed by the
     same post-publish duties a mutator-based write ran (renders, releases,
-    nudge): the targeted helpers replaced locked_mutate_graph calls, so they
+    nudge): the targeted helpers replaced the raw mutator calls, so they
     carry the same visible effects.
 
     The plan-rung map rides in the op params, computed over a light
     plan_refs read (id, plan_path, cwd per node) instead of a full
-    begin, which ships the whole graph for one derived value. A session op
-    that opens or closes a do row re-derives in_progress the way any full
-    write would. No Python op mutates plan_path, so the map is exact. The
-    begin fallback keeps a keeper predating the verb working."""
+    snapshot read. A session op that opens or closes a do row re-derives
+    in_progress the way any full write would. No Python op mutates
+    plan_path, so the map is exact."""
     path = Path(path)
     client = _client_for(path)
-    try:
-        rung_entries = client.request("plan_refs", {})["entries"]
-    except RuntimeError as exc:
-        if str(exc) != 'store error (invalid): unknown store method "plan_refs"':
-            raise
-        rung_entries = client.request("begin", {})["entries"]
+    rung_entries = client.request("plan_refs", {})["entries"]
     params = {**params, "plan_rungs": _plan_rung_map(rung_entries)}
     result = client.request("op", {"name": name, "params": params})
     _finish_mutation(path, result["outcome"])
@@ -1887,7 +1825,7 @@ def reap_open_session_record(
         report["settled"] = bool(report.get("found"))
         return report
     try:
-        entries = read_graph(Path(path))
+        entries = read_graph_strict(Path(path))
         node = next((e for e in entries if e.get("id") == resolved), None)
         if node is None:
             report.update({"status_after": None, "remaining_open_do": 0, "settled": report.get("found", False)})
@@ -1913,7 +1851,7 @@ def find_nodes_for_pr(
     """Node ids carrying ``pr_number``, optionally narrowed to one repo slug
     (: pr_number is not unique across repos; the url is the only
     per-node field carrying the repo slug)."""
-    entries = read_graph(Path(path))
+    entries = read_graph_strict(Path(path))
     result = _query(entries, "find_for_pr", {"pr_number": pr_number, "repo": repo})
     return result.get("ids", [])
 

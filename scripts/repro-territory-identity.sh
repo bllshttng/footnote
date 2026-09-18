@@ -102,7 +102,7 @@ EOF
 
 py - <<PYEOF || fail "fixture graph write"
 import pathlib
-from fno.graph.store import locked_mutate_graph
+from fno.graph.store import commit_rows_via_store
 
 plan = str(pathlib.Path("$FIXTURE") / "plans" / "x-idea.md")
 cwd = "$FIXTURE"
@@ -119,7 +119,7 @@ def mutator(entries):
     ])
     return entries
 
-locked_mutate_graph(pathlib.Path("$RESOLVED"), mutator)
+commit_rows_via_store(pathlib.Path("$RESOLVED"), mutator)
 print("fixture graph written:", "$RESOLVED")
 PYEOF
 
