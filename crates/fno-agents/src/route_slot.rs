@@ -2402,6 +2402,9 @@ fn journal_routing_refusal(payload: &Value, out: &Value) {
         return;
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    // Canonicalize like `state_path::run`: /var vs /private/var must never
+    // mint two spaces.
+    let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
     let Some(path) = crate::state_path::resolve("events", &cwd) else {
         return;
     };
@@ -2445,10 +2448,17 @@ fn journal_routing_refusal(payload: &Value, out: &Value) {
     }
     record.insert("lanes".into(), Value::Array(lanes_from_chain(chain)));
     record.insert("exit_code".into(), json!(if queue { 78 } else { 2 }));
-    for key in ["substrate", "plan_path"] {
-        if let Some(v) = payload.get(key).filter(|v| !v.is_null()) {
-            record.insert(key.into(), v.clone());
-        }
+    if let Some(v) = payload.get("substrate").filter(|v| !v.is_null()) {
+        record.insert("substrate".into(), v.clone());
+    }
+    // plan_path rides nested in node_payload, not at the payload top level.
+    if let Some(v) = payload
+        .get("node")
+        .and_then(|n| n.get("plan_path"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        record.insert("plan_path".into(), json!(v));
     }
     let _ = append_journal_line(&path, record, "spawn_gate_refused");
 }
