@@ -145,10 +145,10 @@ mod tests {
         let dir = scan_dir("session-id");
         let now = crate::claims::now_ms();
         let yaml = format!(
-            "schema_version: 1\nkey: \"node:x-90fa\"\nholder: \"target-session:a6d2ce6a-1da0\"\nacquired_at: {now}\npid: 1\nhost: test-host\nexpires_at: {}\nsession_id: \"target-session:a6d2ce6a-1da0\"\n",
+            "schema_version: 1\nkey: \"node:x-cccc\"\nholder: \"target-session:a6d2ce6a-1da0\"\nacquired_at: {now}\npid: 1\nhost: test-host\nexpires_at: {}\nsession_id: \"target-session:a6d2ce6a-1da0\"\n",
             now + 900_000
         );
-        std::fs::write(dir.join("node%3Ax-90fa.lock"), yaml).expect("write claim");
+        std::fs::write(dir.join("node%3Ax-cccc.lock"), yaml).expect("write claim");
         let (name, pre_change) =
             handover_row("spawn-handover:t-90fa-port", 900_000, "node%3Ax-requeue");
         std::fs::write(dir.join(name), pre_change).expect("write pre-change claim");
@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(rows.len(), 2, "both rows stay in scope: {rows:?}");
         let named = rows
             .iter()
-            .find(|r| r["key"] == "node:x-90fa")
+            .find(|r| r["key"] == "node:x-cccc")
             .expect("session-carrying row present");
         assert_eq!(named["session_id"], "target-session:a6d2ce6a-1da0");
         assert_eq!(named["acquired_at"], now, "epoch milliseconds, unchanged");
