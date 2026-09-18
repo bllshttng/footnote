@@ -1,379 +1,77 @@
-"""fno do pr sync-canonical - post-merge canonical-checkout sync.
+"""fno do pr sync-canonical - transport over the native sync verb.
 
-Pure-mechanical, fail-open. After a PR merges, bring the CANONICAL checkout and
-its installed tooling up to the merged HEAD by running the project's configured
-``config.post_merge.sync_command`` (footnote example:
-``git checkout main && git pull origin main && fno doctor update && fno agents restart``).
-
-Load-bearing constraints, each with its own guard below:
-
-- **Location.** The sync ALWAYS targets the canonical checkout, even when
-  invoked from a worktree cwd - a worktree cannot ``git checkout main`` without
-  hijacking its own branch. The resolved root is guarded by an origin-slug
-  match against the PR's repo before any command runs.
-- **Files from GitHub, not local git.** At gate time the canonical has NOT
-  pulled the merge (the pull is *inside* ``sync_command``), so the merged file
-  list and SHA come from ``gh pr view``, never a local ``git diff``.
-- **Exactly-once per merge SHA.** A ``.fno/post-merge-synced/<sha>`` marker
-  (written only on success) is the cross-session record; a single-flight claim
-  serializes concurrent runs so two ``fno agents restart``s never overlap.
-
-Every outcome prints a status line (AC1-UI); no outcome is silent. A failure
-also surfaces the command that ran plus its captured stdout/stderr - the exit
-code alone has hidden a one-word typo for days - while staying non-fatal to
-callers (reconcile/ritual): a non-zero exit withholds the marker so the next
-reconcile retries.
+The sync, its catch-up sweep, and the staleness alarm are native:
+crates/fno-agents/src/sync_canonical.rs owns the guard chain, the marker
+write, the lease, the fnmatch path gate, the file-backed shell runner, and
+every receipt string. This module only carries the JSON payload and echoes
+the answer lines; a failure detail is computed natively and rides back, so a
+reported cause is the real cause.
 """
 from __future__ import annotations
 
-import fnmatch
-import re
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any, Callable, Optional
+import os
+from typing import Any
 
 import typer
 
-from fno.pr._proc import Result, ToolMissing, run as _run
-
-# Single-flight claim TTL: long enough to cover a slow sync (build + restart),
-# short enough that a crashed holder's lock recovers within one coffee break.
-_SYNC_CLAIM_TTL_MS = 30 * 60 * 1000
-
-# Bound every catch-up probe: this runs inside the pr-watch tick, and a hung gh
-# would wedge the daemon this feature exists to work around. `timeout(1)` is
-# absent on stock macOS, so the bound is _proc.run's own, never a shell wrapper.
-_CATCHUP_PROBE_TIMEOUT_S = 30.0
-# Bound sync_command itself: a trailing `fno agents restart` detaches a
-# daemon; the closed pipes detach it cleanly, and this timeout is the backstop
-# for a genuinely stuck command. Generous (pull + update + restart can be slow)
-# and well inside the 30m single-flight claim TTL.
-_SYNC_COMMAND_TIMEOUT_S = 600.0
-# gh page size. The window filter is what actually bounds the sweep; this only
-# caps the wire payload for a very busy week.
-_CATCHUP_GH_LIMIT = 50
-
-_REMOTE_SLUG_RE = re.compile(
-    r"(?:github\.com[:/])([^/]+)/(.+?)(?:\.git)?/?$"
-)
+# The sync runs a 600s shell plus gh probes; the door must outlast the verb's
+# worst case, not report it unreachable. The read-only actions are bounded by
+# their gh probes plus a fetch.
+_TIMEOUT_SYNC_S = 720.0
+_TIMEOUT_PROBE_S = 120.0
 
 
-def _origin_slug(canonical: Path, runner: Callable[..., Result]) -> Optional[str]:
-    """``owner/repo`` from the canonical checkout's origin remote, or None.
-
-    Handles both ``git@github.com:owner/repo.git`` and
-    ``https://github.com/owner/repo(.git)`` forms.
-    """
-    try:
-        res = runner(["git", "remote", "get-url", "origin"], cwd=str(canonical))
-    except ToolMissing:
-        return None
-    if not res.ok:
-        return None
-    m = _REMOTE_SLUG_RE.search(res.stdout.strip())
-    return f"{m.group(1)}/{m.group(2)}" if m else None
+def _answer_fields(answer: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in answer.items() if k not in ("exit", "stdout", "stderr")}
 
 
-def _synced_marker(canonical: Path, sha: str) -> Path:
-    return canonical / ".fno" / "post-merge-synced" / sha
+def _echo_lines(answer: dict[str, Any]) -> None:
+    for line in answer.get("stdout") or []:
+        typer.echo(line)
+    for line in answer.get("stderr") or []:
+        typer.echo(line, err=True)
 
 
-def _canonical_check(payload: dict) -> dict:
-    """One round-trip to the `fno-agents canonical-check` verb, fail-open.
-
-    An empty answer proceeds: a probe that cannot answer must not refuse every
-    future sync, so it reads as "no dirt, not ahead" and the old raw
-    sync_command failure is what a worker sees.
-    """
+def run_sync_canonical(pr_number: int) -> int:
+    """Run the canonical sync for a merged PR. Returns the process exit code."""
     from fno.rust_binary import VerbUnavailable, verb_call
 
     try:
-        # The verb's own budget is a 30s fetch plus 10s per probe; the door
-        # must outlast the verb's worst case, not report it unreachable.
-        return verb_call("canonical-check", payload, timeout=120)
+        answer = verb_call(
+            "sync-canonical",
+            {"action": "sync", "cwd": os.getcwd(), "pr": pr_number},
+            timeout=_TIMEOUT_SYNC_S,
+        )
     except VerbUnavailable as exc:
-        typer.echo(f"post-merge sync: canonical check unavailable ({exc}); proceeding", err=True)
-        return {}
-
-
-def run_sync_canonical(
-    pr_number: int,
-    *,
-    settings: Any = None,
-    canonical_root: Optional[Path] = None,
-    runner: Callable[..., Result] = _run,
-    gh_json: Optional[Callable[[list[str], Optional[str]], dict[str, Any]]] = None,
-    shell_runner: Optional[Callable[[str, str], Result]] = None,
-    check: Optional[Callable[[dict], dict]] = None,
-) -> int:
-    """Run the canonical-sync for a merged PR. Returns a process exit code.
-
-    Seams (``settings`` / ``canonical_root`` / ``runner`` / ``gh_json`` /
-    ``shell_runner`` / ``check``) let unit tests exercise every branch without
-    shelling out.
-    """
-    from fno.config import load_settings
-
-    if settings is None:
-        settings = load_settings()
-    pm = settings.post_merge
-
-    # 1. Unset command -> clean no-op (opt-in).
-    if not (pm.sync_command or "").strip():
-        typer.echo("post-merge sync: not configured")
-        return 0
-
-    # 2. Resolve the canonical checkout (targets canonical even from a worktree).
-    if canonical_root is None:
-        from fno.paths import resolve_canonical_repo_root
-
-        canonical_root = resolve_canonical_repo_root()
-    canonical = Path(canonical_root)
-
-    origin = _origin_slug(canonical, runner)
-    if origin is None:
+        # The marker stays withheld, so the next reconcile retries.
         typer.echo(
-            f"post-merge sync: canonical {canonical} has no resolvable origin; skipping",
-            err=True,
+            f"post-merge sync: native verb unavailable ({exc}); skipping", err=True
         )
-        return 0
+        return 1
+    _echo_lines(answer)
+    return int(answer.get("exit", 1))
 
-    # 3. Read merge SHA + files from GitHub (the canonical has not pulled yet).
-    if gh_json is None:
-        gh_json = _default_gh_json
-    try:
-        row = gh_json(
-            ["pr", "view", str(pr_number), "--repo", origin,
-             "--json", "state,mergeCommit,files,url"],
-            str(canonical),
-        )
-    except ToolMissing:
-        typer.echo("post-merge sync: gh not found on PATH; skipping", err=True)
-        return 0
-    except _GhError as exc:
-        typer.echo(f"post-merge sync: gh pr view #{pr_number} failed: {exc}", err=True)
-        return 1  # no marker; next reconcile retries
 
-    state = row.get("state")
-    if state != "MERGED":
-        typer.echo(f"post-merge sync: PR #{pr_number} not merged (state={state}); skipping")
-        return 0
-
-    # Wrong-repo guard: the PR's own url must sit in the resolved canonical's
-    # repo before we let sync_command run `git checkout main` there.
-    pr_slug = _slug_from_pr_url(row.get("url"))
-    # GitHub owner/repo are case-insensitive; compare lowercased so a casing
-    # mismatch (Owner/Repo vs owner/repo) is not a false-positive refusal.
-    if pr_slug and pr_slug.lower() != origin.lower():
-        typer.echo(
-            f"post-merge sync: PR repo {pr_slug} != canonical origin {origin}; "
-            f"refusing to sync the wrong repo",
-            err=True,
-        )
-        return 0
-
-    sha = (row.get("mergeCommit") or {}).get("oid")
-    if not sha:
-        typer.echo(f"post-merge sync: PR #{pr_number} has no merge commit yet; skipping")
-        return 0
-
-    # 4. Dedup by merge SHA (cross-session).
-    marker = _synced_marker(canonical, sha)
-    if marker.exists():
-        typer.echo(f"post-merge sync: already synced {sha[:12]}")
-        return 0
-
-    # 5. Single-flight lock (canonical-scoped, TTL-live).
-    from fno.backlog.single_flight import acquire_flight
-
-    # Canonical-wide, NOT per-SHA. The claim's job is that two `fno agents restart`s
-    # never overlap in one checkout, and a per-SHA key does not deliver that: a
-    # catch-up for one merge and a merge-time sync for another take different
-    # locks and pull, update, and restart concurrently. Exactly-once-per-SHA is
-    # the marker's job, and it still is - separating the two is what lets this
-    # key be the coarse one the non-overlap invariant actually needs.
-    flight = acquire_flight(
-        "post-merge-sync", scope="post-merge canonical sync",
-        name=f"sync-canonical:{pr_number}", root=canonical, ttl_ms=_SYNC_CLAIM_TTL_MS,
-    )
-    if flight is None or flight.held:
-        # Someone else has this lock right now; skipping is the fail-open
-        # contract, and an unavailable gate reads the same way.
-        by = f" (held by {flight.holder}, expires {flight.expires or 'no expiry'})" if flight else ""
-        typer.echo(f"post-merge sync: in progress elsewhere for {sha[:12]}{by}; skipping")
-        return 0
+def run_sync_catchup() -> dict[str, Any]:
+    """Catch-up sweep over the native verb; the answer dict drives the tick."""
+    from fno.rust_binary import VerbUnavailable, verb_call
 
     try:
-        # Re-check under the lock (double-checked): a loser that read the marker
-        # as absent before the winner wrote it must not re-run sync_command
-        # after the winner releases.
-        if marker.exists():
-            typer.echo(f"post-merge sync: already synced {sha[:12]}")
-            return 0
-
-        # 6. Path-gate (globs computed from the GitHub file list, not local git).
-        files = [f.get("path", "") for f in (row.get("files") or []) if isinstance(f, dict)]
-        globs = list(pm.sync_paths or [])
-        if globs and not _any_match(files, globs):
-            _write_marker(marker)
-            typer.echo(
-                f"post-merge sync: skipped - no buildable change "
-                f"({len(files)} files, none matched {globs}); marked {sha[:12]}"
-            )
-            return 0
-
-        # 6.5 Divergence gate: `canonical-check` owns the read - the
-        #    dirty-overlap refusal (a pull dies over locally modified paths the
-        #    merge touches) and the ahead refusal (a clean canonical that is AHEAD
-        #    of origin is the wedge recorded: the pull cannot fast-forward,
-        #    the marker stays withheld, and the retry loop has no owner). Report,
-        #    never an auto-stash or auto-reset. Fail-open: an answer that cannot
-        #    be had must not refuse every sync.
-        check = check or _canonical_check
-        answer = check(
-            {"canonical": str(canonical), "files": files, "pr": pr_number, "sha": sha}
+        answer = verb_call(
+            "sync-canonical",
+            {"action": "catchup", "cwd": os.getcwd()},
+            timeout=_TIMEOUT_PROBE_S,
         )
-        refusal = answer.get("refusal")
-        if refusal:
-            typer.echo(refusal, err=True)
-            return 1
-
-        # 7. Run sync_command in the canonical via a login shell so uv/cargo/npm
-        #    on the shell-rc PATH resolve (a bare `bash -c` would miss them).
-        cmd = pm.sync_command
-        typer.echo(f"post-merge sync: running in {canonical} for {sha[:12]}")
-        if shell_runner is None:
-            shell_runner = _default_shell_runner
-        result = shell_runner(cmd, str(canonical))
-        if result.ok:
-            _write_marker(marker)
-            typer.echo(f"post-merge sync: synced {sha[:12]}")
-            return 0
-        # Surface the command and its output, not just the exit code: a real
-        # failure here was a one-word typo the receipt hid for days. The marker
-        # stays withheld, so retry behaviour is unchanged.
-        parts = [
-            f"post-merge sync: failed (exit {result.returncode}); marker withheld, will retry",
-            f"  command: {cmd}",
-        ]
-        if result.stderr.strip():
-            parts.append(f"  stderr: {_tail(result.stderr)}")
-        if result.stdout.strip():
-            parts.append(f"  stdout: {_tail(result.stdout)}")
-        typer.echo("\n".join(parts), err=True)
-        return result.returncode
-    finally:
-        flight.release()
+    except VerbUnavailable as exc:
+        return {
+            "outcome": "unknown",
+            "detail": f"native verb unavailable: {exc}",
+        }
+    _echo_lines(answer)
+    return _answer_fields(answer)
 
 
-# ---------------------------------------------------------------------------
-# Catch-up sweep + staleness alarm
-#
-# The sync above fires only at merge-DETECTION time, so a merge nobody was alive
-# to see is never synced. Everything below therefore reads only ground truth (gh,
-# the marker dir, git's behind-count): the watcher state file and the events bus
-# were both dead or lying during the outage this exists to survive.
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class SyncStaleness:
-    """Outcome-keyed health of the canonical sync.
-
-    ``state`` is ``fresh`` / ``stale`` / ``unknown`` rather than a bool: an
-    unauthenticated gh must read as neither "fine" nor "alarm".
-    """
-
-    state: str
-    markerless: tuple[dict, ...] = ()  # newest-first {number, sha, merged_at}
-    behind: Optional[int] = None
-    detail: str = ""
-
-
-@dataclass(frozen=True)
-class CatchupResult:
-    """One catch-up sweep. ``outcome`` drives the tick's alarm decision."""
-
-    outcome: str  # disabled | unknown | fresh | synced | marked | skipped | failed
-    pr_number: Optional[int] = None
-    swept: int = 0
-    detail: str = ""
-    # Whether the predicate found the canonical stale. The alarm is "detected AND
-    # unresolved", so the tick needs the detection separately from the outcome: a
-    # failed sync of a merge from two minutes ago is not yet an outage, and a
-    # canonical proven behind with every marker present is one even though there
-    # was nothing for the sweep to do.
-    stale: bool = False
-
-
-def _default_gh_list(canonical: Path, window_days: int) -> Optional[list[dict]]:
-    """Merged PRs in the window, newest-first, or None when gh cannot answer.
-
-    None (not an exception, not an empty list) is the "unknown" signal: an empty
-    list means "nothing merged recently", and conflating the two would let a
-    gh outage read as a clean bill of health.
-    """
-    import json
-
-    try:
-        res = _run(
-            [
-                "gh", "pr", "list", "--state", "merged",
-                "--limit", str(_CATCHUP_GH_LIMIT),
-                "--json", "number,mergedAt,mergeCommit",
-            ],
-            cwd=str(canonical),
-            timeout=_CATCHUP_PROBE_TIMEOUT_S,
-        )
-    except Exception:  # noqa: BLE001 - ToolMissing, timeout, OSError all mean "unknown"
-        return None
-    if not res.ok:
-        return None
-    try:
-        rows = json.loads(res.stdout or "[]")
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(rows, list):
-        return None
-
-    cutoff = datetime.now(timezone.utc) - timedelta(days=max(window_days, 0))
-    out: list[dict] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        sha = (row.get("mergeCommit") or {}).get("oid")
-        merged_at = _parse_iso(row.get("mergedAt"))
-        if not sha or merged_at is None or merged_at < cutoff:
-            continue
-        out.append({"number": row.get("number"), "sha": sha, "merged_at": merged_at})
-    out.sort(key=lambda r: r["merged_at"], reverse=True)
-    return out
-
-
-def _parse_iso(raw: object) -> Optional[datetime]:
-    """Parse a gh timestamp, always tz-aware.
-
-    A naive datetime here would raise TypeError on every comparison against the
-    aware `now`, taking the whole leg down from one odd offset-less timestamp.
-    """
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-
-def sync_staleness(
-    *,
-    settings: Any = None,
-    canonical_root: Optional[Path] = None,
-    check: Optional[Callable[[dict], dict]] = None,
-    gh_list: Optional[Callable[[Path, int], Optional[list[dict]]]] = None,
-    fetch: bool = False,
-) -> SyncStaleness:
+def sync_staleness(*, fetch: bool = False) -> dict[str, Any]:
     """Is the canonical checkout current with recently-merged PRs?
 
     Read-only, so it is safe for ``fno doctor`` to call regardless of
@@ -381,275 +79,19 @@ def sync_staleness(
     payload so the divergence read refreshes the remote-tracking ref first; a
     human-facing caller wants that, the 5-minute tick does not.
     """
-    from fno.config import load_settings
-
-    if settings is None:
-        settings = load_settings()
-    pm = settings.post_merge
-
-    if canonical_root is None:
-        from fno.paths import resolve_canonical_repo_root
-
-        canonical_root = resolve_canonical_repo_root()
-    canonical = Path(canonical_root)
-
-    rows = (gh_list or _default_gh_list)(canonical, pm.catchup_window_days)
-    if rows is None:
-        return SyncStaleness("unknown", detail="gh unavailable or unauthenticated")
-
-    markerless = tuple(
-        r for r in rows if not _synced_marker(canonical, r["sha"]).exists()
-    )
-    check = check or _canonical_check
-    answer = check({"canonical": str(canonical), "fetch": fetch})
-    behind = answer.get("behind")
-    ahead = answer.get("ahead")
-
-    # ANY markerless merge past the threshold is stale, not just the newest one.
-    # Keying on the newest alone would call the older ones cosmetic on the theory
-    # that a newer sync pulled past them - but a marker does not imply a pull (a
-    # merge missing the sync_paths globs is marked without one), so the newest
-    # being marked proves nothing about the merges behind it.
-    now = datetime.now(timezone.utc)
-    overdue = [
-        r for r in markerless
-        if (now - r["merged_at"]).total_seconds() / 3600 > pm.sync_stale_hours
-    ]
-    detail = ""
-    stale = bool(overdue)
-    if overdue:
-        oldest = overdue[-1]  # markerless is newest-first
-        age_h = (now - oldest["merged_at"]).total_seconds() / 3600
-        detail = f"PR #{oldest['number']} merged {age_h:.0f}h ago, never synced"
-        if len(overdue) > 1:
-            detail += f" (+{len(overdue) - 1} more)"
-    if behind or ahead:
-        stale = True
-    # The verb's notes ride even when the verdict stays fresh (naming the dirt
-    # is doctor's job); they never flip it by themselves.
-    notes = [note for note in (answer.get("notes") or []) if note]
-    if notes:
-        detail = (detail + "; " if detail else "") + "; ".join(notes)
-
-    return SyncStaleness(
-        "stale" if stale else "fresh", markerless, behind, detail
-    )
-
-
-def run_sync_catchup(
-    *,
-    settings: Any = None,
-    canonical_root: Optional[Path] = None,
-    check: Optional[Callable[[dict], dict]] = None,
-    gh_list: Optional[Callable[[Path, int], Optional[list[dict]]]] = None,
-    sync: Optional[Callable[..., int]] = None,
-) -> CatchupResult:
-    """Sync the canonical for any merge the event-time triggers missed.
-
-    Newest-only: one ``run_sync_canonical`` regardless of how many merges piled
-    up, because a single pull brings HEAD current for all of them. The older
-    swept SHAs are marker-stamped afterwards so they stop reading as stale - but
-    ONLY once the newest SHA's marker proves the sync actually landed, so a
-    claim-held skip or a failed ``fno doctor update`` can never backdate a lie.
-    """
-    from fno.config import load_settings
-
-    if settings is None:
-        settings = load_settings()
-    if not settings.post_merge.auto_run:
-        return CatchupResult("disabled")
-
-    if canonical_root is None:
-        from fno.paths import resolve_canonical_repo_root
-
-        canonical_root = resolve_canonical_repo_root()
-    canonical = Path(canonical_root)
-
-    st = sync_staleness(
-        settings=settings, canonical_root=canonical, check=check, gh_list=gh_list
-    )
-    if st.state == "unknown":
-        typer.echo(f"post-merge sync catch-up: {st.detail}; skipping", err=True)
-        return CatchupResult("unknown", detail=st.detail)
-    if not st.markerless:
-        # Carry the staleness detail even here. Every marker can be present while
-        # the canonical is still behind origin - that is what "the markers lie"
-        # looks like, and it is the one state the sweep cannot act on, so the
-        # least it can do is say so rather than report a flat "fresh".
-        return CatchupResult("fresh", detail=st.detail, stale=st.state == "stale")
-
-    newest = st.markerless[0]
-    # Stamping the older merges is only sound if the newest one actually PULLED,
-    # and neither the exit code nor the marker proves that: run_sync_canonical
-    # returns 0 and writes a marker for a merge that misses the sync_paths globs
-    # (a docs-only merge needs no build), having run nothing. Stamping older
-    # merges off that would permanently mark real code merges as synced without
-    # ever pulling them - the exact silent-skip this feature exists to end. So
-    # the proof is whether sync_command's shell was entered, observed through
-    # the shell_runner seam the function already exposes.
-    pulled: list[int] = []
-
-    def _tracking_shell(command: str, cwd: str) -> Result:
-        pulled.append(1)
-        return _default_shell_runner(command, cwd)
-
-    rc = (sync or run_sync_canonical)(
-        newest["number"], settings=settings, canonical_root=canonical,
-        shell_runner=_tracking_shell,
-    )
-    if rc != 0:
-        typer.echo(
-            f"post-merge sync catch-up: sync of PR #{newest['number']} failed "
-            f"(exit {rc}); markers withheld, will retry",
-            err=True,
-        )
-        return CatchupResult(
-            "failed", newest["number"], detail=f"exit {rc}", stale=st.state == "stale"
-        )
-
-    if not _synced_marker(canonical, newest["sha"]).exists():
-        return CatchupResult(
-            "skipped", newest["number"],
-            detail="sync declined (claim held or out of scope)",
-            stale=st.state == "stale",
-        )
-
-    if not pulled:
-        # The newest merge needed no sync, so it is marked but nothing was
-        # pulled. The older merges keep their claim on the next sweep, which
-        # will pick the newest REMAINING one and pull for real.
-        return CatchupResult(
-            "marked", newest["number"],
-            detail="no buildable change; older merges still pending",
-            stale=st.state == "stale",
-        )
-
-    swept = 0
-    for row in st.markerless[1:]:
-        marker = _synced_marker(canonical, row["sha"])
-        if not marker.exists():
-            _write_marker(marker)
-            swept += 1
-    typer.echo(
-        f"post-merge sync catch-up: synced PR #{newest['number']}"
-        + (f", stamped {swept} older merge(s)" if swept else "")
-    )
-    return CatchupResult("synced", newest["number"], swept)
-
-
-def _any_match(files: list[str], globs: list[str]) -> bool:
-    return any(fnmatch.fnmatch(f, g) for f in files for g in globs)
-
-
-def _write_marker(marker: Path) -> None:
-    # Best-effort: the sync already ran, so a marker failure only makes the next
-    # sweep re-run (safe direction). mkdir is inside the guard too, keeping the
-    # whole write fail-open rather than letting an ENOENT/EACCES escape. A
-    # failure is signalled so the operator can see WHY the sync re-runs each
-    # sweep (a persistently-unwritable .fno) rather than it looking like normal.
-    try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.touch(exist_ok=True)
-    except OSError as exc:
-        typer.echo(
-            f"post-merge sync: marker write failed ({exc}); will re-run next sweep",
-            err=True,
-        )
-
-
-_PR_URL_SLUG_RE = re.compile(r"github\.com/([^/]+)/([^/]+)/pull/\d+")
-
-
-def _slug_from_pr_url(url: Optional[str]) -> Optional[str]:
-    if not url:
-        return None
-    m = _PR_URL_SLUG_RE.search(url)
-    return f"{m.group(1)}/{m.group(2)}" if m else None
-
-
-class _GhError(Exception):
-    pass
-
-
-def _default_gh_json(args: list[str], cwd: Optional[str]) -> dict[str, Any]:
-    """Run ``gh <args>`` in ``cwd`` and parse a single JSON object."""
-    import json
-
-    res = _run(["gh", *args], cwd=cwd)
-    if not res.ok:
-        raise _GhError((res.stderr or res.stdout or "").strip()[:200])
-    try:
-        obj = json.loads(res.stdout or "{}")
-    except json.JSONDecodeError as exc:
-        raise _GhError(f"non-JSON gh output: {exc}") from exc
-    return obj if isinstance(obj, dict) else {}
-
-
-# Cap captured output echoed in a failure receipt: a pull/update/build can spew
-# megabytes, and the receipt is a diagnostic line, not a log sink. The tail is
-# where a shell error (e.g. a misspelled git subcommand) lands.
-_CAPTURE_TAIL_CHARS = 2000
-
-
-def _tail(text: str, n: int = _CAPTURE_TAIL_CHARS) -> str:
-    return text if len(text) <= n else "..." + text[-n:]
-
-
-def _read_tail_text(path: Path) -> str:
-    # Read only the tail off disk (bounded memory): a sync_command can emit for
-    # the full _SYNC_COMMAND_TIMEOUT_S window, and loading the whole capture
-    # would OOM the long-lived watcher for a receipt that discards all but the
-    # tail. On-disk growth during the run is bounded by that timeout and the
-    # temp files are removed on exit; capping the child's own write rate would
-    # take a sidecar process, out of scope for a diagnostic.
-    max_bytes = _CAPTURE_TAIL_CHARS * 4  # UTF-8 worst case covers the char budget
-    with path.open("rb") as f:
-        f.seek(0, 2)
-        size = f.tell()
-        f.seek(max(0, size - max_bytes))
-        return f.read().decode("utf-8", "replace")
-
-
-def _default_shell_runner(command: str, cwd: str) -> Result:
-    """Run ``command`` via a login shell in ``cwd``; return its captured result.
-
-    Output is captured to temp FILES, never ``subprocess.PIPE`` : a
-    ``sync_command`` ending in ``fno agents restart`` detaches a daemon that INHERITS
-    the child's stdout/stderr and never closes them, and with PIPE the parent's
-    ``communicate()`` would block on the EOF that live daemon never sends (the
-    wedge this runner exists to avoid). A plain file has no EOF-reader, so the
-    parent's ``wait()`` returns as soon as the shell child exits, daemon or no;
-    a detached grandchild merely keeps appending to a file we have already
-    read. Only the tail of each captured stream is loaded onto the returned
-    ``Result`` (see :func:`_read_tail_text`) so a failing ``sync_command`` can
-    be diagnosed from the receipt without dragging its full output into the
-    watcher's memory. The run is still bounded by ``_SYNC_COMMAND_TIMEOUT_S`` as the
-    stuck-command backstop.
-    """
-    import subprocess
-    import tempfile
+    from fno.rust_binary import VerbUnavailable, verb_call
 
     try:
-        with tempfile.TemporaryDirectory() as td:
-            out_path = Path(td) / "stdout"
-            err_path = Path(td) / "stderr"
-            with out_path.open("w") as outf, err_path.open("w") as errf:
-                proc = subprocess.run(
-                    ["bash", "-lc", command],
-                    cwd=cwd,
-                    stdin=subprocess.DEVNULL,
-                    stdout=outf,
-                    stderr=errf,
-                    timeout=_SYNC_COMMAND_TIMEOUT_S,
-                    check=False,
-                )
-            stdout = _read_tail_text(out_path)
-            stderr = _read_tail_text(err_path)
-    except subprocess.TimeoutExpired:
-        typer.echo(
-            f"post-merge sync: sync_command timed out after {int(_SYNC_COMMAND_TIMEOUT_S)}s; "
-            "marker withheld, will retry",
-            err=True,
+        answer = verb_call(
+            "sync-canonical",
+            {"action": "staleness", "cwd": os.getcwd(), "fetch": fetch},
+            timeout=_TIMEOUT_PROBE_S,
         )
-        return Result(124, "", "")
-    return Result(proc.returncode, stdout, stderr)
+    except VerbUnavailable as exc:
+        return {
+            "state": "unknown",
+            "markerless": [],
+            "behind": None,
+            "detail": f"native verb unavailable: {exc}",
+        }
+    return _answer_fields(answer)

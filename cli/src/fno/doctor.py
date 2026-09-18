@@ -1297,10 +1297,10 @@ def _post_merge_sync_health() -> dict[str, Any]:
         # invisible exactly when it has lasted longest.
         st = sync_staleness(fetch=True)
         return {
-            "state": st.state,
-            "stale": st.state == "stale",
-            "behind": st.behind,
-            "detail": st.detail,
+            "state": st["state"],
+            "stale": st["state"] == "stale",
+            "behind": st["behind"],
+            "detail": st["detail"],
         }
     except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
         return {"state": "unknown", "stale": False, "behind": None, "detail": ""}
