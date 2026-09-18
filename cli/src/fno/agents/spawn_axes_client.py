@@ -43,17 +43,13 @@ def keeper_posture(
     """The launch permission tokens for one harness lane, from the Rust
     owner. A non-empty note prints once to stderr as ``agy posture:
     <effective> (<source>) - <note>``."""
-    answer = spawn_axes_call(
-        {
-            "keeper_posture": {
-                "harness": harness,
-                "lane": lane,
-                "permission_mode": permission_mode or "",
-                "yolo": bool(yolo),
-            }
-        }
-    )
-    tokens = _answer_or_raise(answer, "tokens")
+    ask = {
+        "harness": harness,
+        "lane": lane,
+        "permission_mode": permission_mode or "",
+        "yolo": bool(yolo),
+    }
+    tokens = _answer_or_raise(spawn_axes_call({"keeper_posture": ask}), "tokens")
     note = answer.get("note") or ""
     if note:
         import sys
@@ -73,15 +69,11 @@ def agy_mint_argv(
     yolo: bool,
 ) -> list[str]:
     """The agy conversation-mint argv, from the Rust owner."""
-    answer = spawn_axes_call(
-        {
-            "agy_mint": {
-                "model": model or "",
-                "effort": effort or "",
-                "permission_mode": permission_mode or "",
-                "yolo": bool(yolo),
-            }
-        }
-    )
-    argv = _answer_or_raise(answer, "argv")
+    ask = {
+        "model": model or "",
+        "effort": effort or "",
+        "permission_mode": permission_mode or "",
+        "yolo": bool(yolo),
+    }
+    argv = _answer_or_raise(spawn_axes_call({"agy_mint": ask}), "argv")
     return [str(t) for t in argv]
