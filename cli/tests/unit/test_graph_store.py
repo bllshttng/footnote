@@ -19,7 +19,7 @@ from fno.graph.store import (
     append_session_record,
     _read_json,
     commit_rows_via_store,
-    read_graph,
+    read_graph_strict,
     render_canonical_views,
 )
 

@@ -15,7 +15,7 @@ import pytest
 from fno.graph.store import (
     GraphMalformedRootError,
     GraphUnreadableError,
-    read_graph,
+    read_graph_strict,
     read_graph_strict,
 )
 
