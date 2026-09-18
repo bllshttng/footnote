@@ -535,7 +535,10 @@ def test_agy_install_refuses_malformed_and_preserves_bytes(tmp_path, monkeypatch
     res = I._agy_install()
 
     assert res.status == "failed"
-    assert "parse error" in res.note
+    # The refusal names the file; the parse position is the Rust owner's
+    # assertion, and the transport caps the note at 200 chars, so the exact
+    # wording is not asserted here.
+    assert str(hooks) in res.note
     assert hooks.read_bytes() == before, "malformed bytes must be preserved"
 
 
