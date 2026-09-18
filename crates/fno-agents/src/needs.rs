@@ -1273,10 +1273,10 @@ pub fn collect_needs_items(
 ) -> Vec<NeedItem> {
     let mut events_raw = String::new();
     for p in event_paths {
-        // questions.jsonl is NOT an events store: the inbox owns those rows
-        // (the x-0915 boundary), so its text feeds the fold unchanged. Event
-        // journals answer from committed rows in commit order; the import
-        // pulls any journal bytes a pre-cutover writer (or fixture) left.
+        // questions.jsonl is NOT an events store: the inbox owns those rows,
+        // so its text feeds the fold unchanged. Event journals answer from
+        // committed rows in commit order; the import pulls any journal bytes
+        // a pre-cutover writer (or fixture) left.
         let is_questions = p.file_name().and_then(|n| n.to_str()) == Some("questions.jsonl");
         if is_questions {
             if let Ok(content) = std::fs::read_to_string(p) {
