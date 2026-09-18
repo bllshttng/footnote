@@ -403,12 +403,56 @@ impl HarnessContract {
         self.render_session_argv_with_ids(harness, lane, session_id, None)
     }
 
+    fn compose_maybe(&self, form: &ResumeForm, tokens: Vec<String>, compose: bool) -> Vec<String> {
+        if compose {
+            with_pre_exec(form, tokens)
+        } else {
+            tokens
+        }
+    }
+
     pub fn render_session_argv_with_ids(
         &self,
         harness: &str,
         lane: &str,
         session_id: Option<&str>,
         short_id: Option<&str>,
+    ) -> Result<Vec<String>, ContractError> {
+        self.render_session_argv_composed(harness, lane, session_id, short_id, true)
+    }
+
+    /// The raw render: tokens only, `pre_exec` NOT composed ahead. A caller
+    /// that must SPLICE lane-owned tokens into the argv (the codex grant and
+    /// `--cd` ride before the subcommand) renders raw, splices, and composes
+    /// last via [`compose_pre_exec`] - splicing a composed `sh -c` script
+    /// would put the grant outside the codex command.
+    pub fn render_session_argv_raw(
+        &self,
+        harness: &str,
+        lane: &str,
+        session_id: Option<&str>,
+    ) -> Result<Vec<String>, ContractError> {
+        self.render_session_argv_composed(harness, lane, session_id, None, false)
+    }
+
+    /// The declared `pre_exec` for one lane, so a raw-render caller can
+    /// compose after its own splices.
+    pub fn form_pre_exec(&self, harness: &str, lane: &str) -> Result<Vec<String>, ContractError> {
+        let caps = self.capabilities(harness)?;
+        let form =
+            caps.resume_strategy.forms.get(lane).ok_or_else(|| {
+                field_error(harness, "resume_strategy", &format!("no lane {lane:?}"))
+            })?;
+        Ok(form.pre_exec.clone())
+    }
+
+    fn render_session_argv_composed(
+        &self,
+        harness: &str,
+        lane: &str,
+        session_id: Option<&str>,
+        short_id: Option<&str>,
+        compose: bool,
     ) -> Result<Vec<String>, ContractError> {
         let caps = self.capabilities(harness)?;
         let form =
@@ -439,7 +483,7 @@ impl HarnessContract {
             };
             let mut tokens = form.tokens.clone();
             tokens[index] = id.to_string();
-            return Ok(with_pre_exec(form, tokens));
+            return Ok(self.compose_maybe(form, tokens, compose));
         }
         if short_id.is_some_and(|id| !id.is_empty()) {
             return Err(field_error(
@@ -449,12 +493,12 @@ impl HarnessContract {
             ));
         }
         let Some(index) = form.tokens.iter().position(|token| token == "{session_id}") else {
-            return Ok(with_pre_exec(form, form.tokens.clone()));
+            return Ok(self.compose_maybe(form, form.tokens.clone(), compose));
         };
         if let Some(id) = session_id.filter(|id| !id.is_empty()) {
             let mut tokens = form.tokens.clone();
             tokens[index] = id.to_string();
-            return Ok(with_pre_exec(form, tokens));
+            return Ok(self.compose_maybe(form, tokens, compose));
         }
         if lane.ends_with("create") {
             let start = index
@@ -463,7 +507,7 @@ impl HarnessContract {
                 .unwrap_or(index);
             let mut tokens = form.tokens.clone();
             tokens.drain(start..=index);
-            return Ok(with_pre_exec(form, tokens));
+            return Ok(self.compose_maybe(form, tokens, compose));
         }
         Err(field_error(
             harness,
@@ -1049,6 +1093,32 @@ pub fn render_session_argv(
     HarnessContract::packaged()?.render_session_argv(harness, lane, session_id)
 }
 
+/// The raw tokens (no `pre_exec` composition), for callers that splice
+/// lane-owned tokens into the argv before shipping it.
+pub fn render_session_argv_raw(
+    harness: &str,
+    lane: &str,
+    session_id: Option<&str>,
+) -> Result<Vec<String>, ContractError> {
+    HarnessContract::packaged()?.render_session_argv_raw(harness, lane, session_id)
+}
+
+/// Compose a lane's declared `pre_exec` ahead of a (raw-rendered, spliced)
+/// argv.
+pub fn compose_pre_exec(
+    harness: &str,
+    lane: &str,
+    argv: Vec<String>,
+) -> Result<Vec<String>, ContractError> {
+    let contract = HarnessContract::packaged()?;
+    let pre = contract.form_pre_exec(harness, lane)?;
+    if pre.is_empty() {
+        return Ok(argv);
+    }
+    let script = format!("{}; exec {}", sh_join(&pre), sh_join(&argv));
+    Ok(vec!["sh".to_string(), "-c".to_string(), script])
+}
+
 pub fn render_session_argv_with_ids(
     harness: &str,
     lane: &str,
@@ -1259,11 +1329,19 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("short_id"));
+        // The resume row carries the same shared-daemon ownership assertion
+        // as attach: `--remote unix://` makes a daemon-down resume LOUD
+        // instead of silently private, and the render composes the declared
+        // daemon start ahead of the argv.
         assert_eq!(
             contract
                 .render_session_argv("codex", "interactive_resume", Some("cx-1"))
                 .unwrap(),
-            ["codex", "resume", "cx-1"]
+            [
+                "sh",
+                "-c",
+                "'codex' 'app-server' 'daemon' 'start'; exec 'codex' 'resume' 'cx-1' '--remote' 'unix://'",
+            ]
         );
         assert_eq!(
             contract
