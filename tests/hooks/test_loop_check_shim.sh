@@ -189,7 +189,7 @@ log "T2: no fno-agents binary -> one stderr line, exit 0 (AC15-EDGE)"
         fail "T2: expected empty stdout, got: $HOOK_STDOUT"
         t2_ok=false
     fi
-    if ! echo "$HOOK_STDERR" | grep -q "fno-agents not found"; then
+    if ! echo "$HOOK_STDERR" | grep -q "no fno-agents could answer the hook verb"; then
         fail "T2: expected the one stderr line; got: $HOOK_STDERR"
         t2_ok=false
     fi
@@ -198,9 +198,10 @@ log "T2: no fno-agents binary -> one stderr line, exit 0 (AC15-EDGE)"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T3: no-intent block (non-claude env) -> exit 2, message on stderr
+# T3: no-intent fire with no gh on PATH -> the advisory gate runs before the
+# no-intent block: exit 2, the advisory line on stderr.
 # ─────────────────────────────────────────────────────────────────────────────
-log "T3: no-intent fire (non-claude env) -> exit 2 + continue message on stderr"
+log "T3: no-intent fire, gh absent -> exit 2 + advisory line on stderr"
 {
     setup_env "cccc-0003"
     run_hook "$TMP_DIR" "$(payload sess-t3)"
@@ -210,11 +211,11 @@ log "T3: no-intent fire (non-claude env) -> exit 2 + continue message on stderr"
         fail "T3: expected exit 2, got $HOOK_RC (stderr: $HOOK_STDERR)"
         t3_ok=false
     fi
-    if ! echo "$HOOK_STDERR" | grep -q "continue working"; then
-        fail "T3: 'continue working' not in stderr; got: $HOOK_STDERR"
+    if ! echo "$HOOK_STDERR" | grep -q "advisory mode"; then
+        fail "T3: advisory line not in stderr; got: $HOOK_STDERR"
         t3_ok=false
     fi
-    [[ "$t3_ok" == "true" ]] && pass "T3: block -> exit 2 + continue message"
+    [[ "$t3_ok" == "true" ]] && pass "T3: block -> exit 2 + advisory line"
     cleanup
 }
 
@@ -335,11 +336,13 @@ log "T14: codex-authored manifest + that codex session's own stop -> judged"
     run_hook "$TMP_DIR" "$(payload sess-t14)"
 
     t14_ok=true
-    if ! echo "$HOOK_STDERR" | grep -q "continue working"; then
+    # The ownership check needs a gh read first; with gh absent the stop is
+    # still ANSWERED - the advisory gate's line - rather than ignored.
+    if ! echo "$HOOK_STDERR" | grep -q "advisory mode"; then
         fail "T14: the owner's own stop was not judged; got: $HOOK_STDERR"
         t14_ok=false
     fi
-    [[ "$t14_ok" == "true" ]] && pass "T14: owner's own stop -> judged (continue message)"
+    [[ "$t14_ok" == "true" ]] && pass "T14: owner's own stop -> judged (advisory line)"
     cleanup
 }
 
