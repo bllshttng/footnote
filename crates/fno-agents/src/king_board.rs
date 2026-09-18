@@ -1132,39 +1132,48 @@ fn graph_session_nodes(entries: Option<&[Value]>) -> HashMap<String, String> {
     let Some(entries) = entries else {
         return map;
     };
-    for node in entries {
-        if TERMINAL_RUNGS.contains(&s_str(node, "status").unwrap_or("")) {
-            continue;
-        }
-        let Some(node_id) = s_str(node, "id").map(str::to_string) else {
-            continue;
-        };
-        let pr_bound = node_has_pr(node);
-        for row in node
-            .get("sessions")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let Some(phase) = row.get("phase").and_then(Value::as_str) else {
-                continue;
-            };
-            if phase == "ship" {
+    // An OPEN phase row is positive occupancy and outranks a closed one: a
+    // session that closed its do row on one node and opened one on another
+    // must land on the open node, so open rows join first and the closed-row
+    // inference only fills sessions no open row claims.
+    let mut admissions = |want_open: bool, map: &mut HashMap<String, String>| {
+        for node in entries {
+            if TERMINAL_RUNGS.contains(&s_str(node, "status").unwrap_or("")) {
                 continue;
             }
-            let Some(session_id) = row
-                .get("session_id")
-                .and_then(Value::as_str)
-                .filter(|s| !s.trim().is_empty())
-            else {
+            let Some(node_id) = s_str(node, "id").map(str::to_string) else {
                 continue;
             };
-            if crate::graph_store::is_open_phase_row(row, phase) || pr_bound {
-                map.entry(session_id.to_string())
-                    .or_insert_with(|| node_id.clone());
+            let pr_bound = node_has_pr(node);
+            for row in node
+                .get("sessions")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let Some(phase) = row.get("phase").and_then(Value::as_str) else {
+                    continue;
+                };
+                if phase == "ship" {
+                    continue;
+                }
+                let Some(session_id) = row
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                else {
+                    continue;
+                };
+                let open = crate::graph_store::is_open_phase_row(row, phase);
+                if open == want_open && (open || pr_bound) {
+                    map.entry(session_id.to_string())
+                        .or_insert_with(|| node_id.clone());
+                }
             }
         }
-    }
+    };
+    admissions(true, &mut map);
+    admissions(false, &mut map);
     map
 }
 
@@ -2571,6 +2580,52 @@ mod tests {
             .filter_map(|r| r.get("node").and_then(Value::as_str))
             .collect();
         assert_eq!(nodes, vec!["x-pr"], "{rows:?}");
+    }
+
+    #[test]
+    fn an_open_row_outranks_a_closed_one_on_another_node() {
+        // One live session closed its do row on a PR-bound node and opened
+        // one on another node: the join must land on the open node, so the
+        // abandoned node keeps its undriven_pr instead of borrowing a driver
+        // it no longer has.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = HOME_LOCK.lock().unwrap();
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
+        let dir = tempfile::tempdir().unwrap();
+        crate::paths::pin_test_claims_root(dir.path());
+        let agents_home = dir.path().join(".fno").join("agents");
+        std::env::set_var("FNO_AGENTS_HOME", &agents_home);
+        let path = agents_home.join("registry.json");
+        crate::state::update_registry(&path, |registry| {
+            registry
+                .entries
+                .push(live_unstamped_row("t-moved-worker", "uuid-move"));
+        })
+        .unwrap();
+        let entries = vec![
+            json!({
+                "id": "x-old",
+                "status": "in_review",
+                "pr_number": 2126,
+                "sessions": [phase_row("do", "uuid-move", Some("2026-09-17T06:19:07Z"))],
+            }),
+            json!({
+                "id": "x-now",
+                "status": "in_progress",
+                "sessions": [phase_row("do", "uuid-move", None)],
+            }),
+        ];
+        let (read, _) = read_driver_rows(Some(&entries));
+        std::env::remove_var("FNO_AGENTS_HOME");
+        assert!(read.is_ok(), "{read:?}");
+        let rows = read.payload.unwrap().as_array().unwrap().clone();
+        let nodes: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| r.get("node").and_then(Value::as_str))
+            .collect();
+        assert_eq!(nodes, vec!["x-now"], "{rows:?}");
     }
 
     #[test]
