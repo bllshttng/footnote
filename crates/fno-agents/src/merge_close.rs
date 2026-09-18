@@ -112,19 +112,54 @@ pub fn outcome_from_reconcile(run: Result<String, String>) -> CloseOutcome {
     };
     let acted = closed.len() as u64;
     let failures = count_of("failures");
+    let evidence = count_of("supersession_evidence_failures");
+    let mut detail = format!(
+        "closed={acted} promise_unmet={} failures={failures}",
+        count_of("promise_unmet")
+    );
+    if evidence > 0 {
+        detail.push_str(&format!(" evidence_failures={evidence}"));
+    }
+    if let Some(first) = parsed
+        .get("failures")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|a| a.first())
+    {
+        let node = first
+            .get("node_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let pr = first
+            .get("pr_number")
+            .and_then(serde_json::Value::as_u64)
+            .map_or("?".to_string(), |n| n.to_string());
+        let why = first
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        detail.push_str(&format!("; first: {node} PR #{pr}: {why}"));
+    }
+    let catchup = parsed.get("sync_catchup");
+    let outcome = catchup
+        .and_then(|s| s.get("outcome"))
+        .and_then(serde_json::Value::as_str);
+    if matches!(outcome, Some("unknown") | Some("failed") | Some("error")) {
+        let why = catchup
+            .and_then(|s| s.get("detail"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        detail.push_str(&format!("; sync_catchup={}: {why}", outcome.unwrap_or("?")));
+    }
     CloseOutcome {
         acted,
         skip_reason: if acted > 0 {
             None
-        } else if failures > 0 {
+        } else if failures > 0 || evidence > 0 {
             Some("failures".to_string())
         } else {
             Some("none_to_close".to_string())
         },
-        detail: format!(
-            "closed={acted} promise_unmet={} failures={failures}",
-            count_of("promise_unmet")
-        ),
+        detail: short(&detail),
     }
 }
 
@@ -135,20 +170,28 @@ fn run_reconcile() -> Result<String, String> {
         .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| format!("spawn: {e}"))?;
-    if !output.status.success() {
-        let last = output
-            .stderr
-            .split(|b| *b == b'\n')
-            .filter(|l| !l.is_empty())
-            .next_back()
-            .map(|l| String::from_utf8_lossy(l).into_owned())
-            .unwrap_or_default();
-        return Err(format!(
-            "exit {}: {last}",
-            output.status.code().unwrap_or(-1)
-        ));
+    reconcile_result(output.status.code(), &output.stdout, &output.stderr)
+}
+
+/// Classify a run from its bytes. Exit 0 is the payload. Exit 4 is the
+/// verb's documented partial status: its JSON is already complete on stdout
+/// and holds the failures, so it is kept instead of discarded for the
+/// stderr tail. Anything else keeps only the last stderr line.
+fn reconcile_result(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> Result<String, String> {
+    if code == Some(0) {
+        return Ok(String::from_utf8_lossy(stdout).into_owned());
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    if code == Some(4)
+        && serde_json::from_slice::<serde_json::Value>(stdout).is_ok_and(|v| v.is_object())
+    {
+        return Ok(String::from_utf8_lossy(stdout).into_owned());
+    }
+    let last = stderr
+        .split(|b| *b == b'\n')
+        .rfind(|l| !l.is_empty())
+        .map(|l| String::from_utf8_lossy(l).into_owned())
+        .unwrap_or_default();
+    Err(format!("exit {}: {last}", code.unwrap_or(-1)))
 }
 
 /// One pass of the arm body: the pause gate, then the run, then exactly one
@@ -318,7 +361,10 @@ mod tests {
         let o = outcome_from_reconcile(Ok(stdout.to_string()));
         assert_eq!(o.acted, 0);
         assert_eq!(o.skip_reason.as_deref(), Some("failures"));
-        assert_eq!(o.detail, "closed=0 promise_unmet=0 failures=1");
+        assert_eq!(
+            o.detail,
+            "closed=0 promise_unmet=0 failures=1; first: x-1 PR #1: gh down"
+        );
     }
 
     #[test]
@@ -328,6 +374,83 @@ mod tests {
         assert_eq!(o.acted, 0);
         assert_eq!(o.skip_reason.as_deref(), Some("none_to_close"));
         assert_eq!(o.detail, "closed=0 promise_unmet=0 failures=0");
+    }
+
+    #[test]
+    fn a_partial_reconcile_names_the_first_failure_and_a_stuck_catchup() {
+        let stdout = r#"{
+  "closed": [],
+  "promise_unmet": [],
+  "failures": [{"node_id": "x-1", "pr_number": 7, "error": "gh pr view refused"}],
+  "supersession_evidence_failures": [],
+  "sync_catchup": {"outcome": "unknown", "detail": "gh unavailable or unauthenticated"}
+}"#;
+        let o = outcome_from_reconcile(Ok(stdout.to_string()));
+        assert_eq!(o.acted, 0);
+        assert_eq!(o.skip_reason.as_deref(), Some("failures"));
+        assert_eq!(
+            o.detail,
+            "closed=0 promise_unmet=0 failures=1; first: x-1 PR #7: gh pr view refused; sync_catchup=unknown: gh unavailable or unauthenticated"
+        );
+    }
+
+    #[test]
+    fn a_fresh_catchup_adds_nothing_to_the_counts() {
+        // A fresh or not-run catch-up is health, not a finding.
+        let stdout = r#"{
+  "closed": [],
+  "promise_unmet": [],
+  "failures": [],
+  "sync_catchup": {"outcome": "fresh", "detail": "canonical in sync"}
+}"#;
+        let o = outcome_from_reconcile(Ok(stdout.to_string()));
+        assert_eq!(o.skip_reason.as_deref(), Some("none_to_close"));
+        assert_eq!(o.detail, "closed=0 promise_unmet=0 failures=0");
+    }
+
+    #[test]
+    fn evidence_failures_alone_read_failures_not_none_to_close() {
+        // A supersession-evidence-only run exits 4 too.
+        let stdout = r#"{
+  "closed": [],
+  "promise_unmet": [],
+  "failures": [],
+  "supersession_evidence_failures": [{"node_id": "x-2", "reason": "stale evidence"}]
+}"#;
+        let o = outcome_from_reconcile(Ok(stdout.to_string()));
+        assert_eq!(o.acted, 0);
+        assert_eq!(o.skip_reason.as_deref(), Some("failures"));
+        assert!(
+            o.detail.contains("evidence_failures=1"),
+            "detail: {}",
+            o.detail
+        );
+    }
+
+    #[test]
+    fn an_exit_4_payload_is_kept_not_discarded() {
+        let stdout = r#"{"closed": [], "failures": [{"node_id": "x-1", "pr_number": 7}]}"#;
+        let got = reconcile_result(Some(4), stdout.as_bytes(), b"skipping\n");
+        assert_eq!(got.unwrap(), stdout);
+    }
+
+    #[test]
+    fn an_exit_4_without_a_payload_keeps_the_stderr_tail() {
+        let got = reconcile_result(Some(4), b"", b"noise\nsync catch-up: gh unavailable\n");
+        assert_eq!(got.unwrap_err(), "exit 4: sync catch-up: gh unavailable");
+    }
+
+    #[test]
+    fn an_exit_1_is_an_error_even_with_a_payload() {
+        // Only exit 4 is a partial; a crash keeps the stderr tail.
+        let got = reconcile_result(Some(1), br#"{"closed": []}"#, b"boom\n");
+        assert_eq!(got.unwrap_err(), "exit 1: boom");
+    }
+
+    #[test]
+    fn a_killed_run_reports_exit_minus_one() {
+        let got = reconcile_result(None, b"", b"");
+        assert_eq!(got.unwrap_err(), "exit -1: ");
     }
 
     #[test]
