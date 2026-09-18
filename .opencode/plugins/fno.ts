@@ -137,11 +137,12 @@ export function toOpencodeAgent(data: Record<string, string>, body: string): Age
   return def
 }
 
-/** Extract the assistant's text from a session.prompt response's parts. */
+/** Extract the assistant's COMPLETED text from a message's parts. Reasoning
+ * parts never join a deliverable on any path (AC5-ERR, AC5-EDGE). */
 export function extractAssistantText(parts: Array<{ type?: string; text?: string }> | undefined): string {
   if (!parts) return ""
   return parts
-    .filter((p) => p.type === "text" || p.type === "reasoning")
+    .filter((p) => p.type === "text")
     .map((p) => p.text ?? "")
     .filter(Boolean)
     .join("\n")
@@ -215,6 +216,7 @@ export function loadFootnoteAgents(projectDir: string): Record<string, AgentDef>
 type SessionClient = {
   session: {
     create(o: { body: Record<string, unknown>; query?: { directory?: string } }): Promise<{ data?: { id: string }; error?: unknown }>
+    list(o?: { query?: { directory?: string } }): Promise<{ data?: Array<{ id?: string; parentID?: string }>; error?: unknown }>
     get(o: { path: { id: string } }): Promise<{ data?: { parentID?: string }; error?: unknown }>
     prompt(o: { path: { id: string }; body: Record<string, unknown> }): Promise<{ data?: { parts?: Array<{ type?: string; text?: string }> }; error?: unknown }>
     promptAsync(o: { path: { id: string }; body: Record<string, unknown> }): Promise<{ error?: unknown }>
@@ -243,8 +245,61 @@ async function sessionDepth(client: SessionClient, sessionId: string): Promise<n
   return depth
 }
 
-// module-level guard: only SYNC delegations (which hold this turn) are counted.
-let inFlightSync = 0
+// Per-parent delegation reservations (Change 3). The reservation is inserted
+// synchronously under a nonce BEFORE the depth walk and before session.create,
+// so two concurrent callers can never both read a pre-increment count; it is
+// rekeyed to the child id once create returns. Background children hold a
+// reservation like any other child and release it when task_result reads a
+// terminal state. In-memory only and deliberately not authority: admission
+// reconciles against the live child set on every fire, so a plugin reload
+// cannot leak capacity - and an unreadable count refuses as `capacity
+// unknown`, never as headroom.
+const reservations = new Map<string, Map<string, unknown>>()
+let nonceCounter = 0
+
+function reserve(parentId: string): string {
+  const token = `nonce-${Date.now()}-${nonceCounter++}`
+  let slot = reservations.get(parentId)
+  if (!slot) {
+    slot = new Map()
+    reservations.set(parentId, slot)
+  }
+  slot.set(token, true)
+  return token
+}
+
+function rekeyReservation(parentId: string, token: string, childId: string): void {
+  const slot = reservations.get(parentId)
+  if (!slot || !slot.has(token)) return
+  slot.delete(token)
+  slot.set(childId, true)
+}
+
+function releaseReservation(key: string): void {
+  for (const slot of reservations.values()) slot.delete(key)
+}
+
+/** Live children of one parent, straight from the server. `null` when the
+ * read fails - an unreadable count is never read as headroom. */
+async function liveChildren(
+  client: SessionClient,
+  parentId: string,
+): Promise<Array<{ id?: string; parentID?: string }> | null> {
+  const res = await client.session
+    .list({})
+    .catch(() => null)
+  const rows = (res as { data?: Array<{ id?: string; parentID?: string }> } | null)?.data
+  if (!Array.isArray(rows)) return null
+  return rows.filter((s) => s?.parentID === parentId)
+}
+
+function pendingNonceCount(parentId: string, ownToken: string): number {
+  let n = 0
+  for (const key of reservations.get(parentId)?.keys() ?? []) {
+    if (key !== ownToken && key.startsWith("nonce-")) n += 1
+  }
+  return n
+}
 
 type TaskDeps = {
   client: SessionClient
@@ -252,6 +307,66 @@ type TaskDeps = {
   knownAgents: () => Set<string>
   availableModels: () => Set<string>
   timeoutMs?: number
+}
+
+// ---------------------------------------------------------------------------
+// Typed delegation results (Change 4)
+// ---------------------------------------------------------------------------
+
+export type TaskResultState = "pending" | "running" | "completed" | "failed" | "aborted" | "blocked"
+
+/** The one delegation envelope both the synchronous and background paths
+ * return. `result` is present only on `completed`; `provider_id`/`model_id`
+ * are the child's own readback when the child message carries them. */
+export type TaskResult = {
+  state: TaskResultState
+  child_session_id: string
+  provider_id?: string
+  model_id?: string
+  result?: string
+}
+
+type AssistantInfo = {
+  role?: string
+  time?: { created?: number; completed?: number }
+  error?: { name?: string }
+  providerID?: string
+  modelID?: string
+}
+
+/** Terminal is `time.completed` present with `error` absent; a present error
+ * maps to failed, or aborted for MessageAbortedError. Never guesses. */
+export function classifyAssistant(
+  info: AssistantInfo | undefined,
+): "completed" | "failed" | "aborted" | "running" {
+  if (info?.error) return info.error.name === "MessageAbortedError" ? "aborted" : "failed"
+  if (typeof info?.time?.completed === "number") return "completed"
+  return "running"
+}
+
+type ChildMessage = { info?: AssistantInfo; parts?: Array<{ type?: string; text?: string }> }
+
+/** Build the delegation envelope from a child session's messages. Reasoning
+ * alone never yields a deliverable (AC5-*). */
+export function buildTaskResult(taskId: string, messages: ChildMessage[] | undefined): TaskResult {
+  const list = Array.isArray(messages) ? messages : []
+  const assistant = list.filter((m) => m?.info?.role === "assistant")
+  if (assistant.length === 0) return { state: "pending", child_session_id: taskId }
+  const last = assistant[assistant.length - 1]
+  const cls = classifyAssistant(last.info)
+  const info = last.info ?? {}
+  if (cls === "running") return { state: "running", child_session_id: taskId }
+  const readback: TaskResult =
+    info.providerID || info.modelID
+      ? {
+          state: cls,
+          child_session_id: taskId,
+          ...(info.providerID ? { provider_id: info.providerID } : {}),
+          ...(info.modelID ? { model_id: info.modelID } : {}),
+        }
+      : { state: cls, child_session_id: taskId }
+  if (cls === "completed") readback.result = extractAssistantText(last.parts)
+  return readback
 }
 
 /** Build the `task` delegation tool. */
@@ -284,14 +399,29 @@ export function createTaskTool(deps: TaskDeps): ToolDefinition {
         return `error: unknown agent "${args.subagent_type}". Available: ${available}`
       }
 
-      const depth = await sessionDepth(deps.client, context.sessionID)
-      if (depth >= MAX_DEPTH) {
-        return `error: delegation depth limit reached (${MAX_DEPTH}). This session is already ${depth} level(s) deep.`
+      // Reserve synchronously, BEFORE any await: two concurrent callers can
+      // never both read a pre-increment count (AC4-HP).
+      const parentKey = context.sessionID
+      const nonce = reserve(parentKey)
+      let resKey = nonce
+      const release = () => releaseReservation(resKey)
+
+      // Reconcile against the live child set before admitting.
+      const live = await liveChildren(deps.client, parentKey)
+      if (live === null) {
+        release()
+        return "error: capacity unknown (cannot read the live child set); no child created."
+      }
+      const total = live.length + pendingNonceCount(parentKey, nonce)
+      if (total >= MAX_CONCURRENCY) {
+        release()
+        return `error: concurrency limit reached (cap ${MAX_CONCURRENCY}, ${total} child delegations in flight). Wait for a slot.`
       }
 
-      const background = args.run_in_background === true
-      if (!background && inFlightSync >= MAX_CONCURRENCY) {
-        return `error: concurrency limit reached (${MAX_CONCURRENCY} synchronous delegations in flight). Wait for a slot.`
+      const depth = await sessionDepth(deps.client, context.sessionID)
+      if (depth >= MAX_DEPTH) {
+        release()
+        return `error: delegation depth limit reached (${MAX_DEPTH}). This session is already ${depth} level(s) deep.`
       }
 
       const model = resolveModel(category, deps.availableModels())
@@ -309,8 +439,11 @@ export function createTaskTool(deps: TaskDeps): ToolDefinition {
         .catch((err) => ({ error: err, data: undefined }))
       const childId = created?.data?.id
       if (created?.error || !childId) {
+        release()
         return `error: failed to create child session: ${String(created?.error ?? "no session id")}`
       }
+      rekeyReservation(parentKey, nonce, childId)
+      resKey = childId
 
       const body = {
         agent,
@@ -318,15 +451,20 @@ export function createTaskTool(deps: TaskDeps): ToolDefinition {
         ...(model ? { model: { providerID: model.providerID, modelID: model.modelID } } : {}),
       }
 
+      const background = args.run_in_background === true
       if (background) {
         const res = await deps.client.session
           .promptAsync({ path: { id: childId }, body })
           .catch((err) => ({ error: err }))
-        if (res?.error) return `error: failed to launch background task: ${String(res.error)}`
+        if (res?.error) {
+          release()
+          return `error: failed to launch background task: ${String(res.error)}`
+        }
+        // The background child keeps its reservation until task_result reads
+        // a terminal state (or the child is gone at the next reconcile).
         return `task_id: ${childId}\nBackground task launched (@${agent}). Fetch the result later with task_result({ task_id: "${childId}" }).`
       }
 
-      inFlightSync += 1
       try {
         const res = await withTimeout(
           deps.client.session.prompt({ path: { id: childId }, body }),
@@ -334,14 +472,26 @@ export function createTaskTool(deps: TaskDeps): ToolDefinition {
           () => deps.client.session.abort({ path: { id: childId } }),
         ).catch((err) => ({ error: err, data: undefined }))
         if (res === TIMEOUT) {
-          return `error: child session timed out after ${timeoutMs}ms and was aborted.`
+          return JSON.stringify({
+            state: "aborted" as TaskResultState,
+            child_session_id: childId,
+          })
         }
-        if (res?.error) return `error: child session failed: ${String(res.error)}`
-        const text = extractAssistantText(res?.data?.parts)
-        if (!text) return "error: child session produced no output."
-        return text
+        if (res?.error) {
+          return JSON.stringify({ state: "failed" as TaskResultState, child_session_id: childId })
+        }
+        const envelope = res?.data?.info
+          ? buildTaskResult(childId, [{ info: res.data.info, parts: res.data.parts }])
+          : extractAssistantText(res?.data?.parts)
+            ? ({
+                state: "completed",
+                child_session_id: childId,
+                result: extractAssistantText(res?.data?.parts),
+              } as TaskResult)
+            : ({ state: "running", child_session_id: childId } as TaskResult)
+        return JSON.stringify(envelope)
       } finally {
-        inFlightSync -= 1
+        release()
       }
     },
   })
@@ -358,15 +508,16 @@ export function createTaskResultTool(deps: Pick<TaskDeps, "client">): ToolDefini
       const res = await deps.client.session
         .messages({ path: { id: args.task_id } })
         .catch((err) => ({ error: err, data: undefined }))
-      if (res?.error) return `error: failed to read task ${args.task_id}: ${String(res.error)}`
-      const messages = res?.data ?? []
-      const assistant = messages.filter((m) => m.info?.role === "assistant")
-      if (assistant.length === 0) return `pending: task ${args.task_id} has not produced output yet.`
-      for (let i = assistant.length - 1; i >= 0; i--) {
-        const text = extractAssistantText(assistant[i].parts)
-        if (text) return text
+      if (res?.error) {
+        return JSON.stringify({ state: "unknown" as TaskResultState, child_session_id: args.task_id })
       }
-      return `pending: task ${args.task_id} is running (no assistant text yet).`
+      const envelope = buildTaskResult(args.task_id, res?.data)
+      // A terminal read releases the background child's reservation (AC4-HP:
+      // release happens on every outcome, incl. a terminal task_result).
+      if (envelope.state !== "pending" && envelope.state !== "running") {
+        releaseReservation(args.task_id)
+      }
+      return JSON.stringify(envelope)
     },
   })
 }

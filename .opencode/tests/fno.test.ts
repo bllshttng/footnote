@@ -8,6 +8,7 @@ import fnoPlugin, {
   collectModels,
   loadFootnoteAgents,
   createTaskTool,
+  createTaskResultTool,
   isActivated,
 } from "../plugins/fno.ts"
 
@@ -80,14 +81,15 @@ test("toOpencodeAgent drops bare model names, keeps provider/model", () => {
   })
 })
 
-test("extractAssistantText joins text/reasoning parts, trims", () => {
+test("extractAssistantText returns completed text only, reasoning never joins (AC5-ERR)", () => {
   expect(
     extractAssistantText([
       { type: "reasoning", text: "thinking" },
       { type: "tool", text: "ignored" },
       { type: "text", text: "answer" },
     ]),
-  ).toBe("thinking\nanswer")
+  ).toBe("answer")
+  expect(extractAssistantText([{ type: "reasoning", text: "thinking" }])).toBe("")
   expect(extractAssistantText([])).toBe("")
   expect(extractAssistantText(undefined)).toBe("")
   expect(extractAssistantText([{ type: "tool" }])).toBe("")
@@ -122,6 +124,7 @@ function mockClient(overrides: Record<string, any> = {}) {
       prompt: async () => ({ data: { parts: [{ type: "text", text: "child result" }] } }),
       promptAsync: async () => ({}),
       messages: async () => ({ data: [] }),
+      list: async () => ({ data: [] }),
       abort: async () => ({}),
       ...overrides,
     },
@@ -137,10 +140,13 @@ const baseDeps = (client: any) => ({
 
 const ctx = { sessionID: "ses_root" } as any
 
-test("task sync delegation returns child text (AC2-HP)", async () => {
+test("task sync delegation returns a completed envelope (AC5-HP)", async () => {
   const t = createTaskTool(baseDeps(mockClient()))
   const out = await t.execute({ prompt: "do X", category: "do" } as any, ctx)
-  expect(out).toBe("child result")
+  const v = JSON.parse(out as string)
+  expect(v.state).toBe("completed")
+  expect(v.child_session_id).toBe("ses_child")
+  expect(v.result).toBe("child result")
 })
 
 test("task rejects when neither category nor subagent_type", async () => {
@@ -156,11 +162,12 @@ test("task rejects unknown subagent_type, lists available (AC4-ERR)", async () =
   expect(out).toContain("fno:archer")
 })
 
-test("task errors on empty child output (AC8-EDGE)", async () => {
+test("task returns a running envelope on empty child output (AC8-EDGE)", async () => {
   const client = mockClient({ prompt: async () => ({ data: { parts: [] } }) })
   const t = createTaskTool(baseDeps(client))
   const out = await t.execute({ prompt: "x", category: "do" } as any, ctx)
-  expect(out).toContain("no output")
+  const v = JSON.parse(out as string)
+  expect(v.state).toBe("running")
 })
 
 test("task enforces depth limit (AC10-EDGE)", async () => {
@@ -190,7 +197,7 @@ test("task surfaces child-session creation failure", async () => {
   expect(out).toContain("failed to create child session")
 })
 
-test("task times out and aborts (AC6-FR)", async () => {
+test("task times out and aborts, returning an aborted envelope (AC6-FR, AC5-*)", async () => {
   let aborted = false
   const client = mockClient({
     prompt: () => new Promise(() => {}), // never resolves
@@ -201,7 +208,9 @@ test("task times out and aborts (AC6-FR)", async () => {
   })
   const t = createTaskTool({ ...baseDeps(client), timeoutMs: 20 })
   const out = await t.execute({ prompt: "x", category: "do" } as any, ctx)
-  expect(out).toContain("timed out")
+  const v = JSON.parse(out as string)
+  expect(v.state).toBe("aborted")
+  expect(v.child_session_id).toBe("ses_child")
   expect(aborted).toBe(true)
 })
 
@@ -309,4 +318,114 @@ test("plugin init issues the populate fetch exactly once when activated", async 
   await initPlugin(input, true)
   await new Promise((r) => setTimeout(r, 10)) // let the populate settle
   expect(calls).toBe(1) // single populate per init, no re-fetch
+})
+
+test("five concurrent synchronous delegations all admit at zero children (AC4-HP)", async () => {
+  const t = createTaskTool(baseDeps(mockClient()))
+  const outs = await Promise.all(
+    Array.from({ length: 5 }, () => t.execute({ prompt: "x", category: "do" } as any, ctx)),
+  )
+  for (const out of outs) {
+    expect(JSON.parse(out as string).state).toBe("completed")
+  }
+})
+
+test("a sixth delegation at the cap is refused by name (AC4-ERR)", async () => {
+  const client = mockClient({
+    list: async () => ({
+      data: Array.from({ length: 5 }, (_, i) => ({ id: `ses_live_${i}`, parentID: "ses_root" })),
+    }),
+  })
+  const t = createTaskTool(baseDeps(client))
+  const out = await t.execute({ prompt: "x", category: "do" } as any, ctx)
+  expect(out).toContain("concurrency limit reached")
+})
+
+test("an unreadable live-child read refuses as capacity unknown (AC4-EDGE)", async () => {
+  const client = mockClient({ list: async () => ({ error: "read failed" }) })
+  const t = createTaskTool(baseDeps(client))
+  const out = await t.execute({ prompt: "x", category: "do" } as any, ctx)
+  expect(out).toContain("capacity unknown")
+})
+
+test("task_result returns a completed readback and releases the slot (AC5-HP)", async () => {
+  const resultTool = createTaskResultTool({
+    client: mockClient({
+      messages: async () => ({
+        data: [
+          {
+            info: {
+              role: "assistant",
+              time: { created: 1, completed: 2 },
+              providerID: "zai",
+              modelID: "glm-5.3-flash",
+            },
+            parts: [{ type: "text", text: "done" }],
+          },
+        ],
+      }),
+    }),
+  })
+  const raw = await resultTool.execute({ task_id: "ses_bg" } as any, ctx)
+  const v = JSON.parse(raw as string)
+  expect(v.state).toBe("completed")
+  expect(v.provider_id).toBe("zai")
+  expect(v.model_id).toBe("glm-5.3-flash")
+  expect(v.result).toBe("done")
+})
+
+test("task_result returns running, never reasoning-as-result (AC5-ERR)", async () => {
+  const resultTool = createTaskResultTool({
+    client: mockClient({
+      messages: async () => ({
+        data: [
+          {
+            info: { role: "assistant", time: { created: 1 } },
+            parts: [{ type: "reasoning", text: "still thinking" }],
+          },
+        ],
+      }),
+    }),
+  })
+  const raw = await resultTool.execute({ task_id: "ses_bg" } as any, ctx)
+  const v = JSON.parse(raw as string)
+  expect(v.state).toBe("running")
+  expect(v.result).toBeUndefined()
+  expect(String(raw)).not.toContain("still thinking")
+})
+
+test("task_result maps an error to failed and an abort to aborted (AC5-EDGE)", async () => {
+  const abortedMsg = {
+    info: {
+      role: "assistant",
+      time: { created: 1, completed: 2 },
+      error: { name: "MessageAbortedError", data: { message: "stopped" } },
+    },
+    parts: [{ type: "text", text: "partial" }],
+  }
+  const failedMsg = {
+    info: {
+      role: "assistant",
+      time: { created: 1, completed: 2 },
+      error: { name: "UnknownError" },
+    },
+    parts: [{ type: "text", text: "boom" }],
+  }
+  const t1 = createTaskResultTool({
+    client: mockClient({ messages: async () => ({ data: [abortedMsg] }) }),
+  })
+  const v1 = JSON.parse((await t1.execute({ task_id: "ses_a" } as any, ctx)) as string)
+  expect(v1.state).toBe("aborted")
+  const t2 = createTaskResultTool({
+    client: mockClient({ messages: async () => ({ data: [failedMsg] }) }),
+  })
+  const v2 = JSON.parse((await t2.execute({ task_id: "ses_f" } as any, ctx)) as string)
+  expect(v2.state).toBe("failed")
+})
+
+test("task_result on a child with no assistant message is pending (AC5-*)", async () => {
+  const t = createTaskResultTool({ client: mockClient() })
+  const v = JSON.parse((await t.execute({ task_id: "ses_p" } as any, ctx)) as string)
+  expect(v.state).toBe("pending")
+  expect(v.result).toBeUndefined()
 })
