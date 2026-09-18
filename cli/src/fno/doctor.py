@@ -2564,7 +2564,25 @@ def _emit_human(
             "fno doctor: opencode is set up but its footnote plugin is missing; "
             "re-run `fno config setup` to install it."
         )
+    elif isinstance(oc, dict):
+        # The opencode leg's receipt: name the difference, not the word
+        # installed. Partial names what never loaded; a legacy bridge-only
+        # machine learns what the bridge never carried.
+        status = oc.get("status")
+        if status == "partial":
+            names = ", ".join(str(n) for n in (oc.get("missing") or []))
+            out(
+                "fno doctor: opencode surface is PARTIAL: installed but not loaded: "
+                f"{names}; re-run `fno config plugin install opencode`."
+            )
+        elif status == "absent" and oc.get("bridge_present"):
+            out(
+                "fno doctor: opencode carries only the legacy stop bridge; the "
+                "fno: commands, agents and skills are not installed; re-run "
+                "`fno config plugin install opencode`."
+            )
     _emit_codex_context_window(result, out=out)
+
     dupes = surf.get("codex_marketplace_duplicates") or []
     if dupes:
         out(
@@ -3714,19 +3732,26 @@ def _harness_surface_report() -> dict[str, Any]:
     registered twice). Never blocks/exits; a missing harness is simply silent."""
     report: dict[str, Any] = {}
     try:
-        from fno.setup.integration import (
-            _opencode_is_installed,
-            _opencode_plugin_dest,
-            _opencode_plugins_dir,
-        )
-
         # Only when opencode is actually set up (its plugins dir exists), so a
-        # non-opencode user is never nagged.
-        if _opencode_plugins_dir().exists():
-            if not _opencode_plugin_dest().exists():
-                report["opencode"] = "missing"
-            elif not _opencode_is_installed():
-                report["opencode"] = "stale"
+        # non-opencode user is never nagged. The opencode leg reads one JSON
+        # receipt from the fno-agents door: what the manifest says is
+        # installed, what the --pure catalogs say is loaded, and the
+        # difference by name.
+        oc_home = Path(
+            os.environ.get("OPENCODE_CONFIG_DIR") or Path.home() / ".config/opencode"
+        )
+        if (oc_home / "plugins").is_dir():
+            from fno.rust_binary import call_binary_json
+
+            err, receipt = call_binary_json(
+                "plugin-install", ["opencode", "--status", "--json"]
+            )
+            if err is None and isinstance(receipt, dict):
+                status = receipt.get("status")
+                if status == "partial" or (status == "absent" and receipt.get("bridge_present")):
+                    report["opencode"] = receipt
+                elif status == "absent":
+                    report["opencode"] = "missing"
     except Exception:
         pass
 

@@ -463,9 +463,7 @@ def test_harness_surface_is_quiet_when_codex_and_footnote_state_are_absent(
         lambda: pytest.fail("plugin inspection should not run without Codex or Footnote state"),
     )
     monkeypatch.setattr(doctor, "_codex_hooks_report", lambda: {})
-    monkeypatch.setattr(
-        "fno.setup.integration._opencode_plugins_dir", lambda: tmp_path / "no-opencode"
-    )
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "no-opencode"))
 
     assert "codex_plugin" not in doctor._harness_surface_report()
 
