@@ -34,6 +34,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "backlog-note",
     "backlog-notes",
     "bash-census",
+    "intel",
     "blueprint-feed",
     "board",
     "claim",
@@ -785,6 +786,11 @@ async fn run(args: Vec<String>) -> i32 {
     }
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);
+    }
+    // `intel`: the session-provenance fold, daemon-free read, == dispatch
+    // like bash-census. Python surface `fno doctor intel` shells HERE.
+    if verb == "intel" {
+        return fno_agents::intel::run_intel(&args[1..]);
     }
     // `reclaim`: the machine janitor, daemon-free. Not a routable
     // `fno agents` verb; the Python surface is `fno doctor reclaim`, a thin
