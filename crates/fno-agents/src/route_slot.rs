@@ -1939,24 +1939,7 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
         // The structured refusal the seam prints verbatim (exit 78): the walk
         // owns the lanes, reasons and reset time, so it composes the payload
         // instead of the consumer re-parsing chain lines.
-        let lanes: Vec<Value> = chain
-            .iter()
-            .filter_map(|line| {
-                let rest = line.as_str()?.strip_prefix("slot skip ")?;
-                // The label is the lane's rung and, when it differs, its row
-                // name: the same lane_label the skip line was built with.
-                let mut tokens = rest.splitn(3, ' ');
-                let first = tokens.next().unwrap_or("");
-                let second = tokens.next();
-                let remainder = tokens.next();
-                let (name, reason) = match (second, remainder) {
-                    (Some(n), Some(r)) => (n, r),
-                    (Some(n), None) => (n, "exhausted"),
-                    (None, _) => (first, "exhausted"),
-                };
-                Some(json!({"name": name, "reason": reason}))
-            })
-            .collect();
+        let lanes = lanes_from_chain(&chain);
         let mut queue_refusal = json!({
             "status": "refused",
             "reason": "slot_exhausted",
@@ -2180,6 +2163,29 @@ fn parse_age_seconds(label: &str) -> Option<f64> {
     }
 }
 
+/// One object per `slot skip` chain line. The fold `exhausted_payload` ships,
+/// shared with the refusal journal row so both name the same lanes.
+fn lanes_from_chain(chain: &[Value]) -> Vec<Value> {
+    chain
+        .iter()
+        .filter_map(|line| {
+            let rest = line.as_str()?.strip_prefix("slot skip ")?;
+            // The label is the lane's rung and, when it differs, its row
+            // name: the same lane_label the skip line was built with.
+            let mut tokens = rest.splitn(3, ' ');
+            let first = tokens.next().unwrap_or("");
+            let second = tokens.next();
+            let remainder = tokens.next();
+            let (name, reason) = match (second, remainder) {
+                (Some(n), Some(r)) => (n, r),
+                (Some(n), None) => (n, "exhausted"),
+                (None, _) => (first, "exhausted"),
+            };
+            Some(json!({"name": name, "reason": reason}))
+        })
+        .collect()
+}
+
 /// Capacity terminals keep the receipt vocabulary verbatim while naming their
 /// kind for machine consumers. A policy hold is never described as a spent
 /// quota, so the verdict word differs from the reason kind.
@@ -2261,6 +2267,7 @@ pub fn run_route_slot_capture(args: &[String]) -> (i32, String, String) {
         return run_route_slot_journal(&payload);
     }
     let out = resolve_slot_payload(&payload);
+    journal_routing_refusal(&payload, &out);
     (0, format!("{out}\n"), String::new())
 }
 
@@ -2295,6 +2302,55 @@ fn read_route_slot_payload(args: &[String]) -> Result<Value, (i32, String, Strin
         .map_err(|e| (2, String::new(), format!("route-slot: bad payload: {e}\n")))
 }
 
+/// The append half every journal write shares: stamp ts and kind, serialize
+/// one flat envelope line (`kind` plus flattened fields), create the parent
+/// dir, append. The journal op passes `spawn_defaults_applied` and surfaces
+/// every failure; the refusal emit passes its own kind and ignores them.
+fn append_journal_line(
+    path: &std::path::Path,
+    mut record: serde_json::Map<String, Value>,
+    kind: &str,
+) -> Result<(), (i32, String, String)> {
+    record.insert("ts".into(), Value::String(crate::events::now_rfc3339()));
+    record.insert("kind".into(), Value::String(kind.to_string()));
+    let mut line = match serde_json::to_string(&Value::Object(record)) {
+        Ok(l) => l,
+        Err(e) => {
+            return Err((
+                1,
+                String::new(),
+                format!("route-slot journal: serialize failed: {e}\n"),
+            ))
+        }
+    };
+    line.push('\n');
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            return Err((
+                1,
+                String::new(),
+                format!("route-slot journal: open failed: {e}\n"),
+            ))
+        }
+    };
+    match std::io::Write::write_all(&mut file, line.as_bytes()) {
+        Ok(()) => Ok(()),
+        Err(e) => Err((
+            1,
+            String::new(),
+            format!("route-slot journal: write failed: {e}\n"),
+        )),
+    }
+}
+
 /// `route-slot journal`: append one spawn_defaults_applied receipt to the
 /// agents event journal. The WRITE belongs to the verb; the row keeps
 /// the flat envelope (`kind` plus flattened fields) every reader of this event
@@ -2311,7 +2367,7 @@ pub fn run_route_slot_journal(payload: &Value) -> (i32, String, String) {
             )
         }
     };
-    let mut record = match payload.get("event").and_then(Value::as_object) {
+    let record = match payload.get("event").and_then(Value::as_object) {
         Some(m) => m.clone(),
         None => {
             return (
@@ -2321,51 +2377,80 @@ pub fn run_route_slot_journal(payload: &Value) -> (i32, String, String) {
             )
         }
     };
-    record.insert("ts".into(), Value::String(crate::events::now_rfc3339()));
-    record.insert(
-        "kind".into(),
-        Value::String("spawn_defaults_applied".to_string()),
-    );
-    let mut line = match serde_json::to_string(&Value::Object(record)) {
-        Ok(l) => l,
-        Err(e) => {
-            return (
-                1,
-                String::new(),
-                format!("route-slot journal: serialize failed: {e}\n"),
-            )
-        }
-    };
-    line.push('\n');
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let mut file = match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        Ok(f) => f,
-        Err(e) => {
-            return (
-                1,
-                String::new(),
-                format!("route-slot journal: open failed: {e}\n"),
-            )
-        }
-    };
-    match std::io::Write::write_all(&mut file, line.as_bytes()) {
+    match append_journal_line(&path, record, "spawn_defaults_applied") {
         Ok(()) => (
             0,
             format!("journal: spawn_defaults_applied -> {}\n", path.display()),
             String::new(),
         ),
-        Err(e) => (
-            1,
-            String::new(),
-            format!("route-slot journal: write failed: {e}\n"),
-        ),
+        Err(fail) => fail,
     }
+}
+
+/// A spawn that launches leaves a `spawn_defaults_applied` row; a spawn the
+/// lane walk refuses left nothing, which is the asymmetry this closes. One
+/// `spawn_gate_refused` row per refusal, `gate: "routing"` so a query
+/// separates it from the Python gate's rows. Best effort, always: a dead
+/// journal never blocks a spawn and never changes a refusal.
+fn journal_routing_refusal(payload: &Value, out: &Value) {
+    let refused = out.get("candidate").map(Value::is_null).unwrap_or(false)
+        && matches!(
+            out.get("verdict").and_then(Value::as_str),
+            Some("capacity-held") | Some("policy-held")
+        );
+    if !refused {
+        return;
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let Some(path) = crate::state_path::resolve("events", &cwd) else {
+        return;
+    };
+    let queue = out.get("reason_kind").and_then(Value::as_str) == Some("capacity-queue");
+    let (reason, detail) = if let Some(t) = out.get("refusal_terminal") {
+        (
+            t.get("class").and_then(Value::as_str).unwrap_or("unknown"),
+            t.get("text").and_then(Value::as_str).unwrap_or(""),
+        )
+    } else if let Some(p) = out.get("exhausted_payload") {
+        // The queue terminal composes its structured payload instead of a
+        // refusal_terminal; its reason rides there and the chain's last line
+        // is the human detail.
+        (
+            p.get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("slot_exhausted"),
+            out.get("chain")
+                .and_then(Value::as_array)
+                .and_then(|c| c.last())
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        )
+    } else {
+        ("unknown", "")
+    };
+    let chain = out
+        .get("chain")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut record = serde_json::Map::new();
+    record.insert("reason".into(), json!(reason));
+    record.insert("detail".into(), json!(detail));
+    record.insert("gate".into(), json!("routing"));
+    if let Some(vb) = payload.get("rung_base").and_then(Value::as_str) {
+        record.insert(
+            "verb".into(),
+            json!(vb.strip_prefix("agents.profiles.").unwrap_or(vb)),
+        );
+    }
+    record.insert("lanes".into(), Value::Array(lanes_from_chain(chain)));
+    record.insert("exit_code".into(), json!(if queue { 78 } else { 2 }));
+    for key in ["substrate", "plan_path"] {
+        if let Some(v) = payload.get(key).filter(|v| !v.is_null()) {
+            record.insert(key.into(), v.clone());
+        }
+    }
+    let _ = append_journal_line(&path, record, "spawn_gate_refused");
 }
 
 /// `route-slot audit`: read-only completion evidence for the routing policy
@@ -2958,6 +3043,195 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect()
+    }
+
+    fn capture_file(dir: &std::path::Path, payload: &Value) -> (i32, String, String) {
+        let path = dir.join("payload.json");
+        std::fs::write(&path, serde_json::to_string(payload).unwrap()).unwrap();
+        run_route_slot_capture(&[path.display().to_string()])
+    }
+
+    fn journal_rows(journal: &std::path::Path) -> Vec<Value> {
+        std::fs::read_to_string(journal)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("journal line parses"))
+            .collect()
+    }
+
+    /// Pins `FNO_EVENTS_PATH` for one test and restores the prior value on
+    /// drop; the claims lock serializes env access across the suite.
+    struct EventsPin(Option<std::ffi::OsString>);
+
+    impl EventsPin {
+        fn at(p: &std::path::Path) -> Self {
+            let prior = std::env::var_os("FNO_EVENTS_PATH");
+            std::env::set_var("FNO_EVENTS_PATH", p);
+            Self(prior)
+        }
+    }
+
+    impl Drop for EventsPin {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(v) => std::env::set_var("FNO_EVENTS_PATH", v),
+                None => std::env::remove_var("FNO_EVENTS_PATH"),
+            }
+        }
+    }
+
+    fn exhausted_capacity() -> Value {
+        json!({
+            "capacity": {"claude": {"state": "exhausted", "window": "lock",
+                                    "accounts": {"zai-main": "exhausted"},
+                                    "sources": {"zai-main": "lock"},
+                                    "observed_at": {"zai-main": now_epoch() - 47.0 * 60.0},
+                                    "evidence": {}, "resets": {}}},
+        })
+    }
+
+    #[test]
+    fn a_refused_spawn_leaves_one_routing_refusal_row() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let journal = dir.path().join("events.jsonl");
+        let _pin = EventsPin::at(&journal);
+
+        let (code, _, _) = capture_file(dir.path(), &payload(exhausted_capacity()));
+        assert_eq!(
+            code, 0,
+            "the verb still exits 0; the transport owns the refusal exit"
+        );
+
+        let rows = journal_rows(&journal);
+        assert_eq!(rows.len(), 1, "exactly one row per refusal: {rows:?}");
+        let row = &rows[0];
+        assert_eq!(row["kind"], "spawn_gate_refused");
+        assert_eq!(row["gate"], "routing");
+        assert_eq!(row["reason"], "exhausted-refuse");
+        assert_eq!(row["verb"], "target");
+        assert_eq!(row["exit_code"], 2);
+        let detail = row["detail"].as_str().unwrap_or("");
+        assert!(
+            detail.contains("every configured lane is exhausted"),
+            "detail: {detail}"
+        );
+        let lanes = row["lanes"].as_array().expect("lanes array");
+        assert_eq!(lanes.len(), 2, "one entry per slot-skip line: {lanes:?}");
+        assert!(
+            lanes.iter().all(|l| l["reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("capacity=exhausted")),
+            "lanes: {lanes:?}"
+        );
+    }
+
+    #[test]
+    fn a_queued_refusal_rows_exit_78_and_the_payload_reason() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let journal = dir.path().join("events.jsonl");
+        let _pin = EventsPin::at(&journal);
+
+        let (code, _, _) = capture_file(
+            dir.path(),
+            &payload(json!({
+                "profile": {"on_exhausted": "queue"},
+                "capacity": {"claude": {"state": "exhausted", "window": "lock",
+                                        "accounts": {"zai-main": "exhausted"},
+                                        "evidence": {}, "resets": {}}},
+            })),
+        );
+        assert_eq!(code, 0);
+
+        let rows = journal_rows(&journal);
+        assert_eq!(rows.len(), 1, "rows: {rows:?}");
+        assert_eq!(rows[0]["exit_code"], 78);
+        assert_eq!(rows[0]["reason"], "slot_exhausted");
+        assert_eq!(rows[0]["gate"], "routing");
+    }
+
+    #[test]
+    fn an_admitted_spawn_and_an_audit_write_no_refusal_row() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let journal = dir.path().join("events.jsonl");
+        let _pin = EventsPin::at(&journal);
+
+        // The healthy payload resolves a candidate: no refusal, no row.
+        let (code, out, _) = capture_file(dir.path(), &payload(json!({})));
+        assert_eq!(code, 0);
+        assert!(out.contains("\"candidate\":{"), "out: {out}");
+        assert!(journal_rows(&journal).is_empty(), "admits never journal");
+
+        // The audit read is reached before the resolve, so it must not
+        // journal either.
+        let snap = dir.path().join("snap.json");
+        std::fs::write(&snap, "{}").unwrap();
+        let _ = run_route_slot_capture(&[
+            "audit".to_string(),
+            "--snapshot".to_string(),
+            snap.display().to_string(),
+        ]);
+        assert!(journal_rows(&journal).is_empty(), "audits never journal");
+    }
+
+    #[test]
+    fn a_dead_journal_never_changes_a_refusal() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Baseline: a writable journal in the same temp space, so the only
+        // difference between the runs is the journal's writability.
+        let live = dir.path().join("live.jsonl");
+        {
+            let _pin = EventsPin::at(&live);
+            capture_file(dir.path(), &payload(exhausted_capacity()));
+        }
+        // A journal path whose parent is a file: every append fails.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "x").unwrap();
+        let dead = blocker.join("events.jsonl");
+        let _pin = EventsPin::at(&dead);
+        let with_dead = capture_file(dir.path(), &payload(exhausted_capacity()));
+
+        let baseline = {
+            let _pin = EventsPin::at(&live);
+            capture_file(dir.path(), &payload(exhausted_capacity()))
+        };
+        assert_eq!(baseline, with_dead, "output must not depend on the journal");
+    }
+
+    #[test]
+    fn the_journal_op_keeps_its_spawn_defaults_applied_kind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let journal = dir.path().join("j.jsonl");
+        let (code, stdout, _) = capture_file(
+            dir.path(),
+            &json!({
+                "op": "journal",
+                "path": journal.display().to_string(),
+                "event": {"verb": "target"},
+            }),
+        );
+        assert_eq!(code, 0);
+        assert!(
+            stdout.contains("spawn_defaults_applied"),
+            "stdout: {stdout}"
+        );
+        let rows = journal_rows(&journal);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["kind"], "spawn_defaults_applied");
     }
 
     #[test]
