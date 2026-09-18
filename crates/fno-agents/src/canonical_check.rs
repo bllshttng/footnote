@@ -316,7 +316,7 @@ fn build_refusal(
     Some(blocks.join("\n"))
 }
 
-fn build_answer(payload: &Value) -> Value {
+pub(crate) fn build_answer(payload: &Value) -> Value {
     let canonical = Path::new(
         payload
             .get("canonical")

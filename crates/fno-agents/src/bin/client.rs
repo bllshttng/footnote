@@ -28,6 +28,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "adopt",
     "announce",
     "canonical-check",
+    "sync-canonical",
     "ask",
     "attach",
     "authorized-merge",
@@ -665,6 +666,14 @@ async fn run(args: Vec<String>) -> i32 {
     // payload and reads the answer back; binary-first like `publish-review`.
     if verb == "canonical-check" {
         return fno_agents::canonical_check::run_canonical_check(&args[1..]);
+    }
+
+    // `sync-canonical`: the post-merge canonical sync + its catch-up sweep
+    // and staleness alarm, native. The Python `fno do pr sync-canonical`
+    // transport sends one JSON payload and reads the answer back;
+    // binary-first like `canonical-check`.
+    if verb == "sync-canonical" {
+        return fno_agents::sync_canonical::run_sync_canonical_verb(&args[1..]);
     }
 
     // `reign-state`/`reign-shape`: the reign reader and the shape rewrite (see
