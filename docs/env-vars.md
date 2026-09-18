@@ -199,6 +199,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `INVOCATION_ID` | py | unclear: cli/src/fno/agents/context.py:94 |
 | `MCP_CHANNEL_INBOUND_POKE` | py | unclear: cli/src/fno/agents/context.py:92 |
 | `NO_COLOR` | rs | unclear: crates/fno/src/pty.rs:1976 |
+| `OPENCODE_CONFIG_DIR` | py+rs | Moves OpenCode's config dir; the installer, the doctor leg and the scratch-install tests read it. |
 | `OUT_DIR` | rs | unclear: crates/fno-agents/build.rs:51 |
 | `PATH` | py+rs | Executable search path. |
 | `PI_HOME` | py+rs | unclear: cli/src/fno/agents/harnesses/pi.py:132 |
