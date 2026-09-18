@@ -1,8 +1,11 @@
 //! Two rows on one territory, and which kind of two.
 //!
 //! `double_ruled` is an authority finding: more than one NON-TERMINAL row
-//! carries the same territory key. It agrees with `crown_settle::resolve`,
-//! which refuses a grant on exactly that condition.
+//! carries the same territory key. For a single-member scope that is the
+//! same condition `crown_settle::resolve` refuses a grant on. Settle
+//! compares the raw scope string, so a comma re-spelling or an alias name
+//! can pass the grant door yet read as double-ruled here. That gap is
+//! named, not fixed.
 //!
 //! `stale` is a board finding: a TERMINAL row still carrying crown fields.
 //! Nothing clears a crown when a row goes terminal, so these accumulate and
