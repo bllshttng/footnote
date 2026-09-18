@@ -1252,9 +1252,10 @@ def tick() -> None:
         # The heal drive loop: nothing called the healer on a timer,
         # so every red open PR waited for a hand. The loop lives in Rust; this
         # phase is only the gate, before stranded so a PR healed this tick is
-        # not reported stranded in the same breath. Guard first, import
-        # inside: the launchd hot path pays nothing unarmed, and the double
-        # getattr reads a settings stub with no auto_heal block as unarmed.
+        # not reported stranded in the same breath. The arm guard lives inside
+        # run_heal_phase (it answers "unarmed" without resolving the binary),
+        # and every gate answer lands in the journal as a control_plane_tick
+        # row, unarmed included, so the status line can say why nothing ran.
         def _phase_heal(_slice_s: float) -> None:
             set_tick_phase("heal")
             try:

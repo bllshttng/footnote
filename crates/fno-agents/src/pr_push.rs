@@ -532,10 +532,16 @@ fn unknown_flag(other: &str) -> String {
     format!("unknown flag: {other}")
 }
 
-/// `$HOME/.fno/push-stamps`, matching the hook's PUSH_STAMP_DIR.
+/// `$FNO_HOME/push-stamps` (else `$HOME/.fno/push-stamps`), matching the
+/// hook's own resolution (git-protection.py: `FNO_HOME = env FNO_HOME or
+/// ~/.fno`). The hook reads the stamps this verb writes, so both sides must
+/// resolve the dir the same way or the registration window never fires.
 pub(crate) fn default_stamps_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".fno").join("push-stamps"))
+    std::env::var_os("FNO_HOME")
+        .map(|h| PathBuf::from(h).join("push-stamps"))
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno").join("push-stamps"))
+        })
         .unwrap_or_else(|| PathBuf::from("/tmp").join(".fno-push-stamps"))
 }
 

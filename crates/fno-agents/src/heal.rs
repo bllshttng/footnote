@@ -93,9 +93,11 @@ pub(crate) enum Remedy {
     /// Append a closure trailer per node id to the PR body. No commit, no
     /// push: the workflow's `types` includes `edited`, so the edit re-fires it.
     EditBody { nodes: Vec<String> },
-    /// `gh run rerun <id> --failed` for a cancelled run: it reached no
-    /// verdict, so rerunning it IS reaching a verdict. Issued at most once
-    /// per head sha; a second cancelled verdict on the same sha escalates.
+    /// `gh run rerun <id>` (full rerun) for a cancelled run: it reached no
+    /// verdict, so rerunning it IS reaching a verdict. `--failed` is wrong
+    /// here: it reruns only `failure` conclusions and a cancelled run has
+    /// none. Issued at most once per head sha; a second cancelled verdict on
+    /// the same sha escalates.
     Rerun { run_id: String },
     /// Not mechanically fixable. `repro` is the command that reproduces it
     /// locally, which is the whole value of the row.
@@ -134,7 +136,7 @@ impl Finding {
             Remedy::EditBody { nodes } => {
                 format!("fno do pr closure-trailer {}", nodes.join(" "))
             }
-            Remedy::Rerun { run_id } => format!("gh run rerun {run_id} --failed"),
+            Remedy::Rerun { run_id } => format!("gh run rerun {run_id}"),
             Remedy::Escalate { repro } => repro.clone(),
             // Matched by CHECK NAME, which is all the main-HEAD read gives.
             // Measured: the same check was red on both, and the failing TEST
@@ -192,7 +194,7 @@ const PINNED_FMT: &str = "+1.94.1";
 const SIGNATURES: &[Signature] = &[
     Signature {
         name: "cancelled",
-        plan: "rerun: gh run rerun <run> --failed, at most once per head sha",
+        plan: "rerun: gh run rerun <run>, at most once per head sha",
         matches: |c| c.bucket == "cancel",
         // Measured on three open PRs: every `unknown` heal reported was a
         // CANCELLED check whose log carried one line. A cancelled run
@@ -1406,7 +1408,9 @@ fn run_detached(
 }
 
 /// The newest `pr_heal_tick` row: (ts, data), or None when the journal holds
-/// none. Read backwards so a long journal costs one pass at the tail.
+/// none. `read_to_string` loads the whole journal and `rev()` walks it; fine
+/// while the journal is small, and the honest tail read (seek to the end,
+/// keep the last N KB) is the upgrade path when it is not.
 fn newest_heal_tick(path: &std::path::Path) -> Option<(String, Value)> {
     let text = std::fs::read_to_string(path).ok()?;
     text.lines()
@@ -1512,7 +1516,7 @@ fn journal_has_rerun(path: &std::path::Path, sha: &str) -> bool {
     })
 }
 
-/// Issue `gh run rerun --failed` for every Rerun finding. At most once per
+/// Issue `gh run rerun` for every Rerun finding. At most once per
 /// head sha (journal-guarded); an already-issued or failed rerun demotes the
 /// row to Escalate, like a failed body edit, so the report never reads the
 /// PR as clean while the cancelled run is still cancelled.
@@ -1535,19 +1539,19 @@ fn apply_rerun(a: &Args, findings: &mut [Finding], head: &str) -> usize {
         }
         match run(
             &a.gh_bin,
-            &["run", "rerun", &run_id, "--failed"],
+            &["run", "rerun", &run_id],
             &a.cwd,
             REMEDY_TIMEOUT,
         ) {
             Ok((true, _, _)) => reran += 1,
             Ok((false, _, err)) => {
                 f.remedy = Remedy::Escalate {
-                    repro: format!("gh run rerun {run_id} --failed refused: {}", err.trim()),
+                    repro: format!("gh run rerun {run_id} refused: {}", err.trim()),
                 };
             }
             Err(e) => {
                 f.remedy = Remedy::Escalate {
-                    repro: format!("gh run rerun {run_id} --failed failed: {e}"),
+                    repro: format!("gh run rerun {run_id} failed: {e}"),
                 };
             }
         }
@@ -2988,7 +2992,7 @@ exit 0
             }
         );
         assert_eq!(f.action(), "rerun");
-        assert_eq!(f.detail(), "gh run rerun 777 --failed");
+        assert_eq!(f.detail(), "gh run rerun 777");
         assert!(f.counts_against_pr());
     }
 

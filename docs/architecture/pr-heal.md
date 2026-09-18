@@ -6,7 +6,7 @@ Everything after a push already had a reader. `fno do pr status` names the faili
 
 heal reads the PR's failing checks over REST, gets each failing job's log, matches it against a signature table, and applies the mechanical fix. `--playbook` prints the table. This page keeps no copy of the table, because a doc copy drifts and the verb's own output cannot.
 
-heal fixes three classes on its own. `rustfmt-drift` runs the pinned `cargo fmt` in each crate that rustfmt named. `ruff-lint` runs `ruff check --fix` over exactly the scope the gate reads. `closure-trailer` adds the generated `Backlog-Closure` trailer to the PR body. That edit re-fires the workflow through its `edited` trigger, so it needs no push. A fourth class, `cancelled`, gets `gh run rerun <run> --failed`: a cancelled run reached no verdict, so the rerun is how it reaches one. It is issued at most once per head sha, journal-guarded; a second cancelled verdict on the same sha escalates, because the rerun already reached a real result. Every other signature escalates with the command that reproduces it locally.
+heal fixes three classes on its own. `rustfmt-drift` runs the pinned `cargo fmt` in each crate that rustfmt named. `ruff-lint` runs `ruff check --fix` over exactly the scope the gate reads. `closure-trailer` adds the generated `Backlog-Closure` trailer to the PR body. That edit re-fires the workflow through its `edited` trigger, so it needs no push. A fourth class, `cancelled`, gets `gh run rerun <run>`: a cancelled run reached no verdict, so the full rerun is how it reaches one (`--failed` reruns only `failure` conclusions and a cancelled run has none). It is issued at most once per head sha, journal-guarded; a second cancelled verdict on the same sha escalates, because the rerun already reached a real result. Every other signature escalates with the command that reproduces it locally.
 
 ## The two rules
 
@@ -46,7 +46,7 @@ One invocation emits one `pr_heal_tick` row into the global `~/.fno/events.jsonl
 
 The tick's heal phase never runs the loop inside its own slice. Armed, the phase calls `pr-heal --all --apply --detach`, and the binary spawns itself (same args minus `--detach`) as a new session with stdio on `/dev/null` and returns 0 at once. The child's pid goes to `<state dir>/pr-heal.<root path>.pid`; a pid file naming a live process (EPERM counts alive) makes the next tick answer `skip_reason=in_flight` instead of spawning a second loop. Every detach decision emits one `control_plane_tick` arm row (`arm=heal`, `acted`, `skip_reason`), and the tick's own gate answers (`unarmed`, `no_binary`, `no_roots`) land in the same row shape, so the journal and the status line agree on why nothing ran.
 
-The pid file is the in-flight guard, so a stale file only ever costs one skipped tick: a dead pid is re-probed with `kill(pid, 0)` and overwritten on the next spawn.
+The pid file is the in-flight guard, so a stale file costs ticks only while the pid it names answers `kill(pid, 0)`: a genuinely dead pid is overwritten on the next spawn. The ceiling: a pid recycled by an unrelated long-lived process reads as alive, and the root keeps answering `in_flight` until that process exits.
 
 ## The status line
 

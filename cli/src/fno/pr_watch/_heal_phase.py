@@ -29,7 +29,8 @@ def run_heal_phase(
 
     Unarmed (``auto_heal.enabled`` falsy or the block absent) answers
     ``"unarmed"`` without resolving the binary: the launchd hot path pays
-    nothing. Armed, returns ``"ran"``, ``"no-binary"``, or ``"no-roots"``;
+    nothing. Armed, returns ``"ran"``, ``"no-binary"``, ``"no-roots"``, or
+    ``"failed"`` (every root's spawn failed or exited a non-verdict code);
     one failing root logs and never stops the rest.
     """
     if not getattr(getattr(settings, "auto_heal", None), "enabled", False):
@@ -50,6 +51,7 @@ def run_heal_phase(
         import subprocess
 
         run = subprocess.run
+    failed = 0
     for root in roots:
         try:
             proc = run(
@@ -71,6 +73,7 @@ def run_heal_phase(
             # and would otherwise read as "ran" with zero healing done.
             code = getattr(proc, "returncode", 0)
             if code not in (0, 1, 2, 3):
+                failed += 1
                 log.warning(
                     "pr-watch: heal drive loop for %s exited %s "
                     "(4 = read error, 127 = binary missing; a stale binary "
@@ -79,5 +82,11 @@ def run_heal_phase(
                     code,
                 )
         except Exception as exc:  # noqa: BLE001 - one root never stops the rest
+            failed += 1
             log.warning("pr-watch: heal drive loop failed for %s: %s", root, exc)
+    # A spawn that failed on every root ran nothing: never report "ran",
+    # or the journal holds no row for this tick and the status line shows a
+    # stale "last run". cli.py emits the gate row for any non-"ran" answer.
+    if failed and failed == len(roots):
+        return "failed"
     return "ran"
