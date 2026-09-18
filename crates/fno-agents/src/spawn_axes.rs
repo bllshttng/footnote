@@ -397,7 +397,13 @@ pub fn decide(payload: &Value) -> Value {
         let eff = explicit_substrate
             .or(injected_substrate)
             .unwrap_or_else(|| "pane".to_string());
-        let mappable = prov == "claude" || (eff == "pane" && flag(payload, "pane_tokens_ok"));
+        // The capability table decides which lanes carry the axis; the seam
+        // precomputes both lanes' answers from the one Rust vocabulary (see
+        // codex_posture.rs). Claude is honored everywhere, as the front doors
+        // have always read.
+        let mappable = prov == "claude"
+            || (eff == "pane" && flag(payload, "pane_tokens_ok"))
+            || ((eff == "thread" || eff == "bg") && flag(payload, "thread_tokens_ok"));
         if !prov.is_empty() && mappable {
             inject.push(json!(["--permission-mode", permission.value]));
             applied.push(json!([

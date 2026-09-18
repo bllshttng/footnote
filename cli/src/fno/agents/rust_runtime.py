@@ -691,7 +691,10 @@ def _refuse_codex_spawn_with_unreachable_tools(args: Sequence[str]) -> None:
         return
     from fno.agents.sandbox_probe import EXIT_SANDBOX_UNREACHABLE, probe_codex_sandbox
 
-    probe = probe_codex_sandbox(Path(_spawn_flag_value(args, "--cwd", "-c") or Path.cwd()))
+    probe = probe_codex_sandbox(
+        Path(_spawn_flag_value(args, "--cwd", "-c") or Path.cwd()),
+        mode=_spawn_flag_value(args, "--permission-mode"),
+    )
     if probe.verdict == "unknown":
         print(f"sandbox-probe: could not judge the codex sandbox ({probe.note}); launching unprobed",
               file=sys.stderr)

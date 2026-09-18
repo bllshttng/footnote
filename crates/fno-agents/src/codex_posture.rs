@@ -350,6 +350,19 @@ mod tests {
     }
 }
 
+/// Whether a registry row's recorded posture names full access (v19): the
+/// resume lane applies it so a daemon restart cannot silently demote a yolo
+/// worker to workspace-write. Read through the typed posture, so the parse
+/// (not a string compare) decides: an unrecognized name reads bounded,
+/// never full.
+pub fn entry_posture_is_full_access(entry: &crate::state::RegistryEntry) -> bool {
+    CodexPosture::from_record(
+        entry.requested_permission_mode.as_deref(),
+        entry.sandbox_posture.as_deref(),
+    )
+    .is_full_access()
+}
+
 /// ---------------------------------------------------------------------------
 /// The one per-harness permission vocabulary (ported from the pane lane's
 /// Python, `fno.agents.mux_spawn.permission_pane_tokens`, which shrinks to a

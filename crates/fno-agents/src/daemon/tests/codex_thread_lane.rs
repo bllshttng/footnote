@@ -89,7 +89,7 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         "a bare yolo bool names no mode; unset stays unset"
     );
     assert!(
-        entry_posture_is_full_access(&yolo)
+        crate::codex_posture::entry_posture_is_full_access(&yolo)
             && yolo.fno_id.as_deref() == Some("thread-p")
             && yolo.mux.is_none()
     );
@@ -163,7 +163,9 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         None,
     );
     assert_eq!(bounded.sandbox_posture.as_deref(), Some("workspace-write"));
-    assert!(!entry_posture_is_full_access(&bounded));
+    assert!(!crate::codex_posture::entry_posture_is_full_access(
+        &bounded
+    ));
     // A requested model stamps its basis on the row; an absent one
     // leaves the basis absent with it.
     let muted = None;

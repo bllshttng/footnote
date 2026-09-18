@@ -44,7 +44,7 @@ pub(super) async fn ensure_codex_thread_handle(
             entry.name
         )
     })?;
-    let bounded = !entry_posture_is_full_access(entry);
+    let bounded = !crate::codex_posture::entry_posture_is_full_access(entry);
     // AC3-EDGE: read the spawn-time record BEFORE the resume runs, so the
     // write-back after it can never overwrite the only durable copy of the
     // grant with a narrowed result. What the resume actually re-applied is
