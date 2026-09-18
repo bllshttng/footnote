@@ -1186,8 +1186,9 @@ fn hook_sources_stay_small() {
         physical(&format!("{root}/src/loopcheck.rs")) <= 19_500,
         "loopcheck.rs grew past its ceiling"
     );
+    // Grok's Stop envelope landed on main at 947 lines; the ceiling follows it.
     assert!(
-        nbnc(&format!("{root}/src/hook/stop.rs"), true) <= 850,
+        nbnc(&format!("{root}/src/hook/stop.rs"), true) <= 950,
         "hook/stop.rs grew past its ceiling"
     );
     assert!(

@@ -6789,6 +6789,12 @@ fn make_fingerprint(
     ci_conclusion: &str,
     latest_ts: &str,
 ) -> String {
+    // An absent latest-review time renders "none", the pre-read's form; two shapes reset the streak.
+    let latest_ts = if latest_ts.is_empty() {
+        "none"
+    } else {
+        latest_ts
+    };
     format!("{head_sha}|{pr_state}|{ci_conclusion}|{latest_ts}")
 }
 
@@ -8053,19 +8059,16 @@ pub(crate) fn decide_with_payload(
         .clone()
         .unwrap_or_else(crate::gh_budget::ledger_path);
 
-    // The fire history is JOURNAL truth now : one local read
-    // answers how many fires this session served, how many trailing fires
-    // shared the newest recorded fingerprint, and what that fingerprint (plus
-    // its pr_state/ci components) was. No PR read happens to decide routing.
+    // Fire history is JOURNAL truth: fires, the trailing shared fingerprint,
+    // and its pr_state/ci come from one local read; no PR read routes. A
+    // generic-delivery fire OBSERVED its world, so its streak counts against
+    // the observed revision; every other fire reads the journal's newest fp.
     let backstop_n: u64 = if manifest.attended { 5 } else { 3 };
     let min_fire_gap = min_fire_gap_secs();
-    // A generic-delivery fire OBSERVED its world this fire (the evaluator ran
-    // above), so the streak counts against the observed revision: progress
-    // resets the streak the same way a moved PR head does. Every other fire
-    // compares journal rows against the journal's own newest fingerprint.
     let generic_observed = generic.is_active();
-    let observed_fp =
-        generic.delivery_fingerprint(make_fingerprint(&head_sha, "none", "none", "none"));
+    let no_pr_fp =
+        || generic.delivery_fingerprint(make_fingerprint(&head_sha, "none", "none", "none"));
+    let observed_fp = no_pr_fp();
     let (prior_fires, journal_streak, last_recorded_fp, streak_window) = read_prior_fires(
         &project_events,
         &session_id,
@@ -8078,15 +8081,12 @@ pub(crate) fn decide_with_payload(
         min_fire_gap,
     );
     let (last_pr_state, last_ci) = read_last_row_fields(&project_events, &session_id);
-    // Fires that do not run done() inherit the last recorded fingerprint (a
-    // first fire with no journal starts at the no-PR basis), so their row
-    // stays comparable with its neighbors and only a done() read can move it.
+    // A fire that does not run done() inherits the last recorded fingerprint,
+    // so its row stays comparable with its neighbors; only done() can move it.
     let fingerprint = if generic_observed {
         observed_fp
     } else {
-        last_recorded_fp.clone().unwrap_or_else(|| {
-            generic.delivery_fingerprint(make_fingerprint(&head_sha, "none", "none", "none"))
-        })
+        last_recorded_fp.clone().unwrap_or_else(no_pr_fp)
     };
     let this_fire = prior_fires + 1;
     // consecutive_unchanged counts prior identical fires; adding this fire.

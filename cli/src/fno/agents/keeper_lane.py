@@ -98,21 +98,18 @@ def keeper_rss_bound_kb() -> int:
 
 
 def store_backend_of(graph: Optional[Path]) -> str:
-    """``graph_meta.backend`` from the graph.db sibling, the way
-    ``crate::backlog::backend`` reads it; absent db reads json."""
+    """``graph_meta.backend``, the way ``crate::backlog::backend`` reads it;
+    absent db reads json. Asked through the keeper's ``export_status``: the
+    db is Rust-owned and Python is sealed off it (test_graph_db_sealed)."""
     if graph is None:
         return "json"
     db = graph.with_suffix(".db")
     if not db.exists():
         return "json"
     try:
-        import sqlite3
+        from fno.graph.store import store_export_status
 
-        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
-            row = conn.execute(
-                "SELECT value FROM graph_meta WHERE key = 'backend'"
-            ).fetchone()
-            return str(row[0]) if row and row[0] else "json"
+        return str(store_export_status(graph).get("backend") or "json")
     except Exception:  # noqa: BLE001 - unreadable meta reads json, never refuses
         return "json"
 

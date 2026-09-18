@@ -114,6 +114,7 @@ fn write_stubs(dir: &Path) {
 
 fn run_verb(dir: &Path, extra: &[&str]) -> (i32, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+        .envs(fno_agents::test_run::self_owner_env())
         .args(["pr-push"])
         .arg("--cwd")
         .arg(dir)

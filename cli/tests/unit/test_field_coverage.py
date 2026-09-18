@@ -82,10 +82,12 @@ def test_source_coverage_accounts_current_agent_entry(monkeypatch) -> None:
     # spawn_provenance (the spawn door's attempt id and structured birth
     # record), storage_only: 61 -> 63. v34 added lineage_kind (the served
     # CHILD/PEER spawn-edge word), storage_only: 63 -> 64, and it joined
-    # the required list: 44 -> 45.
-    assert payload["declared_count"] == 64
+    # the required list: 44 -> 45. v35 added the codex thread posture
+    # record (requested_permission_mode, turn_policy_source),
+    # storage_only: 64 -> 66.
+    assert payload["declared_count"] == 66
     assert payload["required_count"] == 45
-    assert payload["accounted_count"] == 64
+    assert payload["accounted_count"] == 66
     assert payload["known_gaps"] == {}
 
 

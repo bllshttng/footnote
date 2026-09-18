@@ -2765,21 +2765,6 @@ event_types:
         elapsed_seconds:
           type: integer
 
-  - name: question_sweep
-    description: "The daemon's periodic node-closed question sweep: open operator questions whose node has closed are auto-closed with an EMPTY answer, deliberately, because a non-empty answer would arm the unrecorded-decision gate against the asking session for a decision nobody made. One emit per pass: closed counts the questions closed, outcome is none or closed, and ids names them when any closed."
-    sources: [daemon]
-    data:
-      required: []
-      properties:
-        closed:
-          type: integer
-        outcome:
-          type: string
-        ids:
-          type: array
-          items:
-            type: string
-
   - name: agent_row_reaped
     description: "An agent-view or roster-only row was retired by the retirement sweep, roster-reap, or `fno agents reap`: the session's WORK is done on every resolved node and its transcript has been quiet past agents.retire_grace_s. basis names that verdict. remover identifies the acting sweep when emitted. A resumable receipt is attempted before this event; receipt_staged and resumable report whether that recovery path persisted. Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
     sources: [daemon]
@@ -2970,6 +2955,8 @@ event_types:
           type: string
         ids:
           type: array
+          items:
+            type: string
 
   - name: bg_worker_terminal_stopped
     description: "A fire-and-forget `claude --bg` /target|/think worker that finalize marked terminal was `claude stop`ped by the daemon terminal-stop sweep, so its slot frees instead of parking at an idle prompt forever."
@@ -5156,6 +5143,57 @@ event_types:
         dry_run:
           type: boolean
           description: "True for a --all --apply --dry-run rehearsal: nothing changed, nothing pushed, no question filed."
+
+  - name: pr_heal_flake
+    description: "CI heal drive loop: one row per check classified a flake and guarded, so a rerun of the same (sha, run id, check) is skipped instead of rerun forever. Rust-emitted into the global journal."
+    sources: [pr-heal, daemon]
+    data:
+      required: [key, sha, run_id, check]
+      properties:
+        key:
+          type: string
+          description: "The dedup key of the flake guard this row staged."
+        sha:
+          type: string
+          description: "The head commit whose run flapped."
+        run_id:
+          type: string
+          description: "The CI run id the flaky check belongs to."
+        check:
+          type: string
+          description: "The check name that flapped."
+        node_id:
+          type: string
+          description: "The backlog node named on the PR branch, when one resolved."
+
+  - name: pr_heal_pr
+    description: "CI heal drive loop: one row per acted-on PR recording which remedy ran and why. Rust-emitted into the global journal."
+    sources: [pr-heal, daemon]
+    data:
+      required: [pr, action, reason]
+      properties:
+        pr:
+          type: integer
+          description: "The acted-on PR number."
+        action:
+          type: string
+          description: "The remedy applied (rerun, escalate, comment, ...)."
+        reason:
+          type: string
+          description: "Why that remedy was chosen, from the finding's signature."
+
+  - name: daemon_fleet_scope
+    description: "Daemon startup scope declaration: whether this daemon owns a sandbox home or the operator's shared home. Readers key fleet gating and board routing off it instead of probing paths."
+    sources: [daemon]
+    data:
+      required: [scope, home]
+      properties:
+        scope:
+          type: string
+          description: "sandbox when the daemon runs on a temp-rooted home, shared otherwise."
+        home:
+          type: string
+          description: "The state root the daemon resolved."
 
   - name: recovery_nudge
     description: "Session auto-recovery injected a resume nudge into a footnote-launched bg session that was idle-but-incomplete after an abnormal turn termination."

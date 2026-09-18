@@ -796,7 +796,9 @@ def _reset_config_state() -> None:
 # The per-test clearer registry is retired: every cached state reader keys on
 # its declared root (test_cached_state_surface enforces a root parameter or a
 # recorded reason), so there is nothing left to clear per test.
-HERMETIC_CACHED_STATE_CLEARERS: tuple[tuple[str, str], ...] = ()
+HERMETIC_CACHED_STATE_CLEARERS: tuple[tuple[str, str], ...] = (
+    ("fno.claims.session_pid", "_session_identity"),
+)
 
 
 MINIMAL_TARGET_STATE = """\

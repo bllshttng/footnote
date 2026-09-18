@@ -1541,16 +1541,24 @@ def select_changed(root: Path, paths: Sequence[str]) -> tuple[list[dict], list[s
 # the packet counts as a failure - so selecting one without its build step
 # produces a false red instead of feedback. The registry already owns the
 # build; selection has to carry it along.
-_RUST_BIN_MARKER = "target/debug/fno-agents"
+_RUST_BIN_MARKERS = (
+    "target/debug/fno-agents",
+    # A harness may resolve the binary through the env pin or the release
+    # fallback instead of spelling the debug path (test_loop_check_shim.sh);
+    # each spelling is a real dependency on a binary being present.
+    "target/release/fno-agents",
+    "FNO_AGENTS_BIN",
+)
 _RUST_BUILD_STEP = "Build fno-agents debug binary (for journey tests)"
 _CLAIM_DOOR_NAME = "fno-agents-claim-door"
 
 
 def _needs_rust_binary(root: Path, rel: str) -> bool:
     try:
-        return _RUST_BIN_MARKER in (root / rel).read_text(encoding="utf-8", errors="replace")
+        text = (root / rel).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
+    return any(marker in text for marker in _RUST_BIN_MARKERS)
 
 
 def _changed_steps(root: Path, selections: Sequence[dict]) -> list[tuple[str, str, str]]:

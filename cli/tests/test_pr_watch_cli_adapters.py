@@ -645,6 +645,18 @@ def test_watchdog_sweep_exception_is_nonfatal_and_runs_each_tick(
     # it would never run. This test's subject is the leg order and the
     # non-fatal exception, not the roster.
     monkeypatch.setattr(watchdog, "fleet_rows", lambda **kw: ([], []))
+    # The report half of the watchdog leg scans real worktree roots with a
+    # real deadline; on a loaded runner that scan outlives the phase slice
+    # or reads partial roots, and the leg lands on its skip arm before the
+    # sweep is ever reached. Fake both halves: the subject is the leg order
+    # and the non-fatal exception, not the report.
+    monkeypatch.setattr(
+        "fno.agents.unfinished_work.build_report",
+        lambda *_a, **_k: {"verdicts": [], "counts": {}, "warnings": []},
+    )
+    monkeypatch.setattr(
+        "fno.agents.unfinished_work.publish_report", lambda *_a, **_k: None
+    )
     # Fleet-tail cadence: watchdog runs on the interval bucket's slot 2, so
     # pin the bucket or this single-tick invocation skips it.
     monkeypatch.setattr("time.time", lambda: 1201.0)
@@ -675,7 +687,17 @@ def test_watchdog_sweep_exception_is_nonfatal_and_runs_each_tick(
     app.command()(prcli.tick)
     result = CliRunner().invoke(app, [])
 
-    assert result.exit_code == 0, result.output
+    # The failure payload carries the three places a 75 can come from: the
+    # cut phase's stderr line, the escaped exception, and the deadline env
+    # seam a sibling test could have left set in this worker.
+    import os as _os
+
+    assert result.exit_code == 0, (
+        f"{result.output}\nstderr: {result.stderr}\n"
+        f"exception: {result.exception!r}\n"
+        f"env FNO_PR_WATCH_TICK_TIMEOUT="
+        f"{_os.environ.get('FNO_PR_WATCH_TICK_TIMEOUT')}"
+    )
     # x-c79d phase order: the PR legs (sweep) run first, the watchdog phase
     # follows on its own slice. The load-bearing half is the non-fatal
     # exception, not the ordering.
