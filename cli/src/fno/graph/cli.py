@@ -7345,6 +7345,15 @@ def _clear_completion_fields(node: dict, *, reason: str) -> None:
     node["reopened_at"] = datetime.now(timezone.utc).isoformat()
     node["reopened_reason"] = reason
     node.pop("reopen_warning", None)  # moot once the parent itself is not done
+    # The store's recompute keeps a status it cannot derive (a plan's
+    # frontmatter lives python-side), so the un-done writes the ladder's
+    # answer directly: a plan reading idea, or none at all, leaves the row
+    # an idea; every other readable rung leaves it ready to work. The json
+    # leg's write-path ladder landed this same status.
+    from fno.graph.ladder import Rung, plan_rung
+
+    rung = plan_rung(node)
+    node["status"] = "idea" if rung in (Rung.IDEA, Rung.NONE) else "ready"
 
 
 def _auto_closed_note(entry: dict) -> str:
