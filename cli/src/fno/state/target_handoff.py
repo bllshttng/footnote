@@ -70,9 +70,6 @@ class ManifestInspection:
     content_hash: str
 
 
-_SAFE_ATTEMPT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-
-
 def _body_field(body: str, key: str) -> str:
     matches = []
     pattern = re.compile(rf"^[ \t]*{re.escape(key)}:[ \t]*(.*?)[ \t]*$", re.MULTILINE)
