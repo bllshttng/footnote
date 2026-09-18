@@ -80,8 +80,8 @@ def mint_session_id(
     the mint itself is per-harness code, so the two are checked against each
     other below. Either way the id exists before any worker starts. A requested
     id (``spawn --resume``) is VALIDATED, never minted: a truncated one names a
-    rival conversation. The agy mint is a real model turn, so it carries the
-    spawn's selected launch axes rather than the harness defaults.
+    rival conversation. The agy mint is a real turn, so it carries the spawn's
+    axes.
     """
     if harness == "cursor-agent":
         from fno.agents.harnesses.cursor_agent import _require_chat_id, create_chat
