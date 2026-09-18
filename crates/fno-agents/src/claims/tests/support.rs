@@ -1,7 +1,6 @@
 //! Shared fixtures for the claims tests, moved verbatim out of `claims.rs`
 //! for file budget: test motion is the sanctioned shrink.
 
-use super::*;
 use tempfile::TempDir;
 
 /// Pin FNO_AGENTS_HOME for a test whose renew call consults the session
@@ -64,14 +63,37 @@ pub(super) fn dead_pid() -> u32 {
     candidate
 }
 
-/// Point `FNO_BIN` at a stub answering `claim session-pid` with `pid`.
-/// An empty `pid` reproduces the no-harness-ancestor degrade, which the
-/// real verb signals with empty stdout and exit 0.
-pub(super) fn stub_session_pid(dir: &std::path::Path, pid: &str) -> PathBuf {
-    let script = dir.join("fno-stub");
-    std::fs::write(&script, format!("#!/bin/sh\nprintf '%s' '{pid}'\n")).unwrap();
-    let mut perms = std::fs::metadata(&script).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-    std::fs::set_permissions(&script, perms).unwrap();
-    script
+/// Scrub the ambient session-pid stamp pair (`FNO_SESSION_PID` +
+/// `FNO_SESSION_HARNESS`) so the durable-pid resolver walks (or answers
+/// None) instead of reading a stamp inherited from the runner's env.
+/// Callers hold test_env_lock; restore with `restore_session_pid_stamps`.
+pub(super) fn scrub_session_pid_stamps() -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+    ["FNO_SESSION_PID", "FNO_SESSION_HARNESS"]
+        .iter()
+        .map(|v| {
+            let saved = std::env::var_os(v);
+            std::env::remove_var(v);
+            (*v, saved)
+        })
+        .collect()
+}
+
+/// Point the stamp pair at `durable_pid` after scrubbing: the pair is the
+/// deterministic seam that replaced the `FNO_BIN` stub.
+pub(super) fn stamp_session_pid(
+    durable_pid: u32,
+) -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+    let saved = scrub_session_pid_stamps();
+    std::env::set_var("FNO_SESSION_PID", durable_pid.to_string());
+    std::env::set_var("FNO_SESSION_HARNESS", "claude");
+    saved
+}
+
+pub(super) fn restore_session_pid_stamps(saved: Vec<(&'static str, Option<std::ffi::OsString>)>) {
+    for (var, val) in saved {
+        match val {
+            Some(x) => std::env::set_var(var, x),
+            None => std::env::remove_var(var),
+        }
+    }
 }
