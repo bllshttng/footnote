@@ -351,3 +351,25 @@ def test_a_stale_keeper_falls_back_to_the_full_read(cwd_tmp, roster, monkeypatch
     assert "worked_by" not in info
     r = runner.invoke(cli, ["status", NODE])
     assert "1 finished session(s) resolved to it: bp-x" in r.output
+
+
+def test_a_closed_worker_is_named_over_an_unresolved_roster(cwd_tmp, roster, monkeypatch):
+    """x-3575: the unresolved branch returned before the finished clause was
+    built, so a node whose only resolved row was a closed session read 'no row
+    resolved to this node' over a payload naming that row in
+    roster_closed_workers."""
+    _pin_closed_entry(monkeypatch)
+    _undatable_transcript(monkeypatch)
+    unresolved = [_unresolved(f"t-other-{i}", f"/wt/other-{i}") for i in range(37)]
+    roster(RosterReading(True, 49, {NODE.removeprefix("node:"): [
+        {"name": "bp-x", "state": "done", "cwd": "/wt/ac1-node", "row_id": "bp-x"},
+    ]}, "", {}, len(unresolved), tuple(unresolved)))
+    r = runner.invoke(cli, ["status", NODE, "--json"])
+    assert r.exit_code == 0, r.output
+    info = json.loads(r.output)
+    assert info["state"] == "free"
+    assert info["roster_closed_workers"] == ["bp-x"]
+    assert info["roster_rows_unresolved"] == 37
+    r = runner.invoke(cli, ["status", NODE])
+    assert "1 finished session(s) resolved to it: bp-x" in r.output
+    assert "no row resolved to this node (49 scanned, 37 unresolved)" in r.output

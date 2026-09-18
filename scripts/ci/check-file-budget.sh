@@ -33,7 +33,9 @@
 # belongs in the capability contract, long prose belongs in docs/, and
 # duplicate blocks belong behind one loop. An operator can grant a one-PR
 # exception with the file-budget-exception label; agents never apply it, and
-# it waives the tree tally alone, never a per-file grow.
+# it waives the tree tally alone, never a per-file grow. One case needs no
+# label: a king-approved blocking-bug repair to existing Python, no new verb,
+# flag or feature, within the thirty-added-line budget.
 #
 # Run: bash scripts/ci/check-file-budget.sh [--quiet]
 # Exit: 0 pass, 1 a refused grow (a grown over-budget file, a new over-budget

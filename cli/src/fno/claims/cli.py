@@ -840,7 +840,8 @@ def _roster_verdict_line(info: dict) -> str:
     Each string is produced by exactly one outcome, so a caller asserts a
     positive marker instead of grepping for the absence of the word free - an
     absence has two explanations and cannot tell them apart, which is the
-    defect this whole cross-check exists to remove.
+    defect this whole cross-check exists to remove. One rider: the
+    finished-session clause rides any outcome it can coexist with.
 
     Five outcomes, not three: a node whose only roster rows are finished
     sessions is genuinely unworked, and printing the live-worker alarm for it
@@ -889,11 +890,21 @@ def _roster_verdict_line(info: dict) -> str:
             f"unmeasured, never live: {rendered}. "
             f"Confirm with: fno agents peek {unmeasurable[0]['name']}"
         )
+    # Two ways a row reads finished: the predicate said so (it is still in
+    # `workers`), or the session closed its own phase row on this node and the
+    # display field dropped it. The clause is built HERE, above the unresolved
+    # branch, because that branch returns and used to leave it unreachable: a
+    # node whose only row was a closed session read "no row resolved to this
+    # node" over a payload naming that row under `roster_closed_workers`.
+    finished = [w["name"] for w in workers] + list(info.get("roster_closed_workers") or [])
+    tail = ""
+    if finished:
+        tail = f"; {len(finished)} finished session(s) resolved to it: {', '.join(finished)}"
     unresolved = info.get("roster_rows_unresolved", 0)
     if unresolved:
         scanned = (
             f"{state}, no row resolved to this node "
-            f"({info['roster_rows_scanned']} scanned, {unresolved} unresolved)"
+            f"({info['roster_rows_scanned']} scanned, {unresolved} unresolved){tail}"
         )
         candidates = info.get("roster_unresolved_candidates") or []
         if candidates:
@@ -907,15 +918,7 @@ def _roster_verdict_line(info: dict) -> str:
         # the roster was complete", which both used to render as plain free.
         return f"{scanned}; roster coverage degraded"
     scanned = f"{state}, no live worker found (roster scanned: {info['roster_rows_scanned']} rows)"
-    # Two ways a row reads finished: the predicate said so (it is still in
-    # `workers`), or the session closed its own phase row on this node and the
-    # display field dropped it. Both are named, so a node whose only row closed
-    # says so instead of reporting nothing at all.
-    finished = [w["name"] for w in workers] + list(info.get("roster_closed_workers") or [])
-    if finished:
-        rendered = ", ".join(finished)
-        return f"{scanned}; {len(finished)} finished session(s) resolved to it: {rendered}"
-    return scanned
+    return f"{scanned}{tail}"
 
 
 def _expiry_clause(info: dict) -> str:
