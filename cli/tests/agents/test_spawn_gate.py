@@ -48,7 +48,7 @@ def _no_live_cpu_axis(monkeypatch):
     monkeypatch.setattr(
         spawn_gate, "_prefetch_fleet_reading", lambda: (idle, None)
     )
-    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: (0.5, 40.0))
+    monkeypatch.setattr(doctor_footprint, "_admission_config", lambda: 0.5)
     admit = Admission(
         verdict="admit",
         axis="fleet_cpu_share",
@@ -62,7 +62,6 @@ def _no_live_cpu_axis(monkeypatch):
         ceiling=0.5,
         gap=None,
         load_15m=1.0,
-        backstop=480.0,
     )
     monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admit)
 

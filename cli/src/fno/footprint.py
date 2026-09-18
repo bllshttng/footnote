@@ -69,12 +69,12 @@ class Admission(NamedTuple):
     """The CPU axis's decision, computed once and read by both gates (LD1).
 
     ``verdict`` is ``admit`` | ``hold`` | ``undecidable`` | ``refuse``;
-    ``axis`` names what decided: the fleet's CPU share, the fifteen-minute
-    backstop, or an unreadable instrument. ``reason`` is the full sentence
+    ``axis`` names what decided: the fleet's CPU share or an unreadable
+    instrument. ``reason`` is the full sentence
     the gates print verbatim. An attribution gap widens the share to an
     interval: ``share_low`` is the attributed share, ``share_high`` the
     whole machine's, and ``bound`` records that the verdict read the upper
-    bound. ``backstop`` is ``hard_max_load_per_cpu x cpus``.
+    bound.
     """
 
     verdict: str
@@ -89,7 +89,6 @@ class Admission(NamedTuple):
     ceiling: float
     gap: str | None = None
     load_15m: float | None = None
-    backstop: float = 0.0
     top_holder: str | None = None
 
 

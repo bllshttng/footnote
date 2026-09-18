@@ -1,5 +1,5 @@
 {
-  "comment": "Shared branch fixture for the CPU-axis decider (x-7783 AC9). Each case feeds `inputs` to cli cpu_admission and pins the exact admission; the Rust gate parses `payload` and must take the same branch the Python gate takes. Regenerate via the 1.1 generator, never by hand.",
+  "comment": "Shared branch fixture for the CPU-axis decider (x-7783 AC9; x-c588 dropped the load backstop). Each case feeds `inputs` to cli cpu_admission and pins the exact admission; the Rust gate parses `payload` and must take the same branch the Python gate takes.",
   "cases": [
     {
       "name": "complete_reading_admits",
@@ -8,10 +8,7 @@
         "measured_cpu_cores": 6.9,
         "attribution_gap": null,
         "capacity_cores": 12,
-        "share_ceiling": 0.5,
-        "load_15m": 3.0,
-        "hard_max_load_per_cpu": 40.0,
-        "cpus": 12
+        "share_ceiling": 0.5
       },
       "payload": {
         "fleet_cpu_cores": 4.927,
@@ -28,9 +25,7 @@
           "machine_cores": 6.9,
           "capacity_cores": 12.0,
           "ceiling": 0.5,
-          "gap": null,
-          "load_15m": 3.0,
-          "backstop": 480.0
+          "gap": null
         }
       }
     },
@@ -41,10 +36,7 @@
         "measured_cpu_cores": 4.4,
         "attribution_gap": "3 pidless row(s) with no identity route (codex; rows: codex-alpha (node=unknown), codex-bravo (node=unknown), codex-charlie (node=unknown))",
         "capacity_cores": 12,
-        "share_ceiling": 0.5,
-        "load_15m": 3.0,
-        "hard_max_load_per_cpu": 40.0,
-        "cpus": 12
+        "share_ceiling": 0.5
       },
       "payload": {
         "fleet_cpu_cores": 2.11,
@@ -61,9 +53,7 @@
           "machine_cores": 4.4,
           "capacity_cores": 12.0,
           "ceiling": 0.5,
-          "gap": "3 pidless row(s) with no identity route (codex; rows: codex-alpha (node=unknown), codex-bravo (node=unknown), codex-charlie (node=unknown))",
-          "load_15m": 3.0,
-          "backstop": 480.0
+          "gap": "3 pidless row(s) with no identity route (codex; rows: codex-alpha (node=unknown), codex-bravo (node=unknown), codex-charlie (node=unknown))"
         }
       }
     },
@@ -74,10 +64,7 @@
         "measured_cpu_cores": 7.2,
         "attribution_gap": "3 pidless row(s) with no identity route (codex; rows: codex-alpha (node=unknown), codex-bravo (node=unknown), codex-charlie (node=unknown))",
         "capacity_cores": 12,
-        "share_ceiling": 0.5,
-        "load_15m": 45.0,
-        "hard_max_load_per_cpu": 40.0,
-        "cpus": 12
+        "share_ceiling": 0.5
       },
       "payload": {
         "fleet_cpu_cores": 2.1,
@@ -94,9 +81,7 @@
           "machine_cores": 7.2,
           "capacity_cores": 12.0,
           "ceiling": 0.5,
-          "gap": "3 pidless row(s) with no identity route (codex; rows: codex-alpha (node=unknown), codex-bravo (node=unknown), codex-charlie (node=unknown))",
-          "load_15m": 45.0,
-          "backstop": 480.0
+          "gap": "3 pidless row(s) with no identity route (codex; rows: codex-alpha (node=unknown), codex-bravo (node=unknown), codex-charlie (node=unknown))"
         }
       }
     },
@@ -107,10 +92,7 @@
         "measured_cpu_cores": 8.0,
         "attribution_gap": null,
         "capacity_cores": 12,
-        "share_ceiling": 0.5,
-        "load_15m": 3.0,
-        "hard_max_load_per_cpu": 40.0,
-        "cpus": 12
+        "share_ceiling": 0.5
       },
       "payload": {
         "fleet_cpu_cores": 7.0,
@@ -127,9 +109,7 @@
           "machine_cores": 8.0,
           "capacity_cores": 12.0,
           "ceiling": 0.5,
-          "gap": null,
-          "load_15m": 3.0,
-          "backstop": 480.0
+          "gap": null
         }
       }
     }

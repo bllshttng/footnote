@@ -786,31 +786,25 @@ def _share_segment(
     return seg
 
 
-def _admission_config() -> tuple[float, float]:
-    """``(max_fleet_cpu_share, hard_max_load_per_cpu)``, degraded to defaults."""
+def _admission_config() -> float:
+    """``max_fleet_cpu_share``, degraded to the default."""
     try:
         from fno.config import load_settings
 
         agents = load_settings().agents
-        return (
-            float(getattr(agents, "max_fleet_cpu_share", 0.5)),
-            float(getattr(agents, "hard_max_load_per_cpu", 40.0)),
-        )
+        return float(getattr(agents, "max_fleet_cpu_share", 0.5))
     except Exception:  # noqa: BLE001 - footprint is a reading, not an enforcer
-        return 0.5, 40.0
+        return 0.5
 
 
 def _compute_admission(reading: Footprint, load_snapshot: Any) -> Admission:
     """Feed :func:`cpu_admission` from one snapshot; the seam the payload
     and the exit decision share."""
-    share_ceiling, hard_max = _admission_config()
+    share_ceiling = _admission_config()
     return cpu_admission(
         reading,
         capacity_cores=_cpu_capacity_cores(),
         share_ceiling=share_ceiling,
-        load_15m=getattr(load_snapshot, "load_15m", None),
-        hard_max_load_per_cpu=hard_max,
-        cpus=int(getattr(load_snapshot, "load_cpu_count", 0) or 1),
     )
 
 
@@ -836,41 +830,14 @@ def cpu_admission(
     *,
     capacity_cores: float,
     share_ceiling: float,
-    load_15m: float | None,
-    hard_max_load_per_cpu: float,
-    cpus: int,
 ) -> Admission:
     """The one CPU-axis decider, consumed by both gates and every readout
     (LD1/LD3). The fleet's attributed share decides; a gap widens it
     to an interval bounded above by the machine's measured CPU, so a ceiling
     above the interval admits, below its floor holds, and inside it refuses.
-    The 15-minute load is the absolute backstop and refuses first; disabled
-    or unreadable passes onward. Pure: no clocks, no subprocesses, no config."""
-    backstop = hard_max_load_per_cpu * cpus
+    Pure: no clocks, no subprocesses, no config."""
     holder = _top_holder(reading)
     holder_clause = f"; top holder {holder}" if holder else ""
-    if load_15m is not None and hard_max_load_per_cpu > 0 and load_15m > backstop:
-        return Admission(
-            verdict="refuse",
-            axis="load_15m",
-            reason=(
-                f"spawn-gate: 15-minute load {load_15m:.1f} against backstop "
-                f"{backstop:.1f} (hard_max_load_per_cpu "
-                f"{hard_max_load_per_cpu:g} x {cpus} cpus){holder_clause}; refusing "
-                f"(--force to bypass)"
-            ),
-            share_low=0.0,
-            share_high=0.0,
-            bound="exact",
-            fleet_cores=reading.fleet_cpu_cores,
-            machine_cores=reading.measured_cpu_cores,
-            capacity_cores=float(capacity_cores),
-            ceiling=share_ceiling,
-            gap=reading.attribution_gap,
-            load_15m=load_15m,
-            backstop=backstop,
-            top_holder=holder,
-        )
     capacity = float(capacity_cores)
     share_low = reading.fleet_cpu_cores / capacity if capacity > 0 else 0.0
     gap = reading.attribution_gap
@@ -888,8 +855,6 @@ def cpu_admission(
         capacity_cores=capacity,
         ceiling=share_ceiling,
         gap=gap,
-        load_15m=load_15m,
-        backstop=backstop,
         top_holder=holder,
     )
     if share_high <= share_ceiling:
@@ -1125,7 +1090,7 @@ def _emit_result(
     if not cause_only:
         leak = leak_verdict(reading.direct_process_count, process_threshold)
         # The CPU axis keeps the historical exit (callers depend on 3);
-        # AC8: it fires on hold, undecidable, or the backstop - an
+        # AC8: it fires on hold or undecidable - an
         # attribution gap no longer forces an exit, because both gates read
         # the admission interval, not the gap. When BOTH alarms fire, the
         # CPU axis wins the exit and the leak still prints.
@@ -1163,19 +1128,6 @@ def _emit_result(
             f"against max_fleet_cpu_share {adm['ceiling'] * 100:.1f}% "
             f"-> {adm['verdict']}"
         )
-        load15 = adm["load_15m"]
-        cpus = int(payload.get("load_cpu_count") or 1)
-        hard = adm["backstop"] / cpus if cpus else 0.0
-        if isinstance(load15, (int, float)):
-            typer.echo(
-                f"load_15m: {load15:.1f} against backstop {adm['backstop']:.1f} "
-                f"(hard_max_load_per_cpu {hard:g} x {cpus} cpus)"
-            )
-        else:
-            typer.echo(
-                f"load_15m: unavailable against backstop {adm['backstop']:.1f} "
-                f"(hard_max_load_per_cpu {hard:g} x {cpus} cpus)"
-            )
         typer.echo(
             f"sustained CPU: {reading.sustained_cpu_cores:.3f} cores "
             f"(threshold {threshold_cores:.3f} from {payload['cpu_capacity_cores']} cpus; "
@@ -1215,9 +1167,7 @@ def _emit_result(
                 "machine's measured CPU)"
             )
         axis = adm["axis"]
-        if axis == "load_15m" and isinstance(adm.get("load_15m"), (int, float)):
-            axis_numbers = f" ({adm['load_15m']:.1f} against {adm['backstop']:.1f})"
-        elif axis == "fleet_cpu_share":
+        if axis == "fleet_cpu_share":
             axis_numbers = (
                 f" ({adm['share_low'] * 100:.1f}% against "
                 f"{adm['ceiling'] * 100:.1f}%)"

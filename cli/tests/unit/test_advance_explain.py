@@ -272,22 +272,12 @@ def test_the_probe_rows_render_as_gates_from_one_answer(monkeypatch):
                 "key": "agents.max_fleet_cpu_share",
                 "note": "spawn-gate: the fleet's CPU share cannot be decided",
             },
-            {
-                "name": "load-backstop",
-                "measured": "45.0",
-                "threshold": "480.0",
-                "verdict": "pass",
-                "key": "agents.hard_max_load_per_cpu",
-            },
         ],
     }
     rows = {g.name: g for g in explain.gates_for(None, probe=answer)}
     assert rows["cpu-share"].verdict == "refuse"
     assert "cannot be decided" in (rows["cpu-share"].note or "")
     assert rows["cpu-share"].measured == "2.10/12.00 cores"
-    assert rows["load-backstop"].measured == "45.0"
-    assert rows["load-backstop"].threshold == "480.0"
-    assert rows["load-backstop"].verdict == "pass"
 
 
 def test_preview_stops_when_the_cpu_axis_would_refuse(monkeypatch):

@@ -202,7 +202,7 @@ def test_the_cpu_refusal_names_the_axis_that_decided(journal: Path) -> None:
             {"status": "refused", "reason": "cpu_share_undecidable"},
             reason="cpu_share_undecidable",
             axis="fleet_cpu_share",
-            axes_read={"ram": "ok", "load_15m": "ok", "cpu": "undecidable"},
+            axes_read={"ram": "ok", "cpu": "undecidable"},
         )
 
     rows = _refusals(journal)
