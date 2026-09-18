@@ -127,6 +127,7 @@
       "pid_start_time",
       "related_session_id",
       "requested_effort",
+      "requested_permission_mode",
       "requested_provider",
       "resolved_sandbox",
       "route_provider_id",
@@ -139,7 +140,8 @@
       "spawned_by_cwd",
       "spawned_by_harness",
       "spawned_by_session",
-      "stop"
+      "stop",
+      "turn_policy_source"
     ]
   },
   "known_gaps": {}
