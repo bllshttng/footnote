@@ -299,10 +299,10 @@ fn real_shell(command: &str, cwd: &Path) -> ShellOutcome {
     // Output goes to temp FILES, never pipes: a sync_command ending in
     // `fno agents restart` detaches a daemon that inherits the child's
     // stdout/stderr and never closes them, and with pipes the parent blocks
-    // on the EOF that live daemon never sends (the wedge x-adf9 records).
-    // A plain file has no EOF-reader, so wait() returns as soon as the shell
-    // child exits; a detached grandchild merely keeps appending to a file we
-    // have already read.
+    // on the EOF that live daemon never sends. A plain file has no
+    // EOF-reader, so wait() returns as soon as the shell child exits; a
+    // detached grandchild merely keeps appending to a file we have already
+    // read.
     let dir = std::env::temp_dir().join(format!("fno-sync-{}-{}", std::process::id(), nanos()));
     if std::fs::create_dir_all(&dir).is_err() {
         return ShellOutcome {
@@ -346,7 +346,13 @@ fn real_shell(command: &str, cwd: &Path) -> ShellOutcome {
             }
         };
         Ok(ShellOutcome {
-            code: status.code().unwrap_or(-1),
+            // A killed child reads as a signal (no code); the timed-out path
+            // reports the 124 the receipt contract names.
+            code: if timed_out {
+                124
+            } else {
+                status.code().unwrap_or(-1)
+            },
             stdout: read_tail_text(&out_path),
             stderr: read_tail_text(&err_path),
             timed_out,
@@ -1731,7 +1737,7 @@ mod tests {
         assert_eq!(rows[0].number, 7);
     }
 
-    // -- real shell runner (pins x-adf9) ------------------------------------
+    // -- real shell runner (a detached child must not wedge the parent) -----
 
     #[test]
     fn real_shell_returns_while_a_detached_child_holds_the_capture_files() {
