@@ -88,6 +88,9 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "CODEX_HOME",  # 12 reads in source; a real per-developer setting
     "GEMINI_PROJECT_DIR",
     "GEMINI_SANDBOX",
+    "OPENCODE_CONFIG_DIR",  # opencode's config root; same category as CODEX_HOME
+    "GROK_HOME",  # grok's session store root; same category as PI_HOME
+    "GROK_SESSION_ID",  # a live grok session marker; identity, not test input
     "CLAUDE_CLI",
     "CLI",  # legacy harness selector; CLI=codex flips harness resolution
     "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP",
