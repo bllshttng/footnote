@@ -42,6 +42,15 @@ elif [ "$1" = "agents" ] && [ "$2" = "king" ] && [ "$3" = "faq" ] && [ "$4" = "l
   cat "$KING_FAQ_FIXTURE" 2>/dev/null || true
 elif [ "$1" = "config" ] && [ "$2" = "paths" ] && [ "$3" = "handoff" ]; then
   cat "$KING_HANDOFF_PATH_FIXTURE" 2>/dev/null || true
+elif [ "$1" = "backlog" ] && [ "$2" = "get" ]; then
+  # Batch node read: the fixture answers with the real verb's shape (a JSON
+  # array, misses as {"id":...,"error":"not found"}). Absent fixture = the
+  # verb itself failing (empty stdout, nonzero exit).
+  if [ -n "$KING_BACKLOG_FIXTURE" ] && [ -f "$KING_BACKLOG_FIXTURE" ]; then
+    cat "$KING_BACKLOG_FIXTURE"
+  else
+    exit 1
+  fi
 else
   exit 1
 fi
@@ -275,6 +284,70 @@ RC=$?
   && pass "oversized user block truncated to the byte budget" \
   || fail "oversized-user rc=$RC payload=${OUT:0:200}"
 : > "$KING_HANDOFF_PATH_FIXTURE"
+
+# 8. Summary id resolution: the NEWEST isCompactSummary entry (by line
+#    position) has its node-id candidates resolved through `fno backlog get`
+#    and injected as unresolved:/resolved: rows the king must act on.
+registry_fixture "$CROWNED_ROW,{\"session_id\":\"worker-1\",\"harness_session_id\":\"full-worker-1\",\"name\":\"worker\",\"status\":\"live\"}"
+export KING_BACKLOG_FIXTURE="$TMP/backlog-rows.json"
+printf '[{"id":"cd-33334444","status":"in_progress","locked_by_harness":"claude","locked_by_harness_session":"worker-1"},{"id":"ee-77778888","error":"not found"}]\n' > "$KING_BACKLOG_FIXTURE"
+SUMMARY_TX="$TMP/summary-transcript.jsonl"
+cat > "$SUMMARY_TX" <<'EOF'
+{"type":"user","message":"older context"}
+{"type":"system","subtype":"compact_boundary","timestamp":"2026-09-17T14:58:05.496Z"}
+{"type":"summary","isCompactSummary":true,"summary":"older beat cites aa-99998888 which must not win"}
+{"type":"assistant","message":"work continues"}
+{"type":"system","subtype":"compact_boundary","timestamp":"2026-09-17T15:58:05.496Z"}
+{"type":"summary","isCompactSummary":true,"summary":"newest beat: ab-11112222 running, cd-33334444 claimed, ee-77778888 gone, uuid 12345678-abcd-1234-abcd-123456789012 is not an id"}
+EOF
+OUT="$(run_king "{\"source\":\"compact\",\"session_id\":\"$SID\",\"transcript_path\":\"$SUMMARY_TX\"}")"
+RC=$?
+[[ $RC -eq 0 ]] && printf '%s' "$OUT" | jq -e '.hookSpecificOutput.additionalContext
+    | contains("The summary'"'"'s node ids, re-resolved")
+      and contains("unresolved: ab-11112222")
+      and contains("resolved: cd-33334444 status=in_progress locked_by=claude holder_live=yes")
+      and contains("Act on these rows, not on the summary")' >/dev/null 2>&1 \
+  && pass "summary ids: newest entry wins, unresolved + resolved rows injected" \
+  || fail "summary-ids rc=$RC payload=${OUT:0:300}"
+
+# 8a. The older summary entry's ids never win (line position, not timestamp).
+printf '%s' "$OUT" | grep -q "aa-99998888" \
+  && fail "older summary entry leaked into the payload" \
+  || pass "older summary entry ignored (line position, not timestamp)"
+
+# 8b. Whole uuids are masked before extraction: their inner hex groups
+#     straddle the id grammar at word boundaries and are never node ids.
+printf '%s' "$OUT" | grep -q "abcd-1234" \
+  && fail "uuid fragment extracted as a candidate id" \
+  || pass "uuid masked before id extraction"
+
+# 8c. An error row from the batch read is unresolved, never resolved: the
+#     verb reports the miss as data and the hook relays it as a correction.
+printf '%s' "$OUT" | grep -q "unresolved: ee-77778888" \
+  && pass "batch error row lands under unresolved" \
+  || fail "error row not surfaced as unresolved: ${OUT:0:200}"
+: > "$KING_BACKLOG_FIXTURE"
+
+# 8d. Degrade: `fno backlog get` failing (empty stdout) adds no section and
+#     never a fabricated all-unresolved list; the other sections still ride.
+OUT="$(run_king "{\"source\":\"compact\",\"session_id\":\"$SID\",\"transcript_path\":\"$SUMMARY_TX\"}")"
+RC=$?
+[[ $RC -eq 0 ]] && printf '%s' "$OUT" | jq -e '.hookSpecificOutput.additionalContext
+    | contains("level 1 over fno")
+      and (contains("The summary'"'"'s node ids") | not)' >/dev/null 2>&1 \
+  && pass "failed backlog read: no id section, brief intact, exit 0" \
+  || fail "failed-read degrade rc=$RC payload=${OUT:0:300}"
+unset KING_BACKLOG_FIXTURE
+
+# 8e. A transcript with no isCompactSummary entry at all: no candidates, no
+#     section, base brief intact.
+printf '{"type":"user","message":"plain transcript, never compacted"}\n' > "$SUMMARY_TX"
+OUT="$(run_king "{\"source\":\"compact\",\"session_id\":\"$SID\"}")"
+RC=$?
+[[ $RC -eq 0 ]] && printf '%s' "$OUT" | grep -q "level 1 over fno" \
+  && ! printf '%s' "$OUT" | grep -q "The summary's node ids" \
+  && pass "no summary entry: no id section, brief intact" \
+  || fail "no-summary rc=$RC payload=${OUT:0:300}"
 
 # 7. Byte budget: the brief is paid on every compaction of every king.
 BRIEF_BYTES=$(wc -c < "$BRIEF" | tr -d '[:space:]')
