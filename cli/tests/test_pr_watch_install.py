@@ -1969,3 +1969,134 @@ def test_status_prints_scanned_in_merge_scan_line(
     m.status(launch_agents_dir=tmp_launch_agents, events_path=events_file)
     out = capsys.readouterr().out
     assert re.search(r"^Merge scan: +.*scanned=13", out, re.M), out
+
+
+# ---------------------------------------------------------------------------
+# The Heal: readout line (status, install, refresh)
+# ---------------------------------------------------------------------------
+
+
+def test_status_prints_the_unarmed_heal_line_with_the_arm_command(
+    tmp_home, tmp_launch_agents, capsys, monkeypatch, tmp_path
+):
+    """auto_heal.enabled false -> `Heal: unarmed` plus the exact arm command,
+    and the heal readout never shells the binary. status itself still shells
+    it for the parked-PR read, so the stub records every invocation and the
+    assert is scoped to the heal verb."""
+    from types import SimpleNamespace
+
+    import fno.pr_watch._install as m
+
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: SimpleNamespace(
+            auto_heal=SimpleNamespace(enabled=False),
+            pr_watch=SimpleNamespace(interval_seconds=600, enabled=True),
+        ),
+    )
+    argv_log = tmp_path / "stub-argv.log"
+    stub = tmp_path / "fno-agents"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$@\" >> {argv_log}\n"
+        "echo '{}'\n"
+    )
+    stub.chmod(0o755)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: stub)
+    monkeypatch.setattr(
+        m,
+        "liveness_report_live",
+        lambda **_kw: {"verdict": "healthy", "detail": "test"},
+    )
+
+    m.status(launch_agents_dir=tmp_launch_agents)
+    out = capsys.readouterr().out
+    assert (
+        "Heal: unarmed (auto_heal.enabled=false; "
+        "arm with: fno config set auto_heal.enabled true)"
+    ) in out, out
+    argv = argv_log.read_text().splitlines()
+    assert not any("pr-heal" in a for a in argv), "the unarmed readout shelled pr-heal"
+
+
+def test_status_shells_pr_heal_status_when_armed(
+    tmp_home, tmp_launch_agents, capsys, monkeypatch, tmp_path
+):
+    """Armed, status passes --status --armed --events-file to the binary and
+    prints its line verbatim. The parked-PR read shells the same stub, so the
+    log is appended to and the heal argv is asserted as one contiguous run."""
+    from types import SimpleNamespace
+
+    import fno.pr_watch._install as m
+
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: SimpleNamespace(
+            auto_heal=SimpleNamespace(enabled=True),
+            pr_watch=SimpleNamespace(interval_seconds=600, enabled=True),
+        ),
+    )
+    argv_log = tmp_path / "stub-argv.log"
+    line = "Heal: armed; last run 2026-09-17T12:00:00Z (12m ago); healed 1, escalated 3, in-flight none"
+    stub = tmp_path / "fno-agents"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$@\" >> {argv_log}\n"
+        "echo '{}'\n"
+        f"echo '{line}'\n"
+    )
+    stub.chmod(0o755)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: stub)
+    monkeypatch.setattr(
+        m,
+        "liveness_report_live",
+        lambda **_kw: {"verdict": "healthy", "detail": "test"},
+    )
+
+    events_file = tmp_home / ".fno" / "events.jsonl"
+    m.status(launch_agents_dir=tmp_launch_agents, events_path=events_file)
+    out = capsys.readouterr().out
+    assert line in out, out
+    argv = argv_log.read_text().splitlines()
+    expected = ["pr-heal", "--status", "--armed", "--events-file", str(events_file)]
+    assert any(
+        argv[i : i + len(expected)] == expected for i in range(len(argv))
+    ), argv
+
+
+def test_armed_status_with_no_binary_degrades_to_a_line_that_says_so(
+    tmp_home, monkeypatch
+):
+    """An armed machine whose binary is missing is reported, never silence."""
+    from types import SimpleNamespace
+
+    import fno.pr_watch._install as m
+
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: SimpleNamespace(auto_heal=SimpleNamespace(enabled=True)),
+    )
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: None)
+
+    line = m.heal_status_line()
+    assert line.startswith("Heal: armed; readout unavailable"), line
+
+
+def test_refresh_prints_the_heal_line(tmp_home, monkeypatch):
+    """A fresh refresh output carries the same Heal: readout status prints."""
+    from types import SimpleNamespace
+
+    from typer.testing import CliRunner
+
+    from fno.cli import app
+    import fno.pr_watch.cli as cli_mod
+    import fno.pr_watch._install as m
+
+    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(True))
+    monkeypatch.setattr(cli_mod, "_resolve_fno_binary", lambda: "/x/fno-py")
+    monkeypatch.setattr(m, "refresh_watcher", lambda **kw: ("bounced", 0))
+    monkeypatch.setattr(m, "heal_status_line", lambda events_path=None: "Heal: armed; never ran")
+
+    result = CliRunner().invoke(app, ["pr-watch", "refresh"])
+    assert result.exit_code == 0
+    assert "Heal: armed; never ran" in result.stdout, result.stdout

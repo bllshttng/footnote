@@ -249,7 +249,7 @@ fn parse_summary(raw: Option<&str>) -> Summary {
 /// inject so no test needs the real binary to re-exec itself.
 type Spawner<'a> = &'a dyn Fn(&[String]) -> Result<u32, String>;
 
-fn self_exe() -> String {
+pub(crate) fn self_exe() -> String {
     std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "fno-agents".into())
@@ -257,7 +257,7 @@ fn self_exe() -> String {
 
 /// kill(pid, 0): existence probe, no signal delivered. EPERM counts as alive
 /// (the process exists, we lack leave); only "no such process" reads as dead.
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     // SAFETY: kill(0) sends no signal; it only queries the process's existence.
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }

@@ -93,6 +93,12 @@ pub(crate) enum Remedy {
     /// Append a closure trailer per node id to the PR body. No commit, no
     /// push: the workflow's `types` includes `edited`, so the edit re-fires it.
     EditBody { nodes: Vec<String> },
+    /// `gh run rerun <id>` (full rerun) for a cancelled run: it reached no
+    /// verdict, so rerunning it IS reaching a verdict. `--failed` is wrong
+    /// here: it reruns only `failure` conclusions and a cancelled run has
+    /// none. Issued at most once per head sha; a second cancelled verdict on
+    /// the same sha escalates.
+    Rerun { run_id: String },
     /// Not mechanically fixable. `repro` is the command that reproduces it
     /// locally, which is the whole value of the row.
     Escalate { repro: String },
@@ -115,6 +121,7 @@ impl Finding {
         match self.remedy {
             Remedy::Auto { .. } => "auto",
             Remedy::EditBody { .. } => "edit-body",
+            Remedy::Rerun { .. } => "rerun",
             Remedy::Escalate { .. } => "escalate",
             Remedy::Inherited => "inherited",
         }
@@ -129,6 +136,7 @@ impl Finding {
             Remedy::EditBody { nodes } => {
                 format!("fno do pr closure-trailer {}", nodes.join(" "))
             }
+            Remedy::Rerun { run_id } => format!("gh run rerun {run_id}"),
             Remedy::Escalate { repro } => repro.clone(),
             // Matched by CHECK NAME, which is all the main-HEAD read gives.
             // Measured: the same check was red on both, and the failing TEST
@@ -160,6 +168,9 @@ pub(crate) struct Ctx<'a> {
     /// it, and reading that absence as an unrecognized failure is the
     /// absence-has-three-explanations trap.
     pub bucket: &'a str,
+    /// The check's `html_url` (`.../actions/runs/<run>/job/<job>`), which a
+    /// remedy aimed at the run itself (a rerun) must resolve.
+    pub link: &'a str,
 }
 
 /// A signature: how a class of failure is recognized, and what to do about it.
@@ -183,15 +194,21 @@ const PINNED_FMT: &str = "+1.94.1";
 const SIGNATURES: &[Signature] = &[
     Signature {
         name: "cancelled",
-        plan: "escalate: not a verdict; the run was superseded or killed",
+        plan: "rerun: gh run rerun <run>, at most once per head sha",
         matches: |c| c.bucket == "cancel",
         // Measured on three open PRs: every `unknown` heal reported was a
         // CANCELLED check whose log carried one line. A cancelled run
-        // concluded nothing, so there is no defect to name and no signature
-        // to add. The action is a rerun, which is a person's call.
-        resolve: |_| Remedy::Escalate {
-            repro: "the run was cancelled, so it reached no verdict; push again or rerun it"
-                .to_string(),
+        // concluded nothing, so a rerun is not papering over a defect; it is
+        // how the run reaches a verdict at all. 3 of the 15 red open PRs
+        // measured on 2026-09-16 were exactly this class. Without a run id
+        // in the link there is nothing to rerun, so the row escalates as
+        // before.
+        resolve: |c| match run_id(c.link) {
+            Some(id) => Remedy::Rerun { run_id: id },
+            None => Remedy::Escalate {
+                repro: "the run was cancelled, so it reached no verdict; push again or rerun it"
+                    .to_string(),
+            },
         },
     },
     Signature {
@@ -613,6 +630,12 @@ pub(crate) fn failing_rows(checks: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// The Actions run id out of a check's link
+/// (`.../actions/runs/<run>/job/<job>`), which `gh run rerun` names.
+pub(crate) fn run_id(link: &str) -> Option<String> {
+    let re = Regex::new(r"^https?://[^/]+/[^/]+/[^/]+/actions/runs/(\d+)").expect("static regex");
+    re.captures(link).map(|c| c[1].to_string())
+}
 // ── the verb ────────────────────────────────────────────────────────────────
 
 /// Exit codes. Zero means the PR has nothing red of its own; an `inherited`
@@ -642,6 +665,16 @@ struct Args {
     /// Rehearse the drive loop: every refusal is walked and printed, no
     /// remedy runs, nothing pushes, no question is filed.
     dry_run: bool,
+    /// One control_plane_tick arm row per invocation; the 30s tick slice only
+    /// ever pays the spawn, so the drive loop's own timeouts never bound it.
+    detach: bool,
+    /// `--status`: print one `Heal:` line and exit. The journal, pid files
+    /// and arm state are this verb's reads; Python shells it rather than
+    /// re-reading the journal itself.
+    status: bool,
+    /// The arm bit for `--status`, passed by Python after reading
+    /// `config.auto_heal.enabled` (one config parser, the Python one).
+    armed: bool,
     gh_bin: String,
     git_bin: String,
     cwd: std::path::PathBuf,
@@ -667,6 +700,9 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         all: false,
         playbook: false,
         dry_run: false,
+        detach: false,
+        status: false,
+        armed: false,
         gh_bin: "gh".to_string(),
         git_bin: "git".to_string(),
         cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -687,6 +723,9 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--all" => a.all = true,
             "--playbook" => a.playbook = true,
             "--dry-run" => a.dry_run = true,
+            "--detach" => a.detach = true,
+            "--status" => a.status = true,
+            "--armed" => a.armed = true,
             "--gh-bin" => {
                 a.gh_bin = take("--gh-bin")?;
                 i += 1;
@@ -789,11 +828,13 @@ fn findings_for(
         };
         let stripped = strip_timestamps(&log);
         let bucket = row["bucket"].as_str().unwrap_or("").to_string();
+        let link = row["link"].as_str().unwrap_or("").to_string();
         out.push(classify(
             &Ctx {
                 check: &check,
                 log: &stripped,
                 bucket: &bucket,
+                link: &link,
             },
             inherited.iter().any(|n| n == &check),
         ));
@@ -979,19 +1020,33 @@ fn report(findings: &[Finding], dry_run: bool, terse: bool) -> i32 {
     }
 }
 
-/// `fno-agents pr-heal <n> [--apply] [--all] [--playbook]`.
+/// `fno-agents pr-heal <n> [--apply] [--all] [--apply --detach] [--status] [--playbook]`.
 pub fn run_heal(argv: &[String]) -> i32 {
     let a = match parse_args(argv) {
         Ok(a) => a,
         Err(msg) => {
             eprintln!("pr-heal: {msg}");
-            eprintln!("usage: pr-heal <pr> [--apply] | --all [--apply] [--dry-run] | --playbook");
+            eprintln!("usage: pr-heal <pr> [--apply] | --all [--apply] [--dry-run] | --playbook | --status");
             return EXIT_READ_ERROR;
         }
     };
     if a.playbook {
         print!("{}", playbook());
         return EXIT_CLEAN;
+    }
+    if a.status {
+        println!("{}", status_line(&a));
+        return EXIT_CLEAN;
+    }
+    if a.detach {
+        // The drive loop detached from the tick: the 30s phase slice only
+        // ever pays the spawn. `--detach` is a drive-loop flag; without
+        // --all --apply behind it there is nothing to detach.
+        if !(a.all && a.apply) {
+            eprintln!("pr-heal: --detach rehearses nothing and reports nothing on its own; it belongs to --all --apply");
+            return EXIT_READ_ERROR;
+        }
+        return run_detached(&a, argv, &spawn_detached);
     }
     if a.all && a.apply {
         return run_all_apply(&a, a.dry_run);
@@ -1010,7 +1065,21 @@ pub fn run_heal(argv: &[String]) -> i32 {
         eprintln!("pr-heal: needs a PR number (or --all, or --playbook)");
         return EXIT_READ_ERROR;
     };
-    run_one(&a, &pr)
+    let (code, reran_shas) = run_one(&a, &pr);
+    if !reran_shas.is_empty() {
+        // The once-per-sha rerun guard reads rerun_shas off pr_heal_tick
+        // rows. The drive loop writes its own; this is the single-PR apply
+        // path's row, so a manual rerun is never issued a second time.
+        emit_tick_event(
+            &a,
+            &std::collections::BTreeMap::new(),
+            0,
+            false,
+            &reran_shas,
+            0.0,
+        );
+    }
+    code
 }
 
 /// One heal per red open PR, report-only. Uses the REST listing for the same
@@ -1026,7 +1095,8 @@ fn run_all(a: &Args) -> i32 {
     let mut worst = EXIT_CLEAN;
     for num in open_pr_numbers(&pages) {
         println!("── PR {num}");
-        worst = worse_of(worst, run_one(a, &num));
+        let (code, _) = run_one(a, &num);
+        worst = worse_of(worst, code);
     }
     worst
 }
@@ -1201,17 +1271,11 @@ fn escalate_unknown_signature(a: &Args, pr: &str, check: &str, head_ref: &str) -
     }
 }
 
-/// One `pr_heal_tick` row per drive-loop invocation: the arm's visibility
-/// (shared row widens onto this later). Written to the global
-/// `~/.fno/events.jsonl`, the same default journal the tick's own
-/// `_emit_event` writes, so `fno doctor event find` reads one place.
-fn emit_tick_event(
-    a: &Args,
-    counts: &std::collections::BTreeMap<&'static str, usize>,
-    unknown: usize,
-    dry_run: bool,
-) {
-    let path = if a.events_file.is_empty() {
+/// The events journal for this invocation. `--events-file` is the test seam;
+/// the default is the global `~/.fno/events.jsonl`, the same journal the
+/// tick's own `_emit_event` and `fno doctor event` read.
+fn journal_path(a: &Args) -> std::path::PathBuf {
+    if a.events_file.is_empty() {
         crate::paths::AgentsHome::from_env()
             .root()
             .parent()
@@ -1219,13 +1283,314 @@ fn emit_tick_event(
             .unwrap_or_else(|| std::path::PathBuf::from(".fno/events.jsonl"))
     } else {
         std::path::PathBuf::from(&a.events_file)
+    }
+}
+
+/// One `control_plane_tick` arm row per detach decision: acted=1 on a spawn,
+/// acted=0 with a skip_reason otherwise. Same event type and arm/acted/
+/// skip_reason/detail vocabulary the tick's own `_emit_tick_row` writes, so
+/// the journal agrees with the status line on why nothing ran.
+fn emit_arm_row(a: &Args, acted: u8, skip_reason: Option<&str>, detail: &str) {
+    let mut fields = serde_json::Map::new();
+    fields.insert("arm".to_string(), serde_json::json!("heal"));
+    fields.insert("acted".to_string(), serde_json::json!(acted));
+    if let Some(s) = skip_reason {
+        fields.insert("skip_reason".to_string(), serde_json::json!(s));
+    }
+    if !detail.is_empty() {
+        fields.insert("detail".to_string(), serde_json::json!(detail));
+    }
+    if let Err(e) = crate::events::EventEmitter::new(journal_path(a), "pr-heal")
+        .emit_fields("control_plane_tick", fields)
+    {
+        eprintln!("pr-heal: the control_plane_tick arm row did not land: {e}");
+    }
+}
+
+/// The dir holding the journal; also where the per-root pid files live.
+fn events_dir(a: &Args) -> std::path::PathBuf {
+    journal_path(a)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// The pid file for the drive loop running against this `--cwd` root. The
+/// root path (not a hash) tags the file, so a `--status` read is legible and
+/// an orphan from a removed root is still attributable.
+fn heal_pid_file(a: &Args) -> std::path::PathBuf {
+    let tag: String = a
+        .cwd
+        .to_string_lossy()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    events_dir(a).join(format!("pr-heal.{tag}.pid"))
+}
+
+fn read_pid_file(path: &std::path::Path) -> Option<u32> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Spawn `argv` as the leader of a new session with stdio on /dev/null (the
+/// `evals_arm.rs` shape), and answer the child pid.
+fn spawn_detached(argv: &[String]) -> std::io::Result<u32> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
+    // SAFETY: setsid() is async-signal-safe and takes no arguments; called
+    // here it runs in the child after fork, before exec, single-threaded.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        })
     };
+    cmd.spawn().map(|c| c.id())
+}
+
+/// `--detach`: one pid-file probe, one spawn, one arm row, exit 0. The child
+/// is this binary with the same args minus `--detach`, in its own session
+/// with stdio on /dev/null, so the tick's 30s slice only pays the spawn and
+/// the drive loop's own 60s/300s bounds are what apply. `argv` is the exact
+/// args this process received (the child argv re-adds the verb).
+fn run_detached(
+    a: &Args,
+    argv: &[String],
+    spawn: &dyn Fn(&[String]) -> std::io::Result<u32>,
+) -> i32 {
+    let pid_file = heal_pid_file(a);
+    if let Some(pid) = read_pid_file(&pid_file) {
+        if crate::evals_arm::pid_alive(pid) {
+            emit_arm_row(
+                a,
+                0,
+                Some("in_flight"),
+                &format!("pid {pid} is still running the drive loop"),
+            );
+            return EXIT_CLEAN;
+        }
+    }
+    let mut child: Vec<String> = Vec::with_capacity(argv.len() + 2);
+    child.push(crate::evals_arm::self_exe());
+    child.push("pr-heal".to_string());
+    child.extend(argv.iter().filter(|s| s.as_str() != "--detach").cloned());
+    match spawn(&child) {
+        Ok(pid) => {
+            if let Some(dir) = pid_file.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let wrote = std::fs::write(&pid_file, format!("{pid}\n"));
+            match wrote {
+                Ok(()) => emit_arm_row(a, 1, None, &format!("spawned pid {pid}")),
+                Err(e) => emit_arm_row(
+                    a,
+                    1,
+                    None,
+                    &format!("spawned pid {pid}; pid file write failed: {e}"),
+                ),
+            }
+        }
+        Err(e) => emit_arm_row(a, 0, Some("spawn_failed"), &format!("{e}")),
+    }
+    EXIT_CLEAN
+}
+
+/// The newest `pr_heal_tick` row: (ts, data), or None when the journal holds
+/// none. `read_to_string` loads the whole journal and `rev()` walks it; fine
+/// while the journal is small, and the honest tail read (seek to the end,
+/// keep the last N KB) is the upgrade path when it is not.
+fn newest_heal_tick(path: &std::path::Path) -> Option<(String, Value)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines()
+        .rev()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|row| row.get("type").and_then(Value::as_str) == Some("pr_heal_tick"))
+        .and_then(|row| {
+            let ts = row.get("ts").and_then(Value::as_str)?.to_string();
+            let data = row.get("data").cloned().unwrap_or(Value::Null);
+            Some((ts, data))
+        })
+}
+
+/// Minutes under 24h, else days: one age vocabulary for the status line.
+fn age_phrase(ts: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(ts) {
+        Ok(t) => {
+            let mins = (chrono::Utc::now() - t.with_timezone(&chrono::Utc))
+                .num_minutes()
+                .max(0);
+            if mins < 24 * 60 {
+                format!("{mins}m ago")
+            } else {
+                format!("{}d ago", mins / (24 * 60))
+            }
+        }
+        Err(_) => "age unknown".to_string(),
+    }
+}
+
+/// Live pids across every `pr-heal.*.pid` file in `dir`. The pid lives in the
+/// file CONTENT (the name only tags the root, and root paths contain dots),
+/// read as an integer; EPERM counts alive.
+fn live_heal_pids(dir: &std::path::Path) -> Vec<u32> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let fname = e.file_name();
+        let Some(name) = fname.to_str() else {
+            continue;
+        };
+        if !name.starts_with("pr-heal.") || !name.ends_with(".pid") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(e.path()) else {
+            continue;
+        };
+        let Ok(pid) = text.trim().parse::<u32>() else {
+            continue;
+        };
+        if crate::evals_arm::pid_alive(pid) {
+            out.push(pid);
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// The one `Heal:` readout line. `--status` prints it; `_install.py` shells
+/// this verb rather than re-reading the journal in Python.
+fn status_line(a: &Args) -> String {
+    if !a.armed {
+        return "Heal: unarmed (auto_heal.enabled=false; arm with: fno config set auto_heal.enabled true)".to_string();
+    }
+    let Some((ts, data)) = newest_heal_tick(&journal_path(a)) else {
+        return "Heal: armed; never ran".to_string();
+    };
+    let healed = data.get("healed").and_then(Value::as_u64).unwrap_or(0);
+    let escalated = data.get("escalated").and_then(Value::as_u64).unwrap_or(0);
+    let pids = live_heal_pids(&events_dir(a));
+    let in_flight = if pids.is_empty() {
+        "none".to_string()
+    } else {
+        pids.iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    format!(
+        "Heal: armed; last run {ts} ({}); healed {healed}, escalated {escalated}, in-flight {in_flight}",
+        age_phrase(&ts)
+    )
+}
+
+/// True when a prior `pr_heal_tick` row names `sha` in `rerun_shas`: the
+/// once-per-sha guard for the cancelled-run rerun. The journal is the state;
+/// a second verdict on the same sha means the rerun reached a real result.
+fn journal_has_rerun(path: &std::path::Path, sha: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    text.lines().any(|l| {
+        serde_json::from_str::<Value>(l).ok().is_some_and(|row| {
+            row.get("type").and_then(Value::as_str) == Some("pr_heal_tick")
+                && row
+                    .get("data")
+                    .and_then(|d| d.get("rerun_shas"))
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|shas| shas.iter().any(|s| s.as_str() == Some(sha)))
+        })
+    })
+}
+
+/// Issue `gh run rerun` for every Rerun finding. At most once per
+/// head sha (journal-guarded); an already-issued or failed rerun demotes the
+/// row to Escalate, like a failed body edit, so the report never reads the
+/// PR as clean while the cancelled run is still cancelled.
+fn apply_rerun(a: &Args, findings: &mut [Finding], head: &str) -> usize {
+    let already = journal_has_rerun(&journal_path(a), head);
+    let mut reran = 0;
+    for f in findings.iter_mut() {
+        let Remedy::Rerun { run_id } = f.remedy.clone() else {
+            continue;
+        };
+        if already {
+            f.remedy = Remedy::Escalate {
+                repro: format!(
+                    "the run was cancelled and a rerun was already issued for sha {}; \
+                     if it is still red it reached a real verdict: fix it or rerun by hand",
+                    &head[..head.len().min(12)]
+                ),
+            };
+            continue;
+        }
+        match run(
+            &a.gh_bin,
+            &["run", "rerun", &run_id],
+            &a.cwd,
+            REMEDY_TIMEOUT,
+        ) {
+            Ok((true, _, _)) => reran += 1,
+            Ok((false, _, err)) => {
+                f.remedy = Remedy::Escalate {
+                    repro: format!("gh run rerun {run_id} refused: {}", err.trim()),
+                };
+            }
+            Err(e) => {
+                f.remedy = Remedy::Escalate {
+                    repro: format!("gh run rerun {run_id} failed: {e}"),
+                };
+            }
+        }
+    }
+    reran
+}
+
+/// One `pr_heal_tick` row per drive-loop invocation: the arm's visibility.
+/// Written to the global `~/.fno/events.jsonl` (or `--events-file`), the same
+/// journal `fno do pr watch status` reads through `pr-heal --status`.
+/// `escalated` sums the rows a person must look at; `rerun_shas` is the
+/// once-per-sha guard's ledger.
+fn emit_tick_event(
+    a: &Args,
+    counts: &std::collections::BTreeMap<&'static str, usize>,
+    unknown: usize,
+    dry_run: bool,
+    rerun_shas: &[String],
+    duration_s: f64,
+) {
+    let path = journal_path(a);
     let mut fields = serde_json::Map::new();
     for (k, v) in counts {
         fields.insert((*k).to_string(), serde_json::json!(v));
     }
     fields.insert("unknown".to_string(), serde_json::json!(unknown));
     fields.insert("dry_run".to_string(), serde_json::json!(dry_run));
+    let escalated = counts.get("still_red").unwrap_or(&0)
+        + counts.get("skip_escalate_only").unwrap_or(&0)
+        + unknown;
+    fields.insert("escalated".to_string(), serde_json::json!(escalated));
+    fields.insert("rerun".to_string(), serde_json::json!(rerun_shas.len()));
+    if !rerun_shas.is_empty() {
+        fields.insert("rerun_shas".to_string(), serde_json::json!(rerun_shas));
+    }
+    fields.insert(
+        "duration_s".to_string(),
+        serde_json::json!((duration_s * 1000.0).round() / 1000.0),
+    );
     if let Err(e) =
         crate::events::EventEmitter::new(path, "pr-heal").emit_fields("pr_heal_tick", fields)
     {
@@ -1238,6 +1603,7 @@ fn emit_tick_event(
 /// cycle, inherited failures named and skipped. `--dry-run` walks every
 /// refusal and prints the plan without touching a worktree or the inbox.
 fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
+    let t0 = std::time::Instant::now();
     let pages = match gh_api_pages(a, "repos/{owner}/{repo}/pulls?state=open&per_page=100") {
         Ok(p) => p,
         Err(msg) => {
@@ -1267,6 +1633,7 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
         *counts.entry(key).or_default() += 1;
     };
     let mut unknown: Vec<(String, String, String)> = Vec::new();
+    let mut reran_shas: Vec<String> = Vec::new();
     let mut worst = EXIT_CLEAN;
     for pr in open_pr_numbers(&pages) {
         bump(&mut counts, "seen");
@@ -1318,9 +1685,12 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
         for f in own.iter().filter(|f| f.signature == "unknown") {
             unknown.push((pr.clone(), f.check.clone(), head_ref.clone()));
         }
-        let healable = own
-            .iter()
-            .any(|f| matches!(f.remedy, Remedy::Auto { .. } | Remedy::EditBody { .. }));
+        let healable = own.iter().any(|f| {
+            matches!(
+                f.remedy,
+                Remedy::Auto { .. } | Remedy::EditBody { .. } | Remedy::Rerun { .. }
+            )
+        });
         if !healable {
             // Known-but-escalate rows (pytest, mypy, a guard refusal) have a
             // playbook entry and a repro; the report is their lane.
@@ -1356,7 +1726,11 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
         };
         // Refusal 3 rides inside run_one: the pre-push re-read holds the
         // commit local over a run in flight, and it pushes exactly once.
-        let code = run_one(&sub, &pr);
+        let (code, shas) = run_one(&sub, &pr);
+        if !shas.is_empty() {
+            bump(&mut counts, "rerun");
+            reran_shas.extend(shas);
+        }
         match code {
             EXIT_CLEAN => bump(&mut counts, "healed"),
             EXIT_IN_FLIGHT => bump(&mut counts, "skip_in_flight"),
@@ -1373,7 +1747,14 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
             }
         }
     }
-    emit_tick_event(a, &counts, unknown_n, dry_run);
+    emit_tick_event(
+        a,
+        &counts,
+        unknown_n,
+        dry_run,
+        &reran_shas,
+        t0.elapsed().as_secs_f64(),
+    );
     let skipped: Vec<String> = counts
         .iter()
         .filter(|(k, _)| k.starts_with("skip_"))
@@ -1389,35 +1770,42 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
     worst
 }
 
-fn run_one(a: &Args, pr: &str) -> i32 {
+fn run_one(a: &Args, pr: &str) -> (i32, Vec<String>) {
     let (head, head_ref, body) = match read_pr(a, pr) {
         Ok(v) => v,
         Err(msg) => {
             eprintln!("pr-heal: {msg}");
-            return if msg.contains("No such file") || msg.contains("NotFound") {
+            let code = if msg.contains("No such file") || msg.contains("NotFound") {
                 EXIT_NO_GH
             } else {
                 EXIT_READ_ERROR
             };
+            return (code, Vec::new());
         }
     };
     if a.apply {
         if let Some(why) = refuse_wrong_worktree(a, &head_ref) {
             eprintln!("pr-heal: refusing to apply: {why}");
-            return EXIT_CWD_REFUSAL;
+            return (EXIT_CWD_REFUSAL, Vec::new());
         }
     }
     let mut findings = match findings_for(a, pr, &head, None) {
         Ok(f) => f,
         Err(msg) => {
             eprintln!("pr-heal: {msg}");
-            return EXIT_READ_ERROR;
+            return (EXIT_READ_ERROR, Vec::new());
         }
     };
     if !a.apply {
-        return report(&findings, true, a.all);
+        return (report(&findings, true, a.all), Vec::new());
     }
 
+    let reran = apply_rerun(a, &mut findings, &head);
+    let reran_shas: Vec<String> = if reran > 0 {
+        vec![head.clone()]
+    } else {
+        Vec::new()
+    };
     let healed = apply_auto(a, &mut findings);
     // A failed body edit must DEMOTE its rows. Logging the error and leaving
     // them as `EditBody` let `report` see zero escalations and exit 0 with the
@@ -1466,7 +1854,7 @@ fn run_one(a: &Args, pr: &str) -> i32 {
 
     let code = report(&findings, false, a.all);
     if !committed {
-        return code;
+        return (code, reran_shas);
     }
     // Re-read BEFORE pushing through the shared guarded push. A push over a
     // run in flight cancels it, and that is the harm this verb exists to
@@ -1482,22 +1870,22 @@ fn run_one(a: &Args, pr: &str) -> i32 {
     match crate::pr_push::guarded_push(&ctx, &head) {
         crate::pr_push::PushOutcome::Pushed { .. } => {
             println!("pushed once");
-            code
+            (code, reran_shas)
         }
         crate::pr_push::PushOutcome::InFlight { .. } => {
             println!(
                 "run in flight; commit kept local, not pushing; \
                  rerun after fno do pr wait {pr}"
             );
-            EXIT_IN_FLIGHT
+            (EXIT_IN_FLIGHT, reran_shas)
         }
         crate::pr_push::PushOutcome::Unreadable(msg) => {
             println!("could not re-read checks ({msg}); commit kept local, not pushing");
-            EXIT_IN_FLIGHT
+            (EXIT_IN_FLIGHT, reran_shas)
         }
         crate::pr_push::PushOutcome::PushFailed(_) => {
             eprintln!("pr-heal: the fix is committed but the push failed");
-            EXIT_READ_ERROR
+            (EXIT_READ_ERROR, reran_shas)
         }
     }
 }
@@ -1522,6 +1910,7 @@ mod tests {
             check,
             log,
             bucket: "fail",
+            link: "",
         }
     }
 
@@ -1530,6 +1919,16 @@ mod tests {
             check,
             log,
             bucket: "cancel",
+            link: "",
+        }
+    }
+
+    fn cancelled_run_ctx<'a>(check: &'a str, link: &'a str) -> Ctx<'a> {
+        Ctx {
+            check,
+            log: "",
+            bucket: "cancel",
+            link,
         }
     }
 
@@ -2307,6 +2706,30 @@ exit 0
         )
     }
 
+    /// The drive-loop stub gh with PR 1's one red check a CANCELLED run
+    /// (Actions run 777): the class the rerun remedy exists for.
+    fn stub_gh_drive_rerun(dir: &Path) -> std::path::PathBuf {
+        write_exec(
+            dir,
+            "gh",
+            r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "gh $*" >> "$D/gh.log"
+for a in "$@"; do case "$a" in
+  *'pulls?state=open'*)
+     echo '[{"number":1,"head":{"sha":"aaa1","ref":"feature/x-1111"},"body":"b"},{"number":2,"head":{"sha":"bbb2","ref":"feature/x-2222"},"body":"b"}]'
+     exit 0 ;;
+  *pulls/1*) echo '{"head":{"sha":"aaa1","ref":"feature/x-1111"},"body":"b"}'; exit 0 ;;
+  *pulls/2*) echo '{"head":{"sha":"bbb2","ref":"feature/x-2222"},"body":"b"}'; exit 0 ;;
+  *check-runs) echo '{"check_runs":[{"name":"ci","status":"completed","conclusion":"cancelled","html_url":"https://github.com/o/r/actions/runs/777/job/9"}]}'; exit 0 ;;
+  */logs) echo "the run was cancelled before any step ran"; exit 0 ;;
+  */status) echo '{"statuses":[]}'; exit 0 ;;
+esac; done
+echo '[]'
+"#,
+        )
+    }
+
     /// A stub `fno` answering the inbox reads. `existing` is the question
     /// list `outstanding --json` reports; every `ask` lands in fno-ask.log.
     fn stub_fno(dir: &Path, existing: &str) {
@@ -2550,6 +2973,323 @@ exit 0
         assert_eq!(
             rest_bucket(&json!({"status": "queued", "conclusion": null})),
             "pending"
+        );
+    }
+
+    // ── the rerun remedy ──────────────────────────────────────────────────
+
+    #[test]
+    fn a_cancelled_run_with_a_run_link_resolves_to_a_rerun() {
+        let f = classify(
+            &cancelled_run_ctx("ci", "https://github.com/o/r/actions/runs/777/job/9"),
+            false,
+        );
+        assert_eq!(f.signature, "cancelled");
+        assert_eq!(
+            f.remedy,
+            Remedy::Rerun {
+                run_id: "777".to_string()
+            }
+        );
+        assert_eq!(f.action(), "rerun");
+        assert_eq!(f.detail(), "gh run rerun 777");
+        assert!(f.counts_against_pr());
+    }
+
+    #[test]
+    fn a_cancelled_check_without_a_run_link_still_escalates() {
+        // A link that names no run (a StatusContext, or no link at all)
+        // leaves nothing to rerun; the escalation is the honest answer.
+        let f = classify(&cancelled_ctx("ci", ""), false);
+        assert_eq!(f.signature, "cancelled");
+        assert!(
+            matches!(&f.remedy, Remedy::Escalate { repro } if repro.contains("cancelled")),
+            "{:?}",
+            f.remedy
+        );
+    }
+
+    #[test]
+    fn a_cancelled_run_is_rerun_once_per_sha() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive_rerun(d);
+        stub_git_drive(d);
+        stub_fno(d, r#"{"questions":[]}"#);
+        hold_claim(d);
+        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
+        let code = run_heal(&drive_args(d, &[]));
+        assert_eq!(code, EXIT_CLEAN, "the rerun acted: the PR exits clean");
+        let gh = log_of(d, "gh.log");
+        assert_eq!(
+            gh.matches("run rerun 777").count(),
+            1,
+            "exactly one rerun: {gh}"
+        );
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("\"rerun\":1"), "{events}");
+        assert!(events.contains("\"rerun_shas\":[\"aaa1\"]"), "{events}");
+    }
+
+    #[test]
+    fn a_manual_single_pr_rerun_is_ledgered_for_the_once_per_sha_guard() {
+        // The guard reads rerun_shas off pr_heal_tick rows; the drive loop
+        // writes its own. A manual `pr-heal <n> --apply` writes one too, so
+        // a hand rerun is never issued a second time by the next cycle.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive_rerun(d);
+        stub_git_drive(d);
+        stub_fno(d, r#"{"questions":[]}"#);
+        hold_claim(d);
+        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
+        let mut args = args_for(d, &["--apply"]);
+        args.push("--claims-root".to_string());
+        args.push(d.to_string_lossy().into_owned());
+        args.push("--events-file".to_string());
+        args.push(d.join("events.jsonl").to_string_lossy().into_owned());
+        run_heal(&args);
+        run_heal(&args);
+        let gh = log_of(d, "gh.log");
+        assert_eq!(
+            gh.matches("run rerun 777").count(),
+            1,
+            "the second manual apply never re-runs the sha: {gh}"
+        );
+    }
+
+    #[test]
+    fn a_second_cancelled_verdict_on_the_same_sha_escalates_instead_of_rerunning() {
+        // The journal is the once-guard: a prior pr_heal_tick row naming the
+        // sha in rerun_shas means the rerun was already issued; a second
+        // cancelled verdict on the same sha reached a real result.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive_rerun(d);
+        stub_git_drive(d);
+        stub_fno(d, r#"{"questions":[]}"#);
+        hold_claim(d);
+        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
+        run_heal(&drive_args(d, &[]));
+        run_heal(&drive_args(d, &[]));
+        let gh = log_of(d, "gh.log");
+        assert_eq!(
+            gh.matches("run rerun 777").count(),
+            1,
+            "the second cycle never re-runs the sha: {gh}"
+        );
+        let events = log_of(d, "events.jsonl");
+        assert!(
+            events.contains("\"still_red\":1"),
+            "the demoted rerun is still red, never healed: {events}"
+        );
+    }
+
+    // ── the detached drive loop ───────────────────────────────────────────
+
+    fn detach_args(dir: &Path) -> Vec<String> {
+        drive_args(dir, &["--detach"])
+    }
+
+    #[test]
+    fn detach_spawns_a_child_names_it_in_a_pid_file_and_journals_the_spawn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let a = parse_args(&detach_args(d)).unwrap();
+        let argv_sent = detach_args(d);
+        let spawned = std::cell::RefCell::new(Vec::<Vec<String>>::new());
+        let spawn = |argv: &[String]| -> std::io::Result<u32> {
+            spawned.borrow_mut().push(argv.to_vec());
+            Ok(std::process::id())
+        };
+        let code = run_detached(&a, &argv_sent, &spawn);
+        assert_eq!(code, EXIT_CLEAN);
+        let pid_file = heal_pid_file(&a);
+        assert_eq!(
+            read_pid_file(&pid_file),
+            Some(std::process::id()),
+            "the pid file names the child"
+        );
+        let calls = spawned.borrow();
+        assert_eq!(calls.len(), 1, "one spawn: {calls:?}");
+        let child = &calls[0];
+        assert_eq!(child[1], "pr-heal", "the child argv re-adds the verb");
+        assert!(
+            !child.iter().any(|s| s == "--detach"),
+            "the child runs the real loop: {child:?}"
+        );
+        assert!(
+            child
+                .windows(2)
+                .any(|w| w[0] == "--cwd" && Path::new(&w[1]) == d),
+            "the child heals this root: {child:?}"
+        );
+        drop(calls);
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("control_plane_tick"), "{events}");
+        assert!(events.contains("\"arm\":\"heal\""), "{events}");
+        assert!(events.contains("\"acted\":1"), "{events}");
+    }
+
+    #[test]
+    fn detach_with_a_live_pid_skips_and_journals_in_flight() {
+        // A drive loop still running when the next tick fires is skipped,
+        // never double-spawned (the in-flight case the pid file exists for).
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let a = parse_args(&detach_args(d)).unwrap();
+        std::fs::write(heal_pid_file(&a), format!("{}\n", std::process::id())).unwrap();
+        let spawned = std::cell::RefCell::new(0);
+        let spawn = |_: &[String]| -> std::io::Result<u32> {
+            *spawned.borrow_mut() += 1;
+            Ok(std::process::id())
+        };
+        let code = run_detached(&a, &detach_args(d), &spawn);
+        assert_eq!(code, EXIT_CLEAN);
+        assert_eq!(*spawned.borrow(), 0, "never double-spawned");
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("\"acted\":0"), "{events}");
+        assert!(events.contains("in_flight"), "{events}");
+    }
+
+    #[test]
+    fn detach_with_a_dead_pid_spawns_and_overwrites_the_pid_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        // A real, now-dead pid: spawned, waited, gone.
+        let dead = {
+            let mut c = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+            let pid = c.id();
+            c.wait().unwrap();
+            pid
+        };
+        let a = parse_args(&detach_args(d)).unwrap();
+        std::fs::write(heal_pid_file(&a), format!("{dead}\n")).unwrap();
+        let spawned = std::cell::RefCell::new(0);
+        let spawn = |_: &[String]| -> std::io::Result<u32> {
+            *spawned.borrow_mut() += 1;
+            Ok(std::process::id())
+        };
+        let code = run_detached(&a, &detach_args(d), &spawn);
+        assert_eq!(code, EXIT_CLEAN);
+        assert_eq!(
+            *spawned.borrow(),
+            1,
+            "a dead pid is never mistaken for a live loop"
+        );
+        assert_eq!(
+            read_pid_file(&heal_pid_file(&a)),
+            Some(std::process::id()),
+            "the pid file names the new child"
+        );
+    }
+
+    // ── the Heal: readout line ────────────────────────────────────────────
+
+    #[test]
+    fn status_line_unarmed_names_the_arm_command() {
+        let a = parse_args(&["--status".to_string()]).unwrap();
+        assert_eq!(
+            status_line(&a),
+            "Heal: unarmed (auto_heal.enabled=false; arm with: fno config set auto_heal.enabled true)"
+        );
+    }
+
+    #[test]
+    fn status_line_armed_without_a_row_says_never_ran() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = parse_args(&[
+            "--status".to_string(),
+            "--armed".to_string(),
+            "--events-file".to_string(),
+            tmp.path()
+                .join("events.jsonl")
+                .to_string_lossy()
+                .into_owned(),
+        ])
+        .unwrap();
+        assert_eq!(status_line(&a), "Heal: armed; never ran");
+    }
+
+    #[test]
+    fn status_line_armed_with_a_recent_row_prints_counts_and_age() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let ts =
+            (chrono::Utc::now() - chrono::Duration::minutes(12) - chrono::Duration::seconds(5))
+                .to_rfc3339();
+        std::fs::write(
+            &events,
+            format!(
+                "{{\"ts\":\"{ts}\",\"type\":\"pr_heal_tick\",\"data\":{{\"healed\":1,\"escalated\":3}}}}\n"
+            ),
+        )
+        .unwrap();
+        let a = parse_args(&[
+            "--status".to_string(),
+            "--armed".to_string(),
+            "--events-file".to_string(),
+            events.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let line = status_line(&a);
+        assert!(line.starts_with("Heal: armed; last run "), "{line}");
+        assert!(line.contains("(12m ago)"), "{line}");
+        assert!(line.contains("healed 1, escalated 3"), "{line}");
+        assert!(line.contains("in-flight none"), "{line}");
+    }
+
+    #[test]
+    fn status_line_prints_days_when_the_row_is_older_than_a_day() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let ts = (chrono::Utc::now() - chrono::Duration::hours(30)).to_rfc3339();
+        std::fs::write(
+            &events,
+            format!("{{\"ts\":\"{ts}\",\"type\":\"pr_heal_tick\",\"data\":{{}}}}\n"),
+        )
+        .unwrap();
+        let a = parse_args(&[
+            "--status".to_string(),
+            "--armed".to_string(),
+            "--events-file".to_string(),
+            events.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        assert!(status_line(&a).contains("(1d ago)"), "{}", status_line(&a));
+    }
+
+    #[test]
+    fn status_line_names_a_live_pid_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let ts = chrono::Utc::now().to_rfc3339();
+        std::fs::write(
+            &events,
+            format!("{{\"ts\":\"{ts}\",\"type\":\"pr_heal_tick\",\"data\":{{}}}}\n"),
+        )
+        .unwrap();
+        let a = parse_args(&[
+            "--status".to_string(),
+            "--armed".to_string(),
+            "--events-file".to_string(),
+            events.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        std::fs::write(heal_pid_file(&a), format!("{}\n", std::process::id())).unwrap();
+        assert!(
+            status_line(&a).contains(&format!("in-flight {}", std::process::id())),
+            "{}",
+            status_line(&a)
+        );
+    }
+
+    #[test]
+    fn detach_without_the_drive_loop_is_a_usage_error() {
+        assert_eq!(
+            run_heal(&["--detach".to_string()]),
+            EXIT_READ_ERROR,
+            "--detach without --all --apply has nothing to detach"
         );
     }
 }

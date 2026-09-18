@@ -12,9 +12,10 @@ from typing import Any, Callable
 
 log = logging.getLogger(__name__)
 
-#: Belt over a wedged binary; the drive loop bounds each remedy itself and
-#: the tick's own SIGALRM deadline bounds the phase.
-_DRIVE_TIMEOUT_S = 600
+#: Belt over a wedged spawn, not a run bound: the phase passes ``--detach``,
+#: the binary answers in milliseconds and the drive loop bounds each remedy
+#: itself; the tick's own SIGALRM deadline bounds the phase.
+_DRIVE_TIMEOUT_S = 30
 
 
 def run_heal_phase(
@@ -28,7 +29,8 @@ def run_heal_phase(
 
     Unarmed (``auto_heal.enabled`` falsy or the block absent) answers
     ``"unarmed"`` without resolving the binary: the launchd hot path pays
-    nothing. Armed, returns ``"ran"``, ``"no-binary"``, or ``"no-roots"``;
+    nothing. Armed, returns ``"ran"``, ``"no-binary"``, ``"no-roots"``, or
+    ``"failed"`` (every root's spawn failed or exited a non-verdict code);
     one failing root logs and never stops the rest.
     """
     if not getattr(getattr(settings, "auto_heal", None), "enabled", False):
@@ -49,13 +51,29 @@ def run_heal_phase(
         import subprocess
 
         run = subprocess.run
+    failed = 0
     for root in roots:
         try:
-            run(
-                [str(binary), "pr-heal", "--all", "--apply", "--cwd", str(root)],
+            proc = run(
+                [str(binary), "pr-heal", "--all", "--apply", "--detach", "--cwd", str(root)],
                 check=False,
                 timeout=_DRIVE_TIMEOUT_S,
             )
+            # 0..3 are drive-loop verdicts; 4/127 means a stale binary that
+            # lacks --detach and would otherwise read as "ran" with no row.
+            code = getattr(proc, "returncode", 0)
+            if code not in (0, 1, 2, 3):
+                failed += 1
+                log.warning(
+                    "pr-watch: heal drive loop for %s exited %s; run `fno doctor`",
+                    root,
+                    code,
+                )
         except Exception as exc:  # noqa: BLE001 - one root never stops the rest
+            failed += 1
             log.warning("pr-watch: heal drive loop failed for %s: %s", root, exc)
+    # A spawn that failed on every root ran nothing; cli.py emits the gate
+    # row for any non-"ran" answer.
+    if failed and failed == len(roots):
+        return "failed"
     return "ran"

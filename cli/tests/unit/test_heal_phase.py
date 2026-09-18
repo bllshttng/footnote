@@ -115,3 +115,62 @@ def test_an_armed_tick_with_no_roots_never_claims_a_run(tmp_path):
     )
     assert outcome == "no-roots"
     assert rec.runs == []
+
+
+def test_the_armed_tick_passes_detach_and_a_30s_spawn_bound(tmp_path):
+    # The drive loop runs detached from the tick: the phase only
+    # ever pays the spawn, so --detach rides the argv and the timeout only
+    # bounds a wedged spawn, not the loop's remedies.
+    captured: dict = {}
+    runs: list = []
+
+    def run(argv, **kwargs):
+        runs.append(argv)
+        captured["timeout"] = kwargs.get("timeout")
+
+    outcome = run_heal_phase(
+        _settings(armed=True), [tmp_path], resolve_binary=Recorder().resolve, run=run
+    )
+
+    assert outcome == "ran"
+    assert "--detach" in runs[0], f"{runs}"
+    assert "--cwd" in runs[0] and runs[0][-1] == str(tmp_path), f"{runs}"
+    assert captured["timeout"] == 30, captured
+
+
+def test_a_drive_loop_that_fails_on_every_root_never_reports_ran(tmp_path):
+    # A stale binary exits 4 on every root: nothing ran, no pr_heal_tick row
+    # will land, and the status line must not keep showing a stale
+    # "last run". The gate row comes from cli.py for any non-"ran" answer.
+    import types
+
+    def failing(argv, **kwargs):
+        return types.SimpleNamespace(returncode=4)
+
+    outcome = run_heal_phase(
+        _settings(armed=True),
+        [tmp_path / "a", tmp_path / "b"],
+        resolve_binary=Recorder().resolve,
+        run=failing,
+    )
+
+    assert outcome == "failed", "an all-failed drive loop is not a run"
+
+
+def test_a_drive_loop_that_fails_on_one_root_still_reports_ran(tmp_path):
+    import types
+
+    def half_failing(argv, **kwargs):
+        # First call (root a) fails, second (root b) runs.
+        if argv[-1].endswith("a"):
+            return types.SimpleNamespace(returncode=4)
+        return types.SimpleNamespace(returncode=0)
+
+    outcome = run_heal_phase(
+        _settings(armed=True),
+        [tmp_path / "a", tmp_path / "b"],
+        resolve_binary=Recorder().resolve,
+        run=half_failing,
+    )
+
+    assert outcome == "ran", "one good root still counts as a run"

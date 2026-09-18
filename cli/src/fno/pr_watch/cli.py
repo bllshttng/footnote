@@ -1249,21 +1249,31 @@ def tick() -> None:
         def _phase_notify(_slice_s: float) -> None:
             _run_notify_watch_phase(_tick_roots())
 
-        # The heal drive loop: nothing called the healer on a timer,
-        # so every red open PR waited for a hand. The loop lives in Rust; this
-        # phase is only the gate, before stranded so a PR healed this tick is
-        # not reported stranded in the same breath. Guard first, import
-        # inside: the launchd hot path pays nothing unarmed, and the double
-        # getattr reads a settings stub with no auto_heal block as unarmed.
+        # The heal drive loop: nothing called the healer on a timer, so every
+        # red open PR waited for a hand. The loop lives in Rust; this phase is
+        # only the gate. The arm guard lives inside run_heal_phase, and every
+        # gate answer lands in the journal as a control_plane_tick row so the
+        # status line can say why nothing ran.
         def _phase_heal(_slice_s: float) -> None:
             set_tick_phase("heal")
-            if getattr(getattr(settings, "auto_heal", None), "enabled", False):
-                try:
-                    from fno.pr_watch._heal_phase import run_heal_phase
+            try:
+                from fno.pr_watch._heal_phase import run_heal_phase
 
-                    typer.echo(f"pr heal: {run_heal_phase(settings, _tick_roots())}")
-                except Exception as exc:  # noqa: BLE001 - never let heal break the tick
-                    log.warning("pr-watch: heal phase failed: %s", exc)
+                answer = run_heal_phase(settings, _tick_roots())
+            except Exception as exc:  # noqa:BLE001 - never let heal break the tick
+                log.warning("pr-watch: heal phase failed: %s", exc)
+                return
+            typer.echo(f"pr heal: {answer}")
+            if answer != "ran":
+                # The same arm row the detached spawn writes; this covers the
+                # gate answers that never reach the binary.
+                _emit_tick_row(
+                    "heal",
+                    interval_s=int(getattr(cfg, "interval_seconds", 600)),
+                    acted=0,
+                    skip_reason=answer.replace("-", "_"),
+                    detail=f"auto_heal gate: {answer}",
+                )
 
         def _phase_evals(_slice_s: float) -> None:
             set_tick_phase("evals")
@@ -1457,6 +1467,10 @@ def install(
         dry_run=dry_run,
         activate=not no_activate,
     )
+    # A fresh install sees the healer's arm state beside the watcher's.
+    from fno.pr_watch._install import heal_status_line
+
+    typer.echo(heal_status_line())
 
 
 @cli.command()
@@ -1486,6 +1500,9 @@ def refresh() -> None:
         caller="refresh",
     )
     typer.echo(f"pr-watch refresh: {msg}")
+    from fno.pr_watch._install import heal_status_line
+
+    typer.echo(heal_status_line())
 
 
 # Single-flight window for the SessionStart self-heal: long enough to cover the

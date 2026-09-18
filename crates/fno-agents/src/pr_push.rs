@@ -438,10 +438,10 @@ fn emit_bypass_row(ctx: &PushCtx) {
             "emit",
             "push_debounce_bypass",
             "--json",
-            &format!(
-                "{{\"branch\": \"{branch}\"}}",
-                branch = current_branch_quoted(ctx)
-            ),
+            // serde builds the payload: a branch name is caller-controlled
+            // text and may carry quotes or backslashes (both legal in git
+            // refs), which a format! would emit as broken JSON.
+            &json!({ "branch": current_branch_quoted(ctx) }).to_string(),
         ],
         &ctx.cwd,
         "pr-push-bypass",
@@ -449,7 +449,7 @@ fn emit_bypass_row(ctx: &PushCtx) {
     );
 }
 
-/// The current branch, flattened for a stamp filename.
+/// The current branch, for the bypass journal row.
 fn current_branch_quoted(ctx: &PushCtx) -> String {
     run_labeled(
         "pr-push",
@@ -483,9 +483,11 @@ fn parse_verb_args(argv: &[String]) -> Result<VerbArgs, String> {
         gh_bin: "gh".to_string(),
         fno_bin: "fno".to_string(),
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        stamps_dir: crate::paths::AgentsHome::from_env_opt()
-            .map(|h| h.root().join("push-stamps"))
-            .unwrap_or_else(|| default_stamps_dir()),
+        // The hook's own stamp dir (git-protection.py PUSH_STAMP_DIR is
+        // $FNO_HOME/push-stamps = ~/.fno/push-stamps). Rooting this at
+        // AgentsHome would split the clock: the verb writes stamps the hook
+        // never reads, and the registration-window guard never fires.
+        stamps_dir: default_stamps_dir(),
     };
     let mut i = 0;
     while i < argv.len() {
@@ -530,10 +532,16 @@ fn unknown_flag(other: &str) -> String {
     format!("unknown flag: {other}")
 }
 
-/// `$HOME/.fno/push-stamps`, matching the hook's PUSH_STAMP_DIR.
+/// `$FNO_HOME/push-stamps` (else `$HOME/.fno/push-stamps`), matching the
+/// hook's own resolution (git-protection.py: `FNO_HOME = env FNO_HOME or
+/// ~/.fno`). The hook reads the stamps this verb writes, so both sides must
+/// resolve the dir the same way or the registration window never fires.
 pub(crate) fn default_stamps_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join(".fno").join("push-stamps"))
+    std::env::var_os("FNO_HOME")
+        .map(|h| PathBuf::from(h).join("push-stamps"))
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno").join("push-stamps"))
+        })
         .unwrap_or_else(|| PathBuf::from("/tmp").join(".fno-push-stamps"))
 }
 
@@ -657,8 +665,12 @@ pub fn run_push(argv: &[String]) -> i32 {
     let before = behind(&git, &cwd);
 
     // (4) Rebase onto origin/main; a non-clean result is the caller's door.
+    // The door depends on the status: needs_resolver LEFT the rebase
+    // in-progress (plain `fno do pr rebase` would dead-end on the dirty
+    // guard or abort the caller's resolutions), refused/failed aborted it.
     let (rc, v) = crate::pr_rebase::phase_a("origin/main", &cwd, &git);
     if rc != 0 {
+        let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("?");
         let files = v
             .get("files")
             .and_then(|f| f.as_array())
@@ -669,11 +681,21 @@ pub fn run_push(argv: &[String]) -> i32 {
                     .join(", ")
             })
             .unwrap_or_default();
+        let door = match status {
+            "needs_resolver" => {
+                "Resolve the conflicts, then run `fno do pr rebase --continue`, \
+                 and re-run the push."
+            }
+            "refused" => {
+                "The rebase was aborted (a guardrail refused auto-resolution); \
+                 resolve by hand, then re-run the push."
+            }
+            "dirty" => "Commit or stash the working-tree changes, then re-run the push.",
+            _ => "The rebase was aborted; rebase by hand, then re-run the push.",
+        };
         eprintln!(
-            "pr-push: the branch is not safely rebasable onto origin/main (status {}{}). \
-             Resolve the conflicts, then run `fno do pr rebase` to enter the \
-             conflict-resolver protocol, and re-run the push.",
-            v.get("status").and_then(|s| s.as_str()).unwrap_or("?"),
+            "pr-push: the branch is not safely rebasable onto origin/main \
+             (status {status}{}). {door}",
             if files.is_empty() {
                 String::new()
             } else {
