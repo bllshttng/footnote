@@ -375,6 +375,18 @@ async fn codex_initialize_handshake(socket_path: &Path) -> Result<(), &'static s
 /// used to discard exactly this response.
 pub fn initialize_server_info() -> Option<serde_json::Value> {
     let socket_path = CodexDaemonAdapter::from_environment().control_socket();
+    // Same guard as `probe_codex_app_server`: block_on from inside a running
+    // runtime panics, and the census reads this from the async daemon loop.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return std::thread::spawn(move || initialize_server_info_inner(&socket_path))
+            .join()
+            .ok()
+            .flatten();
+    }
+    initialize_server_info_inner(&socket_path)
+}
+
+fn initialize_server_info_inner(socket_path: &Path) -> Option<serde_json::Value> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1263,6 +1275,17 @@ pub fn parse_loaded_list_response(
     Ok((ids, next_cursor))
 }
 
+/// The runtime `status.type` a `thread/read` answer carries: `notLoaded`,
+/// `idle`, `systemError`, or `active`. `None` = the answer named no status,
+/// which the upgrade transaction treats as unreadable.
+pub fn parse_thread_read_status(raw: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()?
+        .pointer("/result/thread/status/type")
+        .and_then(|status| status.as_str())
+        .map(str::to_string)
+}
+
 pub fn parse_thread_read_cwd(raw: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     v.pointer("/result/thread/cwd")
@@ -1881,7 +1904,10 @@ async fn discover(sock: &Path) -> Result<Vec<LoadedThread>, &'static str> {
 /// Read Text frames until one whose `id` equals `want`, returning its raw text.
 /// Skips notifications (no `id`) and frames for other ids; ignores non-Text
 /// frames. Bounded by [`MAX_FRAMES`]; a read error / closed stream is `"io-error"`.
-async fn read_until_id<S>(stream: &mut S, want: &serde_json::Value) -> Result<String, &'static str>
+pub(crate) async fn read_until_id<S>(
+    stream: &mut S,
+    want: &serde_json::Value,
+) -> Result<String, &'static str>
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {

@@ -55,16 +55,8 @@ pub fn codex_daemon_readiness() -> CodexDaemonReadiness {
     let installed_version = installed_cli_version();
     let live_version = live_app_server_version();
     let verdict = match (&installed_version, &live_version) {
-        (Some(installed), Some(live)) => match compare_versions(installed, live) {
-            Some(std::cmp::Ordering::Equal) => VersionVerdict::Current,
-            Some(std::cmp::Ordering::Less) => VersionVerdict::Stale,
-            Some(std::cmp::Ordering::Greater) => VersionVerdict::Ahead,
-            None => VersionVerdict::Unknown,
-        },
-        (installed, live) => {
-            let _ = (installed, live);
-            VersionVerdict::Unknown
-        }
+        (Some(installed), Some(live)) => verdict_from(installed, live),
+        _ => VersionVerdict::Unknown,
     };
     CodexDaemonReadiness {
         healthy,
@@ -83,10 +75,24 @@ fn endpoint_path() -> std::path::PathBuf {
     crate::codex_inject::CodexDaemonAdapter::from_environment().control_socket()
 }
 
+/// Locate the codex CLI: `$FNO_CODEX_BIN` first (private roots and tests),
+/// then PATH. Every codex subprocess in the readiness and upgrade paths
+/// resolves through this ONE function, so a test or private-root run never
+/// mixes the fake CLI with the real one.
+pub fn codex_cli_path() -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("FNO_CODEX_BIN") {
+        return Some(std::path::PathBuf::from(path));
+    }
+    let path_var = std::env::var("PATH").ok()?;
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join("codex"))
+        .find(|candidate| candidate.is_file())
+}
+
 /// The installed CLI's own version: `codex --version`, parsed from its last
 /// whitespace-separated token. `None` = the CLI is absent or unreadable.
 pub fn installed_cli_version() -> Option<String> {
-    let out = std::process::Command::new("codex")
+    let out = std::process::Command::new(codex_cli_path()?)
         .arg("--version")
         .output()
         .ok()?;
@@ -131,7 +137,7 @@ pub fn live_version_readings() -> Vec<(String, Option<String>)> {
 }
 
 fn daemon_version_verb() -> Option<String> {
-    let out = std::process::Command::new("codex")
+    let out = std::process::Command::new(codex_cli_path()?)
         .args(["app-server", "daemon", "version"])
         .output()
         .ok()?;
@@ -166,6 +172,18 @@ pub fn compare_versions(installed: &str, live: &str) -> Option<std::cmp::Orderin
     Some(a.cmp(&b))
 }
 
+/// The verdict from two parsed versions: equal is current, installed newer
+/// than live is stale (the running daemon lags), installed older than live
+/// is ahead (the daemon leads the CLI). Pure and unit-tested.
+pub fn verdict_from(installed: &str, live: &str) -> VersionVerdict {
+    match compare_versions(installed, live) {
+        Some(std::cmp::Ordering::Equal) => VersionVerdict::Current,
+        Some(std::cmp::Ordering::Greater) => VersionVerdict::Stale,
+        Some(std::cmp::Ordering::Less) => VersionVerdict::Ahead,
+        None => VersionVerdict::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +203,22 @@ mod tests {
             "installed older than live = ahead"
         );
         assert_eq!(compare_versions("garbage", "0.153.4"), None);
+    }
+
+    #[test]
+    fn verdict_maps_installed_newer_to_stale_not_ahead() {
+        assert_eq!(verdict_from("0.153.4", "0.153.4"), VersionVerdict::Current);
+        assert_eq!(
+            verdict_from("0.154.0", "0.153.4"),
+            VersionVerdict::Stale,
+            "installed newer = the running daemon lags = stale"
+        );
+        assert_eq!(
+            verdict_from("0.152.0", "0.153.4"),
+            VersionVerdict::Ahead,
+            "installed older = the daemon leads = ahead"
+        );
+        assert_eq!(verdict_from("garbage", "0.153.4"), VersionVerdict::Unknown);
     }
 
     #[test]

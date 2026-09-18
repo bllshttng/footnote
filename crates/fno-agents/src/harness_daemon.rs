@@ -251,7 +251,7 @@ fn success(harness: &str, state: DaemonState, reused: bool) -> EnsureResult {
     }
 }
 
-fn acquire_lock(path: &Path) -> Option<std::fs::File> {
+pub(crate) fn acquire_lock(path: &Path) -> Option<std::fs::File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok()?;
     }
