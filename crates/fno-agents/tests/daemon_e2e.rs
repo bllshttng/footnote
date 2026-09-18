@@ -1689,7 +1689,10 @@ async fn restart_force_recovers_a_wedged_holder() {
         "the failure names the wedge shape: {stderr}"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(10),
+        started.elapsed() < Duration::from_secs(30),
+        // 30s, not 10s: the bound proves the failure is bounded, never a
+        // hang, and a loaded machine (load average in the hundreds) needs
+        // the headroom to spawn the child at all.
         "the injected deadline bounded the failure"
     );
 
