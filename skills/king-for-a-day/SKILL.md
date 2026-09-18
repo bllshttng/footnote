@@ -280,7 +280,7 @@ A pass that only mutates the graph leaves no trace of its reasoning, and the nex
 
 Every write is an `fno backlog` verb.
 They take the graph lock, so a pass and a grooming run can race harmlessly.
-Never edit `~/.fno/graph.json`.
+Never edit `~/.fno/graph.db`.
 
 **3a. Wire the strata first, before anything becomes dispatchable.**
 

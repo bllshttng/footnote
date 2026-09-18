@@ -57,7 +57,7 @@ outer loop:
 
 ### The scoreboard reads the merge, not the terminal
 
-When its PR merged (`graph.json` `merge_status: merged`, written only from merge evidence), `fno whoami scoreboard` counts the node as shipped - never from the session's `termination_reason`. The terminal is what a session believed. The merge is what happened. The two disagreed by 2x before 2026-09-03: a PR that merges after the session stops is a `reconcile-backstop` row, not a `Done*` terminal. The terminal count prints beside the merge count for one release (`by session terminal alone:`), then drops. The Stop-cause distribution keeps reading "how sessions ended". Ledger rows record `started` and `completed` in aware UTC (`+00:00` suffix) from 2026-09-03. Earlier rows carry a naive-local `completed`. Readers normalize through the fold's `_parse_ts`, not a backfill.
+When its PR merged (the node's `merge_status: merged` in the graph store, written only from merge evidence), `fno whoami scoreboard` counts the node as shipped - never from the session's `termination_reason`. The terminal is what a session believed. The merge is what happened. The two disagreed by 2x before 2026-09-03: a PR that merges after the session stops is a `reconcile-backstop` row, not a `Done*` terminal. The terminal count prints beside the merge count for one release (`by session terminal alone:`), then drops. The Stop-cause distribution keeps reading "how sessions ended". Ledger rows record `started` and `completed` in aware UTC (`+00:00` suffix) from 2026-09-03. Earlier rows carry a naive-local `completed`. Readers normalize through the fold's `_parse_ts`, not a backfill.
 
 ---
 
@@ -81,7 +81,7 @@ pub trait Queue {
 
 **Target Queue (group 1):** degenerate - one unit read from `.fno/target-state.md`. `close()` is inert: the session's own stop hook already emitted the `termination` event; the manifest is immutable. As of step 6 the session's terminal side-effects (ledger session-record, and on a ship the plan stamp/graduate + handoff artifact) are written by `fno-agents finalize`, which the shim invokes at the terminal-allow boundary BEFORE the worker process exits. A failed `DoneDelivery` finalize keeps the hook alive for an idempotent retry; legacy finalize failures remain best-effort. The outer loop only observes the terminal after the hook permits exit, so `TargetQueue::close` stays inert exactly as designed - placing the writes in `close` would miss attended interactive `/target` runs, which have no outer loop at all.
 
-**Megawalk Queue (group 2):** shells `fno backlog next` and `fno backlog done`. It NEVER reads `graph.json` directly (locked decision / grilled 7). Selection logic (epics-first, project scoping, rank, `make_selection_sort_key`) stays inside `fno backlog next` - one place, no duplication.
+**Megawalk Queue (group 2):** shells `fno backlog next` and `fno backlog done`. It NEVER reads the graph store directly (locked decision / grilled 7). Selection logic (epics-first, project scoping, rank, `make_selection_sort_key`) stays inside `fno backlog next` - one place, no duplication.
 
 ### Dispatcher
 
@@ -468,7 +468,7 @@ Model-fallback is a deliberate drop, not an oversight. The loop contract is type
 
 ### MegawalkQueue
 
-`MegawalkQueue` is the backlog `Queue` adapter. It never reads `graph.json` directly (grilled decision 7). All selection logic - epics-first ordering, project scoping, rank, `make_selection_sort_key` - lives inside `fno backlog next`. The queue shells two commands:
+`MegawalkQueue` is the backlog `Queue` adapter. It never reads the graph store directly (grilled decision 7). All selection logic - epics-first ordering, project scoping, rank, `make_selection_sort_key` - lives inside `fno backlog next`. The queue shells two commands:
 
 - **`next()`**: shells `fno backlog next [--project P | --all]` and parses the JSON response. A literal `null` output means the backlog is drained; `next()` returns `Ok(None)` and the walk terminates with `NoWork`. Malformed JSON or a non-zero exit is a `LoopError::Queue`.
 

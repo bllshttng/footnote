@@ -61,7 +61,7 @@ The trigger shipped as **one global launchd daemon**, not the per-repo watcher s
 
 The ritual itself is no longer fired as a headless `/fno:pr merged` (or `/fno:post-merge`) LLM session. Its mechanical core is the `fno do pr ritual <pr> --autonomous` verb (`cli/src/fno/pr/_ritual.py`), which pr-watch runs directly as a bounded subprocess from the merged PR's canonical root (or warm-injects the identical command into the live origin session). The verb owns its own conditional headless judgment leg, so no post-merge path wraps the ritual in a second model layer or spawns a `--substrate bg` thread. Every dispatch attempt reserves a `post_merge_dispatch_receipt` (keyed by merge SHA) for attribution; it is observability only and is never a dedup input (the marker + TTL claim remain the idempotency layer).
 
-A GitHub Action cannot host this: the ritual needs local state (`~/.fno/graph.json`, the Obsidian vault, the repo working copy), and `/schedule` cloud agents lack the local creds. Polling locally is required.
+A GitHub Action cannot host this: the ritual needs local state (the graph.db backlog store, the Obsidian vault, the repo working copy), and `/schedule` cloud agents lack the local creds. Polling locally is required.
 
 The original per-repo-launchd sketch this section replaced is retained only as design history: it polled `gh pr list --state merged` per repo and fired `claude --print --dangerously-skip-permissions "/fno:post-merge <pr>"`. That framework is superseded by the global watcher.
 

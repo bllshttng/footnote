@@ -25,7 +25,7 @@ The mux is the plain workspace. A plain shell, splits, detach and reattach, and 
 | mux clients to server | protocol | crates/fno/src/proto.rs | versioned control socket |
 | fno-agents views to daemon | protocol | crates/fno/src/agents_view.rs | agent.watch unix protocol (failed watch degrades to the file scan) |
 | mux to keeper | protocol | crates/fno/src/store_client.rs | framed tag, length, payload protocol, versioned through Identify |
-| graph.json | state writer | crates/fno-agents (keeper) and the Python backlog verbs | two writers, one file format (the keeper is the canonical store) |
+| graph.db | state writer | crates/fno-agents (keeper) and the Python backlog verbs | two writers, one store (the keeper is the canonical writer) |
 | claims, detach records, squads | state writer | crates/fno-agents and crates/fno | each state file names its owner in its module docs |
 | generated capability copies | artifact | build.rs | generated, freshness-gated in CI, not dual logic |
 

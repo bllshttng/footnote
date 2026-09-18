@@ -112,7 +112,7 @@ flowchart TD
 
 ### 1. Ship gate (primary)
 
-After the ship artifact is written and `ledger.json` / `graph.json` are
+After the ship artifact is written and `ledger.json` / the graph store are
 updated, the target skill invokes:
 
 ```bash
@@ -137,7 +137,7 @@ python3 "${REPO_ROOT}/scripts/lib/stamp-plan.py" graduate \
   --plan-path "$PLAN_PATH"
 ```
 
-`graduate` is conditional. It reads `expected_url_count` from the frontmatter and counts the current `urls` list. At the full count, `in_review` flips to `done`. On intermediate ships of a cross-project plan it exits 0 without touching the file. The graph.json sync follows a `done` transition.
+`graduate` is conditional. It reads `expected_url_count` from the frontmatter and counts the current `urls` list. At the full count, `in_review` flips to `done`. On intermediate ships of a cross-project plan it exits 0 without touching the file. The graph-store sync follows a `done` transition.
 
 ### 3. Stop-hook backfill
 
@@ -183,7 +183,7 @@ to both the plan frontmatter update and the `COMPLETION.md` append. Because
 `os.replace` is atomic at the filesystem level, a crash mid-write leaves the
 original file intact rather than a truncated partial write.
 
-The same pattern is used by `roadmap-tasks.py` for `graph.json` mutations.
+The same pattern is used by `roadmap-tasks.py` for backlog graph mutations.
 See `megawalk-pipeline.md` for context on the broader write discipline.
 
 ## COMPLETION.md

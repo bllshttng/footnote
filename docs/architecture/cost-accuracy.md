@@ -14,8 +14,9 @@ How session cost numbers are computed, why they were ~7.5x inflated until
    `model_tier()` matched known opus versions explicitly and fell through to
    the legacy opus-4.0 tier ($15/$75 per Mtok) for anything unrecognized.
    Each new opus release (4.7, then 4.8 at $5/$25) was priced 3x high until
-   someone updated the table. `backfill-opus47-costs.py` was the first
-   cleanup; `backfill-cost-recompute.py` is the second and the general one.
+   someone updated the table. Two one-shot backfills cleaned up the
+   historical rows (the opus-4.7 repricing, then a general ledger recompute);
+   both scripts are deleted now.
 
 The bugs multiplied: opus-4-8 sessions registered at ~7.5x true cost, and
 budget caps (`cost_cap_usd`) tripped sessions at ~13% of their real budget.
@@ -27,7 +28,6 @@ budget caps (`cost_cap_usd`) tripped sessions at ~13% of their real budget.
 | `scripts/lib/cost_tracker.py` | **Single pricing source of truth.** `PRICING` table + `model_tier()` + `calculate_cost()` + the `estimate` CLI for shell callers. Pricing sources cited in the header: the Anthropic pricing page (canonical) and LiteLLM's `model_prices_and_context_window.json` (machine-readable reference, the same one community cost tools use). |
 | `scripts/metrics/session-cost.py` | Transcript parser. Dedups usage by `(message.id, requestId)`; computes `SessionMetrics`; `--json` feeds the register path. |
 | `scripts/metrics/cost-tracker.sh` | Shell shim. `estimate_cost` delegates to `cost_tracker.py estimate` - there is deliberately no shell pricing table. |
-| `scripts/metrics/backfill-cost-recompute.py` | One-shot historical correction for ledger.json + graph.json (idempotent, marker-based). |
 | `fno doctor --cost-check` | Opt-in drift tripwire vs the reference cost tool. |
 
 ```
@@ -38,7 +38,7 @@ transcript JSONL ──parse (dedup by message.id+requestId)──> SessionMetri
 stop hook ──register-session-cost.sh──> session-cost.py ──> ledger.json
                                                                  │
                 budget cap (loopcheck.rs cost/wall-clock caps)   ┤
-                graph.json cost_sessions (register path)─────────┤
+                backlog graph cost_sessions (register path)──────┤
                 ledger.md render ────────────────────────────────┘
 ```
 
@@ -75,30 +75,9 @@ only if Anthropic raises prices, which the doctor cross-check catches. When
 a new opus ships, add its tier to `PRICING` and update
 `LATEST_MODERN_OPUS_TIER`.
 
-## Operator runbook: historical backfill
+## Historical backfills (retired)
 
-`scripts/metrics/backfill-cost-recompute.py` corrects ledger.json +
-graph.json once, idempotently:
-
-```bash
-python3 scripts/metrics/backfill-cost-recompute.py            # dry-run, no writes
-python3 scripts/metrics/backfill-cost-recompute.py --apply    # write
-```
-
-- Per-entry strategy (marker `cost_backfill`, re-runs skip marked entries):
-  transcripts survive -> full recompute (`recomputed`); opus-4-8 without
-  transcripts -> cost/3 (`pricing_only` - exact for the pricing component,
-  the dedup factor is unknowable without data); anything else ->
-  `no_transcript`, cost untouched, never guess.
-- Graph `cost_sessions` rows are corrected via session-id cross-reference through `fno.graph.store.locked_mutate_graph` (flock + backup). `session_id` fields are never rewritten - the budget enforcement path greps by session-id prefix.
-- Concurrency: holds the register path's ledger flock
-  (`/tmp/fno-ledger.lock`); `--apply` refuses while live
-  target-session claims exist in `~/.fno/claims` (both TTL and
-  PID-liveness claim shapes). `--force` overrides for a quiesced system you
-  know is safe. The ledger and graph passes are individually atomic but not
-  mutually atomic; an interrupted apply is re-run safe.
-- After applying, review `config.budget.*.cost_cap_usd` values: caps set
-  against inflated observations now bind ~7.5x later in real terms.
+Two one-shot scripts corrected the historical ledger after the pricing fixes, completed their runs, and were deleted. `backfill-opus47-costs.py` repriced the opus-4.7 rows; `backfill-cost-recompute.py` recomputed every ledger entry and its graph `cost_sessions` from surviving transcripts (full recompute when a transcript survived, cost/3 for opus-4-8 on pricing alone, untouched when nothing was known; marker-based and idempotent, holding the register path's ledger flock). No recompute pass is maintained: the parser-level fixes above keep new rows honest.
 
 ## Drift tripwire: `fno doctor --cost-check`
 
