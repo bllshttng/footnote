@@ -3141,14 +3141,17 @@ async fn spawn_claude_stream_lane(
     claim_guard.disarm();
     let _ = ctx.emitter.emit(
         "agent_spawned",
-        &json!({
-            "name": name,
-            "provider": "claude",
-            "short_id": short_id,
-            "lane": "stream",
-            "session_uuid": uuid,
-            "node": req.params.get("node").and_then(Value::as_str),
-        }),
+        &crate::spawn_edge::birth_event(
+            name,
+            &crate::state::Lineage::from_request(&req.params),
+            json!({
+                "provider": "claude",
+                "short_id": short_id,
+                "lane": "stream",
+                "session_uuid": uuid,
+                "node": req.params.get("node").and_then(Value::as_str),
+            }),
+        ),
     );
 
     Response::ok(

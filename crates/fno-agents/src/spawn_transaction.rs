@@ -281,17 +281,33 @@ pub async fn spawn(
     })?
     .map_err(|e: String| SpawnError::Contradiction(format!("birth persistence failed: {e}")))?;
 
-    // 8. The durable birth event, correlated by spawn_id.
+    // 8. The durable birth event, correlated by spawn_id. The lineage is the
+    //    same triple RegistryEntry::new_spawn derived from the provenance.
+    let lineage = match &provenance.origin {
+        crate::spawn_contract::SpawnOrigin::Session { parent, .. } => {
+            crate::state::Lineage::captured((
+                Some(parent.session_id.clone()),
+                Some(parent.harness.clone()),
+                Some(parent.cwd.clone()),
+            ))
+        }
+        crate::spawn_contract::SpawnOrigin::NonSession { .. } => {
+            crate::state::Lineage::unproven("spawn transaction: origin names no session parent")
+        }
+    };
     let _ = runtime.emitter.emit(
         "agent_spawned",
-        &serde_json::json!({
-            "spawn_id": spawn_id,
-            "name": name,
-            "pid": facts.pid,
-            "harness_session_id": facts.child_session_id,
-            "cwd": validated.request().work.cwd,
-            "substrate": validated.request().how.substrate,
-        }),
+        &crate::spawn_edge::birth_event(
+            &name,
+            &lineage,
+            serde_json::json!({
+                "spawn_id": spawn_id,
+                "pid": facts.pid,
+                "harness_session_id": facts.child_session_id,
+                "cwd": validated.request().work.cwd,
+                "substrate": validated.request().how.substrate,
+            }),
+        ),
     );
 
     Ok(receipt(
