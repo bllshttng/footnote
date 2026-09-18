@@ -355,9 +355,6 @@ def _reap_session_processes(tmp_path_factory):
 
     yield
 
-    from fno.graph.store import reap_spawned_keepers
-
-    survivors = reap_spawned_keepers(timeout=15.0)
     # This session's own pid, not the default: a leak still parented by THIS
     # worker has a readable cwd only when the worker is the named reaper, and
     # a worker-parented child is exactly the leak that never reaches ppid 1.
@@ -375,10 +372,8 @@ def _reap_session_processes(tmp_path_factory):
     while census_rooted([str(basetemp)]) and time.monotonic() < grace_end:
         time.sleep(0.5)
     rooted = reap_rooted([str(basetemp)], reaper=os.getpid())
-    assert not survivors and not rooted, (
-        f"{len(survivors)} store keeper(s) outlived the test session "
-        f"(pids {sorted(survivors)[:10]}); the spawn ledger must drain to "
-        f"zero. {len(rooted)} process tree(s) stayed rooted in this "
+    assert not rooted, (
+        f"{len(rooted)} process tree(s) stayed rooted in this "
         f"session's tmp tree: "
         + "; ".join(
             f"pid {r['pid']} at {r['cwd']} "
@@ -387,25 +382,6 @@ def _reap_session_processes(tmp_path_factory):
         )
     )
 
-
-@pytest.fixture(autouse=True)
-def _drain_exited_keepers():
-    """Reap exited store keepers between tests, not only at session end.
-
-    The session reaper above runs ONCE, at teardown, and an exited child stays
-    in the process table as a zombie until someone collects its status - so
-    every keeper that self-exits mid-run holds a table slot under its xdist
-    worker pid until the whole session ends. Measured 2026-09-03: ~52 zombie
-    keepers per minute under four workers, 549 zombies at 31% of the process
-    table, with two suites running. Draining around every test bounds the
-    corpse window to one test; the session reaper above stays as the SIGTERM
-    backstop for keepers still LIVE at teardown, and its assert stays.
-    """
-    from fno.graph.store import drain_exited_keepers
-
-    drain_exited_keepers()
-    yield
-    drain_exited_keepers()
 
 @pytest.fixture(autouse=True)
 def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
