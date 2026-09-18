@@ -2273,8 +2273,9 @@ where
     let out = f(&mut registry);
     // Every transition into Exited carries its date, whichever closure wrote
     // it. A row already Exited with no stamp stays unstamped: a stamp written
-    // now would date an old exit to an unrelated write. A row revived out of
-    // Exited drops its stamp, or the ladder keeps reading it as exit-proven.
+    // now would date an old exit to an unrelated write. Any drive-eligible row
+    // drops an old stamp, even when another terminal status sat between the
+    // exit and revival, or the ladder can read the old exit as current again.
     let was_exited: std::collections::HashSet<&str> = before_entries
         .iter()
         .filter(|b| b.status == AgentStatus::Exited)
@@ -2286,7 +2287,7 @@ where
         if entry.status == AgentStatus::Exited && entry.exited_at.is_none() && !before_exited {
             let now = stamp.get_or_insert_with(crate::daemon::now_rfc3339_like);
             entry.exited_at = Some(now.clone());
-        } else if before_exited && entry.status.is_drive_eligible() {
+        } else if entry.status.is_drive_eligible() && entry.exited_at.is_some() {
             entry.exited_at = None;
         }
     }

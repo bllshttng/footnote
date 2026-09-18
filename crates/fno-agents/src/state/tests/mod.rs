@@ -2521,7 +2521,12 @@ fn update_registry_stamps_a_transition_into_exited() {
         .as_deref()
         .expect("exited_at stamped");
     assert!(rfc3339_like_to_secs(stamp).is_some(), "stamp={stamp}");
-    // A follow-up ask revives the row; the old stamp must not survive it.
+    // A reconciliation can change Exited to another terminal status before a
+    // follow-up ask revives the row; the old stamp must not survive the revive.
+    update_registry(&path, |r| {
+        r.find_mut("stops").unwrap().status = AgentStatus::Orphaned;
+    })
+    .unwrap();
     update_registry(&path, |r| {
         r.find_mut("stops").unwrap().status = AgentStatus::Live;
     })
