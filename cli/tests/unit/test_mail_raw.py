@@ -170,7 +170,7 @@ def test_raw_refuses_worker_status_reports(mailbox, monkeypatch, capsys, payload
 @pytest.mark.parametrize(
     "payload",
     [
-        "/code-review high --comment",
+        "/code-review <level> --comment",
         "/compact",
         "/loop 30m watch the merge slot",
         "$fno:review",
