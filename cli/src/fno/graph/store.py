@@ -1356,6 +1356,27 @@ def _emit_graph_tx_event(**data: Any) -> None:
         pass
 
 
+def _promote_linked_rows(entries: list[dict]) -> None:
+    """The write-path ladder's plan branch, in place (entries mutate).
+
+    A row sitting on ``idea`` whose linked plan has reached a rung reads
+    ``ready``: linking the filled plan is the design-completion signal. The
+    json leg derived this at every publish; the keeper cannot read plan
+    docs, so the client derives the word and ships it in the diff. The same
+    branch ``requeue``'s release uses: only a plan-less row or an
+    undesigned scaffold stays ``idea``.
+    """
+    from fno.graph.ladder import Rung, plan_rung
+
+    for entry in entries:
+        if (
+            isinstance(entry, dict)
+            and entry.get("status") == "idea"
+            and plan_rung(entry) not in (Rung.IDEA, Rung.NONE)
+        ):
+            entry["status"] = "ready"
+
+
 def commit_rows_via_store(path: Path, mutator) -> list[dict]:
     """The raw write: read one snapshot, mutate it client-side, publish the
     diff through the keeper's row commit with the bounded retry, return the
@@ -1371,6 +1392,7 @@ def commit_rows_via_store(path: Path, mutator) -> list[dict]:
         base_entries = copy.deepcopy(base_entries)
         entries = mutator(copy.deepcopy(base_entries))
         _validate_company_work(entries)
+        _promote_linked_rows(entries)
         try:
             outcome = _commit_rows(client, base_version, base_entries, entries)
             break
