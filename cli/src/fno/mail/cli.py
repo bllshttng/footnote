@@ -2915,14 +2915,21 @@ def _raw_send(
         print(f"refused: {reason}", file=sys.stderr)
         raise typer.Exit(code=2)
 
-    # 1. Refuse an empty or whitespace-only payload. Any single line is a
-    #    legal raw payload (law d-5976045c): a slash verb, a codex skill verb,
-    #    or a plain word. A bare marker is nothing to invoke.
+    # 1. Refuse an empty or whitespace-only payload. A raw payload is a
+    #    command line (law d-f6570dc9, amending d-5976045c): it must start
+    #    with / or $. A message goes wrapped. A bare marker is nothing to
+    #    invoke.
     stripped = payload.strip()
     if not stripped:
         _refused("payload is empty", usage=True)
     if stripped in ("/", "$"):
         _refused("payload is just a bare marker; nothing to invoke", usage=True)
+    if not stripped.startswith(("/", "$")):
+        _refused(
+            "raw is for running a command only: the payload must start with "
+            "/ or $. Drop --raw and send the message wrapped.",
+            usage=True,
+        )
 
     # 2. Single line: the transport is one bracketed paste plus one CR, so a
     #    second line would ride in as trailing content on the same turn.
@@ -3579,13 +3586,15 @@ def cmd_send(
         False, "--raw",
         help=(
             "Inject the payload UNWRAPPED at the recipient's prompt line: one "
-            "line, typed verbatim - a slash verb, a codex skill verb, or a "
-            "plain word. A payload starting /fno: or $fno: is an fno verb, and "
-            "the lane rewrites the marker to the form of the receiving "
-            "harness. A showing prompt is answered with `fno agents ask`. "
-            "Never queues durable. An actor OTHER than the model must supply "
-            "the trigger; self-injection is barred unless --to-self. "
-            "Mechanics and the reviewer-off-the-author rationale: "
+            "line, typed verbatim - a command only, so the payload must start "
+            "with / or $. A status report or any authored message goes "
+            "WRAPPED (drop --raw) so its sender stays visible. A payload "
+            "starting /fno: or $fno: is an fno verb, and the lane rewrites "
+            "the marker to the form of the receiving harness. A showing "
+            "prompt is answered with `fno agents ask`. Never queues durable. "
+            "An actor OTHER than the model must supply the trigger; "
+            "self-injection is barred unless --to-self. Mechanics and the "
+            "reviewer-off-the-author rationale: "
             "docs/architecture/review-lanes.md."
         ),
     ),

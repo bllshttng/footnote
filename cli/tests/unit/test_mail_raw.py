@@ -131,21 +131,61 @@ def _raw_payload_at_word_cap() -> str:
     return payload
 
 
-def test_raw_delivers_plain_and_codex_verb_payloads_unchanged(
-    mailbox, monkeypatch, capsys
-):
-    """Law d-5976045c: a raw payload need not start with a slash. A plain word
-    and a codex skill verb reach the inject unchanged."""
+def test_raw_delivers_command_and_refuses_plain_word(mailbox, monkeypatch, capsys):
+    """Law d-f6570dc9 (amending d-5976045c): raw runs a command only. A slash
+    or dollar command reaches the inject unchanged; a plain word is a message
+    and is refused with the wrapped-send hint."""
     from fno.mail.cli import _raw_send
 
     injected = _seed_claude(mailbox, monkeypatch)
     with pytest.raises(typer.Exit) as exc:
-        _raw_send("claudepeer", "hello", self_ok=False)
-    assert exc.value.exit_code == 0
-    with pytest.raises(typer.Exit) as exc:
         _raw_send("claudepeer", "$fno:reign x-4d9b", self_ok=False)
     assert exc.value.exit_code == 0
-    assert [t for (_s, t, _sender) in injected] == ["hello", "$fno:reign x-4d9b"]
+    assert [t for (_s, t, _sender) in injected] == ["$fno:reign x-4d9b"]
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("claudepeer", "hello", self_ok=False)
+    assert exc.value.exit_code != 0
+    assert "send the message wrapped" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "Law repair landed on PR 2209 through the review lane; ready for your look.",
+        "PR 2219 open for the worktree work; CI is running now.",
+    ],
+)
+def test_raw_refuses_worker_status_reports(mailbox, monkeypatch, capsys, payload):
+    """The measured incident payloads: a worker status report over --raw reads
+    as the operator typing. Each is refused at the door."""
+    from fno.mail.cli import _raw_send
+
+    _seed_claude(mailbox, monkeypatch)
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("claudepeer", payload, self_ok=False)
+    assert exc.value.exit_code != 0
+    assert "send the message wrapped" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "/code-review high --comment",
+        "/compact",
+        "/loop 30m watch the merge slot",
+        "$fno:review",
+    ],
+)
+def test_raw_delivers_any_harness_command(mailbox, monkeypatch, capsys, payload):
+    """Raw is command-only across harnesses, not fno-only: slash commands,
+    compact, loop, and codex dollar verbs all ride the lane verbatim."""
+    from fno.mail.cli import _raw_send
+
+    injected = _seed_claude(mailbox, monkeypatch)
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("claudepeer", payload, self_ok=False)
+    assert exc.value.exit_code == 0
+    assert [t for (_s, t, _sender) in injected] == [payload]
 
 
 def test_raw_refuses_an_empty_payload(mailbox, monkeypatch, capsys):
