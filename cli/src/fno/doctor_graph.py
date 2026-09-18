@@ -81,19 +81,15 @@ def _flip(target: str) -> None:
 
 
 def _illegal_canonical_keepers() -> "list[tuple[int, int]]":
-    """``(pid, rss_kb)`` of resident store keepers holding the canonical
-    graph while the store reads sqlite. The clients serve by exec now, so a
-    hit is a stale binary or a hand-spawn; the status verb refuses on it and
-    names the collector. The json archive keeper is legal here and never
-    trips this scan; its size reads in the watchdog lane."""
-    import os
+    """``(pid, rss_kb)`` of resident store keepers on the canonical graph
+    while the store reads sqlite, discovered through the watchdog's keeper
+    lane. A hit is a stale binary or a hand-spawn; the status verb refuses
+    and names the collector."""
     from pathlib import Path
 
-    import psutil
+    from fno.agents import keeper_lane as kl
 
-    from fno.agents.keeper_lane import graph_read_source, store_backend_of
-
-    if graph_read_source() != "sqlite":
+    if kl.graph_read_source() != "sqlite":
         return []
     try:
         from fno import paths
@@ -101,25 +97,14 @@ def _illegal_canonical_keepers() -> "list[tuple[int, int]]":
         canonical = str(Path(paths.graph_json()).resolve())
     except Exception:  # noqa: BLE001 - an unresolvable config owns no canonical graph
         return []
-    hits: "list[tuple[int, int]]" = []
-    me = os.getpid()
-    for proc in psutil.process_iter(["pid", "cmdline"]):
-        try:
-            if proc.info["pid"] == me:
-                continue
-            cmd = proc.info["cmdline"] or []
-            if "--store-keeper" not in cmd or "--graph" not in cmd:
-                continue
-            graph = Path(cmd[cmd.index("--graph") + 1])
-            if graph.resolve() != canonical or store_backend_of(graph) != "sqlite":
-                continue
-            rss_kb = proc.memory_info().rss // 1024
-        except (psutil.Error, OSError):  # noqa: BLE001 - unreadable process, no hit
-            continue
-        except ValueError:  # noqa: BLE001 - argv ended past --graph
-            continue
-        hits.append((proc.info["pid"], rss_kb))
-    return hits
+    return [
+        (obs.pid, obs.rss_kb or 0)
+        for obs in kl.discover().observations
+        if obs.lane == "store"
+        and obs.graph is not None
+        and obs.graph.resolve() == canonical
+        and kl.store_backend_of(obs.graph) == "sqlite"
+    ]
 
 
 @graph_app.command("backend")

@@ -67,9 +67,18 @@ def test_the_reaper_reaps_a_keeper_it_can_name(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_STORE_KEEPER_IDLE_SECS", "0")
 
     graph = _make_graph(tmp_path, [{"id": "ab-reap", "title": "reap me"}])
-    _client = store_mod._client_for(graph)  # spawns the keeper on demand
-    keeper = _client.request("read", {"strict": False, "keep_malformed": False})
-    assert keeper["entries"], "keeper must answer before the reap control"
+    # The client no longer mints keepers on demand; the ledger control names
+    # its own spawn directly, then waits out the bind window.
+    store_mod._spawn_keeper(graph)
+    keeper_client = store_mod._Keeper(store_mod.store_socket_for(graph))
+    entries = None
+    for _ in range(50):
+        try:
+            entries = keeper_client.read(graph)["entries"]
+            break
+        except store_mod.StoreUnavailable:
+            time.sleep(0.1)
+    assert entries, "keeper must answer before the reap control"
 
     ledger = store_mod._SPAWNED_KEEPERS
     assert ledger, "a spawned keeper must be addressable in the spawn ledger"
@@ -1087,6 +1096,7 @@ def test_read_nodes_by_ids_returns_none_when_the_keeper_predates_the_verb(tmp_pa
         raise RuntimeError("store error (invalid): unknown store method \"read_ids\"")
 
     monkeypatch.setattr(store_mod._Keeper, "request", stale_request)
+    monkeypatch.setattr(store_mod._ExecClient, "request", stale_request)
     path = _make_graph(tmp_path, [{"id": "ab-1", "title": "One"}])
     assert store_mod.read_nodes_by_ids(path, ["ab-1"]) is None
 
@@ -1115,6 +1125,7 @@ def test_run_op_derives_the_rung_map_from_the_light_plan_refs_read(tmp_path, mon
         raise AssertionError(f"unexpected keeper method {method}")
 
     monkeypatch.setattr(store_mod._Keeper, "request", fake_request)
+    monkeypatch.setattr(store_mod._ExecClient, "request", fake_request)
     monkeypatch.setattr(store_mod, "_finish_mutation", lambda path, outcome: None)
     result = store_mod._run_op(
         tmp_path / "graph.json", "append_progress_note",
@@ -1144,6 +1155,7 @@ def test_run_op_falls_back_to_begin_when_the_keeper_predates_the_verb(tmp_path, 
         raise AssertionError(f"unexpected keeper method {method}")
 
     monkeypatch.setattr(store_mod._Keeper, "request", stale_request)
+    monkeypatch.setattr(store_mod._ExecClient, "request", stale_request)
     monkeypatch.setattr(store_mod, "_finish_mutation", lambda path, outcome: None)
     result = store_mod._run_op(
         tmp_path / "graph.json", "append_progress_note",

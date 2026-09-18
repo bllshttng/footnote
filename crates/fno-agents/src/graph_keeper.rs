@@ -59,7 +59,7 @@ pub(crate) const TAG_IDENTIFY_REPLY: u8 = 5;
 /// One request/response frame exchange bound. Sized for a large operator
 /// graph's entries array, not the daemon protocol's cap: a canonical
 /// graph.json of 11 MB answers a `read` with a same-order JSON array.
-const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 /// Parsed `--store-keeper` lane argv:
 /// `--store-keeper --sock <path> --graph <path> [--session <id>]
@@ -139,133 +139,6 @@ pub fn parse_store_keeper_args(args: &[String]) -> Result<KeeperConfig, String> 
         events,
         idle_limit,
     })
-}
-
-/// Parsed `--store-exec` lane argv: `--store-exec --graph <path>
-/// [--canonical] [--events <path>] [--lock-timeout-secs N]`. No socket and
-/// no session: the lane serves one request on stdin/stdout and exits.
-#[derive(Debug)]
-pub struct ExecConfig {
-    pub graph: PathBuf,
-    pub canonical: bool,
-    pub lock_timeout: Duration,
-    pub events: Option<PathBuf>,
-}
-
-pub fn parse_store_exec_args(args: &[String]) -> Result<ExecConfig, String> {
-    let mut graph: Option<String> = None;
-    let mut canonical = false;
-    let mut lock_timeout = graph_store::DEFAULT_LOCK_TIMEOUT;
-    let mut events = None;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--store-exec" => {}
-            "--graph" => graph = Some(it.next().ok_or("--graph needs a value")?.clone()),
-            "--canonical" => canonical = true,
-            "--lock-timeout-secs" => {
-                let v: u64 = it
-                    .next()
-                    .ok_or("--lock-timeout-secs needs a value")?
-                    .parse()
-                    .map_err(|_| "--lock-timeout-secs needs a number")?;
-                lock_timeout = Duration::from_secs(v);
-            }
-            "--events" => events = Some(PathBuf::from(it.next().ok_or("--events needs a value")?)),
-            other => return Err(format!("unknown arg: {other}")),
-        }
-    }
-    Ok(ExecConfig {
-        graph: PathBuf::from(graph.ok_or("missing --graph")?),
-        canonical,
-        lock_timeout,
-        events,
-    })
-}
-
-/// The shared `StoreState` constructor: the resident `run()` and the
-/// one-shot `run_exec()` build the same state, so an answer cannot depend on
-/// which lane served it.
-fn fresh_store_state(
-    graph: PathBuf,
-    canonical: bool,
-    lock_timeout: Duration,
-    events: Option<PathBuf>,
-    sock_ino: Option<(u64, u64)>,
-    startup_fp: Option<crate::drift::ExeFingerprint>,
-) -> StoreState {
-    StoreState {
-        graph,
-        canonical,
-        lock_timeout,
-        gate: RwLock::new(()),
-        inflight: RwLock::new(()),
-        cache: RwLock::new(None),
-        fill: Mutex::new(()),
-        file_opens: AtomicU64::new(0),
-        snapshots: Mutex::new(std::collections::VecDeque::new()),
-        write_ledger: Mutex::new(std::collections::VecDeque::new()),
-        gate_metrics: Mutex::new(GateMetrics::new()),
-        last_write: Mutex::new(None),
-        render_in_flight: std::sync::atomic::AtomicBool::new(false),
-        render_failures: std::sync::atomic::AtomicU32::new(0),
-        last_render_attempt: Mutex::new(None),
-        events,
-        sock_ino,
-        startup_fp,
-    }
-}
-
-/// The serving half of the exec lane, split from stdin/stdout so tests drive
-/// it with an in-memory payload.
-///
-/// No render pass here, deliberately: the Python client already renders the
-/// canonical views after a landed publish (`_finish_mutation`), so an exec
-/// render would run the pass twice for every CLI write - and a synchronous
-/// `fno backlog render-views` inside the child re-enters the store client,
-/// which wedges under the test sandbox. The resident trigger's remaining
-/// job (native mux writes rendering graph.md) rides with the resident
-/// keeper itself.
-fn exec_reply(cfg: &ExecConfig, payload: &[u8]) -> Value {
-    if payload.len() > MAX_FRAME_BYTES {
-        return err_reply(
-            0,
-            "malformed_frame",
-            format!("request of {} bytes exceeds the cap", payload.len()),
-        );
-    }
-    let state = fresh_store_state(
-        cfg.graph.clone(),
-        cfg.canonical,
-        cfg.lock_timeout,
-        cfg.events.clone(),
-        None,
-        None,
-    );
-    handle_request(&state, payload)
-}
-
-/// `--store-exec` lifecycle: read ONE request JSON (the same
-/// `{"id","method","params"}` envelope the framed clients send) from stdin,
-/// serve it through `handle_request` on a fresh state, print the reply
-/// envelope on stdout, exit. Exit 0 on an ok reply, 1 otherwise; the reply
-/// is the completion record, so a lost reply means the process died - the
-/// same terminal state the socket path's `write_status` resolution reaches.
-pub fn run_exec(cfg: ExecConfig) -> Result<(), String> {
-    use std::io::Read as _;
-
-    let mut payload = Vec::new();
-    std::io::stdin()
-        .read_to_end(&mut payload)
-        .map_err(|e| format!("cannot read request from stdin: {e}"))?;
-    let reply = exec_reply(&cfg, &payload);
-    let ok = reply.get("ok").and_then(Value::as_bool) == Some(true);
-    println!("{reply}");
-    if ok {
-        Ok(())
-    } else {
-        Err("store request failed (see reply on stdout)".into())
-    }
 }
 
 fn encode(tag: u8, payload: &[u8]) -> Vec<u8> {
@@ -380,7 +253,7 @@ enum CacheKey {
 /// version token (begin's tx token), the parsed entries shared with every
 /// concurrent reader via one `Arc`, and the lazily serialized views the
 /// reply paths splice instead of re-copying the tree.
-struct CachedGraph {
+pub(crate) struct CachedGraph {
     key: CacheKey,
     version: String,
     entries: Arc<Vec<Value>>,
@@ -401,7 +274,7 @@ enum WriteLedgerState {
     Done(Value),
 }
 
-struct WriteLedgerEntry {
+pub(crate) struct WriteLedgerEntry {
     request_id: String,
     recorded_at: std::time::Instant,
     state: WriteLedgerState,
@@ -410,57 +283,57 @@ struct WriteLedgerEntry {
 /// The keeper's shared state. Writes exclude here; reads hold shared guards,
 /// so concurrent reads overlap and every read still waits out an in-flight
 /// publish rather than observing one.
-struct StoreState {
-    graph: PathBuf,
-    canonical: bool,
-    lock_timeout: Duration,
+pub(crate) struct StoreState {
+    pub(crate) graph: PathBuf,
+    pub(crate) canonical: bool,
+    pub(crate) lock_timeout: Duration,
     /// Readers share, writers exclude: read guards for handlers that only
     /// read the owned graph, write guards for the ones that publish.
-    gate: RwLock<()>,
+    pub(crate) gate: RwLock<()>,
     /// One read guard per in-flight REQUEST, held from handle_request through
     /// the reply write. Shutdown ladders on the write guard, so it cannot cut
     /// a request that is mid-publish or mid-reply (the old ladder
     /// dropped its guard before exit and a later request died mid-frame with
     /// its client reading a hangup for a write that answered ok).
-    inflight: RwLock<()>,
+    pub(crate) inflight: RwLock<()>,
     /// The parsed graph, validated by cache key on every hit. Seeded by the
     /// write path (commit/op) rather than invalidated, so a mutating fleet
     /// still hits. Never held for a corrupt/malformed/empty graph.
-    cache: RwLock<Option<Arc<CachedGraph>>>,
+    pub(crate) cache: RwLock<Option<Arc<CachedGraph>>>,
     /// The single-flight fill: one cache miss parses (or exports) while the
     /// rest re-check and hit, so a burst of concurrent cold readers costs
     /// one copy, not one copy per reader.
-    fill: Mutex<()>,
+    pub(crate) fill: Mutex<()>,
     /// Every cache-miss parse is one real file open (or db export); the
     /// counter is the cache's honest receipt (AC4's positive marker, and
     /// the PR's before/after evidence).
-    file_opens: AtomicU64,
-    snapshots: Mutex<std::collections::VecDeque<(String, Arc<Vec<Value>>)>>,
-    write_ledger: Mutex<std::collections::VecDeque<WriteLedgerEntry>>,
-    gate_metrics: Mutex<GateMetrics>,
+    pub(crate) file_opens: AtomicU64,
+    pub(crate) snapshots: Mutex<std::collections::VecDeque<(String, Arc<Vec<Value>>)>>,
+    pub(crate) write_ledger: Mutex<std::collections::VecDeque<WriteLedgerEntry>>,
+    pub(crate) gate_metrics: Mutex<GateMetrics>,
     /// The instant of the last successful publish. The render trigger reads
     /// it to debounce: the pass runs once the store has been quiet for the
     /// settle window, never per write.
-    last_write: Mutex<Option<std::time::Instant>>,
+    pub(crate) last_write: Mutex<Option<std::time::Instant>>,
     /// True while the render trigger's subprocess runs, so overlapping 1 s
     /// ticks never stack two passes.
-    render_in_flight: std::sync::atomic::AtomicBool,
+    pub(crate) render_in_flight: std::sync::atomic::AtomicBool,
     /// Consecutive render failures: drives the retry backoff, reset on the
     /// first success, so a keeper whose view pass can never run stops paying
     /// one spawn plus one durable event per second.
-    render_failures: std::sync::atomic::AtomicU32,
+    pub(crate) render_failures: std::sync::atomic::AtomicU32,
     /// The instant the trigger last RAN a pass (success or failure): the
     /// backoff measures quiet time against this, not the tick clock.
-    last_render_attempt: Mutex<Option<std::time::Instant>>,
-    events: Option<PathBuf>,
+    pub(crate) last_render_attempt: Mutex<Option<std::time::Instant>>,
+    pub(crate) events: Option<PathBuf>,
     /// The (dev, ino) of the socket path at bind time: the seat's proof.
     /// Unlinks are guarded by it, and an idle keeper whose path was rebound
     /// stands down (AC2-ERR).
-    sock_ino: Option<(u64, u64)>,
+    pub(crate) sock_ino: Option<(u64, u64)>,
     /// The build this keeper process launched from: drift is computed fresh
     /// at every Identify, and the WouldBlock arm self-retires when the
     /// binary under the keeper is rewritten while it idles.
-    startup_fp: Option<crate::drift::ExeFingerprint>,
+    pub(crate) startup_fp: Option<crate::drift::ExeFingerprint>,
 }
 
 impl StoreState {
@@ -489,7 +362,7 @@ const WAIT_BOUNDS_MS: [u64; 12] = [
     u64::MAX,
 ];
 
-struct GateMetrics {
+pub(crate) struct GateMetrics {
     started: std::time::Instant,
     started_epoch_ms: u128,
     counts: [u64; WAIT_BOUNDS_MS.len()],
@@ -499,7 +372,7 @@ struct GateMetrics {
 }
 
 impl GateMetrics {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             started: std::time::Instant::now(),
             started_epoch_ms: std::time::SystemTime::now()
@@ -942,7 +815,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         .map(|md| (md.dev(), md.ino()));
     let startup_fp = crate::drift::ExeFingerprint::current();
 
-    let state = Arc::new(fresh_store_state(
+    let state = Arc::new(crate::store_exec::fresh_store_state(
         cfg.graph.clone(),
         cfg.canonical,
         cfg.lock_timeout,
@@ -1509,7 +1382,7 @@ fn serve_client(
     }
 }
 
-fn err_reply(id: u64, kind: &str, message: String) -> Value {
+pub(crate) fn err_reply(id: u64, kind: &str, message: String) -> Value {
     json!({"id": id, "ok": false, "error": {"kind": kind, "message": message}})
 }
 
@@ -1528,7 +1401,7 @@ fn store_err_kind(err: &StoreError) -> &'static str {
     }
 }
 
-fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
+pub(crate) fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
     let req: Value = match serde_json::from_slice(payload) {
         Ok(v) => v,
         Err(e) => return err_reply(0, "malformed_frame", format!("request is not JSON: {e}")),
@@ -4706,78 +4579,6 @@ mod tests {
         handle_op(&state, &plain).unwrap();
         let body = std::fs::read_to_string(&graph).unwrap();
         assert!(body.contains("\"rank\": 2.0"), "{body}");
-    }
-
-    #[test]
-    fn store_exec_serves_a_read_then_a_commit_on_sqlite() {
-        // The one-shot lane answers the same dispatch the socket keeper
-        // does, with no socket bound and no resident process: a begin on
-        // one exec and its commit on a SECOND exec is the stateless write
-        // path the clients ride, serialized by the publish's file flock.
-        let (dir, _state) = sqlite_state(json!({
-            "entries": [{"id": "x-exe", "slug": "exec-node", "title": "e", "status": "ready"}]
-        }));
-        let graph = dir.path().join("graph.json");
-        let cfg = ExecConfig {
-            graph: graph.clone(),
-            canonical: false,
-            lock_timeout: Duration::from_secs(2),
-            events: None,
-        };
-        let payload = |v: Value| serde_json::to_vec(&v).unwrap();
-        let read = exec_reply(
-            &cfg,
-            &payload(json!({"id": 1, "method": "read", "params": {}})),
-        );
-        assert_eq!(read["ok"], json!(true), "{read}");
-        assert!(read["result"]["entries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|e| e["id"] == "x-exe"));
-        assert!(
-            !dir.path().join("graph.json.store.sock").exists(),
-            "exec binds no socket"
-        );
-
-        let begin = exec_reply(
-            &cfg,
-            &payload(json!({"id": 1, "method": "begin", "params": {}})),
-        );
-        assert_eq!(begin["ok"], json!(true), "{begin}");
-        let version = begin["result"]["version"].as_str().unwrap().to_string();
-        let mut rows: Vec<Value> = begin["result"]["entries"].as_array().unwrap().clone();
-        for row in rows.iter_mut() {
-            if row["id"] == "x-exe" {
-                row["title"] = json!("executed");
-            }
-        }
-        let commit = exec_reply(
-            &cfg,
-            &payload(json!({
-                "id": 1, "method": "commit",
-                "params": {"version": version, "entries": rows, "plan_rungs": {}, "attempt": 1}
-            })),
-        );
-        assert_eq!(commit["ok"], json!(true), "{commit}");
-
-        let after = exec_reply(
-            &cfg,
-            &payload(json!({"id": 1, "method": "read", "params": {}})),
-        );
-        let landed = after["result"]["entries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|e| e["id"] == "x-exe")
-            .unwrap();
-        assert_eq!(landed["title"], json!("executed"));
-    }
-
-    #[test]
-    fn store_exec_refuses_without_a_graph() {
-        let err = parse_store_exec_args(&["--store-exec".to_string()]).unwrap_err();
-        assert!(err.contains("missing --graph"), "{err}");
     }
 
     #[test]

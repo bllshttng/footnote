@@ -97,8 +97,8 @@ fn store_keeper_lane(args: &[String]) -> Result<(), String> {
 /// completion record; the exit code is for the shell, the stdout is for the
 /// client).
 fn store_exec_lane(args: &[String]) -> Result<(), String> {
-    let cfg = fno_agents::graph_keeper::parse_store_exec_args(args)?;
-    fno_agents::graph_keeper::run_exec(cfg)
+    let cfg = fno_agents::store_exec::parse_store_exec_args(args)?;
+    fno_agents::store_exec::run_exec(cfg)
 }
 
 /// `--keeper` / `--pane` entrypoint: parse, then run the keeper to completion.

@@ -621,28 +621,21 @@ class _Keeper:
 _EXEC_TIMEOUT_S = 60.0
 
 
-class _ExecClient:
-    """One-shot store transport: every request execs `fno-agents-worker
-    --store-exec`, serves through the keeper's own dispatch, and the child
-    exits. No resident process holds the store, so a request-driven leak has
-    nowhere to accumulate (both keepers grew ~3.6 GB/hour on 2026-09-17 with the
-    graph resident). An already-listening keeper is still preferred by
-    `_client_for`, so old binaries keep working; this is the path the client
-    takes when nothing is listening.
-
-    A lost write has no `write_status` to poll: the child is gone. That is
-    the same terminal state the socket path reaches when its keeper died,
-    raised directly instead of after a poll loop.
+class _ExecClient(_Keeper):
+    """One-shot store transport over `_Keeper`'s typed helpers: every request
+    execs `fno-agents-worker --store-exec` and the child exits, so a
+    request-driven leak has no process to grow in. A lost write raises
+    `WriteUnconfirmed` directly - an exec process cannot answer
+    `write_status` after death.
     """
 
     def __init__(self, path: Path):
         self.path = Path(path)
+        self.sock = None  # unused on this transport; _Keeper helpers read it
 
     def request(self, method: str, params: dict) -> Any:
         is_write = method in {"commit", "commit_rows", "op", "api"}
-        request_id = uuid.uuid4().hex if is_write else ""
-        request_params = {**params, "request_id": request_id} if is_write else params
-        request = {"id": 1, "method": method, "params": request_params}
+        request_params = {**params, "request_id": uuid.uuid4().hex} if is_write else params
         binary = _worker_binary()
         if binary is None:
             raise StoreUnavailable(
@@ -665,7 +658,7 @@ class _ExecClient:
         try:
             proc = subprocess.run(
                 argv,
-                input=json.dumps(request).encode(),
+                input=json.dumps({"id": 1, "method": method, "params": request_params}).encode(),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 timeout=_EXEC_TIMEOUT_S,
@@ -701,31 +694,8 @@ class _ExecClient:
         error = reply.get("error") or {}
         _raise_store_error(error.get("kind", "invalid"), str(error.get("message", error)))
 
-    def read(self, path: Path, *, strict: bool = False, keep_malformed: bool = False) -> dict:
-        del path  # single-graph lane: the bound graph IS the target
-        try:
-            return self.request(
-                "read" if not strict else "read_strict",
-                {"strict": strict, "keep_malformed": keep_malformed},
-            )
-        except GraphCorruptError as exc:
-            if not strict:
-                raise
-            # Taxonomy, not wording: the strict read's contract is that EVERY
-            # parse failure is a GraphUnreadableError (cli.py catches that
-            # class to tell "graph unreadable" from "node absent"), while the
-            # soft path's parse failure is the swallower's GraphCorruptError.
-            raise GraphUnreadableError(str(exc)) from None
-
-    def read_file(self, path: Path) -> dict:
-        del path
-        return self.request("read_file", {})
-
-    def read_ids(self, ids: "list[str]") -> dict:
-        return self.request("read_ids", {"ids": list(ids)})
-
     def shutdown(self) -> None:
-        del self  # one-shot: nothing resident to shut down
+        pass  # one-shot: nothing resident to shut down
 
 
 def shutdown_keeper(path: Path) -> None:
