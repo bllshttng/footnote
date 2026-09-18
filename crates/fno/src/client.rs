@@ -40,7 +40,9 @@ use self::rename_overlay::RenameTarget;
 // client.rs is shrink-only under the file-budget gate.
 mod placement_pickers;
 
-use self::placement_pickers::{attach_place_keys, portal_pick_keys, AttachPlace, PortalPick};
+use self::placement_pickers::{
+    attach_place_keys, portal_pick_keys, AttachPlace, PortalPick, PortalPickDecision,
+};
 use crate::keys::{
     key_bindings, meta_rows, resolve_chord, Event, KeySection, Scanner, PANE_IDS_REPEAT_WINDOW,
 };
@@ -14923,27 +14925,24 @@ async fn selector_keys(
                 }
             }
             b'P' => {
-                // opened the NEXT FREE portal; `P` opens the
-                // portal picker instead: the portals that are OPEN, numbered,
+                // `P` opens the portal PICKER: the OPEN portals, numbered,
                 // plus a new-portal row PRE-SELECTED, so `P` Enter still sends
                 // the exact wire gesture this key always had. The SERVER still
-                // picks the index for that row - a client computing it from the
-                // rows it last rendered races every other client onto the same
-                // number, and the loser's new portal is silently repointed.
-                //
-                // A bare digit was the obvious spelling and is not available:
-                // `b'0'..=b'9'` here is the answerable-prompt path. `P`
-                // pairs with `p` (the placement picker) the way `X`/`x` already
-                // pair.
-                let picked = match view.display_rows().get(cur) {
-                    Some(DisplayRow::Agent(a)) if a.pane_id.is_none() && !a.exited => {
-                        Some(a.attach_id.clone().unwrap_or_else(|| a.name.clone()))
-                    }
+                // picks a new index - a client computing it from the rows it
+                // last rendered races every other client onto the same number.
+                // `P` pairs with `p` (the placement picker) the way `X`/`x`
+                // pair; the row decision and the refusal words live with the
+                // picker (portal_pick_decision).
+                let on_agent = match view.display_rows().get(cur) {
+                    // DisplayRow::Agent carries the row by reference, so the
+                    // match under `.get()` binds it double; the decision wants
+                    // one.
+                    Some(DisplayRow::Agent(a)) => Some(*a),
                     _ => None,
                 };
-                match picked {
-                    Some(id) => view.open_portal_pick(id),
-                    None => view.set_notice("a portal shows a paneless live row".into()),
+                match view.portal_pick_decision(on_agent) {
+                    PortalPickDecision::Open(id) => view.open_portal_pick(id),
+                    PortalPickDecision::Refuse(text) => view.set_notice(text),
                 }
             }
             b'X' => {

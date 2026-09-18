@@ -43,6 +43,22 @@ impl AttachPlace {
     }
 }
 
+/// What `P` does with the row under the cursor: open the picker, or refuse
+/// naming the row's observed state. One decision, one home, so the four
+/// states the old gate collapsed into one sentence (`a portal shows a
+/// paneless live row`) can never collapse again - the sentence contradicted
+/// the screen whenever the row was already shown through a portal the
+/// picker itself would have listed. The shape is `paneless_route_hint`'s
+/// (mux_cli), the same fix one layer down: the state rides in the line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PortalPickDecision {
+    /// The attach key the picker opens on - the old gate's exact outcome.
+    Open(String),
+    /// The refusal the notice strip shows: the row, its state, and the verb
+    /// that moves it where one applies.
+    Refuse(String),
+}
+
 /// The portal-placement picker state: the attach id of the row being
 /// placed and a cursor. Like [`AttachPlace`] the cursor is an index into the
 /// DRAWN list, never a portal index - portal membership is derived per frame,
@@ -116,6 +132,49 @@ impl View {
             cursor: self.open_portal_rows().len(),
             esc: Vec::new(),
         });
+    }
+
+    /// The `P` decision for the row under the cursor; `None` = the cursor is
+    /// not on an agent row at all, the only arm that states the rule, because
+    /// there is no row whose state could be named. The GATE does not move: a
+    /// pane-hosted row still refuses rather than opening the picker. Only the
+    /// refusal's words changed, and they live here with the picker so
+    /// client.rs stays under the file budget.
+    pub(crate) fn portal_pick_decision(&self, row: Option<&AgentRow>) -> PortalPickDecision {
+        let Some(a) = row else {
+            return PortalPickDecision::Refuse("a portal shows an agent row".into());
+        };
+        if a.pane_id.is_none() && !a.exited {
+            return PortalPickDecision::Open(a.attach_id.clone().unwrap_or_else(|| a.name.clone()));
+        }
+        // The tab context resolves through the SAME renderer the picker
+        // listing uses, so the refusal and the list cannot disagree about
+        // where the row sits.
+        let tab = match self.agent_tab_context(a.squad, a.tab) {
+            Some(TabContext::Ordinal(n)) => format!(" at tab {n}"),
+            Some(TabContext::Named(name)) => format!(" at ·{name}"),
+            None => String::new(),
+        };
+        // Meaning-first: the notice strip ellipsizes from the right, so the
+        // row and its state lead and the recovery verb trails.
+        if let Some(idx) = a.portal {
+            PortalPickDecision::Refuse(format!(
+                "{} is already portal {idx}{tab}; move it: \
+                 fno mux thread reseat <name> --portal N",
+                a.name
+            ))
+        } else if a.exited {
+            PortalPickDecision::Refuse(format!(
+                "{} has exited; a portal shows a live row only",
+                a.name
+            ))
+        } else {
+            PortalPickDecision::Refuse(format!(
+                "{} already has a pane{tab}; move it: \
+                 fno mux thread reseat <name> --portal N",
+                a.name
+            ))
+        }
     }
 
     /// Build the attach-placement picker lines: a header, one row per candidate
