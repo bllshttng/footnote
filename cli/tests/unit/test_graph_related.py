@@ -130,6 +130,36 @@ def test_replace_semantics_unlink_the_dropped_peer(tmp_graph):
     assert _related(tmp_graph, "x-cccc") == ["x-aaaa"]
 
 
+def test_set_related_keeps_held_row_references_live(monkeypatch):
+    """A mutator holding a node dict keeps writing to the row that persists."""
+    import fno.graph.store as gs
+
+    monkeypatch.setattr(
+        gs, "_pure",
+        lambda entries, name, params: [dict(e, related=["x-bbbb"]) for e in entries],
+    )
+    entries = [_node("x-aaaa")]
+    held = entries[0]
+    gs.set_related(entries, "x-aaaa", ["x-bbbb"])
+    held["details"] = "marker-5934"
+    assert entries[0]["details"] == "marker-5934"
+    assert entries[0]["related"] == ["x-bbbb"]
+
+
+def test_related_keeps_the_other_fields_of_the_same_update(tmp_graph):
+    """--related rewrites the rows; a flag applied after it must still land."""
+    result = runner.invoke(
+        app,
+        ["backlog", "update", "x-aaaa", "--details", "marker-5934", "--related", "x-bbbb"],
+    )
+    assert result.exit_code == 0, result.output
+    node = next(
+        e for e in json.loads(tmp_graph.read_text())["entries"] if e["id"] == "x-aaaa"
+    )
+    assert node["related"] == ["x-bbbb"]
+    assert node["details"] == "marker-5934"
+
+
 def test_related_accepts_slugs_and_repeated_flags(tmp_graph):
     result = runner.invoke(
         app,
