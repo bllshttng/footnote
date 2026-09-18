@@ -1623,6 +1623,86 @@ mod tests {
         );
     }
 
+    fn active_probe(token: &str) -> (String, crate::truth_probe::TruthProbe) {
+        (
+            token.to_string(),
+            crate::truth_probe::TruthProbe {
+                state: "working".to_string(),
+                provider_refusal: None,
+                harness_title: None,
+                reachability: Some("reachable".to_string()),
+                basis: Some("transcript".to_string()),
+                last_activity_age_s: Some(30.0),
+                last_activity_basis: None,
+                last_event_at: None,
+                last_message: None,
+                observed_model: Value::Null,
+            },
+        )
+    }
+
+    #[test]
+    fn a_worker_recovered_through_a_closed_row_never_reads_undriven() {
+        // The measured specimen (2026-09-17): a live worker's do row closed
+        // and the same session drove PR 2126 for fourteen more hours, yet
+        // undriven_pr named the node - the drivers feed joined on the
+        // registry `node` stamp alone, and the stamp was absent. Post-join
+        // the feed emits the recovered row, so node_driver reads active
+        // through roster_verdict and the queue stops inviting a double
+        // dispatch.
+        let mut inputs = pr_board_inputs(
+            json!([]),
+            json!([{
+                "id": "x-cccc",
+                "priority": "p1",
+                "status": "in_review",
+                "title": "driven mid-fix",
+                "pr_number": 2126,
+            }]),
+        );
+        inputs.scope_ids = None;
+        inputs.crown_scope = None;
+        // What read_driver_rows emits after the graph join: the unstamped
+        // live registry row resolved through the PR-bound entry's closed do
+        // row.
+        inputs.drivers = SourceRead::ok(json!([
+            {"name": "t-x-cccc-worker", "node": "x-cccc", "token": "uuid-cccc"},
+        ]));
+        let (token, probe) = active_probe("uuid-cccc");
+        inputs.holder_activity.insert(token, probe);
+        let board = build_board(&inputs);
+        let rows = queue_rows(&board, "undriven_pr");
+        assert!(
+            rows.iter().all(|r| r["id"] != "x-cccc"),
+            "a driven PR was named undriven: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_prless_node_whose_worker_only_reached_a_closed_row_stays_none() {
+        // The closed-planner ruling, pinned on the board: on a node with no
+        // PR the closed row emits nothing, so the drivers feed carries no
+        // candidate and node_driver still reaches none - the node stays
+        // available to the queues that name a dead handoff.
+        let node = json!({
+            "id": "x-nopr",
+            "priority": "p1",
+            "status": "ready",
+        });
+        let drivers = SourceRead::ok(json!([]));
+        let worked = SourceRead::ok(json!([]));
+        let state = node_driver(
+            &node,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            Some(&worked),
+            Some(&drivers),
+        )
+        .0;
+        assert_eq!(state, "none");
+    }
+
     #[test]
     fn a_pr_without_a_gate_verdict_is_not_actionable() {
         // Fail closed: absent verdict means unknown, and unknown is never
