@@ -166,7 +166,10 @@ fn process_table_libproc() -> (Vec<ProcRow>, usize) {
             unreadable += 1;
             continue;
         }
-        let zombie = pid_is_zombie(pid);
+        // Zombies never reach this line: their proc_pidinfo read is a zero
+        // write and was counted unreadable above, so the sysctl-based
+        // pid_is_zombie would be a dead second read per pid here.
+        let zombie = bsd.pbi_status == libc::SZOMB;
         let mut rss_kb = 0u64;
         let mut usage_sum = 0i64;
         let mut state = if zombie { 'Z' } else { 'S' };

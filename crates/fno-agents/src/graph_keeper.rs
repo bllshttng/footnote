@@ -693,24 +693,50 @@ fn take_seat(sock: &Path) -> Option<std::fs::File> {
     if let Some(parent) = lock_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .ok()?;
-    for attempt in 0..SEAT_LOCK_ATTEMPTS {
-        match file.try_lock() {
-            Ok(()) => return Some(file),
-            Err(e) => {
-                let io_err: std::io::Error = e.into();
-                if io_err.kind() != std::io::ErrorKind::WouldBlock {
-                    return None;
+    // Two open-and-lock rounds: the daemon's startup sweep unlinks an
+    // orphaned lock while holding its own flock, so a keeper that opened
+    // the file just before that unlink would otherwise succeed on an
+    // unnamed inode and share the seat with a replacement. Re-stat the
+    // path after locking: anything but the exact inode we hold means the
+    // name moved, and one fresh reopen settles it; a second mismatch
+    // means the name is being cycled faster than we can claim it, which
+    // reads as the seat being owned.
+    for _round in 0..2 {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .ok()?;
+        let mut name_moved = false;
+        for attempt in 0..SEAT_LOCK_ATTEMPTS {
+            match file.try_lock() {
+                Ok(()) => {
+                    let named_ok = std::fs::metadata(&lock_path)
+                        .ok()
+                        .zip(file.metadata().ok())
+                        .is_some_and(|(named, held)| {
+                            named.dev() == held.dev() && named.ino() == held.ino()
+                        });
+                    if named_ok {
+                        return Some(file);
+                    }
+                    name_moved = true;
+                    break;
                 }
-                if attempt + 1 < SEAT_LOCK_ATTEMPTS {
-                    std::thread::sleep(SEAT_LOCK_RETRY * (attempt as u32 + 1));
+                Err(e) => {
+                    let io_err: std::io::Error = e.into();
+                    if io_err.kind() != std::io::ErrorKind::WouldBlock {
+                        return None;
+                    }
+                    if attempt + 1 < SEAT_LOCK_ATTEMPTS {
+                        std::thread::sleep(SEAT_LOCK_RETRY * (attempt as u32 + 1));
+                    }
                 }
             }
+        }
+        if !name_moved {
+            return None; // the lock never came free: the seat is owned
         }
     }
     None
