@@ -1966,7 +1966,10 @@ fn emit_tick_event(
         fields.insert("rerun_keys".to_string(), serde_json::json!(reran_keys));
     }
     if !acted_prs.is_empty() {
-        fields.insert("acted_prs".to_string(), serde_json::json!(acted_prs));
+        // The status line reads these back as numbers; a string row would
+        // render as "acted on nothing" whatever the run did.
+        let nums: Vec<u64> = acted_prs.iter().filter_map(|p| p.parse().ok()).collect();
+        fields.insert("acted_prs".to_string(), serde_json::json!(nums));
     }
     fields.insert(
         "duration_s".to_string(),
@@ -3739,6 +3742,20 @@ exit 0
         let events = log_of(d, "events.jsonl");
         assert!(events.contains("\"rebased\":1"), "{events}");
         assert!(events.contains("pr_heal_pr"), "{events}");
+        // The emitter's own row, read back the way --status reads it: the
+        // acted list must survive the string-to-number trip.
+        let sa = parse_args(&[
+            "--status".to_string(),
+            "--armed".to_string(),
+            "--events-file".to_string(),
+            d.join("events.jsonl").to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        assert!(
+            status_line(&sa).contains("acted on PR 1"),
+            "{}",
+            status_line(&sa)
+        );
     }
 
     #[test]
