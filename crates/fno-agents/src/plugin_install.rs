@@ -1141,8 +1141,8 @@ fn run_agy_hooks(
     hooks_file: Option<&str>,
     json: bool,
 ) -> i32 {
-    if harness.is_some_and(|h| h != "agy") {
-        eprintln!("plugin install: --hooks/--hooks-status apply to the agy arm");
+    if harness != Some("agy") {
+        eprintln!("plugin install: --hooks/--hooks-status apply to the agy arm; name it: plugin-install agy --hooks");
         return 2;
     }
     let Some(home) = std::env::var_os("HOME") else {
