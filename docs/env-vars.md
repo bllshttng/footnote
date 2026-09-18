@@ -157,8 +157,8 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_RUNTIME_STATE_PATH` | py+rs | Overrides the provider runtime-state file (quota locks, usage); the default is ~/.fno/runtime-state.json. |
 | `FNO_SERVER` | py | Names the target mux server. |
 | `FNO_SESSION` | py+rs | Deprecated alias of FNO_SERVER; the Rust pane-send audit row also reads it as the calling session the send came from. |
-| `FNO_SESSION_HARNESS` | py+rs | unclear: cli/src/fno/claims/session_pid.py:223 |
-| `FNO_SESSION_PID` | py+rs | unclear: cli/src/fno/claims/session_pid.py:163 |
+| `FNO_SESSION_HARNESS` | rs | The launcher-stamped harness half of the session-proof pair; a known name beside a live `FNO_SESSION_PID` answers the harness before the census walk (spawn_context.rs stamp_pair_harness). |
+| `FNO_SESSION_PID` | rs | The launcher-stamped pid half of the session-proof pair; must be a positive, live pid or the pair is ignored (spawn_context.rs stamp_pid_is_live). |
 | `FNO_SIDECAR_SOCKET` | py | unclear: cli/src/fno/mcp/sidecar.py:97 |
 | `FNO_SKIP_MIGRATION` | py | unclear: cli/src/fno/cli.py:402 |
 | `FNO_SOURCE` | py | unclear: cli/src/fno/update.py:172 |
