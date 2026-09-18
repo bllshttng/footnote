@@ -26,8 +26,10 @@ reconcile retries.
 """
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -493,10 +495,13 @@ def run_sync_catchup(
         pulled.append(1)
         return _default_shell_runner(command, cwd)
 
-    rc = (sync or run_sync_canonical)(
-        newest["number"], settings=settings, canonical_root=canonical,
-        shell_runner=_tracking_shell,
-    )
+    # Catch-up runs inside reconcile --json: every progress echo below must
+    # stay off stdout or the JSON document is unparseable.
+    with contextlib.redirect_stdout(sys.stderr):
+        rc = (sync or run_sync_canonical)(
+            newest["number"], settings=settings, canonical_root=canonical,
+            shell_runner=_tracking_shell,
+        )
     if rc != 0:
         typer.echo(
             f"post-merge sync catch-up: sync of PR #{newest['number']} failed "
@@ -532,7 +537,8 @@ def run_sync_catchup(
             swept += 1
     typer.echo(
         f"post-merge sync catch-up: synced PR #{newest['number']}"
-        + (f", stamped {swept} older merge(s)" if swept else "")
+        + (f", stamped {swept} older merge(s)" if swept else ""),
+        err=True,
     )
     return CatchupResult("synced", newest["number"], swept)
 
