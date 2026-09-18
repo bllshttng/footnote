@@ -4883,7 +4883,7 @@ event_types:
           description: "GitHub PR number."
         reason:
           type: string
-          description: "Why this PR was skipped: 'no-checkout' (repo_dir missing/absent), 'claimed' (live node: or walker: claim), 'locked' (another merge holds the per-PR lock), 'no-watermark' (no watcher row), 'merged' (an overlapping tick merged it), 'parked' (retries exhausted), 'not-open' (the listing saw it merged or closed), 'execute-budget' (too little merge-phase slice left)."
+          description: "Why this PR was skipped: 'no-checkout' (repo_dir missing/absent), 'claimed' (live node: or walker: claim), 'locked' (another merge holds the per-PR lock), 'no-watermark' (no watcher row), 'merged' (an overlapping tick merged it), 'parked' (retries exhausted), 'not-open' (the listing saw it merged or closed), 'execute-budget' (too little merge-phase slice left), 'admission-refused' (the spawn gate refused the fire; not an attempt, so no retry burned)."
 
   - name: pr_watch_dispatch_failed
     description: "A headless claude skill fired by the PR-state watcher returned an error (rc != 0, is_error:true, or non-JSON stdout). The PR will be retried on the next tick."

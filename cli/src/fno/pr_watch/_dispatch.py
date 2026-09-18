@@ -299,10 +299,16 @@ _SPAWN_TIMEOUT_GRACE = 30.0
 # the dispatch (never the scan) and let the next tick re-decide.
 _READ_FLOOR_S = 15.0
 _FIRE_FLOOR_S = 30.0
-#: The admission gate's own refusal codes (spawn_gate.rs EXIT_FLEET_STOP*).
-#: A refusal is not a failed attempt: is_error=False carries that upstream so
-#: the caller never burns a retry on a fire that never started.
-_ADMISSION_REFUSED_RCS = (82, 83)
+
+
+def _admission_refused_rcs() -> tuple[int, ...]:
+    """The admission gate's own refusal codes, imported lazily so the
+    harness layer stays off this module's launchd hot path. A refusal is
+    not a failed attempt: is_error=False carries that upstream so the
+    caller never burns a retry on a fire that never started."""
+    from fno.agents.spawn_gate import EXIT_FLEET_STOP, EXIT_FLEET_STOP_UNAVAILABLE
+
+    return (EXIT_FLEET_STOP, EXIT_FLEET_STOP_UNAVAILABLE)
 
 
 def fire_skill(
@@ -400,7 +406,7 @@ def fire_skill(
 
     # The admission gate's own refusal codes: a durable stop answered the
     # fire, not a failed attempt.
-    if result.returncode in _ADMISSION_REFUSED_RCS:
+    if result.returncode in _admission_refused_rcs():
         return DispatchResult(ok=False, rc=result.returncode, is_error=False, raw=raw)
 
     if result.returncode != 0:
