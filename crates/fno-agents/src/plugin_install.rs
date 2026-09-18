@@ -15,7 +15,7 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
 
-use crate::paths::{dirs_home, worktree_repo_root, AgentsHome};
+use crate::paths::{dirs_home, AgentsHome};
 
 const BUILD_DIR_KEY: &str = "CARGO_BUILD_BUILD_DIR";
 const RC_MARK: &str = "# fno: cargo build-dir";
@@ -24,7 +24,7 @@ const RC_MARK: &str = "# fno: cargo build-dir";
 const HOOK_REF_PATTERN: &str =
     r#"\$\{(?:CLAUDE_PLUGIN_ROOT|CODEX_PLUGIN_ROOT|PLUGIN_ROOT)\}/([^\s"'\\]+)"#;
 
-fn state_root() -> PathBuf {
+pub(crate) fn state_root() -> PathBuf {
     std::env::var_os("FNO_RECLAIM_STATE_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| dirs_home().join(".fno"))
@@ -468,16 +468,11 @@ fn install_claude(stage: &Path, force: bool) -> Result<String, String> {
 }
 
 fn install_opencode() -> Result<String, String> {
-    let root = worktree_repo_root(&std::env::current_dir().unwrap_or_default());
-    let src = root.join("cli/src/fno/setup/assets/opencode/footnote.js");
-    if !src.is_file() {
-        return Err("opencode: not inside the footnote repo".to_string());
-    }
-    let dest_dir = dirs_home().join(".config/opencode/plugins");
-    let dest = dest_dir.join("footnote.js");
-    std::fs::create_dir_all(&dest_dir).map_err(|e| format!("opencode: {e}"))?;
-    std::fs::copy(&src, &dest).map_err(|e| format!("opencode: {e}"))?;
-    Ok(format!("plugin -> {}", dest.display()))
+    let receipt = crate::opencode_install::install(&std::env::current_dir().unwrap_or_default())?;
+    Ok(format!(
+        "{} (footnote {} -> {})",
+        receipt.status, receipt.version, receipt.config_dir
+    ))
 }
 
 fn export_claude_env() -> Result<(), String> {
@@ -660,6 +655,9 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
     let mut source: Option<String> = None;
     let mut stage: Option<String> = None;
     let mut json = false;
+    let mut uninstall = false;
+    let mut status = false;
+    let mut quick = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -676,6 +674,18 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
                 i += 1;
             }
             "--force" => i += 1,
+            "--uninstall" => {
+                uninstall = true;
+                i += 1;
+            }
+            "--status" => {
+                status = true;
+                i += 1;
+            }
+            "--installed" => {
+                quick = true;
+                i += 1;
+            }
             "--check" | "--restage" | "--stage-only" | "--env-only" => {
                 if mode.is_none() {
                     mode = Some(args[i].clone());
@@ -757,6 +767,15 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
             0
         }
         Some(harness) => {
+            if harness == "opencode" {
+                return run_opencode_arm(harness, json, uninstall, status, quick);
+            }
+            if uninstall || status || quick {
+                eprintln!(
+                    "plugin install: --uninstall/--status/--installed apply to the opencode arm only"
+                );
+                return 2;
+            }
             let force = args.iter().any(|a| a == "--force");
             let outcome = install_harness(harness, force);
             match outcome {
@@ -788,6 +807,165 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
     }
 }
 
+/// The opencode arm: one install/uninstall/status door onto
+/// `opencode_install`, plus the shared env exports and stale-copy sweep the
+/// other harness arms run. `--json` keeps stdout to the receipt alone (the
+/// Python door parses it), so the prose side lines move to stderr there.
+fn run_opencode_arm(harness: &str, json: bool, uninstall: bool, status: bool, quick: bool) -> i32 {
+    let say = |line: String| {
+        if json {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    };
+    if uninstall {
+        return match crate::opencode_install::uninstall() {
+            Ok(receipt) => {
+                if json {
+                    println!("{}", serde_json::to_string(&receipt).unwrap_or_default());
+                } else {
+                    println!(
+                        "plugin uninstall opencode: {} ({} file(s) removed from {})",
+                        receipt.status, receipt.removed, receipt.config_dir
+                    );
+                    for rel in &receipt.kept {
+                        println!(
+                            "kept user file: {rel} (its bytes changed since the install; \
+                             remove it by hand if it is yours to remove)"
+                        );
+                    }
+                }
+                if receipt.kept.is_empty() {
+                    0
+                } else {
+                    3
+                }
+            }
+            Err(e) => {
+                eprintln!("plugin uninstall opencode FAILED: {e}");
+                1
+            }
+        };
+    }
+    if status {
+        let value = crate::opencode_install::status_json();
+        if json {
+            println!("{value}");
+        } else {
+            print_status_prose(&value);
+        }
+        return 0;
+    }
+    if quick {
+        let value = crate::opencode_install::installed_status();
+        if json {
+            println!("{value}");
+        } else {
+            println!("opencode install: {}", value["status"]);
+        }
+        return 0;
+    }
+    match crate::opencode_install::install(&std::env::current_dir().unwrap_or_default()) {
+        Ok(receipt) => {
+            if json {
+                println!("{}", serde_json::to_string(&receipt).unwrap_or_default());
+            } else {
+                println!(
+                    "plugin install opencode: {} (footnote {} -> {})",
+                    receipt.status, receipt.version, receipt.config_dir
+                );
+                for rel in &receipt.kept {
+                    println!("kept user file: {rel} (footnote did not overwrite it)");
+                }
+            }
+            for (line, is_error) in env_exports_lines() {
+                if is_error {
+                    eprintln!("{line}");
+                } else {
+                    say(line);
+                }
+            }
+            let stale = remove_stale_copies();
+            if !stale.is_empty() {
+                let joined: Vec<String> = stale.iter().map(|p| p.display().to_string()).collect();
+                say(format!("removed stale copies: {}", joined.join(", ")));
+            }
+            let home = AgentsHome::from_env();
+            let _ = crate::reclaim::run_reclaim(&["--apply".to_string()], &home);
+            if receipt.status == "partial" {
+                3
+            } else {
+                0
+            }
+        }
+        Err(e) => {
+            eprintln!("plugin install opencode FAILED: {e}");
+            1
+        }
+    }
+}
+
+fn print_status_prose(value: &serde_json::Value) {
+    let status = value["status"].as_str().unwrap_or("unknown");
+    match status {
+        "installed" => println!(
+            "opencode: installed (footnote {}): {} command(s), {} agent(s), {} skill(s)",
+            value["version"].as_str().unwrap_or("?"),
+            value["installed"]["commands"]
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or(0),
+            value["installed"]["agents"]
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or(0),
+            value["installed"]["skills"]
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or(0)
+        ),
+        "absent" => println!(
+            "opencode: not installed (bridge file {}); \
+             install with `fno config plugin install opencode`",
+            if value["bridge_present"].as_bool() == Some(true) {
+                "present, legacy"
+            } else {
+                "absent"
+            }
+        ),
+        _ => {
+            println!(
+                "opencode: PARTIAL: {} name(s) installed but not loaded: {}",
+                value["missing"].as_array().map(Vec::len).unwrap_or(0),
+                value["missing"]
+                    .as_array()
+                    .map(|names| names
+                        .iter()
+                        .filter_map(|n| n.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "))
+                    .unwrap_or_default()
+            );
+            let stale = value["stale"].as_array().map(Vec::len).unwrap_or(0);
+            if stale > 0 {
+                println!(
+                    "opencode: {} loaded name(s) footnote's manifest does not know: {}",
+                    stale,
+                    value["stale"]
+                        .as_array()
+                        .map(|names| names
+                            .iter()
+                            .filter_map(|n| n.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "))
+                        .unwrap_or_default()
+                );
+            }
+        }
+    }
+}
+
 fn install_harness(harness: &str, force: bool) -> Result<String, String> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let root = repo_root(&cwd)?;
@@ -806,19 +984,36 @@ fn install_harness(harness: &str, force: bool) -> Result<String, String> {
     Ok(detail)
 }
 
-fn env_exports_receipt() {
+/// The env exports as (line, is_error) pairs, so an arm that must keep
+/// stdout to a JSON receipt can still run them with everything on stderr.
+fn env_exports_lines() -> Vec<(String, bool)> {
+    let mut lines: Vec<(String, bool)> = Vec::new();
     if let Err(e) = export_claude_env() {
-        eprintln!("fno plugin install: {e}");
+        lines.push((format!("fno plugin install: {e}"), true));
     }
     if let Err(e) = export_codex_env() {
-        eprintln!("fno plugin install: {e}");
+        lines.push((format!("fno plugin install: {e}"), true));
     }
     let rc = export_rc_env();
-    println!(
-        "build-dir env exported to: claude settings env; codex shell_environment_policy; rc ({})",
-        rc.map(|p| p.display().to_string())
-            .unwrap_or_else(|| "skipped".into())
-    );
+    lines.push((
+        format!(
+            "build-dir env exported to: claude settings env; codex shell_environment_policy; rc ({})",
+            rc.map(|p| p.display().to_string())
+                .unwrap_or_else(|| "skipped".into())
+        ),
+        false,
+    ));
+    lines
+}
+
+fn env_exports_receipt() {
+    for (line, is_error) in env_exports_lines() {
+        if is_error {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    }
 }
 
 fn install_agy(stage: &Path, force: bool) -> Result<String, String> {
