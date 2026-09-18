@@ -145,6 +145,8 @@ Two paths produce the line. The classify pass fires on the stale graph row (`gc_
 
 The real run carries its own cure. The settle pass fills stale open do rows on done and merged nodes before the row pass reads the graph (`gc.rs:452-456`). A dry run prints the cure as `would settle {id} (stale open do row filled on done+merged node: {node})`.
 
+An additional PR settles by record, never by guess. Three facts settle one: its own stamp reads `merged` or `closed`, it is the primary of a node whose merge status reads `merged`, or another node carries it as its primary. Any extra on a held node that no rule settles gets one GitHub read per pass, resolved in the node's `cwd` when the entry carries no url, and a merged or closed answer is stamped onto the entry. The stamp settles the row on the same pass; a refused stamp or an unreadable read keeps the hold.
+
 Never hand-close the node to clear this line. That hides the obligation and falsifies the record.
 
 ### planning assignment not finished by this session
@@ -204,7 +206,7 @@ The same `fno-agents node-route` command confirms it. Fix the source that answer
 
 The line reads `kept {id} (pr state contradicts: {node} {detail})`. The node reads done, but PR evidence disagrees (`gc_sweep.rs:833-857`). The detail names the shape: `additional_prs: N of M not recorded merged`, or `merge_status: X` for a recorded status that is not `merged`.
 
-The asymmetry matters (`gc.rs:152-155`). A recorded status that is not `merged` holds the row. An absent status does not hold, because absence has three explanations and none of them is `unmerged`.
+The asymmetry matters (`gc.rs:152-155`). A recorded status that is not `merged` holds the row. An absent status does not hold, because absence has three explanations and none of them is `unmerged`. For an additional PR the same pass may stamp `closed`: a closed stamp settles the entry the same way a merged one does.
 
 ### active
 
