@@ -4,7 +4,7 @@ After a reboot or a killed mux server, every worker pane is gone. A pane's pty w
 
 ## Is this page for you?
 
-**Update:** the keeper now hosts every pane, so a restart is no longer "every worker pane is gone". A keeper-hosted pane re-adopts into the fresh server at its birth pane id, and a stored leaf records that id at capture, so the pane returns to its own leaf instead of a fresh shell minting beside it. Restore's role shifts to the seats nobody holds: portals whose viewer did not come back re-arm held, and one whose viewer did come back re-arms live. A worker member whose pane is already live is focused, never spawned twice.
+**Update:** the keeper now hosts every pane, so a restart is no longer "every worker pane is gone". A keeper-hosted pane re-adopts into the fresh server at its birth pane id. A stored leaf records that id at capture. The pane therefore returns to its own leaf instead of a fresh shell minting beside it. Restore's role shifts to the seats nobody holds. A portal whose viewer did not come back re-arms held. One whose viewer did come back re-arms live. A worker member whose pane is already live is focused, never spawned twice.
 
 You are bringing worker panes back after a reboot or a killed mux server, or choosing `[mux.restore] policy` in your config. This page owns what `hold`, `idle`, and `resume` do to worker members, and what the on-demand verb relaunches. Misreading it picks the wrong knob for your symptom. On 2026-09-04 an operator set `idle` to cut a 28-tab restore. `idle` does not govern tabs at all.
 
