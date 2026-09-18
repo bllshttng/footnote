@@ -248,7 +248,9 @@ def test_map_covers_current_surface_once():
     # take one row: 608 -> 610. This branch allocates `doctor intel`, the
     # doctor leaf over the binary's provenance fold (the binary-side action
     # stays unregistered under d-fe66560a and takes no row): 610 -> 611.
-    assert len(mapped) == 611, (
+    # Task 17.1 then deletes the `backlog archive-dedupe-ids` action with
+    # the json leg it belonged to: 611 -> 610.
+    assert len(mapped) == 610, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

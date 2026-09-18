@@ -1923,6 +1923,7 @@ def test_warn_similar_nodes_includes_archived_nodes(monkeypatch, tmp_path, capsy
         json.dumps({"entries": [
             _node(
                 "arch1", title="dedup gate for backlog filings", status="done",
+                completed_at="2026-07-01T00:00:00Z",
                 pr_number=99, archived_at="2026-08-01T00:00:00Z",
             ),
         ]})
