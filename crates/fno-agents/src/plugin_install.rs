@@ -528,7 +528,9 @@ fn plugin_roots() -> (Vec<PluginRoot>, Vec<String>) {
     plugin_roots_for(&dirs_home())
 }
 
-/// A single root's verdict carrying the role it played in the enumeration.
+/// A single root's verdict carrying the role it played in the enumeration,
+/// plus the rendered one-line note and blocker text the doctor printer and
+/// blocker list print verbatim (the Python side is transport only).
 #[derive(Serialize)]
 struct RootVerdict {
     #[serde(flatten)]
@@ -536,12 +538,40 @@ struct RootVerdict {
     path: String,
     origin: &'static str,
     live: bool,
+    kind: &'static str,
+    note: String,
+    blocker: Option<String>,
 }
 
+/// The doctor-shaped fold: flat keys pointed at the live root, status the
+/// worst across roots, and the per-root detail under `roots`.
 #[derive(Serialize)]
 struct RootsReport {
+    status: String,
+    sha: Option<String>,
+    installed_at: Option<String>,
+    kind: Option<&'static str>,
+    stage: Option<String>,
+    remedy: Option<String>,
+    detail: Option<String>,
     roots: Vec<RootVerdict>,
-    detail: Vec<String>,
+    enumeration_detail: Vec<String>,
+}
+
+fn root_note(live: bool, drift: usize, remedy: &str) -> String {
+    let mut note = format!(" ({drift} file(s) differ from source HEAD)");
+    if drift == 0 {
+        note.clear();
+    }
+    if !live && drift > 0 {
+        let remedy = if remedy.is_empty() {
+            "fno config plugin install claude"
+        } else {
+            remedy
+        };
+        note.push_str(&format!(". Fix: {remedy} removes the stale second copy"));
+    }
+    note
 }
 
 /// Byte verdict for EVERY enumerated root against source HEAD. The exit code
@@ -552,23 +582,76 @@ fn check_roots_report(
     detail: Vec<String>,
     source_dir: &Path,
 ) -> (RootsReport, i32) {
+    // Worst status reads stale above unknown: stale carries a remedy and the
+    // doctor exit gate keys on it, while unknown only names its gap.
+    fn rank(status: &str) -> u8 {
+        match status {
+            "stale" => 2,
+            "unknown" => 1,
+            _ => 0,
+        }
+    }
     let mut roots = Vec::new();
-    let mut worst = 0;
+    let mut worst: Option<(u8, &'static str)> = None;
     for root in scan {
         let check = check_stage_report(&root.path, source_dir);
-        worst = worst.max(check_exit_code(check.status));
+        let drift = check.differing_count + check.missing_count;
+        let blocker = if check.status == "stale" {
+            let role = if root.live { "live" } else { "second copy" };
+            Some(format!(
+                "plugin root {} ({}) differs from source HEAD in {} file(s) (e.g. {}). Fix: {}",
+                root.path.display(),
+                role,
+                drift,
+                check.sample.first().map(String::as_str).unwrap_or("?"),
+                check.remedy
+            ))
+        } else {
+            None
+        };
+        let note = root_note(root.live, drift, &check.remedy);
+        let last_status = check.status;
         roots.push(RootVerdict {
             path: root.path.display().to_string(),
             origin: root.origin,
             live: root.live,
+            kind: "stage",
+            note,
+            blocker,
             check,
         });
+        let rank_cur = rank(last_status);
+        if worst.map_or(true, |w| rank_cur > w.0) {
+            worst = Some((rank_cur, last_status));
+        }
     }
-    (RootsReport { roots, detail }, worst)
+    let live = roots.iter().find(|r| r.live);
+    let joined = if detail.is_empty() {
+        None
+    } else {
+        Some(detail.join("; "))
+    };
+    let report = RootsReport {
+        status: worst.map(|w| w.1).unwrap_or("unknown").to_string(),
+        sha: live.map(|r| r.check.source_head.clone()),
+        installed_at: None,
+        kind: if live.is_some() || roots.is_empty() {
+            Some("stage")
+        } else {
+            None
+        },
+        stage: live.map(|r| r.path.clone()),
+        remedy: live.map(|r| r.check.remedy.clone()),
+        detail: joined,
+        enumeration_detail: detail,
+        roots,
+    };
+    let exit = worst.map(|w| check_exit_code(w.1)).unwrap_or(4);
+    (report, exit)
 }
 
 fn print_roots_report(report: &RootsReport) {
-    for line in &report.detail {
+    for line in &report.enumeration_detail {
         println!("plugin root: {line}");
     }
     for root in &report.roots {

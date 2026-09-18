@@ -2796,10 +2796,22 @@ def test_plugin_cache_no_source_is_unknown(tmp_path, monkeypatch):
 
 
 def _root_verdict(path: str, status: str, live: bool, **extra) -> dict:
+    drift = extra.get("differing_count", 0) + extra.get("missing_count", 0)
+    note = f" ({drift} file(s) differ from source HEAD)" if drift else ""
+    if status == "stale" and not live:
+        note += ". Fix: cd /src && fno config plugin install claude removes the stale second copy"
+    blocker = None
+    if status == "stale":
+        blocker = (
+            f"plugin root {path} ({'live' if live else 'second copy'}) differs from "
+            f"source HEAD in {drift} file(s) (e.g. {(extra.get('sample') or ['?'])[0]}). "
+            "Fix: cd /src && fno config plugin install claude"
+        )
     verdict = {
         "path": path,
         "origin": "marketplace" if live else "registry",
         "live": live,
+        "kind": "stage",
         "status": status,
         "source": "/src",
         "source_head": "a" * 40,
@@ -2808,13 +2820,29 @@ def _root_verdict(path: str, status: str, live: bool, **extra) -> dict:
         "sample": [],
         "remedy": "cd /src && fno config plugin install claude",
         "detail": None,
+        "note": note,
+        "blocker": blocker,
     }
     verdict.update(extra)
     return verdict
 
 
-def _roots_stdout(roots: list[dict], detail: list[str] | None = None) -> str:
-    return json.dumps({"roots": roots, "detail": detail or []})
+def _roots_stdout(roots: list[dict], detail: str | None = None) -> str:
+    live = next((r for r in roots if r["live"]), None)
+    rank = {"fresh": 0, "absent": 0, "unknown": 1, "stale": 2}
+    worst = max(roots, key=lambda r: rank.get(r["status"], 1), default=None)
+    return json.dumps(
+        {
+            "status": (worst or {"status": "unknown"})["status"],
+            "sha": (live or {}).get("sha"),
+            "installed_at": None,
+            "kind": "stage" if (live or not roots) else None,
+            "stage": (live or {}).get("path"),
+            "remedy": (live or {}).get("remedy"),
+            "detail": detail,
+            "roots": roots,
+        }
+    )
 
 
 def test_plugin_cache_multi_root_folds_worst_and_names_cache(tmp_path, monkeypatch):

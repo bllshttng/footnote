@@ -697,30 +697,19 @@ def _run_stage_check(argv: list[str]) -> tuple[int, str, str]:
         return -1, "", str(exc)
 
 
-def _stage_check_report() -> dict[str, Any]:
-    """Every-root drift verdict via ``plugin-install --check`` with no
-    ``--stage``: the Rust verb enumerates every fno plugin root on disk
-    (marketplace, registry, orphan copies) and byte-checks each against
-    source HEAD; Python is transport only. Any transport failure maps to
-    ``unknown`` in ``detail``, never ``fresh``.
-    """
+def _plugin_cache_report() -> dict[str, Any]:
+    """Root freshness, folded natively by the Rust verb; transport only."""
     def unknown(detail: str) -> dict[str, Any]:
-        return {
-            "status": "unknown",
-            "sha": None,
-            "installed_at": None,
-            "detail": detail,
-            "kind": "stage",
-            "stage": None,
-            "roots": [],
-        }
+        return {"status": "unknown", "sha": None, "installed_at": None, "detail": detail, "kind": "stage", "stage": None, "roots": []}
 
     binary = _cargo_bin_path()
     src = _resolve_source(None)
-    if not binary:
-        return unknown("no cargo fno-agents binary to run the stage check")
-    if src is None:
-        return unknown("no source checkout to compare against")
+    if not binary or src is None:
+        return unknown(
+            "no cargo fno-agents binary to run the stage check"
+            if not binary
+            else "no source checkout to compare against"
+        )
     code, out, err = _run_stage_check(
         [binary, "plugin-install", "--check", "--json", "--source", str(src)]
     )
@@ -729,59 +718,10 @@ def _stage_check_report() -> dict[str, Any]:
     try:
         verdict = json.loads(out)
     except ValueError:
-        return unknown("plugin-install --check printed no JSON")
-    if not isinstance(verdict, dict):
-        return unknown("plugin-install --check printed a non-object")
-    roots = verdict.get("roots")
-    if not isinstance(roots, list) or not roots:
-        return unknown("plugin-install --check named no plugin root")
-    for root in roots:
-        root["kind"] = "stage"
-        root["sha"] = root.pop("source_head", None)
-        root.setdefault(
-            "remedy",
-            f"cd {verdict.get('source') or src} && fno config plugin install claude",
-        )
-    return {
-        "status": "unknown",
-        "sha": None,
-        "installed_at": None,
-        "detail": "; ".join(verdict.get("detail") or []) or None,
-        "kind": "stage",
-        "stage": None,
-        "roots": roots,
-    }
-
-
-def _plugin_cache_report() -> dict[str, Any]:
-    """Freshness of every fno plugin root Claude could load or mistake for
-    the loaded one.
-
-    ``fno doctor`` already owns source-vs-installed staleness for the wheel
-    and the cargo bins; this leg covers the plugin trees. The Rust verb
-    enumerates every root (the live marketplace stage plus any registry or
-    orphan copy) and byte-checks each against source HEAD. The fold keeps
-    the flat keys (status, sha, stage, kind, detail, remedy) pointed at the
-    live root so ``_silent_switch_report`` and the human printer keep
-    working unchanged, with the per-root detail under ``roots``. Status is
-    the WORST root's status, so one stale orphan never reads as a clean
-    bill of health.
-    """
-    verdict = _stage_check_report()
-    roots = verdict.get("roots") or []
-    live = next((r for r in roots if r.get("live")), None)
-    rank = {"fresh": 0, "absent": 0, "unknown": 1, "stale": 2}
-    worst = max(roots, key=lambda r: rank.get(r.get("status"), 1), default=None)
-    return {
-        "status": (worst or verdict).get("status", "unknown"),
-        "sha": (live or {}).get("sha"),
-        "installed_at": None,
-        "detail": verdict.get("detail"),
-        "kind": "stage" if (live or not roots) else None,
-        "stage": (live or {}).get("path"),
-        "remedy": (live or {}).get("remedy"),
-        "roots": roots,
-    }
+        verdict = None
+    if not isinstance(verdict, dict) or not isinstance(verdict.get("roots"), list) or not verdict["roots"]:
+        return unknown("plugin-install --check named no readable plugin root")
+    return verdict
 
 
 # ---------------------------------------------------------------------------
@@ -1964,16 +1904,7 @@ def _blockers(result: dict[str, Any]) -> list[str]:
         blockers.append(f"{plugin_hooks['failed']} plugin hook(s) cannot launch.")
 
     plugin_cache = result.get("plugin_cache") or {}
-    for root in plugin_cache.get("roots") or []:
-        if root.get("status") != "stale":
-            continue
-        sample = root.get("sample") or []
-        drift = root.get("differing_count", 0) + root.get("missing_count", 0)
-        role = "live" if root.get("live") else "second copy"
-        blockers.append(
-            f"plugin root {root.get('path')} ({role}) differs from source HEAD in {drift} "
-            f"file(s) (e.g. {sample[0] if sample else '?'}). Fix: {root.get('remedy')}"
-        )
+    blockers.extend(r["blocker"] for r in plugin_cache.get("roots") or [] if r.get("blocker"))
     if plugin_cache.get("roots"):
         return blockers
     if plugin_cache.get("kind") == "stage" and plugin_cache.get("status") == "stale":
@@ -2674,26 +2605,11 @@ def _emit_human(
             f"run `{finding['command']}` or let the reaper restore it."
         )
 
-    # Deployed fno plugin roots: every copy Claude could load or mistake for
-    # the loaded one. One line per root; the live root is named as live, and
-    # a stale second copy names its removal.
+    # Deployed fno plugin roots: one line per root, rendered by the Rust fold.
     pc = result.get("plugin_cache") or {}
     for root in pc.get("roots") or []:
         role = "live" if root.get("live") else "second copy"
-        status = root.get("status")
-        drift = root.get("differing_count", 0) + root.get("missing_count", 0)
-        line = (
-            f"fno doctor: plugin root ({root.get('origin')}, {role}): "
-            f"{root.get('path')}: {status}"
-        )
-        if drift:
-            line += f" ({drift} file(s) differ from source HEAD)"
-        if status == "stale" and not root.get("live"):
-            line += (
-                f". Fix: {root.get('remedy') or 'fno config plugin install claude'}"
-                " removes the stale second copy"
-            )
-        out(line)
+        out(f"fno doctor: plugin root ({root.get('origin')}, {role}): {root.get('path')}: {root.get('status')}{root.get('note') or ''}")
     if pc.get("roots"):
         pass
     elif pc.get("kind") == "stage" and pc.get("status") == "stale":
