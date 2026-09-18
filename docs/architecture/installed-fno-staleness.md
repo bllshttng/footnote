@@ -180,7 +180,7 @@ When the running daemon reads `drifted` after the triad sync, `fno doctor update
 
 ## The Codex app-server: health and readiness are different axes
 
-`is_healthy` answers "is a daemon alive and answering initialize". Readiness answers a different question: is that daemon the version the installed CLI would start? The two never substitute for each other. A symlink moved to 0.154.0 does not change PID 27454's 0.153.4 executable.
+`is_healthy` answers "is a daemon alive and answering initialize". Readiness answers a different question: is that daemon the version the installed CLI starts? The two never substitute for each other. A symlink moved to 0.154.0 does not change PID 27454's 0.153.4 executable.
 
 `crates/fno-agents/src/codex_daemon_readiness.rs` owns the readiness snapshot. It carries `healthy`, pid, start token, endpoint, `CODEX_HOME`, the installed CLI version (`codex --version`), the live version, and a `verdict` of `current`, `stale`, `ahead`, or `unknown`.
 
@@ -188,5 +188,5 @@ The live version needs TWO agreeing positive readings. One is the initialize res
 
 The census emits one `codex-app-server` row from this single owner. A healthy daemon on an older version reads healthy + `stale`, never healthy alone. `fno agents census --json` exposes it beside the daemon, keeper, and mux rows.
 
-When `restart` handles the daemon, the row's `on_restart` field carries the upgrade stance: a stale daemon upgrades only through the session-preserving transaction, never a bare daemon kill. The transaction itself is wave 7's `codex_daemon_upgrade.rs`.
+When `restart` handles the daemon, the row's `on_restart` field carries the upgrade stance. A stale daemon upgrades only through the session-preserving transaction, never a bare daemon kill. The transaction itself is wave 7's `codex_daemon_upgrade.rs`.
 
