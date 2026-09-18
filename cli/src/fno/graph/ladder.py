@@ -454,20 +454,15 @@ def is_blueprint_doc(entry: object) -> bool:
     if not readable:
         return False
     if isinstance(fm, dict):
-        kinds = [
-            value.strip().lower()
-            for key in DOC_KIND_KEYS
-            if isinstance(value := fm.get(key), str)
-        ]
+        kinds = [v.strip().lower() for k in DOC_KIND_KEYS if isinstance(v := fm.get(k), str)]
         if any(kind in NOT_BLUEPRINT_KINDS for kind in kinds):
             return False
         if any(kind in BLUEPRINT_KINDS for kind in kinds):
             return True
     try:
         with open(probe, encoding="utf-8") as fh:
-            for line in fh:
-                if line.strip() == "## Execution Strategy":
-                    return True
+            if any(line.strip() == "## Execution Strategy" for line in fh):
+                return True
     except (OSError, UnicodeDecodeError):
         return False
     return False

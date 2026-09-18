@@ -236,9 +236,8 @@ def resolve_node_spawn(
         # resolver owns declared precedence; the spawn path must not strip it.
         if isinstance(node, dict):
             resolve_kwargs.update(_lifecycle_kwargs(node))
-            declared = str(node.get("dispatch_verb") or "").strip() or None
-            if declared:
-                resolve_kwargs["verb"] = declared
+            if str(node.get("dispatch_verb") or "").strip():
+                resolve_kwargs["verb"] = node["dispatch_verb"]
         if node_verb:
             resolve_kwargs["verb"] = node_verb
     resolved = harness_map.resolve_dispatch(**resolve_kwargs)
@@ -507,9 +506,8 @@ def find_node_row(node: str) -> Optional[dict]:
 
 
 def _lifecycle_kwargs(row: Optional[dict]) -> dict:
-    """The node-derived kwargs every lifecycle resolve spells: one dict for
-    the three feed sites (_spawn_worker, node_effective_verb, render_node_seed)
-    so none of them drifts on the blueprint gate."""
+    """The node-derived lifecycle kwargs, one spelling for the three feed
+    sites so none of them drifts on the blueprint gate."""
     from fno.graph.ladder import is_blueprint_doc, plan_rung
 
     entry = row or {}

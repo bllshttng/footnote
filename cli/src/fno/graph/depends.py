@@ -175,10 +175,7 @@ def _declares_values(raw: object) -> bool:
     """Does a frontmatter key carry at least one usable value?"""
     if isinstance(raw, list):
         return any(str(x).strip() for x in raw)
-    if isinstance(raw, str):
-        s = raw.strip()
-        return bool(s) and s != "[]"
-    return False
+    return isinstance(raw, str) and bool(raw.strip()) and raw.strip() != "[]"
 
 
 def _collect_frontmatter_depends(plan_path: str) -> tuple[list[str], Path]:
