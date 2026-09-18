@@ -34,7 +34,6 @@ def _adm(verdict: str, *, axis: str = "fleet_cpu_share", **kw) -> Admission:
         capacity_cores=kw.pop("capacity_cores", 12.0),
         ceiling=kw.pop("ceiling", 0.5),
         gap=kw.pop("gap", None),
-        load_15m=kw.pop("load_15m", 1.0),
         top_holder=kw.pop("top_holder", None),
     )
     assert not kw, f"unexpected overrides: {kw}"

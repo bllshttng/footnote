@@ -80,7 +80,6 @@ def _pin_admission(
         capacity_cores=12.0,
         ceiling=0.5,
         gap=None,
-        load_15m=load_15m,
     )
     monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admission)
     monkeypatch.setattr(
@@ -503,7 +502,6 @@ def _instrument_admission():
         capacity_cores=0.0,
         ceiling=0.0,
         gap=None,
-        load_15m=None,
     )
 
 

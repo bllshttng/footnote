@@ -61,7 +61,6 @@ def _no_live_cpu_axis(monkeypatch):
         capacity_cores=12.0,
         ceiling=0.5,
         gap=None,
-        load_15m=1.0,
     )
     monkeypatch.setattr(spawn_gate, "_cpu_axis", lambda *a, **k: admit)
 

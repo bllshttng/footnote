@@ -88,7 +88,6 @@ class Admission(NamedTuple):
     capacity_cores: float
     ceiling: float
     gap: str | None = None
-    load_15m: float | None = None
     top_holder: str | None = None
 
 
