@@ -78,6 +78,11 @@ pub enum UpgradeOutcome {
         after: serde_json::Value,
         threads: Vec<SnapshotThread>,
         config_unchanged: bool,
+        /// The top-level `model_context_window` before and after, `None`
+        /// when the config declares none. A key present before and absent
+        /// after never reaches this arm: it is a failed transaction.
+        model_context_window_before: Option<String>,
+        model_context_window_after: Option<String>,
     },
 }
 
@@ -195,7 +200,7 @@ fn codex_bin() -> Result<PathBuf, String> {
 /// The transaction entry. Lock, re-read, snapshot, restart, verify.
 pub async fn codex_daemon_upgrade_transaction() -> UpgradeOutcome {
     let adapter = CodexDaemonAdapter::from_environment();
-    let _lock = match crate::harness_daemon::acquire_lock(&adapter.lock_path()) {
+    let _lock = match crate::harness_daemon::try_acquire_lock(&adapter.lock_path()) {
         Some(lock) => lock,
         None => {
             return UpgradeOutcome::Held {
@@ -257,6 +262,16 @@ async fn snapshot_and_swap(
         };
     }
     let config_before = read_config_bytes();
+    let window_before = match config_before.as_deref().map(read_context_window) {
+        None => None,
+        Some(Err(error)) => {
+            return UpgradeOutcome::Refused {
+                reason: format!("config.toml does not parse before the restart: {error}"),
+                threads: snapshot,
+            }
+        }
+        Some(Ok(window)) => window,
+    };
     if let Err(reason) = codex_bin().and_then(|bin| vendor_restart(&bin)) {
         return UpgradeOutcome::Failed {
             reason,
@@ -264,7 +279,7 @@ async fn snapshot_and_swap(
             missing_ids: Vec::new(),
         };
     }
-    verify_after_restart(adapter, before, snapshot, config_before).await
+    verify_after_restart(adapter, before, snapshot, config_before, window_before).await
 }
 
 /// Post-restart verification. Every check reads live state; nothing is
@@ -274,10 +289,32 @@ async fn verify_after_restart(
     before: CodexDaemonReadiness,
     snapshot: Vec<SnapshotThread>,
     config_before: Option<Vec<u8>>,
+    window_before: Option<String>,
 ) -> UpgradeOutcome {
     let after = codex_daemon_readiness();
     let config_after = read_config_bytes();
     let config_unchanged = config_before == config_after;
+    let window_after = match config_after.as_deref().map(read_context_window) {
+        None => None,
+        Some(Err(error)) => {
+            return UpgradeOutcome::Failed {
+                reason: format!("config.toml does not parse after the restart: {error}"),
+                threads: snapshot,
+                missing_ids: Vec::new(),
+            }
+        }
+        Some(Ok(window)) => window,
+    };
+    if window_before != window_after {
+        return UpgradeOutcome::Failed {
+            reason: format!(
+                "model_context_window changed across the transaction (writer=unknown, before {:?}, after {:?})",
+                window_before, window_after
+            ),
+            threads: snapshot,
+            missing_ids: Vec::new(),
+        };
+    }
     let same_incarnation = after.pid == before.pid && after.start_token == before.start_token;
     if !after.healthy || same_incarnation {
         return UpgradeOutcome::Failed {
@@ -320,6 +357,84 @@ async fn verify_after_restart(
         after: readiness_json(&after),
         threads: snapshot,
         config_unchanged,
+        model_context_window_before: window_before,
+        model_context_window_after: window_after,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{missing_ids, snapshot_refusal, SnapshotThread};
+
+    fn thread(id: &str, status: Option<&str>) -> SnapshotThread {
+        SnapshotThread {
+            id: id.to_string(),
+            cwd: "/tmp/x".to_string(),
+            status: status.map(str::to_string),
+            fno_row: None,
+        }
+    }
+
+    #[test]
+    fn refusal_holds_on_active_systemerror_and_unreadable() {
+        let idle = vec![thread("a", Some("idle")), thread("b", Some("notLoaded"))];
+        assert_eq!(snapshot_refusal(&idle), None, "idle and notLoaded are safe");
+
+        let active = vec![thread("a", Some("idle")), thread("b", Some("active"))];
+        assert!(
+            snapshot_refusal(&active)
+                .expect("active refuses")
+                .contains("b"),
+            "the refusal names the holding thread"
+        );
+
+        let error = vec![thread("c", Some("systemError"))];
+        assert!(snapshot_refusal(&error)
+            .expect("systemError refuses")
+            .contains("c"));
+
+        let unreadable = vec![thread("d", None)];
+        assert!(
+            snapshot_refusal(&unreadable).is_some(),
+            "unreadable status refuses"
+        );
+    }
+
+    #[test]
+    fn missing_ids_names_only_threads_that_lost_id_or_cwd() {
+        let snapshot = vec![thread("keep", Some("idle")), thread("lose", Some("idle"))];
+        let mut moved = thread("keep", Some("idle"));
+        moved.cwd = "/moved".to_string();
+        let post = vec![moved, thread("keep", Some("idle"))];
+        // "keep" survives with the SAME cwd it was snapshotted at; a thread
+        // whose cwd changed reads as missing, which is what the fold owes.
+        assert_eq!(missing_ids(&snapshot, &post), Vec::<String>::new());
+        let gone = vec![thread("lose", Some("idle"))];
+        assert_eq!(
+            missing_ids(&snapshot, &gone),
+            vec!["keep".to_string(), "lose".to_string()],
+            "both snapshot ids are gone"
+        );
+    }
+
+    /// AC23-EDGE: a second transaction behind the lock reads lock-busy and
+    /// never touches the daemon. The lock file is the provider's own; the
+    /// test only holds and releases it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_second_concurrent_transaction_reads_lock_busy() {
+        use crate::harness_daemon::HarnessDaemonAdapter;
+        let adapter = crate::codex_inject::CodexDaemonAdapter::from_environment();
+        let held = crate::harness_daemon::acquire_lock(&adapter.lock_path())
+            .expect("test acquires the provider lock first");
+        let outcome = crate::codex_daemon_upgrade::codex_daemon_upgrade_transaction().await;
+        drop(held);
+        match outcome {
+            crate::codex_daemon_upgrade::UpgradeOutcome::Held {
+                kind: crate::codex_daemon_upgrade::HoldKind::LockBusy,
+                ..
+            } => {}
+            other => panic!("expected lock-busy hold, got {other:?}"),
+        }
     }
 }
 
@@ -358,4 +473,18 @@ fn codex_home() -> PathBuf {
 /// survived the restart byte-identically. `None` = no config file.
 fn read_config_bytes() -> Option<Vec<u8>> {
     std::fs::read(codex_home().join("config.toml")).ok()
+}
+
+/// The top-level `model_context_window` value from config bytes, rendered
+/// as a string. `Ok(None)` = the key is absent (never invented). `Err` =
+/// the config does not parse as TOML.
+fn read_context_window(config: &[u8]) -> Result<Option<String>, String> {
+    let text = std::str::from_utf8(config).map_err(|e| e.to_string())?;
+    let value: toml::Value = toml::from_str(text).map_err(|e| e.to_string())?;
+    Ok(value
+        .get("model_context_window")
+        .map(|window| match window {
+            toml::Value::Integer(n) => n.to_string(),
+            other => other.to_string(),
+        }))
 }

@@ -1866,18 +1866,40 @@ fn the_resume_form_comes_from_the_capability_table() {
     let toml: std::collections::BTreeMap<String, toml::Value> =
         toml::from_str(crate::harness_capabilities::CAPABILITY_TOML).unwrap();
     for harness in ["claude", "codex"] {
-        let tokens: Vec<String> = toml["harness"][&harness]["resume_strategy"]["forms"]
-            ["interactive_resume"]["tokens"]
+        let form = &toml["harness"][&harness]["resume_strategy"]["forms"]["interactive_resume"];
+        let tokens: Vec<String> = form["tokens"]
             .as_array()
             .unwrap()
             .iter()
             .map(|t| t.as_str().unwrap().replace("{session_id}", "s-1"))
             .collect();
+        let pre_exec: Vec<String> = form["pre_exec"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| t.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // The declared pre_exec composes the way the resume builder does:
+        // one `sh -c` whose script runs the pre-exec then execs the filled
+        // tokens. claude declares none and renders bare.
+        let expected = if pre_exec.is_empty() {
+            tokens.join(" ")
+        } else {
+            let join = |v: &[String]| {
+                v.iter()
+                    .map(|t| format!("'{t}'"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            format!("sh -c {}; exec {}", join(&pre_exec), join(&tokens))
+        };
         let mut e = ask_row("form", None);
         e.harness = Some(harness.into());
         e.harness_session_id = Some("s-1".into());
         let receipt = build_reap_receipt(&e, None).unwrap();
-        assert_eq!(receipt.resume, tokens.join(" "), "{harness}");
+        assert_eq!(receipt.resume, expected, "{harness}");
     }
     // A harness with no capability row (hermes hosts real sessions per
     // docs/SETUP-*.md and ships no row) cannot produce a resume command:

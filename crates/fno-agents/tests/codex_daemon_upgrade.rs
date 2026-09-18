@@ -170,6 +170,8 @@ async fn a_stale_safe_daemon_upgrades_and_preserves_every_thread() {
             after,
             threads,
             config_unchanged,
+            model_context_window_before,
+            model_context_window_after,
         } => {
             assert_eq!(
                 before.get("live").and_then(|v| v.as_str()),
@@ -188,6 +190,11 @@ async fn a_stale_safe_daemon_upgrades_and_preserves_every_thread() {
                 config_unchanged,
                 "no config file changed and none was written"
             );
+            assert_eq!(
+                model_context_window_before, None,
+                "no config declares no window, and none is invented"
+            );
+            assert_eq!(model_context_window_after, None);
         }
         other => panic!("expected upgraded, got {other:?}"),
     }

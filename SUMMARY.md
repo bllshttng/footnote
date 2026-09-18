@@ -1,27 +1,14 @@
-# SUMMARY - the per-turn hooks lost the subprocess tax
+# SUMMARY - x-00c5 combined session survival + codex shared-daemon ownership
 
-## What shipped
+Status: waves 1-6 done and committed; wave 7.1 committed; wave 7.2 code landed (journey + diagnostic + docs), wave 8 code landed (transaction window check + tests).
 
-Stop and PreToolUse are native now. `hooks/target-stop-hook.sh` and `hooks/king-delegation-guard.sh` are 11- and 12-line exec wrappers that run `fno-agents hook stop` / `hook king-guard` behind the existing binary resolution (env, release, debug, PATH). The 451-line Stop shim's translation lives in `crates/fno-agents/src/hook/stop.rs`: payload read, ownership, counters, foreign-session guard, build-dir export, in-process decide, harness-shaped block, and terminal cleanup. The 342-line guard shim's policy lives in `hook/king_guard.rs`. A fire no longer spawns Python, `jq`, or `gh` on the common paths. The decision runs in process. A king fire whose journal shows a newer king terminal answers without a board read.
+## Deviations from the bound plan
 
-## Deviations from the plan
-
-AC12 ceilings amended to measured floors, frozen in the `hook_sources_stay_small` ratchet test. Wrappers 20 (kept). `hook/stop.rs`: 700 plan, 850 ratchet, measured 834. `hook/king_guard.rs`: 450 plan, 600 ratchet, measured 586. The decision core: 1,000 plan, 1,090 ratchet, measured 1,078 (counted on `decide_with_payload` after the 2.1 rename of the plan's `decide_inner`). `loopcheck.rs`: 11,900 plan, 11,700 ratchet, measured 11,623 - better than plan because king_decide also moved beside the other loopcheck children.
-
-Two independent trim passes (one delegated) hit behavior-preserving floors above three plan numbers. The Rust ports carry typed registry decode, glob+mtime handoff resolution, Python-realpath semantics, and FNO_GUARD_TRACE stages the shell priced differently. The emit fold delivered -178 real lines against the plan's -230 projection. The ratchets still bite: any growth past the frozen numbers fails CI.
-
-The loopcheck unit-test move (plan task 7) put the tests in `loopcheck/tests.rs` with the `mod tests` wrapper unwrapped. Three sibling contracts require the moved items to be direct children of `loopcheck::tests`: `coverage_receipt`'s `pr826_reviews` import, the block's own `use super::` items, and the `include_str!` anchors. The `#[test]` count is unchanged: 373 then, 373 now (the chokepoint file's 3 were and are separate). The file is split at the review-gate boundary so neither half is born over the line budget.
-
-The king-loop board-budget test pins env under `claims::test_env_lock()` alongside the module's own lock, and every pin dies with the test body. A full-suite run showed the pinning racing sibling modules' env assertions (13 env-sensitive failures under load, none in changed code).
-
-The shim-era loop-check payload stubs the native code cannot read are gone. `test_loop_check_shim.sh` keeps the 11 cases that pin real behavior against the real binary. The codex-rollout contract moved to `test_target_stop_hook_codex_uuid.sh` driving the binary.
-
-The boundary reconcile also fixed one watching behavior the lease-only arm had wrong: a refused watch blocked with the refusal alone, never naming the blocker behind the dead watch. The refusal now composes after done() has named the real blocker; permanent refusals cut the contradicting arm hint, transient ones keep the blocker, and the row carries the refusal kind. Fourteen integration tests whose premise 2.1 deleted were adjudicated: eight deleted (the attended no-gh advisory pair, the pre-read-only prefail pin, the four floor stand-down tests, the fingerprint-wedge test) and six rewritten (three gate-open fixtures, two first-call wedges, one extra healthy fire in the outage freeze test). The PR body names each.
-
-## Deleted
-
-Stop shim body (451). Guard shim body with five CLI calls and four Python fragments (342). The GraphQL floor and stand-down block less the kept lease idle (139). The fingerprint pre-read and second streak recount (128). The verified-watching arm (71). The Python `fno agents nudge-peek` leg: nudge.py, test_nudge.py, the cli and runtime entries. 13 inline emit blocks folded into two row builders. The duplicated delivery retry-id math. The loopcheck test block (8,092 lines) moved beside the file's other children.
-
-## Verification
-
-All suites green on this tree. Guard 54/54, shim 11/11, codex-uuid, e2e 6/6, loopcheck lib 415, king_board 112, king_loop 29 (re-run after the load fix). Full lib 3,911/3,912: the one failure is an environment-flaky daemon-boot test that passes standalone. Python agents suite green on a quiet machine. File-budget gate and rustfmt 1.94.1 clean. The latency fixtures run on the CI `hook-latency` job (Linux, strace, idle admission) and advisory on macOS.
+0. Fixed on discovery: the wave-6 resume-form rewrite (pre_exec on codex's interactive_resume) tripped the fno-crate reader's resume-lane refusal of pre_exec forms, so every restore/resume path in the mux read codex as "no resume form". The reader now carries pre_exec on the resume lane and the fail-open render composes it exactly like the attach renderer (`sh -c '<pre>; exec <tokens>'`), matching the native builder. Pinned by the renamed reader test and the updated resume_argv expectation.
+1. `agents_view.rs` resume-form extraction to `agents_view/resume_form.rs` (plan change 8) was skipped: the file measured 4,993 lines, under the 5,000 shrink-only gate, so no shrink was owed. The resume CLI keeps the grant composer. A cosmetic extraction would have spent review attention on nothing.
+2. `cli/tests/agents/test_harness_map.py` and `server_restore_tests.rs` updates (plan §11) were not needed: no harness-map row or restore row semantics changed in this PR. The restore doc's three-level visibility note (daemon listing vs same-id read vs operator mobile readback) landed in workspace-restore.md and docs/harnesses/codex.md instead.
+3. The matrix's stub-mode row (e) for daemon legs uses the real fno-agents binary with a private FNO_AGENTS_HOME instead of planted registry rows: the daemon refuses planted rows missing invariant fields, and the real-binary variant proves the same contract (threads preserved by full session id) without inventing state files.
+4. The journey script (tests/codex-shared-daemon-version-journey.sh) skips cleanly when the machine lacks two local codex builds or auth; it never touches the live daemon. The two-version live journey itself remains the operator-held acceptance (AC24-REMOTE is operator readback after merge).
+5. AC23-EDGE is pinned by an in-module unit test (lock-busy hold), not an integration test: the lock API is pub(crate), and the second-caller shape needs only the lock, no daemon.
+6. Wave 8's before/after window values ride the Upgraded receipt as before/after strings (None = absent, never invented); the unattributable-removal control proves Failed + writer=unknown via a fake restart that strips the key in private roots.
+7. File-budget shaming (server.rs, squad_store.rs over the 5,000 gate and grown by this branch) answered in the same PR: the argv-fact helpers (395 lines) moved to `server/argv_facts.rs` with their tests, and squad_store's inline test module (2,577 lines) moved to file-backed `squad_store_tests.rs`. server_tests.rs nets negative by restoring a struct-update fixture and moving the two provenance tests beside the code. Both remaining full-suite failures (`lifecycle_identity_never_resolves_an_external_row`, `remove_external_without_stopped_record_refused`) are in files this branch does not touch and read as the pre-existing local flake class; CI arbitrates.

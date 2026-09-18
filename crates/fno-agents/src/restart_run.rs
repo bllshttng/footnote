@@ -112,13 +112,17 @@ pub(crate) fn render_upgrade(
             after,
             threads,
             config_unchanged,
+            model_context_window_before,
+            model_context_window_after,
         } => {
             let say = format!(
-                "fno agents restart: codex app-server upgraded ({} -> {}, {} thread(s) re-read; config {}).",
+                "fno agents restart: codex app-server upgraded ({} -> {}, {} thread(s) re-read; config {}; model_context_window {:?} -> {:?}).",
                 before.get("live").and_then(|v| v.as_str()).unwrap_or("?"),
                 after.get("live").and_then(|v| v.as_str()).unwrap_or("?"),
                 threads.len(),
                 if *config_unchanged { "unchanged" } else { "CHANGED" },
+                model_context_window_before,
+                model_context_window_after,
             );
             (vec![say], Vec::new(), false)
         }

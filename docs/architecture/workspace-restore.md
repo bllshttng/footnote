@@ -81,3 +81,11 @@ Not necessarily. The label means fno holds no session id for the member. The spa
 - `crates/fno/src/proto.rs` - `ControlVerb::WorkspaceRestore`, `ServerMsg::WorkspaceRestored`, `RestoreRow`, the `RESTORE_NOT_RUN` error class
 - `crates/fno/src/digest_overlay.rs` - `MuxRestorePolicy` (hold | idle | resume)
 - `crates/fno/tests/server_spine.rs` - the wire-tolerance arms for the new reply
+
+## Three codex visibility levels, never conflated
+
+A codex thread can be visible three ways, and each is a different claim.
+
+1. Daemon listing. `thread/loaded/list` names the id. This proves the daemon hosts the thread, nothing about its content.
+2. Same-id read. `thread/read` answers for the id with its history intact. This is what the upgrade transaction verifies after a swap.
+3. Operator mobile visibility. The same id opens in ChatGPT mobile Remote Control and a new message loads there. This is the only level the operator accepts on, and it is read by a person after merge, never asserted by a test.

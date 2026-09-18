@@ -4220,27 +4220,43 @@ mod tests {
         assert_eq!(session_id_field("cursor-agent"), Some("harness_session_id"));
         assert_eq!(session_id_field("unknown"), None);
 
-        // --cd lands the resume in the row's own tree, beside the -c grant
-        // BEFORE the subcommand where codex's globals go; token ORDER is
-        // load-bearing (byte-identical to Python `_build_resume_argv`).
+        // --cd lands the resume in the row's own tree instead of the session
+        // directory codex defaults to. It sits with the -c grant BEFORE the
+        // subcommand, where codex's globals go. The raw spliced argv then
+        // composes with the declared pre_exec (the shared-daemon ownership
+        // assertion), so the rendered shape is one `sh -c` whose script runs
+        // the daemon start and execs the filled resume.
+        let composed = |argv: &[&str]| -> Vec<String> {
+            let script = format!(
+                "'codex' 'app-server' 'daemon' 'start'; exec {}",
+                argv.iter()
+                    .map(|t| format!("'{t}'"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            vec!["sh".into(), "-c".into(), script]
+        };
         assert_eq!(
             build_resume_argv("codex", "uuid-1", Some("/path/that/does/not/exist")),
-            Some(vec![
-                "codex".into(),
-                "-c".into(),
-                "sandbox_workspace_write.writable_roots=[\"/path/that/does/not/exist/.fno/plans\"]"
-                    .into(),
-                "--cd".into(),
-                "/path/that/does/not/exist".into(),
-                "resume".into(),
-                "uuid-1".into(),
-            ])
+            Some(composed(&[
+                "codex",
+                "-c",
+                "sandbox_workspace_write.writable_roots=[\"/path/that/does/not/exist/.fno/plans\"]",
+                "--cd",
+                "/path/that/does/not/exist",
+                "resume",
+                "uuid-1",
+                "--remote",
+                "unix://",
+            ]))
         );
         // No cwd means no --cd: a bare flag fails parsing, and inventing a
         // directory is the wrong-tree failure this exists to prevent.
         assert_eq!(
             build_resume_argv("codex", "uuid-2", None),
-            Some(vec!["codex".into(), "resume".into(), "uuid-2".into()])
+            Some(composed(&[
+                "codex", "resume", "uuid-2", "--remote", "unix://"
+            ]))
         );
         // An EMPTY cwd is absent too, which is what Python's `if cwd` does.
         // Pinned here because nothing else is: drop the `.filter` and this is
@@ -4248,7 +4264,9 @@ mod tests {
         // codex, which cannot start on it.
         assert_eq!(
             build_resume_argv("codex", "uuid-3", Some("")),
-            Some(vec!["codex".into(), "resume".into(), "uuid-3".into()]),
+            Some(composed(&[
+                "codex", "resume", "uuid-3", "--remote", "unix://"
+            ])),
             "empty cwd must be treated as absent, matching the Python twin"
         );
         assert_eq!(
