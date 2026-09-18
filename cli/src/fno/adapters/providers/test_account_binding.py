@@ -277,7 +277,7 @@ def test_bearer_lane_attributes_a_shared_slot_holding_one_principal(
     store: Path, monkeypatch
 ) -> None:
     """A daemon adds a second blob for the SAME account; counting blobs read
-    one account twice and hid the operator's own usage (x-aff9)."""
+    one account twice and hid the operator's own usage."""
     record = _record("makers")
     _bind(store, "makers", MAKERS)
     proven = _serve(monkeypatch, {"t-a": MAKERS, "t-b": MAKERS})

@@ -1334,7 +1334,7 @@ class TestUntaintedStampDrift:
             lambda cli, record_id, r, bearer, **kw: verdicts[bearer],
         )
         # The bearer lane proves the shared slot's blobs before the per-bearer
-        # verdict (x-aff9), so every planted blob must resolve to one principal
+        # verdict, so every planted blob must resolve to one principal
         # or the lane refuses before the table above is consulted.
         monkeypatch.setattr(
             managed_mod, "slot_principal",
