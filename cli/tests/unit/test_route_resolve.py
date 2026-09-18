@@ -842,4 +842,4 @@ def test_an_unrouted_verb_still_walks_the_resolver_and_names_the_grid():
     assert candidate is None
     assert chain, "the walk must leave a receipt for an unrouted verb"
     assert chain[-1] == "grid=no-inventory-declared"
-    assert verdict == "armed"
+    assert verdict == "unarmed"

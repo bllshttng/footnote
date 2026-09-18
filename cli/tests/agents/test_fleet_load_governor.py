@@ -162,10 +162,10 @@ def test_config_defaults_and_coercion():
 
     a = AgentsBlock()
     assert a.max_fleet_cpu_share == 0.5
-    assert a.hard_max_load_per_cpu == 40.0
     assert AgentsBlock(max_fleet_cpu_share="0.25").max_fleet_cpu_share == 0.25
     assert AgentsBlock(max_fleet_cpu_share="junk").max_fleet_cpu_share == 0.5
-    assert AgentsBlock(hard_max_load_per_cpu="junk").hard_max_load_per_cpu == 40.0
+    # The load backstop is retired: the key is unmodeled and reads as absent.
+    assert getattr(AgentsBlock(hard_max_load_per_cpu="junk"), "hard_max_load_per_cpu", None) is None
 
 
 def test_non_finite_never_disarms_a_machine_guard():
@@ -173,7 +173,7 @@ def test_non_finite_never_disarms_a_machine_guard():
 
     Either way the ceiling stops refusing while still reading as
     configured, which is worse than a value that is merely wrong. All
-    four sibling knobs shared the hole, so all four are checked.
+    sibling knobs shared the hole, so all are checked.
     """
     from fno.config import AgentsBlock
 
@@ -181,7 +181,6 @@ def test_non_finite_never_disarms_a_machine_guard():
         "min_free_gb": 4.0,
         "max_load_per_cpu": 8.0,
         "max_fleet_cpu_share": 0.5,
-        "hard_max_load_per_cpu": 40.0,
     }
     for name, default in fields.items():
         for bad in ("nan", "inf", "-inf", "NaN", float("nan"), float("inf")):
@@ -203,10 +202,9 @@ def test_a_settings_object_missing_new_fields_keeps_its_cap():
         max_live = 9  # the value that must survive
         min_free_gb = 0.0
         max_load_per_cpu = 0.0
-        # max_fleet_cpu_share and hard_max_load_per_cpu deliberately ABSENT
+        # max_fleet_cpu_share deliberately ABSENT
 
     assert float(getattr(_Agents, "max_fleet_cpu_share", 0.5)) == 0.5
-    assert float(getattr(_Agents, "hard_max_load_per_cpu", 40.0)) == 40.0
     assert int(_Agents.max_live) == 9
 
 
