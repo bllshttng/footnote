@@ -615,11 +615,124 @@ class _Keeper:
         self._control(_TAG_SHUTDOWN, _TAG_RESPONSE)
 
 
+# Wall-clock bound for one --store-exec request. The socket path's
+# read_timeout is 60s; exec adds process start but removes queueing, so the
+# same bound holds, and a hung child cannot outlive it.
+_EXEC_TIMEOUT_S = 60.0
+
+
+class _ExecClient:
+    """One-shot store transport: every request execs `fno-agents-worker
+    --store-exec`, serves through the keeper's own dispatch, and the child
+    exits. No resident process holds the store, so a request-driven leak has
+    nowhere to accumulate (both keepers grew ~3.6 GB/hour on 2026-09-17 with the
+    graph resident). An already-listening keeper is still preferred by
+    `_client_for`, so old binaries keep working; this is the path the client
+    takes when nothing is listening.
+
+    A lost write has no `write_status` to poll: the child is gone. That is
+    the same terminal state the socket path reaches when its keeper died,
+    raised directly instead of after a poll loop.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+
+    def request(self, method: str, params: dict) -> Any:
+        is_write = method in {"commit", "commit_rows", "op", "api"}
+        request_id = uuid.uuid4().hex if is_write else ""
+        request_params = {**params, "request_id": request_id} if is_write else params
+        request = {"id": 1, "method": method, "params": request_params}
+        binary = _worker_binary()
+        if binary is None:
+            raise StoreUnavailable(
+                STATE_SPAWN_FAILED,
+                "fno-agents-worker not found (set FNO_AGENTS_WORKER or install the runtime)",
+            )
+        argv = [
+            str(binary),
+            "--store-exec",
+            "--graph",
+            str(self.path),
+            "--lock-timeout-secs",
+            str(_LOCK_TIMEOUT_SECS),
+        ]
+        if _is_canonical(self.path):
+            from fno import paths as _paths
+
+            argv.extend(["--events", str(_paths.project_events_json())])
+            argv.append("--canonical")
+        try:
+            proc = subprocess.run(
+                argv,
+                input=json.dumps(request).encode(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=_EXEC_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            failure = StoreUnavailable(
+                STATE_UNREACHABLE, f"store-exec timed out after {_EXEC_TIMEOUT_S}s"
+            )
+            if is_write:
+                raise WriteUnconfirmed(
+                    failure.state, f"{failure.detail}; the write was not confirmed"
+                ) from None
+            raise failure from None
+        except OSError as exc:  # the request was never sent
+            raise StoreUnavailable(STATE_SPAWN_FAILED, str(exc)) from None
+        out = proc.stdout
+        if not out:
+            detail = f"store-exec exited with code {proc.returncode} and no reply"
+            if is_write:
+                raise WriteUnconfirmed(
+                    STATE_UNCONFIRMED, f"{detail}; read the graph before retrying"
+                ) from None
+            raise StoreUnavailable(
+                STATE_SPAWN_FAILED,
+                f"{detail}; is fno-agents-worker current? `fno doctor` names lag",
+            ) from None
+        try:
+            reply = json.loads(out.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise StoreUnavailable(STATE_UNREACHABLE, f"store-exec reply is not JSON: {exc}") from None
+        if reply.get("ok"):
+            return reply.get("result")
+        error = reply.get("error") or {}
+        _raise_store_error(error.get("kind", "invalid"), str(error.get("message", error)))
+
+    def read(self, path: Path, *, strict: bool = False, keep_malformed: bool = False) -> dict:
+        del path  # single-graph lane: the bound graph IS the target
+        try:
+            return self.request(
+                "read" if not strict else "read_strict",
+                {"strict": strict, "keep_malformed": keep_malformed},
+            )
+        except GraphCorruptError as exc:
+            if not strict:
+                raise
+            # Taxonomy, not wording: the strict read's contract is that EVERY
+            # parse failure is a GraphUnreadableError (cli.py catches that
+            # class to tell "graph unreadable" from "node absent"), while the
+            # soft path's parse failure is the swallower's GraphCorruptError.
+            raise GraphUnreadableError(str(exc)) from None
+
+    def read_file(self, path: Path) -> dict:
+        del path
+        return self.request("read_file", {})
+
+    def read_ids(self, ids: "list[str]") -> dict:
+        return self.request("read_ids", {"ids": list(ids)})
+
+    def shutdown(self) -> None:
+        del self  # one-shot: nothing resident to shut down
+
+
 def shutdown_keeper(path: Path) -> None:
     """Ask `path`'s keeper to exit, best-effort; a bootstrap lookup must leave nothing the session reaper counts as a leak."""
     try:
         _client_for(path).shutdown()
-    except Exception:  # noqa: BLE001 - a refusing keeper is the caller's absence
+    except Exception:  # noqa: BLE001 - a refusing store is the caller's absence
         pass
 
 
@@ -636,8 +749,16 @@ def _recv_exact(stream: socket.socket, length: int) -> bytes:
     return bytes(buf)
 
 
-def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
-    """Connect to `path`'s keeper, spawning only for a positively dead socket."""
+def _client_for(path: Path, *, spawn: bool = True) -> "_Keeper | _ExecClient":
+    """Connect to `path`'s keeper; when nothing is listening, serve by exec.
+
+    A live keeper is still preferred: old binaries spawn them, and an
+    answered socket is a working store. The spawn-needed branch no longer
+    mints one: a resident keeper's memory grows with requests served
+    (measured 2026-09-17), so the request execs a one-shot `--store-exec` lane instead
+    and leaves no process behind. An unreachable store still raises
+    StoreUnavailable - never an empty graph.
+    """
     path = Path(path)
     sock = store_socket_for(path)
     keeper = _Keeper(sock)
@@ -648,36 +769,7 @@ def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
     except StoreUnavailable as exc:
         if not spawn or exc.state not in (STATE_ABSENT, STATE_NO_LISTENER):
             raise
-    proc = _spawn_keeper(path)
-    deadline = time.monotonic() + 10.0
-    last: StoreUnavailable | None = None
-    while time.monotonic() < deadline:
-        if proc.poll() is not None and proc.returncode != 3:
-            # Our spawned worker died before binding (a stale binary without
-            # the store lane, or an unexpected crash). Probe once: a live
-            # listener means the seat is taken by a valid keeper and the
-            # request can ride it; still dead means our binary is the
-            # problem, and that never justifies waiting out the clock.
-            try:
-                probe = keeper._connect()
-                probe.close()
-                return keeper
-            except StoreUnavailable as exc:
-                raise StoreUnavailable(
-                    STATE_SPAWN_FAILED,
-                    f"keeper exited immediately with code {proc.returncode} "
-                    f"({proc.args!r}); is fno-agents-worker current? "
-                    "`fno doctor` names lag",
-                ) from exc
-        # Exit 3 (EXIT_SEAT_OWNED): an incumbent holds the seat; keep polling.
-        try:
-            probe = keeper._connect()
-            probe.close()
-            return keeper
-        except StoreUnavailable as exc:
-            last = exc
-            time.sleep(0.05)
-    raise last or StoreUnavailable(STATE_SILENT, "keeper never answered")
+    return _ExecClient(path)
 
 
 def _raise_store_error(kind: str, message: str) -> None:

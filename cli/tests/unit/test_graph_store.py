@@ -1325,43 +1325,39 @@ def test_the_spent_budget_raises_the_existing_error_unchanged(tmp_path, monkeypa
     )
     assert len(delays) == 4, "the fifth conflict raises without a trailing sleep"
 
-def test_seat_owned_spawn_polls_for_the_incumbent(tmp_path, monkeypatch):
-    """x-f188 AC2-EDGE: the spawned keeper exits 3 (seat owned by an
-    incumbent); _client_for keeps polling and rides the incumbent instead of
-    raising spawn_failed."""
-    import socket as _socket
-    import threading
-    import time as _time
-
+def test_dead_socket_serves_by_exec_and_never_spawns(tmp_path, monkeypatch):
+    """The spawn-needed branch execs a one-shot lane: no resident keeper is
+    minted, so nothing holds the store to grow on. A live incumbent is still
+    preferred, and the exec client answers typed helpers."""
     graph = tmp_path / "graph.json"
     graph.write_text('{"entries": []}')
-    sock = store_mod.store_socket_for(graph)
+    spawned: "list[Path]" = []
+    monkeypatch.setattr(
+        store_mod, "_spawn_keeper", lambda p: spawned.append(Path(p)) or None
+    )
+    monkeypatch.setattr(
+        store_mod,
+        "_worker_binary",
+        lambda: tmp_path / "absent-worker",
+    )
+    client = store_mod._client_for(graph)
+    assert isinstance(client, store_mod._ExecClient)
+    assert spawned == [], "no keeper may be spawned on the exec route"
 
-    class _Exit3Proc:
-        returncode = 3
-        args = ("fno-agents-worker", "--store-keeper")
-
-        def poll(self):
-            return 3
-
-        def kill(self):
+    # A live incumbent still rides the socket: the connect probe answers, so
+    # _client_for returns the _Keeper without consulting the exec route.
+    class _FakeStream:
+        def close(self):
             pass
 
-    monkeypatch.setattr(store_mod, "_spawn_keeper", lambda _path: _Exit3Proc())
-
-    def incumbent():
-        _time.sleep(0.3)
-        srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-        srv.bind(str(sock))
-        srv.listen(1)
-        _time.sleep(3.0)
-        srv.close()
-
-    threading.Thread(target=incumbent, daemon=True).start()
+    monkeypatch.setattr(
+        store_mod._Keeper,
+        "_connect",
+        lambda self: _FakeStream(),
+    )
     keeper = store_mod._client_for(graph)
-    assert keeper.sock == sock
-    srv_sock = sock
-    assert srv_sock.exists()
+    assert isinstance(keeper, store_mod._Keeper)
+    assert keeper.sock == store_mod.store_socket_for(graph)
 
 
 _CHUNK_CAP = 8192
