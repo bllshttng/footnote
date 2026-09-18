@@ -1249,13 +1249,11 @@ def tick() -> None:
         def _phase_notify(_slice_s: float) -> None:
             _run_notify_watch_phase(_tick_roots())
 
-        # The heal drive loop: nothing called the healer on a timer,
-        # so every red open PR waited for a hand. The loop lives in Rust; this
-        # phase is only the gate, before stranded so a PR healed this tick is
-        # not reported stranded in the same breath. The arm guard lives inside
-        # run_heal_phase (it answers "unarmed" without resolving the binary),
-        # and every gate answer lands in the journal as a control_plane_tick
-        # row, unarmed included, so the status line can say why nothing ran.
+        # The heal drive loop: nothing called the healer on a timer, so every
+        # red open PR waited for a hand. The loop lives in Rust; this phase is
+        # only the gate. The arm guard lives inside run_heal_phase, and every
+        # gate answer lands in the journal as a control_plane_tick row so the
+        # status line can say why nothing ran.
         def _phase_heal(_slice_s: float) -> None:
             set_tick_phase("heal")
             try:
@@ -1267,9 +1265,7 @@ def tick() -> None:
                 return
             typer.echo(f"pr heal: {answer}")
             if answer != "ran":
-                # The same arm row the detached spawn writes, so the journal
-                # agrees with the status line on why nothing ran. The spawn
-                # path rows come from the Rust side; this covers the three
+                # The same arm row the detached spawn writes; this covers the
                 # gate answers that never reach the binary.
                 _emit_tick_row(
                     "heal",
@@ -1471,8 +1467,7 @@ def install(
         dry_run=dry_run,
         activate=not no_activate,
     )
-    # A fresh install sees the healer's arm state beside the watcher's: an
-    # operator who never armed it learns it here, with the command.
+    # A fresh install sees the healer's arm state beside the watcher's.
     from fno.pr_watch._install import heal_status_line
 
     typer.echo(heal_status_line())

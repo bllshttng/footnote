@@ -55,38 +55,25 @@ def run_heal_phase(
     for root in roots:
         try:
             proc = run(
-                [
-                    str(binary),
-                    "pr-heal",
-                    "--all",
-                    "--apply",
-                    "--detach",
-                    "--cwd",
-                    str(root),
-                ],
+                [str(binary), "pr-heal", "--all", "--apply", "--detach", "--cwd", str(root)],
                 check=False,
                 timeout=_DRIVE_TIMEOUT_S,
             )
-            # 0..3 are drive-loop verdicts (clean, escalations remain,
-            # in-flight, refusal). 4 is a read error and 127 a missing binary:
-            # a binary too old to know --detach fails this way in milliseconds
-            # and would otherwise read as "ran" with zero healing done.
+            # 0..3 are drive-loop verdicts; 4/127 means a stale binary that
+            # lacks --detach and would otherwise read as "ran" with no row.
             code = getattr(proc, "returncode", 0)
             if code not in (0, 1, 2, 3):
                 failed += 1
                 log.warning(
-                    "pr-watch: heal drive loop for %s exited %s "
-                    "(4 = read error, 127 = binary missing; a stale binary "
-                    "that lacks --detach fails this way; run `fno doctor`)",
+                    "pr-watch: heal drive loop for %s exited %s; run `fno doctor`",
                     root,
                     code,
                 )
         except Exception as exc:  # noqa: BLE001 - one root never stops the rest
             failed += 1
             log.warning("pr-watch: heal drive loop failed for %s: %s", root, exc)
-    # A spawn that failed on every root ran nothing: never report "ran",
-    # or the journal holds no row for this tick and the status line shows a
-    # stale "last run". cli.py emits the gate row for any non-"ran" answer.
+    # A spawn that failed on every root ran nothing; cli.py emits the gate
+    # row for any non-"ran" answer.
     if failed and failed == len(roots):
         return "failed"
     return "ran"
