@@ -505,9 +505,6 @@ jobs:
   hook-latency:
     name: per-turn hook latency budgets
     needs: [smoke-pytest]
-  test-agents:
-    name: cargo test (fno-agents) + schema parity
-    needs: [smoke-pytest]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -549,6 +546,204 @@ jobs:
         with:
           name: hook-latency-samples
           path: ${{ runner.temp }}/hook-latency
+
+  test-agents:
+    name: cargo test (fno-agents) + schema parity
+    needs: [smoke-pytest]
+    runs-on: ubuntu-latest
+    # 40, kept from the old single `test` job, now over half the work. Split
+    # 2026-09-17 (x-e8b1) after two runs (main at 37da45e9, PR 2137) were
+    # cancelled at this cap: the job could pass on its merits and still not
+    # finish in the time it was given, so main read red and every PR in the
+    # queue waited on one job. Shard by crate, the x-5b73 smoke split, instead
+    # of raising the number - a raised cap only hides the growth until the
+    # next PR pays it. The 2026-08-27 measurement still names the cost owner:
+    # the fno-agents real-process integration suite runs `--test-threads=1`
+    # for 1128s, 76 percent of the old whole-job time.
+    timeout-minutes: 40
+
+    # The claim classifier parity harness needs the FULL oracle package
+    # (pydantic included: fno.claims.staleness imports claims/types.py), not a
+    # hand-picked subset a bare interpreter could carry. Point it at the
+    # uv-synced venv so the guard runs on the interpreter CI already keeps
+    # complete; otherwise the import fails and the harness rots into a
+    # silent skip.
+    env:
+      FNO_CLAIMS_PARITY_PYTHON: ${{ github.workspace }}/cli/.venv/bin/python
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # The PROTO_VERSION guard below needs a merge-base between the base
+          # tip and the PR head; the default shallow fetch cannot compute one.
+          fetch-depth: 0
+
+      - name: PROTO_VERSION monotonic bump guard
+        # Runs before the Rust build so a version collision fails in seconds
+        # instead of after a full cargo test. PR_HEAD_SHA is load-bearing (this
+        # checkout is the merge ref, which cannot show the PR's own bump); the
+        # script header explains why and what this check does not close.
+        if: github.event_name == 'pull_request'
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/ci/check-proto-version-bump.sh
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/build
+            crates/fno-agents/target
+            crates/fno/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Set up Python (for flock_interop.rs cross-language test)
+        # flock_interop.rs spawns a real python3 subprocess to verify that
+        # Rust flock and Python fcntl.flock serialize correctly. ubuntu-latest
+        # ships with Python 3 on PATH; this step ensures a known version and
+        # installs the fno package so the parity check can also run.
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv + sync cli
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "latest"
+
+      - name: Install fno Python package
+        working-directory: cli
+        run: uv sync
+
+      - name: Install PyYAML + psutil for the bare python3 (parity oracles)
+        # verify_evidence.rs shells to a bare-PATH `python3 -c "import yaml,..."`
+        # for byte-parity with the deleted bash oracle. `uv sync` installs pyyaml
+        # only into cli/.venv, which the cargo-test step does not activate, so the
+        # resolved python3 lacks `yaml` and every valid fixture is falsely flagged
+        # "settings.yaml unparseable". Install pyyaml onto the setup-python
+        # interpreter (the one which_python3() resolves) so the parity check sees
+        # the same parser its frozen goldens were captured with.
+        #
+        # psutil is here for the same reason: the claim classifier parity
+        # harness imports fno.claims.staleness, whose module-level psutil import
+        # would fail on a bare interpreter and turn the differential harness
+        # into a permanent silent skip - a guard that never fires.
+        run: python3 -m pip install "pyyaml>=6" "psutil>=5"
+
+      - name: Clean cached Rust package artifacts
+        # The cache key follows Cargo.lock, so source-only changes can restore
+        # package artifacts whose mtimes make a stale test harness look fresh.
+        # Dependencies remain cached; only this shard's package is rebuilt.
+        # The fno mux shard cleans its own package the same way.
+        run: cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml
+
+      - name: cargo test --lib --bins (fno-agents)
+        working-directory: crates/fno-agents
+        run: cargo test --lib --bins
+
+      - name: cargo test --test '*' --test-threads=1 (fno-agents real-process integration)
+        working-directory: crates/fno-agents
+        run: cargo test --test '*' -- --test-threads=1
+
+      - name: Build fno-agents binary (for parity check)
+        working-directory: crates/fno-agents
+        # The package clean before unit tests makes those tests and this parity
+        # binary share one fresh source build. Dependencies stay cached.
+        run: cargo build --bin fno-agents
+
+      - name: Generated copies match their sources
+        # The ONE freshness gate for every build-generated copy. build.rs
+        # regenerates the capability copies, the merge-posture copy,
+        # events_limits.toml, and the registry-schema copy on every build;
+        # `fno doctor harness-matrix --write` renders the capability doc (and
+        # the verb doc, whose own cheap freshness step lives in guards.yml
+        # because it also reads skills/*/SKILL.md). A committed copy that
+        # drifted from its source (a hand edit, a forgotten rebuild) shows up
+        # here as a dirty tree - which is the wrong-merge class the retired
+        # *-fresh.sh scripts checked, at one step instead of four.
+        run: |
+          # fno-py, not fno: the project env's console script is fno-py and a
+          # bare `fno` on PATH is a stale installed tool, not this checkout.
+          (cd cli && uv run fno-py doctor harness-matrix --write)
+          git diff --exit-code -- \
+            cli/src/fno/agents/harness_capabilities.toml \
+            crates/fno/src/harness_capabilities.toml \
+            cli/src/fno/agents/merge_posture.toml \
+            cli/src/fno/graph/page_reload.js \
+            cli/src/fno/agents/spawn_phase.toml \
+            cli/src/fno/agents/slot_lanes.toml \
+            crates/fno-agents/src/events_limits.toml \
+            cli/src/fno/agents/registry_schema.toml \
+            docs/harnesses/capability-matrix.md
+
+      - name: Schema parity check
+        # The parity script resolves the Rust binary via `command -v fno-agents`
+        # FIRST, only then the fresh crates/fno-agents/target/debug build. If any
+        # stale fno-agents shadows PATH, the freshly-built one is ignored and the
+        # check reads an outdated --emit-schema (phantom kind drift). Prepend the
+        # fresh build dir so `command -v` resolves it, and print a diagnostic of
+        # the resolved binary + its emitted kind count for future triage.
+        run: |
+          export PATH="$PWD/crates/fno-agents/target/debug:$PATH"
+          echo "parity-diag: resolved fno-agents = $(command -v fno-agents || echo NONE)"
+          echo "parity-diag: emits newest kind (inside_leg_completed) = $(fno-agents --emit-schema 2>/dev/null | grep -c inside_leg_completed) (fresh=1, stale=0)"
+          bash scripts/check-event-schema-parity.sh
+
+      - name: Preflight receipt-scope parity
+        # Runs HERE, not only in the smoke registry. The guard's own subject is
+        # a Rust file (verify_evidence.rs), so this leg rides the cargo job that
+        # already triggers for Rust source changes.
+        run: bash scripts/tests/test_preflight_parity.sh
+
+      - name: Reviewer descriptor parity check
+        # The reviewer table is declared in Python (config validator + init
+        # capability refusal) and in Rust (the stop gate's blocked reason). A
+        # Rust-only invocation edit never touches cli/**, so cli-ci's smoke
+        # registry would not fire - this leg is what catches it. Pure text
+        # extraction; no binary needed.
+        run: bash scripts/ci/check-reviewer-descriptor-parity.sh
+
+      - name: Review app login + marker parity check (x-0eaf)
+        # The review-App login set is declared three times (Rust BOT_PROFILES,
+        # Python _OPTIONAL_BOTS, Python _KNOWN_REVIEW_APP_LOGINS); the Rust
+        # profiles also carry the usage_markers the refusal classifier reads.
+        # A login on one side only is an App one path honors and another cannot
+        # explain; a profile without an explicit usage_markers is an undecided
+        # refusal shape (AC10 - "no marker matched" must never read as "did not
+        # refuse"). Pure text extraction; no binary needed.
+        run: bash scripts/ci/check-review-app-parity.sh
+
+      - name: Parity-test provenance check
+        # Every *_parity.rs declares whether it pins a LIVE second
+        # implementation (differential) or stands in for a deleted one
+        # (characterization), and this asserts the declaration against disk in
+        # both directions. Catches a finished port that still advertises a dual
+        # implementation, which is how two of these files were miscounted.
+        run: bash scripts/ci/check-parity-test-provenance.sh
+
+      - name: Provider vocabulary parity check
+        # Rust registry/claim writers and Python's resolver/claim reader share
+        # one vocabulary. The detector harness proves drift fails before the
+        # canonical sources are compared.
+        run: |
+          bash tests/ci/test_provider_vocabulary_parity.sh
+          bash scripts/ci/check-provider-vocabulary-parity.sh
+
+      - name: Product boundary gate
+        # The boundary inventory's claims against the real manifests: the
+        # dev-only compile edge, one availability classifier, one PATH walk,
+        # and the recorded duplicate-decision debt. Doc + gate + module move
+        # together; the paths filter above carries all three.
+        run: bash scripts/ci/check-product-boundaries.sh
 
   test-mux:
     name: cargo test (fno mux)
