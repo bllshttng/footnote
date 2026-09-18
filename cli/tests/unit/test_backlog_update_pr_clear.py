@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from fno.harness_identity import AMBIENT_IDENTITY_ENV as _MARKERS
+from fno.graph.store import read_graph_strict
 
 runner = CliRunner()
 
@@ -36,11 +37,11 @@ def _seed(g: Path, entries: list[dict]) -> None:
 
 
 def _first(g: Path) -> dict:
-    return json.loads(g.read_text())["entries"][0]
+    return read_graph_strict(g)[0]
 
 
 def _node(g: Path, nid: str) -> dict:
-    for e in json.loads(g.read_text())["entries"]:
+    for e in read_graph_strict(g):
         if e.get("id") == nid:
             return e
     raise AssertionError(f"node {nid} missing from graph")

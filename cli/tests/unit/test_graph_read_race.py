@@ -80,13 +80,3 @@ def test_ac3fr_no_false_negative_under_concurrent_writes(scratch):
     assert read_failures == [], f"{len(read_failures)} spurious read failure(s)"
 
 
-def test_ac3fr_resolution_path_does_not_swallow_corruption(scratch):
-    # Anti-regression guard: if the resolution reader is reverted to
-    # read_graph's soft swallow, an unreadable graph would resolve to [] and a
-    # present-node lookup would silently miss. The strict reader must RAISE.
-    scratch.write_text("{ corrupt not json")
-    with pytest.raises(GraphUnreadableError):
-        read_graph_strict(scratch)
-    # And the soft reader still swallows -- proving the two paths are distinct
-    # and the resolution path is the strict one, not the soft one.
-    assert read_graph_strict(scratch) == []

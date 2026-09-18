@@ -14,6 +14,7 @@ import threading
 import pytest
 
 from fno.config import ConfigBlock, StatusFanoutConfig, StatusSinkConfig
+from fno.graph.store import read_graph_strict
 
 
 # ── shared fixtures/helpers for tick tests ──────────────────────────────────
@@ -863,7 +864,7 @@ def test_backlog_note_appends_timestamped_and_returns_plan_path(tmp_graph):
     # Second note accumulates (append-only, never replaces).
     append_progress_note(tmp_graph, "x-9", {"ts": "T2", "text": "again"})
     import json as _json
-    entry = _json.loads(tmp_graph.read_text())["entries"][0]
+    entry = read_graph_strict(tmp_graph)[0]
     assert [n["text"] for n in entry["progress_notes"]] == ["hi", "again"]
 
 
@@ -894,7 +895,7 @@ def test_backlog_note_cli_verb(tmp_graph, monkeypatch):
     payload = _json.loads(res.stdout)
     assert payload["id"] == "x-9" and payload["text"] == "shipped wave 1"
     assert payload["routed"] == "state" and payload["revision"] == 1
-    node = _json.loads(tmp_graph.read_text())["entries"][0]
+    node = read_graph_strict(tmp_graph)[0]
     state = node["current_state"]
     assert state["body"] == "shipped wave 1"
     assert state["source_session_id"] == session_id
@@ -928,7 +929,7 @@ def test_backlog_note_is_visible_and_preserves_details_and_prior_notes(tmp_graph
     assert appended.exit_code == 0, appended.output
     import json as _json
 
-    node = _json.loads(tmp_graph.read_text())["entries"][0]
+    node = read_graph_strict(tmp_graph)[0]
     assert node["details"] == "original rationale"
     # The new note REPLACES current state; the legacy feed is untouched until
     # the explicit migration (x-920a): never grown, never truncated.

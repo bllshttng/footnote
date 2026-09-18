@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 
 import pytest
+from fno.graph.store import read_graph_strict
 
 
 # -- fixtures --
@@ -189,7 +190,7 @@ def _graph(tmp_path: Path, rows: list[dict] | None = None) -> Path:
 
 
 def _node(graph_path: Path) -> dict:
-    return json.loads(graph_path.read_text())["entries"][0]
+    return read_graph_strict(graph_path)[0]
 
 
 def test_cost_update_replaces_an_existing_session_row(tmp_path):

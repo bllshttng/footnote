@@ -71,8 +71,6 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
     from fno import doctor_graph
 
-    monkeypatch.setattr(doctor_graph, "_gate_gaps", lambda client: [])
-    monkeypatch.setattr(doctor_graph, "_keeper_gaps", lambda client: [])
     return {"graph": graph, "tmp": tmp_path}
 
 
@@ -98,18 +96,18 @@ def test_default_reads_drop_archived_include_archived_keeps_them(world):
     assert everything == {"x-live", "x-old"}
 
 
-def test_only_export_now_writes_the_archive_file(world):
+def test_export_now_writes_residents_into_the_json_file(world):
     from fno import doctor_graph
-    from fno.graph.store import read_archive_entries
 
     archive = world["graph"].parent / "graph-archive.json"
     _sweep(world)
     assert not archive.exists(), "the sweep writes rows, never the advisory file"
     doctor_graph._flip("sqlite")  # export is a sqlite-backend read
     doctor_graph.export_graph(now=True)
-    assert archive.exists()
-    folded = read_archive_entries(path=world["graph"])
-    assert [e["id"] for e in folded] == ["x-old"], "export rebuilds it from residents"
+    exported = json.loads(world["graph"].read_text(encoding="utf-8"))["entries"]
+    assert {e["id"] for e in exported} == {"x-live", "x-old"}, (
+        "export rebuilds every resident, archived ones included"
+    )
 
 
 def test_import_refuses_when_an_id_already_lives_in_nodes(tmp_path, monkeypatch):

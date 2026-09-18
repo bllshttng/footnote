@@ -81,8 +81,6 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
     from fno import doctor_graph
-    monkeypatch.setattr(doctor_graph, "_gate_gaps", lambda client: [])
-    monkeypatch.setattr(doctor_graph, "_keeper_gaps", lambda client: [])
     return {"graph": graph, "tmp": tmp_path}
 
 

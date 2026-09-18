@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import pytest
+from fno.graph.store import read_graph_strict
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +143,7 @@ def _seed(g: Path, entry: dict) -> None:
 
 
 def _node(g: Path, node_id: str) -> dict:
-    return next(e for e in json.loads(g.read_text())["entries"] if e["id"] == node_id)
+    return next(e for e in read_graph_strict(g) if e["id"] == node_id)
 
 
 def _stub_gh(monkeypatch, state: str | None, *, calls: list | None = None):

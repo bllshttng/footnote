@@ -8,6 +8,8 @@ envelope event whose `type` is `graph_tx_conflict`.
 """
 from __future__ import annotations
 
+import base64
+import json
 from pathlib import Path
 from typing import Any
 
@@ -24,11 +26,14 @@ class _FakeClient:
         self.conflicts = conflicts
         self.entries = entries
         self.commits = 0
+        self.version = 0
 
     def request(self, verb: str, payload: dict[str, Any]) -> dict[str, Any]:
-        if verb == "begin":
-            return {"version": "v1", "entries": self.entries}
-        if verb == "commit":
+        if verb == "read_file":
+            self.version += 1
+            body = json.dumps({"entries": self.entries}).encode()
+            return {"bytes_b64": base64.b64encode(body).decode(), "sha256": f"v{self.version}"}
+        if verb == "commit_rows":
             self.commits += 1
             if self.commits <= self.conflicts:
                 raise store._Conflict()
@@ -36,7 +41,7 @@ class _FakeClient:
                 "dropped": 0,
                 "backup": None,
                 "closure_releases": [],
-                "entries": payload["entries"],
+                "entries": payload["changed"],
             }
         raise AssertionError(f"unexpected verb {verb}")
 

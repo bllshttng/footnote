@@ -62,6 +62,10 @@ def _stub_signals(
     monkeypatch.setattr(doctor, "_probe_installed_verb", lambda: capture_present)
     # Config-schema surfaces (x-6c5b): default to EQUAL keysets so existing tests
     # exercise no drift; drift tests pass differing sets explicitly.
+    # The store export-freshness arm reads the real store; hermetic default.
+    import fno.doctor_graph as _doctor_graph
+
+    monkeypatch.setattr(_doctor_graph, "export_health", lambda: {"stale": False})
     monkeypatch.setattr(doctor, "_deployed_config_keys", lambda: deployed_config_keys)
     monkeypatch.setattr(doctor, "_source_config_keys", lambda source: source_config_keys)
     monkeypatch.setattr(

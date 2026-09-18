@@ -1051,7 +1051,7 @@ def test_on_node_born_gate_off_is_complete_noop(iso, monkeypatch):
     monkeypatch.setattr(st, "maybe_spawn_think", lambda *a, **k: reached.append(1))
     # Any graph re-read would import read_graph_strict; assert it is never called.
     import fno.graph.store as gs
-    monkeypatch.setattr(gs, "read_graph", lambda *a, **k: reached.append("read"))
+    monkeypatch.setattr(gs, "read_graph_strict", lambda *a, **k: reached.append("read"))
     assert st.on_node_born(_node()) is None
     assert reached == []
 
@@ -1136,7 +1136,7 @@ def test_on_node_born_persisted_skips_reread(iso, monkeypatch):
 
     import fno.graph.store as gs
     reached: list = []
-    monkeypatch.setattr(gs, "read_graph", lambda *a, **k: reached.append("read") or [])
+    monkeypatch.setattr(gs, "read_graph_strict", lambda *a, **k: reached.append("read") or [])
 
     st.on_node_born(_node(slug="durable-slug"), persisted=True)
 

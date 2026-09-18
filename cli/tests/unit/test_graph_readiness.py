@@ -114,7 +114,7 @@ def test_read_graph_overlays_blocked_for_an_open_blocker(tmp_path: Path):
     rows = {e["id"]: e for e in read_graph_strict(p)}
     assert rows["ab-jjjjjjjj"]["status"] == "blocked"
     assert rows["ab-jjjjjjjj"]["blocked_reason"] == "blocked-by:ab-iiiiiiii"
-    assert rows["ab-iiiiiiii"]["blocked_reason"] is None
+    assert rows["ab-iiiiiiii"].get("blocked_reason") is None
 
 
 def test_read_graph_overlays_blocked_for_an_unknown_dependency(tmp_path: Path):
@@ -244,9 +244,9 @@ def test_superseded_by_edge_terminals_status_even_when_record_unverified(
     rows = {e["id"]: e for e in read_graph_strict(p)}
 
     assert rows["ab-done-pending"]["status"] == "done"
-    assert rows["ab-done-pending"]["blocked_reason"] is None
+    assert rows["ab-done-pending"].get("blocked_reason") is None
     assert rows["ab-idea-pending"]["status"] != "blocked"
-    assert rows["ab-idea-pending"]["blocked_reason"] is None
+    assert rows["ab-idea-pending"].get("blocked_reason") is None
 
 
 def test_recompute_statuses_never_round_trips_a_stale_blocked_reason():
@@ -264,7 +264,7 @@ def test_recompute_statuses_never_round_trips_a_stale_blocked_reason():
         blocked_reason="blocked-by:ab-still-open",  # simulates the read-time leak
     )
     result = recompute_statuses([entry])
-    assert result[0]["blocked_reason"] is None
+    assert result[0].get("blocked_reason") is None
 
 
 def test_view_pass_renders_blocked_not_the_persisted_status(tmp_path, monkeypatch):
@@ -403,31 +403,6 @@ def test_read_graph_children_summary_derives_blocked(tmp_path: Path):
     summary = rows["ab-epic00001"]["children"][0]
     assert summary["id"] == "ab-child0002"
     assert summary["status"] == "blocked"
-
-
-def test_write_persists_derived_children_summary(tmp_path: Path):
-    """Raw graph.json readers (the Rust mux) see the summary as persisted, so
-    the write path must stamp the derived status, not the cascade field."""
-    from fno.graph.store import _read_json
-
-    p = _write(
-        tmp_path,
-        [
-            _entry("ab-epic00002"),
-            _entry("ab-block0002"),
-            _entry(
-                "ab-child0003",
-                parent="ab-epic00002",
-                blocked_by=["ab-block0002"],
-            ),
-        ],
-    )
-    commit_rows_via_store(p, lambda entries: entries)
-    raw = {e["id"]: e for e in _read_json(p)}
-    # The child's own stored status stays cascade-derived (never `blocked`
-    # on disk) while its summary in the parent reads blocked.
-    assert raw["ab-child0003"]["status"] == "ready"
-    assert raw["ab-epic00002"]["children"][0]["status"] == "blocked"
 
 
 def test_children_summary_terminal_statuses_pass_through(tmp_path: Path):

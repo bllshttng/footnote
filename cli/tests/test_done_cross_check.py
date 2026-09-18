@@ -60,7 +60,9 @@ def _seed(g: Path, entries: list[dict]) -> None:
 
 
 def _read(g: Path) -> list[dict]:
-    return json.loads(g.read_text()).get("entries", [])
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(g)
 
 
 def _node(
