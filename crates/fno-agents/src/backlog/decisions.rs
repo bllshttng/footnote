@@ -78,7 +78,7 @@ pub fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(),
                     let Some(decisions) = entry.get("decisions").and_then(Value::as_array) else {
                         continue;
                     };
-                    for (position, reference) in decisions.iter().enumerate() {
+                    for reference in decisions.iter() {
                         // A projection row whose journal event is gone is
                         // exactly what `fno backlog decide-reindex` exists
                         // to recover, so a dangling or malformed reference

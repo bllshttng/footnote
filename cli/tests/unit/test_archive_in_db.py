@@ -110,7 +110,8 @@ def test_export_now_writes_residents_into_the_json_file(world):
     )
 
 
-def test_import_refuses_when_an_id_already_lives_in_nodes(tmp_path, monkeypatch):
+def test_import_skips_an_id_reuse_and_the_live_row_wins(tmp_path, monkeypatch):
+    from fno.graph.api import wire_rows
     from fno.graph.store import _client_for, _worker_binary
 
     if _worker_binary() is None:
@@ -118,16 +119,42 @@ def test_import_refuses_when_an_id_already_lives_in_nodes(tmp_path, monkeypatch)
     graph = tmp_path / "graph.json"
     _seed(graph, _row("x-dup", title="already here"))
     (tmp_path / "graph-archive.json").write_text(
-        json.dumps({"entries": [_row("x-dup", archived_at="2026-08-01T00:00:00Z")]}),
+        json.dumps(
+            {
+                "entries": [
+                    _row("x-dup", archived_at="2026-08-01T00:00:00Z", title="old done"),
+                    _row("x-fold", archived_at="2026-08-01T00:00:00Z", title="folded in"),
+                ]
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
     # `version` is the worker's own verb and `node` reads graph.json
     # directly; only an op that opens the db (decisions) reaches the
-    # one-shot import and its refusal.
-    with pytest.raises(RuntimeError, match="already exists in nodes"):
-        _client_for(graph).request("api", {"op": "decisions"})
+    # one-shot import and its fold.
+    _client_for(graph).request("api", {"op": "decisions"})
+    rows = {r["id"]: r for r in wire_rows(path=graph, include_archived=True)}
+    assert rows["x-dup"]["title"] == "already here", "the live row wins a reused id"
+    assert "x-fold" in rows, "the fold completes around the collision"
+
+
+def test_import_without_a_file_stamps_nothing_and_folds_later(tmp_path, monkeypatch):
+    from fno.graph.store import _client_for, _worker_binary
+
+    if _worker_binary() is None:
+        pytest.skip("no fno-agents-worker binary; build with `cargo build -p fno-agents`")
+    graph = tmp_path / "graph.json"
+    _seed(graph, _row("x-live", title="here"))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
+    _client_for(graph).request("api", {"op": "decisions"})
+    with sqlite3.connect(graph.with_suffix(".db")) as connection:
+        stamped = connection.execute(
+            "SELECT value FROM graph_meta WHERE key = 'archive_imported_v2'"
+        ).fetchone()
+    assert stamped is None, "no archive file, no stamp: a restored file must still fold"
 
 
 def test_unarchive_clears_the_stamp(world):
