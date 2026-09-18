@@ -29,6 +29,19 @@ def test_post_gate_plan_without_difficulty_refuses_naming_bands():
         assert "low, medium, high" in msg, msg
 
 
+def test_plan_with_only_claims_validates_and_fills_node():
+    # The writer-side duplicate: a plan carrying only `claims:` validates with
+    # node filled from it, matching validate-plan.sh's node-then-claims read.
+    fm = PlanFrontmatter.model_validate(_fm(node=None, claims="x-ab12"))
+    assert fm.node == "x-ab12"
+
+
+def test_plan_with_neither_node_nor_claims_refuses():
+    with pytest.raises(ValidationError) as exc:
+        PlanFrontmatter.model_validate(_fm(node=None))
+    assert "node" in str(exc.value)
+
+
 def test_gate_date_and_older_plans_without_difficulty_pass():
     # On-the-gate-date passes: a plan created ON the gate date predates the
     # gate reaching its author (strictly-after boundary).
