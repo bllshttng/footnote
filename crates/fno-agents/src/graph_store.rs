@@ -24,7 +24,6 @@
 //!   is no unbounded acquire to call.
 
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -128,10 +127,11 @@ pub(crate) const CURATION_FIELDS: &[&str] =
     &["status", "priority", "rank", "parent", "blocked_by", "size"];
 
 /// Legacy `priority` vocabulary -> current (constants.PRIORITY_MIGRATION).
-const PRIORITY_MIGRATION: &[(&str, &str)] = &[("high", "p1"), ("medium", "p2"), ("low", "p3")];
+pub(crate) const PRIORITY_MIGRATION: &[(&str, &str)] =
+    &[("high", "p1"), ("medium", "p2"), ("low", "p3")];
 
 /// Legacy `status` vocabulary -> current (statuses.STATUS_MIGRATION).
-const STATUS_MIGRATION: &[(&str, &str)] = &[("claimed", "in_progress")];
+pub(crate) const STATUS_MIGRATION: &[(&str, &str)] = &[("claimed", "in_progress")];
 
 /// Derived `status` vocabulary that outranks the blocked read-time overlay.
 const OVERLAY_TERMINAL_STATUSES: &[&str] = &["done", "superseded", "deferred", "in_review"];
@@ -304,9 +304,9 @@ pub fn apply_field_update(entry: &mut Map<String, Value>, field: &str, update: &
 /// escapes for every non-ASCII code point (surrogate pairs beyond the BMP),
 /// and the four short control escapes where Python uses them.
 ///
-/// Byte compatibility is a port requirement, not cosmetic: the differential
-/// parity stage asserts the Rust store publishes the same bytes the Python
-/// store did, and every `fno backlog` consumer reads this file.
+/// Byte compatibility is a port requirement, not cosmetic: `fno doctor
+/// graph export --now` publishes graph.json with these bytes, and every
+/// consumer of the exported file reads them.
 pub fn to_python_json(value: &Value) -> String {
     let mut out = String::new();
     write_value(value, 0, &mut out);
@@ -408,136 +408,6 @@ pub fn serialize_graph_file(entries: &[Value]) -> String {
 /// byte-identical to Python's `json.dumps(read_graph(path), indent=2)`.
 pub fn serialize_entries(entries: &[Value]) -> String {
     to_python_json(&Value::Array(entries.to_vec()))
-}
-
-// ---------------------------------------------------------------------------
-// Raw read: the four-shape taxonomy from _read_json / read_graph_strict
-// ---------------------------------------------------------------------------
-
-/// The strict read outcome. `Empty` covers an absent file (an absent graph is
-/// empty, not unreadable - matching read_graph and read_graph_strict).
-pub enum RawRead {
-    /// File absent: zero entries, no error.
-    Empty,
-    /// Parsed `entries` list.
-    Entries(Vec<Value>),
-    /// Root not a JSON object, bad JSON, or `entries` not a list.
-    Corrupt(String),
-    /// Root is an object but carries no `entries` key.
-    MalformedRoot,
-}
-
-/// Defuse the non-finite float literals Python's `json.dumps` writes bare
-/// (`Infinity`, `-Infinity`, `NaN`) into JSON-null, string-aware. The old
-/// Python store read such a file happily and its rank math treated a
-/// non-finite rank as unranked; the ported store cannot carry a non-finite
-/// f64 at all, so the honest equivalent is to read them as null (unranked)
-/// and let the next write publish a finite file. Tokens OUTSIDE strings
-/// only: a string value spelling "Infinity" is data, not a float.
-fn defuse_nonfinite(text: &str) -> String {
-    const TOKENS: [&str; 3] = ["Infinity", "-Infinity", "NaN"];
-    let mut out = String::with_capacity(text.len());
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut rest = text;
-    while !rest.is_empty() {
-        let c = rest.chars().next().unwrap();
-        if in_string {
-            out.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                in_string = false;
-            }
-            rest = &rest[c.len_utf8()..];
-            continue;
-        }
-        if c == '"' {
-            in_string = true;
-            out.push(c);
-            rest = &rest[c.len_utf8()..];
-            continue;
-        }
-        let hit = TOKENS.iter().find(|t| rest.starts_with(**t));
-        if let Some(tok) = hit {
-            let after = &rest[tok.len()..];
-            let next = after.chars().next();
-            let delimited = next.is_none()
-                || matches!(
-                    next,
-                    Some(',')
-                        | Some('}')
-                        | Some(']')
-                        | Some(' ')
-                        | Some('\n')
-                        | Some('\r')
-                        | Some('\t')
-                );
-            if delimited {
-                out.push_str("null");
-                rest = after;
-                continue;
-            }
-        }
-        out.push(c);
-        rest = &rest[c.len_utf8()..];
-    }
-    out
-}
-
-/// Raw read of the entries file. Raises nothing; callers map [`RawRead`] onto
-/// their own strictness (read_graph swallows Corrupt to empty; the strict
-/// read surfaces it).
-pub fn read_raw(path: &Path) -> Result<RawRead, StoreError> {
-    if !path.exists() {
-        return Ok(RawRead::Empty);
-    }
-    let raw = std::fs::read(path)
-        .map_err(|e| StoreError::Unreadable(path.display().to_string(), format!("{e}")))?;
-    let text = String::from_utf8(raw).map_err(|e| {
-        StoreError::Unreadable(path.display().to_string(), format!("not UTF-8: {e}"))
-    })?;
-    if text.trim().is_empty() {
-        return Err(StoreError::Unreadable(
-            path.display().to_string(),
-            "empty (zero bytes)".to_string(),
-        ));
-    }
-    let text = if text.contains("Infinity") || text.contains("NaN") {
-        defuse_nonfinite(&text)
-    } else {
-        text
-    };
-    // The three parse shapes answer as RawRead::Corrupt (not Err) so the
-    // caller decides strictness: the soft read backs the bytes up before
-    // surfacing them; the strict read just diagnoses.
-    let data: Value = match serde_json::from_str(&text) {
-        Ok(v) => v,
-        Err(_) => {
-            return Ok(RawRead::Corrupt(format!(
-                "{} is not valid JSON",
-                path.display()
-            )))
-        }
-    };
-    let Some(obj) = data.as_object() else {
-        return Ok(RawRead::Corrupt(format!(
-            "{} root is not a JSON object",
-            path.display()
-        )));
-    };
-    let Some(entries) = obj.get("entries") else {
-        return Ok(RawRead::MalformedRoot);
-    };
-    let Some(list) = entries.as_array() else {
-        return Ok(RawRead::Corrupt(format!(
-            "{} 'entries' is not a list",
-            path.display()
-        )));
-    };
-    Ok(RawRead::Entries(list.clone()))
 }
 
 // ---------------------------------------------------------------------------
@@ -987,24 +857,6 @@ pub(crate) fn index_by_id(entries: &[Value]) -> std::collections::HashMap<&str, 
         .collect()
 }
 
-/// The overlay's field half for one row: status + blocked_reason derived
-/// from a borrowed id index, written in the same order the full overlay
-/// has always used.
-pub(crate) fn overlay_entry(entry: &mut Value, by_id: &std::collections::HashMap<&str, &Value>) {
-    if !is_dict(entry) {
-        return;
-    }
-    let (status, reason) = readiness_status(entry, by_id);
-    let obj = entry.as_object_mut().unwrap();
-    obj.insert(
-        "status".to_string(),
-        status.map(Value::String).unwrap_or(Value::Null),
-    );
-    obj.insert(
-        "blocked_reason".to_string(),
-        reason.map(Value::String).unwrap_or(Value::Null),
-    );
-}
 
 /// Overlay read-time dependency readiness onto `status`/`blocked_reason`
 /// (store._apply_readiness_overlay).
@@ -2014,53 +1866,12 @@ impl Drop for BoundedLock {
 }
 
 // ---------------------------------------------------------------------------
-// Atomic publish: backup, write
+// Atomic write: temp sibling + rename
 // ---------------------------------------------------------------------------
 
 /// Backups live in a `backups/` sibling of the graph file, never beside it:
 /// a rotation family at the state-root top level is exactly what
-/// docs/state-root-inventory.md forbids.
-fn backup_dir(path: &Path) -> Option<PathBuf> {
-    let dir = path.parent()?.join("backups");
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir)
-}
-
-/// Copy the current file to a timestamped backup, prune to
-/// GRAPH_BACKUP_KEEP, and return the backup path (store._create_backup).
-/// None when the file does not yet exist or the copy failed (warned, never
-/// fatal: the mutation proceeds).
-pub fn create_backup(path: &Path) -> Option<PathBuf> {
-    if !path.exists() {
-        return None;
-    }
-    let name = path.file_name()?.to_string_lossy().to_string();
-    let dir = backup_dir(path)?;
-    let backup = dir.join(format!("{}.bak.{}", name, backup_stamp()));
-    if std::fs::copy(path, &backup).is_err() {
-        return None;
-    }
-    let prefix = format!("{}.bak.", name);
-    if let Some(parent) = path.parent() {
-        if let Ok(entries) = std::fs::read_dir(parent) {
-            for legacy in entries
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
-            {
-                let source = legacy.path();
-                let target = dir.join(legacy.file_name());
-                if std::fs::rename(&source, &target).is_err()
-                    && std::fs::copy(&source, &target).is_ok()
-                {
-                    let _ = std::fs::remove_file(source);
-                }
-            }
-        }
-    }
-    let _ = rotate_backups(&dir, &prefix);
-    Some(backup)
-}
-
+/// docs/state-root-inventory.md forbids. Callers create that dir.
 /// Shared backup-rotation prune: keep the newest GRAPH_BACKUP_KEEP files
 /// matching `prefix` in `dir`, and on a collapse (newest at most a tenth of
 /// its predecessor, the state canary's threshold) rename that predecessor to
@@ -2143,22 +1954,18 @@ pub fn write_atomic(path: &Path, body: &str) -> Result<(), StoreError> {
 }
 
 // ---------------------------------------------------------------------------
-// The locked mutate cycle (store.locked_mutate_graph, store-side half)
+// The locked mutate cycle (store-side half)
 // ---------------------------------------------------------------------------
 
 /// What the store-side mutate cycle reports to its caller, so the client can
 /// run its post-lock duties (claim releases, renders, nudge) on the same
-/// facts the file-leg implementation produced.
+/// facts the store produced.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MutateOutcome {
-    /// The final, canonicalized entries (the published bytes' content).
+    /// The final, canonicalized entries (the published rows' content).
     pub entries: Vec<Value>,
-    /// Entries dropped because they were not JSON objects, with the backup
-    /// that preserves them named.
+    /// Entries dropped because they were not JSON objects.
     pub dropped: usize,
-    pub backup: Option<String>,
-    /// Best-effort shadow failures are visible without failing the JSON publish.
-    pub shadow_warning: Option<String>,
     /// `(node_id, rung)` pairs whose status newly entered a terminal rung
     /// during this mutation; the caller releases their claims after the lock
     /// drops.
@@ -2201,8 +2008,12 @@ pub struct MutateInput {
     pub plan_rungs: Option<BTreeMap<String, String>>,
 }
 
-/// The content digest a begin/commit pair compares (the wire "version").
-pub fn file_content_version(path: &Path) -> String {
+/// The content digest the frozen graph.json file carried. The json leg is
+/// deleted, so this survives only as a test helper: the positive controls
+/// that pin a frozen file's bytes compare against it.
+#[cfg(test)]
+pub(crate) fn file_content_version(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
     use std::io::Read;
     let mut file = match File::open(path) {
         Ok(f) => f,
@@ -2215,17 +2026,13 @@ pub fn file_content_version(path: &Path) -> String {
     format!("sha256:{:x}", h.finalize())
 }
 
-/// The stamp [`MutateInput::base_version`] carries: the same value
-/// `locked_mutate` re-derives under the lock, resolved by the same backend
-/// switch. A caller snapshots it before its read and holds it to the
-/// publish, so an interleaved writer surfaces as
-/// [`StoreError::Conflict`] instead of a lost write.
+/// The stamp [`MutateInput::base_version`] carries: the store's version row,
+/// the same value `locked_mutate` re-derives under the lock. A caller
+/// snapshots it before its read and holds it to the publish, so an
+/// interleaved writer surfaces as [`StoreError::Conflict`] instead of a
+/// lost write.
 pub fn base_version(path: &Path) -> Result<String, StoreError> {
-    if crate::backlog::backend(path) == crate::backlog::Backend::Sqlite {
-        crate::backlog::version(path).map_err(StoreError::Sqlite)
-    } else {
-        Ok(file_content_version(path))
-    }
+    crate::backlog::version(path).map_err(StoreError::Sqlite)
 }
 
 /// The store-side half of the locked read-modify-write cycle. Holds the
@@ -2311,31 +2118,14 @@ pub fn locked_mutate_with_hook(
         std::fs::create_dir_all(parent)?;
     }
     let _lock = BoundedLock::acquire(path, timeout)?;
-    // The store names its own backend in graph_meta; this cycle reads it
-    // under the lock, so every caller (keeper, daemon settle, direct) agrees
-    // by construction and a mid-flight flip lands on the next mutation.
-    let sqlite_backend = crate::backlog::backend(path) == crate::backlog::Backend::Sqlite;
-    let current = if sqlite_backend {
-        crate::backlog::version(path).map_err(StoreError::Sqlite)?
-    } else {
-        file_content_version(path)
-    };
+    // The sqlite backend owns every publish. `version` opens the store,
+    // which imports a graph.json fixture on first open, so a test seeding
+    // only the file still lands here on the owned tables.
+    let current = crate::backlog::version(path).map_err(StoreError::Sqlite)?;
     if current != input.base_version {
         return Err(StoreError::Conflict);
     }
-    let raw_read = if sqlite_backend {
-        RawRead::Entries(crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?)
-    } else {
-        read_raw(path)?
-    };
-    let raw = match raw_read {
-        RawRead::Entries(v) => v,
-        RawRead::Empty => vec![],
-        RawRead::MalformedRoot => {
-            return Err(StoreError::MalformedRoot(path.display().to_string()))
-        }
-        RawRead::Corrupt(reason) => return Err(StoreError::Corrupt(reason)),
-    };
+    let raw = crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?;
 
     // Pre-image defaults for the curation snapshot, re-derived through the
     // same pipeline (store.py's _status_normalized + _pre_curation).
@@ -2477,46 +2267,26 @@ pub fn locked_mutate_with_hook(
         hook(&raw)?;
     }
 
-    let (backup, shadow_warning, version) = if sqlite_backend {
-        let version = crate::backlog::authoritative_sync(path, &shadow_before, &entries)
-            .map_err(StoreError::Sqlite)?;
-        // graph.json is frozen under sqlite: the readers moved onto the
-        // backend switch, so a publish rewrites only graph.db. The file
-        // comes back on demand via `fno doctor graph export --now`.
-        (None, None, version)
-    } else {
-        let backup = create_backup(path);
-        let body = serialize_graph_file(&entries);
-        write_atomic(path, &body)?;
-        let version = {
-            use sha2::Digest as _;
-            format!("sha256:{:x}", sha2::Sha256::digest(body.as_bytes()))
-        };
-        let warning = crate::backlog::shadow_sync(path, &shadow_before, &entries, &version)
-            .err()
-            .map(|error| format!("SQLite shadow write for {} failed: {error}", path.display()));
-        (backup, warning, version)
-    };
+    let version = crate::backlog::authoritative_sync(path, &shadow_before, &entries)
+        .map_err(StoreError::Sqlite)?;
+    // graph.json is frozen: the readers moved onto the store, so a publish
+    // rewrites only graph.db. The file comes back on demand via
+    // `fno doctor graph export --now`.
 
-    // The JSON backend still reads the published bytes back and compares
-    // digests. The sqlite backend already confirmed its stored ids in
-    // authoritative_sync. Every receipt rides this Ok, so a publish that
-    // silently failed to land refuses instead of claiming success.
-    if !sqlite_backend {
-        let readback = file_content_version(path);
-        if readback != version {
-            return Err(StoreError::Invalid(format!(
-                "publish read-back mismatch on {}: wrote {version}, file holds {readback}",
-                path.display()
-            )));
-        }
+    // Still under the lock, read the stamped version back. Every receipt
+    // (idea, session close, note) rides this Ok, so a publish that silently
+    // failed to land refuses instead of claiming success.
+    let readback = crate::backlog::version(path).map_err(StoreError::Sqlite)?;
+    if readback != version {
+        return Err(StoreError::Invalid(format!(
+            "publish read-back mismatch on {}: wrote {version}, store holds {readback}",
+            path.display()
+        )));
     }
 
     Ok(MutateOutcome {
         entries,
         dropped,
-        backup: backup.map(|p| p.display().to_string()),
-        shadow_warning,
         closure_releases,
         is_canonical,
         version,
@@ -2530,16 +2300,11 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// One rows reader for every writer: the backend switch plus the default
-/// pass. `api::read_rows` and `node_state::read_rows_for` were this same
+/// One rows reader for every writer: the store, plus the default pass.
+/// `api::read_rows` and `node_state::read_rows_for` were this same
 /// shape twice; both delegate here now.
 pub fn read_rows(path: &Path) -> Result<Vec<Value>, StoreError> {
-    let mut rows = match crate::backlog::backend(path) {
-        crate::backlog::Backend::Sqlite => {
-            crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?
-        }
-        crate::backlog::Backend::Json => read_defaulted_opts(path, false, true)?,
-    };
+    let mut rows = crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?;
     apply_defaults(&mut rows, false);
     Ok(rows)
 }
@@ -2599,71 +2364,6 @@ pub fn mutate_rows(
         }
     }
     unreachable!("every loop arm returns")
-}
-
-// ---------------------------------------------------------------------------
-// Read path with defaults (read_graph / read_graph_strict, store-side)
-// ---------------------------------------------------------------------------
-
-/// Serialize the defaulted entries a read returns, byte-identical to the
-/// Python leg's `json.dumps` of its own result (the differential parity
-/// contract). Applies defaults; junk rows are kept only when `keep_malformed`
-/// (load_graph's discovery caller needs them; ordinary reads filter).
-///
-/// The strict read: an unreadable store is `Err`, never an empty answer, so
-/// a caller that misses on `Ok(vec![])` can only be reporting a genuinely
-/// absent node, never a read it could not make.
-///
-/// The soft read that degrades `MalformedRoot` to empty and copies the
-/// corrupt bytes to a `.json.bak` sibling first is the explicit
-/// `read_defaulted_opts(path, keep_malformed, true)` spelling.
-pub fn read_defaulted(path: &Path, keep_malformed: bool) -> Result<Vec<Value>, StoreError> {
-    read_defaulted_opts(path, keep_malformed, false)
-}
-
-/// `backup_on_corrupt = true` is the soft read, the deliberate exception:
-/// a root with no entries key reads EMPTY, and corrupt bytes are copied to a
-/// `.json.bak` before the error surfaces. `false` is strict and read-only:
-/// `MalformedRoot`/`Corrupt` surface untouched and nothing is written.
-pub fn read_defaulted_opts(
-    path: &Path,
-    keep_malformed: bool,
-    backup_on_corrupt: bool,
-) -> Result<Vec<Value>, StoreError> {
-    match read_raw(path) {
-        Ok(RawRead::Empty) => Ok(vec![]),
-        Ok(RawRead::MalformedRoot) => {
-            if backup_on_corrupt {
-                // Soft read: a root with no entries key reads EMPTY, never an
-                // error, exactly as the Python soft reader answered.
-                Ok(vec![])
-            } else {
-                Err(StoreError::MalformedRoot(path.display().to_string()))
-            }
-        }
-        Ok(RawRead::Corrupt(reason)) => {
-            if backup_on_corrupt {
-                // path.with_suffix(".json.bak") in Python; the file-name form
-                // keeps "graph.json" -> "graph.json.bak" for the same effect,
-                // inside backups/ rather than at the state root.
-                if let Some(dir) = backup_dir(path) {
-                    let backup = dir.join(format!(
-                        "{}.bak",
-                        path.file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_default()
-                    ));
-                    let _ = std::fs::copy(path, &backup);
-                }
-            }
-            Err(StoreError::Corrupt(reason))
-        }
-        Ok(RawRead::Entries(mut v)) => {
-            apply_defaults(&mut v, keep_malformed);
-            Ok(v)
-        }
-        Err(e) => Err(e),
-    }
 }
 
 /// Normalize a plan_path for comparison (store.normalize_plan_path):
@@ -2736,9 +2436,8 @@ mod tests {
 
     #[test]
     fn python_json_matches_reference_shapes() {
-        // Byte-compat with json.dumps(indent=2, ensure_ascii=True), verified
-        // against fixtures the differential parity corpus also drives through
-        // the Python leg.
+        // Byte-compat with json.dumps(indent=2, ensure_ascii=True), the
+        // format `fno doctor graph export --now` publishes.
         let v = json!({"entries": [{"id": "ab-1", "n": 2, "ok": true, "none": null,
             "nested": {"a": [1, 2]}, "uni": "h\u{e9}llo", "emoji": "\u{1f600}"}]});
         let out = to_python_json(&v);
@@ -2769,7 +2468,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        crate::backlog::set_backend(&graph, crate::backlog::Backend::Sqlite).unwrap();
+        crate::backlog::set_backend(&graph).unwrap();
         let frozen_bytes = std::fs::read(&graph).unwrap();
 
         let mut entries = crate::backlog::read_entries(&graph).unwrap();
@@ -2797,47 +2496,6 @@ mod tests {
             frozen_bytes,
             "graph.json must stay frozen across a sqlite publish"
         );
-    }
-
-    #[test]
-    fn create_backup_prunes_legacy_siblings() {
-        let root = tempfile::tempdir().unwrap();
-        let graph = root.path().join("graph.json");
-        std::fs::write(&graph, b"current graph").unwrap();
-
-        let legacy_one = root.path().join("graph.json.bak.20240101T000000000000");
-        let legacy_two = root.path().join("graph.json.bak.20240102T000000000000");
-        std::fs::write(&legacy_one, b"legacy one").unwrap();
-        std::fs::write(&legacy_two, b"legacy two").unwrap();
-
-        let retained_dir = root.path().join("backups");
-        std::fs::create_dir(&retained_dir).unwrap();
-        let retained = retained_dir.join("graph.json.bak.retained");
-        std::fs::write(&retained, b"retained bytes").unwrap();
-        let unrelated = root.path().join("other.json.bak.20240101T000000000000");
-        std::fs::write(&unrelated, b"unrelated bytes").unwrap();
-
-        let legacy_count = || {
-            std::fs::read_dir(root.path())
-                .unwrap()
-                .filter_map(Result::ok)
-                .filter(|entry| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with("graph.json.bak.")
-                })
-                .count()
-        };
-        assert_eq!(legacy_count(), 2, "positive control for legacy siblings");
-
-        let created = create_backup(&graph).expect("new retained backup");
-
-        assert_eq!(legacy_count(), 0);
-        assert_eq!(created.parent(), Some(retained_dir.as_path()));
-        assert_eq!(std::fs::read(&created).unwrap(), b"current graph");
-        assert_eq!(std::fs::read(&retained).unwrap(), b"retained bytes");
-        assert_eq!(std::fs::read(&unrelated).unwrap(), b"unrelated bytes");
     }
 
     fn count_prefixed(dir: &Path, prefix: &str) -> usize {
@@ -3085,7 +2743,10 @@ mod tests {
         locked_mutate(
             &graph,
             MutateInput {
-                entries: vec![json!({"id": "ab-1", "title": "t"})],
+                entries: vec![json!({
+                    "id": "ab-1", "slug": "ab-1", "title": "t",
+                    "type": "feature", "status": "idea", "priority": "p2",
+                })],
                 canonical_path: None,
                 base_version: base_version(&graph).unwrap(),
                 plan_rungs: None,
@@ -3353,10 +3014,13 @@ mod tests {
     }
 
     #[test]
-    fn mutate_pipeline_publishes_bytes_the_python_shape_produces() {
+    fn mutate_pipeline_persists_the_python_shape_rows() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        let entries = vec![json!({"id": "ab-1", "title": "t"})];
+        let entries = vec![json!({
+            "id": "ab-1", "slug": "ab-1", "title": "t",
+            "type": "feature", "status": "idea", "priority": "p2",
+        })];
         let out = locked_mutate(
             &graph,
             MutateInput {
@@ -3368,9 +3032,13 @@ mod tests {
             Duration::from_secs(2),
         )
         .unwrap();
-        let body = std::fs::read_to_string(&graph).unwrap();
-        assert!(body.starts_with("{\n  \"entries\": [\n    {"));
-        assert!(body.ends_with("\n"));
+        // graph.json stays frozen; the rows live in the store.
+        let ids: Vec<String> = read_rows(&graph)
+            .unwrap()
+            .iter()
+            .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert_eq!(ids, vec!["ab-1".to_string()]);
         assert!(out.dropped == 0);
     }
 
@@ -3390,7 +3058,10 @@ mod tests {
                 // this cycle's snapshot does not hold.
                 let base = base_version(&graph).unwrap();
                 let mut foreign = read_rows(&graph).unwrap();
-                foreign.push(json!({"id": "x-fresh", "title": "landed mid-cycle"}));
+                foreign.push(json!({
+                    "id": "x-fresh", "slug": "x-fresh", "title": "landed mid-cycle",
+                    "type": "feature", "status": "idea", "priority": "p2",
+                }));
                 locked_mutate(
                     &graph,
                     MutateInput {
@@ -3403,7 +3074,10 @@ mod tests {
                 )
                 .unwrap();
             }
-            rows.push(json!({"id": "x-mine", "title": "mine"}));
+            rows.push(json!({
+                "id": "x-mine", "slug": "x-mine", "title": "mine",
+                "type": "feature", "status": "idea", "priority": "p2",
+            }));
             Ok(true)
         })
         .unwrap();
@@ -3437,14 +3111,17 @@ mod tests {
     #[test]
     fn a_landed_publish_reads_back_its_own_digest_and_leaves_no_tmp() {
         // First acceptance line: the returned version equals
-        // the file's content digest and no graph.json.tmp-* sibling remains.
+        // the store's stamped version and no graph.json.tmp-* sibling remains.
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
         std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
         let outcome = locked_mutate(
             &graph,
             MutateInput {
-                entries: vec![json!({"id": "ab-1", "title": "t"})],
+                entries: vec![json!({
+                    "id": "ab-1", "slug": "ab-1", "title": "t",
+                    "type": "feature", "status": "idea", "priority": "p2",
+                })],
                 canonical_path: None,
                 base_version: base_version(&graph).unwrap(),
                 plan_rungs: None,
@@ -3454,8 +3131,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             outcome.version,
-            file_content_version(&graph),
-            "the Ok version names the bytes the file actually holds"
+            crate::backlog::version(&graph).unwrap(),
+            "the Ok version names the state the store actually holds"
         );
         let tmp_siblings: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -3475,28 +3152,6 @@ mod tests {
         // round trip.
         let v: Value = serde_json::from_str(r#"{"b": 1, "a": 2}"#).unwrap();
         assert_eq!(to_python_json(&v), "{\n  \"b\": 1,\n  \"a\": 2\n}");
-    }
-
-    #[test]
-    fn python_nonfinite_floats_defuse_to_null_and_strings_survive() {
-        // json.dumps(float("inf")) writes the bare token; the old Python
-        // store read it and its rank math treated non-finite as unranked.
-        // The port reads it as null (unranked) instead of refusing the file.
-        let raw = "{\"entries\": [{\"rank\": Infinity, \"neg\": -Infinity, \"nan\": NaN, \
-                   \"keep\": \"Infinity and NaN stay\", \"esc\": \"escaped \\\"Infinity\\\"\"}]}";
-        let defused = defuse_nonfinite(raw);
-        let v: Value = serde_json::from_str(&defused).expect("defused output parses");
-        let e = &v["entries"][0];
-        assert!(e["rank"].is_null());
-        assert!(e["neg"].is_null());
-        assert!(e["nan"].is_null());
-        assert_eq!(e["keep"], "Infinity and NaN stay");
-        assert_eq!(e["esc"], "escaped \"Infinity\"");
-        // A full file with a poisoned rank reads Entries, never Corrupt.
-        let dir = tempfile::tempdir().unwrap();
-        let graph = dir.path().join("graph.json");
-        std::fs::write(&graph, raw).unwrap();
-        assert!(matches!(read_raw(&graph), Ok(RawRead::Entries(_))));
     }
 
     fn readiness_fixture(entries: &[Value]) -> std::collections::HashMap<&str, &Value> {

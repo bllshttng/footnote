@@ -1075,15 +1075,15 @@ mod tests {
     }
 
     #[test]
-    fn read_defaulted_reads_the_written_graph_back() {
-        // Positive control for the fixture writer: the same read_defaulted the
-        // verb uses must see the entries the test wrote.
+    fn read_entries_reads_the_written_graph_back() {
+        // Positive control for the fixture writer: the same read the verb
+        // uses must see the entries the test wrote.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_graph(
             dir.path(),
             &[json!({"id": "x-aaa", "plan_path": "/p/a.md"})],
         );
-        let entries = graph_store::read_defaulted(&path, false).expect("read");
+        let entries = crate::backlog::read_entries(&path).expect("read");
         assert_eq!(entries.len(), 1);
         assert_eq!(entry_id(&entries[0]), Some("x-aaa"));
     }

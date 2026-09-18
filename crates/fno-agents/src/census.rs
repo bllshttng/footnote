@@ -805,7 +805,7 @@ pub struct CycledKeeper {
 /// Shutdown the stale store keepers the census found (change 6). No
 /// respawn is attempted here: the next read respawns each keeper on the
 /// installed binary - the same self-heal the fate text promises - and the
-/// Python client's spawner owns the launch flags (read_source, events).
+/// Python client's spawner owns the keeper launch flags.
 /// A keeper answering `busy` keeps its seat and is reported, not forced.
 pub async fn cycle_stale_store_keepers() -> (Vec<CycledKeeper>, usize) {
     let rows = keeper_rows();

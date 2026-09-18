@@ -1144,7 +1144,8 @@ pub fn run_update(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph_store::{read_defaulted, CANONICAL_FIELD_ORDER};
+    use crate::backlog::read_entries;
+    use crate::graph_store::CANONICAL_FIELD_ORDER;
     use std::io::Write;
 
     #[test]
@@ -1240,7 +1241,7 @@ mod tests {
     }
 
     fn status_of(graph: &Path, id: &str) -> String {
-        let rows = read_defaulted(graph, false).expect("read back");
+        let rows = read_entries(graph).expect("read back");
         rows.iter()
             .find(|e| field_eq(e, "id", id))
             .and_then(|e| e.get("status"))
@@ -1280,7 +1281,7 @@ mod tests {
             .expect("backref change");
         assert_eq!(backref.id, "x-aaaa");
         assert_eq!(status_of(&graph, "x-bbbb"), "idea");
-        let rows = read_defaulted(&graph, false).unwrap();
+        let rows = read_entries(&graph).unwrap();
         let repl = rows.iter().find(|e| field_eq(e, "id", "x-aaaa")).unwrap();
         assert_eq!(repl.get("supersedes"), Some(&json!([])));
     }
@@ -1330,7 +1331,7 @@ mod tests {
         let receipt = apply(&graph, &req("x-2", Some("ready"), &[])).expect("applied");
         assert_eq!(receipt.status.to, "ready");
         assert_eq!(status_of(&graph, "x-2"), "ready");
-        let rows = read_defaulted(&graph, false).unwrap();
+        let rows = read_entries(&graph).unwrap();
         let row = rows.iter().find(|e| field_eq(e, "id", "x-2")).unwrap();
         assert_eq!(row.get("deferred_at"), Some(&Value::Null));
     }
@@ -1445,7 +1446,7 @@ mod tests {
         )
         .expect("applied");
         assert_eq!(receipt.status.to, "deferred");
-        let rows = read_defaulted(&graph, false).unwrap();
+        let rows = read_entries(&graph).unwrap();
         let row = rows.iter().find(|e| field_eq(e, "id", "x-3")).unwrap();
         assert_eq!(row.get("locked_by"), Some(&Value::Null));
         assert_eq!(row.get("locked_at"), Some(&Value::Null));
