@@ -145,7 +145,7 @@ Two paths produce the line. The classify pass fires on the stale graph row (`gc_
 
 The real run carries its own cure. The settle pass fills stale open do rows on done and merged nodes before the row pass reads the graph (`gc.rs:452-456`). A dry run prints the cure as `would settle {id} (stale open do row filled on done+merged node: {node})`.
 
-An additional PR settles by record, never by guess. One of three facts settles an extra. Its own stamp reads `merged` or `closed`. It is the primary of a node whose merge status reads `merged`. Another node carries it as its primary, and that node's worker holds the PR. The sweep reads GitHub once per pass for any extra that no fact settles. The read resolves in the node's `cwd` when the entry carries no url. A merged or closed answer is stamped onto the entry. The stamp settles the row on the same pass. A refused stamp or an unreadable read keeps the hold.
+An additional PR settles by record, never by guess. One of three facts settles an extra. Its own stamp reads `merged` or `closed`. It is the primary of a node whose merge status reads `merged`. Another node carries it as its primary, and that node's worker holds the PR. The sweep reads GitHub once per pass for any extra that no fact settles. When the entry carries no url, the read resolves in the node's `cwd`. A merged or closed answer is stamped onto the entry. The stamp settles the row on the same pass. A refused stamp or an unreadable read keeps the hold.
 
 Never hand-close the node to clear this line. That hides the obligation and falsifies the record.
 
