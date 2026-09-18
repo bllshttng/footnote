@@ -1,22 +1,38 @@
-# grok Stop-contract readings. Live continuation run: BLOCKED 2026-09-18.
-# Receipt: `grok models` prints "You are not authenticated." auth.json was
-# expired (is_expired=true) at its last good read 2026-09-17T23:31Z
-# (~/.grok/logs/unified.jsonl) and is absent now. No XAI_API_KEY, no keychain
-# item, no fno provider key. The keys below marked source=bundled-docs come
-# from grok 1.0.34's bundled user guide (~/.grok/docs/user-guide), not from a
-# live turn. The capability row stays "extension" until a live run re-measures
-# continued=true with fires_in_turn>=2.
+# grok Stop-contract readings. Live continuation run: MEASURED 2026-09-18.
+# Receipt: `grok models` read "You are logged in with grok.com" (OIDC login
+# minted 2026-09-18T15:34Z). One scratch git repo under the job tmp dir, one
+# headless turn (`grok --trust --session-id <uuid> -p "Reply with the word
+# ready."`) plus one keeper-lane pty turn, each blocked once by a project
+# Stop hook. The block reply ({"decision":"block","reason":...} on hook
+# stdout) kept the agent working: Stop re-fired with stopHookActive=true and
+# the final headless stdout carried the requested GROK_CONT_<session-id>
+# token. grok wrote one scratch-scoped entry into
+# ~/.grok/trusted_folders.toml when --trust was honored; the folder is a
+# throwaway and no other grok config was read or written.
+#
+# The capability row stays "extension". The Stop CONTRACT above is real, but
+# it was measured through a PROJECT hook in the scratch repo. Footnote's own
+# route into grok is the Claude-plugin scan, and the live debug receipt
+# (`grok --debug-file`) shows grok 1.0.34 discovering the fno plugin with
+# has_hooks=true yet dispatching NONE of its hooks: on session_start,
+# user_prompt_submit and stop only global (Claude settings compat) and
+# project hooks ran. With no plugin hook dispatched, footnote's Stop gate
+# never reaches grok, so a looping dispatch stays refused until grok
+# dispatches plugin hooks or the plugin is installed through grok's own
+# installer (an operator config change, out of scope for a measurement run).
 grok_version=1.0.34 (3736acbc8658) [stable] source=measured grok --version 2026-09-18
-stop_payload_keys=cwd,hookEventName,lastAssistantMessage,permissionMode,promptId,sessionId,stopHookActive,timestamp,workspaceRoot source=bundled-docs 10-hooks.md Input and common fields
-session_id_matches_cli_id=true source=bundled-docs 17-sessions.md (-s supplies the session id) and 10-hooks.md common fields
-env_session_id_matches=true source=bundled-docs 10-hooks.md hook env table, GROK_SESSION_ID set for every hook
-prompt_id_present=true source=bundled-docs 10-hooks.md common fields, absent for session-scoped events
-fires_in_turn=unmeasured (bundled-docs: Stop fires again per continuation round, 8-continuation cap)
-continued=unmeasured source=live-run-blocked, no grok login, row stays extension
-store_path=$GROK_HOME|$HOME/.grok/sessions/<url-encoded-cwd>/<session-id>/chat_history.jsonl source=bundled-docs 17-sessions.md Storage Layout
-store_has_prompt=unmeasured (bundled-docs: chat_history.jsonl holds the raw chat messages sent to the model)
-store_has_marker=unmeasured source=live-run-blocked, no grok login
-session_end_fire_has_prompt_id=false source=bundled-docs 10-hooks.md, session-end Stop fire (reason channel_closed or shutdown) is session-scoped
+stop_payload_keys=backgroundTasks,cwd,hookEventName,hook_event_name,lastAssistantMessage,permissionMode,permission_mode,promptId,reason,sessionCrons,sessionId,session_id,stopHookActive,timestamp,transcriptPath,transcript_path,workspaceRoot source=measured live Stop fires 2026-09-18 (camelCase keys plus snake_case mirrors; transcriptPath names updates.jsonl in the session dir, and the fno reader uses chat_history.jsonl beside it)
+session_id_matches_cli_id=true source=measured payload sessionId equals the --session-id value on every fire
+env_session_id_matches=true source=measured hook-env GROK_SESSION_ID equals the payload sessionId on every fire
+prompt_id_present=true source=measured present on both turn fires; the session-end fire carries none
+fires_in_turn=2 source=measured first fire blocked (stopHookActive=false), continuation re-fired with stopHookActive=true (8-continuation cap unchanged)
+continued=true source=measured the headless stdout carried the requested GROK_CONT_<session-id> token after the block
+store_path=$GROK_HOME|$HOME/.grok/sessions/<url-encoded-cwd>/<session-id>/chat_history.jsonl source=measured session dir confirmed 2026-09-18; the dir also holds the updates.jsonl the payload's transcriptPath names
+store_has_prompt=true source=measured the -p text appears JSON-escaped in chat_history.jsonl
+store_has_marker=true source=measured a keeper-lane pty session (grok --session-id <uuid2>, one typed marker line) recorded the marker in its chat_history.jsonl
+session_end_fire_has_prompt_id=false source=measured the shutdown fire at process exit carried no promptId
 inspect_plugins_fno=reachable path=/Users/bb16/.claude/plugins/cache/footnote/fno/0.3.2 enabled=true provides.hooks=true source=measured grok inspect --json 2026-09-18, no auth needed
-# The payload shape the replay tests drive (docs-derived, grok 1.0.34):
-payload_sample={"hookEventName":"stop","sessionId":"0198abcd-1234-5678-9abc-def012345678","cwd":"/repo","workspaceRoot":"/repo","permissionMode":"default","promptId":"prompt-1","stopHookActive":false,"lastAssistantMessage":"Reply with the token GROK_CONT_demo.","timestamp":"2026-09-18T00:00:00Z"}
+plugin_hooks_dispatched=false source=measured grok --debug-file receipt 2026-09-18: every hook_name row on session_start, user_prompt_submit, stop and stop_cancelled came from global (Claude settings compat) or project hook sources; no plugin-sourced hook fired
+# The payload shape the replay tests drive (live turn, grok 1.0.34,
+# 2026-09-18; demo session id and paths):
+payload_sample={"hookEventName":"stop","sessionId":"0198abcd-1234-5678-9abc-def012345678","cwd":"/repo","workspaceRoot":"/repo/","timestamp":"2026-09-18T15:41:36.200480+00:00","transcriptPath":"/grok-home/sessions/%2Frepo/0198abcd-1234-5678-9abc-def012345678/updates.jsonl","promptId":"797808b0-ca42-406d-958f-4d8ba62be018","permissionMode":"auto","reason":"end_turn","stopHookActive":false,"lastAssistantMessage":"ready","backgroundTasks":[],"sessionCrons":[],"hook_event_name":"Stop","session_id":"0198abcd-1234-5678-9abc-def012345678","transcript_path":"/grok-home/sessions/%2Frepo/0198abcd-1234-5678-9abc-def012345678/updates.jsonl","permission_mode":"auto"}

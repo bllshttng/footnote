@@ -1,10 +1,13 @@
 #![cfg(unix)]
 //! grok's Stop envelope through the real `fno-agents hook stop` binary.
 //!
-//! Payloads replay the recorded grok 1.0.34 contract
-//! (tests/fixtures/grok-stop-trials.txt). The live continuation run is
-//! blocked machine-wide (no grok login), so these pin the envelope handling
-//! only; the capability row stays "extension" until a live run re-measures.
+//! Payloads replay the measured grok 1.0.34 contract
+//! (tests/fixtures/grok-stop-trials.txt, live run 2026-09-18): a Stop hook's
+//! block reply keeps the turn working (stopHookActive re-fired true, the
+//! turn continued). The capability row stays "extension" all the same: grok
+//! discovers footnote's plugin but dispatches none of its hooks, so the
+//! Stop gate does not reach grok through the plugin scan. These pin the
+//! envelope handling for the day that route delivers.
 
 use std::fs;
 use std::io::Write;
@@ -164,16 +167,25 @@ fn last_loop_check(events: &Path) -> Option<serde_json::Value> {
 }
 
 fn grok_payload(repo: &Path, extra: serde_json::Value, lam: &str) -> String {
+    let sid_dir = format!("/grok-home/sessions/%2Frepo/{SID}");
     let mut body = serde_json::json!({
         "hookEventName": "stop",
         "sessionId": SID,
         "cwd": repo.to_str().unwrap(),
-        "workspaceRoot": repo.to_str().unwrap(),
-        "permissionMode": "default",
-        "promptId": "prompt-1",
+        "workspaceRoot": format!("{}/", repo.to_str().unwrap()),
+        "timestamp": "2026-09-18T15:41:36.200480+00:00",
+        "transcriptPath": format!("{sid_dir}/updates.jsonl"),
+        "promptId": "797808b0-ca42-406d-958f-4d8ba62be018",
+        "permissionMode": "auto",
+        "reason": "end_turn",
         "stopHookActive": false,
         "lastAssistantMessage": lam,
-        "timestamp": "2026-09-18T00:00:00Z"
+        "backgroundTasks": [],
+        "sessionCrons": [],
+        "hook_event_name": "Stop",
+        "session_id": SID,
+        "transcript_path": format!("{sid_dir}/updates.jsonl"),
+        "permission_mode": "auto"
     });
     for (k, v) in extra.as_object().into_iter().flatten() {
         body[k] = v.clone();
