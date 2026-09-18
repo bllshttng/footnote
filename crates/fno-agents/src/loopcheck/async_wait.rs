@@ -251,6 +251,25 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_head_with_stale_settled_checks_still_refuses() {
+        // The shape measured on a live conflicting PR: the runs on the head
+        // concluded green before the base moved. No new check can start on
+        // this head and those results are stale, so the idle still refuses
+        // and the receipt still teaches the rebase - whatever the count says.
+        let pr = PrInfo {
+            ci_conclusion: CiConclusion::Success,
+            ci_has_pending: false,
+            ..conflicting_pr()
+        };
+        assert_eq!(async_wait_class(&pr, true, true), None);
+        let reason = build_block_reason(&pr, "abc", true, true);
+        assert!(reason.contains("CONFLICTING"), "got: {reason}");
+        assert!(reason.contains("fno do pr rebase"), "got: {reason}");
+        assert!(reason.contains("no new check run"), "got: {reason}");
+        assert!(reason.contains("before the base moved"), "got: {reason}");
+    }
+
+    #[test]
     fn block_reason_names_the_rebase_not_a_wait() {
         let reason = build_block_reason(&conflicting_pr(), "abc", true, true);
         assert!(reason.contains("CONFLICTING"), "got: {reason}");
