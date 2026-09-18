@@ -102,6 +102,25 @@ impl CodexDaemonAdapter {
         )
     }
 
+    /// The managed daemon's (pid, start token) from the provider-owned
+    /// state file. `None` = the state is absent or unreadable: readiness
+    /// degrades to unknown, never to a guessed pid.
+    pub fn provider_pid_start(&self) -> Option<(u32, u64)> {
+        let state = self.provider_state().ok()?;
+        Some((state.pid?, state.process_start_time?))
+    }
+
+    /// The control socket path this adapter resolves.
+    pub fn control_socket(&self) -> PathBuf {
+        self.socket_path.clone()
+    }
+
+    /// Socket-level reachability plus the initialize handshake: the
+    /// process/socket/initialize predicate, without the state wrapper.
+    pub fn socket_up(&self) -> bool {
+        self.socket_path.exists() && probe_codex_app_server(&self.socket_path)
+    }
+
     fn provider_state(&self) -> Result<crate::harness_daemon::DaemonState, String> {
         let raw = std::fs::read_to_string(&self.provider_state_path)
             .map_err(|error| format!("read Codex daemon state: {error}"))?;
@@ -346,6 +365,39 @@ async fn connect_app_server_unbounded(
 
 async fn codex_initialize_handshake(socket_path: &Path) -> Result<(), &'static str> {
     connect_app_server(socket_path).await.map(|_| ())
+}
+
+/// Read the initialize response's serverInfo (the server's own name +
+/// version user-agent) WITHOUT retaining the connection: a second
+/// initialize on the same connection is a protocol error, so this helper
+/// owns its whole lifecycle. `None` = the daemon never answered. This is
+/// the live-version reader the readiness verdict needs - the handshake
+/// used to discard exactly this response.
+pub fn initialize_server_info() -> Option<serde_json::Value> {
+    let socket_path = CodexDaemonAdapter::from_environment().control_socket();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    runtime.block_on(async {
+        let conn = UnixStream::connect(&socket_path).await.ok()?;
+        let ws = tokio_tungstenite::client_async("ws://localhost/rpc", conn)
+            .await
+            .ok()?
+            .0;
+        let (mut sink, mut stream) = ws.split();
+        use futures_util::SinkExt;
+        sink.send(Message::Text(initialize_request_json().into()))
+            .await
+            .ok()?;
+        let response = read_until_id(&mut stream, &serde_json::json!("init"))
+            .await
+            .ok()?;
+        drop(sink);
+        drop(stream);
+        let frame: serde_json::Value = serde_json::from_str(&response).ok()?;
+        frame.pointer("/result/serverInfo").cloned()
+    })
 }
 
 /// The `initialize` request frame. Local socket needs no auth/pairing — just the

@@ -127,7 +127,6 @@ impl LsRow {
             state,
         })
     }
-
 }
 
 /// The one partition pass over `mux ls` rows. Buckets mirror the restart
