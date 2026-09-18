@@ -5341,7 +5341,7 @@ fn remove_external_without_stopped_record_refused() {
     );
     assert!(drain_notice(&mut rx)
         .unwrap()
-        .contains("no such stopped row"));
+        .contains("no external lifecycle record"));
     // A stopping record refuses with the stop-first ordering.
     crate::squad_store::begin_external_stop("deadbeef", "ext", "/tmp").unwrap();
     core.command(
