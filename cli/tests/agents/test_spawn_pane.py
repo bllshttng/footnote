@@ -2147,7 +2147,7 @@ def test_cmd_spawn_pane_refuses_unbound_codex_receipt(tmp_path: Path, monkeypatc
         agents_cli.agents_app,
         ["spawn", "--name", "peer", "--harness", "codex", "--substrate", "pane", "/fno:target x-81ad"],
     )
-    assert result.exit_code == 1
+    assert result.exit_code == 1, result.output
     assert "required codex session binding" in result.output
     # x-1595: no refusal an operator actually reads may route them to the
     # canary. It binds in a scratch cwd with its own baseline, so it read green
