@@ -15,20 +15,20 @@ use crate::state::RegistryEntry;
 use std::collections::BTreeMap;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct ScopeSplit {
+pub struct ScopeSplit {
     pub scope: String,
     pub holders: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct StaleCrown {
+pub struct StaleCrown {
     pub row: String,
     pub scope: String,
     pub stored_status: String,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct CrownSplits {
+pub struct CrownSplits {
     pub double_ruled: Vec<ScopeSplit>,
     pub stale: Vec<StaleCrown>,
 }
