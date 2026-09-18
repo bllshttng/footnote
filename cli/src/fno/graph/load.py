@@ -31,10 +31,13 @@ def load_graph(path: Path | None = None, *, keep_malformed: bool = False) -> lis
     if path is None:
         path = GRAPH_JSON
 
-    if not path.exists():
-        return []
+    # The store, not the seed file, is what holds the rows now: a store
+    # born from a write never materializes graph.json, so an absent seed
+    # file means "read the store", not "nothing exists".
+    from fno.graph.store import read_graph_strict
 
-    from fno.graph.store import read_file_bytes
+    if not path.exists():
+        return read_graph_strict(Path(path))
 
     raw_bytes = read_file_bytes(Path(path))
     return _entries(json.loads(raw_bytes), keep_malformed=keep_malformed)
