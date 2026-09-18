@@ -169,15 +169,16 @@ fn fno_verb(args: &[&str]) -> Result<(i32, String, String), String> {
 /// The crown-keyed handoff doc for one scope, newest existing file first.
 /// The key scheme matches the precompact writer (`config paths handoff
 /// --scope`), so the two cannot drift; no doc yet is a failed reading, not a
-/// placeholder beat.
-fn crown_handoff_doc(ctx: &Ctx) -> Result<PathBuf, String> {
-    let key = format!("crown-{}", sanitize_scope_key(&ctx.scope));
+/// placeholder beat. Takes the directory and scope rather than `Ctx` so the
+/// stop gate's stale-doc resolver calls the same one.
+pub(crate) fn crown_handoff_doc(handoffs_dir: &Path, scope: &str) -> Result<PathBuf, String> {
+    let key = format!("crown-{}", sanitize_scope_key(scope));
     if key == "crown-" {
         return Err("empty scope names no canon doc".into());
     }
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    let it = std::fs::read_dir(&ctx.handoffs_dir)
-        .map_err(|_| format!("no canon handoff doc for scope {}", ctx.scope))?;
+    let it = std::fs::read_dir(handoffs_dir)
+        .map_err(|_| format!("no canon handoff doc for scope {scope}"))?;
     for entry in it.flatten() {
         let path = entry.path();
         if !path.is_file() {
@@ -196,7 +197,7 @@ fn crown_handoff_doc(ctx: &Ctx) -> Result<PathBuf, String> {
         }
     }
     best.map(|(_, p)| p)
-        .ok_or_else(|| format!("no canon handoff doc for scope {}", ctx.scope))
+        .ok_or_else(|| format!("no canon handoff doc for scope {scope}"))
 }
 
 pub(crate) fn sanitize_scope_key(scope: &str) -> String {
@@ -267,7 +268,7 @@ fn is_user_placeholder(text: &str) -> bool {
 }
 
 fn r_user_notes(ctx: &Ctx) -> Result<Value, String> {
-    let doc = crown_handoff_doc(ctx)?;
+    let doc = crown_handoff_doc(&ctx.handoffs_dir, &ctx.scope)?;
     let text =
         std::fs::read_to_string(&doc).map_err(|e| format!("{}: unreadable: {e}", doc.display()))?;
     let block = extract_user_marker(&text)

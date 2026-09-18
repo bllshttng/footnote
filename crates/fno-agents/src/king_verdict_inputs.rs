@@ -19,7 +19,7 @@ const DEFAULT_CHECKIN_SECS: i64 = 14400;
 /// The window is three check-in intervals (Python `verdict_counts`).
 const WINDOW_INTERVALS: i64 = 3;
 /// The default compaction ceiling (`config.king.compaction_ceiling`).
-const DEFAULT_COMPACTION_CEILING: i64 = 3;
+pub(crate) const DEFAULT_COMPACTION_CEILING: i64 = 3;
 
 /// The registry statuses Python reads as terminal (`registry.TERMINAL_STATUSES`).
 fn row_status_word(status: &AgentStatus) -> Option<&'static str> {

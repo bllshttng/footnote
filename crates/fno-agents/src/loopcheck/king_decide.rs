@@ -182,6 +182,15 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     if let Some(result) = crate::king_term::gate(&reading, &manifest.scope, dry, &blind_block) {
         return result;
     }
+    if let Some((gate_reading, gate_message)) = stale_crown_doc_gate(
+        &manifest,
+        &parsed.transcript_path,
+        &parsed.cwd,
+        &parsed.fno_bin,
+        std::time::SystemTime::now(),
+    ) {
+        return blind_block(&gate_reading, &gate_message, 0, dry);
+    }
 
     let board = match read_king_board(&parsed.fno_bin, &parsed.cwd, &parsed.state_path) {
         Ok(b) => b,
@@ -375,4 +384,238 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             dry + 1,
         ),
     )
+}
+
+/// The stale-crown-doc gate: past the compaction ceiling, a crown handoff doc
+/// that is gone or 24h stale means the king acts on a snapshot nothing has
+/// refreshed. Claude-only: the boundary count is measured on claude
+/// transcripts, and a harness whose transcript carries no `compact_boundary`
+/// line counts zero, so the gate stays silent there by design. Fail-open on
+/// anything it cannot measure: it blocks exit, and a false block traps a
+/// session for a fact it cannot see.
+fn stale_crown_doc_gate(
+    manifest: &KingManifest,
+    transcript: &Path,
+    cwd: &Path,
+    fno_bin: &str,
+    now: std::time::SystemTime,
+) -> Option<(String, String)> {
+    if manifest.harness.as_deref().unwrap_or("claude") != "claude" {
+        return None;
+    }
+    let scope = manifest.scope.trim();
+    if scope.is_empty() {
+        return None;
+    }
+    let ceiling = match crate::agents_config::config_lookup(cwd, &["king", "compaction_ceiling"]) {
+        Some(v) => v
+            .as_integer()
+            .filter(|n| *n >= 0)
+            .unwrap_or(crate::king_verdict_inputs::DEFAULT_COMPACTION_CEILING),
+        None => crate::king_verdict_inputs::DEFAULT_COMPACTION_CEILING,
+    } as u64;
+    // Count first: a scan of the transcript this fire already holds. The doc
+    // resolution (a subprocess) is paid only past the ceiling, so the common
+    // path adds no cost to the board read.
+    let crown_start = manifest
+        .created_at
+        .as_deref()
+        .and_then(|s| s.parse::<DateTime<Utc>>().ok())?;
+    let boundaries =
+        crate::compaction::count_boundaries_since(transcript, Some(crown_start.timestamp()))
+            .ok()?;
+    if boundaries <= ceiling {
+        return None;
+    }
+    // The handoffs-dir resolver lives only in the Python CLI; shell it rather
+    // than copy it, then pick newest + mtime with the same resolver
+    // king_checkin uses, so the two cannot drift.
+    let out = std::process::Command::new(fno_bin)
+        .args(["config", "paths", "handoff", "--scope", scope])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let printed = String::from_utf8_lossy(&out.stdout);
+    let printed = printed.lines().next()?.trim();
+    if printed.is_empty() {
+        return None;
+    }
+    let dir = std::path::Path::new(printed).parent()?;
+    let doc = match crate::king_checkin::crown_handoff_doc(dir, scope) {
+        Ok(doc) => doc,
+        Err(_) => return Some(stale_doc_block(scope, ceiling, boundaries, None)),
+    };
+    let age_secs = std::fs::metadata(&doc)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|mtime| now.duration_since(mtime).ok())
+        .map(|d| d.as_secs())
+        // An unstattable doc cannot prove itself fresh; treat it as ancient,
+        // the same direction the resolver's own UNIX_EPOCH floor takes.
+        .unwrap_or(u64::MAX);
+    if age_secs <= crate::king_term::STALE_CROWN_DOC_MAX_AGE_SECS as u64 {
+        return None;
+    }
+    Some(stale_doc_block(
+        scope,
+        ceiling,
+        boundaries,
+        Some(age_secs / 3600),
+    ))
+}
+
+fn stale_doc_block(
+    scope: &str,
+    ceiling: u64,
+    boundaries: u64,
+    age_hours: Option<u64>,
+) -> (String, String) {
+    let age = match age_hours {
+        Some(h) => format!("{h}h old"),
+        None => "missing".to_string(),
+    };
+    (
+        crate::king_escalation::reading_stale_crown_doc(),
+        format!(
+            "the crown's handoff doc for {scope} is {age} and this reign is past its compaction ceiling ({boundaries} > {ceiling}); refresh it: bash \"$PLUGIN_ROOT/hooks/precompact-canon-doc.sh\" < /dev/null"
+        ),
+    )
+}
+
+#[cfg(test)]
+mod stale_crown_doc_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    const CROWN_START: &str = "2026-09-15T00:00:00Z";
+
+    fn manifest(harness: &str) -> KingManifest {
+        KingManifest {
+            scope: "footnote".into(),
+            created_at: Some(CROWN_START.into()),
+            harness: Some(harness.into()),
+            ..Default::default()
+        }
+    }
+
+    fn write_transcript(dir: &Path, name: &str, boundaries: usize) -> PathBuf {
+        let path = dir.join(name);
+        let mut body = String::new();
+        for i in 0..boundaries {
+            body.push_str(&format!(
+                "{{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"timestamp\":\"2026-09-16T0{i}:00:00Z\"}}\n"
+            ));
+        }
+        body.push_str("{\"type\":\"user\",\"message\":\"tail\"}\n");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// The CLI stub answers `config paths handoff --scope` with a path inside
+    /// `handoffs_dir`, the way the real verb prints the scope's newest doc.
+    fn stub_fno(dir: &Path, handoffs_dir: &Path) -> String {
+        let stub = dir.join("fno-stub.sh");
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                handoffs_dir.join("unused-crown-footnote.md").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        stub.to_string_lossy().into_owned()
+    }
+
+    fn seed_doc(handoffs_dir: &Path) {
+        std::fs::create_dir_all(handoffs_dir).unwrap();
+        std::fs::write(handoffs_dir.join("20260916-crown-footnote.md"), "# canon").unwrap();
+    }
+
+    #[test]
+    fn stale_doc_past_ceiling_blocks_and_names_the_refresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript = write_transcript(tmp.path(), "t.jsonl", 4);
+        let handoffs = tmp.path().join("handoffs");
+        seed_doc(&handoffs);
+        let fno = stub_fno(&tmp.path().join("bin"), &handoffs);
+        let now = std::time::SystemTime::now() + Duration::from_secs(30 * 3600);
+        let gate = stale_crown_doc_gate(&manifest("claude"), &transcript, tmp.path(), &fno, now);
+        let (reading, message) = gate.expect("gate must block on a 30h-old doc");
+        assert_eq!(reading, crate::king_escalation::reading_stale_crown_doc());
+        assert!(message.contains("precompact-canon-doc.sh"), "{message}");
+        assert!(message.contains("4 > 3"), "{message}");
+    }
+
+    #[test]
+    fn fresh_doc_past_ceiling_allows_the_board_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript = write_transcript(tmp.path(), "t.jsonl", 4);
+        let handoffs = tmp.path().join("handoffs");
+        seed_doc(&handoffs);
+        let fno = stub_fno(&tmp.path().join("bin"), &handoffs);
+        let now = std::time::SystemTime::now() + Duration::from_secs(3600);
+        assert!(
+            stale_crown_doc_gate(&manifest("claude"), &transcript, tmp.path(), &fno, now).is_none()
+        );
+    }
+
+    #[test]
+    fn no_compaction_boundary_stays_silent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript = write_transcript(tmp.path(), "t.jsonl", 0);
+        let handoffs = tmp.path().join("handoffs");
+        seed_doc(&handoffs);
+        let fno = stub_fno(&tmp.path().join("bin"), &handoffs);
+        let now = std::time::SystemTime::now() + Duration::from_secs(30 * 3600);
+        assert!(
+            stale_crown_doc_gate(&manifest("claude"), &transcript, tmp.path(), &fno, now).is_none()
+        );
+    }
+
+    #[test]
+    fn non_claude_harness_never_fires() {
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript = write_transcript(tmp.path(), "t.jsonl", 4);
+        let handoffs = tmp.path().join("handoffs");
+        seed_doc(&handoffs);
+        let fno = stub_fno(&tmp.path().join("bin"), &handoffs);
+        let now = std::time::SystemTime::now() + Duration::from_secs(30 * 3600);
+        assert!(
+            stale_crown_doc_gate(&manifest("codex"), &transcript, tmp.path(), &fno, now).is_none()
+        );
+    }
+
+    #[test]
+    fn missing_doc_past_ceiling_blocks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript = write_transcript(tmp.path(), "t.jsonl", 4);
+        let handoffs = tmp.path().join("empty-handoffs");
+        std::fs::create_dir_all(&handoffs).unwrap();
+        let fno = stub_fno(&tmp.path().join("bin"), &handoffs);
+        let now = std::time::SystemTime::now() + Duration::from_secs(3600);
+        let (reading, message) =
+            stale_crown_doc_gate(&manifest("claude"), &transcript, tmp.path(), &fno, now)
+                .expect("a missing doc past the ceiling must block");
+        assert_eq!(reading, crate::king_escalation::reading_stale_crown_doc());
+        assert!(message.contains("missing"), "{message}");
+    }
+
+    #[test]
+    fn ceiling_reached_but_not_exceeded_allows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript = write_transcript(tmp.path(), "t.jsonl", 3);
+        let handoffs = tmp.path().join("handoffs");
+        seed_doc(&handoffs);
+        let fno = stub_fno(&tmp.path().join("bin"), &handoffs);
+        let now = std::time::SystemTime::now() + Duration::from_secs(30 * 3600);
+        assert!(
+            stale_crown_doc_gate(&manifest("claude"), &transcript, tmp.path(), &fno, now).is_none()
+        );
+    }
 }

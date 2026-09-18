@@ -46,6 +46,10 @@ pub fn reading_term_unreadable() -> String {
     "reading:term-unreadable".to_owned()
 }
 
+pub fn reading_stale_crown_doc() -> String {
+    "reading:stale-crown-doc".to_owned()
+}
+
 #[derive(Deserialize)]
 pub struct EscalationRequest {
     pub stalled: Vec<String>,
