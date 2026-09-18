@@ -197,50 +197,61 @@ def _codex_install(run: Runner) -> IntegrationResult:
 
 
 # --- opencode ---------------------------------------------------------------
-# OpenCode is a loop-wrapper harness (scripts/lib/driver-opencode.sh), not a
-# native plugin-marketplace CLI. Its integration is a local-file plugin copied
-# into OpenCode's plugin dir - no npm publish needed (OpenCode loads .js files
-# from ~/.config/opencode/plugins/ directly). Unlike codex, the installed state
-# is verifiable (the file exists and matches the shipped source), so we can
-# claim "installed" honestly.
-
-def _opencode_plugin_src() -> Path:
-    return Path(__file__).parent / "assets" / "opencode" / "footnote.js"
+# OpenCode is a loop-wrapper harness (scripts/lib/driver-opencode.sh). Its
+# integration is one fno-agents install (opencode_install.rs) that writes the
+# stop bridge, generated fno:<verb> command files, translated agent files and
+# the skill trees into the directories OpenCode already scans in the global
+# config dir. The Python side reads JSON receipts through the fno-agents door
+# and owns no install logic of its own; the receipt decides "installed".
 
 
-def _opencode_plugins_dir() -> Path:
-    return Path.home() / ".config" / "opencode" / "plugins"
+def _opencode_status():
+    """One door round-trip: (error, receipt) from the fno-agents opencode arm.
 
+    The flags ride AHEAD of the harness word: a deployed binary older than
+    this change parses the first flag as the mode, lands on "unknown
+    harness", and refuses - so a stale binary can answer a PROBE with an
+    install, never the reverse."""
+    from fno.rust_binary import call_binary_json
 
-def _opencode_plugin_dest() -> Path:
-    return _opencode_plugins_dir() / "footnote.js"
+    return call_binary_json("plugin-install", ["--installed", "--json", "opencode"])
 
 
 def _opencode_is_installed() -> bool:
-    # Installed == the dest file exists AND matches the shipped source, so a
-    # stale copy (older footnote) reports not-installed and gets refreshed.
-    dest = _opencode_plugin_dest()
-    if not dest.exists():
-        return False
-    try:
-        return dest.read_text(encoding="utf-8") == _opencode_plugin_src().read_text(
-            encoding="utf-8"
-        )
-    except OSError:
-        return False
+    err, receipt = _opencode_status()
+    return (
+        err is None
+        and isinstance(receipt, dict)
+        and receipt.get("status") == "installed"
+    )
 
 
 def _opencode_install() -> IntegrationResult:
     label = "OpenCode"
-    src = _opencode_plugin_src()
-    dest = _opencode_plugin_dest()
-    try:
-        src_text = src.read_text(encoding="utf-8")
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(src_text, encoding="utf-8")
-    except OSError as exc:
-        return IntegrationResult("opencode", label, "failed", note=str(exc))
-    return IntegrationResult("opencode", label, "installed", note=f"plugin -> {dest}")
+    from fno.rust_binary import call_binary_json
+
+    err, receipt = call_binary_json("plugin-install", ["--json", "opencode"])
+    if err is not None:
+        return IntegrationResult("opencode", label, "failed", note=str(err))
+    if not isinstance(receipt, dict):
+        return IntegrationResult(
+            "opencode", label, "failed", note="unreadable install receipt"
+        )
+    kept = receipt.get("kept") or []
+    note = "{} file(s) (footnote {}) -> {}".format(
+        receipt.get("written", 0),
+        receipt.get("version", "?"),
+        receipt.get("config_dir", "?"),
+    )
+    if kept:
+        note += "; kept user files: " + ", ".join(str(k) for k in kept)
+    status = receipt.get("status")
+    return IntegrationResult(
+        "opencode",
+        label,
+        "installed" if status in ("installed", "partial") else "failed",
+        note=note,
+    )
 
 
 # --- pi ---------------------------------------------------------------------

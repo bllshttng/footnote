@@ -2564,7 +2564,10 @@ def _emit_human(
             "fno doctor: opencode is set up but its footnote plugin is missing; "
             "re-run `fno config setup` to install it."
         )
+    elif isinstance(oc, str):
+        out(f"fno doctor: opencode {oc}")
     _emit_codex_context_window(result, out=out)
+
     dupes = surf.get("codex_marketplace_duplicates") or []
     if dupes:
         out(
@@ -3714,19 +3717,48 @@ def _harness_surface_report() -> dict[str, Any]:
     registered twice). Never blocks/exits; a missing harness is simply silent."""
     report: dict[str, Any] = {}
     try:
-        from fno.setup.integration import (
-            _opencode_is_installed,
-            _opencode_plugin_dest,
-            _opencode_plugins_dir,
-        )
-
         # Only when opencode is actually set up (its plugins dir exists), so a
-        # non-opencode user is never nagged.
-        if _opencode_plugins_dir().exists():
-            if not _opencode_plugin_dest().exists():
-                report["opencode"] = "missing"
-            elif not _opencode_is_installed():
-                report["opencode"] = "stale"
+        # non-opencode user is never nagged. The opencode leg reads one JSON
+        # receipt from the fno-agents door: what the manifest says is
+        # installed, what the --pure catalogs say is loaded, and the
+        # difference by name.
+        oc_home = Path(
+            os.environ.get("OPENCODE_CONFIG_DIR") or Path.home() / ".config/opencode"
+        )
+        if (oc_home / "plugins").is_dir():
+            from fno.rust_binary import call_binary_json
+
+            err, receipt = call_binary_json(
+                "plugin-install", ["--status", "--json", "opencode"]
+            )
+            if err is None and isinstance(receipt, dict):
+                status = receipt.get("status")
+                # The message is built here so the printer stays string-only:
+                # partial names what never loaded, stale names version drift,
+                # and a legacy bridge-only machine learns what the bridge
+                # never carried.
+                if status == "stale":
+                    report["opencode"] = (
+                        f"surface is STALE: installed at footnote {receipt.get('version')}, "
+                        f"footnote ships {receipt.get('source_version')}; re-run "
+                        "`fno config plugin install opencode`."
+                    )
+                elif status == "partial":
+                    names = ", ".join(str(n) for n in (receipt.get("missing") or []))
+                    report["opencode"] = (
+                        "surface is PARTIAL: installed but not loaded: "
+                        + names
+                        + "; re-run `fno config plugin install opencode`."
+                    )
+                elif status == "absent":
+                    if receipt.get("bridge_present"):
+                        report["opencode"] = (
+                            "carries only the legacy stop bridge; the fno: "
+                            "commands, agents and skills are not installed; "
+                            "re-run `fno config plugin install opencode`."
+                        )
+                    else:
+                        report["opencode"] = "missing"
     except Exception:
         pass
 

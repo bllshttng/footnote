@@ -858,7 +858,6 @@ mod process_table_tests {
     }
 
     #[test]
-    #[cfg(not(target_os = "macos"))]
     fn ps_leg_parses_right_aligned_columns() {
         let row = super::parse_ps_row("  1234  2556 S 02:03  1.5  10240 /bin/sleep 37")
             .expect("an aligned ps row parses");

@@ -310,31 +310,80 @@ def test_manual_result_echoes_a_finish_step_not_installed():
     assert "Codex CLI: installed" not in blob
 
 
-# --- opencode (local-file plugin install, x-6007) ---------------------------
+# --- opencode (fno-agents door, x-11ca) --------------------------------------
 
-def test_opencode_install_copies_plugin_and_is_installed(tmp_path, monkeypatch):
-    # Redirect HOME so the plugin lands under a temp ~/.config/opencode/plugins/.
-    monkeypatch.setenv("HOME", str(tmp_path))
+def test_opencode_is_installed_reads_the_door(monkeypatch):
+    """Installed == the door receipt says installed; no local byte-compare."""
+    calls = []
 
+    def fake_status():
+        calls.append(1)
+        return (None, {"status": "installed"})
+
+    monkeypatch.setattr(I, "_opencode_status", fake_status)
+    assert I._opencode_is_installed() is True
+    assert calls
+
+    monkeypatch.setattr(I, "_opencode_status", lambda: (None, {"status": "partial"}))
     assert I._opencode_is_installed() is False
 
+    monkeypatch.setattr(I, "_opencode_status", lambda: ("binary missing", None))
+    assert I._opencode_is_installed() is False
+
+
+def test_opencode_install_maps_the_receipt(monkeypatch):
+    import fno.rust_binary as rb
+
+    monkeypatch.setattr(
+        rb,
+        "call_binary_json",
+        lambda verb, args, **kw: (
+            None,
+            {
+                "status": "installed",
+                "written": 71,
+                "version": "9.9.9",
+                "config_dir": "/tmp/conf",
+                "kept": [],
+            },
+        ),
+    )
     res = I._opencode_install()
     assert res.ok and res.cli == "opencode"
+    assert "71 file(s)" in res.note
+    assert "9.9.9" in res.note
 
-    dest = I._opencode_plugin_dest()
-    assert dest.exists()
-    assert dest.read_text(encoding="utf-8") == I._opencode_plugin_src().read_text(
-        encoding="utf-8"
+
+def test_opencode_install_names_kept_user_files(monkeypatch):
+    import fno.rust_binary as rb
+
+    monkeypatch.setattr(
+        rb,
+        "call_binary_json",
+        lambda verb, args, **kw: (
+            None,
+            {
+                "status": "partial",
+                "written": 3,
+                "version": "9.9.9",
+                "config_dir": "/tmp/conf",
+                "kept": ["skills/decoy/SKILL.md"],
+            },
+        ),
     )
-    assert I._opencode_is_installed() is True
+    res = I._opencode_install()
+    assert res.ok
+    assert "kept user files: skills/decoy/SKILL.md" in res.note
 
 
-def test_opencode_is_installed_false_when_stale(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    dest = I._opencode_plugin_dest()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text("// stale older footnote plugin\n", encoding="utf-8")
-    assert I._opencode_is_installed() is False
+def test_opencode_install_maps_door_failure(monkeypatch):
+    import fno.rust_binary as rb
+
+    monkeypatch.setattr(rb, "call_binary_json", lambda verb, args, **kw: ("no binary", None))
+    res = I._opencode_install()
+    assert not res.ok
+    assert res.status == "failed"
+    assert res.note == "no binary"
 
 
 def test_opencode_adapter_registered():
