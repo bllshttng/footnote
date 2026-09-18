@@ -1908,17 +1908,13 @@ def _live_field_coverage(
     projected_zeroes = sorted(
         name for name, count in projected_counts.items() if count == 0
     )
-    persisted_dead, persisted_conditional, persisted_transient = _partition_zeroes(
-        persisted_zeroes, persisted_counts, contract, "persisted"
-    )
-    projected_dead, projected_conditional, projected_transient = _partition_zeroes(
-        projected_zeroes, projected_counts, contract, "projected"
-    )
+    persisted_dead, persisted_cond, persisted_trans = _partition_zeroes(
+        persisted_zeroes, persisted_counts, contract, "persisted")
+    projected_dead, projected_cond, projected_trans = _partition_zeroes(
+        projected_zeroes, projected_counts, contract, "projected")
     return {
         "status": (
-            "findings"
-            if persisted_dead or projected_dead or errors
-            else "ok"
+            "findings" if persisted_dead or projected_dead or errors else "ok"
         ),
         "anchors": anchors,
         "contract_errors": errors,
@@ -1926,15 +1922,15 @@ def _live_field_coverage(
             "total": len(persisted_rows),
             "counts": persisted_counts,
             "dead_fields": persisted_dead,
-            "conditional_zero": persisted_conditional,
-            "transient_zero": persisted_transient,
+            "conditional_zero": persisted_cond,
+            "transient_zero": persisted_trans,
         },
         "projected": {
             "total": len(projected_rows),
             "counts": projected_counts,
             "dead_fields": projected_dead,
-            "conditional_zero": projected_conditional,
-            "transient_zero": projected_transient,
+            "conditional_zero": projected_cond,
+            "transient_zero": projected_trans,
         },
     }
 
@@ -1997,15 +1993,11 @@ def field_coverage(live: bool = False, as_json: bool = False) -> None:
                     typer.echo(f"population contract error: {error}")
                 for reading in ("persisted", "projected"):
                     section = payload[reading]
-                    typer.echo(
-                        f"{reading} dead fields: "
-                        + ", ".join(section["dead_fields"])
-                    )
+                    typer.echo(f"{reading} dead fields: "
+                               + ", ".join(section["dead_fields"]))
                     for bucket in ("conditional_zero", "transient_zero"):
-                        typer.echo(
-                            f"{reading} {bucket.replace('_', ' ')}: "
-                            + ", ".join(sorted(section[bucket]))
-                        )
+                        typer.echo(f"{reading} {bucket.replace('_', ' ')}: "
+                                   + ", ".join(sorted(section[bucket])))
 
     if exit_code:
         raise typer.Exit(code=exit_code)
