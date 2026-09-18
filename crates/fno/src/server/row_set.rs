@@ -78,7 +78,7 @@ impl Core {
                                 pane_id: Some(pid),
                                 // Derived every build from the open portals; the row
                                 // stores no index of its own.
-                                portal: self.portal_of(Some(pid)),
+                                portal: self.portal_marker(Some(pid)),
                                 badge: if exited { None } else { a.badge },
                                 reason: if exited { None } else { a.reason.clone() },
                                 exited,
@@ -152,7 +152,7 @@ impl Core {
                                 pane_id: Some(pid),
                                 // Derived every build from the open portals; the row
                                 // stores no index of its own.
-                                portal: self.portal_of(Some(pid)),
+                                portal: self.portal_marker(Some(pid)),
                                 badge: None,
                                 reason: None,
                                 exited: pane_dead
