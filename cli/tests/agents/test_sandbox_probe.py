@@ -162,6 +162,7 @@ def test_outside_a_repo_the_git_row_is_skipped(tmp_path):
     assert not run.ran("git", "update-ref")
 
 
+@pytest.mark.smoke
 @pytest.mark.skipif(
     shutil.which("codex") is None or shutil.which("gh") is None or sys.platform != "darwin",
     reason="needs the codex and gh binaries and macOS seatbelt",
@@ -204,6 +205,7 @@ def test_live_codex_sandbox_tracks_the_network_setting(tmp_path, monkeypatch, ne
     assert residue.stdout == ""
 
 
+@pytest.mark.smoke
 @pytest.mark.skipif(
     shutil.which("codex") is None or sys.platform != "darwin",
     reason="needs the codex binary and macOS seatbelt",
