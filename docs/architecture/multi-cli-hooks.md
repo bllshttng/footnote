@@ -231,10 +231,7 @@ The remaining build-time unknown is agy's exact `transcript.jsonl` line schema; 
 
 ### OpenCode: outcome parity through the plugin seams, not a hook manifest
 
-OpenCode has no `hooks.json`. Its plugin surface exposes the same outcomes as
-seam callbacks, so `.opencode/plugins/fno.ts` (repo-local dogfood) and the
-installed `footnote.js` bridge map each claude/codex hook door to the callback
-that produces it. The mapping, by outcome rather than by hook count:
+OpenCode has no `hooks.json`. Its plugin surface exposes the same outcomes as seam callbacks. `.opencode/plugins/fno.ts` (repo-local dogfood) and the installed `footnote.js` bridge map each claude/codex hook door to the callback that produces it. The mapping is by outcome, not by hook count:
 
 | Outcome | Claude / codex door | OpenCode seam |
 |---------|--------------------|---------------|
@@ -243,27 +240,10 @@ that produces it. The mapping, by outcome rather than by hook count:
 | Compaction context (canon-doc pointer) | `PreCompact` command hook | `experimental.session.compacting` |
 | Completion loop | `Stop` command hook | `session.idle` event + `fno-agents loop-check` |
 
-The pre-tool seam translates OpenCode's `{tool, sessionID, callID}` plus
-`output.args` into the claude-shaped `{tool_name, tool_input, cwd, session_id}`
-payload the five shared scripts already read from stdin, and honors
-`permissionDecision: "deny"`. The abort channel is an exception: the hook
-signature returns void and offers no decision field, so a deny throws and the
-tool never runs. The same scripts, the same payload shape, the same
-fail-open posture: a script that is missing, times out, or answers without a
-decision is reported once and the tool proceeds, because a protection gap
-must never become a silent block. The heartbeat and compact arms feed the
-same scripts the same stdin shapes they already parse. `autocontinue` is left
-at OpenCode's default (enabled): the synthetic continue turn is what the
-claude flow relies on too.
+The pre-tool seam translates OpenCode's `{tool, sessionID, callID}` plus `output.args` into the claude-shaped `{tool_name, tool_input, cwd, session_id}` payload the five shared scripts already read from stdin, and honors `permissionDecision: "deny"`. The abort channel is an exception: the hook signature returns void and offers no decision field, so a deny throws and the tool never runs. The same scripts read the same payload shape, and the fail-open posture carries over. A script that is missing, times out, or answers without a decision is reported once and the tool proceeds. A protection gap must never become a silent block. The heartbeat and compact arms feed the same scripts the same stdin shapes they already parse. `autocontinue` is left at OpenCode's default (enabled): the synthetic continue turn is what the claude flow relies on too.
 
-Two loop mechanics are OpenCode-specific. The bridge resolves the target
-manifest through `fno-agents state path target-state` (the space-resolved
-path; the legacy in-repo `.fno/target-state.md` is the fallback) instead of
-assuming it, and it passes the idle event's own session id to
-`loop-check --harness opencode --harness-session <id>`, so the gate refuses a
-session its target is not bound to before any continuation. Gates are
-serialized per session: an idle for a running session is a pending recheck,
-never a dropped event, and different sessions never block each other.
+Two loop mechanics are OpenCode-specific. The bridge resolves the target manifest through `fno-agents state path target-state` instead of assuming the legacy in-repo `.fno/target-state.md`. That verb prints the space-resolved path. The bridge passes the idle event's own session id to `loop-check --harness opencode --harness-session <id>`. The gate then refuses a session its target is not bound to before any continuation. Gates are serialized per session. An idle for a running session becomes a pending recheck, never a dropped event. Different sessions never block each other.
+
 ## Hook Script Retirement (one-release tombstones)
 
 The harness reads hook config once at session start. It answers from that snapshot for the session's life. A commit that deletes a hook script while unregistering it leaves the repo self-consistent. It also bricks every session started before the merge. The cached registration points at a missing file. The dead entry sits on the Bash PreToolUse matcher, and a hook that cannot launch fails the whole tool call. On 2026-08-29 one missing file removed every shell verb at once for three live sessions. It took the diagnostic verbs with it.
