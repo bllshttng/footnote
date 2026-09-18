@@ -5772,19 +5772,17 @@ fn cleanup_king_manifest(entry: &state::RegistryEntry) {
     {
         return;
     }
-    let path = std::path::Path::new(&entry.cwd)
-        .join(".fno")
-        .join("kings")
-        .join(format!("{scope}.md"));
+    let Some(kings) = crate::paths::space_dir_opt(std::path::Path::new(&entry.cwd)) else {
+        return;
+    };
+    let path = kings.join("kings").join(format!("{scope}.md"));
     // Owner guard, the Rust half of Python remove_king_manifest's
     // expected_harness_session_id: a successor crowned over this scope after
     // the row went terminal can have re-armed the manifest with ITS session
     // id, and deleting unconditionally would disarm that live king. Skip only
     // on a PROVEN foreign owner (the manifest names a different session id);
     // an id-less or matching manifest deletes on the registry's own authority,
-    // which is what rm acts on. The cwd join stays entry-relative: a
-    // subdirectory cwd may miss the repo-root manifest and leave a stale
-    // file, which is the same safe direction.
+    // which is what rm acts on.
     if let Ok(content) = std::fs::read_to_string(&path) {
         let current = content
             .lines()
