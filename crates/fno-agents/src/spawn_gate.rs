@@ -156,15 +156,13 @@ const CPU_ADMIT_SAMPLES: u32 = 2;
 /// spawn-gate mutex TTL: generous vs the seconds-scale check→dispatch window;
 /// PID liveness frees it instantly if the spawner dies.
 const GATE_CLAIM_TTL_MS: i64 = 5 * 60 * 1000;
-/// How long to tolerate an UNBROKEN run of failed mutex acquisitions before
-/// proceeding unserialized. The mutex is a check→dispatch serializer, not a
-/// state owner: a spawner that dies inside the critical section leaves it
-/// `Suspect` for the full [`GATE_CLAIM_TTL_MS`], and with no bound here EVERY
-/// spawner on the machine then queues behind that corpse until its own queue
-/// timeout; the gate becomes the very thing that bricks spawning, which LD5
+/// How long an uncapped spawner tolerates an UNBROKEN run of failed mutex
+/// acquisitions before proceeding unserialized. The claim records the holder
+/// pid, so a holder that dies frees the mutex on the next acquire. This bound
+/// covers a LIVE holder stuck in dispatch: the mutex is a check→dispatch
+/// serializer, not a state owner, and a gate that bricks spawning is what LD5
 /// forbids. Failing open can overshoot the cap by the number of racing
-/// spawners; wedging the whole mesh is strictly worse. Mirrors
-/// `spawn_gate.py::MUTEX_WAIT_BUDGET_S`.
+/// spawners, so a capped spawner keeps queueing instead.
 const MUTEX_WAIT_BUDGET: Duration = Duration::from_secs(60);
 /// worker:<name> headless slot TTL: bounds a one-shot that outlives its
 /// client pid record; PID liveness is the primary release.
@@ -1317,14 +1315,15 @@ pub fn run_gate(
             claims::AcquireOpts {
                 ttl_ms: Some(GATE_CLAIM_TTL_MS),
                 root: root.clone(),
-                pid: fail_closed.then_some(holder_pid),
+                // Always the holder pid: a dead holder then frees the mutex
+                // on the next acquire, whatever the TTL says.
+                pid: Some(holder_pid),
                 ..Default::default()
             },
         ) {
             claims::AcquireOutcome::Acquired(_) => true,
-            // Contention is a peer or a corpse, never a verdict: queue. The
-            // wait budget's takeover decides a dead holder; --no-wait refuses
-            // fast. Exactly the Python gate's CLAIM_UNAVAILABLE arm.
+            // Contention is a holder acquire could not prove dead: a dead
+            // holder's pid already freed the claim. Queue; --no-wait refuses fast.
             claims::AcquireOutcome::HeldByOther { .. } => false,
             claims::AcquireOutcome::Error(e) => {
                 if fail_closed {
@@ -1352,8 +1351,8 @@ pub fn run_gate(
             // tell "cap is full" from "the gate is wedged".
             if flags.no_wait {
                 eprintln!(
-                    "spawn-gate: another spawner holds the gate mutex; refusing \
-                     (--no-wait). See `fno agents top`."
+                    "spawn-gate: a holder the gate cannot prove dead holds the gate mutex; refusing \
+                     (--no-wait). Read the holder with `fno agents claim status gate:spawn`."
                 );
                 return Err(Refusal::with_receipt(
                     EXIT_NO_WAIT,
@@ -1364,41 +1363,12 @@ pub fn run_gate(
                     }),
                 ));
             }
-            if now.duration_since(since) >= MUTEX_WAIT_BUDGET {
-                if fail_closed {
-                    // Contention is a peer or a corpse, never a full cap. The
-                    // takeover asks THE single reap decision: force
-                    // only a provably-dead holder, queue past anything else.
-                    match takeover_dead_gate_mutex(root.as_deref()) {
-                        Takeover::Freed => {
-                            mutex_blocked_since = None;
-                            continue;
-                        }
-                        Takeover::Kept(basis) => {
-                            eprintln!(
-                                "spawn-gate: gate claim kept ({basis}); queueing past \
-                                 the wait budget"
-                            );
-                        }
-                        Takeover::Gone => {
-                            mutex_blocked_since = None;
-                            continue;
-                        }
-                        Takeover::Unreadable(why) => {
-                            eprintln!(
-                                "spawn-gate: gate claim unreadable by the native door \
-                                 ({why}); queueing"
-                            );
-                        }
-                    }
-                } else {
-                    eprintln!(
-                        "spawn-gate: gate mutex still held after {}s (holder likely died \
-                         mid-gate); proceeding unserialized",
-                        MUTEX_WAIT_BUDGET.as_secs()
-                    );
-                    acquired_mutex = true;
-                }
+            if now.duration_since(since) >= MUTEX_WAIT_BUDGET && !fail_closed {
+                eprintln!(
+                    "spawn-gate: the gate mutex stayed held for {}s; proceeding unserialized",
+                    MUTEX_WAIT_BUDGET.as_secs()
+                );
+                acquired_mutex = true;
             }
         }
 
@@ -1787,11 +1757,20 @@ pub fn run_gate(
             } else {
                 "queue_timeout"
             };
-            eprintln!(
-                "spawn-gate: {reason} after {}s held on {held_on}; \
-                 inspect live workers with `fno agents top`, or retry with --no-wait/--force",
-                QUEUE_TIMEOUT.as_secs()
-            );
+            if mutex_blocked_since.is_some() {
+                eprintln!(
+                    "spawn-gate: {reason} after {}s; a holder the gate cannot prove dead holds the gate mutex. \
+                     Read it with `fno agents claim status gate:spawn`. Release a stuck holder \
+                     with `fno agents claim release gate:spawn --force --reason \"<why>\"`.",
+                    QUEUE_TIMEOUT.as_secs()
+                );
+            } else {
+                eprintln!(
+                    "spawn-gate: {reason} after {}s held on {held_on}; \
+                     inspect live workers with `fno agents top`, or retry with --no-wait/--force",
+                    QUEUE_TIMEOUT.as_secs()
+                );
+            }
             return Err(Refusal::with_receipt(
                 EXIT_QUEUE_TIMEOUT,
                 serde_json::json!({
@@ -2421,48 +2400,6 @@ fn gate_fault_refusal(provider: Option<&str>, reason: &str, error: &str) -> Refu
             "error": error,
         }),
     )
-}
-
-/// The outcome of asking the native claim verdict about a gate mutex held
-/// past the wait budget.
-enum Takeover {
-    /// The claim was provably dead and has been removed; retry the acquire.
-    Freed,
-    /// The claim vanished while we looked; retry the acquire.
-    Gone,
-    /// A live peer holds it; keep queueing.
-    Kept(&'static str),
-    /// The verdict itself could not be read; keep queueing.
-    Unreadable(String),
-}
-
-/// THE single reap decision for the spawn-gate mutex: force only a
-/// provably-dead holder, queue past anything else. Used when a provider cap
-/// applies, where an unserialized overshoot would break the cap.
-fn takeover_dead_gate_mutex(root: Option<&Path>) -> Takeover {
-    let path = match claims::claim_path("gate:spawn", root) {
-        Ok(path) => path,
-        Err(_) => return Takeover::Unreadable("claims root unresolved".into()),
-    };
-    if !path.exists() {
-        let _ = std::fs::remove_file(&path);
-        return Takeover::Gone;
-    }
-    let record = match claims::read_claim_file(&path) {
-        Ok(record) => record,
-        // Atomic writes mean corruption is damage, not a hold.
-        Err(_) => {
-            let _ = std::fs::remove_file(&path);
-            return Takeover::Gone;
-        }
-    };
-    let (provably_dead, bucket) =
-        claims::classify_for_sweep(&record, None, &|pid| claims::probe_pid(pid), None, None);
-    if provably_dead {
-        let _ = std::fs::remove_file(&path);
-        return Takeover::Freed;
-    }
-    Takeover::Kept(bucket)
 }
 
 /// The king-share refusal (W4 / LD1): the share divides
@@ -3159,7 +3096,8 @@ MemAvailable:    8000000 kB\n";
         )
         .unwrap();
 
-        // Hold the mutex as somebody else, exactly as a corpse would.
+        // Hold the mutex as somebody else. The claim defaults its pid to this
+        // live test process, so it reads as a live holder.
         let held = claims::acquire(
             "gate:spawn",
             "spawn-gate:999999:ghost",
@@ -3173,11 +3111,9 @@ MemAvailable:    8000000 kB\n";
             matches!(held, claims::AcquireOutcome::Acquired(_)),
             "test setup: ghost must hold the mutex, got {held:?}"
         );
-        // Positive control on the test's own premise. The ghost pid is dead, so
-        // the claim is `Suspect` (TTL unexpired, holder gone) and acquire must
-        // still report it held by another. Assert that instead of assuming it:
-        // if claim semantics ever let a dead holder be reclaimed, the mutex
-        // would be FREE, run_gate would sail through, and this test would pass
+        // Positive control on the test's own premise: acquire must report the
+        // mutex held by another. Assert that instead of assuming it: a free
+        // mutex would let run_gate sail through, and this test would pass
         // while exercising none of the branch it exists to pin.
         let contended = claims::acquire(
             "gate:spawn",
@@ -3223,6 +3159,112 @@ MemAvailable:    8000000 kB\n";
             elapsed < QUEUE_TIMEOUT,
             "must refuse fast, not queue: took {elapsed:?}"
         );
+    }
+
+    /// A holder that dies by signal leaves no release behind. The claim's pid
+    /// must free the mutex anyway, so the next capped spawner acquires at once
+    /// instead of queueing behind the TTL.
+    #[test]
+    fn a_gate_holder_killed_by_a_signal_frees_the_mutex_at_once() {
+        use std::os::unix::process::CommandExt;
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-gate-sigdeath-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("claims-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_SPAWN_GATE");
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 999\nmin_free_gb = 0\nmax_swap_pct = 0\n\n\
+             [agents.provider_limits.zai]\nlanes = 99\n",
+        )
+        .unwrap();
+        let registry = dir.join("registry.json");
+        std::fs::write(&registry, r#"{"schema_version":1,"entries":[]}"#).unwrap();
+
+        for sig in [libc::SIGTERM, libc::SIGKILL, libc::SIGPIPE] {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("300");
+            // The test process ignores SIGPIPE and an ignored disposition
+            // survives exec, so reset it or SIGPIPE would not kill the child.
+            unsafe {
+                command.pre_exec(move || {
+                    libc::signal(sig, libc::SIG_DFL);
+                    Ok(())
+                });
+            }
+            let mut child = command.spawn().unwrap();
+            let child_pid = child.id();
+            let holder = format!("spawn-gate:{child_pid}:holder");
+            let held = claims::acquire(
+                "gate:spawn",
+                &holder,
+                claims::AcquireOpts {
+                    ttl_ms: Some(GATE_CLAIM_TTL_MS),
+                    root: Some(root.clone()),
+                    pid: Some(child_pid),
+                    ..Default::default()
+                },
+            );
+            assert!(
+                matches!(held, claims::AcquireOutcome::Acquired(_)),
+                "setup: the child must hold the mutex, got {held:?}"
+            );
+            unsafe { libc::kill(child_pid as i32, sig) };
+            let _ = child.wait();
+
+            let (state, _) = claims::status("gate:spawn", Some(&root));
+            assert!(
+                !matches!(
+                    state,
+                    claims::ClaimState::Live | claims::ClaimState::Suspect
+                ),
+                "signal {sig}: a dead holder must not read held, got {state:?}"
+            );
+
+            let started = Instant::now();
+            let got = run_gate(
+                &dir,
+                &registry,
+                GateInput {
+                    name: "w-after-death".into(),
+                    substrate: "bg".into(),
+                    flags: GateFlags {
+                        force: true,
+                        no_wait: true,
+                    },
+                    route_provider: Some("zai".into()),
+                    ..GateInput::default()
+                },
+            );
+            let elapsed = started.elapsed();
+            let guard = got.unwrap_or_else(|r| {
+                panic!(
+                    "signal {sig}: gate refused after holder death: {:?}",
+                    r.receipt
+                )
+            });
+            let me = format!("spawn-gate:{}:w-after-death", std::process::id());
+            assert_eq!(
+                guard.gate_key.as_ref().map(|(_, h)| h.as_str()),
+                Some(me.as_str())
+            );
+            assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+            drop(guard);
+        }
+
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_spawn_gate {
+            Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+            None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// AC5-HP: a route spawn onto a provider whose lane snapshot shows a

@@ -841,17 +841,14 @@ pub fn classify_with_basis(
     classify_with_basis_and_exclusivity(rec, now, probe, None, None)
 }
 
-/// Classify with optional sweep-time sibling evidence. `None` is the honest
-/// value for single-key reads; a full scan passes the PID exclusivity map's
-/// result for the record being classified. `session_witness` is the
-/// session-keyed liveness reader; `None` keeps the pid-only
-/// verdicts legacy records were characterized under.
-/// The pid verdict for a claim whose holder is one short-lived process, at
-/// TTL expiry. Live keeps the claim; any pid cause except a refused probe
-/// frees it (Stale, reapable); a refusal falls through to the witness path -
-/// a refusal is not proof of death. None = no verdict; off-host records,
-/// pid-less records, and refused probes keep today's witness/grace path.
-fn pid_verdict_on_expiry(
+/// The pid verdict for a claim whose holder is one short-lived process.
+/// `gate:` keys read it at any age: the gate pid holds the mutex for the
+/// whole hold, so a dead pid means no holder. Other short-lived holders read
+/// it only at TTL expiry. Live keeps the claim; any pid cause except a
+/// refused probe frees it (Stale, reapable); a refusal falls through - a
+/// refusal is not proof of death. None = no verdict; off-host records,
+/// pid-less records, and refused probes keep the path they took before.
+fn pid_verdict(
     rec: &ClaimRecord,
     probe: &dyn Fn(i32) -> PidProbe,
 ) -> Option<(ClaimState, &'static str)> {
@@ -871,6 +868,11 @@ fn pid_verdict_on_expiry(
     None
 }
 
+/// Classify with optional sweep-time sibling evidence. `None` is the honest
+/// value for single-key reads; a full scan passes the PID exclusivity map's
+/// result for the record being classified. `session_witness` is the
+/// session-keyed liveness reader; `None` keeps the pid-only
+/// verdicts legacy records were characterized under.
 pub fn classify_with_basis_and_exclusivity(
     rec: &ClaimRecord,
     now: Option<i64>,
@@ -890,21 +892,27 @@ pub fn classify_with_basis_and_exclusivity(
                 SessionLiveness::Absent | SessionLiveness::Unresolved => None,
             })
     };
+    // A `dispatch:` pid can predate the worker's exec, so it waits for expiry.
+    // A gate pid never does, so it decides before the TTL ends.
+    if rec.key.starts_with("gate:") {
+        if let Some(verdict) = pid_verdict(rec, probe) {
+            return verdict;
+        }
+    }
     if is_expired(rec, now) {
         // A review hold is a lease on the review; the holder's session answers another question.
         if rec.key.starts_with("review:branch:") {
             return (ClaimState::Stale, basis::TTL_EXPIRED);
         }
         // A lease whose holder is ONE SHORT-LIVED PROCESS reads its recorded
-        // pid as the verdict: `dispatch:` reservations, the `gate:` spawn
-        // mutex, and any lease its writer stamped `holder-process`. The
-        // session witness asks about the session that wrote the record, which
-        // outlives the process and must not heal its lease.
+        // pid as the verdict: `dispatch:` reservations and any lease its
+        // writer stamped `holder-process`. The session witness asks about the
+        // session that wrote the record, which outlives the process and must
+        // not heal its lease.
         if rec.key.starts_with("dispatch:")
-            || rec.key.starts_with("gate:")
             || rec.pid_provenance.as_deref() == Some("holder-process")
         {
-            if let Some(verdict) = pid_verdict_on_expiry(rec, probe) {
+            if let Some(verdict) = pid_verdict(rec, probe) {
                 return verdict;
             }
         }

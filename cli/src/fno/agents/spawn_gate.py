@@ -84,22 +84,11 @@ CPU_HOLD_POLL_S = 15.0
 CPU_ADMIT_SAMPLES = 2
 #: : a slow bg-socket census names its own wait instead of silence.
 SLOW_SCAN_WARN_S = 5.0
-GATE_CLAIM_TTL_MS = 5 * 60 * 1000
 #: The mutex claim key. Prefixed so `claims_root_for` routes it to the global
 #: root the gate writes; the old colon-less `spawn-gate` key unrouted, so
 #: `claim status`/`release --force` read `<space>/claims/spawn-gate.lock`
 #: while the gate held `~/.fno/claims/spawn-gate.lock` and both lied.
 GATE_CLAIM_KEY = "gate:spawn"
-#: How long to tolerate an UNBROKEN run of failed mutex acquisitions before
-#: proceeding unserialized. The mutex is a check->dispatch serializer, not a
-#: state owner: a spawner that dies inside the critical section leaves it
-#: `suspect` for the full ``GATE_CLAIM_TTL_MS``, and with no bound here EVERY
-#: spawner on the machine then queues behind that corpse until its own queue
-#: timeout - the gate becoming the very thing that bricks spawning, which the
-#: module contract forbids. Failing open can overshoot the cap by the number of
-#: racing spawners; wedging the whole mesh is strictly worse. Mirrors
-#: ``spawn_gate.rs::MUTEX_WAIT_BUDGET``.
-MUTEX_WAIT_BUDGET_S = 60.0
 WORKER_CLAIM_TTL_MS = 4 * 60 * 60 * 1000
 CLAIM_RELEASE_ATTEMPTS = 3
 
