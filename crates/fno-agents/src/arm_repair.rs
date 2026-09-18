@@ -85,6 +85,21 @@ fn entry(
             None,
             Some(OPERATOR),
         ),
+        "fleet_stop" => (
+            "the fleet incident breaker is armed; held on purpose, wait for it to clear",
+            Some("fno agents incident status"),
+            None,
+        ),
+        "loops_paused" => (
+            "loops are paused by hand; wait for resume-all",
+            Some("fno do loops status"),
+            None,
+        ),
+        "fleet_stop_unavailable" => (
+            "the fleet incident record is unreadable; every loop pauses until it reads",
+            Some("fno agents incident status"),
+            Some(OPERATOR),
+        ),
         _ => (
             "no class matches; read the skip reason and detail",
             None,
@@ -212,6 +227,22 @@ pub fn annotate(rows: &mut [ArmStatus], facts: &RepairFacts) {
 fn classify(row: &mut ArmStatus, facts: &RepairFacts) {
     if row.producer_evidence == ProducerEvidence::Unobserved {
         // No receipt, no measured cause.
+        return;
+    }
+    // A paused row is held on purpose, not attention-worthy: it still
+    // carries a read verb, never an action, and never a heal owner.
+    if let Some(cause) = row
+        .cause
+        .as_deref()
+        .filter(|c| matches!(*c, "fleet_stop" | "loops_paused"))
+        .map(str::to_string)
+    {
+        let (hint, verb, _) = entry(&cause, row.scheduler.as_deref());
+        row.repair = verb.map(str::to_string);
+        if row.line.is_empty() {
+            row.line = format!("{} cause={cause} ({hint})", render_row(row));
+        }
+        row.line.push_str(&suffix(row));
         return;
     }
     let held_dead = held_dead_holder(row, facts);
@@ -342,6 +373,19 @@ pub fn heal(
     }
     if skipped > 0 {
         parts.push(format!("skipped:{skipped}"));
+    }
+    // The breaker covers the whole fleet: no self-heal action runs under it.
+    // The dead-holder lane above stays, because releasing a dead pid's claim
+    // frees a scope without reinstalling anything.
+    if rows.iter().any(|r| {
+        matches!(
+            r.cause.as_deref(),
+            Some("fleet_stop") | Some("loops_paused") | Some("fleet_stop_unavailable")
+        )
+    }) {
+        parts.clear();
+        parts.push("paused".to_string());
+        return format!("heal={}", parts.join(","));
     }
     let mut refresh_set: Vec<String> = rows
         .iter()
@@ -770,5 +814,68 @@ mod tests {
             true
         });
         assert_eq!(runs, 2);
+    }
+
+    // AC5-HP: an annotated paused row ends in a read verb, never a refresh,
+    // and carries no heal owner.
+    #[test]
+    fn a_paused_row_reads_the_incident_verb_and_no_heal() {
+        let mut kw = row("king_wake", SCHED_LAUNCHD);
+        kw.cause = Some("fleet_stop".into());
+        kw.line = format!(
+            "{} cause=fleet_stop (fleet incident stopped at generation 5: two cargo runs; \
+             held on purpose; wait for the breaker to clear)",
+            render_row(&kw)
+        );
+        let mut rows = vec![kw];
+        annotate(&mut rows, &facts(false));
+        let kw = &rows[0];
+        assert!(
+            kw.line.ends_with("repair: fno agents incident status"),
+            "line: {}",
+            kw.line
+        );
+        assert_eq!(kw.repair.as_deref(), Some("fno agents incident status"));
+        assert_eq!(kw.heal, None);
+        assert!(!kw.line.contains("pr watch refresh"), "line: {}", kw.line);
+    }
+
+    // AC6-HP: self-heal runs nothing under a breaker and says why.
+    #[test]
+    fn heal_runs_nothing_under_a_pause() {
+        let td = tempfile::TempDir::new().unwrap();
+        let store = td.path().join("signals.json");
+        let mut kw = row("king_wake", SCHED_LAUNCHD);
+        kw.cause = Some("fleet_stop".into());
+        kw.age_s = Some(3000);
+        let rows = vec![kw];
+        let mut calls: Vec<String> = Vec::new();
+        let token = heal(&rows, &[], true, &store, 600, 1800, &mut |a| {
+            calls.push(a.to_string());
+            true
+        });
+        assert_eq!(token, "heal=paused");
+        assert!(calls.is_empty(), "runs: {calls:?}");
+    }
+
+    // AC7-EDGE: a hand-pause names the loops verb.
+    #[test]
+    fn a_hand_paused_row_names_the_loops_verb() {
+        let mut kw = row("king_wake", SCHED_LAUNCHD);
+        kw.cause = Some("loops_paused".into());
+        kw.line = format!(
+            "{} cause=loops_paused (loops paused by hand; \
+             held on purpose; wait for resume-all)",
+            render_row(&kw)
+        );
+        let mut rows = vec![kw];
+        annotate(&mut rows, &facts(false));
+        let kw = &rows[0];
+        assert!(
+            kw.line.ends_with("repair: fno do loops status"),
+            "line: {}",
+            kw.line
+        );
+        assert_eq!(kw.heal, None);
     }
 }
