@@ -3569,6 +3569,11 @@ MemAvailable:    8000000 kB\n";
         std::env::set_var("FNO_CLAIMS_ROOT", &root);
         let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
         std::env::remove_var("FNO_SPAWN_GATE");
+        // A prior test's FNO_CONFIG can name a deleted TempDir; config
+        // candidates then resolve to that dead path alone and max_live
+        // defaults, so this test's own config.toml never gets read.
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::remove_var("FNO_CONFIG");
         // Pin the CPU axis to an admit: the king share under test sits AFTER
         // the CPU axis in gate order, so a busy machine (or a CI runner with
         // no probe installed) would refuse with 79 before reaching it.
@@ -3631,6 +3636,10 @@ MemAvailable:    8000000 kB\n";
         match prior_spawn_gate {
             Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
             None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
         }
         match prior_payload {
             Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
