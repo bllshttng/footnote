@@ -615,18 +615,14 @@ class _Keeper:
         self._control(_TAG_SHUTDOWN, _TAG_RESPONSE)
 
 
-# Wall-clock bound for one --store-exec request. The socket path's
-# read_timeout is 60s; exec adds process start but removes queueing, so the
-# same bound holds, and a hung child cannot outlive it.
+# Wall-clock bound for one --store-exec request; a hung child cannot outlive it.
 _EXEC_TIMEOUT_S = 60.0
 
 
 class _ExecClient(_Keeper):
-    """One-shot store transport over `_Keeper`'s typed helpers: every request
-    execs `fno-agents-worker --store-exec` and the child exits, so a
-    request-driven leak has no process to grow in. A lost write raises
-    `WriteUnconfirmed` directly - an exec process cannot answer
-    `write_status` after death.
+    """One-shot transport: every request execs `--store-exec` and the child
+    exits, so a request-driven leak has no process to grow in. A lost write
+    raises `WriteUnconfirmed` - no process survives to answer write_status.
     """
 
     def __init__(self, path: Path):
@@ -721,12 +717,9 @@ def _recv_exact(stream: socket.socket, length: int) -> bytes:
 
 def _client_for(path: Path, *, spawn: bool = True) -> "_Keeper | _ExecClient":
     """Connect to `path`'s keeper; when nothing is listening, serve by exec.
-
-    A live keeper is still preferred: old binaries spawn them, and an
-    answered socket is a working store. The spawn-needed branch no longer
-    mints one: a resident keeper's memory grows with requests served
-    (measured 2026-09-17), so the request execs a one-shot `--store-exec` lane instead
-    and leaves no process behind. An unreachable store still raises
+    A live keeper is still preferred (old binaries spawn them); the
+    spawn-needed branch no longer mints one, because a resident keeper's
+    memory grows with requests served. An unreachable store still raises
     StoreUnavailable - never an empty graph.
     """
     path = Path(path)

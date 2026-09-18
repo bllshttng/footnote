@@ -77,16 +77,13 @@ LEAVE = "leave"
 #: socket) is a refusal, and the verdict names which arm refused.
 REAPABLE_SOCK_STATES = frozenset({NO_LISTENER, ABSENT})
 
-#: Default resident-memory bound for a store keeper, in KiB (2 GiB). A fresh
-#: keeper holds the graph resident (~0.8 GB measured 2026-09-17); growth past
-#: the bound is the per-request retention measured at ~3.6 GB/hour.
-#: `FNO_STORE_KEEPER_RSS_KB` overrides.
+# Store keeper RSS bound in KiB (2 GiB): a fresh keeper holds the graph
+# resident (~0.8 GB); past it, growth is the leak shape.
 DEFAULT_KEEPER_RSS_KB = 2 * 1024 * 1024
 
 
 def keeper_rss_bound_kb() -> int:
-    """The store keeper's RSS bound in KiB: `FNO_STORE_KEEPER_RSS_KB` or the
-    2 GiB default, read at call time so a test's env override lands."""
+    """`FNO_STORE_KEEPER_RSS_KB` or the 2 GiB default, read at call time."""
     import os
 
     raw = os.environ.get("FNO_STORE_KEEPER_RSS_KB")
@@ -101,11 +98,8 @@ def keeper_rss_bound_kb() -> int:
 
 
 def store_backend_of(graph: Optional[Path]) -> str:
-    """The store's backend, read the way ``crate::backlog::backend`` reads
-    it: ``graph_meta.backend`` from the graph.db sibling, opened read-only;
-    absent db or unreadable reads json (the rollback default). The Python
-    mirror exists so the watchdog never needs a store request to judge a
-    keeper it may be about to kill."""
+    """``graph_meta.backend`` from the graph.db sibling, the way
+    ``crate::backlog::backend`` reads it; absent db reads json."""
     if graph is None:
         return "json"
     db = graph.with_suffix(".db")
@@ -124,10 +118,9 @@ def store_backend_of(graph: Optional[Path]) -> str:
 
 
 def graph_read_source() -> str:
-    """The configured authoritative backend (`graph.read_source`), json when
-    config cannot answer. The keeper-legality arm reads BOTH sides: a
-    keeper on a graph whose db says sqlite is illegal only while the config
-    agrees, so a json rollback never reads as a leak."""
+    """The configured authoritative backend; failure reads json. The
+    legality arm reads BOTH sides, so a json rollback never reads as a
+    leak."""
     try:
         from fno.config import load_settings
 

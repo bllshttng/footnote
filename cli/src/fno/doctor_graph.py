@@ -81,10 +81,9 @@ def _flip(target: str) -> None:
 
 
 def _illegal_canonical_keepers() -> "list[tuple[int, int]]":
-    """``(pid, rss_kb)`` of resident store keepers on the canonical graph
-    while the store reads sqlite, discovered through the watchdog's keeper
-    lane. A hit is a stale binary or a hand-spawn; the status verb refuses
-    and names the collector."""
+    """Store keepers on the canonical graph while the store reads sqlite,
+    discovered through the watchdog's keeper lane; the status verb refuses
+    on a hit and names the collector."""
     from pathlib import Path
 
     from fno.agents import keeper_lane as kl
