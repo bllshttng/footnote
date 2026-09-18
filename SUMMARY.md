@@ -1,14 +1,18 @@
 # SUMMARY - x-00c5 combined session survival + codex shared-daemon ownership
 
-Status: waves 1-6 done and committed; wave 7.1 committed; wave 7.2 code landed (journey + diagnostic + docs), wave 8 code landed (transaction window check + tests).
+All eight waves landed and committed on this branch.
+
+## Fixed on discovery
+
+The wave-6 resume rewrite put pre_exec on codex's resume row. The mux reader refused pre_exec on the resume lane, so restore read codex as unresumable. The reader now carries pre_exec there. The fail-open render composes it like the attach renderer. Reader and builder tests pin the shape.
 
 ## Deviations from the bound plan
 
-0. Fixed on discovery: the wave-6 resume-form rewrite (pre_exec on codex's interactive_resume) tripped the fno-crate reader's resume-lane refusal of pre_exec forms, so every restore/resume path in the mux read codex as "no resume form". The reader now carries pre_exec on the resume lane and the fail-open render composes it exactly like the attach renderer (`sh -c '<pre>; exec <tokens>'`), matching the native builder. Pinned by the renamed reader test and the updated resume_argv expectation.
-1. `agents_view.rs` resume-form extraction to `agents_view/resume_form.rs` (plan change 8) was skipped: the file measured 4,993 lines, under the 5,000 shrink-only gate, so no shrink was owed. The resume CLI keeps the grant composer. A cosmetic extraction would have spent review attention on nothing.
-2. `cli/tests/agents/test_harness_map.py` and `server_restore_tests.rs` updates (plan §11) were not needed: no harness-map row or restore row semantics changed in this PR. The restore doc's three-level visibility note (daemon listing vs same-id read vs operator mobile readback) landed in workspace-restore.md and docs/harnesses/codex.md instead.
-3. The matrix's stub-mode row (e) for daemon legs uses the real fno-agents binary with a private FNO_AGENTS_HOME instead of planted registry rows: the daemon refuses planted rows missing invariant fields, and the real-binary variant proves the same contract (threads preserved by full session id) without inventing state files.
-4. The journey script (tests/codex-shared-daemon-version-journey.sh) skips cleanly when the machine lacks two local codex builds or auth; it never touches the live daemon. The two-version live journey itself remains the operator-held acceptance (AC24-REMOTE is operator readback after merge).
-5. AC23-EDGE is pinned by an in-module unit test (lock-busy hold), not an integration test: the lock API is pub(crate), and the second-caller shape needs only the lock, no daemon.
-6. Wave 8's before/after window values ride the Upgraded receipt as before/after strings (None = absent, never invented); the unattributable-removal control proves Failed + writer=unknown via a fake restart that strips the key in private roots.
-7. File-budget shaming (server.rs, squad_store.rs over the 5,000 gate and grown by this branch) answered in the same PR: the argv-fact helpers (395 lines) moved to `server/argv_facts.rs` with their tests, and squad_store's inline test module (2,577 lines) moved to file-backed `squad_store_tests.rs`. server_tests.rs nets negative by restoring a struct-update fixture and moving the two provenance tests beside the code. Both remaining full-suite failures (`lifecycle_identity_never_resolves_an_external_row`, `remove_external_without_stopped_record_refused`) are in files this branch does not touch and read as the pre-existing local flake class; CI arbitrates.
+1. The plan's resume-form extraction from agents_view.rs was skipped. The file measures 4,993 lines, under the shrink-only gate. No shrink was owed.
+2. The harness-map and restore test updates were not needed. No row semantics changed. The three-level visibility note landed in the docs instead.
+3. Matrix row (e) uses the real fno-agents binary with a private home. The daemon refuses planted rows missing invariant fields. The real binary proves the same contract.
+4. The journey script skips cleanly without two local codex builds or auth. AC24-REMOTE stays the operator's post-merge readback.
+5. AC23-EDGE rides an in-module lock-busy unit test. The lock API is crate-private, and the shape needs only the lock.
+6. The window values ride the receipt as before and after strings. Absent reads None, never an invented default. A stripped key reads failed with writer=unknown.
+7. The budget overruns paid with two extractions. The argv-fact helpers moved to server/argv_facts.rs with their tests. squad_store's inline tests moved to squad_store_tests.rs.
+8. Two full-suite failures remain. Both sit in files this branch never touches. They match the known local flake class, and CI arbitrates.
