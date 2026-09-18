@@ -107,6 +107,9 @@ def test_pr_info_uses_one_rest_request_and_returns_positive_metadata():
         "head_ref": "feature/rest-info",
         "base_ref": "main",
         "mergeable": "MERGEABLE",
+        # The REST spelling of mergeStateStatus rides the same payload; the
+        # fixture carries none, so the mapped value stays None.
+        "merge_state_status": None,
         "merged_at": None,
         "merge_sha": None,
         "author": "alice",
