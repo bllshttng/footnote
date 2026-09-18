@@ -161,6 +161,9 @@ pub(crate) fn resolve_blocked_child_candidates(
             None => true,
             Some(state) => DEAD_CLAIM_STATES.contains(&state.as_str()),
         };
+        if closed || claim_released {
+            continue;
+        }
         // A claim taken after the row is a new hand; the raising worker's
         // distress does not bind it. Strictly after keeps a same-second row
         // (a worker can claim and hit distress inside one second). Fail
@@ -176,7 +179,7 @@ pub(crate) fn resolve_blocked_child_candidates(
             (Some(row_s), Some(acq_ms)) => acq_ms / 1000 > row_s,
             _ => false,
         };
-        if closed || claim_released || stale_holder {
+        if stale_holder {
             continue;
         }
         let row_epoch = row_epoch_opt.unwrap_or(now_s);
@@ -2025,15 +2028,15 @@ mod tests {
 
     #[test]
     fn a_claim_taken_after_the_row_reads_stale_not_blocked() {
-        // AC2-HP, the x-0ccc specimen: a live claim acquired after the row
-        // ts is a new hand; the old worker's distress does not bind it, so
-        // the row stays off the board even past grace with a live claim.
-        let rows = vec![blocked("2026-09-08T00:00:00Z", "cx-1", "x-0ccc")];
+        // AC2-HP: a live claim acquired after the row ts is a new hand; the
+        // old worker's distress does not bind it, so the row stays off the
+        // board even past grace with a live claim.
+        let rows = vec![blocked("2026-09-08T00:00:00Z", "cx-1", "x-c11c")];
         let mut claims = HashMap::new();
-        claims.insert("x-0ccc".to_string(), "live".to_string());
+        claims.insert("x-c11c".to_string(), "live".to_string());
         let mut acquired = HashMap::new();
         let row_s = crate::tick_ledger::parse_rfc3339_unix("2026-09-08T00:00:00Z").unwrap() as i64;
-        acquired.insert("x-0ccc".to_string(), (row_s + 1) * 1000);
+        acquired.insert("x-c11c".to_string(), (row_s + 1) * 1000);
         let candidates = resolve_blocked_child_candidates(
             rows,
             &claims,
