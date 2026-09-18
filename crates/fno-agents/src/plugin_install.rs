@@ -14,6 +14,7 @@ use std::process::Command;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
+use serde_json::Value;
 
 use crate::paths::{dirs_home, AgentsHome};
 
@@ -798,9 +799,14 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
             if harness == "opencode" {
                 return run_opencode_arm(harness, json, uninstall, status, quick);
             }
+            if harness == "grok" && status {
+                let receipt = grok_status_receipt();
+                println!("{receipt}");
+                return if receipt.starts_with("unknown") { 1 } else { 0 };
+            }
             if uninstall || status || quick {
                 eprintln!(
-                    "plugin install: --uninstall/--status/--installed apply to the opencode arm only"
+                    "plugin install: --uninstall/--status/--installed apply to the opencode or grok arms"
                 );
                 return 2;
             }
@@ -826,7 +832,9 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
             }
         }
         None => {
-            eprintln!("usage: fno-agents plugin-install <claude|codex|opencode|agy> [--force]");
+            eprintln!(
+                "usage: fno-agents plugin-install <claude|codex|opencode|agy|grok> [--force]"
+            );
             eprintln!("       fno-agents plugin-install --check [--stage <dir>] [--source <dir>] [--json|-J]");
             eprintln!("       fno-agents plugin-install --restage [--source <dir>]");
             2
@@ -1002,9 +1010,10 @@ fn install_harness(harness: &str, force: bool) -> Result<String, String> {
         "claude" => install_claude(&stage, force)?,
         "opencode" => install_opencode()?,
         "agy" => install_agy(&stage, force)?,
+        "grok" => install_grok(&stage, force)?,
         other => {
             return Err(format!(
-                "unknown harness '{other}'; want claude, codex, opencode or agy"
+                "unknown harness '{other}'; want claude, codex, opencode, agy or grok"
             ))
         }
     };
@@ -1055,6 +1064,118 @@ fn install_agy(stage: &Path, force: bool) -> Result<String, String> {
         None,
     )?;
     Ok("agy plugin imported, hooks.json carries the stop hook".to_string())
+}
+
+/// Read whether footnote's hooks reach grok on THIS machine: run
+/// `grok inspect --json` (no auth needed) and look for an enabled fno plugin
+/// with hooks. Reports `reachable` (naming the plugin path), `absent`, or
+/// `unknown` (grok missing, inspect failed, or unparseable output).
+fn grok_status_receipt() -> String {
+    match grok_reachability() {
+        GrokReachability::Reachable { path } => format!("reachable: {path}"),
+        GrokReachability::Absent => "absent: no enabled fno plugin with hooks".to_string(),
+        GrokReachability::Unknown { reason } => format!("unknown: {reason}"),
+    }
+}
+
+#[derive(Debug)]
+enum GrokReachability {
+    Reachable { path: String },
+    Absent,
+    Unknown { reason: String },
+}
+
+/// The 30-second-bounded `grok inspect --json` read, classified.
+fn grok_reachability() -> GrokReachability {
+    match which_grok() {
+        None => GrokReachability::Unknown {
+            reason: "grok not found on PATH".to_string(),
+        },
+        Some(_) => match run_grok_inspect() {
+            Some(text) => parse_grok_inspect(&text),
+            None => GrokReachability::Unknown {
+                reason: "grok inspect --json failed or timed out".to_string(),
+            },
+        },
+    }
+}
+
+fn which_grok() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join("grok"))
+        .find(|candidate| candidate.is_file())
+}
+
+fn run_grok_inspect() -> Option<String> {
+    let mut cmd = std::process::Command::new("grok");
+    cmd.arg("inspect")
+        .arg("--json")
+        .env_remove("GROK_SESSION_ID");
+    let out = crate::bounded_cmd::output_with_timeout_result(cmd, 30).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()
+}
+
+/// Classify recorded `grok inspect --json` text. `Absent` when no enabled fno
+/// plugin carries hooks; `Unknown` on unparseable JSON.
+fn parse_grok_inspect(text: &str) -> GrokReachability {
+    let Ok(v) = serde_json::from_str::<Value>(text) else {
+        return GrokReachability::Unknown {
+            reason: "inspect output did not parse as JSON".to_string(),
+        };
+    };
+    let Some(plugins) = v.get("plugins").and_then(Value::as_array) else {
+        return GrokReachability::Unknown {
+            reason: "inspect output has no plugins array".to_string(),
+        };
+    };
+    for plugin in plugins {
+        let name_ok = plugin.get("name").and_then(Value::as_str) == Some("fno");
+        let enabled = plugin.get("enabled").and_then(Value::as_bool) == Some(true);
+        let hooks = plugin
+            .get("provides")
+            .and_then(|p| p.get("hooks"))
+            .and_then(Value::as_bool)
+            == Some(true);
+        if name_ok && enabled && hooks {
+            let path = plugin
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            return GrokReachability::Reachable { path };
+        }
+    }
+    GrokReachability::Absent
+}
+
+/// grok's own installer, then a second status read: `installed` prints only
+/// when the second read is reachable. grok dedupes plugins by name, so a
+/// Claude-compat copy and a grok-installed copy never both load.
+fn install_grok(stage: &Path, _force: bool) -> Result<String, String> {
+    match grok_reachability() {
+        GrokReachability::Reachable { path } => Ok(format!("already installed, reachable: {path}")),
+        GrokReachability::Unknown { reason } => Err(format!("unknown: {reason}")),
+        GrokReachability::Absent => {
+            run_checked(
+                &[
+                    "grok".into(),
+                    "plugin".into(),
+                    "install".into(),
+                    stage.display().to_string(),
+                    "--trust".into(),
+                ],
+                None,
+            )?;
+            match grok_reachability() {
+                GrokReachability::Reachable { path } => Ok(format!("installed, reachable: {path}")),
+                _ => Err("installed but post-install status read is not reachable".into()),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1283,5 +1404,60 @@ mod tests {
         let parsed = parse_plugin_install_args(&args);
         assert_eq!(parsed.mode.as_deref(), Some("claude"));
         assert!(!parsed.uninstall && !parsed.status && !parsed.quick);
+    }
+
+    /// Recorded `grok inspect --json` text (grok 1.0.34, machine 2026-09-18):
+    /// the fno plugin entry, an unrelated plugin, and a hooks-bearing plugin.
+    fn grok_inspect_sample() -> String {
+        let fno = serde_json::json!({
+            "name": "fno", "scope": "user", "enabled": true,
+            "path": "/claude/plugins/cache/footnote/fno/0.3.2",
+            "provides": {"skills": 25, "agents": 1, "hooks": true, "mcpServers": 0}
+        });
+        let other = serde_json::json!({
+            "name": "feature-dev", "scope": "user", "enabled": true,
+            "path": "/plugins/feature-dev",
+            "provides": {"skills": 0, "agents": 1, "hooks": false, "mcpServers": 0}
+        });
+        serde_json::to_string(&serde_json::json!({ "plugins": [other, fno] })).unwrap()
+    }
+
+    #[test]
+    fn grok_parse_reachable_absent_disabled_and_malformed() {
+        // Reachable: the recorded sample names fno enabled with hooks.
+        match parse_grok_inspect(&grok_inspect_sample()) {
+            GrokReachability::Reachable { path } => {
+                assert!(path.ends_with("fno/0.3.2"), "{path}");
+            }
+            other => panic!("want Reachable, got {other:?}"),
+        }
+        // Absent: fno missing entirely.
+        let no_fno =
+            r#"{"plugins":[{"name":"feature-dev","enabled":true,"provides":{"hooks":false}}]}"#;
+        assert!(matches!(
+            parse_grok_inspect(no_fno),
+            GrokReachability::Absent
+        ));
+        // Disabled, hooks false: both read as absent.
+        let disabled = r#"{"plugins":[{"name":"fno","enabled":false,"provides":{"hooks":true}}]}"#;
+        assert!(matches!(
+            parse_grok_inspect(disabled),
+            GrokReachability::Absent
+        ));
+        let no_hooks = r#"{"plugins":[{"name":"fno","enabled":true,"provides":{"hooks":false}}]}"#;
+        assert!(matches!(
+            parse_grok_inspect(no_hooks),
+            GrokReachability::Absent
+        ));
+        // Malformed: unknown, never reads as installed.
+        assert!(matches!(
+            parse_grok_inspect("not json {"),
+            GrokReachability::Unknown { .. }
+        ));
+        let no_array = r#"{"plugins":{}}"#;
+        assert!(matches!(
+            parse_grok_inspect(no_array),
+            GrokReachability::Unknown { .. }
+        ));
     }
 }
