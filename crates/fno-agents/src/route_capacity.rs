@@ -302,7 +302,10 @@ mod tests {
     /// A hermetic world: FNO_CONFIG pins the sole config candidate (records
     /// come from the records argument), FNO_RUNTIME_STATE_PATH pins the state
     /// file, and the identity stamps live under the pinned state_dir.
-    struct Env(std::sync::MutexGuard<'static, ()>, tempfile::TempDir);
+    struct Env {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        dir: tempfile::TempDir,
+    }
 
     impl Env {
         fn new(state_json: &str, records: &[&str]) -> Self {
@@ -323,11 +326,11 @@ mod tests {
             std::fs::write(&state, state_json).unwrap();
             std::env::set_var("FNO_CONFIG", &path);
             std::env::set_var("FNO_RUNTIME_STATE_PATH", &state);
-            Self(guard, dir)
+            Self { _guard: guard, dir }
         }
 
         fn providers(&self) -> std::path::PathBuf {
-            self.1.path().join("providers")
+            self.dir.path().join("providers")
         }
     }
 
@@ -365,7 +368,7 @@ mod tests {
             &state,
             &["[[accounts.records]]\nid = \"codex\"\nharness = \"codex\"\n"],
         );
-        let cap = capacity(&inv(json!([])), env.1.path(), now(), None);
+        let cap = capacity(&inv(json!([])), env.dir.path(), now(), None);
         assert_eq!(account_of(&cap, "codex"), "unknown");
         assert_eq!(cap["codex"]["sources"]["codex"], "stale");
     }
@@ -384,7 +387,7 @@ mod tests {
         });
         let mut refreshed = Map::new();
         refreshed.insert("codex".into(), refreshed_raw["codex"].clone());
-        let cap = capacity(&inv(json!([])), env.1.path(), now(), Some(&refreshed));
+        let cap = capacity(&inv(json!([])), env.dir.path(), now(), Some(&refreshed));
         assert_eq!(account_of(&cap, "codex"), "ok");
         assert_eq!(cap["codex"]["sources"]["codex"], "window");
     }
@@ -407,7 +410,7 @@ mod tests {
         );
         std::fs::create_dir_all(env.providers()).unwrap();
         std::fs::write(env.providers().join(".active-claude"), "makers").unwrap();
-        let cap = capacity(&inv(json!([])), env.1.path(), now(), None);
+        let cap = capacity(&inv(json!([])), env.dir.path(), now(), None);
         assert_eq!(cap["claude"]["evidence"]["makers"], "proven");
         assert_eq!(cap["claude"]["evidence"]["backup"], "mismatch");
         // The proven account's state IS the harness state, exhausted included.
@@ -431,7 +434,7 @@ mod tests {
                 "[[accounts.records]]\nid = \"backup\"\nharness = \"claude\"\n",
             ],
         );
-        let cap = capacity(&inv(json!([])), env.1.path(), now(), None);
+        let cap = capacity(&inv(json!([])), env.dir.path(), now(), None);
         assert_eq!(account_of(&cap, "claude"), "ok");
         assert_eq!(cap["claude"]["accounts"]["primary"], "exhausted");
         assert_eq!(cap["claude"]["accounts"]["backup"], "ok");
@@ -443,7 +446,7 @@ mod tests {
             &state,
             &["[[accounts.records]]\nid = \"primary\"\nharness = \"claude\"\n"],
         );
-        let cap = capacity(&inv(json!([])), env.1.path(), now(), None);
+        let cap = capacity(&inv(json!([])), env.dir.path(), now(), None);
         assert_eq!(account_of(&cap, "claude"), "exhausted");
     }
 
@@ -462,9 +465,9 @@ mod tests {
             {"name": "opus-x", "harness": "claude", "model": "o", "route": "zai/glm-5.3"},
             {"name": "flash-x", "harness": "claude", "model": "f", "account": "paid-lane"},
         ]));
-        let accounts = harness_accounts("claude", &inventory, env.1.path());
+        let accounts = harness_accounts("claude", &inventory, env.dir.path());
         assert_eq!(accounts, vec!["paid-lane".to_string(), "rec-a".to_string()]);
-        let accounts = harness_accounts("codex", &inventory, env.1.path());
+        let accounts = harness_accounts("codex", &inventory, env.dir.path());
         assert_eq!(accounts, vec!["rec-b".to_string()]);
     }
 
@@ -473,7 +476,7 @@ mod tests {
     #[test]
     fn no_accounts_reads_window_absent() {
         let env = Env::new("{}", &[]);
-        let cap = capacity(&inv(json!([])), env.1.path(), now(), None);
+        let cap = capacity(&inv(json!([])), env.dir.path(), now(), None);
         assert_eq!(cap["claude"]["window"], "absent");
         assert_eq!(account_of(&cap, "claude"), "unknown");
     }
@@ -495,7 +498,7 @@ mod tests {
                 {"name": "x", "harness": "claude", "model": "o", "account": "paid"},
                 {"name": "y", "harness": "claude", "model": "m", "account": "free"},
             ])),
-            env.1.path(),
+            env.dir.path(),
             t,
             None,
         );

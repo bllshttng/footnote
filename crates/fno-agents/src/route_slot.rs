@@ -4282,7 +4282,10 @@ mod tests {
     /// A hermetic config + runtime-state env: FNO_CONFIG pins the sole config
     /// candidate (no canonical/global tier), FNO_RUNTIME_STATE_PATH pins the
     /// state file. Drop clears both.
-    struct CapacityEnv(std::sync::MutexGuard<'static, ()>, tempfile::TempDir);
+    struct CapacityEnv {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        dir: tempfile::TempDir,
+    }
 
     impl CapacityEnv {
         /// `fno_bin` pins the refresh subprocess: the stub script's path, or
@@ -4307,7 +4310,7 @@ mod tests {
             let providers = dir.path().join("providers");
             std::fs::create_dir_all(&providers).unwrap();
             std::fs::write(providers.join(".active-claude"), "makers").unwrap();
-            Self(guard, dir)
+            Self { _guard: guard, dir }
         }
     }
 
@@ -4413,8 +4416,8 @@ mod tests {
     #[test]
     fn refresh_gate_probes_a_stale_lane_and_the_pick_uses_the_fresh_reading() {
         let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
-        let marker = env.1.path().join("marker");
-        let stub = write_refresh_stub(env.1.path(), &fresh_codex_row(), &marker);
+        let marker = env.dir.path().join("marker");
+        let stub = write_refresh_stub(env.dir.path(), &fresh_codex_row(), &marker);
         std::env::set_var("FNO_BIN", &stub);
         let out = resolve_slot_payload(&slot_env_payload(json!({
             "capacity_refresh": true,
@@ -4436,8 +4439,8 @@ mod tests {
     #[test]
     fn refresh_gate_covers_a_never_probed_account() {
         let env = CapacityEnv::new(&state_json(None), None);
-        let marker = env.1.path().join("marker");
-        let stub = write_refresh_stub(env.1.path(), &fresh_codex_row(), &marker);
+        let marker = env.dir.path().join("marker");
+        let stub = write_refresh_stub(env.dir.path(), &fresh_codex_row(), &marker);
         std::env::set_var("FNO_BIN", &stub);
         let out = resolve_slot_payload(&slot_env_payload(json!({
             "capacity_refresh": true,
@@ -4451,9 +4454,9 @@ mod tests {
     #[test]
     fn no_refresh_flag_means_no_probe() {
         let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
-        let marker = env.1.path().join("marker");
+        let marker = env.dir.path().join("marker");
         let stub = write_refresh_stub(
-            env.1.path(),
+            env.dir.path(),
             r#"{"codex": {"source": "probe", "probed_at": 0, "partial": false, "windows": []}}"#,
             &marker,
         );
@@ -4477,9 +4480,9 @@ mod tests {
     #[test]
     fn a_lane_the_probe_cannot_read_stays_skipped_and_names_the_reason() {
         let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
-        let marker = env.1.path().join("marker");
+        let marker = env.dir.path().join("marker");
         let stub = write_refresh_stub(
-            env.1.path(),
+            env.dir.path(),
             r#"{"codex": {"state": "unknown", "reason": "auth-unsupported"}}"#,
             &marker,
         );
