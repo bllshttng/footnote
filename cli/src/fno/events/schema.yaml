@@ -2765,6 +2765,21 @@ event_types:
         elapsed_seconds:
           type: integer
 
+  - name: question_sweep
+    description: "The daemon's periodic node-closed question sweep: open operator questions whose node has closed are auto-closed with an EMPTY answer, deliberately, because a non-empty answer would arm the unrecorded-decision gate against the asking session for a decision nobody made. One emit per pass: closed counts the questions closed, outcome is none or closed, and ids names them when any closed."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        closed:
+          type: integer
+        outcome:
+          type: string
+        ids:
+          type: array
+          items:
+            type: string
+
   - name: agent_row_reaped
     description: "An agent-view or roster-only row was retired by the retirement sweep, roster-reap, or `fno agents reap`: the session's WORK is done on every resolved node and its transcript has been quiet past agents.retire_grace_s. basis names that verdict. remover identifies the acting sweep when emitted. A resumable receipt is attempted before this event; receipt_staged and resumable report whether that recovery path persisted. Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
     sources: [daemon]

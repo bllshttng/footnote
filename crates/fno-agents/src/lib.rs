@@ -1189,6 +1189,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // dedupe index: a pair already observed in the window never re-emits.
     "scratch_shape_observed",
     "scratch_shape_filed",
+    // Node-closed question sweep (daemon-emitted): the periodic walk that
+    // auto-closes open operator questions whose node has closed; one emit
+    // per pass names how many it closed and, when any, which.
+    "question_sweep",
     // Meta (daemon/worker-emitted)
     "event_payload_too_large",
     // Inside-leg state push (daemon-emitted, inside-out E3.2): a per-turn hook

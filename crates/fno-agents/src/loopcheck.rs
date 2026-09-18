@@ -13872,10 +13872,16 @@ mod tests {
         // Production region only: the file's own test module may legitimately
         // spawn helper processes.
         let source = include_str!("loopcheck.rs");
-        let production = source
+        let mut production = source
             .split("\nmod tests {")
             .next()
-            .expect("test module marker");
+            .expect("test module marker")
+            .to_string();
+        // The range-tiling child module is production too: the file budget's
+        // remedy moved the tiling git reads there verbatim, and a bypass
+        // hiding in a named-by-question child would dodge a loopcheck-only
+        // scan.
+        production.push_str(include_str!("loopcheck/range_tiling.rs"));
         // Positive control first, so an empty scan can never read as green:
         // the centralized runner must exist and carry real call sites.
         assert!(production.contains("fn run_bounded("));
@@ -13887,7 +13893,7 @@ mod tests {
             production.matches("git_bounded(").count() >= 10,
             "the bounded transport must carry the stop-gate git read sites"
         );
-        let bypasses = direct_wait_bypasses(production);
+        let bypasses = direct_wait_bypasses(&production);
         assert!(
             bypasses.is_empty(),
             "direct synchronous gh/fno/git waits outside the bounded runner: {bypasses:?}"

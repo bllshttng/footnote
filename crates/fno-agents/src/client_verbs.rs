@@ -4234,6 +4234,12 @@ mod tests {
 
     #[test]
     fn session_id_field_and_resume_argv_match_python() {
+        // The codex grant folds FNO_WORKER_ADD_DIRS into the writable roots,
+        // so an ambient dispatch env (every fno-spawned worker carries one)
+        // grows the expected argv and breaks the byte-identity pin. The
+        // contract here is the argv SHAPE: pin the dirs empty. Left unset on
+        // purpose - no other test asserts the live value.
+        std::env::remove_var("FNO_WORKER_ADD_DIRS");
         assert_eq!(session_id_field("claude"), Some("short_id"));
         assert_eq!(session_id_field("codex"), Some("harness_session_id"));
         assert_eq!(session_id_field("gemini"), Some("harness_session_id"));
