@@ -22,7 +22,13 @@ fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
     path
 }
 
-fn setup(cwd: &Path, home: &Path) {
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Tests in this file run threaded and each points `HOME` at its own tree,
+/// so the returned guard must live for the whole test.
+#[must_use]
+fn setup(cwd: &Path, home: &Path) -> std::sync::MutexGuard<'static, ()> {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     fs::create_dir_all(cwd.join(".fno")).unwrap();
     fs::create_dir_all(home.join(".fno")).unwrap();
     fs::write(
@@ -33,6 +39,7 @@ fn setup(cwd: &Path, home: &Path) {
     std::env::set_var("FNO_NUDGE_DISABLED", "1");
     std::env::set_var("FNO_LOOPCHECK_MIN_FIRE_GAP_SECS", "0");
     std::env::set_var("HOME", home);
+    guard
 }
 
 fn fire(args: &[&str]) -> Decision {
@@ -53,7 +60,7 @@ fn fire(args: &[&str]) -> Decision {
 fn paused_target_and_king_allow_without_terminal_reason() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
-    setup(tmp.path(), &home);
+    let _env = setup(tmp.path(), &home);
     fs::write(
         home.join(".fno/loops-paused.json"),
         r#"{"who":"operator","paused_at":10}"#,
@@ -84,7 +91,7 @@ fn paused_target_and_king_allow_without_terminal_reason() {
 fn clear_loop_check_keeps_normal_manifest_decision() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
-    setup(tmp.path(), &home);
+    let _env = setup(tmp.path(), &home);
     let bin_dir = tmp.path().join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
     let gh = script(
@@ -122,4 +129,57 @@ esac"#,
         git.to_str().unwrap(),
     ]);
     assert_eq!(decision.decision, "block");
+}
+
+#[test]
+fn a_held_cargo_build_allows_without_touching_loop_state() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let _env = setup(tmp.path(), &home);
+    let cwd = fs::canonicalize(tmp.path()).unwrap();
+    let waiters = home.join(".fno/claims/build-waiters");
+    fs::create_dir_all(&waiters).unwrap();
+    let body = serde_json::json!({
+        "pid": std::process::id(),
+        "cargo_pid": std::process::id(),
+        "worktree": cwd,
+        "holder": "cargo:/elsewhere:77",
+        "since_ms": fno_agents::claims::now_ms(),
+    });
+    let marker = format!(
+        "{}.json",
+        fno_agents::claims::encode_key(&cwd.to_string_lossy())
+    );
+    fs::write(waiters.join(marker), body.to_string()).unwrap();
+    let listing = |dir: &Path| {
+        let mut names: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    };
+    let before = listing(&cwd.join(".fno"));
+
+    let state = cwd.join("state.md");
+    let transcript = cwd.join("transcript.jsonl");
+    let decision = fire(&[
+        "loop-check",
+        "--state",
+        state.to_str().unwrap(),
+        "--transcript",
+        transcript.to_str().unwrap(),
+        "--cwd",
+        cwd.join("crates").to_str().unwrap(),
+        "--driver",
+        "target",
+    ]);
+    assert_eq!(decision.decision, "allow");
+    assert!(decision.termination_reason.is_none());
+    assert!(
+        decision.message.contains("cargo:/elsewhere:77"),
+        "{}",
+        decision.message
+    );
+    assert_eq!(listing(&cwd.join(".fno")), before);
 }

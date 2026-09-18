@@ -7692,7 +7692,7 @@ pub(crate) fn decide_with_payload(
         std::time::Instant::now() + STOPGATE_FIRE_BUDGET,
         reserve_ms,
     );
-    if let Some(message) = crate::loops_pause::pause_message() {
+    if let Some(message) = crate::loops_pause::pause_message(&parsed.cwd) {
         return (0, paused_output(&parsed.driver, &message));
     }
     // The king uses a separate manifest and decision path.
