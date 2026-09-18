@@ -1100,13 +1100,11 @@ def _unbake_constants_facade():
     restores that resolved path as a concrete attribute on teardown, so
     every later test in the process reads a dead tmp graph. The module doc
     begs for ``setitem(vars(module), ...)``; dozens of sites use setattr
-    anyway. This deletes any facade name that became concrete during the
-    test, restoring lazy resolution for the whole process.
+    anyway. Cleanup runs at SETUP: the previous test's monkeypatch undo is
+    the last writer by then, so the delete cannot race it.
     """
     import fno.graph._constants as gc
 
-    baked = [name for name in _FACADE_NAMES if name in vars(gc)]
-    yield
     for name in _FACADE_NAMES:
-        if name not in baked and name in vars(gc):
+        if name in vars(gc):
             delattr(gc, name)
