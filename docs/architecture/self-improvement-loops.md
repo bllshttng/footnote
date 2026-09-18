@@ -13,7 +13,7 @@ The three loops that turn what the fleet did into what the fleet does better. Ea
 
 ## What feeds what
 
-- The transcript fold (`fno-agents intel`, report via `/fno:intel`) is the S2 writer's only report source: before intel, no writer produced a file with `#agent-correction` lines, so the S2 path had been starving since it shipped (x-df2e). The fold classifies turns by provenance first, so only operator-typed turns reach the corrections the skill quotes.
+- The transcript fold (`fno-agents intel`, report via `/fno:intel`) is the S2 writer's only report source. Before intel, no writer produced a file with `#agent-correction` lines, so the S2 path had been starving since it shipped (x-df2e). The fold classifies turns by provenance first, so only operator-typed turns reach the corrections the skill quotes.
 - The S0 watcher and the S2 rows share `~/.fno/corrections.log`. S0 rows come from postmortems, S2 rows from intel reports. The x-4173 verify lane scores the `signal=` field across both.
 - Evals and heal are daemon-tick loops: both read what the other loops wrote. A healed PR re-runs evals banks, and a regression bank failure files a node the autocorrect review can pick up.
 
