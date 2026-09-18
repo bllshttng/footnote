@@ -6789,8 +6789,7 @@ fn make_fingerprint(
     ci_conclusion: &str,
     latest_ts: &str,
 ) -> String {
-    // An absent latest-review time renders "none", the pre-read's no-PR form;
-    // empty let the two shapes disagree and reset the backstop streak forever.
+    // An absent latest-review time renders "none", the pre-read's form; two shapes reset the streak.
     let latest_ts = if latest_ts.is_empty() {
         "none"
     } else {
@@ -8060,11 +8059,10 @@ pub(crate) fn decide_with_payload(
         .clone()
         .unwrap_or_else(crate::gh_budget::ledger_path);
 
-    // The fire history is JOURNAL truth now: fires, the trailing shared
-    // fingerprint, and its pr_state/ci come from one local read; no PR read
-    // routes. A generic-delivery fire OBSERVED its world this fire, so its
-    // streak counts against the observed revision; every other fire compares
-    // journal rows against the journal's own newest fingerprint.
+    // Fire history is JOURNAL truth: fires, the trailing shared fingerprint,
+    // and its pr_state/ci come from one local read; no PR read routes. A
+    // generic-delivery fire OBSERVED its world, so its streak counts against
+    // the observed revision; every other fire reads the journal's newest fp.
     let backstop_n: u64 = if manifest.attended { 5 } else { 3 };
     let min_fire_gap = min_fire_gap_secs();
     let generic_observed = generic.is_active();
@@ -8083,9 +8081,8 @@ pub(crate) fn decide_with_payload(
         min_fire_gap,
     );
     let (last_pr_state, last_ci) = read_last_row_fields(&project_events, &session_id);
-    // Fires that do not run done() inherit the last recorded fingerprint (a
-    // first fire with no journal starts at the no-PR basis), so their row
-    // stays comparable with its neighbors and only a done() read can move it.
+    // A fire that does not run done() inherits the last recorded fingerprint,
+    // so its row stays comparable with its neighbors; only done() can move it.
     let fingerprint = if generic_observed {
         observed_fp
     } else {
