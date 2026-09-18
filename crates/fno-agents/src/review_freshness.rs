@@ -191,6 +191,12 @@ pub fn review_freshness(reviewed_sha: &str, head_sha: &str, facts: &FreshnessFac
         return Freshness::Stale;
     };
     if reviewed.hash != head.hash {
+        // One side is docs-only and the other carries code: a reviewer who
+        // read zero code lines has not read the new code, and a head that
+        // dropped all code is a change the reviewer never saw.
+        if reviewed.lines.is_empty() || head.lines.is_empty() {
+            return Freshness::Stale;
+        }
         // The code delta changed, but it can still have only SHRUNK: every raw
         // line still shipping was read, and the lines that vanished are paths
         // the base absorbed on the rebase. Each raw line carries both blob
@@ -224,9 +230,9 @@ pub fn review_freshness(reviewed_sha: &str, head_sha: &str, facts: &FreshnessFac
     }
 }
 
-/// Strict subset over two SORTED raw-diff line sets: non-empty (an empty HEAD
-/// identity is `None`, never an empty set, per the absence-matching rule
-/// above), strictly smaller, and every HEAD line present in the reviewed set.
+/// Strict subset over two SORTED raw-diff line sets: strictly smaller, and
+/// every HEAD line present in the reviewed set. An empty HEAD set is vacuously
+/// a subset, so [`review_freshness`] rejects empty sets before calling this.
 fn is_strict_subset(head: &[String], reviewed: &[String]) -> bool {
     head.len() < reviewed.len() && {
         let have: std::collections::HashSet<&str> = reviewed.iter().map(|s| s.as_str()).collect();
@@ -332,11 +338,15 @@ pub fn interdiff_lines_between(
 /// `--no-renames` pins it against a per-user `diff.renames` config that would
 /// otherwise make two runs of the same comparison disagree.
 ///
-/// `None` on any git failure AND when nothing outside documentation changed.
-/// An empty code diff is not positive evidence of anything, and letting two of
-/// them compare equal is the absence-matched-against-absence trap above. The
-/// cost is that a documentation-only PR never carries an attestation, which is
-/// the fail-closed direction and matches today's behavior exactly.
+/// `None` on any git failure AND when the three-dot diff itself is empty. An
+/// empty diff is not positive evidence of anything (a merged PR reads empty
+/// against current base), and letting two of them compare equal is the
+/// absence-matched-against-absence trap above.
+///
+/// A readable, non-empty diff whose every path is documentation yields an
+/// identity with empty `lines`: positive evidence that no code is under review.
+/// [`review_freshness`] never carries across a move between that and a
+/// code-bearing identity.
 fn pr_code_diff_identity(
     git_bin: &str,
     cwd: &Path,
@@ -358,14 +368,18 @@ fn pr_code_diff_identity(
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout).to_string();
-    let mut lines: Vec<String> = text
+    let raw: Vec<String> = text
         .lines()
         .map(|l| l.trim_end().to_string())
-        .filter(|l| !l.is_empty() && !is_documentation_path(raw_diff_line_path(l)))
+        .filter(|l| !l.is_empty())
         .collect();
-    if lines.is_empty() {
+    if raw.is_empty() {
         return None;
     }
+    let mut lines: Vec<String> = raw
+        .into_iter()
+        .filter(|l| !is_documentation_path(raw_diff_line_path(l)))
+        .collect();
     lines.sort_unstable();
     let mut hasher = blake3::Hasher::new();
     for line in &lines {
@@ -480,13 +494,17 @@ impl<'a> FreshnessResolver<'a> {
         // fresh and carried-identity paths - the common cases - pay no extra
         // git.
         let interdiff_lines = match (&reviewed_identity, &head_identity) {
-            (Some(r), Some(h)) if r.hash != h.hash => interdiff_lines_between(
-                self.git_bin,
-                self.cwd,
-                &self.base_ref,
-                reviewed_sha,
-                &self.head_sha,
-            ),
+            (Some(r), Some(h))
+                if r.hash != h.hash && !r.lines.is_empty() && !h.lines.is_empty() =>
+            {
+                interdiff_lines_between(
+                    self.git_bin,
+                    self.cwd,
+                    &self.base_ref,
+                    reviewed_sha,
+                    &self.head_sha,
+                )
+            }
             _ => None,
         };
         let facts = FreshnessFacts {
@@ -795,5 +813,117 @@ mod tests {
         let head = git(&repo, &["rev-parse", "HEAD"]);
         let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
         assert!(resolver.freshness(&reviewed).counts());
+    }
+
+    // ── docs-only PRs ───────────────────────────────────────────────────────
+
+    /// A repo on `main` holding `f.txt`, with `origin/main` pointing at it.
+    fn base_repo() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("r");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "base\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        (tmp, repo)
+    }
+
+    /// Write `files` into `repo`, commit, and return the new sha.
+    fn commit(repo: &Path, files: &[(&str, &str)]) -> String {
+        for (path, body) in files {
+            let full = repo.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, body).unwrap();
+        }
+        git(repo, &["add", "-A"]);
+        git(repo, &["commit", "-q", "-m", "c"]);
+        git(repo, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn resolver_docs_only_pr_carries_a_docs_advance() {
+        let (_tmp, repo) = base_repo();
+        git(&repo, &["checkout", "-q", "-b", "feature"]);
+        let reviewed = commit(&repo, &[("docs/x.md", "one\n")]);
+        let head = commit(&repo, &[("docs/x.md", "one\ntwo\n")]);
+        let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
+        assert_eq!(resolver.freshness(&reviewed), Freshness::CarriedDocsOnly);
+    }
+
+    #[test]
+    fn resolver_docs_only_pr_carries_across_a_rebase() {
+        let (_tmp, repo) = base_repo();
+        git(&repo, &["checkout", "-q", "-b", "feature"]);
+        let reviewed = commit(&repo, &[("docs/x.md", "one\n")]);
+        git(&repo, &["checkout", "-q", "main"]);
+        commit(&repo, &[("other.txt", "base moved\n")]);
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&repo, &["checkout", "-q", "feature"]);
+        git(&repo, &["rebase", "-q", "origin/main"]);
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
+        let verdict = resolver.freshness(&reviewed);
+        assert!(
+            verdict.counts(),
+            "a docs-only rebase must carry: {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn resolver_docs_only_review_does_not_carry_new_code() {
+        let (_tmp, repo) = base_repo();
+        git(&repo, &["checkout", "-q", "-b", "feature"]);
+        let reviewed = commit(&repo, &[("docs/x.md", "one\n")]);
+        let head = commit(&repo, &[("code.txt", "new code\n")]);
+        let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
+        assert_eq!(resolver.freshness(&reviewed), Freshness::Stale);
+    }
+
+    #[test]
+    fn resolver_code_review_does_not_carry_a_revert_to_docs_only() {
+        let (_tmp, repo) = base_repo();
+        git(&repo, &["checkout", "-q", "-b", "feature"]);
+        let reviewed = commit(&repo, &[("code.txt", "code\n"), ("docs/x.md", "one\n")]);
+        git(&repo, &["rm", "-q", "code.txt"]);
+        git(&repo, &["commit", "-q", "-m", "drop code"]);
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
+        assert_eq!(resolver.freshness(&reviewed), Freshness::Stale);
+    }
+
+    #[test]
+    fn resolver_merged_docs_only_pr_never_matches_absence() {
+        // Both commits already sit in origin/main, so both three-dot diffs are
+        // empty: the merged-PR absence, which must not carry.
+        let (_tmp, repo) = base_repo();
+        let reviewed = commit(&repo, &[("docs/x.md", "one\n")]);
+        let head = commit(&repo, &[("docs/x.md", "one\ntwo\n")]);
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
+        assert_eq!(resolver.freshness(&reviewed), Freshness::Stale);
+    }
+
+    #[test]
+    fn empty_code_identity_on_one_side_never_carries() {
+        let docs_only = || Some(ident_of(&[]));
+        let code = || Some(ident_of(&[":100644 100644 a b M\tcode.txt"]));
+        for (reviewed_identity, head_identity) in [(docs_only(), code()), (code(), docs_only())] {
+            let verdict = review_freshness(
+                "r",
+                "h",
+                &FreshnessFacts {
+                    reviewed_identity,
+                    head_identity,
+                    tree_paths: Some(vec!["code.txt".to_string()]),
+                    interdiff_lines: Some(1),
+                    carry_interdiff_lines: 100,
+                },
+            );
+            assert_eq!(verdict, Freshness::Stale);
+        }
     }
 }
