@@ -200,7 +200,8 @@ fn grok_fire_with_a_promise_terminates_advisory_through_the_payload() {
     assert_eq!(code, 0, "{stdout} {stderr}");
     // The allow path prints nothing; the block path is the one that speaks.
     assert!(stdout.trim().is_empty(), "allow must be silent: {stdout}");
-    let row = last_loop_check(&fx.events).expect("a loop_check row");
+    let row = last_loop_check(&fx.events)
+        .expect("a loop_check row; the hook's stderr names any journal-write failure");
     assert_eq!(
         row.pointer("/data/decision").and_then(|s| s.as_str()),
         Some("allow"),
@@ -224,7 +225,11 @@ fn grok_fire_without_a_pr_blocks_like_any_session() {
     let d: serde_json::Value =
         serde_json::from_str(stdout.trim()).unwrap_or(serde_json::Value::Null);
     assert_eq!(d["decision"], "block", "{d}");
-    assert!(last_loop_check(&fx.events).is_some(), "decide ran");
+    assert!(
+        last_loop_check(&fx.events).is_some(),
+        "decide ran: events={} stderr={stderr}",
+        fx.events.display()
+    );
 }
 
 /// AC2-ERR: a subagent's stop is not the session's turn gate.
