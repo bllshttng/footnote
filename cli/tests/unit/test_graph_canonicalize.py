@@ -206,7 +206,7 @@ def test_ownership_defect_has_canonical_lifecycle_position():
 
 
 def test_ownership_defect_round_trips_through_entry_schema():
-    from fno.graph.types import Entry
+    from fno.graph.types import Node as Entry
 
     marker = {
         "kind": "stale-active-owner-unverified",

@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 from fno.graph._reconcile import detect_reverted_nodes
-from fno.graph.types import Entry
+from fno.graph.types import Node as Entry
 from fno.retro.land import land_candidates
 from fno.retro.types import TIER_NODE, Candidate
 

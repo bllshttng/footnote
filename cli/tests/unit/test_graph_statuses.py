@@ -565,7 +565,7 @@ def test_in_review_survives_stale_claim():
 def test_in_review_reachable_through_typed_entry():
     """The Entry.status computed field must also derive in_review, so a typed
     round-trip (model_dump) does not silently emit ready/idea/blocked."""
-    from fno.graph.types import Entry
+    from fno.graph.types import Node as Entry
 
     entry = Entry(id="ab-prreview5", title="t", pr_number=358)
     assert entry.status == "in_review"
