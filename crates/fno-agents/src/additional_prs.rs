@@ -217,6 +217,109 @@ pub(crate) fn apply_stamps(entries: &mut [Value], stamps: &[PrStamp]) {
     }
 }
 
+/// The state-shaped REST read behind the sweep's PR questions: `gh api
+/// <path>` in the given cwd. `None` unreadable - an unreadable answer never
+/// stamps and never retires. Bounded 30s; the caller caches per
+/// `(path, cwd)` for one pass, so steady state pays nothing.
+pub(crate) fn gh_pr_state(path: &str, cwd: &str) -> Option<PrState> {
+    let out = crate::loopcheck::bounded_read(
+        "gh".as_ref(),
+        &["api", path],
+        std::path::Path::new(cwd),
+        "gc-sweep",
+        std::time::Duration::from_secs(30),
+    )
+    .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+    if v.get("merged_at").and_then(Value::as_str).is_some() {
+        return Some(PrState::Merged);
+    }
+    match v.get("state").and_then(Value::as_str) {
+        Some("open") => Some(PrState::Open),
+        Some("closed") => Some(PrState::Closed),
+        _ => None,
+    }
+}
+
+/// The production reader for one settle or dry-run pass: every
+/// `(path, cwd)` answer is read once and cached for the pass.
+pub(crate) fn gh_pr_state_reader() -> impl FnMut(&str, &str) -> Option<PrState> {
+    let mut cache: HashMap<(String, String), Option<PrState>> = HashMap::new();
+    move |path: &str, cwd: &str| {
+        *cache
+            .entry((path.to_string(), cwd.to_string()))
+            .or_insert_with(|| gh_pr_state(path, cwd))
+    }
+}
+
+/// The stamp pass ahead of the settle: one GitHub read per unsettled extra
+/// on a held node, one `pull_request_stamp` write per answer, each write
+/// confirmed on the returned node. Every stamp refusal is named, and its
+/// row keeps its hold. An unreadable graph plans nothing here: the settle's
+/// own read names the refusal, and both legs share the store.
+pub(crate) fn stamp_pass(
+    home: &crate::paths::AgentsHome,
+    read: &mut dyn FnMut(&str, &str) -> Option<PrState>,
+) -> Vec<(String, String)> {
+    let mut refusals = Vec::new();
+    let store = crate::backlog::api::Store::new(&crate::gc_sweep::graph_path(home));
+    let Ok(entries) = crate::backlog::api::rows(&store) else {
+        return refusals;
+    };
+    for stamp in plan_stamps(&entries, read) {
+        let result = crate::backlog::api::pull_request_stamp(
+            &store,
+            &stamp.node,
+            stamp.number,
+            stamp.url.as_deref(),
+            stamp.merge_status,
+        );
+        match result {
+            Ok(payload) if payload.success => {
+                let confirmed = payload.node.as_ref().is_some_and(|node| {
+                    node.additional_prs.iter().flatten().any(|extra| {
+                        extra.number == Some(stamp.number)
+                            && extra.merge_status.as_deref() == Some(stamp.merge_status)
+                    })
+                });
+                if !confirmed {
+                    refusals.push((
+                        stamp.node.clone(),
+                        "stamp refused: returned node lacks the stamp".to_string(),
+                    ));
+                }
+            }
+            Ok(_) => refusals.push((
+                stamp.node.clone(),
+                "stamp refused: no matching unsettled entry".to_string(),
+            )),
+            Err(err) => refusals.push((stamp.node.clone(), format!("stamp refused: {}", err.0))),
+        }
+    }
+    refusals
+}
+
+/// The dry-run settle plan with its stamp plan: reads the store, plans
+/// stamps, applies them in memory, and returns the stale rows the stamped
+/// graph still yields plus the stamps behind them. Writes nothing.
+pub(crate) fn plan_settle(
+    home: &crate::paths::AgentsHome,
+    read: &mut dyn FnMut(&str, &str) -> Option<PrState>,
+) -> (Vec<crate::gc_sweep::StaleDoRow>, Vec<PrStamp>) {
+    let store = crate::backlog::api::Store::new(&crate::gc_sweep::graph_path(home));
+    match crate::backlog::api::rows(&store) {
+        Ok(mut entries) => {
+            let stamps = plan_stamps(&entries, read);
+            apply_stamps(&mut entries, &stamps);
+            (crate::gc_sweep::stale_open_do_rows(&entries), stamps)
+        }
+        Err(_) => (Vec::new(), Vec::new()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
