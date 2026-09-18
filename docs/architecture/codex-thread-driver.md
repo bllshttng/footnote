@@ -276,9 +276,9 @@ A missing registry row is never evidence of death. Read the claim lockfile pid a
 
 A stale daemon (live version older than the installed CLI) upgrades only through one transaction in `crates/fno-agents/src/codex_daemon_upgrade.rs`. It is the ONLY caller of the vendor `codex app-server daemon restart`. Nobody signals the daemon pid by hand.
 
-The order is fixed. Acquire the provider-daemon lock. Re-read readiness under it, so a concurrent upgrade reads reused-current instead of double-swapping. Snapshot every loaded thread: full id, cwd, runtime status, and its fno registry row. Refuse before ANY mutation when a thread reads active or systemError, or any status is unreadable.
+The order is fixed. Acquire the provider-daemon lock. Re-read readiness under it, so a concurrent upgrade reads reused-current instead of double-swapping. Snapshot every loaded thread: full id, cwd, runtime status, and its fno registry row. When a thread reads active or systemError, or any status is unreadable, refuse before ANY mutation.
 
-Then, and only then, run the vendor restart with the resolved `CODEX_HOME`. Verify after: the recorded incarnation changed, initialize answers, both version readers agree the daemon now equals the installed CLI, every snapshot id re-reads with the same cwd, and the config bytes are unchanged. Every check passes makes the receipt `upgraded`. Any failure makes it `failed` with the missing ids named. Never a success-shaped line on failure. Never a blind retry.
+Then, and only then, run the vendor restart with the resolved `CODEX_HOME`. Verify after. The recorded incarnation must have changed. Initialize must answer. Both version readers must agree the daemon now equals the installed CLI. Every snapshot id must re-read with the same cwd. The config bytes must be unchanged. Every check passing makes the receipt `upgraded`. Any failure makes it `failed` with the missing ids named. Never a success-shaped line on failure. Never a blind retry.
 
 `fno agents restart` runs the transaction as one more component in its own receipt. A current daemon is reused. A stale but unsafe daemon is reported and held, and does not fail the verb, because nothing was mutated. A post-restart verification failure DOES fail the verb.
 
