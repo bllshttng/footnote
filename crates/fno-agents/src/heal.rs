@@ -3087,6 +3087,10 @@ exit 0
         ];
         v.push("--bin-dir".to_string());
         v.push(dir.to_string_lossy().into_owned());
+        // The journal rides the same test seam as drive_args below: without it
+        // the default resolves through $HOME and the hermetic guard panics.
+        v.push("--events-file".to_string());
+        v.push(dir.join("events.jsonl").to_string_lossy().into_owned());
         v.extend(extra.iter().map(|s| s.to_string()));
         v
     }
