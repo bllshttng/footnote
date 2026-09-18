@@ -92,5 +92,7 @@ def test_apply_emit_failure_never_breaks_apply(tmp_graph, tmp_path, monkeypatch)
 
     r = runner.invoke(app, ["backlog", "triage", "apply", str(proposal)])
     assert r.exit_code == 0, r.output  # clean apply, emit failure swallowed
-    graph = json.loads(tmp_graph.read_text())
-    assert graph["entries"][0]["priority"] == "p1"
+    from fno.graph.store import read_graph_strict
+
+    graph = read_graph_strict(tmp_graph)
+    assert graph[0]["priority"] == "p1"
