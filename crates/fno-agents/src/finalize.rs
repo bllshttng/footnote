@@ -425,28 +425,33 @@ fn count_run_tasks(project_events: &Path, run: &str) -> (u64, u64, u64) {
 /// fire used to emit + push a fresh copy (one king got 14 mails in 67 minutes
 /// for a single DoneAwaitingMerge run). Keys on run PLUS reason so a session
 /// that hits Budget and then resumes to DoneAwaitingMerge still reports the
-/// new terminal. Streaming read, same shape as `count_run_tasks`; a missing
-/// or unreadable log is a false (emit and push as before).
+/// new terminal. Committed rows are the record (the cutover stopped journal
+/// appends); a missing or unreadable store is a false (emit and push as
+/// before).
 fn run_summary_already_emitted(project_events: &Path, run: &str, reason: &str) -> bool {
-    use std::io::BufRead;
-    if let Ok(file) = fs::File::open(project_events) {
-        let mut reader = std::io::BufReader::new(file);
-        let mut line = String::new();
-        while reader.read_line(&mut line).unwrap_or(0) > 0 {
-            if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                if v.get("type").and_then(|t| t.as_str()) == Some("run_summary")
-                    && v.get("run").and_then(|r| r.as_str()) == Some(run)
+    if fno_event_store::import_all(project_events).is_err() {
+        return false;
+    }
+    let rows = match fno_event_store::query_events(
+        project_events,
+        &fno_event_store::EventQuery {
+            types: vec!["run_summary".to_string()],
+            ..Default::default()
+        },
+    ) {
+        Ok(rows) => rows,
+        Err(_) => return false,
+    };
+    rows.iter().any(|row| {
+        serde_json::from_str::<Value>(&row.line)
+            .ok()
+            .is_some_and(|v| {
+                v.get("run").and_then(|r| r.as_str()) == Some(run)
                     && v.pointer("/data/termination_reason")
                         .and_then(|r| r.as_str())
                         == Some(reason)
-                {
-                    return true;
-                }
-            }
-            line.clear();
-        }
-    }
-    false
+            })
+    })
 }
 
 /// Append a pre-built extended envelope through the shared Branch-A mutex.

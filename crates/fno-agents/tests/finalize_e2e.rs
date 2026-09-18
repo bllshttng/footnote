@@ -482,18 +482,23 @@ fn handoff_files(env: &Env) -> Vec<PathBuf> {
 /// Count run_summary rows for one run in an events log (envelope-level `run`,
 /// the join `count_run_tasks` and `run_summary_already_emitted` use).
 fn count_run_summary(p: &Path, run: &str) -> usize {
-    events_text(p)
-        .lines()
-        .filter(|l| {
-            serde_json::from_str::<serde_json::Value>(l)
-                .ok()
-                .map(|v| {
-                    v.get("type").and_then(|t| t.as_str()) == Some("run_summary")
-                        && v.get("run").and_then(|r| r.as_str()) == Some(run)
-                })
-                .unwrap_or(false)
-        })
-        .count()
+    let _ = fno_event_store::import_all(p);
+    fno_event_store::query_events(
+        p,
+        &fno_event_store::EventQuery {
+            types: vec!["run_summary".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap_or_default()
+    .iter()
+    .filter(|r| {
+        serde_json::from_str::<serde_json::Value>(&r.line)
+            .ok()
+            .map(|v| v.get("run").and_then(|r| r.as_str()) == Some(run))
+            .unwrap_or(false)
+    })
+    .count()
 }
 fn postmortem_files(env: &Env) -> Vec<PathBuf> {
     fs::read_dir(&env.postmortems)
