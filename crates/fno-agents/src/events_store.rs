@@ -125,6 +125,7 @@ fn open_store(store: &Path) -> Result<Connection, String> {
          PRAGMA synchronous=FULL;
          CREATE TABLE IF NOT EXISTS events (
              row_hash BLOB PRIMARY KEY NOT NULL,
+             seq INTEGER NOT NULL UNIQUE,
              ts_ms INTEGER NOT NULL,
              type TEXT NOT NULL,
              source TEXT NOT NULL,
@@ -149,7 +150,37 @@ fn open_store(store: &Path) -> Result<Connection, String> {
          );"
     ))
     .map_err(|e| format!("{}: {e}", store.display()))?;
+    ensure_sequence_column(&conn)?;
     Ok(conn)
+}
+
+/// Add append order to stores created by the pre-sequence branch build.
+/// Existing equal-timestamp rows have already lost their original order, so
+/// the migration uses a deterministic hash tie-break; every new ingest is
+/// exact from this point forward.
+fn ensure_sequence_column(conn: &Connection) -> Result<(), String> {
+    let has_seq: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('events') WHERE name = 'seq'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if has_seq == 0 {
+        conn.execute_batch(
+            "ALTER TABLE events ADD COLUMN seq INTEGER;
+             WITH ranked AS (
+                 SELECT row_hash, row_number() OVER (ORDER BY ts_ms, row_hash) AS n
+                 FROM events
+             )
+             UPDATE events SET seq = (
+                 SELECT n FROM ranked WHERE ranked.row_hash = events.row_hash
+             );",
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    conn.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS events_seq ON events(seq);")
+        .map_err(|e| e.to_string())
 }
 
 /// Read-only handle for history readers; a failure names the store path.
@@ -200,7 +231,7 @@ pub(crate) fn journal_text(journal: &Path, types: &[&str]) -> String {
         // Corrupt and typeless rows store with an empty type; parsers count
         // our own corrupted rows for their notices.
         let sql = format!(
-            "SELECT row_hash, line FROM events WHERE type IN ({placeholders}, '') ORDER BY ts_ms"
+            "SELECT row_hash, line FROM events WHERE type IN ({placeholders}, '') ORDER BY seq"
         );
         let mut stmt = conn.prepare(&sql).ok()?;
         let rows = stmt
@@ -265,6 +296,11 @@ fn ingest_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, 
     // Only complete lines: a tail without its newline belongs to the next sync.
     let complete_end = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     let mut tally = FileTally::default();
+    let mut next_seq: i64 = tx
+        .query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM events", [], |r| {
+            r.get(0)
+        })
+        .map_err(|e| e.to_string())?;
     for line_bytes in bytes[start..complete_end].split(|&b| b == b'\n') {
         let line_bytes = line_bytes.strip_suffix(b"\r").unwrap_or(line_bytes);
         if line_bytes.is_empty() {
@@ -282,12 +318,13 @@ fn ingest_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, 
         let inserted = tx
             .execute(
                 "INSERT OR IGNORE INTO events
-                     (row_hash, ts_ms, type, source, scope, reject_reason, line)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![row_hash, ts_ms, ty, source, scope, reject, line],
+                     (row_hash, seq, ts_ms, type, source, scope, reject_reason, line)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![row_hash, next_seq, ts_ms, ty, source, scope, reject, line],
             )
             .map_err(|e| format!("{}: {e}", path.display()))?;
         tally.ingested += inserted as u64;
+        next_seq += 1;
     }
     tx.execute(
         "INSERT INTO ingest_cursor (dev, ino, head_hash, \"offset\", path, updated_ms)
@@ -668,6 +705,36 @@ mod tests {
             |t: &str| crate::loopcheck::rounds_since_last_pass(t, "feature/x", "abc1234", None);
         assert_eq!(rounds(&live_only), 0);
         assert_eq!(rounds(&text), 1);
+    }
+
+    #[test]
+    fn journal_text_preserves_append_order_for_equal_timestamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = journal(dir.path(), "events.jsonl");
+        let rotated = journal(dir.path(), "events.jsonl.1");
+        let a = json!({"ts": "2026-09-15T08:26:07Z", "type": "review_attestation",
+            "source": "test", "data": {"reviewer": "reviewer-a", "verdict": "pass"}});
+        let b = json!({"ts": "2026-09-15T08:26:07Z", "type": "review_attestation",
+            "source": "test", "data": {"reviewer": "reviewer-b", "verdict": "fail"}});
+        // Put the larger hash first: the old WITHOUT ROWID table returned equal
+        // timestamps in primary-key hash order and therefore reversed these.
+        let (first, second) = if Sha256::digest(a.to_string().as_bytes())
+            > Sha256::digest(b.to_string().as_bytes())
+        {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        let first_name = first["data"]["reviewer"].as_str().unwrap().to_string();
+        let second_name = second["data"]["reviewer"].as_str().unwrap().to_string();
+        append(&rotated, &[first, second]);
+        sync(&live).unwrap();
+
+        let text = review_text(&live);
+        assert!(
+            text.find(&first_name).unwrap() < text.find(&second_name).unwrap(),
+            "same-second verdicts must retain append order: {text}"
+        );
     }
 
     #[test]
