@@ -923,3 +923,66 @@ def test_an_empty_plan_file_is_unreadable_not_ready(tmp_path):
     entry = {"id": "x-empty01", "plan_path": str(empty)}
     assert plan_rung(entry) is Rung.UNREADABLE
     assert is_dispatchable(entry) is False
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "---\nkind: quick-plan\nstatus: ready\n---\n\n## Changes\n",
+        "---\nkind: plan\n---\n\n# Doc\n",
+        "---\nkind: implementation-plan\n---\n\n# Doc\n",
+        "---\ntype: blueprint\n---\n\n# Doc\n",
+        "---\ntype: quick-plan\n---\n\n# Doc\n",  # migrated plan: type carries the kind
+        "# No frontmatter\n\n## Execution Strategy\n\n- step\n",
+    ],
+)
+def test_blueprint_doc_markers_are_true(tmp_path, body):
+    from fno.graph.ladder import is_blueprint_doc
+
+    assert is_blueprint_doc(_plan(tmp_path, body))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "---\nkind: research\nstatus: ready\n---\n\n# Findings\n",
+        "# No frontmatter, no strategy heading\n",
+        "---\ntype: research\n---\n\n# Doc\n",
+        # a declared non-blueprint kind is a hard no, above the heading marker
+        "---\nkind: research\nstatus: ready\n---\n\n## Execution Strategy\n\n- step\n",
+    ],
+)
+def test_non_blueprint_docs_are_false(tmp_path, body):
+    from fno.graph.ladder import is_blueprint_doc
+
+    assert not is_blueprint_doc(_plan(tmp_path, body))
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        None,
+        "not-an-entry",
+        {},                                     # no plan_path
+        {"id": "x-test", "plan_path": "d.md"},  # relative, no cwd to anchor
+        {"id": "x-test", "plan_path": 42},
+    ],
+)
+def test_blueprint_doc_unanswerable_is_false_without_raising(entry):
+    from fno.graph.ladder import is_blueprint_doc
+
+    assert not is_blueprint_doc(entry)
+
+
+def test_blueprint_doc_missing_file_is_false(tmp_path):
+    from fno.graph.ladder import is_blueprint_doc
+
+    assert not is_blueprint_doc({"id": "x-test", "plan_path": str(tmp_path / "absent.md")})
+
+
+def test_blueprint_doc_undecodable_file_is_false(tmp_path):
+    from fno.graph.ladder import is_blueprint_doc
+
+    binary = tmp_path / "d.md"
+    binary.write_bytes(b"\xff\xfe\x00\x80 not utf-8")
+    assert not is_blueprint_doc({"id": "x-test", "plan_path": str(binary)})

@@ -380,6 +380,45 @@ def plan_rung(entry: object) -> Rung:
     return _STATUS_TO_RUNG.get(canonical_status(raw), Rung.UNREADABLE)
 
 
+#: Frontmatter kind values, read across both ``kind`` and ``type`` (migrated
+#: plans spell ``type: quick-plan``): the first set marks a blueprint; the
+#: second is a declared non-blueprint and is a hard no above every body
+#: marker.
+BLUEPRINT_DOC_KINDS = frozenset({"quick-plan", "plan", "implementation-plan", "blueprint"})
+NON_BLUEPRINT_DOC_KINDS = frozenset({"research", "findings", "think", "stub"})
+
+
+def is_blueprint_doc(entry: object) -> bool:
+    """Whether the linked doc is a blueprint: an executable plan. Never raises.
+
+    The lifecycle verb table answers ``/target`` on a build rung only for a
+    blueprint; a research doc that happens to carry ``status: ready`` must
+    keep deriving ``/blueprint``. Kindless plans fall to the ``## Execution
+    Strategy`` heading marker.
+
+    Deliberately does NOT read ``status``: the rung stays :func:`plan_rung`'s
+    answer, and the rung-authority CI guards that read.
+    """
+    if not isinstance(entry, dict):
+        return False
+    probe = resolve_plan_probe(entry)
+    if not probe:
+        return False
+    fm, readable = _read_frontmatter(probe)
+    if not readable or fm is None:
+        return False
+    kinds = {str(fm.get(key) or "").strip() for key in ("kind", "type")}
+    if kinds & NON_BLUEPRINT_DOC_KINDS:
+        return False
+    if kinds & BLUEPRINT_DOC_KINDS:
+        return True
+    try:
+        with open(probe, encoding="utf-8") as f:
+            return any(line.strip() == "## Execution Strategy" for line in f)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return False
+
+
 def is_dispatchable(entry: object) -> bool:
     """May a fresh-context worker be launched against this plan? FAILS CLOSED.
 

@@ -844,15 +844,22 @@ Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
     conditional over the node's plan rung and difficulty. At INTAKE (plan rung
     ``none``) difficulty decides - ``low`` dispatches straight to ``/target``
     with no plan, ``medium``/``high`` blueprint on a frontier lane first and a
-    separate ``/target`` builds the resulting plan. At RE-DISPATCH the linked
-    plan's rung decides - ``idea``/``design`` keep ``/blueprint``,
-    ``ready``/``in_progress``/``in_review`` advance to ``/target``. The node's
-    stored ``dispatch_verb`` is audit input only: a target/blueprint-family
-    value reconciles through the same table and the decision trail names both
-    spellings, so correctness never depends on the blueprint session close
-    having rewritten the graph field. An out-of-family verb (``/think``) keeps
-    declared precedence; ``unreadable``/``done``/``superseded`` plan rungs and
-    a planless node without a valid difficulty REFUSE. Selection drops such a
+    separate ``/target`` builds the resulting plan. At RE-DISPATCH the table
+    answers only an UNDECLARED node - ``idea``/``design`` keep ``/blueprint``;
+    ``ready``/``in_progress``/``in_review`` derive ``/target`` only when
+    ``ladder.is_blueprint_doc`` reads the linked doc as a blueprint (a
+    blueprint ``kind`` or ``type`` value, or no declared kind and an ``##
+    Execution Strategy`` heading; a declared ``research``/``findings``/
+    ``think``/``stub`` kind is a hard no above the heading) - and otherwise
+    derive ``/blueprint``, so a research doc that merely carries ``status:
+    ready`` never dispatches ``/target``. A DECLARED target-family
+    ``dispatch_verb`` WINS: the resolver returns it as declared and the
+    decision trail names what the table would have answered, so a stale
+    declaration costs one more pass on its declared verb, never a silent
+    override. Refusals still fire before the declared verb. An out-of-family
+    verb (``/think``) keeps declared precedence; ``unreadable``/``done``/
+    ``superseded`` plan rungs and a planless node without a valid difficulty
+    REFUSE. Selection drops such a
     node as ``no-difficulty`` on the UNSCOPED drain head, before any dispatcher
     reserves it, so one underivable row never spends a drain tick. A scoped
     call (``--parent``, ``--mission``, ``--roadmap-id``) is an enumeration:
@@ -861,7 +868,7 @@ Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
     the RAW declaration state (declared / none-declared) beside the resolved
     verb, and a node dict missing the ``dispatch_verb`` key at all is a lossy
     selection projection: the spawn refuses before anything is spent. The stage
-    table reads the DERIVED verb, so ``agents.profiles.blueprint`` reaches
+    table reads the RESOLVED verb (declared or derived), so ``agents.profiles.blueprint`` reaches
     medium/high planless nodes and ``agents.profiles.target`` no longer
     acquires planning eligibility from plan absence (the ``_grid_lane_for``
     role floor and the ``spawn_defaults.grid_role`` split are gone).
