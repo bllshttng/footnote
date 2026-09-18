@@ -565,6 +565,46 @@ pub fn resolve_reentry_with(
         }
     }
 
+    // The model pin. An unpinned `claude --resume` lands on the account
+    // default, so the resume arms ask resume_pin which model the session
+    // comes back on: the row's request, else the transcript's birth identity.
+    // A routed plan never pins (the route owns the argv); an unresolvable row
+    // leaves the argv as today - `fno agents resume` carries no model flag to
+    // override a refusal with, so a pin that cannot resolve cannot block an
+    // attended resume. The explicit-token guard keeps a `--model`/`--effort`
+    // an earlier arm added first (the pane-to-thread transition on this same
+    // arm plans to carry the live writer's own axes).
+    if mechanism == "resume" || mechanism == "bg-resume" {
+        let projects_base = claude_config_dir
+            .as_deref()
+            .map(|d| Path::new(d).join("projects"))
+            .unwrap_or_else(|| claude_home.projects_dir());
+        let transcript = crate::claude_drive::find_transcript_in(&projects_base, &session_id);
+        let pins = crate::resume_pin::RowPins::from_entry(entry);
+        let lookup: crate::resume_pin::RouteProviderOf<'_> =
+            &|m| crate::claude_adopt::provider_from_route_settings(m);
+        if let Ok(pin) = crate::resume_pin::resolve(
+            Some(pins),
+            transcript.as_deref(),
+            routed,
+            &session_id,
+            lookup,
+        ) {
+            if !argv.iter().any(|t| t == "--model") {
+                if let Some(m) = pin.argv_model {
+                    argv.push("--model".into());
+                    argv.push(m);
+                }
+            }
+            if !argv.iter().any(|t| t == "--effort") {
+                if let Some(e) = pin.effort {
+                    argv.push("--effort".into());
+                    argv.push(e);
+                }
+            }
+        }
+    }
+
     Ok(ReentryPlan {
         resolved: true,
         transition: transition.as_str().to_string(),
