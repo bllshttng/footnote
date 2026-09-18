@@ -20,6 +20,7 @@ _METADATA_FIELDS = {
     "headRefName",
     "headRefOid",
     "mergeable",
+    "mergeStateStatus",
     "baseRefName",
     "author",
 }
@@ -86,6 +87,7 @@ def _metadata(
         "headRefName": info["head_ref"],
         "headRefOid": info["head_sha"],
         "mergeable": info["mergeable"],
+        "mergeStateStatus": info.get("merge_state_status") or "",
         "baseRefName": info["base_ref"],
         # The gh CLI shape for `--json author`; None only when REST carried
         # no login, which the Rust reader treats as unreadable (fail-closed).

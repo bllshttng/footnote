@@ -74,6 +74,36 @@ def test_metadata_uses_one_rest_pull_and_no_graphql(monkeypatch):
     assert calls == [["/real/gh", "api", "repos/o/r/pulls/930"]]
 
 
+def test_the_stop_gate_read_with_merge_state_status_still_routes_rest(monkeypatch):
+    # loop-check's pr view asks for mergeStateStatus beside the metadata set.
+    # A field set outside _METADATA_FIELDS falls to the GraphQL executor,
+    # where a coverage-purpose executable refuses it as
+    # "coverage reserve accepts review-coverage reads only" -- the stop gate
+    # of every session then fails its fingerprint read. The REST lane must
+    # carry the field so the read never leaves the translator.
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        _internal_gh._rest, "_slug_or_reason", lambda cwd, runner, repo=None: ("o/r", "")
+    )
+    result = _internal_gh.execute(
+        "coverage",
+        [
+            "pr",
+            "view",
+            "930",
+            "--json",
+            "state,number,headRefName,headRefOid,mergeable,mergeStateStatus,baseRefName,author",
+        ],
+        runner=_runner(calls),
+        real_gh="/real/gh",
+    )
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["mergeStateStatus"] == ""
+    assert payload["headRefOid"] == "abc123"
+    assert calls == [["/real/gh", "api", "repos/o/r/pulls/930"]]
+
+
 def test_checks_translate_rest_rollup_to_gh_bucket_shape(monkeypatch):
     calls: list[list[str]] = []
     monkeypatch.setattr(

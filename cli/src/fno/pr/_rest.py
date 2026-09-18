@@ -440,6 +440,9 @@ def fetch_pr_info_rest(
             "head_ref": head_ref,
             "base_ref": base_ref,
             "mergeable": _map_mergeable(pr_data.get("mergeable")),
+            # The same payload GitHub's GraphQL mergeStateStatus carries; the
+            # Rust stop gate asks for either spelling on one pr view read.
+            "merge_state_status": pr_data.get("mergeable_state"),
             "merged_at": merged_at,
             "merge_sha": merge_sha,
             "author": author,
