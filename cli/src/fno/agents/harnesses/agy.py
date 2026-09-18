@@ -3,8 +3,8 @@
 ``--conversation`` resumes and nothing creates, so the id comes from the only
 surface that returns one: a print-mode turn whose JSON envelope carries
 ``conversation_id``. The turn's argv is the Rust owner's answer
-(crates/fno-agents/src/agy_launch.rs), which carries the spawn's selected
-model, effort and permission posture. Lane notes: docs/architecture/thread-lanes.md."""
+(crates/fno-agents/src/agy_launch.rs) and carries the spawn's selected axes.
+Lane notes: docs/architecture/thread-lanes.md."""
 from __future__ import annotations
 
 import json
