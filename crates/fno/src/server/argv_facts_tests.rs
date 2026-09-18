@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 //! `argv_facts` tests: the wrapper-token provenance reads.
 
 use super::*;

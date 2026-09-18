@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 //! `squad_store`'s tests, file-backed so the store itself stays small.
 
 use super::*;

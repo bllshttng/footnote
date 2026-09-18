@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 //! `client_verbs` resume-argv parity test, file-backed to keep the host small.
 
 use super::*;
