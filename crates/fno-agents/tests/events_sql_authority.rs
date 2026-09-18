@@ -81,11 +81,10 @@ fn legacy_import_reconciles_source_counts_and_retries_clean() {
     // A torn write and a scope that fails the canonical check: both must be
     // STORED with their reject_reason, never dropped.
     body.push_str("{not json\n");
-    body.push_str(
-        json!({"ts": "2026-09-10T08:00:00Z", "type": "reign_checkin",
-               "source": "loop", "data": {"scope": "two words", "change": "c"}})
-        .to_string(),
-    );
+    let bad_scope = json!({"ts": "2026-09-10T08:00:00Z", "type": "reign_checkin",
+        "source": "loop", "data": {"scope": "two words", "change": "c"}})
+    .to_string();
+    body.push_str(&bad_scope);
     body.push('\n');
     std::fs::write(&live, body).unwrap();
 
