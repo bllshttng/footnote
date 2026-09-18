@@ -10106,10 +10106,10 @@ fn build_block_reason(
     }
 
     // A conflicting head has work to do NOW (rebase): "CI still running" or
-    // "declare ci.declared_none" would prescribe waiting out checks GitHub
-    // never started. It follows the head arm on purpose: a local head that
-    // differs from the PR head means the worker may have rebased already and
-    // just not pushed.
+    // "declare ci.declared_none" would prescribe waiting on a head that can
+    // start no new check, and whose existing results are stale. It follows
+    // the head arm on purpose: a local head that differs from the PR head
+    // means the worker may have rebased already and just not pushed.
     if let Some(r) = conflicting_reason(pr) {
         return r;
     }

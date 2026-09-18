@@ -6,24 +6,27 @@
 use super::watch_lease::ARM_HINT_LEAD;
 use super::{nudge_class_idlable, short_sha, CiConclusion, Coverage, PrInfo, PrState};
 
-/// An open PR whose merge commit cannot be created. GitHub starts no
-/// `pull_request` workflow on it, so a zero check count is a positive fact,
-/// not a delay to sleep through. UNKNOWN (GitHub still computing) is NOT
-/// this: it clears by itself.
+/// An open PR whose merge commit cannot be created. GitHub cannot build the
+/// merge ref for it, so no new `pull_request` workflow starts on that head;
+/// a check count above zero means those runs finished before the base moved
+/// and tested a merge that no longer exists. UNKNOWN (GitHub still
+/// computing) is NOT this: it clears by itself.
 fn is_conflicting(pr: &PrInfo) -> bool {
     pr.state == PrState::Open && pr.mergeable == "CONFLICTING"
 }
 
-/// The rebase receipt for a conflicting head - the same text the Python wait
-/// (`cli/src/fno/pr/_wait.py`, exit 5) prints, so both surfaces teach one
-/// remedy. None when the PR is not an open conflicting head.
+/// The rebase receipt for a conflicting head. The Python wait
+/// (`cli/src/fno/pr/_wait.py`, exit 5) and this receipt teach one remedy;
+/// this surface carries the reason. None when the PR is not an open
+/// conflicting head.
 pub(super) fn conflicting_reason(pr: &PrInfo) -> Option<String> {
     if !is_conflicting(pr) {
         return None;
     }
     Some(format!(
-        "PR #{} is CONFLICTING at {}. GitHub starts no checks on a conflicting PR, \
-         so none will arrive. Rebase onto the base (`fno do pr rebase`), push, \
+        "PR #{} is CONFLICTING at {}. A conflicting PR has no merge ref, so GitHub \
+         starts no new check run on this head, and any check already on it ran \
+         before the base moved. Rebase onto the base (`fno do pr rebase`), push, \
          then re-arm the wait.",
         pr.number,
         short_sha(&pr.head_oid)
@@ -45,8 +48,9 @@ pub(super) fn async_wait_class(
     open_findings_empty: bool,
     head_shipped: bool,
 ) -> Option<&'static str> {
-    // A conflicting PR has work to do NOW (rebase): no check can ever arrive
-    // on this head, and a review of it is superseded by the rebase - so the
+    // A conflicting PR has work to do NOW (rebase): no new check can start
+    // on this head, and a result already there is stale, so idling on
+    // either is wrong - a review of it is superseded by the rebase, so the
     // review idle below is refused with the CI one.
     if is_conflicting(pr) {
         return None;
