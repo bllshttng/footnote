@@ -63,18 +63,6 @@ const AGENT_INFERENCE: Record<string, string> = {
   "code-reviewer": "review",
 }
 
-// category -> preferred model as "providerID/modelID". Best-effort: a model is
-// only forced when the provider registry actually has it (see resolveModel);
-// otherwise the child session uses opencode's default. Env-specific model names
-// are intentionally NOT hardcoded blindly — a missing model must degrade, not
-// break delegation (AC5-ERR).
-const CATEGORY_MODEL: Record<string, string> = {
-  // Left empty by default: routing rides each agent's own `model:` field plus
-  // opencode's default. Populate per-environment, e.g.
-  //   ship: "anthropic/claude-haiku-4-5",
-  //   plan: "anthropic/claude-opus-4-6",
-}
-
 const MAX_DEPTH = 3
 const MAX_CONCURRENCY = 5
 const SYNC_TIMEOUT_MS = 120_000
@@ -195,43 +183,6 @@ export function extractAssistantText(parts: Array<{ type?: string; text?: string
     .filter(Boolean)
     .join("\n")
     .trim()
-}
-
-/**
- * Resolve a "providerID/modelID" for a category, but only if the model exists
- * in the available set. Returns undefined to let opencode use its default.
- */
-export function resolveModel(
-  category: string | undefined,
-  available: Set<string>,
-): { providerID: string; modelID: string } | undefined {
-  if (!category) return undefined
-  const spec = CATEGORY_MODEL[category]
-  if (!spec) return undefined
-  const slash = spec.indexOf("/")
-  if (slash < 0) return undefined
-  const providerID = spec.slice(0, slash)
-  const modelID = spec.slice(slash + 1)
-  if (!available.has(`${providerID}/${modelID}`)) return undefined
-  return { providerID, modelID }
-}
-
-/**
- * Fold a provider.list() response into the available-model set (in place).
- * The SDK response body nests the providers under `data.all` (alongside
- * `default`/`connected`), NOT directly under `data` - iterating `data` itself
- * would throw on the object and the fire-and-forget .catch would silently
- * swallow it, leaving the set empty.
- */
-export function collectModels(
-  providers: { data?: { all?: Array<{ id: string; models?: Record<string, unknown> }> } } | undefined,
-  into: Set<string>,
-): Set<string> {
-  for (const p of providers?.data?.all ?? []) {
-    if (!p?.id) continue // skip malformed entries (no "undefined/model" pollution)
-    for (const modelID of Object.keys(p.models ?? {})) into.add(`${p.id}/${modelID}`)
-  }
-  return into
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +313,6 @@ type TaskDeps = {
   client: SessionClient
   directory: string
   knownAgents: () => Set<string>
-  availableModels: () => Set<string>
   timeoutMs?: number
 }
 
@@ -481,7 +431,6 @@ export function createTaskTool(deps: TaskDeps): ToolDefinition {
         return `error: delegation depth limit reached (${MAX_DEPTH}). This session is already ${depth} level(s) deep.`
       }
 
-      const model = resolveModel(category, deps.availableModels())
       const title = `${args.description ?? agent} (@${agent})`
 
       const created = await deps.client.session
@@ -489,7 +438,6 @@ export function createTaskTool(deps: TaskDeps): ToolDefinition {
           body: {
             parentID: context.sessionID,
             title,
-            ...(model ? { model: { id: model.modelID, providerID: model.providerID } } : {}),
           },
           query: { directory: deps.directory },
         })
@@ -505,7 +453,6 @@ export function createTaskTool(deps: TaskDeps): ToolDefinition {
       const body = {
         agent,
         parts: [{ type: "text", text: args.prompt }],
-        ...(model ? { model: { providerID: model.providerID, modelID: model.modelID } } : {}),
       }
 
       const background = args.run_in_background === true
@@ -651,25 +598,6 @@ const plugin: Plugin = async (input: PluginInput) => {
   const orchestratorPrompt = loadOrchestratorPrompt(projectDir)
   const { agents: footnoteAgents, refusals } = loadFootnoteAgents(projectDir)
 
-  // Available models, populated fire-and-forget for best-effort category
-  // routing (AC5-ERR). NEVER await a client.* SDK call in plugin init: plugins
-  // load inside opencode's bootstrap, which serves no request until every
-  // plugin returns, so an awaited provider.list() reenters a server that cannot
-  // answer yet and deadlocks startup. The set fills in place once the response
-  // lands; a task() firing before then degrades to the default model.
-  const available = new Set<string>()
-  try {
-    ;(input.client as unknown as {
-      provider: { list(): Promise<{ data?: { all?: Array<{ id: string; models?: Record<string, unknown> }> } }> }
-    }).provider
-      .list()
-      .then((providers) => collectModels(providers, available))
-      .catch(() => {}) // async rejection: unhandled in plugin scope can crash the host
-  } catch {
-    // synchronous throw (malformed client at init) -> no registry read; the try
-    // wraps only the call issuance, NOT an await, so it never blocks bootstrap.
-  }
-
   // Registered-agent set: footnote's translated agents plus the native
   // `.opencode/agents/*.md` (explore/oracle/librarian) opencode auto-loads.
   const nativeAgents = new Set<string>()
@@ -683,7 +611,6 @@ const plugin: Plugin = async (input: PluginInput) => {
     client,
     directory: projectDir,
     knownAgents,
-    availableModels: () => available,
   })
   const taskResultTool = createTaskResultTool({ client })
 
