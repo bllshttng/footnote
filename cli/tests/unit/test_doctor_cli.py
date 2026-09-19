@@ -25,6 +25,7 @@ def test_doctor_lists_direct_actions() -> None:
         "graph",
         "harness",
         "harness-matrix",
+        "intel",
         "lanes",
         "lint",
         "observer",
