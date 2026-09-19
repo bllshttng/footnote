@@ -1318,11 +1318,12 @@ def run_execute_queue(
                 # Retryable, no failure budget; an already-terminal PR never retries.
                 counts["held"] += 1
                 entry["retries"] = prior_retries
-                if reason.startswith(_merge.ALREADY_TERMINAL):
+                bare = _merge.reason_after_outcome(reason)
+                if bare.startswith(_merge.ALREADY_TERMINAL):
                     entry["last_seen_state"] = "NOT_OPEN"
                 store.set(key, entry)
                 _grant("held", pr, cand, grant_fields, reason=reason)
-                if reason.startswith("checks are red"):
+                if bare.startswith("checks are red"):
                     # A red hold never clears by retrying: the healer or the
                     # worker owns the next push, so park with the why instead
                     # of re-running the whole merge chain every tick. The park
