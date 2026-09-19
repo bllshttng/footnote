@@ -34,11 +34,13 @@ mod rm_refusal_detail;
 mod rm_teardown;
 pub(crate) mod roster_death;
 mod stop_refusal_detail;
+pub(crate) mod store_socket_sweep;
 pub(crate) mod worktree_sweep;
 pub(crate) use self::blocking_bound::directory_bytes;
 use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 use self::roster_death::claude_row_provably_absent;
 pub(crate) use self::roster_death::{claude_row_id, pid_is_gone};
+pub(crate) use self::store_socket_sweep::store_socket_sweep;
 mod list_rows;
 use self::list_rows::{
     activity_basis_from_truth, apply_row_contradiction, attention_sort_key, basis_word_from_truth,
@@ -1694,10 +1696,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         match keeper_registry_sweep(&home_sweep, &emitter_sweep) {
                             Ok(report) => {
                                 // Store-socket hygiene rides the same startup
-                                // pass: dead store sockets unlinked, live
-                                // ones untouched. Non-fatal by posture.
-                                let store_unlinked =
-                                    store_socket_sweep(&home_sweep, &emitter_sweep);
+                                // pass: dead store sockets and orphaned seat
+                                // locks unlinked, live ones untouched.
+                                // Non-fatal by posture.
+                                let store_swept = store_socket_sweep(&home_sweep, &emitter_sweep);
                                 let _ = emitter_sweep.emit(
                                     "keeper_sweep_done",
                                     &json!({
@@ -1706,7 +1708,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                                         "dead": report.dead.len(),
                                         "wedged": report.wedged.len(),
                                         "superseded": report.superseded.len(),
-                                        "store_unlinked": store_unlinked,
+                                        "store_unlinked": store_swept.sockets,
+                                        "store_locks_unlinked": store_swept.locks,
                                     }),
                                 );
                             }
@@ -5472,7 +5475,9 @@ async fn worker_down_within(sock: &std::path::Path, budget: Duration) -> bool {
 /// two very different reasons: the process is dead (ESRCH), or it is alive but
 /// unsignalable (EPERM) / recycled. Using it as a death oracle turns "I cannot
 /// tell" into "it stopped", which reports a clean stop over a process that is
-/// still running. Only ESRCH is death.
+/// still running. Only ESRCH is death - except the zombie, which is dead but
+/// not yet reaped: `kill(pid, 0)` keeps succeeding while it holds no fds and
+/// serves nothing, so `census::pid_is_zombie` decides that arm.
 fn pid_confirmed_dead(pid: u32) -> bool {
     if pid <= 1 || pid > i32::MAX as u32 {
         // Never signalled in the first place, so nothing is running on our behalf.
@@ -5480,7 +5485,8 @@ fn pid_confirmed_dead(pid: u32) -> bool {
     }
     // SAFETY: signal 0 is an existence/permission probe only, no signal is sent.
     if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
-        return false; // reachable => alive
+        // Reachable => alive, unless it is a zombie: dead-but-unreaped.
+        return crate::census::pid_is_zombie(pid);
     }
     std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
@@ -5772,19 +5778,17 @@ fn cleanup_king_manifest(entry: &state::RegistryEntry) {
     {
         return;
     }
-    let path = std::path::Path::new(&entry.cwd)
-        .join(".fno")
-        .join("kings")
-        .join(format!("{scope}.md"));
+    let Some(kings) = crate::paths::space_dir_opt(std::path::Path::new(&entry.cwd)) else {
+        return;
+    };
+    let path = kings.join("kings").join(format!("{scope}.md"));
     // Owner guard, the Rust half of Python remove_king_manifest's
     // expected_harness_session_id: a successor crowned over this scope after
     // the row went terminal can have re-armed the manifest with ITS session
     // id, and deleting unconditionally would disarm that live king. Skip only
     // on a PROVEN foreign owner (the manifest names a different session id);
     // an id-less or matching manifest deletes on the registry's own authority,
-    // which is what rm acts on. The cwd join stays entry-relative: a
-    // subdirectory cwd may miss the repo-root manifest and leave a stale
-    // file, which is the same safe direction.
+    // which is what rm acts on.
     if let Ok(content) = std::fs::read_to_string(&path) {
         let current = content
             .lines()
@@ -6674,110 +6678,6 @@ fn lane_b_keeper_dir(home: &AgentsHome) -> PathBuf {
         .unwrap_or(home.root())
         .join("mux")
         .join("threads")
-}
-
-/// Stale store-socket hygiene: the store keeper unlinks its socket
-/// on every clean exit, so a socket file nobody answers is a kill -9
-/// leftover. The graph client self-heals a dead socket (its
-/// connect-before-bind removes the stale file and rebinds), so this walk is
-/// tidiness plus an honest dead count, never liveness authority: a socket
-/// with a live listener is left exactly as found, and an unreadable one is
-/// left for the process-table reaper (keeper_lane) rather than guessed at.
-///
-/// A state-root SIBLING socket is unlinked only when its graph file is gone
-/// too: a rebind requires a client, a client requires the graph, so with the
-/// graph absent no keeper can ever be behind the path and the probe-then-
-/// unlink race with a self-healing client cannot happen. A sibling whose
-/// graph still lives stays for the client's own connect-before-bind. The
-/// hashed temp root is different: its contents are ours by construction and
-/// its graph names are hashed away, so the probe alone decides.
-pub fn store_socket_sweep(home: &AgentsHome, emitter: &EventEmitter) -> usize {
-    // SAFETY: getuid reads a per-process kernel value; it cannot fail or race.
-    let uid = unsafe { libc::getuid() };
-    store_socket_sweep_in(
-        home,
-        std::env::temp_dir().join(format!("fno-store-{uid}")),
-        emitter,
-    )
-}
-
-/// The parameterized core, so tests point the hashed root at their own tree
-/// instead of sweeping the machine's real one.
-pub fn store_socket_sweep_in(
-    home: &AgentsHome,
-    temp_root: std::path::PathBuf,
-    emitter: &EventEmitter,
-) -> usize {
-    let state_root = home.root().parent().unwrap_or(home.root()).to_path_buf();
-    let dirs = vec![state_root, temp_root.clone()];
-    let mut unlinked = 0;
-    for dir in dirs {
-        let in_temp_root = dir == temp_root;
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let is_store_sock = if in_temp_root {
-                // The hashed root is ours by construction: every .sock in it
-                // is a store socket.
-                name.starts_with(".fno-store-") && name.ends_with(".sock")
-            } else {
-                name.ends_with(".store.sock")
-            };
-            if !is_store_sock {
-                continue;
-            }
-            let path = entry.path();
-            // Sibling ownership rule: `<name>.store.sock` is only ours to
-            // unlink when `<name>` (its graph) is gone. With the graph
-            // present, a client rebind is always one connection away and
-            // unlinking here could steal a socket a keeper just bound.
-            if !in_temp_root {
-                let graph = path.with_file_name(
-                    path.file_name()
-                        .map(|n| {
-                            n.to_string_lossy()
-                                .trim_end_matches(".store.sock")
-                                .to_string()
-                        })
-                        .unwrap_or_default(),
-                );
-                if graph.exists() {
-                    continue;
-                }
-            }
-            let dead = match std::os::unix::net::UnixStream::connect(&path) {
-                Ok(stream) => {
-                    // A live keeper is behind it: leave the socket alone.
-                    drop(stream);
-                    false
-                }
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::ConnectionRefused
-                        || e.kind() == std::io::ErrorKind::NotFound
-                        // macOS answers ENOTSOCK when the path is not a
-                        // socket at all (Linux says ECONNREFUSED); either
-                        // way nothing can ever be listening behind it, so
-                        // the litter is safe to unlink.
-                        || e.raw_os_error() == Some(libc::ENOTSOCK) =>
-                {
-                    true
-                }
-                Err(_) => false, // unreadable is not dead; the reaper owns that verdict
-            };
-            if dead && std::fs::remove_file(&path).is_ok() {
-                unlinked += 1;
-                let _ = emitter.emit(
-                    "store_socket_unlinked",
-                    &json!({"path": path.to_string_lossy()}),
-                );
-            }
-        }
-    }
-    unlinked
 }
 
 /// One planned row mutation out of the sweep. `bound_socket`/`bound_session`
@@ -8143,3 +8043,8 @@ pub(crate) use sweeps::{parse_stale_sweep, PARK_SWEEP_INTERVAL_SECS, STALE_SWEEP
 #[cfg(test)]
 #[path = "daemon_tests.rs"]
 mod tests;
+// Declared beside tests (not inside daemon_tests.rs): that aggregator is
+// over the file budget and may only shrink.
+#[cfg(test)]
+#[path = "daemon/tests/pid_zombie_tests.rs"]
+mod pid_zombie_tests;

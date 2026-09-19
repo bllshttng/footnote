@@ -31,8 +31,11 @@
 use crate::graph_store::{self, FieldUpdate, MutateInput, StoreError};
 use crate::identity::{harness_of_session_id, shape_known_harness};
 
+mod seat_lock;
+
 mod splice;
 
+use seat_lock::take_seat;
 use splice::splice_reply;
 
 use serde_json::{json, Map, Value};
@@ -669,52 +672,9 @@ fn run_render_pass() -> Result<(), (i32, String)> {
     Err((code, tail))
 }
 
-/// Seat-ladder pacing, mirroring daemon.rs's LOCK_ACQUIRE_* shape: a probe
-/// holds the seat lock for microseconds, an incumbent for life, and only
-/// duration separates them.
-const SEAT_LOCK_ATTEMPTS: usize = 6;
-const SEAT_LOCK_RETRY: Duration = Duration::from_millis(25);
-
 /// How often an idle keeper re-checks that the socket path still names the
 /// inode it bound.
 const SEAT_CHECK_EVERY: Duration = Duration::from_secs(1);
-
-fn seat_lock_path(sock: &Path) -> PathBuf {
-    let mut s = sock.as_os_str().to_os_string();
-    s.push(".lock");
-    PathBuf::from(s)
-}
-
-/// Take the exclusive seat flock on `<sock>.lock`, held for the process
-/// life (the returned File keeps it). `None` = the seat is owned: the
-/// daemon's bind_supervisor_socket rule, applied to the store.
-fn take_seat(sock: &Path) -> Option<std::fs::File> {
-    let lock_path = seat_lock_path(sock);
-    if let Some(parent) = lock_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .ok()?;
-    for attempt in 0..SEAT_LOCK_ATTEMPTS {
-        match file.try_lock() {
-            Ok(()) => return Some(file),
-            Err(e) => {
-                let io_err: std::io::Error = e.into();
-                if io_err.kind() != std::io::ErrorKind::WouldBlock {
-                    return None;
-                }
-                if attempt + 1 < SEAT_LOCK_ATTEMPTS {
-                    std::thread::sleep(SEAT_LOCK_RETRY * (attempt as u32 + 1));
-                }
-            }
-        }
-    }
-    None
-}
 
 /// One Identify with a short reply bound: true only when something behind
 /// the path answers. An answering incumbent predates the seat lock (it was
@@ -2969,8 +2929,10 @@ fn stamp_utc(v: &str) -> Result<String, StoreError> {
 }
 
 /// store.reap_open_session_record: close open rows with positive death
-/// evidence. `do` REMOVES; every other phase FILLS ended_at; `all` applies
-/// both to every open row carrying the identity.
+/// evidence. Every phase, `do` included, FILLS ended_at and keeps the row:
+/// a filled row is not open, so it un-wedges node status exactly as a
+/// removal did, and the session provenance survives. `all` applies the fill
+/// to every open row carrying the identity.
 ///
 /// With a node id the op answers about that one entry exactly as before.
 /// Without one (the death-cascade form), it walks every entry and applies
@@ -2993,17 +2955,10 @@ fn session_reap_open(
         )));
     }
     let close_phases: Vec<&str> = if phase == "all" {
-        SESSION_PHASES
-            .iter()
-            .copied()
-            .filter(|p| *p != "do")
-            .collect()
-    } else if phase == "do" {
-        vec![]
+        SESSION_PHASES.to_vec()
     } else {
         vec![phase]
     };
-    let remove_do = phase == "do" || phase == "all";
     if harness.trim().is_empty() || session_id.trim().is_empty() {
         return Err(StoreError::Invalid(
             "identity must be non-empty strings".into(),
@@ -3016,19 +2971,7 @@ fn session_reap_open(
     // The crate's one openness predicate (graph_store::is_open_phase_row,
     // mirroring the Python authority) applied to one entry's rows; both
     // forms share it so they cannot drift.
-    let reap_rows = |rows: &mut Vec<Value>| -> (bool, bool) {
-        let mut row_removed = false;
-        if remove_do {
-            rows.retain(|r| {
-                let matches = graph_store::is_open_phase_row(r, "do")
-                    && r.get("harness").and_then(Value::as_str) == Some(harness)
-                    && r.get("session_id").and_then(Value::as_str) == Some(session_id);
-                if matches {
-                    row_removed = true;
-                }
-                !matches
-            });
-        }
+    let reap_rows = |rows: &mut Vec<Value>| -> bool {
         let mut row_closed = false;
         for cp in &close_phases {
             for r in rows.iter_mut() {
@@ -3044,7 +2987,7 @@ fn session_reap_open(
                 }
             }
         }
-        (row_removed, row_closed)
+        row_closed
     };
     match node_id {
         Some(node_id) => {
@@ -3065,14 +3008,14 @@ fn session_reap_open(
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            let (row_removed, row_closed) = reap_rows(&mut rows);
-            if row_removed || row_closed {
+            let row_closed = reap_rows(&mut rows);
+            if row_closed {
                 obj.insert("sessions".to_string(), Value::Array(rows));
             }
             Ok(json!({
                 "found": true,
                 "settled": true,
-                "row_removed": row_removed,
+                "row_removed": false,
                 "row_closed": row_closed,
                 "status_before": status_before,
                 "status_after": Value::Null,
@@ -3082,7 +3025,6 @@ fn session_reap_open(
         }
         None => {
             let mut node_ids: Vec<String> = Vec::new();
-            let mut row_removed = false;
             let mut row_closed = false;
             for idx in 0..entries.len() {
                 if !entries[idx]
@@ -3099,20 +3041,19 @@ fn session_reap_open(
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
-                let (removed, closed) = reap_rows(&mut rows);
-                if removed || closed {
+                let closed = reap_rows(&mut rows);
+                if closed {
                     if let Some(node) = node {
                         node_ids.push(node);
                     }
                     obj.insert("sessions".to_string(), Value::Array(rows));
                 }
-                row_removed |= removed;
                 row_closed |= closed;
             }
             Ok(json!({
                 "found": !node_ids.is_empty(),
                 "settled": true,
-                "row_removed": row_removed,
+                "row_removed": false,
                 "row_closed": row_closed,
                 "status_before": Value::Null,
                 "status_after": Value::Null,
@@ -3534,6 +3475,7 @@ fn api_mutation(
             let ended_by = param_str(params, "ended_by")?;
             let phase = params.get("phase").and_then(Value::as_str);
             let harness = params.get("harness").and_then(Value::as_str);
+            let ended_at = params.get("ended_at").and_then(Value::as_str);
             let payload = api::session_end(
                 store,
                 id.unwrap_or_default(),
@@ -3541,6 +3483,7 @@ fn api_mutation(
                 ended_by,
                 phase,
                 harness,
+                ended_at,
             )?;
             Ok(json!({
                 "success": payload.success,

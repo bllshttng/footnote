@@ -955,7 +955,6 @@ def reclaim_crown(handle: Optional[str] = None) -> dict[str, Any]:
                 arm_king_manifest(
                     scope,
                     getattr(target, "harness_session_id", None) or "",
-                    owner_pid=getattr(target, "pid", None),
                     owner_cwd=getattr(target, "cwd", None),
                     crown_level=level,
                     crown_scope=scope,
@@ -1186,7 +1185,6 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             manifest_path = arm_king_manifest(
                 scope,
                 target.harness_session_id or target.cc_session_id or target.short_id or "",
-                owner_pid=target.pid,
                 owner_cwd=target.cwd,
                 crown_level=level,
                 crown_scope=scope,
@@ -1222,7 +1220,9 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     # a post-release re-read could see a concurrent grant over the
     # just-freed scope and mislabel that heir as stranded.
     rows_after = update_registry(_stamp)
-    receipt["missions_armed"] = arm_crowned_missions(scope)
+    # Clear the vacated manifest BEFORE arming missions: a crown killed
+    # between the registry commit and a slow arm would otherwise leave the
+    # leftover on disk, listing as a phantom crown.
     if receipt.get("vacated_scope") and not _same_territory(
         receipt["vacated_scope"], scope
     ):
@@ -1233,6 +1233,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             owner_cwd=vacated_owner_cwd,
             expected_harness_session_id=vacated_manifest_owner,
         )
+    receipt["missions_armed"] = arm_crowned_missions(scope)
     try:
         receipt["stranded_subordinates"] = _stranded_subordinates(
             receipt["vacated_scope"], scope, target_name, rows_after

@@ -484,17 +484,18 @@ def test_abandoned_arm_row_settles_and_advance_names_the_node_a_candidate(
     tmp_path, monkeypatch
 ):
     """AC1-HP + AC2-HP: quiet transcript past the bar -> the apply receipt
-    reads row_removed true with status_after idea, and advance --explain
+    reads row_closed true with status_after idea, and advance --explain
     answers with a candidate line, never `never a candidate`. A planless
     idea with no intake difficulty now reads as an attributed selection
     drop, so the answer narrates the drop instead of an eligible rank."""
     g = _ab_world(tmp_path, monkeypatch, _AB_SID_GONE, age_hours=72)
     result = _ab_maintain_apply(monkeypatch)
-    assert "row_removed true" in result.output
+    assert "row_closed true" in result.output
     assert "status_after idea" in result.output
 
     entries = _json.loads(g.read_text())["entries"]
-    assert entries[0]["sessions"] == []
+    assert len(entries[0]["sessions"]) == 1
+    assert entries[0]["sessions"][0]["ended_at"]
     assert entries[0]["status"] == "idea"
 
     from fno.cli import app

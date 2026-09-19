@@ -439,6 +439,21 @@ fn portal_reply(landed: bool, landing: Option<String>, name: &str, portal: u8) -
     }
 }
 
+/// The Drive replay placement: the replay names THIS portal AND keeps the
+/// caller's geometry (split, tab, target), so a claude-row reach opens the
+/// split the operator asked for instead of dropping to a new tab. `here`
+/// never reaches this point - reach_portal refuses it at the gate - and a
+/// replay that lands on a live seat is told "a portal takes no split" once,
+/// which matches the repoint arm's documented contract.
+pub(super) fn portal_replay_placement(placement: &PanePlacement, portal_idx: u8) -> PanePlacement {
+    PanePlacement {
+        portal: Some(portal_idx),
+        portal_new: false,
+        thread_pane: false,
+        ..placement.clone()
+    }
+}
+
 impl Core {
     /// Reach `key` (an attach id for a claude row, a registry name
     /// for every other harness) through portal `portal`. The tier is
@@ -611,13 +626,12 @@ impl Core {
                 // The Drive argv is the canonical re-entry plan for a
                 // claude row. `None` means the plan is resolving off-loop; the
                 // replay carries a portal placement, which re-lands in this
-                // reach with the verdict staged. It names THIS
-                // portal, so an off-loop replay returns to the index the
-                // operator reached, not to portal 0.
-                let placement = crate::proto::PanePlacement {
-                    portal: Some(portal_idx),
-                    ..Default::default()
-                };
+                // reach with the verdict staged. The replay names THIS
+                // portal AND keeps the caller's geometry (split, tab,
+                // target), so an off-loop replay returns to the index the
+                // operator reached without discarding the split they asked
+                // for - the geometry the fresh open honors.
+                let placement = portal_replay_placement(placement, portal_idx);
                 let Some((argv, _cd)) = self.attach_gesture_argv(client_id, &id, &placement) else {
                     return Flow::Continue;
                 };
@@ -827,8 +841,13 @@ impl Core {
         let owner = self.session.find_by_cwd(&spawn_cwd).unwrap_or(view.0);
         let (dest, effective) = match remembered_tab {
             Some((sid, tid)) => {
+                // The remembered tab still wins over a caller tab, but the
+                // caller's DIRECTION rides along: a stale-seat reuse that
+                // drops the split turns a named Right into place_with's
+                // Down default - the open-close-split-again loop breaking.
                 let eff = PanePlacement {
                     tab: Some(crate::proto::TabSel::Id(tid)),
+                    split: placement.split,
                     ..Default::default()
                 };
                 (Some(sid), eff)

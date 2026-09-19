@@ -114,8 +114,10 @@ def test_ac1_requeue_settles_wedged_node(tmp_graph, claims_root, monkeypatch):
     node = _read(tmp_graph)[0]
     assert node["status"] != "in_progress"
     assert node["status"] == "ready"
-    # The do row is removed, not just stamped: nothing reads as an open window.
-    assert node["sessions"] == []
+    # The do row is filled and kept, not removed: closed reads as no open window.
+    assert len(node["sessions"]) == 1
+    assert node["sessions"][0]["session_id"] == DEAD_SESSION
+    assert node["sessions"][0]["ended_at"]
     assert DEAD_SESSION in result.output
 
 
@@ -202,7 +204,8 @@ def test_requeue_unwedges_a_warm_spelling_past_the_freshness_bound(
     assert result.exit_code == 0, _out(result)
     node = _read(tmp_graph)[0]
     assert node["status"] == "ready"
-    assert node["sessions"] == []
+    assert len(node["sessions"]) == 1
+    assert node["sessions"][0]["ended_at"]
 
 
 # -- AC4-HP / AC5-EDGE: unclaim earns its success line ------------------------
@@ -314,7 +317,8 @@ def test_requeue_settles_a_429_corpse_inside_the_freshness_bound(
     assert result.exit_code == 0, _out(result)
     node = _read(tmp_graph)[0]
     assert node["status"] == "ready"
-    assert node["sessions"] == []
+    assert len(node["sessions"]) == 1
+    assert node["sessions"][0]["ended_at"]
 
 
 def test_requeue_still_refuses_a_worker_with_a_climbing_sample_count(

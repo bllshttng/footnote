@@ -3417,39 +3417,9 @@ pub fn parse_pid_sidecar(s: &str) -> Option<(i32, Option<u64>)> {
     }
 }
 
-/// True while `pid` is a zombie: dead but not yet reaped by its parent, so
-/// `kill(pid, 0)` keeps succeeding even though it holds no fds and serves
-/// nothing. A bare-init container never reaps an adopted orphan, so waiting
-/// out a grace window for ESRCH there never converges; a zombie
-/// must read as gone the moment it is observed.
-#[cfg(target_os = "linux")]
-pub fn pid_is_zombie(pid: i32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|s| Some(s.rsplit_once(')')?.1.trim_start().starts_with('Z')))
-        .unwrap_or(false)
-}
-
-#[cfg(target_os = "macos")]
-pub fn pid_is_zombie(pid: i32) -> bool {
-    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-    let written = unsafe {
-        libc::proc_pidinfo(
-            pid as libc::pid_t,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            &mut info as *mut _ as *mut libc::c_void,
-            size,
-        )
-    };
-    written == size && info.pbi_status == libc::SZOMB
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn pid_is_zombie(_pid: i32) -> bool {
-    false
-}
+/// The zombie read; extracted beside its siblings for the file budget.
+mod pid_state;
+pub use pid_state::pid_is_zombie;
 
 /// True only when `kill(pid, 0)` proves `pid` is dead: ESRCH is the sole
 /// unambiguous signal. Any other outcome - alive, or an error like EPERM
@@ -3457,10 +3427,16 @@ pub fn pid_is_zombie(_pid: i32) -> bool {
 /// reads as not-provably-dead. The single implementation for a read that
 /// three call sites (kill-server's pre-check, its poll loop, and the
 /// server's own respawn-vs-alive check) each duplicated inline before
-///, which is exactly the shape that lets one of them drift.
+///, which is exactly the shape that lets one of them drift. A reachable
+/// ZOMBIE also reads as dead: it is unreaped (its parent may be slow, or a
+/// bare-init container never reaps at all), holds no fds, and serves
+/// nothing, so waiting out ESRCH would never converge.
 pub fn pid_confirmed_dead(pid: i32) -> bool {
     let result = unsafe { libc::kill(pid, 0) };
-    result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    if result != 0 {
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    }
+    pid_is_zombie(pid)
 }
 
 /// Every file a session leaves beside its name: the socket, the wire-version
@@ -4602,6 +4578,11 @@ mod tests {
     // the same rule; the RetireSession entries ride the moved lists.
     #[path = "control_roundtrip_tests.rs"]
     mod control_roundtrip_tests;
+    // The zombie-read family: an unreaped exit reads as dead on both
+    // helpers pinned here, so the two-call `|| pid_is_zombie` dance at the
+    // callers never needs repeating.
+    #[path = "pid_zombie_tests.rs"]
+    mod pid_zombie_tests;
 
     #[test]
     fn proto_session_name_cannot_escape_mux_dir() {

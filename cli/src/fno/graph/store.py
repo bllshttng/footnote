@@ -1860,12 +1860,12 @@ def reap_open_session_record(
 ) -> dict:
     """Close one exact open observer-owned session row and report settlement.
 
-    ``do`` REMOVES the row (an open do window wedges node status in_progress,
-    so after death the honest state is "no do window"); every other phase
-    FILLS ``ended_at`` and keeps the row (a reviewer session's provenance did
-    happen); ``all`` applies both semantics to every open row carrying the
-    identity. The fill value defaults to the reap instant, an UPPER BOUND on
-    the true end. ``node_id=None`` is the death-cascade form: every node
+    Every phase, ``do`` included, FILLS ``ended_at`` and keeps the row: a
+    filled row is not open, so node status un-wedges exactly as the retired
+    do-removal did, and the session provenance survives. The fill value
+    defaults to the reap instant, an UPPER BOUND on the true end;
+    ``abandoned_leg`` passes the transcript tail instant instead.
+    ``node_id=None`` is the death-cascade form: every node
     holding an open row for the identity settles, and the receipt's
     ``node_ids`` names them."""
     if phase != "all" and phase not in _SESSION_PHASES:
