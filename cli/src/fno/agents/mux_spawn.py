@@ -1209,10 +1209,8 @@ def build_pane_argv(
         # file). Opening a NOT-yet-existing id is a CREATE, the unserialised
         # half - the spawn lane serialises via
         # `fno.agents.harnesses.pi.create_decision`; this builder only composes
-        # argv. The route is the ONE pi route owner (keeper and pane share
-        # it): a `provider/id` model stays `--model` only, a bare model
-        # carries `--provider`, no model defers to pi's own settings. pi
-        # ships no permission popups, so `yolo` maps to nothing.
+        # argv. The ONE pi route owner (keeper and pane share it). pi ships
+        # no permission popups, so `yolo` maps to nothing.
         from fno.agents.spawn_axes_client import spawn_axes_call
         from fno.agents.keeper_thread import _pi_axes
 

@@ -177,25 +177,21 @@ class SessionLookup:
 
 
 def lookup_sessions(cwd: Path | str, session_id: str) -> SessionLookup:
-    """One ``(cwd, session_id)`` pair's store answer, oldest first, from the
-    Rust owner. Ranking by CONTENT is forbidden: an empty assistant array
-    marks a turn attempted and failed, often the one a human needs.
+    """One ``(cwd, session_id)`` pair's store answer from the Rust owner.
+    Ranking by CONTENT is forbidden: an empty array marks a failed turn.
     """
     try:
         answer = spawn_axes_call(
             {"pi_session_lookup": {"cwd": str(cwd), "session_id": session_id}}
         )
     except SpawnAxesUnavailable:
-        return SessionLookup(
-            state="unknown",
-            directory=Path(""),
-            reason="fno-agents is missing or failed; run fno doctor update --rust",
-        )
+        reason = "fno-agents is missing or failed; run fno doctor update --rust"
+        return SessionLookup(state="unknown", directory=Path(""), reason=reason)
     return SessionLookup(
-        state=str(answer.get("state", "unknown")),
-        directory=Path(str(answer.get("directory", "") or "")),
-        files=tuple(Path(f) for f in answer.get("files", [])),
-        reason=str(answer.get("reason", "")),
+        state=answer.get("state", "unknown"),
+        directory=Path(answer.get("directory") or ""),
+        files=tuple(map(Path, answer.get("files") or ())),
+        reason=answer.get("reason", ""),
     )
 
 

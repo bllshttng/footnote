@@ -1470,8 +1470,19 @@ fn print_pi_receipt(
     json: bool,
 ) {
     if json {
+        // cli/label/status/note name the setup wizard's receipt fields, so
+        // the Python door relays the answer instead of translating it.
         let answer = serde_json::json!({
             "installed": installed,
+            "cli": "pi",
+            "label": "pi",
+            "status": if installed { "installed" } else { "failed" },
+            "note": format!(
+                "extension -> {} (agent dir from {}, skills: {})",
+                dest.display(),
+                agent_dir_source,
+                skills
+            ),
             "dest": dest.display().to_string(),
             "agent_dir_source": agent_dir_source,
             "skills": skills,
