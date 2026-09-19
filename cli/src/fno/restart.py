@@ -3,13 +3,9 @@
 `fno doctor update && fno agents restart` is the reboot loop: `update` installs new binaries,
 `restart` swaps the RUNNING processes onto them.
 
-The whole verb lives in the Rust `fno-agents restart`: the daemon swap, the
-mux session policy, and the truthful receipt. This module is a pass-through:
-it execs the Rust verb and returns its exit code, so the flag spellings and
-the receipt cannot drift between the two doors.
+The verb itself lives in the Rust `fno-agents restart`; this module is a pass-through
+that execs it, so the flag spellings and the receipt cannot drift between the doors.
 """
-
-from __future__ import annotations
 
 import subprocess
 import sys
