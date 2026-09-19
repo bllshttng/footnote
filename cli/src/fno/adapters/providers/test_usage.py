@@ -1067,7 +1067,6 @@ class TestRequiredBotHeadroomCheck:
     def test_exhausted_required_bot_warns_and_emits(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import json as _json
         import time as _t
         from types import SimpleNamespace
 

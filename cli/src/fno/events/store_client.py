@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import stat as stat_module
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
