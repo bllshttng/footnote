@@ -120,7 +120,7 @@ Three reasons are permanent by construction. The gate decides them before it rea
 
 - `kept {id} (operator row)`: a human started this session (`gc.rs` `gc_decide`). No sweep touches it.
 - `kept {id} (crowned)`: the row belongs to a crowned orchestrator (`gc.rs` `gc_decide`).
-- `kept {id} (not a spawn row: {why})`: fno did not spawn the session. The row is someone else's fact about it, and done plus quiet does not make it fno's to remove (`gc.rs` `gc_decide`). One exit exists. A recorded pid that answers ESRCH proves a corpse. So does a claude row absent from a known `claude agents` roster read. Such a row falls through and is judged like any other row. An unknown or partial roster read keeps the row.
+- `kept {id} (not a spawn row: {why})`: fno did not spawn the session. The row is someone else's fact about it. Done plus quiet does not make it fno's to remove (`gc.rs` `gc_decide`). One exit exists. A recorded pid that answers ESRCH proves a corpse. So does a claude row absent from a known `claude agents` roster read. Such a row falls through and is judged like any other row. An unknown or partial roster read keeps the row.
 
 When the registry holds no origin at all, the third reason prints `no origin recorded` (`reap_render.rs` `render_reap`).
 
@@ -182,7 +182,7 @@ Events: `pr_nudge_sent`, `pr_nudge_escalated`, `pr_nudge_paused`. State is one f
 
 The full line reads `kept {id} (open do row on done node: {node}: {detail})`. Every node the row names is done, but the graph still holds an open do row for the session. The retirement re-opens settled work, so the row stays (`gc_sweep.rs` `run_with_release`).
 
-Two paths produce the line. The classify pass fires on the stale graph row (`gc_sweep.rs` `run_with_release`). The apply pass re-checks at stage and commit, because fresh work can arrive between decision and stop, and a stop then kills live work (`gc_sweep.rs` `commit_retirements`).
+Two paths produce the line. The classify pass fires on the stale graph row (`gc_sweep.rs` `run_with_release`). The apply pass re-checks at stage and commit. Fresh work can arrive between decision and stop, and a stop then kills live work (`gc_sweep.rs` `commit_retirements`).
 
 The real run carries its own cure. The settle pass fills stale open do rows on done and merged nodes before the row pass reads the graph (`gc.rs` `gc_sweep`, `gc_sweep.rs` `settle_stale_do_rows`). A dry run prints the cure as `would settle {id} (stale open do row filled on done+merged node: {node})`.
 
@@ -204,7 +204,7 @@ A finished planner retires once its transcript is quiet for 1200 s, not the defa
 
 A planner with neither marker keeps its row, and the hold ages. Past `agents.hold_escalate_after_s` the line names the cure: `fno agents reap --release <row>` (`reap_render.rs` `render_reap`).
 
-The retirement basis names the marker that fired, in order: `planning finished on {node}: closed by this session`, `planning finished on {node}: plan written`, `planning finished on {node}: node {status}` for a moved-on node, `planning finished on {node}: released`, or `planning halted on {node}: turn ended with no plan` for the halted planner (`gc_sweep.rs` `run_with_release`). A blueprint row whose assignment set is empty retires through the session arms instead, and never borrows the planning wording.
+The retirement basis names the marker that fired, in order (`gc_sweep.rs` `run_with_release`): `planning finished on {node}: closed by this session`, `planning finished on {node}: plan written`, `planning finished on {node}: node {status}` for a moved-on node, or `planning finished on {node}: released`. A halted planner reads `planning halted on {node}: turn ended with no plan`. A blueprint row whose assignment set is empty retires through the session arms instead, and never borrows the planning wording.
 
 ### live descendant
 
