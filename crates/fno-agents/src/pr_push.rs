@@ -138,11 +138,10 @@ pub(crate) fn read_checks_rows(gh_bin: &str, cwd: &Path, head: &str) -> Result<V
     rows.extend(zero_job_rows(gh_bin, cwd, head, &raw)?);
     // The check-runs endpoint returns ONLY check-runs. A commit StatusContext
     // lives on a different endpoint, and reading one without the other is a
-    // false green.
-    rows.extend(read_statuses(gh_bin, cwd, head));
+    // false green; a failed read propagates, it never reads green.
+    rows.extend(read_statuses(gh_bin, cwd, head)?);
     Ok(rows)
 }
-
 
 /// The rows for the Actions runs that failed before minting a job (x-5cf9):
 /// the head_sha-scoped runs listing, the shared rule in
@@ -195,23 +194,22 @@ pub(crate) fn zero_job_rows(
 }
 
 /// The commit's StatusContexts, in the same row shape as the check-runs. A
-/// read failure yields none rather than aborting the run.
-fn read_statuses(gh_bin: &str, cwd: &Path, head: &str) -> Vec<Value> {
-    let Ok(raw) = gh_api(
+/// failed read is an `Err`: a legacy status the read could not fetch must
+/// never read as an absent-and-green one.
+fn read_statuses(gh_bin: &str, cwd: &Path, head: &str) -> Result<Vec<Value>, String> {
+    let raw = gh_api(
         gh_bin,
         cwd,
         &format!("repos/{{owner}}/{{repo}}/commits/{head}/status"),
         &[],
-    ) else {
-        return Vec::new();
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&raw) else {
-        return Vec::new();
-    };
-    let Some(rows) = v.get("statuses").and_then(|s| s.as_array()) else {
-        return Vec::new();
-    };
-    rows.iter()
+    )?;
+    let v: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("the status read was unparseable: {e}"))?;
+    let rows = v
+        .get("statuses")
+        .and_then(|s| s.as_array())
+        .ok_or_else(|| "the status read carried malformed statuses".to_string())?;
+    Ok(rows.iter()
         .map(|st| json!({
             "name": st.get("context").and_then(|v| v.as_str()).unwrap_or(""),
             "bucket": match st.get("state").and_then(|v| v.as_str()).unwrap_or("").to_lowercase().as_str() {
@@ -224,7 +222,7 @@ fn read_statuses(gh_bin: &str, cwd: &Path, head: &str) -> Vec<Value> {
             "startedAt": st.get("created_at").and_then(|v| v.as_str()).unwrap_or(""),
             "completedAt": st.get("updated_at").and_then(|v| v.as_str()).unwrap_or(""),
         }))
-        .collect()
+        .collect())
 }
 
 /// A REST check-run's `status`/`conclusion` folded to the bucket vocabulary.
@@ -880,6 +878,10 @@ for a in "$@"; do case "$a" in
     echo '{"check_runs":[{"name":"rust-ci","status":"completed","conclusion":"success","started_at":"2026-09-19T06:00:00Z","completed_at":"2026-09-19T06:05:00Z","html_url":"https://github.com/o/r/actions/runs/35344488345/job/99","check_suite":{"id":7}}]}'
     exit 0 ;;
   */status)
+    if [ -f "$D/fail-status" ]; then
+      echo "gh: status read failed" >&2
+      exit 1
+    fi
     echo '{"statuses":[]}'
     exit 0 ;;
   *actions/runs?head_sha=*)
@@ -923,6 +925,19 @@ exit 1
         std::fs::write(dir.path().join("fail-runs"), b"").unwrap();
         let err = read_checks_rows(gh.to_str().unwrap(), dir.path(), "abc123")
             .expect_err("the runs read failed");
-        assert!(err.contains("actions/runs"), "err names the runs read: {err}");
+        assert!(
+            err.contains("actions/runs"),
+            "err names the runs read: {err}"
+        );
+    }
+
+    #[test]
+    fn a_failed_status_read_is_err_never_green_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = stub_gh(dir.path());
+        std::fs::write(dir.path().join("fail-status"), b"").unwrap();
+        let err = read_checks_rows(gh.to_str().unwrap(), dir.path(), "abc123")
+            .expect_err("the status read failed");
+        assert!(err.contains("status"), "err names the status read: {err}");
     }
 }

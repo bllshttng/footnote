@@ -779,16 +779,33 @@ fn main_ci_token(rows: Vec<Value>) -> Result<Value, String> {
 
 fn r_main_ci() -> Result<Value, String> {
     let sha = {
-        let argv: Vec<std::ffi::OsString> =
-            vec!["git".into(), "rev-parse".into(), "origin/main".into()];
+        // The REMOTE tip, not the local ref: origin/main is stale until the
+        // caller fetches, and the check-in must not grade yesterday's main.
+        let argv: Vec<std::ffi::OsString> = vec![
+            "git".into(),
+            "ls-remote".into(),
+            "origin".into(),
+            "refs/heads/main".into(),
+        ];
         let (code, out, err) = run_capture(&argv).map_err(|e| e.to_string())?;
         if code != 0 {
             return Err(format!(
-                "git rev-parse failed: {}",
+                "git ls-remote failed: {}",
                 err.trim().chars().take(120).collect::<String>()
             ));
         }
-        out.trim().to_string()
+        // `git ls-remote origin refs/heads/main` answers "<sha>\trefs/heads/main".
+        let sha = out
+            .trim()
+            .split('\t')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if sha.is_empty() {
+            return Err("git ls-remote named no main tip".to_string());
+        }
+        sha
     };
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let rows = crate::pr_push::read_checks_rows("gh", &cwd, &sha)?;
@@ -2142,6 +2159,27 @@ mod tests {
             serde_json::json!({"name": ".github/workflows/cli-ci.yml", "bucket": "fail"}),
         ];
         assert_eq!(main_ci_token(rows).unwrap(), Value::String("red".into()));
+    }
+
+    #[test]
+    fn main_ci_token_reads_red_on_a_failed_status_row() {
+        let rows = vec![
+            serde_json::json!({"name": "rust-ci", "bucket": "pass"}),
+            serde_json::json!({"name": "external-ci", "bucket": "fail"}),
+        ];
+        assert_eq!(main_ci_token(rows).unwrap(), Value::String("red".into()));
+    }
+
+    #[test]
+    fn main_ci_token_reads_pending_on_a_pending_row() {
+        let rows = vec![
+            serde_json::json!({"name": "rust-ci", "bucket": "pass"}),
+            serde_json::json!({"name": "guards", "bucket": "pending"}),
+        ];
+        assert_eq!(
+            main_ci_token(rows).unwrap(),
+            Value::String("pending".into())
+        );
     }
 
     #[test]
