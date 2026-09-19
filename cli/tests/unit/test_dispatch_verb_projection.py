@@ -28,11 +28,11 @@ from types import SimpleNamespace
 import pytest
 
 from fno.backlog import advance as adv
-from fno.rust_binary import find_dev_binary
+from fno.rust_binary import resolve_binary
 
 requires_rust = pytest.mark.skipif(
-    find_dev_binary() is None,
-    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+    resolve_binary() is None,
+    reason="no fno-agents binary resolvable (the name mint shells it)",
 )
 
 
