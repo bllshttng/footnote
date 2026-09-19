@@ -502,7 +502,10 @@ impl<'a> FreshnessResolver<'a> {
         } else {
             let fetched = git_bounded(
                 self.git_bin,
-                &["fetch", "--quiet", "--no-tags", "origin", sha],
+                // `--` pins sha to the refspec slot: attestation rows feed
+                // this string, and a `-`-leading one must parse as a ref,
+                // never as an option.
+                &["fetch", "--quiet", "--no-tags", "origin", "--", sha],
                 self.cwd,
             )
             .map(|o| o.status.success())
@@ -1227,7 +1230,14 @@ mod tests {
             write(&repo, "f.txt", "resolved differently\n");
             git(&repo, &["add", "-A"]);
             let cont = std::process::Command::new("git")
-                .args(["-c", "core.hooksPath=/dev/null", "-c", "core.editor=true", "rebase", "--continue"])
+                .args([
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "core.editor=true",
+                    "rebase",
+                    "--continue",
+                ])
                 .current_dir(&repo)
                 .output()
                 .unwrap();
