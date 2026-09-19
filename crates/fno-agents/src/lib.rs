@@ -46,9 +46,12 @@
 
 pub mod acceptance_evidence;
 pub mod active_backlog;
+pub mod additional_prs;
 mod agent_lock;
 pub mod agents_config;
 pub mod agy_ask;
+pub mod agy_hooks;
+pub mod agy_launch;
 pub mod announce;
 pub mod arm_repair;
 pub mod arm_watch;
@@ -57,12 +60,16 @@ pub mod authorized_merge;
 pub mod backlog;
 pub mod backlog_ready;
 pub mod bash_census;
+#[cfg(test)]
+#[path = "birth_guard_tests.rs"]
+mod birth_guard_tests;
 pub mod blueprint_judge;
 mod bounded_cmd;
 mod bounded_spawn;
 mod cancel_sentinel;
 pub mod canonical_check;
 pub mod capability_leaves;
+pub mod cargo_build_dirs;
 pub mod census;
 pub mod check_supersession;
 pub mod claim_store;
@@ -87,6 +94,7 @@ pub mod codex_fake_daemon;
 pub mod codex_inject;
 /// Public because `codex_resume` (pub, exercised by the parity test) names
 /// [`CodexRoute`] in its signature.
+pub mod codex_posture;
 pub mod codex_route;
 pub mod codex_store;
 pub mod codex_thread;
@@ -97,6 +105,7 @@ pub mod component_update;
 pub mod context_run;
 pub mod court_fold;
 pub mod crown_settle;
+pub mod crown_split;
 pub mod cursor_agent;
 pub mod daemon;
 pub mod decision_index;
@@ -133,12 +142,14 @@ mod git_test_helpers;
 pub mod graph_get;
 pub mod graph_keeper;
 pub mod graph_store;
+pub mod grok_store;
 pub mod harness_capabilities;
 pub mod harness_daemon;
 pub mod heal;
 pub mod honesty_sweep;
 pub mod hook;
 mod identity;
+pub mod install_verify;
 pub mod interrupt_classify;
 pub mod json_output;
 pub mod kill_criteria;
@@ -179,10 +190,13 @@ pub mod model_env_scrub;
 pub mod naming;
 pub mod needs;
 pub mod node_origin;
+pub mod node_reading;
 pub mod node_route;
 pub mod node_seed;
 pub mod nudge;
+pub mod occupancy_login;
 pub mod opencode_ask;
+pub mod opencode_install;
 pub mod opencode_serve;
 pub mod operator_notice;
 pub mod operator_turns;
@@ -195,32 +209,42 @@ pub mod paths;
 pub mod pi;
 pub mod plugin_install;
 pub mod pr_nudge;
+pub mod pr_park;
+pub mod pr_push;
+pub mod pr_rebase;
+pub mod pr_status_facts;
 pub mod protocol;
 pub mod prove_it_verdicts;
 pub mod provider;
 pub mod provider_cap;
 pub mod provider_cap_verbs;
 pub mod publish_review;
+pub mod question_sweep;
 pub mod readiness;
 pub mod reap_release;
 pub mod reap_render;
 pub mod receipt;
 pub mod reclaim;
 pub mod reentry;
+pub mod refusal_rate;
 pub mod registry_json;
 pub mod rename;
 pub mod restart_run;
 pub mod resume_args;
+pub mod resume_pin;
 pub mod resume_receipt;
 pub mod resume_wake;
 pub mod review_freshness;
 pub mod review_summary;
+pub mod rm_receipt;
 pub mod roster_progress;
 pub mod roster_reap;
+pub mod route_capacity;
 pub mod route_slot;
 pub mod row_truth;
 pub mod run_outcome;
 pub mod run_state;
+pub mod sandbox_probe;
 pub mod scoreboard;
 pub mod scrape;
 pub mod scratch;
@@ -245,12 +269,14 @@ pub mod spawn_payload;
 pub mod spawn_transaction;
 pub mod state;
 pub mod state_path;
+pub mod store_exec;
 pub mod stream_worker;
 pub mod stuck_work;
 pub mod subprocess_ask;
 pub mod subscribe;
 pub mod supervisor;
 pub mod surface_check;
+pub mod sync_canonical;
 pub mod task_context;
 pub mod terminal_stop;
 pub mod territory;
@@ -261,6 +287,7 @@ pub mod usage;
 pub mod verify_evidence;
 pub mod version;
 pub mod wait;
+pub mod worktree_reapable;
 pub mod write_queue;
 
 use serde::{Deserialize, Serialize};
@@ -1037,6 +1064,21 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Emitted even on outcome none/duplicate, so a quiet run cannot be
     // mistaken for a sweep that never ran.
     "stale_sweep",
+    // Question sweep (daemon-emitted): `fno agents question-sweep` ran on
+    // its interval floor and closed the node-closed questions it found,
+    // appending one empty-answer row per question (a non-empty answer would
+    // arm the unrecorded-decision gate against the asking session). Emitted
+    // even on outcome none, so a quiet run cannot be mistaken for a sweep
+    // that never ran.
+    "question_sweep",
+    // Park sweep (daemon-emitted): `fno-agents pr-park sweep` ran on its 6h
+    // floor and un-parked open rows whose head moved or whose park passed
+    // 24h, marking finished rows handled. Emitted even on a quiet or skipped
+    // run, so a quiet run cannot be mistaken for a sweep that never ran.
+    "park_sweep",
+    // A parked PR resumed polling (pr-park-emitted): retries reset, by hand
+    // (the king row's verb) or by the sweep.
+    "pr_watch_unparked",
     // Dead-row GC also reconstructs the loop's canonical failure event when a
     // convention-named dispatch disappeared without a termination receipt.
     "node_failed",
@@ -1126,9 +1168,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "keeper_row_superseded",
     "keeper_row_terminal_socket_live",
     // Store-keeper socket hygiene (daemon-start sweep): dead store sockets in
-    // the state root and the hashed temp root are unlinked; live listeners are
-    // left as found.
+    // the state root and the hashed temp root are unlinked, as are orphaned
+    // seat locks; live listeners are left as found.
     "store_socket_unlinked",
+    "store_seat_lock_unlinked",
     // Deliver (daemon-emitted, Task 2.2 US4)
     "agent_deliver_injected",
     "agent_deliver_demoted",
@@ -1173,6 +1216,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // dedupe index: a pair already observed in the window never re-emits.
     "scratch_shape_observed",
     "scratch_shape_filed",
+    // Node-closed question sweep (daemon-emitted): the periodic walk that
+    // auto-closes open operator questions whose node has closed; one emit
+    // per pass names how many it closed and, when any, which.
+    "question_sweep",
     // Meta (daemon/worker-emitted)
     "event_payload_too_large",
     // Inside-leg state push (daemon-emitted, inside-out E3.2): a per-turn hook
@@ -1203,6 +1250,13 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // for the same reason worktree_sweep is: a quiet repo must not read as a
     // loop that never ran. The Python tick emits nothing for this family.
     "pr_heal_tick",
+    // The heal loop's acted-on rows: one flake guard staged per flapping
+    // (sha, run id, check), and one remedy row per PR the loop acted on.
+    "pr_heal_flake",
+    "pr_heal_pr",
+    // Daemon startup scope declaration: sandbox home vs the operator's
+    // shared home. Fleet gating and board routing key off it.
+    "daemon_fleet_scope",
     // NOTE: the a2a status-breakpoint kinds (task_started/task_done/blocked/
     // run_summary) are NOT registered here. They are Python-defined in
     // cli/src/fno/events/schema.yaml; the parity gate partitions names (a kind
@@ -1247,7 +1301,7 @@ pub fn emit_schema_json() -> serde_json::Value {
                 "source": {
                     "type": "string",
                     "anyOf": [
-                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "cli", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "pr-heal", "python", "skill_diff", "subagent", "target", "test"] },
+                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "cli", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "pr-heal", "pr-park", "python", "skill_diff", "subagent", "target", "test"] },
                         { "pattern": "^(worker|stream-worker):.+$" }
                     ],
                     "description": "Producer identity: a fixed-string source or a per-agent worker (worker:<id> / stream-worker:<id>)"

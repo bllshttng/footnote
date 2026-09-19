@@ -18,6 +18,11 @@
 #   --delete-branch  After removing the worktree, delete its branch with
 #                    `git branch -D` (force). Default: keep branch.
 #   --merge-triggered  Require HEAD to be reachable from refreshed origin/main.
+#   --done-node   The merged sweep's arm: only a fresh gate receipt of
+#                 `reason=done-node` passes the strict check. Untracked files
+#                 are salvaged first, a detached HEAD is pinned to a salvage
+#                 branch first, and the unpushed refusal is skipped (the branch
+#                 survives removal, so no commit is lost).
 #
 # Exit codes:
 #   0  worktree removed
@@ -34,6 +39,7 @@ FORCE=0
 ASSUME_YES=0
 DELETE_BRANCH=0
 MERGE_TRIGGERED=0
+DONE_NODE=0
 TARGET_ARG=""
 
 while [[ $# -gt 0 ]]; do
@@ -42,6 +48,7 @@ while [[ $# -gt 0 ]]; do
     --yes|-y) ASSUME_YES=1; shift ;;
     --delete-branch) DELETE_BRANCH=1; shift ;;
     --merge-triggered) MERGE_TRIGGERED=1; shift ;;
+    --done-node) DONE_NODE=1; shift ;;
     -h|--help)
       sed -n '2,/^set -euo/p' "$0" | sed 's/^# //; s/^#//'
       exit 0
@@ -51,6 +58,15 @@ while [[ $# -gt 0 ]]; do
     *) TARGET_ARG="$1"; shift ;;
   esac
 done
+
+# The done-node arm speaks through the same gate flag the sweep set when it
+# decided to call us; every wt_reapable call below re-reads with it on.
+if [[ "$DONE_NODE" -eq 1 ]]; then
+  export WT_REAPABLE_DONE_NODE=1
+fi
+# Set by the done-node path; receipt lines name them when set.
+DONE_NODE_SALVAGE_DIR=""
+DONE_NODE_PINNED_BRANCH=""
 
 # Resolve target worktree path. Three input shapes:
 #   1. absolute path                 -> use as-is
@@ -425,6 +441,13 @@ if [[ "$FORCE" -eq 0 ]]; then
       echo "    --force to override, or commit/stash first." >&2
       exit 2
     fi
+    # --done-node is not a blanket pass: the gate must have said yes BECAUSE
+    # the node reads done (or the branch is merged). Any other yes is a
+    # caller bug, and the tree stays.
+    if [[ "$DONE_NODE" -eq 1 && "$WT_REAPABLE_LINE" != *reason=done-node* ]]; then
+      echo "archive-worktree: --done-node needs a done-node receipt, got: $WT_REAPABLE_LINE" >&2
+      exit 2
+    fi
     # Cleared, but git will still object. It objects to TWO classes we cleared
     # on their own terms: tracked files missing from disk, and the untracked
     # symlinks setup-worktree.sh wrote (`discounted=`). Record either so the
@@ -451,7 +474,11 @@ if [[ "$FORCE" -eq 0 ]]; then
     exit 2
   fi
 
-  if [[ "$FORCE_UNPUSHED_COUNT" -gt 0 ]]; then
+  if [[ "$DONE_NODE" -eq 1 ]]; then
+    # The branch survives removal, so an unpushed commit is not lost - that
+    # is the done-node arm's contract. The unpushed refusal does not apply.
+    :
+  elif [[ "$FORCE_UNPUSHED_COUNT" -gt 0 ]]; then
     if [[ "$BRANCH" == "(detached)" ]]; then
       echo "archive-worktree: $FORCE_UNPUSHED_COUNT commit(s) on detached HEAD not on any remote at $TARGET" >&2
     elif [[ -n "$FORCE_UPSTREAM" ]]; then
@@ -688,6 +715,74 @@ salvage_fno() {
   return 0
 }
 
+# ---- done-node arm: salvage untracked content, pin a detached HEAD ---------
+# The arm's whole deal: removal loses the untracked files git does not carry
+# and any commit no branch names. Both are rescued BEFORE the strict removal,
+# into the same canonical salvage tree salvage_fno uses. A failure keeps the
+# worktree (exit 5) - losing work to save disk is never the trade.
+salvage_untracked() {
+  local node date dest rel base parent
+  node="$(_salvage_node)"
+  date="$(date +%Y%m%d)"
+  dest="$CANONICAL/.fno/salvage/${date}-${node}/untracked"
+  local status line
+  status="$(git -C "$TARGET" status --porcelain --untracked-files=all 2>/dev/null)" || return 0
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    [[ "${line:0:2}" == "??" ]] || continue
+    rel="${line:3}"
+    base="$(basename "$rel")"
+    parent="$(dirname "$rel")"
+    # The gate discounts setup-worktree.sh's links; copying one would copy a
+    # slice of the canonical checkout through the link. Skip the same shape.
+    if [[ -L "$TARGET/$rel" ]]; then
+      case "$base" in
+        internal|.agents|.codex|.codex-plugin|.gemini) continue ;;
+      esac
+      if [[ "$parent" == ".claude" || "$parent" == *"/.claude" ]]; then
+        continue
+      fi
+    fi
+    [[ -e "$TARGET/$rel" ]] || continue
+    if ! mkdir -p "$dest/$(dirname "$rel")" 2>/dev/null; then
+      echo "archive-worktree: salvage failed: cannot create $dest" >&2
+      return 5
+    fi
+    if ! cp -R "$TARGET/$rel" "$dest/$rel" 2>/dev/null; then
+      echo "archive-worktree: salvage failed: $rel -> $dest/$rel" >&2
+      return 5
+    fi
+  done <<< "$status"
+  return 0
+}
+
+if [[ "$DONE_NODE" -eq 1 ]]; then
+  # A detached HEAD pins first: its commit belongs to no branch, so removal
+  # would leave it unreachable. An existing salvage branch at a DIFFERENT sha
+  # gets the short sha appended instead of being clobbered.
+  if [[ "$BRANCH" == "(detached)" ]]; then
+    _dn_head="$(git -C "$TARGET" rev-parse HEAD)"
+    _dn_short="$(git -C "$TARGET" rev-parse --short HEAD)"
+    _dn_name="salvage/$(basename "$TARGET")"
+    if git show-ref --verify --quiet "refs/heads/$_dn_name"; then
+      if [[ "$(git rev-parse "refs/heads/$_dn_name")" != "$_dn_head" ]]; then
+        _dn_name="$_dn_name-$_dn_short"
+      fi
+    fi
+    if ! git -C "$TARGET" branch "$_dn_name" "$_dn_head"; then
+      echo "archive-worktree: keeping worktree $TARGET (could not pin detached HEAD)" >&2
+      exit 5
+    fi
+    DONE_NODE_PINNED_BRANCH="$_dn_name"
+    echo "archive-worktree: pinned detached HEAD to branch $_dn_name" >&2
+  fi
+  if ! salvage_untracked; then
+    echo "archive-worktree: keeping worktree $TARGET (untracked salvage failed, nothing removed)" >&2
+    exit 5
+  fi
+  DONE_NODE_SALVAGE_DIR="$CANONICAL/.fno/salvage/$(date +%Y%m%d)-$(_salvage_node)/untracked"
+fi
+
 if ! salvage_fno; then
   echo "archive-worktree: keeping worktree $TARGET (salvage failed, nothing removed)" >&2
   exit 5
@@ -710,7 +805,18 @@ REMOVE_FLAGS=""
 # agent killed mid-write can leave a modified tracked file behind. Git's refusal
 # is the last line of defence, so only wave it aside on a verdict that is still
 # true right now (the same rule the liveness re-check follows).
-if [[ "${_WT_RECOVERABLE_ONLY:-0}" -eq 1 ]]; then
+if [[ "$DONE_NODE" -eq 1 ]]; then
+  # RE-READ AT REMOVAL TIME on the arm's terms too: only a FRESH done-node
+  # verdict waves git's refusal aside (the salvage pass just moved untracked
+  # files; an editor can still have written). A tree that no longer reads
+  # done-node stays.
+  if wt_reapable "$TARGET" && [[ "$WT_REAPABLE_LINE" == *reason=done-node* ]]; then
+    REMOVE_FLAGS="--force"
+  else
+    echo "archive-worktree: $WT_REAPABLE_LINE at removal time; keeping $TARGET" >&2
+    exit 2
+  fi
+elif [[ "${_WT_RECOVERABLE_ONLY:-0}" -eq 1 ]]; then
   if wt_reapable "$TARGET"; then
     REMOVE_FLAGS="--force"
   else
@@ -733,6 +839,9 @@ git worktree prune
 if declare -F _wt_emit_removal_event >/dev/null 2>&1; then
   _WT_EVENT_CLAIM="no-live-claim"
   _WT_EVENT_REASON="strict checks passed (reapable, pushed, no live session)"
+  if [[ "$DONE_NODE" -eq 1 ]]; then
+    _WT_EVENT_REASON="done-node; tree removed, branch kept"
+  fi
   if [[ "$FORCE" -eq 1 ]]; then
     _WT_EVENT_CLAIM="overridden-by-force: ${INITIAL_LIVE_EVIDENCE:-none}"
     _WT_EVENT_REASON="--force override of disclosed checks"
@@ -777,5 +886,13 @@ else
   else
     echo "archive-worktree: archived $TARGET (worktree directory discarded; detached branch data has no named branch)" >&2
   fi
+fi
+
+# The done-node receipt: where the untracked content went, and what holds the
+# detached commit now. Both lines are best-effort narration AFTER a successful
+# removal; neither can fail the run.
+if [[ "$DONE_NODE" -eq 1 ]]; then
+  [[ -n "$DONE_NODE_SALVAGE_DIR" ]] && echo "archive-worktree: untracked content salvaged to $DONE_NODE_SALVAGE_DIR" >&2
+  [[ -n "$DONE_NODE_PINNED_BRANCH" ]] && echo "archive-worktree: detached HEAD pinned to $DONE_NODE_PINNED_BRANCH" >&2
 fi
 exit "$BRANCH_DELETE_RC"

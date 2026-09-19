@@ -1,14 +1,16 @@
-"""Integration tests for the build-base half of `cleanup --cargo-targets`.
+"""Integration tests for the build-base delegation of `cleanup --cargo-targets`.
 
-test_worktree_cleanup_merged.py covers the sweep's worktree half. These cover
-the lanes this repo added with build.build-dir: the sharded hash dirs under
-the build base (reap + protect), the unverifiable-metadata guard, and the
-legacy offload-symlink refusal the retired verb's suite used to own.
+The build-base half of the sweep is the Rust lane now
+(`fno-agents reclaim cargo-build-dirs`, crates/fno-agents/src/cargo_build_dirs.rs);
+its classification cases live in that module's Rust tests. These cover the
+bash side of the contract: the delegate prints the binary's lines and skips
+without error when no binary resolves, and the in-checkout lanes keep their
+legacy offload-symlink refusal (the retired verb's suite used to own it).
 
 Drives the real scripts/lib/worktree-lifecycle.sh against a throwaway git
 repo with a bare origin, same fixture family as the merged-cleanup tests.
 FNO_CARGO_TARGETS_BASE points the sweep at a sandbox so no real build dir is
-ever touched.
+ever touched; FNO_AGENTS_BIN pins the delegate so no ambient binary answers.
 """
 from __future__ import annotations
 
@@ -27,7 +29,6 @@ TARGET_GUARD_SRC = REPO_ROOT / "scripts" / "lib" / "target-guard.sh"
 REMOVAL_EVENT_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-removal-event.sh"
 
 CACHEDIR_TAG = "Signature: 8a477f597d28d172789f068868ba2775\n"
-OLD_TS = 1_600_000_000
 
 
 def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -70,12 +71,30 @@ def base(tmp_path: Path) -> Path:
     return b
 
 
+STUB_SUMMARY = (
+    "cargo-build-dirs mode=dry-run bases=1 rows=1 trees_resolved=1 orphans=0 "
+    "reaped=0 reclaimed_bytes=0 after_bytes=0 effective_cap_bytes=0 orphan_lane=on shards_removed=0"
+)
+
+
+def _plant_stub(tmp_path: Path, extra: str = "") -> Path:
+    """A stub fno-agents whose cargo-build-dirs answers deterministically."""
+    stub = tmp_path / "bin" / "fno-agents"
+    stub.parent.mkdir(exist_ok=True)
+    stub.write_text(f"#!/bin/sh\nprintf '%s\\n' '{STUB_SUMMARY}'\n{extra}")
+    stub.chmod(stub.stat().st_mode | 0o111)
+    return stub
+
+
 def _sweep(
     canon: Path, base: Path, *flags: str, env_extra: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess:
     script = canon / "scripts" / "lib" / "worktree-lifecycle.sh"
     env = os.environ.copy()
     env["FNO_CARGO_TARGETS_BASE"] = str(base)
+    # Pin the delegate unless a test overrides it: no ambient fno-agents may
+    # answer from a developer's PATH.
+    env.setdefault("FNO_AGENTS_BIN", "/nonexistent/fno-agents")
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
@@ -87,94 +106,42 @@ def _sweep(
     )
 
 
-def _plant_hash(base: Path, tag: str, size: int = 4096) -> Path:
-    """A realistic build-dir hash dir: sharded two deep, CACHEDIR.TAG on top."""
-    hash_dir = base / "bd" / f"bac4721f2d16ec{tag}"
-    (hash_dir / "debug" / "deps").mkdir(parents=True)
-    (hash_dir / "CACHEDIR.TAG").write_text(CACHEDIR_TAG)
-    payload = hash_dir / "debug" / "deps" / "probe-0123456789abcdef"
-    payload.write_bytes(b"x" * size)
-    os.utime(hash_dir, (OLD_TS, OLD_TS))
-    return hash_dir
+# -- the build-base rows ride the Rust lane ------------------------------------
 
 
-def _make_live(tree: Path) -> None:
-    """A target-state.md whose owner_pid is this test: _wt_live reads it live."""
-    fno = tree / ".fno"
-    fno.mkdir(exist_ok=True)
-    (fno / "target-state.md").write_text(f"owner_pid: {os.getpid()}\n")
+def test_delegate_prints_the_binary_s_cargo_build_dirs_lines(repo: Path, base: Path, tmp_path: Path):
+    """AC9: the sweep prints a stub binary's cargo-build-dirs line, and the
+    --apply flag reaches it. No bash code walks the build base anymore."""
+    stub = _plant_stub(
+        tmp_path,
+        'case "$*" in *--apply*) printf \'STUB-SAW-APPLY\\n\' ;; esac\n',
+    )
 
-
-# -- the build-base lane reaps an unowned tagged hash dir ----------------------
-
-
-def test_build_base_hash_dir_dry_runs_then_reaps(repo: Path, base: Path):
-    hash_dir = _plant_hash(base, "one")
-
-    dry = _sweep(repo, base, "--cap-bytes", str(64 * 1024 * 1024), "--target-max-age", "0d")
+    dry = _sweep(repo, base, env_extra={"FNO_AGENTS_BIN": str(stub)})
     assert dry.returncode == 0, dry.stderr
-    assert "would-reap" in dry.stdout, "an unowned tagged hash dir is a reap candidate"
-    assert f"path={hash_dir}" in dry.stdout
-    assert hash_dir.exists(), "dry run must delete nothing"
+    assert STUB_SUMMARY in dry.stdout, dry.stdout
+    assert "STUB-SAW-APPLY" not in dry.stdout
 
-    applied = _sweep(
-        repo, base, "--cap-bytes", str(64 * 1024 * 1024), "--target-max-age", "0d", "--apply"
-    )
+    applied = _sweep(repo, base, "--apply", env_extra={"FNO_AGENTS_BIN": str(stub)})
     assert applied.returncode == 0, applied.stderr
-    assert "reason=age" in applied.stdout
-    assert not hash_dir.exists(), "the sweep deletes the resolved hash dir"
+    assert "STUB-SAW-APPLY" in applied.stdout, applied.stdout
 
 
-# -- an unreadable cargo metadata protects EVERY build-base dir ----------------
-
-
-def test_unverifiable_metadata_protects_every_build_base_dir(repo: Path, base: Path):
-    hash_dir = _plant_hash(base, "guard")
-    _make_live(repo)
-    broken = repo / "crates" / "broken"
-    broken.mkdir(parents=True)
-    (broken / "Cargo.toml").write_text("not [valid toml")
-
-    applied = _sweep(
-        repo, base, "--cap-bytes", str(64 * 1024 * 1024), "--target-max-age", "0d", "--apply"
-    )
-
-    assert applied.returncode == 0, applied.stderr
-    assert "reason=build-dir-unverifiable" in applied.stdout, applied.stdout
-    assert hash_dir.exists(), "a blind sweep is the one mistake this lane cannot undo"
-
-
-# -- a live workspace's resolved build_directory is protected ------------------
-
-
-def test_live_workspace_build_dir_is_protected(repo: Path, base: Path, tmp_path: Path):
-    hash_dir = _plant_hash(base, "live")
-    _make_live(repo)
-    crates = repo / "crates" / "fake"
-    crates.mkdir(parents=True)
-    (crates / "Cargo.toml").write_text("[package]\nname = 'fake'\nversion = '0.1.0'\n")
-    # A cargo stub whose metadata answers the planted hash dir, so the sweep's
-    # live-workspace resolution is deterministic without cargo 1.91 semantics.
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    cargo = fake_bin / "cargo"
-    cargo.write_text(f"#!/bin/sh\nprintf '{{\"build_directory\":\"{hash_dir}\"}}\\n'\n")
-    cargo.chmod(cargo.stat().st_mode | 0o111)
-
+def test_missing_binary_skips_the_build_base_without_error(repo: Path, base: Path):
+    """A partial deploy (no fno-agents resolvable) skips the lane and still
+    exits 0: the in-checkout half is untouched. The system PATH is dropped so
+    a developer's ambient fno-agents cannot answer either."""
     applied = _sweep(
         repo,
         base,
-        "--cap-bytes",
-        str(64 * 1024 * 1024),
-        "--target-max-age",
-        "0d",
         "--apply",
-        env_extra={"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        env_extra={
+            "FNO_AGENTS_BIN": "/nonexistent/fno-agents",
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        },
     )
-
     assert applied.returncode == 0, applied.stderr
-    assert "reason=live-workspace-build-dir" in applied.stdout, applied.stdout
-    assert hash_dir.exists(), "a live workspace keeps its build dir"
+    assert "cargo-target build-base skipped reason=fno-agents-missing" in applied.stdout
 
 
 # -- a legacy offload link outside both bases is never followed with rm --------

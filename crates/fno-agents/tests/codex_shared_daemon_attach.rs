@@ -213,7 +213,14 @@ async fn a_missing_control_socket_fails_the_same_way_for_both_callers() {
 async fn a_driver_thread_is_registered_on_the_shared_daemon() {
     let _guard = codex_home_guard();
     let Some(socket) = live_socket() else { return };
-    let driver = match CodexThread::start(std::env::temp_dir(), None, false, None).await {
+    let driver = match CodexThread::start(
+        std::env::temp_dir(),
+        None,
+        &fno_agents::codex_posture::CodexPosture::bounded(),
+        None,
+    )
+    .await
+    {
         Ok(driver) => driver,
         Err(error) => {
             eprintln!("skip: could not start a thread on the shared daemon: {error}");

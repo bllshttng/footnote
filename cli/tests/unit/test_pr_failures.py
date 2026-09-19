@@ -11,8 +11,25 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from fno.pr import _failures
 from fno.pr._proc import Result
+
+
+@pytest.fixture(autouse=True)
+def _stub_rust_verdict_reader(monkeypatch):
+    """`first_error` is a transport; the verdict logic lives in fno-agents
+    (`status-failure-cause`). Default every test to a canned answer so no
+    test depends on a built binary; the tests below that pin the transport
+    or the cause content override this stub."""
+    import fno.rust_binary as rust_binary
+
+    monkeypatch.setattr(
+        rust_binary,
+        "verb_call",
+        lambda verb, payload, **kw: {"cause": "canned cause from the stub", "source": "error_line"},
+    )
 
 
 def _ts(line: str) -> str:
@@ -41,56 +58,38 @@ def test_failing_step_tolerates_timestamp_prefixes_and_is_none_when_absent() -> 
 # --- first_error -------------------------------------------------------------
 
 
-def _pytest_red_log() -> str:
-    """The PR 1069 shape: the error sits INSIDE the step's group, before the
-    step-failed line (the runner prints that line only after the child dies)."""
-    return "\n".join(
-        [
-            "::group::Pytest (unit + integration)",
-            _ts("collected 1200 items"),
-            _ts("FAILED cli/tests/unit/test_x.py::test_y - assert 1 == 2"),
-            _ts("E       assert 1 == 2"),
-            "::endgroup::",
-            _ts("smoke: fail   30s  Pytest (unit + integration)"),
-            _ts("smoke: step failed, stopping (fail-fast): Pytest (unit + integration)"),
-            _ts("##[error]Process completed with exit code 1."),
-        ]
-    ) + "\n"
+def test_first_error_is_a_transport_to_the_rust_verdict_reader(monkeypatch) -> None:
+    """The parser moved to fno-agents (one owner for the verdict
+    logic, at most 30 added Python lines); this module carries the payload
+    and hands back the cause."""
+    import fno.rust_binary as rust_binary
+
+    seen: dict = {}
+
+    def fake(verb, payload, **kw):
+        seen.update({"verb": verb, **payload})
+        return {"cause": "test t panicked at tests/x.rs:535: boom", "source": "cargo"}
+
+    monkeypatch.setattr(rust_binary, "verb_call", fake)
+    err = _failures.first_error("raw log", "step name", window=[{"conclusion": "failure"}])
+    assert err == "test t panicked at tests/x.rs:535: boom"
+    assert seen["verb"] == "authorized-merge"
+    assert seen["op"] == "status-failure-cause"
+    assert seen["log"] == "raw log"
+    assert seen["step"] == "step name"
+    assert seen["window"] == [{"conclusion": "failure"}]
 
 
-def test_first_error_picks_the_earliest_error_line_in_the_step_block() -> None:
-    log = _pytest_red_log()
-    err = _failures.first_error(log, "Pytest (unit + integration)")
-    assert err is not None and "FAILED" in err and "test_x.py" in err
+def test_first_error_degrades_loudly_when_the_owner_is_unreachable(monkeypatch) -> None:
+    import fno.rust_binary as rust_binary
 
+    def boom(verb, payload, **kw):
+        raise rust_binary.VerbUnavailable("the fno-agents binary was not found")
 
-def test_first_error_surfaces_the_ruff_code_line() -> None:
-    """The PR 1059 shape: pytest already passed; the lint step failed with E402."""
-    log = "\n".join(
-        [
-            "::group::ruff + mypy (both repo-wide)",
-            _ts("cli/src/fno/pr/reconcile_findings.py:52:1: E402 module level import not at top of file"),
-            _ts("Found 1 error."),
-            "::endgroup::",
-            _ts("smoke: fail   12s  ruff + mypy (both repo-wide)"),
-            _ts("smoke: step failed, stopping (fail-fast): ruff + mypy (both repo-wide)"),
-        ]
-    ) + "\n"
-    err = _failures.first_error(log, "ruff + mypy (both repo-wide)")
-    assert err is not None and "E402" in err and "reconcile_findings.py" in err
-
-
-def test_first_error_falls_back_to_the_block_tail_then_none() -> None:
-    body = "\n".join(
-        [
-            "=== Weird step ===",
-            "no recognizable error words",
-            "exited 127",
-            "smoke: step failed, stopping (fail-fast): Weird step",
-        ]
+    monkeypatch.setattr(rust_binary, "verb_call", boom)
+    assert _failures.first_error("log", "step") == (
+        "failure cause unreadable: the fno-agents binary was not found"
     )
-    assert _failures.first_error(body, "Weird step") == "exited 127"
-    assert _failures.first_error("smoke: step failed, stopping (fail-fast): X\n", "X") is None
 
 
 # --- unreached steps ---------------------------------------------------------
@@ -196,7 +195,14 @@ _RED_LOG = "\n".join(
 ) + "\n"
 
 
-def test_collect_failures_names_step_error_and_unreached() -> None:
+def test_collect_failures_names_step_error_and_unreached(monkeypatch) -> None:
+    import fno.rust_binary as rust_binary
+
+    monkeypatch.setattr(
+        rust_binary,
+        "verb_call",
+        lambda verb, payload, **kw: {"cause": "FAILED t.py::test_a - assert 1 == 2"},
+    )
     steps = [
         {"name": "Smoke shard: pytest", "status": "completed", "conclusion": "failure"},
         {"name": "Post Checkout", "status": "completed", "conclusion": "success"},
@@ -308,9 +314,16 @@ def test_canonical_smoke_red_path_fetches_no_job_object() -> None:
     assert calls and all(c.endswith("/logs") for c in calls), calls
 
 
-def test_plain_multi_step_job_reads_step_and_unreached_from_steps() -> None:
+def test_plain_multi_step_job_reads_step_and_unreached_from_steps(monkeypatch) -> None:
     """A log with no runner markers (a plain Actions job) falls back to the
     job object: the failed step's name and the steps after it."""
+    import fno.rust_binary as rust_binary
+
+    monkeypatch.setattr(
+        rust_binary,
+        "verb_call",
+        lambda verb, payload, **kw: {"cause": "Traceback (most recent call last)"},
+    )
     plain_log = (
         "::group::cargo test --all-targets\n"
         "collected\n"

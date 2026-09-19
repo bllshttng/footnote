@@ -307,9 +307,11 @@ cat > "$PLAN_SEMANTIC" <<'HEREDOC'
 status: ready
 created: 2026-07-25
 project: fno
+node: x-a11b003
 consolidation:
   outcome: proceed_alone
   proceed_alone_against: []
+  decisions_acknowledged: []
 surface:
   question: "Does the semantic execution contract validate?"
   sweep: "bash tests/test-validate-plan.sh"
@@ -342,7 +344,24 @@ tasks:
     acceptance: [AC7]
 ```
 HEREDOC
-OUTPUT=$(bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1)
+# A keyed plan activates the stage-law gate, so AC7a runs it against a stub
+# that lists zero laws; the fixture must keep producing zero warnings.
+SEMLAWBIN="$TMPDIR_BASE/semlawbin"
+mkdir -p "$SEMLAWBIN"
+cat > "$SEMLAWBIN/fno-agents" <<'STUB'
+#!/bin/bash
+if [[ "${1:-}" == "law-match" ]]; then
+    printf '%s' '{"ok":true,"stage":"blueprint","hook_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"## Law governing blueprint\n\nThese live operator rulings govern the blueprint you are starting.\n"}}}'
+    exit 0
+fi
+if [[ "${1:-}" == "surface-check" ]]; then
+    # A clean surface receipt: zero findings, nothing on stdout.
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$SEMLAWBIN/fno-agents"
+OUTPUT=$(FNO_AGENTS_BIN="$SEMLAWBIN/fno-agents" bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1)
 if ! grep -q "WARN:" <<< "$OUTPUT"; then
     pass "AC7a: Semantic plan needs no task/wave/critical-path headings"
 else
@@ -958,6 +977,10 @@ mkdir -p "$STUBBIN"
     echo '    echo "no decision carries it"'
     echo '    exit 0'
     echo 'fi'
+    echo 'if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then'
+    echo '    echo 30'
+    echo '    exit 0'
+    echo 'fi'
     if [[ -n "$REAL_FNO" ]]; then
         printf 'exec %q "$@"\n' "$REAL_FNO"
     else
@@ -978,7 +1001,7 @@ created: 2099-01-01
 
 | File | Action |
 |------|--------|
-| `cli/src/fno/mail/cli.py` | Grant d-1234abcd |
+| `cli/src/fno/mail/cli.py` | Grant d-1234abcd +5 |
 EOF
 OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_NNPY_E" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 NNPY_OUT=$(nnpy "$OUTPUT")
@@ -1001,7 +1024,7 @@ created: 2099-01-01
 
 | File | Action |
 |------|--------|
-| `cli/src/fno/mail/cli.py` | Grant d-9999abcd |
+| `cli/src/fno/mail/cli.py` | Grant d-9999abcd +5 |
 EOF
 OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_NNPY_F" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 NNPY_OUT=$(nnpy "$OUTPUT")
@@ -1149,6 +1172,185 @@ if ! grep -q "d-a11b0002" <<< "$OUTPUT"; then
     pass "AC11k: acknowledged stage law prints nothing"
 else
     fail "AC11k: expected no d-a11b0002 finding: $OUTPUT"
+fi
+
+# AC12: Plan Node Binding. A filename-encoded node id with no node:/claims:
+# key in the frontmatter binds to nothing and mutes both id-keyed gates, and
+# every gate skip must say NOT CHECKED instead of reading green.
+PLAN_BIND_A="$TMPDIR_BASE/20990101-binding-a-x-dcc5.md"
+cat > "$PLAN_BIND_A" <<'EOF'
+---
+project: fno
+status: ready
+kind: quick-plan
+created: 2099-01-01
+difficulty: low
+join: manual
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
+kill_criteria:
+  - name: iteration_ceiling
+    predicate: iteration > 15
+    reason: "too many"
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `crates/fno-agents/src/mail.rs` | Modify |
+EOF
+OUTPUT=$(bash "$VALIDATE" "$PLAN_BIND_A" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "the filename names x-dcc5 but no node:/claims: key does" <<< "$OUTPUT"; then
+    pass "AC12a: filename id with no frontmatter key errors naming the id"
+else
+    fail "AC12a: expected the binding ERROR: $OUTPUT"
+fi
+
+# AC12b: the same plan carrying the key is clean of binding findings and of
+# the two NOT CHECKED warnings.
+PLAN_BIND_B="$TMPDIR_BASE/20990101-binding-b-x-dcc5.md"
+sed 's/^join: manual$/join: manual\nnode: x-dcc5\ndecisions_acknowledged: []/' "$PLAN_BIND_A" > "$PLAN_BIND_B"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_BIND_B" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if ! grep -q "filename names x-dcc5" <<< "$OUTPUT" \
+    && ! grep -q "no node:/claims: id in frontmatter" <<< "$OUTPUT"; then
+    pass "AC12b: keyed plan prints no binding error and no NOT CHECKED warning"
+else
+    fail "AC12b: expected a clean binding section: $OUTPUT"
+fi
+
+# AC12c: an id-less filename with no key stays legal but warns NOT CHECKED
+# from both id-keyed gates.
+PLAN_BIND_C="$TMPDIR_BASE/20990101-binding-c.md"
+sed 's/binding-a-x-dcc5\.md/binding-c.md/' "$PLAN_BIND_A" > "$PLAN_BIND_C"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_BIND_C" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "decisions_acknowledged check NOT CHECKED" <<< "$OUTPUT" \
+    && grep -q "stage-law check NOT CHECKED" <<< "$OUTPUT" \
+    && ! grep -q "filename names" <<< "$OUTPUT"; then
+    pass "AC12c: key-less id-less plan warns NOT CHECKED from both gates"
+else
+    fail "AC12c: expected both NOT CHECKED warnings and no binding finding: $OUTPUT"
+fi
+
+# AC12d: a pre-gate plan warns with its created date instead of erroring.
+PLAN_BIND_D="$TMPDIR_BASE/20990101-binding-d-x-dcc5.md"
+sed 's/binding-a-x-dcc5\.md/binding-d-x-dcc5.md/; s/^created: 2099-01-01$/created: 2020-01-01/' "$PLAN_BIND_A" > "$PLAN_BIND_D"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_BIND_D" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "the filename names x-dcc5 but no node:/claims: key does (created 2020-01-01, before the" <<< "$OUTPUT" \
+    && ! grep -q "ERROR.*filename names" <<< "$OUTPUT"; then
+    pass "AC12d: pre-gate plan warns with its created date"
+else
+    fail "AC12d: expected the pre-gate WARN: $OUTPUT"
+fi
+
+# AC12f: a Grant row declaring over the budget errors naming the count, the
+# budget and the config key.
+PLAN_BIND_F="$TMPDIR_BASE/20990101-binding-f.md"
+cat > "$PLAN_BIND_F" <<'EOF'
+---
+project: fno
+status: ready
+kind: quick-plan
+created: 2099-01-01
+difficulty: low
+join: manual
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
+kill_criteria:
+  - name: iteration_ceiling
+    predicate: iteration > 15
+    reason: "too many"
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/mail/cli.py` | Grant d-1234abcd +101 |
+EOF
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_BIND_F" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "declare +101 added cli/src/fno lines against a budget of 30 (config blueprint.python_repair_added_lines)" <<< "$OUTPUT"; then
+    pass "AC12f: over-budget Grant errors naming count, budget and key"
+else
+    fail "AC12f: expected the budget ERROR: $OUTPUT"
+fi
+
+# AC12g: a Grant row with no +N errors naming the missing size.
+PLAN_BIND_G="$TMPDIR_BASE/20990101-binding-g.md"
+sed 's/Grant d-1234abcd +101/Grant d-1234abcd/' "$PLAN_BIND_F" > "$PLAN_BIND_G"
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_BIND_G" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "with no declared size - write the row as Grant d-1234abcd +N" <<< "$OUTPUT"; then
+    pass "AC12g: unsized Grant errors naming the +N remedy"
+else
+    fail "AC12g: expected the missing-size ERROR: $OUTPUT"
+fi
+
+# AC12h: Grant rows are summed - one plan is one PR and the ceiling is the PR's.
+PLAN_BIND_H="$TMPDIR_BASE/20990101-binding-h.md"
+cat > "$PLAN_BIND_H" <<'EOF'
+---
+project: fno
+status: ready
+kind: quick-plan
+created: 2099-01-01
+difficulty: low
+join: manual
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
+kill_criteria:
+  - name: iteration_ceiling
+    predicate: iteration > 15
+    reason: "too many"
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/mail/cli.py` | Grant d-1234abcd +20 |
+| `cli/src/fno/mail/send.py` | Grant d-1234abcd +20 |
+EOF
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_BIND_H" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "declare +40 added cli/src/fno lines against a budget of 30" <<< "$OUTPUT"; then
+    pass "AC12h: Grant rows sum against the budget"
+else
+    fail "AC12h: expected the summed budget ERROR: $OUTPUT"
+fi
+
+# AC12i: a missing config key falls back to 30, so the gate still bites.
+FAILBIN="$TMPDIR_BASE/failbin"
+mkdir -p "$FAILBIN"
+{
+    echo '#!/bin/bash'
+    echo 'if [[ "${1:-} ${2:-}" == "backlog decisions" && "${3:-}" == "d-1234abcd" ]]; then'
+    echo '    echo "LIVE  LAW  d-1234abcd  2026-09-12T00:00:00Z  new-code-language  stub"'
+    echo '    exit 0'
+    echo 'fi'
+    echo 'exit 1'
+} > "$FAILBIN/fno"
+chmod +x "$FAILBIN/fno"
+PLAN_BIND_I="$TMPDIR_BASE/20990101-binding-i.md"
+sed 's/Grant d-1234abcd +101/Grant d-1234abcd +31/' "$PLAN_BIND_F" > "$PLAN_BIND_I"
+OUTPUT=$(PATH="$FAILBIN:$PATH" bash "$VALIDATE" "$PLAN_BIND_I" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "against a budget of 30" <<< "$OUTPUT"; then
+    pass "AC12i: unreadable config falls back to the 30-line budget"
+else
+    fail "AC12i: expected the fallback-budget ERROR: $OUTPUT"
+fi
+
+# AC12j: a malformed frontmatter id mutes the id-keyed gates exactly like an
+# absent one, so the binding check warns instead of printing a clean OK.
+PLAN_BIND_J="$TMPDIR_BASE/20990101-binding-j-x-dcc5.md"
+sed 's/^join: manual$/join: manual\nclaims: [one, two]/' "$PLAN_BIND_A" > "$PLAN_BIND_J"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_BIND_J" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "the node:/claims: id in frontmatter is malformed" <<< "$OUTPUT" \
+    && grep -q "decisions_acknowledged check NOT CHECKED" <<< "$OUTPUT"; then
+    pass "AC12j: malformed id warns from the binding check and the decisions gate"
+else
+    fail "AC12j: expected the malformed-id warnings: $OUTPUT"
 fi
 
 # --- Summary ---

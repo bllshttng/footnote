@@ -525,6 +525,72 @@ def test_closure_trailer_bare_invocation_refusal_is_loud(monkeypatch):
     assert "pass the node explicitly" in result.output
 
 
+def test_closure_trailer_unresolvable_node_stays_silent(monkeypatch, tmp_path):
+    """AC3-HP: an unresolvable NODE prints nothing and exits 0 - the
+    documented contract, unchanged. Unresolvable here is the not-well-formed
+    case: explicit mode renders any well-formed id without a graph-membership
+    check (unknown ids red the CI gate at open, by design)."""
+    from fno import paths
+
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps({"entries": [{"id": "x-1111", "status": "ready"}]}))
+    monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
+
+    result = runner.invoke(app, ["do", "pr", "closure-trailer", "not-an-id"])
+
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
+def test_closure_trailer_dead_reader_exits_4_and_names_the_read(monkeypatch):
+    """AC3-ERR: a read that raises is not an unresolvable node. This used to
+    be a bare `except Exception: return` - print nothing, exit 0 - so a dead
+    keeper answered exactly like a missing node and three PRs sat red on the
+    closure gate with no named cause."""
+    import fno.graph.api as api_mod
+
+    def _dead(path):
+        raise RuntimeError("keeper exited immediately with code -9")
+
+    monkeypatch.setattr(api_mod, "wire_rows", _dead)
+
+    result = runner.invoke(app, ["do", "pr", "closure-trailer", "x-1111"])
+
+    assert result.exit_code == 4
+    assert "graph read failed" in result.output
+    assert "keeper exited immediately with code -9" in result.output
+    assert "Backlog-Closure" not in result.output
+
+
+def test_closure_trailer_bare_mode_dead_reader_exits_4_not_1(monkeypatch):
+    """AC3-BARE: branch-resolution refusals keep exit 1; a failed graph read
+    exits 4 with the reader named. The two refusals stay separable."""
+    import fno.graph.api as api_mod
+
+    def _dead(path):
+        raise RuntimeError("store unreadable")
+
+    monkeypatch.setattr(api_mod, "wire_rows", _dead)
+
+    result = runner.invoke(app, ["do", "pr", "closure-trailer"])
+
+    assert result.exit_code == 4
+    assert "store unreadable" in result.output
+
+
+def test_closure_trailer_external_backend_explicit_node_stays_silent(monkeypatch):
+    """AC3-EDGE: an external tracker with an explicit node prints nothing and
+    exits 0 - graph.json is not the delivery record there, unchanged."""
+    import fno.tracker as tracker_mod
+
+    monkeypatch.setattr(tracker_mod, "active_backend_name", lambda: "linear")
+
+    result = runner.invoke(app, ["do", "pr", "closure-trailer", "x-1111"])
+
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
 def test_global_receipt_path_uses_pinned_accessor(monkeypatch, tmp_path):
     from fno import paths
 

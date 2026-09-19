@@ -16,6 +16,47 @@
       }
     },
     {
+      "name": "exit-recorded verdict behind a fresher event, reconcile stamp newer",
+      "row": {
+        "status": "orphaned",
+        "basis": "exit-recorded",
+        "exited_at": "2026-08-21T00:10:00Z",
+        "last_event_at": "2026-08-21T00:59:30Z",
+        "last_reconciled_at": "2026-08-21T01:00:00Z"
+      },
+      "expected": {
+        "status": "unknown",
+        "basis": "stale-verdict-fresher-event"
+      }
+    },
+    {
+      "name": "exit-recorded verdict newer than the last event stands",
+      "row": {
+        "status": "orphaned",
+        "basis": "exit-recorded",
+        "exited_at": "2026-08-21T01:00:00Z",
+        "last_event_at": "2026-08-21T00:59:30Z",
+        "last_reconciled_at": "2026-08-21T01:00:30Z"
+      },
+      "expected": {
+        "status": "orphaned",
+        "basis": "exit-recorded"
+      }
+    },
+    {
+      "name": "exit-recorded with no stamp falls back to the reconcile stamp",
+      "row": {
+        "status": "orphaned",
+        "basis": "exit-recorded",
+        "last_event_at": "2026-08-21T00:59:30Z",
+        "last_reconciled_at": "2026-08-21T00:10:00Z"
+      },
+      "expected": {
+        "status": "unknown",
+        "basis": "stale-verdict-fresher-event"
+      }
+    },
+    {
       "name": "stored message newer than transcript",
       "row": {
         "status": "live",

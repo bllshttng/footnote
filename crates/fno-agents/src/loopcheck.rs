@@ -31,11 +31,6 @@ use serde_json::Value;
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-// Production code spawns only through bounded_spawn; bare Command remains in
-// the git-fixtured test modules below.
-#[cfg(test)]
-use std::process::Command;
-
 // ── public types ──────────────────────────────────────────────────────────────
 
 /// Why the loop terminated. Serialized as the exact string enum the spec names.
@@ -90,6 +85,12 @@ pub enum TerminationReason {
     NoWork,
     Budget,
     NoProgress,
+    /// A node held on an open operator question: the first fire blocked once
+    /// naming the question and the decide verb; this fire is the second on
+    /// the same still-open question, so the loop terminates instead of
+    /// re-asking. The journal (not the fingerprint) carries the held state.
+    /// Terminal, NOT a ship reason: the operator answers, a later run ships.
+    HeldOnQuestion,
     Interrupted,
     Aborted,
 }
@@ -1085,12 +1086,13 @@ fn detect_intent_full(transcript_path: &Path) -> Intent {
 /// PR state vocabulary (fu-4faa3d). Parsed once at the read_pr_info boundary.
 /// `as_str()` reproduces the exact legacy strings so the fingerprint (which
 /// persists across fires in events.jsonl) stays byte-identical.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum PrState {
     Open,
     Merged,
     Closed,
     /// No PR, or an unrecognized gh state string (fail-closed, AC5-EDGE).
+    #[default]
     None,
 }
 
@@ -1120,7 +1122,7 @@ impl PrState {
 
 /// CI conclusion vocabulary (fu-4faa3d). `render()` reproduces the exact
 /// legacy strings ("FAILURE:{name}" carries the failing check name).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 enum CiConclusion {
     Success,
     /// Failing check name when one was identified.
@@ -1129,6 +1131,7 @@ enum CiConclusion {
     /// CI read skipped via ci.declared_none.
     Skipped,
     /// No checks found (fail-closed unless declared_none).
+    #[default]
     None,
 }
 
@@ -1149,7 +1152,7 @@ impl CiConclusion {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct PrInfo {
     state: PrState,
     number: i64,
@@ -1171,6 +1174,15 @@ struct PrInfo {
     /// cannot merge past main-red until the branch is rebased, and the terminal
     /// would drop the node from retry circulation while it is un-mergeable.
     mergeable: String,
+    /// Live merge-slot holder for this PR's base ref when ANOTHER PR holds it.
+    /// A fail-open read of the local claims store - no GitHub spend.
+    /// None on no hold, a self-held slot, or an unreadable store.
+    merge_slot_holder: Option<u64>,
+    /// GitHub `mergeStateStatus` == BEHIND (REST `mergeable_state` == behind):
+    /// the base moved past this PR's head, so a rebase is work to do now and a
+    /// merge-slot hold must not idle: the refusal stays for a hold the
+    /// session can act on. Absent on either payload reads as false.
+    base_behind: bool,
     /// Newest review/comment/inline-comment activity (ISO8601 or "none");
     /// folded into the fingerprint's 4th component on done() fires.
     latest_review_ts: String,
@@ -1523,8 +1535,6 @@ fn classify_payload_for_floor(
 // rather than growing here. The interdiff-carry arm (law d-608344c1)
 // rode the same move.
 
-#[cfg(test)]
-pub(crate) use crate::review_freshness::raw_diff_line_path;
 pub use crate::review_freshness::{
     freshness_rank, review_freshness, CodeDiffIdentity, Freshness, FreshnessFacts,
     FreshnessResolver,
@@ -1538,13 +1548,17 @@ mod attestation_journal;
 mod authorship;
 mod awaiting_merge;
 mod coverage_receipt;
+mod holds;
 mod king_decide;
+mod range_tiling;
+mod session_binding;
+pub use range_tiling::{compute_range_tiling, RangeTiling};
 mod review_count;
 mod review_state;
 use attestation_journal::missing_global_attestations;
 pub use attestation_journal::unattested_reviewers_scan_text;
 mod watch_lease;
-use async_wait::{arm_watch_hint, async_wait_class, conflicting_reason};
+use async_wait::{arm_watch_hint, async_wait_class, conflicting_reason, merge_slot_reason};
 use authorship::carry_author_session_forward;
 pub use authorship::AttestationOrigin;
 use authorship::{classify_attestation_origin, default_attestation_origin};
@@ -1725,7 +1739,8 @@ fn stderr_tail(bytes: &[u8]) -> String {
     }
 }
 
-const PR_VIEW_FIELDS: &str = "state,number,headRefName,headRefOid,mergeable,baseRefName,author";
+const PR_VIEW_FIELDS: &str =
+    "state,number,headRefName,headRefOid,mergeable,mergeStateStatus,baseRefName,author";
 
 fn pr_head_oid(pr_json: &Value) -> Option<String> {
     pr_json
@@ -1964,104 +1979,6 @@ pub struct UnattestedReviewer {
     failed_at_head: bool,
 }
 
-/// A question THIS session asked, that was closed WITH an answer, and for
-/// which no `operator_decision` event exists on any reachable journal. The
-/// stop gate holds the session until the decision is
-/// recorded, because a ruling that dies with the transcript is the failure
-/// the decision record exists to prevent.
-pub(crate) struct UnrecordedDecision {
-    pub(crate) question_id: String,
-    pub(crate) question: String,
-}
-
-/// Fold the question/decision family across a UNION of journals.
-///
-/// A question can be asked and closed in one journal while the decision lands
-/// in another (the operator verbs write to the canonical root's journal; a
-/// worktree stop gate reads its own cwd's), so membership is only decidable
-/// after every journal is folded - checking per-file would hold a session
-/// whose record sits one path away.
-///
-/// An unreadable or absent journal contributes nothing (fail open): this gate
-/// scans for an OBLIGATION contracted elsewhere, and a missing journal means
-/// no obligation is visible, not that one was breached. The substring
-/// prefilter mirrors the Python reader: the journals are shared, append-only,
-/// and never rotated, so parsing every line costs more than the scan.
-fn scan_unrecorded_decisions(
-    journals: &[std::path::PathBuf],
-    session_id: &str,
-) -> Vec<UnrecordedDecision> {
-    let mut asked: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut closed_with_answer: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
-    let mut recorded: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for path in journals {
-        let Ok(content) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        for line in content.lines() {
-            if !(line.contains("operator_question") || line.contains("operator_decision")) {
-                continue;
-            }
-            let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
-                continue;
-            };
-            let kind = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            let data = val
-                .get("data")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({}));
-            match kind {
-                "operator_question" => {
-                    if data.get("session_id").and_then(|v| v.as_str()) == Some(session_id) {
-                        if let Some(qid) = data.get("question_id").and_then(|v| v.as_str()) {
-                            asked.insert(
-                                qid.to_string(),
-                                data.get("question")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .chars()
-                                    .take(80)
-                                    .collect(),
-                            );
-                        }
-                    }
-                }
-                "operator_question_closed" => {
-                    let answered = data
-                        .get("answer")
-                        .and_then(|v| v.as_str())
-                        .map(|a| !a.trim().is_empty())
-                        .unwrap_or(false);
-                    if answered {
-                        if let Some(qid) = data.get("question_id").and_then(|v| v.as_str()) {
-                            closed_with_answer.insert(qid.to_string());
-                        }
-                    }
-                }
-                "operator_decision" => {
-                    if let Some(qid) = data.get("question_id").and_then(|v| v.as_str()) {
-                        recorded.insert(qid.to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let mut out: Vec<UnrecordedDecision> = asked
-        .into_iter()
-        .filter(|(qid, _)| closed_with_answer.contains(qid) && !recorded.contains(qid))
-        .map(|(question_id, question)| UnrecordedDecision {
-            question_id,
-            question,
-        })
-        .collect();
-    out.sort_by(|a, b| a.question_id.cmp(&b.question_id));
-    out
-}
-
 /// The `config.review.reviewers` entries NOT satisfied by a head-pinned
 /// `review_attestation` event. A
 /// reviewer is satisfied when events.jsonl carries a line with
@@ -2102,8 +2019,10 @@ pub fn unattested_reviewers_scan(
     head_sha: &str,
     rounds_exhausted: bool,
 ) -> (Vec<UnattestedReviewer>, usize) {
-    // no evidence file -> gate unmet (fail closed)
-    let Ok(content) = std::fs::read_to_string(events_path) else {
+    // Read across rotation generations: a round that rotated out still counts.
+    // An empty or unreadable store leaves the gate unmet (fail closed).
+    let content = crate::events_store::review_text(events_path);
+    if content.is_empty() {
         let unsatisfied = reviewers
             .iter()
             .map(|r| UnattestedReviewer {
@@ -2113,7 +2032,7 @@ pub fn unattested_reviewers_scan(
             })
             .collect();
         return (unsatisfied, 0);
-    };
+    }
     unattested_reviewers_scan_text(
         &content,
         reviewers,
@@ -2144,9 +2063,7 @@ struct OpenFinding {
 /// failure yields no findings (the gate is only ADDED by evidence, never
 /// invented from an unreadable file).
 fn open_review_findings(events_path: &Path, node: &str) -> (Vec<OpenFinding>, usize) {
-    let Ok(content) = std::fs::read_to_string(events_path) else {
-        return (Vec::new(), 0);
-    };
+    let content = crate::events_store::review_text(events_path);
     // Preserve first-seen order via a Vec of (id, first_line); a later duplicate
     // id (shouldn't happen - ids are minted) just refreshes the first_line.
     let mut findings: Vec<(String, String)> = Vec::new();
@@ -2227,6 +2144,18 @@ fn build_findings_block_reason(open: &[OpenFinding], malformed: usize) -> String
     )
 }
 
+/// A `Covered(0)` that rests on a commit the object store could not measure
+/// is not a known zero - it is an unread. Demote it to `Unknown` so the row
+/// publishes pending and the gate recomputes it on its next read (the
+/// recompute fetches the commit through the resolver). A `Covered(n > 0)` is
+/// real reviews counted and is never demoted, which also keeps the
+/// spent-budget discharge (always `n >= 1`) intact.
+fn demote_unmeasured_coverage(coverage: &mut Coverage, resolver: &FreshnessResolver) {
+    if matches!(coverage, Coverage::Covered(0)) && !resolver.unmeasured().is_empty() {
+        *coverage = Coverage::Unknown;
+    }
+}
+
 /// Run done() reads. Returns Ok(PrInfo) or Err((read_name, stderr_tail)) on gh failure.
 #[allow(clippy::too_many_arguments)]
 fn read_pr_info(
@@ -2288,31 +2217,11 @@ fn read_pr_info(
         None => read_pr_view(gh_bin, cwd, pr_selector)?,
     }) else {
         // No PR yet: world-state, not an error. done() is simply false, and
-        // the backstop can resolve a stuck no-PR session as NoProgress.
+        // the backstop can resolve a stuck no-PR session as NoProgress. Every
+        // omitted field is PrInfo's no-information default.
         return Ok(PrInfo {
-            range_tiling: RangeTiling::default(),
-            state: PrState::None,
-            number: 0,
-            head_oid: String::new(),
-            ci_conclusion: CiConclusion::None,
-            failing_checks: Vec::new(),
-            ci_has_pending: false,
             mergeable: "UNKNOWN".to_string(),
-            latest_review_ts: "none".to_string(),
-            reviewed: false,
-            missing_bots: Vec::new(),
-            bot_nudges: Vec::new(),
-            stale_bots: Vec::new(),
-            unaddressed_findings: Vec::new(),
-            review_skipped: false,
-            unattested_reviewers: Vec::new(),
-            malformed_attestations: 0,
-            posture: None,
-            coverage: CoverageReport {
-                github_approval_satisfies: false,
-                coverage: Coverage::Covered(0),
-                verdicts: Vec::new(),
-            },
+            ..PrInfo::default()
         });
     };
 
@@ -2350,6 +2259,16 @@ fn read_pr_info(
         .and_then(|v| v.as_str())
         .unwrap_or("UNKNOWN")
         .to_string();
+    // BEHIND on either payload spelling (GraphQL `mergeStateStatus`, REST
+    // `mergeable_state`): the base moved past this head, so a rebase is work
+    // to do now. Absent on both reads as false (fail-open to idlable).
+    let base_behind = ["mergeStateStatus", "mergeable_state"].iter().any(|k| {
+        pr_json
+            .get(*k)
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("behind"))
+            .unwrap_or(false)
+    });
 
     // One freshness resolver for every reviewer on this PR.
     // Both producers and both presence scans read it, so there is one rule
@@ -2361,6 +2280,11 @@ fn read_pr_info(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let resolver = FreshnessResolver::new(git_bin, cwd, base_ref, head_sha, carry_interdiff_lines);
+    // Fetch a head the store cannot read before anything judges it: a
+    // server-side rebase publishes the new head on GitHub before the next
+    // local fetch, and an absent head reads `None`, then stale, then a stored
+    // uncovered row that never recomputes. Memoized, so at most one fetch.
+    resolver.ensure_local(head_sha);
     let freshness = |sha: &str| resolver.freshness(sha);
 
     // The range-tiling answer for this PR's attestation chain, computed ONCE
@@ -2368,7 +2292,7 @@ fn read_pr_info(
     // consumer below (the classify_coverage local axis, the emitted
     // review_coverage row). Fail-closed inside: any git failure answers
     // not-tiled and today's single-attestation rule stands alone.
-    // The local attestation axis reads the project log PLUS the global
+    // The local attestation axis reads every project-log rotation PLUS the global
     // journal's slug-scoped attestations: a review fork emits into its own
     // checkout's project log and mirrors to the global journal, and when the
     // fork's checkout dies the mirror alone survives (measured on PR 2137:
@@ -2376,7 +2300,7 @@ fn read_pr_info(
     // log). Mirrors of rows the project log still holds are deduped, so a
     // round is never counted twice. An unreadable journal degrades to
     // project-only, today's behavior.
-    let project_text = std::fs::read_to_string(events_path).unwrap_or_default();
+    let project_text = crate::events_store::review_text(events_path);
     let global_text =
         attestation_journal::tail_text(global_events_path, attestation_journal::GLOBAL_TAIL_BYTES);
     let extra_global = missing_global_attestations(&global_text, &project_text, repo_slug);
@@ -2393,6 +2317,10 @@ fn read_pr_info(
         &head_branch,
         head_sha,
         max_rounds,
+        // The same resolver the per-verdict axis built above, same base_ref
+        // and head_sha: the carry costs no git call the per-verdict axis was
+        // not already making.
+        Some(&resolver),
     );
 
     // (E): a MERGED PR is terminal. A PR merged out-of-band (GitHub
@@ -2407,29 +2335,14 @@ fn read_pr_info(
     // unshipped work.
     if state == PrState::Merged {
         return Ok(PrInfo {
-            range_tiling: RangeTiling::default(),
             state,
             number,
             head_oid,
             ci_conclusion: CiConclusion::Skipped,
-            failing_checks: Vec::new(),
-            ci_has_pending: false,
             mergeable,
-            latest_review_ts: "none".to_string(),
             reviewed: true,
-            missing_bots: Vec::new(),
-            bot_nudges: Vec::new(),
-            stale_bots: Vec::new(),
-            unaddressed_findings: Vec::new(),
             review_skipped: true,
-            unattested_reviewers: Vec::new(),
-            malformed_attestations: 0,
-            posture: None,
-            coverage: CoverageReport {
-                github_approval_satisfies: false,
-                coverage: Coverage::Covered(0),
-                verdicts: Vec::new(),
-            },
+            ..PrInfo::default()
         });
     }
 
@@ -2540,7 +2453,7 @@ fn read_pr_info(
         // round-budget refresh below re-runs it so every conjunct downstream
         // reads the SAME budget, never a mix.
         let classify_with = |tiling: &RangeTiling| {
-            let coverage = classify_coverage_tiled(
+            let mut coverage = classify_coverage_tiled(
                 &[],
                 &[],
                 &events_text,
@@ -2554,6 +2467,7 @@ fn read_pr_info(
                 pr_author.as_deref(),
                 github_approval_satisfies,
             );
+            demote_unmeasured_coverage(&mut coverage.coverage, &resolver);
             // Locked Decision 1: the pass condition is disposition-complete.
             // Non-terminal blocking findings withhold `reviewed` here exactly as
             // the Python merge gate refuses on them - below the cap only.
@@ -2876,6 +2790,7 @@ fn read_pr_info(
             pr_author.as_deref(),
             github_approval_satisfies,
         );
+        demote_unmeasured_coverage(&mut coverage.coverage, &resolver);
         mark_owed_verdicts(&mut coverage, required_bots);
         let local_recovery = local_recovery_from_refusal(
             &info.reviewer_refused,
@@ -2941,6 +2856,19 @@ fn read_pr_info(
         );
     }
 
+    // The merge-slot hold: a local claims read keyed to this PR's
+    // base ref, so idling on a slot held by another PR costs no GitHub spend.
+    // A slot this PR holds itself is not a hold on THIS session. The read is
+    // gated on the classifier's cheap preconditions (green CI, review gate
+    // satisfied): every consumer of this field sits behind both, so a red or
+    // unreviewed PR pays no `git worktree list` subprocess for a value it
+    // never reads.
+    let merge_slot_holder = if ci_conclusion.is_ok() && reviewed {
+        crate::authorized_merge::merge_slot_holder(cwd, base_ref)
+            .filter(|m| *m != number.unsigned_abs())
+    } else {
+        None
+    };
     Ok(PrInfo {
         range_tiling: tiling,
         state,
@@ -2950,6 +2878,8 @@ fn read_pr_info(
         failing_checks,
         ci_has_pending,
         mergeable,
+        merge_slot_holder,
+        base_behind,
         latest_review_ts,
         reviewed,
         missing_bots,
@@ -5204,6 +5134,13 @@ impl Coverage {
     }
 }
 
+/// A known zero: the same value every no-information site already wrote.
+impl Default for Coverage {
+    fn default() -> Self {
+        Coverage::Covered(0)
+    }
+}
+
 /// Authorship of a local attestation lives in [`authorship`]: the enum, its
 /// classifier, and the manifest fallback all answer one question.
 ///
@@ -5319,7 +5256,7 @@ fn human_approval_counts(v: &ReviewerVerdict, flag: bool) -> bool {
 }
 
 /// The coverage over a PR plus the per-reviewer verdicts that produced it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CoverageReport {
     pub coverage: Coverage,
     pub verdicts: Vec<ReviewerVerdict>,
@@ -5428,62 +5365,12 @@ struct LocalPass {
     reviewer_context: Option<String>,
 }
 
-/// The union-of-ranges coverage answer over a branch's attestations: whether
-/// the `reviewed_base_sha..reviewed_head_sha` ranges on the branch's
-/// attestations, taken as a CHAIN, tile `merge_base(base, head)..head`.
-///
-/// This is what lets a fix-and-re-review loop terminate: every commit that
-/// fixes a finding moves the head, and under a single-attestation freshness
-/// rule every fix voids the only artifact that can clear the gate. A chain
-/// covers the union of what its members read, so round N+1 only has to cover
-/// the delta round N left behind.
-///
-/// Fail-closed everywhere: an unresolvable sha, a range whose endpoints are
-/// not on the branch (rebased-away history), a git invocation that fails, or
-/// any uncovered commit, all produce `tiled: false` with the gap named by
-/// sha - never a silent "covered".
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct RangeTiling {
-    /// Whether the chain's ranges cover every commit in `merge_base..head`.
-    pub tiled: bool,
-    /// Uncovered stretches, each named `parent-of-first-uncovered..last-
-    /// uncovered` by sha. Empty iff tiled.
-    pub gaps: Vec<(String, String)>,
-    /// Range head shas dropped from the chain (unresolvable, or off the
-    /// branch's ancestry), reported by sha so the drop is auditable.
-    pub dropped: Vec<String>,
-    /// `reviewed_head_sha` of every range that participated in the chain.
-    /// A local attestation whose head is in this list counts as Reviewed
-    /// when the whole chain tiles, whatever its single-sha freshness says.
-    pub chain_heads: Vec<String>,
-    /// Review rounds across the whole life of the PR, one per reviewed head
-    /// (see [`rounds_since_last_pass`]). Carried on the chain analysis because it
-    /// reads the same events with the same scoping; computed even on the
-    /// git-failure paths, which answer tiling fail-closed but rounds honestly.
-    pub rounds_used: i64,
-    /// The `config.review.max_rounds` budget `rounds_exhausted` was computed
-    /// against, carried so the row is self-contained: `fno do pr status`
-    /// prints the gate's pair verbatim instead of re-reading config (one
-    /// producer per number; ).
-    pub rounds_max: i64,
-    /// Whether `rounds_used` reaches the resolved `config.review.max_rounds`.
-    /// At the cap the review obligation is satisfied - the merge gate
-    /// discharges every open finding - so this flag OPENS the gate, never
-    /// closes it.
-    pub rounds_exhausted: bool,
-    /// Whether ANY hard non-terminal finding remains, budget aside. The
-    /// standing operator-law waiver consults this below the cap: it may waive
-    /// an uncovered review but never an unresolved CONFIRMED correctness or
-    /// security finding. At the cap the budget discharges it like any other.
-    pub hard_blocker: bool,
-}
-
 /// The branch-scoped `review_attestation` chain, oldest first: branch match
 /// with the legacy exact-head admission, both verdicts, head-pinned lines
 /// only. ONE parse serves every consumer (disposition blockers, tiling
 /// ranges, the answered-fail predicates); a second hand-copy of this loop is
 /// how the gates drift.
-fn in_scope_chain(events_text: &str, head_branch: &str, head_sha: &str) -> Vec<Value> {
+pub(super) fn in_scope_chain(events_text: &str, head_branch: &str, head_sha: &str) -> Vec<Value> {
     let mut chain: Vec<Value> = Vec::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
@@ -5524,27 +5411,6 @@ pub fn disposition_blockers(
 ) -> Vec<DispositionBlocker> {
     let chain = in_scope_chain(events_text, head_branch, head_sha);
     disposition_blockers_on_chain(&chain)
-}
-
-/// Run `git rev-list` and return its commit lines, oldest first only when
-/// `--reverse` is in the args. None on any git failure (fail closed).
-fn git_rev_list(git_bin: &str, cwd: &Path, args: &[&str]) -> Option<Vec<String>> {
-    // Through the bounded runner like every other stop-gate git read: a hung
-    // `rev-list` on a pathological history must read as not-tiled, never
-    // wedge the hook that called it.
-    let mut argv: Vec<&str> = vec!["rev-list"];
-    argv.extend_from_slice(args);
-    let out = git_bounded(git_bin, &argv, cwd)?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    Some(
-        text.lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect(),
-    )
 }
 
 /// The PR's review-round total, on two evidence axes. The operator's ruling
@@ -5661,146 +5527,6 @@ pub fn rounds_since_last_pass(
         counted_heads.insert(oid.to_string());
     }
     declared_rounds.max(counted_heads.len() as i64)
-}
-
-/// Compute the range tiling for one PR's attestation chain.
-///
-/// Mechanics, no LLM, no new data: order the ancestry walk
-/// (`git rev-list --ancestry-path --reverse merge_base..head`), mark every
-/// walk commit covered by some in-scope attestation's range, and read the
-/// gap set off the marking. A merge commit from main into the branch is
-/// covered when a range spans it; it is not special-cased.
-pub fn compute_range_tiling(
-    git_bin: &str,
-    cwd: &Path,
-    base_ref: &str,
-    events_text: &str,
-    head_branch: &str,
-    head_sha: &str,
-    max_rounds: i64,
-) -> RangeTiling {
-    let mut tiling = RangeTiling::default();
-    // Rounds do not depend on the git walk, so they are computed before the
-    // fail-closed early returns: a merge-base failure answers tiling
-    // not-tiled but the round budget honestly. This default is the
-    // events-only answer; each caller that holds review objects refreshes
-    // both axes on top of it (the external arm unconditionally, the
-    // no-external arm behind the same gate the Python merge gate uses).
-    tiling.rounds_used = rounds_since_last_pass(events_text, head_branch, head_sha, None);
-    tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
-    tiling.rounds_max = max_rounds;
-    // The merge base decides where coverage must start. An unresolvable one
-    // answers the whole question fail-closed.
-    let merge_out = git_bounded(git_bin, &["merge-base", head_sha, base_ref], cwd);
-    let merge_base = merge_out
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
-        .filter(|s| !s.is_empty());
-    let Some(merge_base) = merge_base else {
-        return tiling;
-    };
-    let walk_spec = format!("{merge_base}..{head_sha}");
-    let Some(walk) = git_rev_list(git_bin, cwd, &["--ancestry-path", "--reverse", &walk_spec])
-    else {
-        return tiling;
-    };
-    let mut position: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for (i, sha) in walk.iter().enumerate() {
-        position.insert(sha.as_str(), i);
-    }
-
-    // The in-scope attestation ranges for this PR: same scoping rule the pass
-    // scan uses (branch field, with the legacy exact-head admission). Both
-    // verdicts count - a review that found bugs still READ its range, and the
-    // disposition gate (not coverage) is what its findings must satisfy.
-    // Collected through the ONE shared chain helper, not a fourth hand-copy.
-    let mut ranges: Vec<(String, String)> = Vec::new();
-    for val in in_scope_chain(events_text, head_branch, head_sha) {
-        let range_base = val
-            .pointer("/data/reviewed_base_sha")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let range_head = val
-            .pointer("/data/reviewed_head_sha")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if range_base.is_empty() || range_head.is_empty() {
-            continue; // pre-range events carry no tile; they cover nothing here
-        }
-        ranges.push((range_base, range_head));
-    }
-
-    // A valid range's endpoints sit on the branch walk: its head at some
-    // position, and its base either the merge base itself or a walk commit.
-    // Anything else is dropped BY SHA - a rebased-away base, a head that no
-    // longer resolves - so the refusal names what fell out rather than
-    // silently shrinking the chain.
-    let mut valid: Vec<(usize, usize, String)> = Vec::new();
-    for (base, head) in ranges {
-        let head_pos = position.get(head.as_str()).copied();
-        let base_pos = if base == merge_base {
-            Some(usize::MAX) // sentinel: covers the walk from its first commit
-        } else {
-            position.get(base.as_str()).copied()
-        };
-        match (base_pos, head_pos) {
-            (Some(bp), Some(hp)) => {
-                let start = if bp == usize::MAX { 0 } else { bp + 1 };
-                if hp + 1 >= start {
-                    valid.push((start, hp, head));
-                } else {
-                    tiling.dropped.push(head);
-                }
-            }
-            _ => tiling.dropped.push(head),
-        }
-    }
-
-    let mut covered = vec![false; walk.len()];
-    for (start, end, _) in &valid {
-        for i in *start..=*end {
-            if i < covered.len() {
-                covered[i] = true;
-            }
-        }
-    }
-    tiling.tiled = covered.iter().all(|c| *c);
-    tiling.chain_heads = valid
-        .iter()
-        .map(|(_, _, h)| h.clone())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
-
-    // Name each maximal uncovered run `parent-of-first..last` so the remedy
-    // is a range to review, never the head-loops "run the review verb at
-    // HEAD" that produced six rounds on one PR.
-    let mut i = 0usize;
-    while i < covered.len() {
-        if covered[i] {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < covered.len() && !covered[i] {
-            i += 1;
-        }
-        let end = i - 1;
-        let gap_base = if start == 0 {
-            merge_base.clone()
-        } else {
-            walk[start - 1].clone()
-        };
-        tiling.gaps.push((gap_base, walk[end].clone()));
-    }
-    tiling
 }
 
 /// Distinct `(reviewer, attester_session_id)` pairs' LATEST in-scope
@@ -6833,6 +6559,9 @@ fn coverage_event_data_full(
             "gaps": gaps,
             "dropped": t.dropped,
             "chain_heads": t.chain_heads,
+            "carried": t.carried.iter().map(|(head, freshness)| {
+                serde_json::json!({ "head": head, "freshness": freshness })
+            }).collect::<Vec<_>>(),
         });
         // The round budget, same chain, same scoping. Emitted beside the
         // tiling (not inside it) because it is a property of the review
@@ -7073,6 +6802,12 @@ fn make_fingerprint(
     ci_conclusion: &str,
     latest_ts: &str,
 ) -> String {
+    // An absent latest-review time renders "none", the pre-read's form; two shapes reset the streak.
+    let latest_ts = if latest_ts.is_empty() {
+        "none"
+    } else {
+        latest_ts
+    };
     format!("{head_sha}|{pr_state}|{ci_conclusion}|{latest_ts}")
 }
 
@@ -7562,6 +7297,12 @@ pub(crate) struct LoopCheckArgs {
     /// inject a small bound so a sleeping fake wedges for ~1s instead of 30;
     /// any value <= 0 keeps the default. Production never passes it.
     read_timeout_ms: Option<u64>,
+    /// The harness whose session asked (`--harness`), and that session's id
+    /// (`--harness-session`). Both must be present for the session-binding
+    /// gate to run; with either absent the engine answers as it always has,
+    /// so every existing caller keeps its exact behavior.
+    harness: Option<String>,
+    harness_session: Option<String>,
 }
 
 pub(crate) fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
@@ -7581,6 +7322,8 @@ pub(crate) fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
     let mut author_harness_override: Option<String> = None;
     let mut hook_input_stdin = false;
     let mut driver = "target".to_string();
+    let mut harness: Option<String> = None;
+    let mut harness_session: Option<String> = None;
     let mut fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
     // Env-as-default like the two bin overrides, so the real shell shim can be
     // driven end to end against a wedged child at a test bound without the
@@ -7637,6 +7380,10 @@ pub(crate) fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
             driver = val;
         } else if let Some(val) = try_flag_value(arg, "--fno-bin", args, &mut i) {
             fno_bin = val;
+        } else if let Some(val) = try_flag_value(arg, "--harness", args, &mut i) {
+            harness = Some(val);
+        } else if let Some(val) = try_flag_value(arg, "--harness-session", args, &mut i) {
+            harness_session = Some(val);
         } else if arg == "--hook-input-stdin" {
             // Bare boolean flag (no value): try_flag_value would consume the
             // next token as a value, so it is matched directly.
@@ -7677,6 +7424,8 @@ pub(crate) fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
         driver,
         fno_bin,
         read_timeout_ms,
+        harness,
+        harness_session,
     })
 }
 
@@ -7976,12 +7725,19 @@ pub(crate) fn decide_with_payload(
         std::time::Instant::now() + STOPGATE_FIRE_BUDGET,
         reserve_ms,
     );
-    if let Some(message) = crate::loops_pause::pause_message() {
+    if let Some(message) = crate::loops_pause::pause_message(&parsed.cwd) {
         return (0, paused_output(&parsed.driver, &message));
     }
     // The king uses a separate manifest and decision path.
     if parsed.driver == "king" {
         return king_decide::king_decide(&parsed);
+    }
+
+    // Session binding: when the caller names the harness session that asked,
+    // the registry answers who may drive this target before any progress
+    // logic runs. Body, refusal and crown routing: loopcheck/session_binding.rs.
+    if let Some(out) = session_binding::gate_output(&parsed) {
+        return out;
     }
 
     let state_path = parsed.state_path.clone();
@@ -8189,54 +7945,141 @@ pub(crate) fn decide_with_payload(
         manifest.plan_path.as_deref(),
         &project_events,
     );
-    // ── Step 3b: decided question left no decision record ────────────────────
-    // The recording obligation is enforced here, never self-reported: a
-    // session that closed one of ITS OWN operator questions WITH an answer but
-    // emitted no matching operator_decision event is held, and the hold names
-    // the question. Scopes to questions this session asked so a foreign
-    // session's unfinished business cannot wedge an unrelated loop. The
-    // journals are folded as a UNION because the operator verbs write to the
-    // canonical root's journal while a worktree stop gate reads its own cwd's
-    // - a record on any of the three paths clears the gate.
-    let unrecorded = if session_id != "unknown" {
-        // One journal per space: the cwd's journal IS the canonical journal for
-        // this repo (the old worktree-vs-canonical fork is what the spaces move
-        // retired), so the union collapses to the two live journals.
-        let mut journals = vec![project_events.clone(), global_events.clone()];
-        if let Some(canon) = crate::paths::canonical_repo_root(&cwd) {
-            let canonical_journal = crate::paths::events_path(&canon);
-            if !journals.contains(&canonical_journal) {
-                journals.push(canonical_journal);
+    // ── Steps 3b/3c: the question gates (decided-but-unrecorded; held-on-open)
+    // Both folds live in `holds` beside the scans they drive; the journal
+    // union, the emit rows, and the order (unrecorded first, then held) are
+    // theirs.
+    if session_id != "unknown" {
+        match holds::question_gates(
+            &project_events,
+            &global_events,
+            &cwd,
+            &session_id,
+            node_id.as_deref().unwrap_or(""),
+            &emit,
+        ) {
+            holds::QuestionGateStop::None => {}
+            holds::QuestionGateStop::Block { reason } => {
+                return (0, allow_output("block", None, &reason, 0, None));
+            }
+            holds::QuestionGateStop::Terminate { reason, message } => {
+                return (0, allow_output("allow", Some(reason), &message, 0, None));
             }
         }
-        scan_unrecorded_decisions(&journals, &session_id)
-    } else {
-        Vec::new()
-    };
-    if !unrecorded.is_empty() {
-        let names = unrecorded
-            .iter()
-            .map(|u| format!("{} '{}'", u.question_id, u.question))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let reason = format!(
-            "a decided question has no decision record ({names}); record it with \
-             `fno backlog decide <node> \"...\" --question-id <id>` \
-             (the gate matches on the question id; a re-run of the clear is a \
-             no-op once the question is closed) \
-             so the decision survives this session"
-        );
+    }
+    // ── Check gh binary availability ──────────────────────────────────────────
+    // Only a NotFound spawn reads as absence. Every other spawn failure is
+    // SpawnTrouble: gh exists but could not be spawned right now, which is
+    // not a fact about the world and must not degrade the session. The probe
+    // outcome is emitted as an event row so what it concluded is observable.
+    let gh_bin = &parsed.gh_bin;
+    let gh_probe = probe_gh_bin(gh_bin.as_ref(), &cwd);
+    // Type is deliberately NOT "loop_check": read_prior_fires treats every
+    // loop_check row for this session as a fire observation, and a probe row
+    // with no fingerprint would break the no-progress streak on each fire.
+    // The probe is its own observable, not a fire decision.
+    emit(
+        "gh_probe",
+        serde_json::json!({
+            "session_id": session_id,
+            "outcome": gh_probe.outcome_str(),
+            "detail": gh_probe.detail_str(),
+        }),
+    );
+    let gh_available = !matches!(gh_probe, GhProbeOutcome::Absent);
+
+    if !gh_available
+        && matches!(
+            generic,
+            crate::delivery_completion::DeliveryCompletion::Inactive
+        )
+    {
+        if !manifest.attended && !manifest.advisory {
+            // Unattended + no advisory + no gh -> Interrupted
+            emit(
+                "termination",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "reason": "Interrupted",
+                    "message": "gh binary not found; unattended sessions require gh"
+                }),
+            );
+            return (
+                0,
+                allow_output(
+                    "allow",
+                    Some(TerminationReason::Interrupted),
+                    "gh binary not found; unattended sessions require gh",
+                    0,
+                    None,
+                ),
+            );
+        }
+        // Attended or declared advisory -> advisory mode (promise + budget only).
+        // Budget was already checked above; honor intent here so a promise can
+        // terminate an advisory session (AC5-ERR) - gh reads are impossible, so
+        // the promise alone is the completion signal.
         emit(
-            "loop_check",
+            "loop_advisory_mode",
             serde_json::json!({
                 "session_id": session_id,
-                "decision": "block",
-                "gate": "unrecorded_decision",
-                "unrecorded": unrecorded.iter().map(|u| u.question_id.clone()).collect::<Vec<_>>()
+                "attended": manifest.attended
             }),
         );
-        return (0, allow_output("block", None, &reason, 0, None));
+        let (advisory_intent, _advisory_intent_source) =
+            detect_intent(last_assistant_message.as_deref(), &transcript_path);
+        if let Intent::Aborted { ref reason } = advisory_intent {
+            emit(
+                "termination",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "reason": "Aborted",
+                    "message": reason
+                }),
+            );
+            return (
+                0,
+                allow_output(
+                    "allow",
+                    Some(TerminationReason::Aborted),
+                    "aborted tag detected (advisory mode)",
+                    0,
+                    None,
+                ),
+            );
+        }
+        if advisory_intent == Intent::Promise {
+            emit(
+                "termination",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "reason": "DoneAdvisory",
+                    "message": "promise accepted in advisory mode (gh unavailable)"
+                }),
+            );
+            return (
+                0,
+                allow_output(
+                    "allow",
+                    Some(TerminationReason::DoneAdvisory),
+                    "promise accepted in advisory mode (gh unavailable)",
+                    0,
+                    None,
+                ),
+            );
+        }
+        return (
+            0,
+            allow_output(
+                "block",
+                None,
+                "gh binary not found; running in advisory mode (promise + budget only)",
+                0,
+                None,
+            ),
+        );
     }
+
     // ── Step 4: intent + backstop ─────────────────────────────────────────────
     let (intent, intent_source) =
         detect_intent(last_assistant_message.as_deref(), &transcript_path);
@@ -8250,19 +8093,16 @@ pub(crate) fn decide_with_payload(
         .clone()
         .unwrap_or_else(crate::gh_budget::ledger_path);
 
-    // The fire history is JOURNAL truth now : one local read
-    // answers how many fires this session served, how many trailing fires
-    // shared the newest recorded fingerprint, and what that fingerprint (plus
-    // its pr_state/ci components) was. No PR read happens to decide routing.
+    // Fire history is JOURNAL truth: fires, the trailing shared fingerprint,
+    // and its pr_state/ci come from one local read; no PR read routes. A
+    // generic-delivery fire OBSERVED its world, so its streak counts against
+    // the observed revision; every other fire reads the journal's newest fp.
     let backstop_n: u64 = if manifest.attended { 5 } else { 3 };
     let min_fire_gap = min_fire_gap_secs();
-    // A generic-delivery fire OBSERVED its world this fire (the evaluator ran
-    // above), so the streak counts against the observed revision: progress
-    // resets the streak the same way a moved PR head does. Every other fire
-    // compares journal rows against the journal's own newest fingerprint.
     let generic_observed = generic.is_active();
-    let observed_fp =
-        generic.delivery_fingerprint(make_fingerprint(&head_sha, "none", "none", "none"));
+    let no_pr_fp =
+        || generic.delivery_fingerprint(make_fingerprint(&head_sha, "none", "none", "none"));
+    let observed_fp = no_pr_fp();
     let (prior_fires, journal_streak, last_recorded_fp, streak_window) = read_prior_fires(
         &project_events,
         &session_id,
@@ -8275,15 +8115,12 @@ pub(crate) fn decide_with_payload(
         min_fire_gap,
     );
     let (last_pr_state, last_ci) = read_last_row_fields(&project_events, &session_id);
-    // Fires that do not run done() inherit the last recorded fingerprint (a
-    // first fire with no journal starts at the no-PR basis), so their row
-    // stays comparable with its neighbors and only a done() read can move it.
+    // A fire that does not run done() inherits the last recorded fingerprint,
+    // so its row stays comparable with its neighbors; only done() can move it.
     let fingerprint = if generic_observed {
         observed_fp
     } else {
-        last_recorded_fp.clone().unwrap_or_else(|| {
-            generic.delivery_fingerprint(make_fingerprint(&head_sha, "none", "none", "none"))
-        })
+        last_recorded_fp.clone().unwrap_or_else(no_pr_fp)
     };
     let this_fire = prior_fires + 1;
     // consecutive_unchanged counts prior identical fires; adding this fire.
@@ -8359,6 +8196,7 @@ pub(crate) fn decide_with_payload(
             let blocker = match reason.as_str() {
                 "ci" => "ci",
                 "review" => "review",
+                "merge_slot" => "merge_slot",
                 _ => "unknown",
             };
             emit(
@@ -10302,10 +10140,10 @@ fn build_block_reason(
     }
 
     // A conflicting head has work to do NOW (rebase): "CI still running" or
-    // "declare ci.declared_none" would prescribe waiting out checks GitHub
-    // never started. It follows the head arm on purpose: a local head that
-    // differs from the PR head means the worker may have rebased already and
-    // just not pushed.
+    // "declare ci.declared_none" would prescribe waiting on a head that can
+    // start no new check, and whose existing results are stale. It follows
+    // the head arm on purpose: a local head that differs from the PR head
+    // means the worker may have rebased already and just not pushed.
     if let Some(r) = conflicting_reason(pr) {
         return r;
     }
@@ -10679,6 +10517,13 @@ fn build_block_reason(
         return coverage_unavailable_description(&pr.head_oid);
     }
 
+    // A merge-slot hold renders beside the other hold remedies
+    // (conflicting_reason), so both hold arms teach one voice and the
+    // classifier's hint rides by construction.
+    if let Some(r) = merge_slot_reason(pr, open_findings_empty, head_shipped) {
+        return r;
+    }
+
     format!("PR #{} done() returned false (unknown reason)", pr.number)
 }
 
@@ -10947,7 +10792,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
             return (
                 2,
                 serde_json::json!({"error": "--cwd is required"}).to_string(),
-            )
+            );
         }
     };
     if let Some(explicit) = head.as_deref() {
@@ -11669,281 +11514,6 @@ mod tests {
         assert_eq!(
             review_freshness("r", "h", &facts(Some("i"), None, None)),
             Freshness::Stale
-        );
-    }
-
-    // ──: the resolver against a REAL rebase ──────────────────────────
-    //
-    // The pure tests above pin the predicate over synthetic facts; this pair
-    // drives the git plumbing (identity computation, base-ref qualification)
-    // through an actual rebase. The Python merge gate's twin pair lives in
-    // cli/tests/unit/test_review_freshness_rebase.py; the two gates must
-    // agree on the same PR shape.
-
-    fn git(repo: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(repo)
-            .output()
-            .expect("git runs");
-        assert!(
-            out.status.success(),
-            "git {:?}: {}",
-            args,
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    }
-
-    fn write(repo: &Path, name: &str, body: &str) {
-        std::fs::write(repo.join(name), body).unwrap();
-    }
-
-    /// One repo whose feature branch rebases onto a moved `origin/main`.
-    /// Returns `(repo, reviewed_sha, head_sha)`. `conflict` selects whether
-    /// the rebase stops on a conflict that the resolution CHANGES.
-    fn rebased_repo(conflict: bool) -> (tempfile::TempDir, String, String) {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path().join("r");
-        std::fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init", "-q", "-b", "main"]);
-        git(&repo, &["config", "user.email", "t@t"]);
-        git(&repo, &["config", "user.name", "t"]);
-        write(&repo, "f.txt", "base\n");
-        git(&repo, &["add", "-A"]);
-        git(&repo, &["commit", "-q", "-m", "base"]);
-
-        git(&repo, &["checkout", "-q", "-b", "feature"]);
-        if conflict {
-            write(&repo, "f.txt", "feature says B\n");
-        } else {
-            write(&repo, "code.txt", "pr change\n");
-        }
-        git(&repo, &["add", "-A"]);
-        git(&repo, &["commit", "-q", "-m", "pr"]);
-        let reviewed = git(&repo, &["rev-parse", "HEAD"]);
-
-        git(&repo, &["checkout", "-q", "main"]);
-        if conflict {
-            write(&repo, "f.txt", "main says C\n");
-        } else {
-            write(&repo, "other.txt", "base moved\n");
-        }
-        git(&repo, &["add", "-A"]);
-        git(&repo, &["commit", "-q", "-m", "base moved"]);
-        let tip = git(&repo, &["rev-parse", "HEAD"]);
-        // The machine's pre-push hook protects even scratch `main`s, so move
-        // the remote-tracking ref directly.
-        git(&repo, &["update-ref", "refs/remotes/origin/main", &tip]);
-
-        git(&repo, &["checkout", "-q", "feature"]);
-        let rebase = Command::new("git")
-            .args(["rebase", "origin/main"])
-            .current_dir(&repo)
-            .output()
-            .unwrap();
-        if conflict {
-            assert!(!rebase.status.success(), "scenario requires a conflict");
-            write(&repo, "f.txt", "resolved differently\n");
-            git(&repo, &["add", "-A"]);
-            let cont = Command::new("git")
-                .args(["-c", "core.editor=true", "rebase", "--continue"])
-                .current_dir(&repo)
-                .output()
-                .unwrap();
-            assert!(
-                cont.status.success(),
-                "{}",
-                String::from_utf8_lossy(&cont.stderr)
-            );
-        } else {
-            assert!(
-                rebase.status.success(),
-                "{}",
-                String::from_utf8_lossy(&rebase.stderr)
-            );
-        }
-        let head = git(&repo, &["rev-parse", "HEAD"]);
-        (tmp, reviewed, head)
-    }
-
-    #[test]
-    fn resolver_carries_an_identical_rebase_and_a_small_conflict() {
-        // The contract on the resolver itself, as amended by the
-        // interdiff arm (law d-608344c1): a rebase that rewrote every commit
-        // but changed no content keeps the attestation (CarriedBaseSync), and
-        // a tiny conflict resolution carries as CarriedInterdiff with the
-        // measured line count. The expiry boundary itself (>= cap stales) is
-        // the pure tests' in review_freshness; a fixture cannot hit it
-        // without a 100-line conflict edit.
-        let (tmp, reviewed, head) = rebased_repo(false);
-        let repo = tmp.path().join("r");
-        let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
-        let verdict = resolver.freshness(&reviewed);
-        assert!(verdict.counts(), "identical rebase must carry: {verdict:?}");
-
-        let (tmp, reviewed, head) = rebased_repo(true);
-        let repo = tmp.path().join("r");
-        let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
-        let verdict = resolver.freshness(&reviewed);
-        assert_eq!(
-            verdict,
-            Freshness::CarriedInterdiff { lines: 4, cap: 100 },
-            "a 4-line conflict resolution must carry"
-        );
-    }
-
-    #[test]
-    fn freshness_base_sync_carries() {
-        // PR 829's specimen: a 153-file rebase whose PR code diff is identical.
-        assert_eq!(
-            review_freshness(
-                "3f64bc31",
-                "83d2b4ce",
-                &facts(
-                    Some("ident-a"),
-                    Some("ident-a"),
-                    Some(&["crates/fno/src/lib.rs"])
-                )
-            ),
-            Freshness::CarriedBaseSync
-        );
-    }
-
-    #[test]
-    fn freshness_identical_trees_carry_as_base_sync() {
-        // An empty tree diff must not fall through the "all paths are docs"
-        // branch, which is vacuously true over an empty list.
-        assert_eq!(
-            review_freshness("aaa", "bbb", &facts(Some("i"), Some("i"), Some(&[]))),
-            Freshness::CarriedBaseSync
-        );
-    }
-
-    #[test]
-    fn freshness_docs_only_carries_with_its_reason() {
-        // PR 830's specimen: one documentation file moved the head.
-        assert_eq!(
-            review_freshness(
-                "e2976abc",
-                "1ef60959",
-                &facts(
-                    Some("i"),
-                    Some("i"),
-                    Some(&["docs/architecture/x.md", "README.md"])
-                )
-            ),
-            Freshness::CarriedDocsOnly
-        );
-    }
-
-    #[test]
-    fn freshness_code_change_dies() {
-        // 20 of the 22 measured transitions are this: genuine code change, and
-        // no rule that refuses to guess can absorb them.
-        assert_eq!(
-            review_freshness(
-                "aaa",
-                "bbb",
-                &facts(Some("i-old"), Some("i-new"), Some(&["a.rs"]))
-            ),
-            Freshness::Stale
-        );
-    }
-
-    #[test]
-    fn freshness_missing_identity_dies() {
-        // Git failure on either side: fail closed, re-review.
-        assert_eq!(
-            review_freshness("aaa", "bbb", &facts(None, Some("i"), Some(&[]))),
-            Freshness::Stale
-        );
-        assert_eq!(
-            review_freshness("aaa", "bbb", &facts(Some("i"), None, Some(&[]))),
-            Freshness::Stale
-        );
-    }
-
-    #[test]
-    fn freshness_two_absent_identities_never_match() {
-        // THE regression guard. A first measurement pass reported 63%
-        // carry-forward and was wrong: merged PRs' three-dot diff against
-        // current origin/main is empty, e3b0c442 is the SHA-256 of the empty
-        // string, and twelve transitions matched absence against absence. The
-        // true figure was 2 of 22. `Carried` requires two Some values that are
-        // equal - never two empties, however they arose.
-        assert_eq!(
-            review_freshness("aaa", "bbb", &facts(None, None, Some(&[]))),
-            Freshness::Stale
-        );
-    }
-
-    #[test]
-    fn freshness_absent_reviewed_sha_dies() {
-        // A github_app review object with no `commit.oid`, or an attestation
-        // with no head_sha. An empty sha must never match an empty head.
-        assert_eq!(
-            review_freshness("", "", &facts(Some("i"), Some("i"), Some(&[]))),
-            Freshness::Stale
-        );
-        assert_eq!(
-            review_freshness("", "bbb", &facts(Some("i"), Some("i"), Some(&[]))),
-            Freshness::Stale
-        );
-    }
-
-    #[test]
-    fn freshness_unreadable_tree_diff_dies() {
-        // Matching identities but no way to name the carry reason: a carry that
-        // cannot say why it carried is not auditable.
-        assert_eq!(
-            review_freshness("aaa", "bbb", &facts(Some("i"), Some("i"), None)),
-            Freshness::Stale
-        );
-    }
-
-    #[test]
-    fn freshness_only_stale_stops_counting() {
-        assert!(Freshness::Fresh.counts());
-        assert!(Freshness::CarriedBaseSync.counts());
-        assert!(Freshness::CarriedDocsOnly.counts());
-        assert!(!Freshness::Stale.counts());
-    }
-
-    #[test]
-    fn code_diff_identity_drops_docs_and_is_none_when_only_docs_changed() {
-        // The identity is computed from `git diff --raw` lines, so exercise the
-        // path classifier and the empty-result rule on that exact shape.
-        let code = ":100644 100644 aaa bbb M\tcrates/fno/src/lib.rs";
-        let docs = ":100644 100644 ccc ddd M\tdocs/architecture/review-lanes.md";
-        assert_eq!(raw_diff_line_path(code), "crates/fno/src/lib.rs");
-        assert!(!is_documentation_path(raw_diff_line_path(code)));
-        assert!(is_documentation_path(raw_diff_line_path(docs)));
-    }
-
-    #[test]
-    fn freshness_resolver_qualifies_a_bare_base_ref() {
-        // `gh pr view` returns `main`, not `origin/main`; a bare branch name
-        // resolves to the local ref, which in a stale worktree is not the base.
-        let cwd = std::env::temp_dir();
-        assert_eq!(
-            FreshnessResolver::new("git", &cwd, "main", "abc", 100).base_ref,
-            "origin/main"
-        );
-        assert_eq!(
-            FreshnessResolver::new("git", &cwd, "origin/release", "abc", 100).base_ref,
-            "origin/release"
-        );
-        // A slash in the name is not remote-qualification: `release/2.0` is a
-        // bare branch and must still be qualified, or the identity resolves
-        // against a local ref the worktree may not have.
-        assert_eq!(
-            FreshnessResolver::new("git", &cwd, "release/2.0", "abc", 100).base_ref,
-            "origin/release/2.0"
-        );
-        assert_eq!(
-            FreshnessResolver::new("git", &cwd, "", "abc", 100).base_ref,
-            "origin/main"
         );
     }
 
@@ -13578,8 +13148,7 @@ mod tests {
 
     #[test]
     fn parse_manifest_budget_caps() {
-        let content =
-            "---\nsession_id: s\ncreated_at: 2026-06-05T00:00:00Z\nbudget_wall_clock_cap_minutes: 120\nbudget_cost_cap_usd: 5.0\n---\n";
+        let content = "---\nsession_id: s\ncreated_at: 2026-06-05T00:00:00Z\nbudget_wall_clock_cap_minutes: 120\nbudget_cost_cap_usd: 5.0\n---\n";
         let m = parse_manifest(content).unwrap();
         assert_eq!(m.budget_wall_clock_cap_minutes, Some(Ok(120)));
         assert_eq!(m.budget_cost_cap_usd, Some(Ok(5.0)));
@@ -13942,29 +13511,12 @@ mod tests {
         // flight; a Pending conclusion must read as "still running", never
         // as the misleading "CI red ... failed" (observed live on PR #455).
         let pr = PrInfo {
-            range_tiling: RangeTiling::default(),
             state: PrState::Open,
             number: 455,
             head_oid: "abc".to_string(),
             ci_conclusion: CiConclusion::Pending,
-            failing_checks: vec![],
-            ci_has_pending: false,
             mergeable: "UNKNOWN".to_string(),
-            latest_review_ts: "none".to_string(),
-            reviewed: false,
-            missing_bots: vec![],
-            bot_nudges: vec![],
-            stale_bots: vec![],
-            unaddressed_findings: vec![],
-            review_skipped: false,
-            unattested_reviewers: vec![],
-            malformed_attestations: 0,
-            posture: None,
-            coverage: CoverageReport {
-                github_approval_satisfies: false,
-                coverage: Coverage::Covered(0),
-                verdicts: vec![],
-            },
+            ..PrInfo::default()
         };
         let reason = build_block_reason(&pr, "abc", true, true);
         assert!(
@@ -14078,10 +13630,16 @@ mod tests {
         // Production region only: the file's own test module may legitimately
         // spawn helper processes.
         let source = include_str!("loopcheck.rs");
-        let production = source
+        let mut production = source
             .split("\nmod tests {")
             .next()
-            .expect("test module marker");
+            .expect("test module marker")
+            .to_string();
+        // The range-tiling child module is production too: the file budget's
+        // remedy moved the tiling git reads there verbatim, and a bypass
+        // hiding in a named-by-question child would dodge a loopcheck-only
+        // scan.
+        production.push_str(include_str!("loopcheck/range_tiling.rs"));
         // Positive control first, so an empty scan can never read as green:
         // the centralized runner must exist and carry real call sites.
         assert!(production.contains("fn run_bounded("));
@@ -14093,7 +13651,7 @@ mod tests {
             production.matches("git_bounded(").count() >= 10,
             "the bounded transport must carry the stop-gate git read sites"
         );
-        let bypasses = direct_wait_bypasses(production);
+        let bypasses = direct_wait_bypasses(&production);
         assert!(
             bypasses.is_empty(),
             "direct synchronous gh/fno/git waits outside the bounded runner: {bypasses:?}"
@@ -14159,29 +13717,13 @@ git_bounded();";
     /// An open PR whose head matches local HEAD, CI still pending, no findings.
     fn watch_pr() -> PrInfo {
         PrInfo {
-            range_tiling: RangeTiling::default(),
             state: PrState::Open,
             number: 404,
             head_oid: "abc".to_string(),
             ci_conclusion: CiConclusion::Pending,
-            failing_checks: vec![],
             ci_has_pending: true,
             mergeable: "UNKNOWN".to_string(),
-            latest_review_ts: "none".to_string(),
-            reviewed: false,
-            missing_bots: vec![],
-            bot_nudges: vec![],
-            stale_bots: vec![],
-            unaddressed_findings: vec![],
-            review_skipped: false,
-            unattested_reviewers: vec![],
-            malformed_attestations: 0,
-            posture: None,
-            coverage: CoverageReport {
-                github_approval_satisfies: false,
-                coverage: Coverage::Covered(0),
-                verdicts: vec![],
-            },
+            ..PrInfo::default()
         }
     }
 
@@ -16884,31 +16426,6 @@ git_bounded();";
     }
 
     #[test]
-    fn allow_output_serializes_correctly() {
-        let json = allow_output(
-            "allow",
-            Some(TerminationReason::DonePRGreen),
-            "done",
-            3,
-            Some("fp".into()),
-        );
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["decision"], "allow");
-        // Verify variant names serialize byte-identically to the spec strings.
-        assert_eq!(v["termination_reason"], "DonePRGreen");
-        assert_eq!(v["fires"], 3);
-        assert_eq!(v["fingerprint"], "fp");
-    }
-
-    #[test]
-    fn allow_output_null_termination_reason() {
-        let json = allow_output("block", None, "continue", 1, None);
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(v["termination_reason"].is_null());
-        assert!(v["fingerprint"].is_null());
-    }
-
-    #[test]
     fn watch_idle_event_is_non_terminal_allow() {
         // AC1-HP invariant: the idle branch emits allow + null termination, so
         // the stop-hook shim (which runs finalize only on a NON-null
@@ -16972,8 +16489,7 @@ git_bounded();";
     #[test]
     fn parse_manifest_malformed_cost_cap_fail_closed() {
         // Fix 2: a present but unparseable cost cap must be Err (fail-closed)
-        let content =
-            "---\nsession_id: s\ncreated_at: 2026-06-05T00:00:00Z\nbudget_cost_cap_usd: 5.OO\n---\n";
+        let content = "---\nsession_id: s\ncreated_at: 2026-06-05T00:00:00Z\nbudget_cost_cap_usd: 5.OO\n---\n";
         let m = parse_manifest(content).unwrap();
         assert!(
             matches!(m.budget_cost_cap_usd, Some(Err(_))),
@@ -16983,8 +16499,7 @@ git_bounded();";
 
     #[test]
     fn parse_manifest_malformed_wall_cap_fail_closed() {
-        let content =
-            "---\nsession_id: s\ncreated_at: 2026-06-05T00:00:00Z\nbudget_wall_clock_cap_minutes: abc\n---\n";
+        let content = "---\nsession_id: s\ncreated_at: 2026-06-05T00:00:00Z\nbudget_wall_clock_cap_minutes: abc\n---\n";
         let m = parse_manifest(content).unwrap();
         assert!(
             matches!(m.budget_wall_clock_cap_minutes, Some(Err(_))),
@@ -18600,8 +18115,7 @@ git_bounded();";
                 clean_pass_review(&comments, "chatgpt-codex-connector", &fresh_at).is_none(),
                 "counted as a pass: {body}"
             );
-            let (verdict, _, _) =
-                bot_verdict("chatgpt-codex-connector", &[], &comments, &fresh_at);
+            let (verdict, _, _) = bot_verdict("chatgpt-codex-connector", &[], &comments, &fresh_at);
             assert_eq!(verdict, CoverageVerdict::Absent, "verdict for: {body}");
         }
     }

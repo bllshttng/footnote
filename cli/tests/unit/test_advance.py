@@ -141,6 +141,7 @@ NODE = {
     "_resolved_cwd": "/tmp/x",
     "difficulty": "low",
     "dispatch_verb": "",
+    "model": "glm-5.3-flash[1m]",
 }
 
 
@@ -1125,7 +1126,9 @@ def test_advance_model_tier_only_resolves_no_model(iso, monkeypatch):
     monkeypatch.setattr(adv, "_spawn_worker", spawn)
     res = adv.advance(project="fno", events_path=iso)
     assert res.decision == "dispatched"
-    assert captured["model"] is None
+    # x-8fb2: the retired tier resolves to nothing upstream; the node's own
+    # pin is the only model the door carries.
+    assert captured["model"] == "glm-5.3-flash[1m]"
 
 
 def test_advance_defers_canonical_difficulty_to_spawn_grid(iso, monkeypatch):
@@ -1141,7 +1144,8 @@ def test_advance_defers_canonical_difficulty_to_spawn_grid(iso, monkeypatch):
     monkeypatch.setattr(adv, "_spawn_worker", spawn)
     res = adv.advance(project="fno", events_path=iso)
     assert res.decision == "dispatched"
-    assert captured["model"] is None
+    # Canonical difficulty defers to the spawn grid; only the raw pin rides.
+    assert captured["model"] == "glm-5.3-flash[1m]"
 
 
 def _declare_grid_inventory(monkeypatch):
@@ -1154,6 +1158,60 @@ def _declare_grid_inventory(monkeypatch):
         {"name": "sol-x", "harness": "codex", "model": "gpt-5.6-sol", "band": "high"},
     ])
     monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
+
+
+def _pin_capacity(monkeypatch, claude=None, codex=None, extra=None, active=None):
+    """Pin the capacity readings the verb judges lanes with.
+
+    The Python capacity read was deleted (x-1c38): the verb computes it from
+    the runtime-state file, so a hermetic one rides in through env instead of
+    a monkeypatched Python function. claude/codex pin one account record each
+    (`cl-a` for claude, `cx-a` for codex); None leaves the harness with no
+    record, which reads unknown. `extra` adds per-account readings as
+    {harness: {account: state}} (a dict value may carry resets_at). `active`
+    writes identity stamps as {harness: account}. Returns (config, state)
+    paths so a test can move capacity mid-flight.
+    """
+    import tempfile
+    import time as _time
+
+    d = tempfile.mkdtemp(prefix="fno-cap-")
+    records = []
+    for harness, spec in (("claude", claude), ("codex", codex)):
+        if spec is not None:
+            records.append((f"{'cl' if harness == 'claude' else 'cx'}-a", harness, spec))
+    for harness, accounts in (extra or {}).items():
+        for account, spec in accounts.items():
+            records.append((account, harness, spec))
+    cfg = os.path.join(d, "config.toml")
+    with open(cfg, "w") as f:
+        f.write(f"state_dir = '{d}'\n")
+        for account, harness, _spec in records:
+            f.write(f'[[accounts.records]]\nid = "{account}"\nharness = "{harness}"\n')
+    now = _time.time()
+
+    def row(spec) -> dict:
+        if isinstance(spec, dict):
+            state, resets = spec.get("state", "ok"), spec.get("resets_at")
+        else:
+            state, resets = spec, None
+        pct = {"ok": 5.0, "low": 95.0}.get(state, 100.0)
+        return {
+            "probed_at": now,
+            "partial": False,
+            "windows": [{"label": "daily", "used_pct": pct, "resets_at": resets}],
+        }
+
+    state = os.path.join(d, "state.json")
+    with open(state, "w") as f:
+        f.write(json.dumps({"usage": {a: row(spec) for a, _h, spec in records}}))
+    for harness, account in (active or {}).items():
+        os.makedirs(os.path.join(d, "providers"), exist_ok=True)
+        with open(os.path.join(d, "providers", f".active-{harness}"), "w") as f:
+            f.write(account)
+    monkeypatch.setenv("FNO_CONFIG", cfg)
+    monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", state)
+    return cfg, state
 
 
 def _fake_spawn_run(short_id):
@@ -1181,10 +1239,7 @@ def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     _declare_grid_inventory(monkeypatch)
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": "exhausted", "codex": "ok"},
-    )
+    _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
     sid = adv._spawn_worker(
         "x-grid1",
         None,
@@ -1206,13 +1261,11 @@ def test_spawn_worker_explicit_pins_beat_grid(monkeypatch):
     captured, fake_run = _fake_spawn_run("sid-pin1")
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda: {"claude": "exhausted", "codex": "ok"},
-    )
+    _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
     adv._spawn_worker(
         "x-pin1", None, "pin-slug", provider="claude",
-        node={"difficulty": "high", "priority": "p1", "dispatch_verb": ""},
+        node={"difficulty": "high", "priority": "p1", "dispatch_verb": "",
+              "model": "glm-5.3-flash[1m]"},
     )
     cmd = captured["cmd"]
     i = cmd.index("--harness")
@@ -1261,10 +1314,7 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     _declare_grid_inventory(monkeypatch)
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {"claude": "exhausted", "codex": "ok"},
-    )
+    _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
 
     receipts = adv.dispatch_lanes(1, events_path=tmp_path / "e.jsonl")
     assert receipts and receipts[0]["status"] == "dispatched"
@@ -1285,7 +1335,7 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
         "id": "x-dec1", "slug": "decline-pin", "difficulty": "high",
         "priority": "p1", "dispatch_verb": "", "cwd": str(tmp_path),
     }
-    capacity = {"claude": "exhausted", "codex": "exhausted"}
+    _pin_state = _pin_capacity(monkeypatch, claude="exhausted", codex="exhausted")[1]
 
     monkeypatch.setattr(adv, "select_lane_fill", lambda *a, **k: [node])
     monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *a, **k: None)
@@ -1300,7 +1350,9 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
         captured["placement_harness"] = harness
         # Capacity changes AFTER the placement decision: codex frees up in the
         # window between _ensure_lane_worktree and _spawn_worker.
-        capacity["codex"] = "ok"
+        data = json.loads(Path(_pin_state).read_text())
+        data["usage"]["cx-a"]["windows"][0]["used_pct"] = 5.0
+        Path(_pin_state).write_text(json.dumps(data))
         return tmp_path
 
     def fake_run(cmd, **kwargs):
@@ -1317,7 +1369,6 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
     monkeypatch.setattr(adv._autobrief, "resolve_dispatch_brief", lambda n: ("", ""))
     monkeypatch.setattr(adv, "_emit", lambda *a, **k: None)
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: dict(capacity))
 
     receipts = adv.dispatch_lanes(1, events_path=tmp_path / "e.jsonl")
 
@@ -1416,7 +1467,7 @@ def test_spawn_worker_argv_with_cwd(monkeypatch):
     assert cmd[:5] == ["fno-py", "agents", "spawn", "--harness", "claude"]
     assert "--cwd" in cmd and "/work/dir" in cmd
     assert "--fresh" not in cmd
-    assert cmd[-2] == "t-2222aaaa"
+    assert cmd[-2] == "t-2222aaaa-glm"  # the mint tags the node's model pin
     assert cmd[-1] == "/target --no-merge ab-2222aaaa"  # no-merge rides as a token
     # subscription lane only - never the API-credit/-p lane.
     assert "-p" not in cmd and "--print" not in cmd and "--bare" not in cmd
@@ -1463,7 +1514,8 @@ def test_spawn_worker_default_provider_claude(monkeypatch):
     adv._spawn_worker("ab-2222aaaa", "/w", node=_node_row("ab-2222aaaa"))
     cmd = captured["cmd"]
     assert cmd[cmd.index("--harness") + 1] == "claude"
-    assert "--model" not in cmd
+    # x-8fb2: the node's pin always rides; an unpinned argv is now a refusal.
+    assert cmd[cmd.index("--model") + 1] == "glm-5.3-flash[1m]"
 
 
 def test_spawn_worker_argv_fresh_when_no_cwd(monkeypatch):
@@ -1824,7 +1876,7 @@ def test_spawn_worker_name_includes_slug(monkeypatch):
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     adv._spawn_worker("ab-2222aaaa", None, "cargo-bootstrapper", node=_node_row("ab-2222aaaa"))
-    assert captured["cmd"][-2] == "t-2222aaaa-cargo"
+    assert captured["cmd"][-2] == "t-2222aaaa-cargo-glm"
 
 
 def test_spawn_worker_name_collision_raises_already_running(monkeypatch):
@@ -1871,11 +1923,11 @@ def test_spawn_worker_receipt_carries_the_registered_name(monkeypatch):
     adv._spawn_worker(
         "x-7aa8abc1", None, "daily-pass", source="ab", verb="/blueprint",
         node={"id": "x-7aa8abc1", "dispatch_verb": "", "difficulty": "high",
-              "plan_path": "", "priority": "p1"},
+              "plan_path": "", "priority": "p1", "model": "glm-5.3-flash[1m]"},
         receipt=receipt,
     )
     minted = captured["cmd"][captured["cmd"].index("--name") + 1]
-    assert minted == "ab-bp-7aa8abc1-daily-pass"
+    assert minted == "ab-bp-7aa8abc1-daily-pass-glm"
     assert receipt["agent_name"] == minted
 
 
@@ -2922,7 +2974,9 @@ def test_failover_dispatches_next_provider(iso, monkeypatch):
     _force_exhausted(monkeypatch, "ccm")
     # (record_id, harness, account_env): a claude account failover ccm -> ccr.
     _destination(monkeypatch, ("ccr", "claude", {"CLAUDE_CONFIG_DIR": "/acct/ccr"}))
-    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    # x-8fb2: a node model pin stands quota failover down (launch_is_pinned),
+    # so this door's subject runs on a pin-less node.
+    monkeypatch.setattr(adv, "_next_node", lambda project: {**NODE, "model": None})
     captured = {}
 
     def fake_spawn(node_id, node_cwd, node_slug=None, **kwargs):
@@ -2953,7 +3007,7 @@ def test_failover_cross_harness_threads_harness(iso, monkeypatch):
     id + harness_to on the receipt."""
     _force_exhausted(monkeypatch, "ccm")
     _destination(monkeypatch, ("codex-acct", "codex", {"CODEX_HOME": "/acct/codex"}))
-    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_next_node", lambda project: {**NODE, "model": None})
     captured = {}
 
     def fake_spawn(node_id, node_cwd, node_slug=None, **kwargs):
@@ -3006,7 +3060,7 @@ def test_failover_spawn_failure_releases_reservation(iso, monkeypatch):
     post-spawn, so a failed launch never leaves a receipt claiming one."""
     _force_exhausted(monkeypatch, "ccm")
     _destination(monkeypatch, ("ccr", "claude", {}))
-    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_next_node", lambda project: {**NODE, "model": None})
 
     def boom(node_id, node_cwd, node_slug=None, **kwargs):
         raise adv.SpawnError("daemon unreachable")
@@ -3028,7 +3082,7 @@ def test_failover_racing_advances_dedup(iso, monkeypatch):
     double-dispatch or double-fail-over."""
     _force_exhausted(monkeypatch, "ccm")
     _destination(monkeypatch, ("ccr", "claude", {}))
-    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_next_node", lambda project: {**NODE, "model": None})
     calls = []
     monkeypatch.setattr(
         adv, "_spawn_worker",
@@ -3048,7 +3102,7 @@ def test_quota_change_after_selection_cannot_rewrite_the_spawn(iso, monkeypatch)
     quota update landing mid-spawn affects only later attempts."""
     _force_exhausted(monkeypatch, "ccm")
     _destination(monkeypatch, ("codex-acct", "codex", {"CODEX_HOME": "/acct/codex"}))
-    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_next_node", lambda project: {**NODE, "model": None})
     captured: dict = {}
 
     def spawn(node_id, node_cwd, node_slug=None, **kw):
@@ -3174,18 +3228,24 @@ from datetime import datetime, timezone, timedelta  # noqa: E402
 
 
 def _node_row(
-    node_id: str, difficulty: str | None = "low", verb: str | None = None
+    node_id: str,
+    difficulty: str | None = "low",
+    verb: str | None = None,
+    model: str | None = "glm-5.3-flash[1m]",
 ) -> dict:
     """The minimal node dict tests pass to the dispatcher.
 
     Key presence is what the projection check reads; difficulty low derives
     /target, matching what the builtin path asserted before the None branch
     was deleted. An out-of-family ``verb`` rides the row so the lifecycle
-    table abstains and the explicit verb wins, as the deleted None path did."""
+    table abstains and the explicit verb wins, as the deleted None path did.
+    The default model pin clears the x-8fb2 seam gate; a pin-less node is
+    ``model=None`` and the gate's subject."""
     return {
         "id": node_id,
         "dispatch_verb": verb or "",
         "difficulty": difficulty,
+        "model": model,
     }
 
 
@@ -3510,7 +3570,7 @@ def test_long_configured_node_id_and_slug_still_spawn_one_valid_worker(monkeypat
     assert len(calls) == 1  # exactly one worker launch requested
     name = calls[0][calls[0].index("--name") + 1]
     assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name), name
-    assert name == f"ab-bp-{node_id}-path"
+    assert name == f"ab-bp-{node_id}-path-glm"
 
 
 def test_unrepresentable_name_projects_a_node_identifying_failure(iso, monkeypatch):
@@ -3524,6 +3584,9 @@ def test_unrepresentable_name_projects_a_node_identifying_failure(iso, monkeypat
         # a real projection row: planless low dispatches straight to target
         "difficulty": "low",
         "dispatch_verb": "",
+        # the refusal-under-test is naming, so the node carries the pin that
+        # clears the x-8fb2 model gate
+        "model": "glm-5.3-flash[1m]",
     }
     monkeypatch.setattr(adv, "_next_node", lambda project: node)
     monkeypatch.setattr("fno.claims.core.machine_id", lambda: "")
@@ -3699,9 +3762,6 @@ def test_grid_lane_for_and_resolve_slot_agree(monkeypatch):
 
     monkeypatch.setattr(route_resolve, "resolve_slot", _fake_slot)
     monkeypatch.setattr(
-        route_resolve, "runtime_capacity", lambda **kw: {"claude": "ok"}
-    )
-    monkeypatch.setattr(
         route_resolve, "resolve_inventory", lambda **kw: route_resolve.Inventory()
     )
     node = {"difficulty": "medium", "priority": "p1", "plan_path": "p.md"}
@@ -3729,9 +3789,6 @@ def test_grid_lane_for_returns_the_grid_candidates_route(monkeypatch):
     monkeypatch.setattr(
         route_resolve, "resolve_slot",
         lambda *a, **k: (candidate, ["grid candidate claude/flash capacity=ok"], "armed"),
-    )
-    monkeypatch.setattr(
-        route_resolve, "runtime_capacity", lambda **kw: {"claude": "ok"}
     )
     monkeypatch.setattr(
         route_resolve, "resolve_inventory", lambda **kw: route_resolve.Inventory()
@@ -3797,7 +3854,8 @@ def test_spawn_worker_preresolved_grid_route_survives_a_pinned_harness(monkeypat
     adv._spawn_worker(
         "x-route3", None, "route-slug", harness="claude",
         grid_route="zai/glm-5.3-flash[1m]", grid_account="zai-main",
-        node={"difficulty": "high", "priority": "p1", "dispatch_verb": ""},
+        node={"difficulty": "high", "priority": "p1", "dispatch_verb": "",
+              "model": "glm-5.3-flash[1m]"},
     )
     cmd = captured["cmd"]
     assert cmd[cmd.index("--route") + 1] == "zai/glm-5.3-flash[1m]"
@@ -3847,7 +3905,8 @@ def test_spawn_worker_grid_account_skips_on_a_non_claude_harness(monkeypatch):
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     adv._spawn_worker(
         "x-route4", None, "route-slug", harness="codex", grid_account="zai-main",
-        node={"difficulty": "high", "priority": "p1", "dispatch_verb": ""},
+        node={"difficulty": "high", "priority": "p1", "dispatch_verb": "",
+              "model": "glm-5.3-flash[1m]"},
     )
     cmd = captured["cmd"]
     assert "--account" not in cmd
@@ -3907,13 +3966,15 @@ def test_spawn_worker_lifecycle_matrix_agrees_across_axes(iso, tmp_path, monkeyp
         monkeypatch.setattr(adv.subprocess, "run", fake_run)
         events = tmp_path / f"matrix-{i}.jsonl"
         adv._spawn_worker(
-            nid, None, slug, node={"id": nid, "slug": slug, **fields},
+            nid, None, slug,
+            node={"id": nid, "slug": slug, "model": "glm-5.3-flash[1m]", **fields},
             events_path=events,
         )
         assert captured["cmd"][-1] == command, (i, captured["cmd"][-1])
         name = captured["cmd"][captured["cmd"].index("--name") + 1]
-        # x-84b2: the name states the verb as a code, no source on a bare call.
-        expected_name = f"{verb_code}-{nid}-{slug}"
+        # x-84b2: the name states the verb as a code, no source on a bare call;
+        # the -glm tail is the model tag the mint puts on every pinned spawn.
+        expected_name = f"{verb_code}-{nid}-{slug}-glm"
         assert name == expected_name, (i, name)
         rows = [
             json.loads(line)

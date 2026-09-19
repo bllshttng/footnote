@@ -217,9 +217,9 @@ assert-absent.sh
 
 # The shared "is removing this worktree safe?" answer. Sourced by
 # scripts/lib/worktree-lifecycle.sh and scripts/setup/archive-worktree.sh;
-# exposes wt_reapable. It is the bash ADAPTER for the wrapped entry point
-# `fno workspace worktree reapable` (cli/src/fno/worktree_reapable.py), which is where the
-# classifier actually lives, so a second wrapper would be a third opinion on a
+# exposes wt_reapable. It is the bash ADAPTER for the gate binary
+# (crates/fno-agents/src/worktree_reapable.rs), where the classifier
+# actually lives, so a second wrapper would be a third opinion on a
 # question that must have exactly one. Pure sourcing library; no CLI of its own.
 worktree-reapable.sh
 
@@ -299,3 +299,4 @@ rooted-writers.sh
 # an fno wrapper would invert the dependency; the bash scripts are the entry
 # points. Pure library + standalone CLI of its own; no fno verb wraps it.
 skill_discovery.py
+cargo-build-dir.sh

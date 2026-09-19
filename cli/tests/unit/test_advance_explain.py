@@ -272,22 +272,12 @@ def test_the_probe_rows_render_as_gates_from_one_answer(monkeypatch):
                 "key": "agents.max_fleet_cpu_share",
                 "note": "spawn-gate: the fleet's CPU share cannot be decided",
             },
-            {
-                "name": "load-backstop",
-                "measured": "45.0",
-                "threshold": "480.0",
-                "verdict": "pass",
-                "key": "agents.hard_max_load_per_cpu",
-            },
         ],
     }
     rows = {g.name: g for g in explain.gates_for(None, probe=answer)}
     assert rows["cpu-share"].verdict == "refuse"
     assert "cannot be decided" in (rows["cpu-share"].note or "")
     assert rows["cpu-share"].measured == "2.10/12.00 cores"
-    assert rows["load-backstop"].measured == "45.0"
-    assert rows["load-backstop"].threshold == "480.0"
-    assert rows["load-backstop"].verdict == "pass"
 
 
 def test_preview_stops_when_the_cpu_axis_would_refuse(monkeypatch):
@@ -349,7 +339,6 @@ def _slot_world(monkeypatch):
         )
 
     monkeypatch.setattr(route_resolve, "resolve_inventory", lambda: object())
-    monkeypatch.setattr(route_resolve, "runtime_capacity", lambda inventory=None: {})
     monkeypatch.setattr(route_resolve, "resolve_slot", _fake_slot)
     return calls
 
@@ -495,17 +484,18 @@ def test_abandoned_arm_row_settles_and_advance_names_the_node_a_candidate(
     tmp_path, monkeypatch
 ):
     """AC1-HP + AC2-HP: quiet transcript past the bar -> the apply receipt
-    reads row_removed true with status_after idea, and advance --explain
+    reads row_closed true with status_after idea, and advance --explain
     answers with a candidate line, never `never a candidate`. A planless
     idea with no intake difficulty now reads as an attributed selection
     drop, so the answer narrates the drop instead of an eligible rank."""
     g = _ab_world(tmp_path, monkeypatch, _AB_SID_GONE, age_hours=72)
     result = _ab_maintain_apply(monkeypatch)
-    assert "row_removed true" in result.output
+    assert "row_closed true" in result.output
     assert "status_after idea" in result.output
 
     entries = _json.loads(g.read_text())["entries"]
-    assert entries[0]["sessions"] == []
+    assert len(entries[0]["sessions"]) == 1
+    assert entries[0]["sessions"][0]["ended_at"]
     assert entries[0]["status"] == "idea"
 
     from fno.cli import app

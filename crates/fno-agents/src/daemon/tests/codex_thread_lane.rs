@@ -62,9 +62,14 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
             let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
                 crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-p"),
             );
-            crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
-                .await
-                .expect("yolo thread starts")
+            crate::codex_thread::CodexThread::start(
+                worktree.path(),
+                None,
+                &crate::codex_posture::CodexPosture::full_access(),
+                None,
+            )
+            .await
+            .expect("yolo thread starts")
         });
     let yolo = build_codex_thread_entry(
         "t",
@@ -72,7 +77,6 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         &start,
         None,
         None,
-        true,
         None,
         None,
         &[],
@@ -80,18 +84,78 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         None,
     );
     assert_eq!(yolo.sandbox_posture.as_deref(), Some("danger-full-access"));
+    assert_eq!(
+        yolo.requested_permission_mode, None,
+        "a bare yolo bool names no mode; unset stays unset"
+    );
     assert!(
-        entry_posture_is_full_access(&yolo)
+        crate::codex_posture::entry_posture_is_full_access(&yolo)
             && yolo.fno_id.as_deref() == Some("thread-p")
             && yolo.mux.is_none()
     );
+    // A typed mode on the request rides the row verbatim (v35): the entry
+    // reads the DRIVER's posture, which the lane resolved from that string.
+    let second = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
+                crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-p"),
+            );
+            crate::codex_thread::CodexThread::start(
+                worktree.path(),
+                None,
+                &crate::codex_posture::CodexPosture::from_record(
+                    Some("read-only:on-request"),
+                    None,
+                ),
+                None,
+            )
+            .await
+            .expect("read-only thread starts")
+        });
+    let read_only = build_codex_thread_entry(
+        "t",
+        worktree.path(),
+        &second,
+        None,
+        None,
+        None,
+        None,
+        &[],
+        &serde_json::value::Value::Null,
+        None,
+    );
+    assert_eq!(read_only.sandbox_posture.as_deref(), Some("read-only"));
+    assert_eq!(
+        read_only.requested_permission_mode.as_deref(),
+        Some("read-only:on-request"),
+        "the operator's exact string is on the row"
+    );
+    let third = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
+                crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-p"),
+            );
+            crate::codex_thread::CodexThread::start(
+                worktree.path(),
+                None,
+                &crate::codex_posture::CodexPosture::bounded(),
+                None,
+            )
+            .await
+            .expect("bounded thread starts")
+        });
     let bounded = build_codex_thread_entry(
         "t",
         worktree.path(),
-        &start,
+        &third,
         None,
         None,
-        false,
         None,
         None,
         &[],
@@ -99,17 +163,19 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         None,
     );
     assert_eq!(bounded.sandbox_posture.as_deref(), Some("workspace-write"));
-    assert!(!entry_posture_is_full_access(&bounded));
+    assert!(!crate::codex_posture::entry_posture_is_full_access(
+        &bounded
+    ));
     // A requested model stamps its basis on the row; an absent one
     // leaves the basis absent with it.
+    let muted = None;
     let modeled = build_codex_thread_entry(
         "t",
         worktree.path(),
         &start,
         Some("gpt-5.6-sol"),
         None,
-        false,
-        None,
+        muted,
         None,
         &[],
         &serde_json::Value::Null,
@@ -159,13 +225,13 @@ fn build_codex_thread_entry_records_the_resolved_posture_and_its_roots() {
                 crate::codex_thread::CodexThread::start_with_state_dirs(
                     cwd,
                     None,
-                    false,
+                    &crate::codex_posture::CodexPosture::full_access(),
                     None,
                     &[granted_s],
                     None,
                 )
                 .await
-                .expect("bounded thread starts")
+                .expect("full-access thread starts")
             }
         });
     let entry = build_codex_thread_entry(
@@ -174,7 +240,6 @@ fn build_codex_thread_entry_records_the_resolved_posture_and_its_roots() {
         &start,
         None,
         None,
-        true,
         None,
         None,
         &[],
@@ -208,9 +273,14 @@ fn build_codex_thread_entry_stamps_the_request_node() {
             let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
                 crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-node"),
             );
-            crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
-                .await
-                .expect("yolo thread starts")
+            crate::codex_thread::CodexThread::start(
+                worktree.path(),
+                None,
+                &crate::codex_posture::CodexPosture::full_access(),
+                None,
+            )
+            .await
+            .expect("yolo thread starts")
         });
     let entry = build_codex_thread_entry(
         "t",
@@ -218,7 +288,6 @@ fn build_codex_thread_entry_stamps_the_request_node() {
         &start,
         None,
         None,
-        true,
         Some("x-535c"),
         None,
         &[],
@@ -242,9 +311,14 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
             let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
                 crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-acct"),
             );
-            crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
-                .await
-                .expect("yolo thread starts")
+            crate::codex_thread::CodexThread::start(
+                worktree.path(),
+                None,
+                &crate::codex_posture::CodexPosture::full_access(),
+                None,
+            )
+            .await
+            .expect("yolo thread starts")
         });
     let pinned = build_codex_thread_entry(
         "t",
@@ -252,7 +326,6 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
         &start,
         None,
         None,
-        true,
         None,
         Some("codex-main"),
         &[],
@@ -266,7 +339,6 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
         &start,
         None,
         None,
-        true,
         None,
         None,
         &[],
@@ -280,7 +352,6 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
         &start,
         None,
         None,
-        true,
         None,
         Some("   "),
         &[],
@@ -305,9 +376,14 @@ fn build_codex_thread_entry_carries_the_request_parent_edge_or_names_why() {
             let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
                 crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-lineage"),
             );
-            crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
-                .await
-                .expect("yolo thread starts")
+            crate::codex_thread::CodexThread::start(
+                worktree.path(),
+                None,
+                &crate::codex_posture::CodexPosture::full_access(),
+                None,
+            )
+            .await
+            .expect("yolo thread starts")
         });
     let linked = build_codex_thread_entry(
         "t",
@@ -315,7 +391,6 @@ fn build_codex_thread_entry_carries_the_request_parent_edge_or_names_why() {
         &start,
         None,
         None,
-        true,
         None,
         None,
         &[],
@@ -334,7 +409,6 @@ fn build_codex_thread_entry_carries_the_request_parent_edge_or_names_why() {
         &start,
         None,
         None,
-        true,
         None,
         None,
         &[],
@@ -389,18 +463,13 @@ async fn ask_a_codex_pane_row_refuses_naming_the_pane_verb() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
-/// A resume writes what it actually resolved onto the row, not a stale
-/// echo of what the ORIGINAL spawn recorded. Caught in review: the schema
-/// this node adds (`resolved_sandbox`/`granted_writable_roots`) was wired
-/// on the spawn path only, leaving exactly the gap the pre-existing
-/// comment on `ensure_codex_thread_handle` named as its own durable fix -
-/// "the sibling node that owns that schema" is this one.
-///
-/// `resume()` carries no state_dirs, so `granted_writable_roots` goes
-/// empty here even though the row was seeded non-empty: that emptiness IS
-/// the loss `codex_thread_resumed_without_state_grant` announces, not a
-/// missed write. A row still showing the spawn-time roots after a resume
-/// would look granted while actually ungranted.
+/// A resume re-applies the recorded grant (AC3-HP/EDGE) and writes back what
+/// it actually resolved, WITHOUT erasing the spawn-time record: the recorded
+/// roots are read before the resume and unioned back after, so a narrowed
+/// resume cannot destroy the only durable copy of the grant and a second
+/// resume can still restore them. The old lane did the opposite: it resumed
+/// with no state dirs and overwrote the row with the narrowed result, which
+/// is the loss `codex_thread_resumed_without_state_grant` used to announce.
 #[tokio::test(flavor = "current_thread")]
 async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
     // CODEX_HOME is process-global: hold the same guard every other fake
@@ -408,9 +477,9 @@ async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
     let _guard = crate::path_test_guard();
     let home = tmp_home("codex-resume-records-posture");
     let cwd = tempfile::tempdir().unwrap();
-    let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
-        crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-resumed"),
-    );
+    let behavior = crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-resumed");
+    let received = std::sync::Arc::clone(&behavior.received);
+    let _daemon = crate::codex_fake_daemon::FakeDaemon::start(behavior);
     // Must match the fake's configured thread_id: `resume()` refuses when
     // `thread/resume` confirms a different id than requested.
     let session_id = "thread-resumed".to_string();
@@ -420,8 +489,8 @@ async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
         entry.project_root = entry.cwd.clone();
         entry.harness_session_id = Some(session_id.clone());
         entry.codex_session_id = Some(session_id.clone());
-        // Seeded as if a prior spawn had granted a root - the exact value
-        // a stale write would leave behind uncorrected.
+        // Seeded as a prior spawn left it: roots recorded, bounded posture.
+        entry.sandbox_posture = Some("workspace-write".into());
         entry.resolved_sandbox = Some("workspaceWrite".into());
         entry.granted_writable_roots = vec!["/stale/spawn-time/root".into()];
         registry.entries.push(entry);
@@ -437,6 +506,18 @@ async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
         .await
         .expect("the fake daemon answers thread/resume");
 
+    // AC3-HP: the resume frame carries the recorded posture (the fake saw
+    // the frame; roots ride the TURN, not the resume).
+    let resume = received
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .find(|f| f["method"] == "thread/resume")
+        .and_then(|f| f.get("params").cloned())
+        .expect("a thread/resume frame");
+    assert_eq!(resume["sandbox"], "workspace-write");
+    assert_eq!(resume["approvalPolicy"], "never");
+
     let after = state::load_registry(&home.registry_json())
         .unwrap()
         .find("t-resume")
@@ -448,12 +529,16 @@ async fn ensure_codex_thread_handle_records_what_the_resume_resolved() {
         after.resolved_sandbox.as_deref(),
         Some(crate::codex_thread::SANDBOX_POSTURE_UNKNOWN)
     );
+    // AC3-EDGE: the recorded grant survives the write-back.
     assert!(
-        after.granted_writable_roots.is_empty(),
-        "a resume carries no state_dirs, so the stale spawn-time root must \
-         not survive: {:?}",
+        after
+            .granted_writable_roots
+            .contains(&"/stale/spawn-time/root".to_string()),
+        "the recorded roots must survive the write-back: {:?}",
         after.granted_writable_roots
     );
+    // AC6: the v35 columns are stamped.
+    assert_eq!(after.turn_policy_source.as_deref(), Some("requested"));
     std::fs::remove_dir_all(home.root()).ok();
 }
 

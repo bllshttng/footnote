@@ -920,18 +920,27 @@ fn dispatch_opencode_serve_inner(
         }
     }
 
-    emit_event(
-        &events,
-        "agent_spawned",
-        &[
-            ("name", name.into()),
-            ("provider", "opencode".into()),
-            ("harness", "opencode".into()),
-            ("session_id", session_id.clone().into()),
-            ("serve_url", serve.base_url.clone().into()),
-            ("node", node.unwrap_or_default().into()),
-        ],
+    // The birth carries the same lineage the row was minted with, so the
+    // journal and the registry can never disagree about who the parent is.
+    let birth = crate::spawn_edge::birth_event(
+        name,
+        &crate::spawn_lineage::ambient_lineage(),
+        serde_json::json!({
+            "provider": "opencode",
+            "harness": "opencode",
+            "session_id": session_id.clone(),
+            "serve_url": serve.base_url.clone(),
+            "node": node.unwrap_or_default(),
+        }),
     );
+    let no_fields = serde_json::Map::new();
+    let fields: Vec<(&str, serde_json::Value)> = birth
+        .as_object()
+        .unwrap_or(&no_fields)
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.clone()))
+        .collect();
+    emit_event(&events, "agent_spawned", &fields);
     AskOutcome::ok_reply(
         serde_json::json!({
             "ok": true,
@@ -939,6 +948,9 @@ fn dispatch_opencode_serve_inner(
             "session_id": session_id,
             "short_id": session_id,
             "serve_url": serve.base_url.clone(),
+            // The generated serve config writes `{"permission":{"*":"allow"}}`;
+            // the receipt NAMES that posture instead of leaving it unnamed.
+            "permission_posture": "explicit allow-all (serve config permission.{*}=allow)",
             "durability": "daemon-owned",
             "incarnation": format!("{}:{}", serve.pid, serve.pid_start.unwrap_or_default()),
             "endpoint": serve.base_url,

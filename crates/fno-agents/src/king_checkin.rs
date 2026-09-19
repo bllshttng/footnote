@@ -32,8 +32,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-/// The twelve readings of the check-in body, in print order.
-const READING_NAMES: [&str; 12] = [
+/// The fourteen readings of the check-in body, in print order.
+const READING_NAMES: [&str; 14] = [
     "user_notes",
     "board",
     "escalations",
@@ -43,13 +43,15 @@ const READING_NAMES: [&str; 12] = [
     "capacity",
     "workers",
     "crown",
+    "refusal_rate",
     "drain",
     "main_ci",
     "control_plane",
+    "parked",
 ];
 
 /// The numeric keys this verb owns and diffs versus the previous beat.
-const NUMERIC_DIFF_KEYS: [&str; 8] = [
+const NUMERIC_DIFF_KEYS: [&str; 9] = [
     "open_prs",
     "free_claim_no_driver",
     "blocked",
@@ -58,6 +60,7 @@ const NUMERIC_DIFF_KEYS: [&str; 8] = [
     "active_nodes",
     "live_workers",
     "undelivered",
+    "held_open",
 ];
 
 /// Diff keys absent from the previous beat's data: a hand-journaled baseline
@@ -166,15 +169,16 @@ fn fno_verb(args: &[&str]) -> Result<(i32, String, String), String> {
 /// The crown-keyed handoff doc for one scope, newest existing file first.
 /// The key scheme matches the precompact writer (`config paths handoff
 /// --scope`), so the two cannot drift; no doc yet is a failed reading, not a
-/// placeholder beat.
-fn crown_handoff_doc(ctx: &Ctx) -> Result<PathBuf, String> {
-    let key = format!("crown-{}", sanitize_scope_key(&ctx.scope));
+/// placeholder beat. Takes the directory and scope rather than `Ctx` so the
+/// stop gate's stale-doc resolver calls the same one.
+pub(crate) fn crown_handoff_doc(handoffs_dir: &Path, scope: &str) -> Result<PathBuf, String> {
+    let key = format!("crown-{}", sanitize_scope_key(scope));
     if key == "crown-" {
         return Err("empty scope names no canon doc".into());
     }
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    let it = std::fs::read_dir(&ctx.handoffs_dir)
-        .map_err(|_| format!("no canon handoff doc for scope {}", ctx.scope))?;
+    let it = std::fs::read_dir(handoffs_dir)
+        .map_err(|_| format!("no canon handoff doc for scope {scope}"))?;
     for entry in it.flatten() {
         let path = entry.path();
         if !path.is_file() {
@@ -193,7 +197,7 @@ fn crown_handoff_doc(ctx: &Ctx) -> Result<PathBuf, String> {
         }
     }
     best.map(|(_, p)| p)
-        .ok_or_else(|| format!("no canon handoff doc for scope {}", ctx.scope))
+        .ok_or_else(|| format!("no canon handoff doc for scope {scope}"))
 }
 
 pub(crate) fn sanitize_scope_key(scope: &str) -> String {
@@ -264,7 +268,7 @@ fn is_user_placeholder(text: &str) -> bool {
 }
 
 fn r_user_notes(ctx: &Ctx) -> Result<Value, String> {
-    let doc = crown_handoff_doc(ctx)?;
+    let doc = crown_handoff_doc(&ctx.handoffs_dir, &ctx.scope)?;
     let text =
         std::fs::read_to_string(&doc).map_err(|e| format!("{}: unreadable: {e}", doc.display()))?;
     let block = extract_user_marker(&text)
@@ -590,7 +594,7 @@ fn r_crown() -> Result<Value, String> {
     let payload: Value = serde_json::from_str(out.trim())
         .map_err(|e| format!("court payload did not parse: {e}: {}", err.trim()))?;
     let summary = payload.get("summary").cloned().unwrap_or(json!({}));
-    let mut anomalies: Vec<String> = Vec::new();
+    let mut court_anomalies: Vec<String> = Vec::new();
     for c in payload
         .get("crowns")
         .and_then(|c| c.as_array())
@@ -605,17 +609,107 @@ fn r_crown() -> Result<Value, String> {
             let reason = s_str(c, "reason")
                 .map(|r| format!(" ({r})"))
                 .unwrap_or_default();
-            anomalies.push(format!(
+            court_anomalies.push(format!(
                 "{holder} scope {scope} status {status} agree {agree:?}{reason}"
             ));
         }
     }
+
+    // The split reading is its OWN registry read, not a court field: the
+    // court filters to stored-live rows, so a terminal row still carrying
+    // crown fields is invisible there by construction, and a court failure
+    // must never read as "no splits either". A failed read names itself and
+    // leaves both counts null, never a measured-looking zero.
+    let split_read =
+        crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json())
+            .map(|registry| crate::crown_split::read_crown_splits(&registry.entries))
+            .map_err(|e| e.to_string());
+    let (double_ruled, stale_crowned, split_read_error, ruled_lines, stale_lines) =
+        crown_split_fields(split_read);
+    let mut anomalies = ruled_lines;
+    anomalies.extend(court_anomalies);
+    anomalies.extend(stale_lines);
     Ok(json!({
         "total": summary.get("total").cloned().unwrap_or(Value::Null),
         "splits": summary.get("splits").cloned().unwrap_or(Value::Null),
         "disagreements": summary.get("disagreements").cloned().unwrap_or(Value::Null),
+        "double_ruled": double_ruled,
+        "stale_crowned": stale_crowned,
+        "split_read_error": split_read_error,
         "anomalies": anomalies,
     }))
+}
+
+/// The split half of the crown reading, as JSON fields plus the anomaly
+/// lines it contributes. Pure so the never-zero rule is testable without a
+/// registry.
+fn crown_split_fields(
+    read: Result<crate::crown_split::CrownSplits, String>,
+) -> (Value, Value, Value, Vec<String>, Vec<String>) {
+    match read {
+        Ok(splits) => {
+            let ruled = splits
+                .double_ruled
+                .iter()
+                .map(|s| {
+                    format!(
+                        "DOUBLE RULED {} held by {} live rows ({})",
+                        s.scope,
+                        s.holders.len(),
+                        s.holders.join(", ")
+                    )
+                })
+                .collect();
+            let stale = splits
+                .stale
+                .iter()
+                .map(|s| {
+                    format!(
+                        "stale crown {} on {} (stored status {}); fno agents rm {}",
+                        s.scope, s.row, s.stored_status, s.row
+                    )
+                })
+                .collect();
+            (
+                json!(splits.double_ruled.len() as i64),
+                json!(splits.stale.len() as i64),
+                Value::Null,
+                ruled,
+                stale,
+            )
+        }
+        Err(reason) => (
+            Value::Null,
+            Value::Null,
+            json!(reason),
+            vec![format!("crown split read failed: {reason}")],
+            Vec::new(),
+        ),
+    }
+}
+
+/// The trailing-window refusal rate: the cheapest available proxy for
+/// context degradation, no model introspection needed. Resolves its OWN
+/// ambient identity (same primitive `claim_store`/`king_verdict_inputs`
+/// already use) rather than taking a flag, so no CLI surface or Python
+/// wiring is needed to reach it - only claude sessions keep a per-session
+/// transcript file today (`crate::claude_drive::find_transcript`), so any
+/// other harness (or a claude session whose transcript cannot be found)
+/// reads as an ordinary failed reading, never a silent zero.
+const REFUSAL_RATE_WINDOW: usize = 200;
+
+fn r_refusal_rate() -> Result<Value, String> {
+    let (session_id, harness) = crate::claims::resolve_identity();
+    if harness.as_deref() != Some("claude") {
+        return Err(
+            "refusal rate needs a claude transcript; this session's harness is not claude".into(),
+        );
+    }
+    let session_id = session_id
+        .ok_or_else(|| "no session id resolved from the ambient environment".to_string())?;
+    let transcript = crate::claude_drive::find_transcript(&session_id)
+        .ok_or_else(|| format!("no transcript found for session {session_id}"))?;
+    crate::refusal_rate::refusal_rate(&transcript, REFUSAL_RATE_WINDOW)
 }
 
 fn r_drain(ctx: &Ctx) -> Result<Value, String> {
@@ -623,6 +717,57 @@ fn r_drain(ctx: &Ctx) -> Result<Value, String> {
     let payload: Value = serde_json::from_str(out.trim())
         .map_err(|e| format!("drain payload did not parse: {e}: {}", err.trim()))?;
     Ok(payload.get("undelivered").cloned().unwrap_or(Value::Null))
+}
+
+/// The parked-PR board fact: open parks with the remedy verb, read
+/// in-process from the one owner so a second reader of the store shape can
+/// never drift. An unreadable store reads empty, the same corrupt-reads-
+/// empty posture the Python watcher store has always had.
+fn r_parked() -> Result<Value, String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("cwd unreadable: {e}"))?;
+    let ctx = crate::pr_park::Ctx::live(&cwd, crate::pr_park::Paths::resolve(&cwd));
+    let rows = crate::pr_park::list_rows(&ctx);
+    let open: Vec<Value> = rows
+        .iter()
+        .filter(|r| r.bucket == "open")
+        .map(|r| {
+            json!({
+                "key": r.key,
+                "node": r.node,
+                "reason_detail": r.reason_detail,
+                "age_hours": r.age_hours,
+            })
+        })
+        .collect();
+    Ok(json!({"open": open.len(), "rows": open}))
+}
+
+/// The held reading: nodes an open operator question blocks, oldest
+/// question first. One fold over the question journals in process; the rows
+/// carry everything the render needs to name the decide verb.
+fn r_held() -> Result<Value, String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("cwd unreadable: {e}"))?;
+    let home = crate::paths::AgentsHome::from_env();
+    let fno_dir = home
+        .root()
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "agents home has no parent".to_string())?;
+    let journals = crate::needs::question_journals(&fno_dir, &cwd);
+    let rows = crate::needs::held_rows(&journals);
+    let rows: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "node": r.node,
+                "question_id": r.question_id,
+                "question": r.question,
+                "ts": r.ts,
+                "epoch": r.epoch,
+            })
+        })
+        .collect();
+    Ok(json!({"open": rows.len(), "rows": rows}))
 }
 
 fn owner_repo(url: &str) -> Result<String, String> {
@@ -722,12 +867,49 @@ fn r_control_plane(ctx: &Ctx) -> Result<Value, String> {
     let findings = crate::stuck_work::collect(&ctx.cwd)?;
     crate::arm_repair::annotate(&mut rows, &crate::arm_repair::RepairFacts::live(&findings));
     let threshold = crate::agents_config::notify_arm_failing_after_s(&ctx.cwd);
-    let mut attention: Vec<String> = crate::arm_watch::overdue_arms(&rows, threshold)
-        .iter()
-        .map(|row| row.line.trim().to_string())
-        .collect();
-    attention.extend(findings.iter().map(|f| f.line.clone()));
+    let attention = control_plane_attention(&rows, &trace, &findings, threshold);
     Ok(json!({ "attention": attention }))
+}
+
+/// The check-in's control-plane attention lines, pure so the summary and
+/// the row lines can never disagree. A deliberate hold (armed breaker or
+/// hand pause) leads with one summary naming it; the overdue arms and
+/// stuck-work findings follow unchanged. An unreadable breaker stays out
+/// of the summary: its rows remain overdue faults.
+fn control_plane_attention(
+    rows: &[crate::tick_ledger::ArmStatus],
+    trace: &crate::tick_ledger::TickTrace,
+    findings: &[crate::stuck_work::Finding],
+    threshold_s: u64,
+) -> Vec<String> {
+    let mut attention: Vec<String> = Vec::new();
+    let paused: Vec<&crate::tick_ledger::ArmStatus> = rows
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.cause.as_deref(),
+                Some("fleet_stop") | Some("loops_paused")
+            )
+        })
+        .collect();
+    if let (false, Some(p)) = (paused.is_empty(), trace.pause.as_ref()) {
+        let verb = match p {
+            crate::loops_pause::DispatchPause::Manual { .. } => "fno do loops status",
+            _ => "fno agents incident status",
+        };
+        attention.push(format!(
+            "{} arms paused on purpose: {}; merges and dispatch are held until the breaker clears ({verb})",
+            paused.len(),
+            p.detail()
+        ));
+    }
+    attention.extend(
+        crate::arm_watch::overdue_arms(rows, threshold_s)
+            .iter()
+            .map(|row| row.line.trim().to_string()),
+    );
+    attention.extend(findings.iter().map(|f| f.line.clone()));
+    attention
 }
 
 /// One territory row per scope: live against cap, the blueprinter
@@ -781,9 +963,12 @@ fn collect_readings(ctx: &Ctx) -> Vec<Reading> {
     take("capacity", r_capacity());
     take("workers", r_workers());
     take("crown", r_crown());
+    take("refusal_rate", r_refusal_rate());
     take("drain", r_drain(ctx));
+    take("held", r_held());
     take("main_ci", r_main_ci());
     take("control_plane", r_control_plane(ctx));
+    take("parked", r_parked());
     readings
 }
 
@@ -835,8 +1020,17 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
             );
         }
     }
+    if let Some(rr) = get("refusal_rate").filter(|r| r.ok) {
+        data.insert(
+            "refusal_rate".into(),
+            rr.value.get("rate").cloned().unwrap_or(Value::Null),
+        );
+    }
     if let Some(drain) = get("drain").filter(|r| r.ok) {
         data.insert("undelivered".into(), drain.value.clone());
+    }
+    if let Some(held) = get("held").filter(|r| r.ok) {
+        data.insert("held_open".into(), held.value["open"].clone());
     }
     if let Some(ci) = get("main_ci").filter(|r| r.ok) {
         data.insert("main_ci".into(), ci.value.clone());
@@ -872,6 +1066,42 @@ fn previous_row(ctx: &Ctx) -> (Option<Value>, String) {
     }
 }
 
+/// The `loop` row before `previous_row`'s. Needed only to tell a rising
+/// refusal rate from a single noisy tick - two consecutive rises, not one.
+fn second_previous_loop_row(ctx: &Ctx) -> Option<Value> {
+    let payload = crate::king_history::scan(&ctx.events_paths, &ctx.scope).ok()?;
+    payload["events"]
+        .as_array()?
+        .iter()
+        .filter(|r| s_str(r, "source") == Some("loop"))
+        .nth(1)
+        .cloned()
+}
+
+fn refusal_rate_of(previous_data: Option<&Value>) -> Option<f64> {
+    previous_data?.get("refusal_rate")?.as_f64()
+}
+
+/// Sets `refusal_rate_rising`: true only when the current rate exceeds the
+/// last beat's, and that beat's exceeded the one before it. A single high
+/// tick is noise; two consecutive rises is the handoff signal.
+fn mark_refusal_rate_trend(
+    data: &mut Map<String, Value>,
+    previous_data: Option<&Value>,
+    second_previous_data: Option<&Value>,
+) {
+    let current = data.get("refusal_rate").and_then(Value::as_f64);
+    let rising = match (
+        current,
+        refusal_rate_of(previous_data),
+        refusal_rate_of(second_previous_data),
+    ) {
+        (Some(c), Some(p1), Some(p2)) => c > p1 && p1 > p2,
+        _ => false,
+    };
+    data.insert("refusal_rate_rising".into(), json!(rising));
+}
+
 fn derive_change(
     previous_data: Option<&Value>,
     data: &Map<String, Value>,
@@ -896,13 +1126,26 @@ fn derive_change(
             }
         }
     }
-    let attention: Vec<&str> = data
+    let mut attention: Vec<String> = data
         .get("control_plane_attention")
         .and_then(|a| a.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default();
-    // Attention outranks silence: a control plane failing for 30 minutes is
-    // never journaled as "no change", whatever the counts did.
+    if data
+        .get("refusal_rate_rising")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        attention.push("refusal rate rising two consecutive beats".into());
+    }
+    // Attention outranks silence: a control plane failing for 30 minutes,
+    // or a refusal rate climbing two beats running, is never journaled as
+    // "no change", whatever the counts did.
     if !attention.is_empty() {
         let moved_suffix = if moved.is_empty() {
             String::new()
@@ -1062,6 +1305,48 @@ fn render_lines(
         }
     }
 
+    match failed("held") {
+        Some(r) => lines.push(format!("READER FAILED held: {}", r.error)),
+        None => {
+            // Held nodes: the rows already carry node, question id
+            // and ask time; the line names the decide verb that clears them.
+            let rows = by_name("held")
+                .map(|r| &r.value)
+                .unwrap_or(&Value::Null)
+                .get("rows")
+                .and_then(|r| r.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if rows.is_empty() {
+                lines.push("held: none".into());
+            } else {
+                let now = SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                lines.push(format!(
+                    "held: {} node(s) waiting on the operator",
+                    rows.len()
+                ));
+                for row in rows.iter().take(MAX_COURT_ROWS) {
+                    let age = row
+                        .get("epoch")
+                        .and_then(Value::as_u64)
+                        .map(|e| now.saturating_sub(e) / 60)
+                        .unwrap_or(0);
+                    lines.push(format!(
+                        "  {} on question {}, age {}m; answer with: fno backlog decide {} \"<ruling>\" --question-id {}",
+                        dash(row.get("node")),
+                        dash(row.get("question_id")),
+                        age,
+                        dash(row.get("node")),
+                        dash(row.get("question_id")),
+                    ));
+                }
+            }
+        }
+    }
+
     match failed("court") {
         Some(r) => lines.push(format!("READER FAILED court: {}", r.error)),
         None => {
@@ -1177,8 +1462,10 @@ fn render_lines(
         None => {
             let crown = by_name("crown").map(|r| &r.value).unwrap_or(&Value::Null);
             lines.push(format!(
-                "crown: {} crowns, splits {}, disagreements {}",
+                "crown: {} crowns, double-ruled {}, stale-crowned {}, manifest-splits {}, disagreements {}",
                 dash(crown.get("total")),
+                dash(crown.get("double_ruled")),
+                dash(crown.get("stale_crowned")),
                 dash(crown.get("splits")),
                 dash(crown.get("disagreements")),
             ));
@@ -1188,16 +1475,43 @@ fn render_lines(
                 .into_iter()
                 .flatten()
             {
-                lines.push(format!(
-                    "  {}",
-                    s_str(anomaly, "scope")
-                        .unwrap_or(&anomaly.to_string())
-                        .to_string()
-                ));
+                if let Some(text) = anomaly.as_str() {
+                    lines.push(format!("  {text}"));
+                } else {
+                    lines.push(format!(
+                        "  {}",
+                        s_str(anomaly, "scope")
+                            .unwrap_or(&anomaly.to_string())
+                            .to_string()
+                    ));
+                }
             }
         }
     }
-    let _ = &by_name;
+    match failed("refusal_rate") {
+        Some(r) => lines.push(format!("READER FAILED refusal_rate: {}", r.error)),
+        None => {
+            let rr = by_name("refusal_rate")
+                .map(|r| &r.value)
+                .unwrap_or(&Value::Null);
+            let rate = rr.get("rate").and_then(Value::as_f64).unwrap_or(0.0);
+            let mut text = format!(
+                "refusal_rate: {:.1}% ({}/{} last {} calls)",
+                rate * 100.0,
+                dash(rr.get("refused")),
+                dash(rr.get("total")),
+                dash(rr.get("window")),
+            );
+            if data
+                .get("refusal_rate_rising")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                text.push_str(" - RISING (handoff signal)");
+            }
+            lines.push(text);
+        }
+    }
 
     match failed("drain") {
         Some(r) => lines.push(format!("READER FAILED drain: {}", r.error)),
@@ -1224,6 +1538,38 @@ fn render_lines(
                 lines.push("control plane:".into());
                 for entry in attention {
                     lines.push(format!("  {entry}"));
+                }
+            }
+        }
+    }
+    match failed("parked") {
+        Some(r) => lines.push(format!("READER FAILED parked: {}", r.error)),
+        None => {
+            let rows = by_name("parked")
+                .and_then(|r| r.value.get("rows"))
+                .and_then(|o| o.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if rows.is_empty() {
+                lines.push("parked: none".into());
+            } else {
+                lines.push("parked:".into());
+                for row in rows {
+                    let key = row.get("key").and_then(Value::as_str).unwrap_or("?");
+                    let node = row.get("node").and_then(Value::as_str).unwrap_or("-");
+                    let detail = row
+                        .get("reason_detail")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let age = row.get("age_hours").and_then(Value::as_i64).unwrap_or(-1);
+                    let age_s = if age < 0 {
+                        "?".to_string()
+                    } else {
+                        format!("{age}h")
+                    };
+                    lines.push(format!(
+                        "  {key} {detail} ({age_s}, node {node}); remedy: fno-agents pr-park unpark {key}"
+                    ));
                 }
             }
         }
@@ -1555,11 +1901,13 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
 
     let ts = iso_now();
     let readings = collect_readings(&ctx);
-    let data = build_data(&readings, &ctx.scope);
+    let mut data = build_data(&readings, &ctx.scope);
     let (previous, previous_error) = previous_row(&ctx);
     let previous_data = previous.as_ref().and_then(|p| p.get("data"));
+    let second_previous = second_previous_loop_row(&ctx);
+    let second_previous_data = second_previous.as_ref().and_then(|p| p.get("data"));
+    mark_refusal_rate_trend(&mut data, previous_data, second_previous_data);
     let derived = derive_change(previous_data, &data, &previous_error);
-    let mut data = data;
     let change = finish_change(derived.clone(), model_change.as_deref(), &mut data);
     let mut lines = render_lines(
         &ctx.scope,
@@ -1889,9 +2237,14 @@ mod tests {
                 "crown",
                 json!({"total": 2, "splits": 0, "disagreements": 0, "anomalies": []}),
             ),
+            Reading::took(
+                "refusal_rate",
+                json!({"rate": 0.05, "refused": 5, "total": 100, "window": 100}),
+            ),
             Reading::took("drain", json!(9)),
             Reading::took("main_ci", json!("green")),
             Reading::took("control_plane", json!({"attention": []})),
+            Reading::took("parked", json!({"open": 0, "rows": []})),
         ]
     }
 
@@ -1930,8 +2283,85 @@ mod tests {
         assert!(board_line.contains("blocked 2"));
         let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
         assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(12)));
+        assert_eq!(data.get("coverage"), Some(&json!(14)));
         assert_eq!(data.get("open_prs"), Some(&json!(7)));
+    }
+
+    // AC1: the printed body carries a refusal_rate line with the real
+    // refused/total/window counts, and the same rate lands in the
+    // journaled data.
+    #[test]
+    fn refusal_rate_line_prints_beside_capacity_and_crown() {
+        let readings = sample_readings(
+            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
+            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        assert_eq!(data.get("refusal_rate"), Some(&json!(0.05)));
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let line = lines
+            .iter()
+            .find(|l| l.starts_with("refusal_rate:"))
+            .unwrap();
+        assert_eq!(line, "refusal_rate: 5.0% (5/100 last 100 calls)");
+    }
+
+    // AC2: two consecutive rises trip the handoff-signal suffix; one rise,
+    // or a flat/falling rate, does not.
+    #[test]
+    fn refusal_rate_rising_only_after_two_consecutive_increases() {
+        let mut data: Map<String, Value> = Map::new();
+        data.insert("refusal_rate".into(), json!(0.20));
+        let row = |rate: f64| Some(json!({"refusal_rate": rate}));
+
+        // Two rises: 0.05 -> 0.10 -> 0.20.
+        mark_refusal_rate_trend(&mut data, row(0.10).as_ref(), row(0.05).as_ref());
+        assert_eq!(data.get("refusal_rate_rising"), Some(&json!(true)));
+
+        // One rise only: 0.10 -> 0.10 -> 0.20 (flat, then up).
+        mark_refusal_rate_trend(&mut data, row(0.10).as_ref(), row(0.10).as_ref());
+        assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
+
+        // Falling into the current beat: 0.05 -> 0.30 -> 0.20.
+        mark_refusal_rate_trend(&mut data, row(0.30).as_ref(), row(0.05).as_ref());
+        assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
+
+        // Missing history reads as not-rising, never a false positive.
+        mark_refusal_rate_trend(&mut data, None, None);
+        assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
+    }
+
+    #[test]
+    fn refusal_rate_rising_line_carries_the_handoff_suffix() {
+        let readings = sample_readings(
+            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
+            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
+        );
+        let mut data = build_data(&readings, "x-bbbb");
+        data.insert("refusal_rate_rising".into(), json!(true));
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let line = lines
+            .iter()
+            .find(|l| l.starts_with("refusal_rate:"))
+            .unwrap();
+        assert!(line.ends_with(" - RISING (handoff signal)"), "line: {line}");
+    }
+
+    // A rising refusal rate outranks silence the same way control-plane
+    // attention does: it must never journal as "no change".
+    #[test]
+    fn refusal_rate_rising_reads_as_attention_not_no_change() {
+        let mut data: Map<String, Value> = Map::new();
+        data.insert("refusal_rate_rising".into(), json!(true));
+        let change = derive_change(None, &data, "");
+        assert!(
+            change.starts_with("attention: refusal rate rising"),
+            "change: {change}"
+        );
     }
 
     #[test]
@@ -1949,7 +2379,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 11 of 12 readings ok")));
+            .any(|l| l.starts_with("coverage: 13 of 14 readings ok")));
         assert!(lines.iter().any(|l| l.contains("failed readers: board")));
         assert_eq!(change, "no numeric movement; readings failed: board");
         assert_eq!(data.get("open_prs"), None);
@@ -1964,9 +2394,54 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
-        readings[9] = Reading::failed("drain", "drain unreadable".into());
+        readings[10] = Reading::failed("drain", "drain unreadable".into());
         let data = build_data(&readings, "x-bbbb");
         assert!(derive_change(None, &data, "").starts_with("no numeric movement; readings failed"));
+    }
+
+    #[test]
+    fn the_king_sees_open_parks_every_beat_with_the_unpark_verb() {
+        let mut readings = sample_readings(
+            json!({"open_prs": 2, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 1, "total_nodes": 2, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 1, "oldest_worker_seen": "30s w1"}),
+        );
+        readings[13] = Reading::took(
+            "parked",
+            json!({"open": 2, "rows": [
+                {"key": "owner/repo#101", "node": "x-aa",
+                 "reason_detail": "failed; checks are red", "age_hours": 2},
+                {"key": "owner/repo#2078", "node": "x-bb",
+                 "reason_detail": "failed; checks are red", "age_hours": 5},
+            ]}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let unpark_rows: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("pr-park unpark"))
+            .collect();
+        assert_eq!(unpark_rows.len(), 2, "lines: {lines:?}");
+        assert!(unpark_rows[0].contains("owner/repo#101"));
+        assert!(unpark_rows[0].contains("checks are red"));
+    }
+
+    #[test]
+    fn a_parked_reading_of_zero_rows_reads_parked_none() {
+        let mut readings = sample_readings(
+            json!({"open_prs": 2, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 1, "total_nodes": 2, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 1, "oldest_worker_seen": "30s w1"}),
+        );
+        readings[13] = Reading::took("parked", json!({"open": 0, "rows": []}));
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        assert!(
+            lines.iter().any(|l| l == "parked: none"),
+            "lines: {lines:?}"
+        );
     }
 
     fn journal(dir: &Path, rows: &[Value]) -> PathBuf {
@@ -1978,12 +2453,54 @@ mod tests {
         dir.join("events.jsonl")
     }
 
+    #[test]
+    fn held_rows_render_the_decide_verb_and_none_when_clear() {
+        let mut readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 0, "oldest_worker_seen": ""}),
+        );
+        readings.push(Reading::took(
+            "held",
+            json!({"open": 2, "rows": [
+                {"node": "x-1", "question_id": "q-1", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0},
+                {"node": "x-2", "question_id": "q-2", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0}
+            ]}),
+        ));
+        let data = build_data(&readings, "x-bbbb");
+        assert_eq!(data.get("held_open"), Some(&json!(2)));
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let summary: Vec<&String> = lines.iter().filter(|l| l.starts_with("held: ")).collect();
+        assert_eq!(summary.len(), 1, "lines: {lines:?}");
+        assert!(summary[0].contains("2 node(s)"), "lines: {lines:?}");
+        let verbs: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("fno backlog decide"))
+            .collect();
+        assert_eq!(verbs.len(), 2, "each row names the decide verb");
+    }
+
+    #[test]
+    fn held_absent_reads_none() {
+        let readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 0, "oldest_worker_seen": ""}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        assert!(lines.iter().any(|l| l == "held: none"), "lines: {lines:?}");
+    }
+
     fn prev_row() -> Value {
         json!({"ts": "2026-09-10T12:00:00Z", "type": "reign_checkin", "source": "loop",
             "data": {"scope": "x-bbbb", "change": "no change", "open_prs": 9,
                      "free_claim_no_driver": 1, "blocked": 2,
                      "escalations_open": 0, "escalations_overdue": 0,
-                     "active_nodes": 4, "live_workers": 3, "undelivered": 9}})
+                     "active_nodes": 4, "live_workers": 3, "undelivered": 9,
+                     "held_open": 0}})
     }
 
     #[test]
@@ -2090,7 +2607,7 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
-        readings[11] = Reading::failed("control_plane", "journals unreadable".into());
+        readings[12] = Reading::failed("control_plane", "journals unreadable".into());
         let data = build_data(&readings, "x-bbbb");
         let change = derive_change(None, &data, "");
         assert_eq!(
@@ -2103,7 +2620,7 @@ mod tests {
             .any(|l| l == "READER FAILED control_plane: journals unreadable"));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 11 of 12 readings ok")));
+            .any(|l| l.starts_with("coverage: 13 of 14 readings ok")));
     }
 
     // AC6-EDGE: under the threshold with nothing stuck, the quiet beat stands.
@@ -2402,5 +2919,152 @@ mod tests {
             chrono::Utc::now()
         ));
         assert!(!path.exists());
+    }
+
+    fn pause_row(arm: &str) -> crate::tick_ledger::ArmStatus {
+        let mut r = crate::tick_ledger::ArmStatus {
+            arm: arm.to_string(),
+            scheduler: Some(crate::tick_ledger::SCHED_LAUNCHD.to_string()),
+            last_ts: Some("2026-09-17T22:30:00Z".to_string()),
+            age_s: Some(600),
+            acted: Some(0),
+            skip_reason: None,
+            detail: None,
+            interval_s: 900,
+            producer_evidence: crate::tick_ledger::ProducerEvidence::Observed,
+            stale: false,
+            failing: false,
+            failing_for_s: None,
+            cause: None,
+            line: String::new(),
+            repair: None,
+            heal: None,
+            upstream: None,
+        };
+        r.cause = Some("fleet_stop".to_string());
+        r.line = format!(
+            "{} cause=fleet_stop (fleet incident stopped at generation 5: two cargo runs; \
+             held on purpose; wait for the breaker to clear)",
+            crate::tick_ledger::render_row(&r)
+        );
+        r
+    }
+
+    // AC9-HP: a paused tier leads the attention list with one breaker
+    // summary, and no line prescribes a refresh.
+    #[test]
+    fn a_paused_tier_leads_attention_with_the_breaker_summary() {
+        use crate::loops_pause::DispatchPause;
+        let rows: Vec<crate::tick_ledger::ArmStatus> =
+            ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"]
+                .iter()
+                .map(|a| pause_row(a))
+                .collect();
+        let trace = crate::tick_ledger::TickTrace {
+            pause: Some(DispatchPause::FleetIncident {
+                generation: 5,
+                reason: "two cargo runs".to_string(),
+            }),
+            ..crate::tick_ledger::TickTrace::default()
+        };
+        let out = control_plane_attention(&rows, &trace, &[], 1800);
+        assert_eq!(out.len(), 1, "lines: {out:?}");
+        assert!(out[0].contains("generation 5"), "line: {}", out[0]);
+        assert!(
+            out[0].contains("fno agents incident status"),
+            "line: {}",
+            out[0]
+        );
+        assert!(
+            out[0].starts_with("4 arms paused on purpose:"),
+            "line: {}",
+            out[0]
+        );
+        assert!(
+            out.iter().all(|l| !l.contains("tick_overdue")),
+            "lines: {out:?}"
+        );
+        assert!(
+            out.iter().all(|l| !l.contains("pr watch refresh")),
+            "lines: {out:?}"
+        );
+    }
+
+    // AC10-EDGE: no pause, the output is today's: the row lines only.
+    #[test]
+    fn without_a_pause_attention_is_the_overdue_rows_alone() {
+        let mut kw = crate::tick_ledger::ArmStatus {
+            arm: "king_wake".to_string(),
+            scheduler: Some(crate::tick_ledger::SCHED_LAUNCHD.to_string()),
+            last_ts: Some("2026-09-17T22:30:00Z".to_string()),
+            age_s: Some(2400),
+            acted: Some(0),
+            skip_reason: None,
+            detail: None,
+            interval_s: 900,
+            producer_evidence: crate::tick_ledger::ProducerEvidence::Observed,
+            stale: true,
+            failing: false,
+            failing_for_s: None,
+            cause: None,
+            line: String::new(),
+            repair: None,
+            heal: None,
+            upstream: None,
+        };
+        kw.cause = Some("tick_overdue".to_string());
+        kw.line = format!(
+            "{} cause=tick_overdue (no tick stamp inside 2x interval)",
+            crate::tick_ledger::render_row(&kw)
+        );
+        let rows = vec![kw];
+        let out =
+            control_plane_attention(&rows, &crate::tick_ledger::TickTrace::default(), &[], 1800);
+        assert_eq!(out.len(), 1, "lines: {out:?}");
+        assert!(out[0].starts_with("king_wake"), "line: {}", out[0]);
+        assert!(out[0].contains("tick_overdue"), "line: {}", out[0]);
+    }
+
+    #[test]
+    fn crown_split_fields_report_counts_and_lines_on_a_reading() {
+        let splits = crate::crown_split::CrownSplits {
+            double_ruled: vec![crate::crown_split::ScopeSplit {
+                scope: "shared".into(),
+                holders: vec!["king-a".into(), "king-b".into()],
+            }],
+            stale: vec![crate::crown_split::StaleCrown {
+                row: "king-dead".into(),
+                scope: "shared".into(),
+                stored_status: "orphaned".into(),
+            }],
+        };
+        let (double_ruled, stale_crowned, err, ruled, stale) = crown_split_fields(Ok(splits));
+        assert_eq!(double_ruled, json!(1));
+        assert_eq!(stale_crowned, json!(1));
+        assert!(err.is_null());
+        assert_eq!(
+            ruled,
+            vec!["DOUBLE RULED shared held by 2 live rows (king-a, king-b)"]
+        );
+        assert_eq!(
+            stale,
+            vec![
+                "stale crown shared on king-dead (stored status orphaned); fno agents rm king-dead"
+            ]
+        );
+    }
+
+    #[test]
+    fn crown_split_fields_never_zero_an_unread_registry() {
+        let (double_ruled, stale_crowned, err, ruled, stale) =
+            crown_split_fields(Err("registry unreadable: boom".into()));
+        assert!(double_ruled.is_null());
+        assert!(stale_crowned.is_null());
+        assert_eq!(err, json!("registry unreadable: boom"));
+        assert_eq!(
+            ruled,
+            vec!["crown split read failed: registry unreadable: boom"]
+        );
+        assert!(stale.is_empty());
     }
 }

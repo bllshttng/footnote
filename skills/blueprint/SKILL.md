@@ -243,7 +243,7 @@ fi
 
    A nonzero exit from the validate-and-finalize chain stops Blueprint before `3a` and `3b`; never register a draft that the executor would reject.
    The `&&` is load-bearing: `--finalize` re-checks only the execution contract, so an unchained run stamps `status: ready` onto a plan the validator rejected for anything else (stub markers, malformed `kill_criteria`).
-   The judge call is advisory and level-gated (prints `skipped level=report` unless `config.loops.blueprint_judge.level` is `assisted` or `--force`). Besides the five questions it runs four source readers: epic_fit reads the parent epic and its siblings, mission_fit the nearest vision_path ancestors and `config.project.vision`, customer_fit `PRODUCT.md`, code_truth the plan's own line citations. A missing source or a missing lens file is a coverage gap, not a fail; a source reader's fail quotes its source. On a fail, revise the plan once or write a one-line disposition under that question in `## Five questions`; never loop, never block intake.
+   The judge call is advisory and level-gated (prints `skipped level=report` unless `config.loops.blueprint_judge.level` is `assisted` or `--force`). The judge asks the dimensions the node's kind calls for: every plan gets the shared readers (surface_fit, deletable, duplication, epic_fit, mission_fit, code_truth), a feature, epic or roadmap node gets the product readers (persona, uncovered_case, customer_fit, plus a competitive read `competitive_fit`, an AI ship-quality read `ship_quality` and the partner challenge questions `partner_challenge`), and a bug node gets the cause readers instead (did the plan reproduce the failure `reproduced`, does it name a root cause `root_cause`, did it check the sibling callers `sibling_callers`, does a test prove the fix `regression_test`). epic_fit reads the parent epic and its siblings, mission_fit the nearest vision_path ancestors and `config.project.vision`, customer_fit and competitive_fit `PRODUCT.md`, code_truth the plan's own line citations. A missing source or a missing lens file is a coverage gap, not a fail; a source reader's fail quotes its source. On a fail, revise the plan once or write a one-line disposition under that question in `## Five questions`; never loop, never block intake.
 
 3a. **Collision check + peer heads-up** (conditional). Between writing the plan and auto-intake, run the collision check (skip with `no-collision-check`) and, when a `peers` block exists, the cross-project peer heads-up. Both are gate-shaped, skip-flagged steps - full procedure (the `fno backlog collisions check` read, high-severity AskUserQuestion / beastmode auto-decision, the four options, and the peer-surface match + send) is in [references/blueprint-gates.md](references/blueprint-gates.md#collision-check-step-3a-skip-with-no-collision-check).
 
@@ -274,6 +274,35 @@ fi
    message.
 
    After `$NODE_ID` is minted, run the **Model Pin / Routing** and **Blueprint Provenance Stamp** gates ([references/blueprint-gates.md](references/blueprint-gates.md#model-pin-transcription--when-a-plan-supplies-a-model)) when their triggers fire.
+
+3b-bis. **Node-bearing filename for raw-prose intake** (US5)
+
+   A node-seeded plan is authored with its id already in the name (step 3, and
+   `/think`'s save rule). Only the **raw-prose** path - `/blueprint "some
+   feature"` with no node - lands id-less, and auto-intake has just minted its
+   node id (`$NODE_ID`, the `intake <id> -> backlog` line). Give the artifact
+   its node-bearing name and repoint `plan_path`, so a roadmap base keyed on the
+   node id finds it:
+
+   ```bash
+   "${SKILL_DIR}/scripts/rename-plan-to-node-id.sh" "$PLAN_PATH" "$NODE_ID"
+   ```
+
+   The helper is idempotent and non-fatal: a plan already ending `-$NODE_ID.md`
+   (every node-seeded path) is a no-op, a pre-existing target is never
+   clobbered, and any failure leaves the id-less file intact and re-runnable -
+   it never blocks the handoff. If `$PLAN_PATH` still points at the old name in
+   the same session, read the helper's `renamed <new-path>` line and use that
+   path downstream.
+
+3b-ter. **Commit the plan write.** The rename runs first so the commit names the final path. Every blueprint write is one commit in the plans dir's own git repo, on the design-doc path too. The cause names what moved this write: a finding, a ruling id, or a note timestamp. A first write says `initial blueprint`.
+
+   ```bash
+   VERSION_LINE="$(bash "${SKILL_DIR}/scripts/commit-plan.sh" "$PLAN_PATH" "$NODE_ID" "<cause>")" \
+     || fno backlog note "$NODE_ID" "blueprint write not versioned: $VERSION_LINE"
+   ```
+
+   A `failed` line never blocks the close. The plan is already intaken and the claim must release, so the failure lands on the node as a note instead. `unversioned` means the plans dir is not in a git repo and the write has no history. Name the status word in the handoff message.
 
    After successful adoption, close the blueprint phase before returning the completion message:
 
@@ -318,26 +347,6 @@ fi
    ```
 
    Plan binding is artifact-only and never claims that the Blueprint phase completed.
-
-3b-bis. **Node-bearing filename for raw-prose intake** (US5)
-
-   A node-seeded plan is authored with its id already in the name (step 3, and
-   `/think`'s save rule). Only the **raw-prose** path - `/blueprint "some
-   feature"` with no node - lands id-less, and auto-intake has just minted its
-   node id (`$NODE_ID`, the `intake <id> -> backlog` line). Give the artifact
-   its node-bearing name and repoint `plan_path`, so a roadmap base keyed on the
-   node id finds it:
-
-   ```bash
-   "${SKILL_DIR}/scripts/rename-plan-to-node-id.sh" "$PLAN_PATH" "$NODE_ID"
-   ```
-
-   The helper is idempotent and non-fatal: a plan already ending `-$NODE_ID.md`
-   (every node-seeded path) is a no-op, a pre-existing target is never
-   clobbered, and any failure leaves the id-less file intact and re-runnable -
-   it never blocks the handoff. If `$PLAN_PATH` still points at the old name in
-   the same session, read the helper's `renamed <new-path>` line and use that
-   path downstream.
 
 4. **Present** plan and offer execution
 

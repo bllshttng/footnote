@@ -225,6 +225,8 @@ detect_provider() {
     echo "codex"
   elif [[ "${GEMINI_SESSION_ID:-}" == *[![:space:]]* ]]; then
     echo "gemini"
+  elif [[ "${OPENCODE_SESSION_ID:-}" == *[![:space:]]* ]]; then
+    echo "opencode"
   elif [[ -n "${CODEX_PLUGIN_ROOT:-}" ]]; then
     echo "codex"
   elif [[ -n "${GEMINI_PROJECT_DIR:-}" ]]; then
@@ -1864,6 +1866,18 @@ PYEOF
     # Unconditional: this whole block is already inside `-n "$_NODE_ID"`, so the
     # null arm that used to sit here could never run.
     echo "graph_node_id: $_NODE_ID" >> "$STATE_FILE"
+
+    # Stale plan: notes newer than the plan's last commit (else its mtime)
+    # mean the plan lags its node. Advisory and silent on any failure.
+    if [[ "$_NODE_OWNED" -eq 1 && -n "${INITIAL_PLAN_PATH:-}" && -f "${INITIAL_PLAN_PATH%%#*}" ]]; then
+      _stale_json="$(fno backlog notes stale "$_NODE_ID" --plan "${INITIAL_PLAN_PATH%%#*}" --json 2>/dev/null)" || _stale_json=""
+      if [[ "$_stale_json" == *'"stale":true'* ]]; then
+        _stale_n="$(printf '%s' "$_stale_json" | sed -n 's/.*"newer_notes":\([0-9]*\).*/\1/p')"
+        _stale_ts="$(printf '%s' "$_stale_json" | sed -n 's/.*"newest_note_at":"\([^"]*\)".*/\1/p')"
+        _stale_basis="$(printf '%s' "$_stale_json" | sed -n 's/.*"basis":"\([^"]*\)".*/\1/p')"
+        echo "target: plan ${INITIAL_PLAN_PATH%%#*} predates ${_stale_n} notes on $_NODE_ID (newest ${_stale_ts}, basis ${_stale_basis}); read them before trusting the plan" >&2
+      fi
+    fi
 
     # ── join: auto - fire join or park ───────────────────────────────────
     # `join: auto` in the plan frontmatter hands the plan's remaining waves

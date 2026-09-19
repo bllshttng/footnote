@@ -1133,6 +1133,24 @@ pub struct RegistryEntry {
     /// `workspaceWrite` alone are different workers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub granted_writable_roots: Vec<String>,
+    /// The permission_mode string the operator's spawn REQUESTED, verbatim
+    /// (schema v35): `read-only:on-request`, `yolo`, `full-auto`. `None` when
+    /// the spawn named no mode (the bare yolo bool or the bounded default).
+    /// Distinct from `sandbox_posture`, which records the resolved NAME of the
+    /// sandbox half only: the requested string is what a resume replays, and a
+    /// row without it cannot tell `read-only:on-request` from
+    /// `read-only:never`. Same X3 passthrough duty as the other posture
+    /// columns, and the same additive-optional writer-protection bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_permission_mode: Option<String>,
+    /// Where the current turn's sandboxPolicy came from (schema v35):
+    /// `resolved` when it echoes the server-reported posture, `requested`
+    /// when the server named no sandbox and the row's recorded request was
+    /// replayed instead. Stamped at spawn, refreshed by the resume
+    /// write-back. `None` on rows that predate the column; readers show
+    /// `unknown`, never a posture name and never a permission claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_policy_source: Option<String>,
     /// v9 backfill-only: the removed `claude_short_id`. Deserialized
     /// (under its old key) so a legacy row's jobId survives the read, but NEVER
     /// serialized -- [`RegistryEntry::backfill_short_id`] moves it into
@@ -2271,6 +2289,26 @@ where
         .map(|entry| (entry.name.clone(), identity_signature(entry)))
         .collect::<BTreeMap<_, _>>();
     let out = f(&mut registry);
+    // Every transition into Exited carries its date, whichever closure wrote
+    // it. A row already Exited with no stamp stays unstamped: a stamp written
+    // now would date an old exit to an unrelated write. Any drive-eligible row
+    // drops an old stamp, even when another terminal status sat between the
+    // exit and revival, or the ladder can read the old exit as current again.
+    let was_exited: std::collections::HashSet<&str> = before_entries
+        .iter()
+        .filter(|b| b.status == AgentStatus::Exited)
+        .map(|b| b.name.as_str())
+        .collect();
+    let mut stamp = None;
+    for entry in &mut registry.entries {
+        let before_exited = was_exited.contains(entry.name.as_str());
+        if entry.status == AgentStatus::Exited && entry.exited_at.is_none() && !before_exited {
+            let now = stamp.get_or_insert_with(crate::daemon::now_rfc3339_like);
+            entry.exited_at = Some(now.clone());
+        } else if entry.status.is_drive_eligible() && entry.exited_at.is_some() {
+            entry.exited_at = None;
+        }
+    }
     // Write-path harness sync (AC6-FR): a closure that mutated a legacy
     // session-id field (the stream-json adopt path writes claude_session_uuid on a
     // uuid-less bg row) must land the value in harness_session_id before serde

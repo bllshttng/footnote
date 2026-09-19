@@ -1240,36 +1240,11 @@ fn agent_rows_pane_dead_corroborates_over_an_unmeasured_registry_liveness() {
 fn agent_rows_watch_only_appendix_carries_unmeasured_from_registry_liveness() {
     // x-9de7: the paneless join has no pane fact; `unmeasured` passes the registry read.
     let paneless = |name: &str, liveness: agents_view::Liveness| RegistryAgent {
-        model: None,
-        route: None,
-        route_provider_id: None,
-        spawned_by_session: None,
-        lineage_kind: None,
-        session_id: None,
-        harness_session_id: None,
-        predecessor_session_ids: Vec::new(),
-        related_session_id: None,
-        forked_from_session_id: None,
-        harness_title: None,
         name: name.into(),
         cwd: "/w".into(),
         exited: true,
-        dnd: false,
-        badge: None,
-        reason: None,
-        mux: None,
-        answerable: None,
-        attach_id: None,
-        external: false,
-        account: None,
-        claude_session_uuid: None,
-        log_path: None,
-        updated_at: None,
-        crown_level: None,
-        crown_scope: None,
         liveness,
-        liveness_measured_at: None,
-        harness: None,
+        ..Default::default()
     };
     let mut core = empty_core();
     core.agents = vec![
@@ -5366,7 +5341,7 @@ fn remove_external_without_stopped_record_refused() {
     );
     assert!(drain_notice(&mut rx)
         .unwrap()
-        .contains("no such stopped row"));
+        .contains("no external lifecycle record"));
     // A stopping record refuses with the stop-first ordering.
     crate::squad_store::begin_external_stop("deadbeef", "ext", "/tmp").unwrap();
     core.command(

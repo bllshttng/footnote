@@ -302,10 +302,7 @@ mod probe {
                 Err(why) => (None, Some(why)),
             };
             let admission = spawn_gate::check_cpu_axis(prefetched.as_deref(), probe_err.as_deref());
-            cpu_rows = vec![
-                cpu_share_row(&admission.payload),
-                load_backstop_row(&admission.payload),
-            ];
+            cpu_rows = vec![cpu_share_row(&admission.payload)];
             match admission.payload.verdict.as_str() {
                 "hold" => {
                     return refuse_with(
@@ -321,9 +318,7 @@ mod probe {
                     );
                 }
                 "refuse" | "undecidable" => {
-                    let token = if admission.payload.axis == "load_15m" {
-                        "load_backstop"
-                    } else if admission.payload.axis == "cpu_instrument" {
+                    let token = if admission.payload.axis == "cpu_instrument" {
                         "cpu_instrument_unreadable"
                     } else {
                         "cpu_share_undecidable"
@@ -419,11 +414,6 @@ mod probe {
         if let Some(payload_adm) = &cpu {
             out.insert("share_low".into(), json!(payload_adm.share_low));
             out.insert("ceiling".into(), json!(payload_adm.ceiling));
-            out.insert("load_15m".into(), json!(payload_adm.load_15m));
-            out.insert(
-                "hard_max_load_per_cpu".into(),
-                json!(agents_config::hard_max_load_per_cpu(&config_cwd)),
-            );
         }
         if floor_gb > 0.0 {
             out.insert("min_free_gb".into(), json!(floor_gb));
@@ -491,7 +481,7 @@ fn fleet_row(slots: usize, cap: usize) -> Value {
 }
 
 /// The Gate-dict row list: provider-lane per lane, fleet-rows, then whatever
-/// machine rows the mode read (RAM floor, CPU share, load backstop).
+/// machine rows the mode read (RAM floor, CPU share).
 fn make_rows(
     lanes: Option<&Value>,
     slots: usize,
@@ -627,41 +617,6 @@ fn cpu_share_row(payload: &spawn_gate::AdmissionPayload) -> Value {
     row.insert("verdict".into(), json!(verdict));
     row.insert("key".into(), json!("agents.max_fleet_cpu_share"));
     row.insert("note".into(), json!(payload.reason));
-    Value::Object(row)
-}
-
-fn load_backstop_row(payload: &spawn_gate::AdmissionPayload) -> Value {
-    let unreadable = payload.axis == "cpu_instrument";
-    let mut row = Map::new();
-    row.insert("name".into(), json!("load-backstop"));
-    row.insert(
-        "measured".into(),
-        json!(payload
-            .load_15m
-            .map(|v| format!("{v:.1}"))
-            .unwrap_or_else(|| "-".into())),
-    );
-    row.insert(
-        "threshold".into(),
-        json!(if unreadable {
-            "-".to_string()
-        } else {
-            format!("{:.1}", payload.backstop)
-        }),
-    );
-    row.insert(
-        "verdict".into(),
-        json!(
-            if payload.axis == "load_15m" && payload.verdict == "refuse" {
-                "refuse"
-            } else if payload.load_15m.is_some() {
-                "pass"
-            } else {
-                "skipped: load unreadable"
-            }
-        ),
-    );
-    row.insert("key".into(), json!("agents.hard_max_load_per_cpu"));
     Value::Object(row)
 }
 

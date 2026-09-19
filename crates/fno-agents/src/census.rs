@@ -25,6 +25,7 @@ const TAG_REPLY: u8 = 5; // both keepers
 /// One row of the process table: the columns `ps -Ao
 /// pid,ppid,state,etime,%cpu,rss,command` reports, read without exec'ing
 /// `ps` (setuid on macOS, so a sandboxed caller's seatbelt refuses it).
+#[derive(Clone)]
 pub struct ProcRow {
     pub pid: u32,
     pub ppid: u32,
@@ -33,6 +34,83 @@ pub struct ProcRow {
     pub cpu_pct: f64,
     pub rss_kb: u64,
     pub command: String,
+}
+
+/// A synthetic row for tests that walk a table without a live census.
+#[cfg(test)]
+pub(crate) fn test_proc_row(pid: u32, ppid: u32, command: &str) -> ProcRow {
+    ProcRow {
+        pid,
+        ppid,
+        state: 'S',
+        elapsed_s: 1,
+        cpu_pct: 0.0,
+        rss_kb: 0,
+        command: command.to_string(),
+    }
+}
+
+/// True while `pid` is a zombie: dead but not yet reaped by its parent, so
+/// `kill(pid, 0)` keeps succeeding while it holds no fds and serves nothing.
+/// On macOS the kernel record is the sysctl `KERN_PROC_PID` read (the
+/// `proc_pidinfo` BSD-status read answers a zero write for a zombie, so it
+/// can never fire; measured 2026-09-18); on Linux the state letter after
+/// the last `)` of `/proc/<pid>/stat`. An unreadable pid reads not-zombie:
+/// this helper never invents a death.
+#[cfg(target_os = "macos")]
+pub fn pid_is_zombie(pid: u32) -> bool {
+    use std::mem;
+    // libc does not export `kinfo_proc` on Apple targets, so the read pins
+    // the one field this decision needs: `extern_proc` prefix (p_un 16, two
+    // pointers 16, p_flag 4) puts `p_stat` at byte 36 of the 648-byte
+    // record. The ABI is stable on all 64-bit Darwin.
+    #[repr(C, align(8))]
+    struct KinfoProcScratch {
+        head: KinfoProcHead,
+        tail: [u8; 768],
+    }
+    #[repr(C)]
+    struct KinfoProcHead {
+        p_un: [u8; 16],
+        p_vmspace: u64,
+        p_sigacts: u64,
+        p_flag: libc::c_int,
+        p_stat: u8,
+    }
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROC,
+        libc::KERN_PROC_PID,
+        pid as libc::c_int,
+    ];
+    let mut info: KinfoProcScratch = unsafe { mem::zeroed() };
+    let mut size = mem::size_of::<KinfoProcScratch>();
+    // SAFETY: sysctl fills a caller-owned zeroed buffer; mib and size live
+    // in this frame and are read only during the call.
+    let done = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            &mut info as *mut _ as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    done == 0 && info.head.p_stat == libc::SZOMB as u8
+}
+
+#[cfg(target_os = "linux")]
+pub fn pid_is_zombie(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| Some(s.rsplit_once(')')?.1.trim_start().starts_with('Z')))
+        .unwrap_or(false)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn pid_is_zombie(_pid: u32) -> bool {
+    false
 }
 
 /// The process table plus the count of pids whose row could not be read.
@@ -88,7 +166,10 @@ fn process_table_libproc() -> (Vec<ProcRow>, usize) {
             unreadable += 1;
             continue;
         }
-        let zombie = bsd.pbi_status == 5; // SZOMB
+        // Zombies never reach this line: their proc_pidinfo read is a zero
+        // write and was counted unreadable above, so the sysctl-based
+        // pid_is_zombie would be a dead second read per pid here.
+        let zombie = bsd.pbi_status == libc::SZOMB;
         let mut rss_kb = 0u64;
         let mut usage_sum = 0i64;
         let mut state = if zombie { 'Z' } else { 'S' };
@@ -283,10 +364,10 @@ fn process_table_ps() -> (Vec<ProcRow>, usize) {
 }
 
 /// One `ps -Ao pid,ppid,state,etime,%cpu,rss,command` data line. Compiled
-/// for the Linux leg and under test everywhere: the test runs on every
-/// host, while a macOS non-test build has no caller and deny-warnings
-/// turns the dead code into a failure.
-#[cfg(any(not(target_os = "macos"), test))]
+/// only where it has a caller: the Linux leg and its tests, both of which
+/// are `not(target_os = "macos")`. A macOS test build otherwise compiles
+/// it with no caller and deny-warnings turns the dead code into a failure.
+#[cfg(not(target_os = "macos"))]
 fn parse_ps_row(line: &str) -> Option<ProcRow> {
     // ps right-aligns the numeric columns, so tokens must split on
     // whitespace RUNS - a per-char split yields empty fields and every
@@ -778,7 +859,7 @@ fn shutdown_reply(sock: &Path) -> Option<Value> {
 
 #[cfg(test)]
 mod process_table_tests {
-    use super::{process_table, ps_text};
+    use super::{pid_is_zombie, process_table, ps_text};
 
     #[test]
     fn process_table_reads_its_own_row() {
@@ -842,7 +923,11 @@ mod process_table_tests {
         );
     }
 
+    // The parser it pins compiles only beside its Linux caller.
+    #[cfg(not(target_os = "macos"))]
     #[test]
+    // The Linux leg under test: parse_ps_row is not compiled on macOS
+    // (deny-warnings kills the dead code there), so neither does its test.
     #[cfg(not(target_os = "macos"))]
     fn ps_leg_parses_right_aligned_columns() {
         let row = super::parse_ps_row("  1234  2556 S 02:03  1.5  10240 /bin/sleep 37")
@@ -885,5 +970,28 @@ mod process_table_tests {
         let theirs = fno::pane_argv::process_argv(std::process::id())
             .expect("fno crate reads the same argv");
         assert_eq!(mine, theirs);
+    }
+
+    #[test]
+    fn pid_is_zombie_reads_an_unreaped_exit_as_zombie_and_a_live_pid_as_not() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline && !pid_is_zombie(pid) {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(
+            pid_is_zombie(pid),
+            "an exited, unwaited child reads as zombie"
+        );
+        assert!(
+            !pid_is_zombie(std::process::id()),
+            "a live pid is not zombie"
+        );
+        child.wait().unwrap();
     }
 }

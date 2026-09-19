@@ -68,7 +68,7 @@ EXIT_GATE_UNAVAILABLE = 87
 #: deadline - not this gate's 600s queue - bounds the wait.
 WAITABLE_REFUSAL_REASONS = frozenset(
     {
-        "load_backstop", "ram_floor", "swap_pressure",
+        "ram_floor", "swap_pressure",
         "cpu_instrument_unreadable",
         "cpu_share_undecidable", "fleet_cpu_share", "provider_cap",
         "max_live", "no_wait", "no_wait_mutex_held",
@@ -84,22 +84,11 @@ CPU_HOLD_POLL_S = 15.0
 CPU_ADMIT_SAMPLES = 2
 #: : a slow bg-socket census names its own wait instead of silence.
 SLOW_SCAN_WARN_S = 5.0
-GATE_CLAIM_TTL_MS = 5 * 60 * 1000
 #: The mutex claim key. Prefixed so `claims_root_for` routes it to the global
 #: root the gate writes; the old colon-less `spawn-gate` key unrouted, so
 #: `claim status`/`release --force` read `<space>/claims/spawn-gate.lock`
 #: while the gate held `~/.fno/claims/spawn-gate.lock` and both lied.
 GATE_CLAIM_KEY = "gate:spawn"
-#: How long to tolerate an UNBROKEN run of failed mutex acquisitions before
-#: proceeding unserialized. The mutex is a check->dispatch serializer, not a
-#: state owner: a spawner that dies inside the critical section leaves it
-#: `suspect` for the full ``GATE_CLAIM_TTL_MS``, and with no bound here EVERY
-#: spawner on the machine then queues behind that corpse until its own queue
-#: timeout - the gate becoming the very thing that bricks spawning, which the
-#: module contract forbids. Failing open can overshoot the cap by the number of
-#: racing spawners; wedging the whole mesh is strictly worse. Mirrors
-#: ``spawn_gate.rs::MUTEX_WAIT_BUDGET``.
-MUTEX_WAIT_BUDGET_S = 60.0
 WORKER_CLAIM_TTL_MS = 4 * 60 * 60 * 1000
 CLAIM_RELEASE_ATTEMPTS = 3
 
@@ -823,9 +812,7 @@ def _cpu_axis(prefetched: object = _NOT_PREFETCHED) -> Admission:
     Maps an unreadable instrument to ``refuse`` on ``cpu_instrument`` (LD3:
     the sensor blinds under exactly the load it measures, and an unreadable
     process table is itself a symptom) and otherwise hands the reading to
-    :func:`cpu_admission` with the 15-minute load as the backstop input. A
-    platform without ``getloadavg`` reads ``load_15m=None``, which the
-    backstop passes (LD3: unreadable load admits).
+    :func:`cpu_admission`, whose fleet CPU share decides alone.
 
     Shared with the ``--explain`` preview, so a dry run answers the question
     the real spawn will.
@@ -852,29 +839,20 @@ def _cpu_axis(prefetched: object = _NOT_PREFETCHED) -> Admission:
             capacity_cores=0.0,
             ceiling=0.0,
             gap=None,
-            load_15m=None,
-            backstop=0.0,
         )
     from fno.doctor_footprint import _admission_config, cpu_admission
 
-    share_ceiling, hard_max = _admission_config()
-    try:
-        load_15m: Optional[float] = os.getloadavg()[2]
-    except (OSError, AttributeError):
-        load_15m = None
+    share_ceiling = _admission_config()
     capacity = float(_load_cpus())
     return cpu_admission(
         reading,
         capacity_cores=capacity,
         share_ceiling=share_ceiling,
-        load_15m=load_15m,
-        hard_max_load_per_cpu=hard_max,
-        cpus=int(capacity) or 1,
     )
 
 
 def _load_cpus() -> int:
-    """The CPU denominator for the CPU axis and the backstop.
+    """The CPU denominator for the CPU axis.
 
     Footprint's capacity reading, which is the minimum of the affinity count,
     the host count and the cgroup quota. Two reasons it is worth the import

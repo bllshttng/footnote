@@ -141,9 +141,11 @@ Proceed to push (user has chosen not to have CI).
 ### 3. Push Branch
 
 ```bash
-# Push with upstream tracking
-git push -u origin "$(git rev-parse --abbrev-ref HEAD)"
+# Fetch, rebase onto origin/main, preflight, push once
+fno do pr push
 ```
+
+Refusals: exit 3 names what to fix, fix it and re-run. Exit 2 means a CI run is in flight: wait with `fno do pr wait <n> --until settled`, then re-run. Exit 1 means preflight is red, do not open the PR yet.
 
 ### 4. Generate PR Description from Commits
 
@@ -205,18 +207,24 @@ For each item line under that heading, in order:
 
 **Purpose:** a PR body naming several nodes in prose only ever closed the ONE node stamped in step 5.5. Every other named node stayed open forever. The exact `Backlog-Closure:` trailer is what the merge-time reconcile binds. Free-text mentions never count.
 
-Reuse `$NODE_ID` from step 4.5 (or read it fresh the same way). Render the trailer - the node plus every `contained_in` descendant already in the graph:
+Reuse `$NODE_ID` from step 4.5 (or read it fresh the same way). Render the trailer - the node plus every `contained_in` descendant already in the graph - and separate the two failures by exit code:
 
 ```bash
 if [[ -n "$NODE_ID" && "$NODE_ID" != "null" ]]; then
-  CLOSURE_TRAILER=$(fno do pr closure-trailer "$NODE_ID")
+  CLOSURE_TRAILER=$(fno do pr closure-trailer "$NODE_ID"); RC=$?
 else
-  CLOSURE_TRAILER=$(fno do pr closure-trailer) \
-    || echo "warn: closure trailer: current branch resolves to no single real node; the CI annotation carries the remedy" >&2
+  CLOSURE_TRAILER=$(fno do pr closure-trailer); RC=$?
+fi
+if [[ $RC -eq 4 ]]; then
+  echo "fail: closure trailer: the graph reader is dead (exit 4); nothing downstream is trustworthy" >&2
+  echo "repair: bring the graph store back (probe fno-agents-worker --store-keeper), then re-run this step" >&2
+  exit 1
+elif [[ $RC -ne 0 ]]; then
+  echo "warn: closure trailer: current branch resolves to no single real node; the CI annotation carries the remedy" >&2
 fi
 ```
 
-When `$NODE_ID` is empty or unresolvable, the bare verb resolves the node from the current branch instead. It demands exactly one real node, the same carrier the CI gate reads. A nonzero exit prints a `warn:` and continues. The trailer is unproducible there, and the red check's annotation names the remedy. `$CLOSURE_TRAILER` stays safe to append unconditionally. The verb is a moved spelling: expect one `is now` deprecation notice on stderr and treat it as expected output, never as a failure signal. Most genuine extra deliveries ARE `contained_in` already. On the rare case where the commits or plan show a real extra one, add it explicitly: `fno do pr closure-trailer "$NODE_ID" --extra <other-id>`.
+When `$NODE_ID` is empty or unresolvable, the bare verb resolves the node from the current branch instead. It demands exactly one real node, the same carrier the CI gate reads. An empty `$CLOSURE_TRAILER` now means exactly one thing: a readable graph that carries no matching node, which is why the empty case stays safe to append unconditionally. Exit 4 is different: the graph read itself failed. A dead reader once answered exactly like a missing node and three PRs shipped red on the closure gate with no named cause (measured 2026-09-16). On exit 4 STOP: do not create the PR. Emit `RESULT: FAILED closure trailer: graph reader dead (exit 4)` as your final line so a dispatcher does not report a PR that was never opened. Any other nonzero prints the `warn:` and continues. The verb is a moved spelling: expect one `is now` deprecation notice on stderr and treat it as expected output, never as a failure signal. Most genuine extra deliveries ARE `contained_in` already. On the rare case where the commits or plan show a real extra one, add it explicitly: `fno do pr closure-trailer "$NODE_ID" --extra <other-id>`.
 
 Append the non-empty `$CLOSURE_TRAILER` as its own paragraph at the end of the body composed in step 5, before calling `gh pr create`. Never hand-write a `Backlog-Closure:` line. Never add an id this command did not produce: a wrong id silently binds the wrong node at merge.
 

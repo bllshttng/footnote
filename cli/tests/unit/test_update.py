@@ -35,6 +35,16 @@ def _isolate_triad_install_dirs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(update, "_triad_install_dirs", lambda: [])
 
 
+def _fresh_rows(rev: str, *, mux: str = "updated") -> list[dict]:
+    """Verdict rows with the whole triad (and the mux front door) current."""
+    return [
+        {"component": "fno-agents", "status": "updated", "observed_rev": rev},
+        {"component": "fno-agents-daemon", "status": "updated", "observed_rev": rev},
+        {"component": "fno-agents-worker", "status": "updated", "observed_rev": rev},
+        {"component": "fno", "status": mux, "observed_rev": rev},
+    ]
+
+
 @pytest.fixture(autouse=True)
 def _converged_verdict_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Freshness now requires a converged native verdict.
@@ -43,14 +53,15 @@ def _converged_verdict_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     whose classification shells the deployed fno-agents binary. Gate tests here
     stub revs and mock effects only, so the transport is stubbed converged BY
     DEFAULT; tests that assert the verdict behavior itself (transport failure,
-    partial outcomes, component lines) override this stub explicitly.
+    partial outcomes, component lines) override this stub explicitly. The gate
+    reads PER-ROW triad statuses, so the stub carries all of them.
     """
     monkeypatch.setattr(
         update,
         "_component_verdict",
         lambda *a, **kw: {
             "converged": True,
-            "components": [{"component": "fno-agents", "status": "updated"}],
+            "components": _fresh_rows("a" * 40),
         },
     )
 
@@ -911,7 +922,6 @@ def test_refresh_rust_bins_gating_outcomes(
             (tmp_path / _n).write_text("x")
         monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
         monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "abc123" * 2)
-        monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: "abc123" * 2)
     elif setup == "no_cargo":
         # binary + rev exist but cargo not on PATH
         (source.parent / "crates" / "fno-agents").mkdir(parents=True)
@@ -919,8 +929,6 @@ def test_refresh_rust_bins_gating_outcomes(
         fake_bin.write_text("x")
         monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
         monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "stale123stale123")
-        # Binary self-reports stale -> would rebuild, but cargo is absent.
-        monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: None)
         # Patch through update module so _refresh_rust_bins sees it
         monkeypatch.setattr(update.shutil, "which", lambda name: None)
 
@@ -964,12 +972,6 @@ def test_ac1_hp_refresh_rust_bins_refreshed(
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
-    # gate + post-deploy verify interrogate the binary. Stale (None) before
-    # cargo runs -> rebuild; the deployed binary reports the source rev -> verify OK.
-    monkeypatch.setattr(
-        update, "_installed_bin_crates_rev",
-        lambda b, **kw: subtree_rev if state["built"] else None,
-    )
 
     result = update._refresh_rust_bins(source)
     assert result == "refreshed"
@@ -1021,21 +1023,17 @@ def test_ac1_err_stale_daemon_forces_rebuild(
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
 
-    def _fake_rev(b, **kw):
-        # Post-rebuild the whole triad reports the source rev (verify passes);
-        # pre-rebuild the daemon sibling is stale (None) while client + worker are fresh.
-        if state["built"]:
-            return subtree_rev
-        return None if b.name.endswith("-daemon") else subtree_rev
-
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", _fake_rev)
-
     def _fake_verdict(*a, **kw):
-        # The gate probe (triad-only, pre-effect) sees the stale daemon; the
+        # The gate probe (include_mux, pre-effect) sees the stale daemon; the
         # post-effect probes see the rebuilt triad.
-        if kw.get("include_mux") is False and not kw.get("attempted"):
-            return {"converged": False, "components": []}
-        return {"converged": True, "components": [{"component": "fno-agents", "status": "updated"}]}
+        if kw.get("include_mux") is True and not kw.get("attempted"):
+            return {"converged": False, "components": [
+                {"component": "fno-agents", "status": "updated", "observed_rev": subtree_rev},
+                {"component": "fno-agents-daemon", "status": "stale", "observed_rev": "old"},
+                {"component": "fno-agents-worker", "status": "updated", "observed_rev": subtree_rev},
+                {"component": "fno", "status": "updated", "observed_rev": subtree_rev},
+            ]}
+        return {"converged": True, "components": _fresh_rows(subtree_rev)}
 
     monkeypatch.setattr(update, "_component_verdict", _fake_verdict)
 
@@ -1058,7 +1056,6 @@ def test_refresh_rust_bins_chains_drift_gated_restart_after_triad_sync(
 
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda _source: "a" * 40)
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda _binary, **_kwargs: "a" * 40)
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: fake_bin.parent / "fno")
     monkeypatch.setattr(update, "_install_mux_front_door", lambda *args, **kwargs: None)
     monkeypatch.setattr(update, "_sync_triad", lambda *args, **kwargs: events.append("sync"))
@@ -1095,7 +1092,6 @@ def test_refresh_rust_bins_restart_failure_does_not_fail_the_refresh(
 
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda _source: "a" * 40)
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda _binary, **_kwargs: "a" * 40)
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: fake_bin.parent / "fno")
     monkeypatch.setattr(update, "_install_mux_front_door", lambda *args, **kwargs: None)
     monkeypatch.setattr(update, "_sync_triad", lambda *args, **kwargs: None)
@@ -1124,7 +1120,6 @@ def test_refresh_rust_bins_dry_run_prints_restart_without_running_it(
 
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda _source: "a" * 40)
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda _binary, **_kwargs: "a" * 40)
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: fake_bin.parent / "fno")
     monkeypatch.setattr(update, "_install_mux_front_door", lambda *args, **kwargs: None)
     monkeypatch.setattr(update, "_sync_triad", lambda *args, **kwargs: None)
@@ -1176,11 +1171,6 @@ def test_refresh_rust_bins_also_installs_mux_front_door(
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
-    monkeypatch.setattr(
-        update, "_installed_bin_crates_rev",
-        lambda b, **kw: ("a" * 40) if state["built"] else None,
-    )
-
     result = update._refresh_rust_bins(source)
     assert result == "refreshed"
 
@@ -1216,7 +1206,19 @@ def test_refresh_rust_bins_installs_mux_on_fresh_marker_when_absent(
         (tmp_path / _n).write_text("x")  # triad siblings present (fresh fast path)
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree_rev)
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: subtree_rev)  # fresh
+    # The gate sees a fresh triad beside an ABSENT front door; the post-effect
+    # probes then read everything (front door included) current.
+    def _verdict(*a, **kw):
+        if kw.get("include_mux") is True and not kw.get("attempted"):
+            return {"converged": False, "components": [
+                {"component": "fno-agents", "status": "updated", "observed_rev": subtree_rev},
+                {"component": "fno-agents-daemon", "status": "updated", "observed_rev": subtree_rev},
+                {"component": "fno-agents-worker", "status": "updated", "observed_rev": subtree_rev},
+                {"component": "fno", "status": "missing"},
+            ]}
+        return {"converged": True, "components": _fresh_rows(subtree_rev)}
+
+    monkeypatch.setattr(update, "_component_verdict", _verdict)
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)  # mux ABSENT
 
     recorded: list[list[str]] = []
@@ -1255,7 +1257,8 @@ def test_refresh_rust_bins_fresh_marker_mux_present_installs_nothing(
         (tmp_path / _n).write_text("x")  # triad siblings present (fresh fast path)
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree_rev)
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: subtree_rev)  # fresh
+    monkeypatch.setattr(update, "_component_verdict", lambda *a, **kw: {
+        "converged": True, "components": _fresh_rows(subtree_rev)})
     fake_mux = tmp_path / "fake-mux"
     fake_mux.write_text("x")
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: fake_mux)  # mux PRESENT
@@ -1298,11 +1301,19 @@ def test_refresh_rust_bins_fresh_marker_stale_mux_reinstalls(
     fake_mux.write_text("x")
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: fake_mux)  # mux PRESENT
 
-    # The triad reports fresh; the mux (name "fno") reports an OLDER rev -> stale.
-    def _rev(b, **kw):
-        return "b" * 40 if Path(b).name == "fno" else subtree_rev
+    # The triad reports fresh; the front door reports an OLDER rev -> stale, so
+    # only the front door is reinstalled.
+    def _verdict(*a, **kw):
+        if kw.get("include_mux") is True and not kw.get("attempted"):
+            return {"converged": False, "components": [
+                {"component": "fno-agents", "status": "updated", "observed_rev": subtree_rev},
+                {"component": "fno-agents-daemon", "status": "updated", "observed_rev": subtree_rev},
+                {"component": "fno-agents-worker", "status": "updated", "observed_rev": subtree_rev},
+                {"component": "fno", "status": "stale", "observed_rev": "b" * 40},
+            ]}
+        return {"converged": True, "components": _fresh_rows(subtree_rev)}
 
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", _rev)
+    monkeypatch.setattr(update, "_component_verdict", _verdict)
 
     recorded: list[list[str]] = []
     monkeypatch.setattr(
@@ -1394,11 +1405,6 @@ def test_ac1_hp_cli_rust_fires_before_execvp(
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
-    # stale before cargo -> rebuild; deployed binary reports source rev -> verify OK.
-    monkeypatch.setattr(
-        update, "_installed_bin_crates_rev",
-        lambda b, **kw: crate_rev if state["built"] else None,
-    )
 
     def _fake_execvp(prog, args):
         call_order.append("execvp")
@@ -1553,7 +1559,6 @@ def test_ac1_edge_fresh_marker_skips_cargo(
     for _n in update._triad_names():
         (tmp_path / _n).write_text("x")  # triad siblings present (fresh fast path)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: rev)
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: rev)  # fresh
 
     cargo_called = []
 
@@ -1595,11 +1600,8 @@ def test_ac1_edge_force_overrides_fresh_marker(
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
-    # force rebuilds even though fresh; post-deploy verify must still see the rev.
-    monkeypatch.setattr(
-        update, "_installed_bin_crates_rev",
-        lambda b, **kw: rev if state["built"] else rev,
-    )
+    # force rebuilds even though the verdict gate would call the triad fresh;
+    # the post-deploy verify still runs and must prove the deployed bytes.
 
     result = update._refresh_rust_bins(source, force=True)
     assert result == "refreshed"
@@ -1621,7 +1623,6 @@ def test_ac1_edge_force_installs_when_no_binary(
     # post-deploy verify finds and interrogates the freshly built bin.
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: post_bin if state["built"] else None)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "e" * 40)
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: "e" * 40 if state["built"] else None)
 
     def _fake_run(cmd, **kwargs):
         if cmd and cmd[0] == "cargo":
@@ -1790,7 +1791,6 @@ def test_c3_hp_refresh_root_pinned_to_detected_binary(
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: ("a" * 40) if state["built"] else None)
 
     result = update._refresh_rust_bins(source)
     assert result == "refreshed"
@@ -1835,7 +1835,6 @@ def test_c3_hp_root_equals_detected_bin_parent_parent(
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: ("b" * 40) if state["built"] else None)
 
     update._refresh_rust_bins(source)
     cargo_calls = [c for c in recorded_cmds if c and c[0] == "cargo"]
@@ -1869,7 +1868,6 @@ def test_c3_edge_force_no_binary_uses_cargo_home_default(
     # First-install: no binary at gate; cargo creates it -> post-deploy verify finds it.
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: post_bin if state["built"] else None)
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: "e" * 40)
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: "e" * 40 if state["built"] else None)
 
     recorded_cmds: list[list[str]] = []
 
@@ -1915,12 +1913,9 @@ def test_ac1_fr_failed_preserves_marker_retry_updates(
     new_rev = "g" * 40
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: new_rev)
     _stale_gate_verdict(monkeypatch)
-    # binary reads stale until a cargo build succeeds, then reports new_rev.
+    # The gate reads stale until a cargo build succeeds, then the verdict
+    # proves the deployed triad current.
     state = {"built": False}
-    monkeypatch.setattr(
-        update, "_installed_bin_crates_rev",
-        lambda b, **kw: new_rev if state["built"] else None,
-    )
 
     # First call: cargo fails
     def _fail_run(cmd, **kwargs):
@@ -1942,80 +1937,8 @@ def test_ac1_fr_failed_preserves_marker_retry_updates(
 
 
 # ---------------------------------------------------------------------------
-# gate on the binary (version --json), triad sync, post-deploy verify
+# triad sync, post-deploy verify
 # ---------------------------------------------------------------------------
-
-
-def _fake_version_run(stdout=None, *, returncode=0, raise_exc=None):
-    """A subprocess.run stub emitting a canned `version --json` result."""
-    def _run(cmd, **kwargs):
-        if raise_exc is not None:
-            raise raise_exc
-        return types.SimpleNamespace(returncode=returncode, stdout=stdout)
-    return _run
-
-
-def test_installed_bin_crates_rev_fresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC1-HP: a clean, non-dirty binary yields its crates_rev."""
-    b = tmp_path / "fno-agents"
-    b.write_text("x")
-    monkeypatch.setattr(
-        update.subprocess, "run",
-        _fake_version_run('{"crates_rev": "abc123", "git_rev": "def456", "dirty": false}'),
-    )
-    assert update._installed_bin_crates_rev(b) == "abc123"
-
-
-def test_installed_bin_crates_rev_dirty_is_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Invariant: a dirty build never reads fresh (fail toward rebuild)."""
-    b = tmp_path / "fno-agents"
-    b.write_text("x")
-    monkeypatch.setattr(
-        update.subprocess, "run",
-        _fake_version_run('{"crates_rev": "abc123", "dirty": true}'),
-    )
-    assert update._installed_bin_crates_rev(b) is None
-
-
-def test_installed_bin_crates_rev_unknown_is_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Boundary: crates_rev == "unknown" (non-git build) is stale, never fresh."""
-    b = tmp_path / "fno-agents"
-    b.write_text("x")
-    monkeypatch.setattr(
-        update.subprocess, "run",
-        _fake_version_run('{"crates_rev": "unknown", "dirty": false}'),
-    )
-    assert update._installed_bin_crates_rev(b) is None
-
-
-def test_installed_bin_crates_rev_timeout_is_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC1-ERR: a hung binary (timeout) classifies stale, never crashes update."""
-    b = tmp_path / "fno-agents"
-    b.write_text("x")
-    monkeypatch.setattr(
-        update.subprocess, "run",
-        _fake_version_run(raise_exc=subprocess.TimeoutExpired(cmd="x", timeout=1)),
-    )
-    assert update._installed_bin_crates_rev(b) is None
-
-
-def test_installed_bin_crates_rev_garbage_is_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC1-ERR: unparseable output is stale, never a crash."""
-    b = tmp_path / "fno-agents"
-    b.write_text("x")
-    monkeypatch.setattr(update.subprocess, "run", _fake_version_run("not json at all"))
-    assert update._installed_bin_crates_rev(b) is None
-
-
-def test_installed_bin_crates_rev_nonzero_exit_is_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A non-zero exit (old binary without the verb) is stale."""
-    b = tmp_path / "fno-agents"
-    b.write_text("x")
-    monkeypatch.setattr(
-        update.subprocess, "run",
-        _fake_version_run('{"crates_rev": "abc"}', returncode=3),
-    )
-    assert update._installed_bin_crates_rev(b) is None
 
 
 def test_post_deploy_verify_mismatch_halts(
@@ -2034,8 +1957,7 @@ def test_post_deploy_verify_mismatch_halts(
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree)
     monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
     monkeypatch.setattr(update.subprocess, "run", lambda cmd, **kw: types.SimpleNamespace(returncode=0))
-    # gate: stale (rebuild); verify: STILL stale (the deploy did not land).
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: "oldoldold")
+    # gate AND verify read STILL stale (the deploy did not land).
     monkeypatch.setattr(update, "_component_verdict", lambda *a, **kw: {
         "converged": False,
         "components": [
@@ -2075,7 +1997,6 @@ def test_post_deploy_verify_no_rev_blames_dirty_not_install_root(
         "run",
         lambda cmd, **kw: types.SimpleNamespace(returncode=0, stdout='{"dirty": true}'),
     )
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: None)
     monkeypatch.setattr(update, "_component_verdict", lambda *a, **kw: {
         "converged": False,
         "components": [
@@ -2178,6 +2099,87 @@ def test_sync_triad_cleans_temp_on_replace_failure(
     assert leftover == [], f"temp file leaked: {leftover}"
 
 
+def test_sync_triad_verifies_each_destination_against_the_bindir_just_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC2-HP: a completed destination gets one component verdict against
+    exactly the bindir just written - not the source bindir."""
+    names = update._triad_names()
+    cargo = tmp_path / "cargo" / "bin"
+    cargo.mkdir(parents=True)
+    for n in names:
+        (cargo / n).write_text("new")
+    dest = tmp_path / "local" / "bin"
+    dest.mkdir(parents=True)
+    (dest / names[0]).write_text("old")
+    monkeypatch.setattr(update, "_triad_install_dirs", lambda: [dest])
+    seen: dict = {}
+
+    def _fake_verdict(source, subtree, bindir, verdict_bin, *, attempted=False, **kw):
+        seen["bindir"] = bindir
+        seen["verdict_bin"] = verdict_bin
+        return {"converged": True, "components": _fresh_rows(subtree)}
+
+    monkeypatch.setattr(update, "_component_verdict", _fake_verdict)
+
+    update._sync_triad(cargo, source=tmp_path / "cli", subtree="a" * 40)
+
+    assert seen["bindir"] == dest
+    assert seen["verdict_bin"] == dest / names[0]
+
+
+def test_sync_triad_dead_destination_fails_the_leg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """AC2-ERR: a destination whose verdict cannot run at all names the path
+    with the three-command repair and fails the leg - never a quiet continue."""
+    names = update._triad_names()
+    cargo = tmp_path / "cargo" / "bin"
+    cargo.mkdir(parents=True)
+    for n in names:
+        (cargo / n).write_text("new")
+    dest = tmp_path / "local" / "bin"
+    dest.mkdir(parents=True)
+    (dest / names[0]).write_text("old")
+    monkeypatch.setattr(update, "_triad_install_dirs", lambda: [dest])
+    monkeypatch.setattr(update, "_component_verdict", lambda *a, **kw: None)
+
+    with pytest.raises(typer.Exit):
+        update._sync_triad(cargo, source=tmp_path / "cli", subtree="a" * 40)
+    assert "install-exec-dead" in capsys.readouterr().err
+
+
+def test_sync_triad_unproven_destination_fails_the_leg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """AC2-ERR: a destination that answers but cannot prove current (the
+    native repair already ran inside the verdict) fails the leg too - a
+    just-written location that reads stale is a dead or mixed install."""
+    names = update._triad_names()
+    cargo = tmp_path / "cargo" / "bin"
+    cargo.mkdir(parents=True)
+    for n in names:
+        (cargo / n).write_text("new")
+    dest = tmp_path / "local" / "bin"
+    dest.mkdir(parents=True)
+    (dest / names[0]).write_text("old")
+    monkeypatch.setattr(update, "_triad_install_dirs", lambda: [dest])
+    monkeypatch.setattr(update, "_component_verdict", lambda *a, **kw: {
+        "converged": False,
+        "components": [
+            {"component": "fno-agents-worker", "status": "unknown",
+             "line": "component fno-agents-worker: unknown (no revision reported);"
+                     " killed by signal 9 on `version --json`"},
+        ],
+    })
+
+    with pytest.raises(typer.Exit):
+        update._sync_triad(cargo, source=tmp_path / "cli", subtree="a" * 40)
+    err = capsys.readouterr().err
+    assert "did not prove current" in err
+    assert str(dest) in err
+
+
 def test_sync_triad_incomplete_cargo_root_is_noop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2249,23 +2251,21 @@ def test_fresh_path_missing_daemon_sibling_rebuilds(
         return types.SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(update.subprocess, "run", _fake_run)
-    # Same-build semantics: the gate probe (triad-only, pre-effect) reports the
+    # Same-build semantics: the gate probe (include_mux, pre-effect) reports the
     # vanished daemon, so the gate falls through to cargo. Post-effect probes
     # see the rebuilt triad and prove refreshed.
-    monkeypatch.setattr(
-        update, "_installed_bin_crates_rev",
-        lambda b, **kw: subtree if Path(b).is_file() else None,
-    )
-
     def _fake_verdict(*a, **kw):
-        if kw.get("include_mux") is False and not kw.get("attempted"):
+        if kw.get("include_mux") is True and not kw.get("attempted"):
             return {
                 "converged": False,
                 "components": [
+                    {"component": "fno-agents", "status": "updated", "observed_rev": subtree},
                     {"component": "fno-agents-daemon", "status": "missing"},
+                    {"component": "fno-agents-worker", "status": "updated", "observed_rev": subtree},
+                    {"component": "fno", "status": "missing"},
                 ],
             }
-        return {"converged": True, "components": [{"component": "fno-agents", "status": "updated"}]}
+        return {"converged": True, "components": _fresh_rows(subtree)}
 
     monkeypatch.setattr(update, "_component_verdict", _fake_verdict)
 
@@ -2290,7 +2290,6 @@ def test_fresh_path_complete_triad_short_circuits(
         (bindir / n).write_text("x")  # full triad present
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: bindir / "fno-agents")
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree)
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: subtree)
     ran = []
     monkeypatch.setattr(
         update.subprocess, "run",
@@ -2830,19 +2829,23 @@ def _fresh_triad_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, subtree: s
         (bindir / n).write_text("x")
     monkeypatch.setattr(update, "_cargo_installed_bin", lambda: bindir / "fno-agents")
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: subtree)
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda b, **kw: subtree)
     return bindir
 
 
 def _stale_gate_verdict(monkeypatch: pytest.MonkeyPatch, *, post=None) -> None:
-    """The gate probe (triad-only, pre-effect) reads NOT converged, so the leg
-    falls through to cargo; post-effect probes read converged (or `post`)."""
+    """The gate probe (include_mux, pre-effect) reads the triad NOT fresh, so
+    the leg falls through to cargo; post-effect probes read converged (or `post`)."""
     def _verdict(*a, **kw):
-        if kw.get("include_mux") is False and not kw.get("attempted"):
-            return {"converged": False, "components": []}
+        if kw.get("include_mux") is True and not kw.get("attempted"):
+            return {"converged": False, "components": [
+                {"component": "fno-agents", "status": "stale"},
+                {"component": "fno-agents-daemon", "status": "stale"},
+                {"component": "fno-agents-worker", "status": "stale"},
+                {"component": "fno", "status": "stale"},
+            ]}
         if post is not None:
             return post
-        return {"converged": True, "components": [{"component": "fno-agents", "status": "updated"}]}
+        return {"converged": True, "components": _fresh_rows("a" * 40)}
 
     monkeypatch.setattr(update, "_component_verdict", _verdict)
 
@@ -2859,8 +2862,9 @@ def test_fresh_path_failed_mux_repair_is_partial(tmp_path: Path, monkeypatch: py
     monkeypatch.setattr(update, "_install_mux_front_door", lambda *a, **kw: False)
 
     def _verdict(*a, **kw):
-        if kw.get("include_mux") is False and not kw.get("attempted"):
-            return {"converged": True, "components": []}  # triad gate passes
+        if kw.get("include_mux") is True and not kw.get("attempted"):
+            # Triad gate passes; the front door reads failed -> reinstall it.
+            return {"converged": False, "components": _fresh_rows(subtree, mux="failed")}
         return {"converged": False, "components": [
             {"component": "fno", "status": "failed", "observed_rev": None,
              "expected_rev": subtree, "executable": None,
@@ -2879,23 +2883,28 @@ def test_fresh_path_failed_mux_repair_is_partial(tmp_path: Path, monkeypatch: py
 
 
 def test_component_verdict_transport_failure_is_never_fresh(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """A deployed binary that cannot answer the verdict is NOT convergence:
-    the fresh path downgrades to partial and the transport failure is named."""
+    """A deployed binary that cannot answer the verdict AT ALL is never a
+    converged update: the fresh path prints install-exec-dead naming the path
+    and fails the leg - the native repair lives inside the dead binary, so
+    nothing here can heal it."""
     subtree = "a" * 40
     _fresh_triad_env(tmp_path, monkeypatch, subtree)
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)
     monkeypatch.setattr(
         update,
         "_component_verdict",
-        lambda *a, **kw: None if kw.get("attempted") else {"converged": True, "components": []},
+        lambda *a, **kw: None if kw.get("attempted") else {
+            "converged": True, "components": _fresh_rows(subtree)},
     )
     monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/" + n)
     monkeypatch.setattr(
         update.subprocess, "run", lambda cmd, **kw: types.SimpleNamespace(returncode=0)
     )
-    assert update._refresh_rust_bins(tmp_path / "cli") == "partial"
+    with pytest.raises(typer.Exit):
+        update._refresh_rust_bins(tmp_path / "cli")
+    assert "install-exec-dead" in capsys.readouterr().err
 
 
 def test_component_lines_name_repair_and_unknown_instrument() -> None:

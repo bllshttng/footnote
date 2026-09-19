@@ -320,9 +320,10 @@ fn default_true() -> bool {
 /// v81: `RestoreRow.portal` (serde default), the verb fills held seats; floor 58.
 /// v82: `AgentRow.lineage_kind` (serde default), the served CHILD/PEER word;
 /// the sideline nests only CHILD rows; `BackendNotLive` also removed here.
-/// v83: `ClientMsg::AgentLaunch` + `ServerMsg::AgentLaunch`, the sideline
-/// new-agent composer's typed request/progress exchange; floor stays 58.
-pub const PROTO_VERSION: u32 = 83;
+/// v84: `AgentRow.spawned_by_name` + `AgentRow.lineage_reason` (serde
+/// default), the parent's registry name and the birth's reason, derived
+/// server-side; floor stays 58.
+pub const PROTO_VERSION: u32 = 84;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1248,6 +1249,19 @@ pub struct AgentRow {
     /// (v82) Served CHILD/PEER word; `child` nests, `peer`/absent renders flat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage_kind: Option<String>,
+    /// (v84) The registry NAME of the row `spawned_by_session` points at,
+    /// derived once per row set server-side (agents_view::merge_rows).
+    /// `None` when the edge names no row in the set or the id is claimed
+    /// by two different names. `#[serde(default)]` keeps a v83 reader
+    /// wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by_name: Option<String>,
+    /// (v84) Why a birth names no parent session (a v33 registry field,
+    /// read straight off the row). `None` when the row carries a parent
+    /// edge or predates the field. `#[serde(default)]` keeps a v83 reader
+    /// wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_reason: Option<String>,
     /// (v49) The row's own harness session id (claude/codex uuid),
     /// the join key for `spawned_by_session`. Same value the registry row
     /// carries; `None` for a row the registry wrote without one.
@@ -3403,39 +3417,9 @@ pub fn parse_pid_sidecar(s: &str) -> Option<(i32, Option<u64>)> {
     }
 }
 
-/// True while `pid` is a zombie: dead but not yet reaped by its parent, so
-/// `kill(pid, 0)` keeps succeeding even though it holds no fds and serves
-/// nothing. A bare-init container never reaps an adopted orphan, so waiting
-/// out a grace window for ESRCH there never converges; a zombie
-/// must read as gone the moment it is observed.
-#[cfg(target_os = "linux")]
-pub fn pid_is_zombie(pid: i32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|s| Some(s.rsplit_once(')')?.1.trim_start().starts_with('Z')))
-        .unwrap_or(false)
-}
-
-#[cfg(target_os = "macos")]
-pub fn pid_is_zombie(pid: i32) -> bool {
-    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-    let written = unsafe {
-        libc::proc_pidinfo(
-            pid as libc::pid_t,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            &mut info as *mut _ as *mut libc::c_void,
-            size,
-        )
-    };
-    written == size && info.pbi_status == libc::SZOMB
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub fn pid_is_zombie(_pid: i32) -> bool {
-    false
-}
+/// The zombie read; extracted beside its siblings for the file budget.
+mod pid_state;
+pub use pid_state::pid_is_zombie;
 
 /// True only when `kill(pid, 0)` proves `pid` is dead: ESRCH is the sole
 /// unambiguous signal. Any other outcome - alive, or an error like EPERM
@@ -3443,10 +3427,16 @@ pub fn pid_is_zombie(_pid: i32) -> bool {
 /// reads as not-provably-dead. The single implementation for a read that
 /// three call sites (kill-server's pre-check, its poll loop, and the
 /// server's own respawn-vs-alive check) each duplicated inline before
-///, which is exactly the shape that lets one of them drift.
+///, which is exactly the shape that lets one of them drift. A reachable
+/// ZOMBIE also reads as dead: it is unreaped (its parent may be slow, or a
+/// bare-init container never reaps at all), holds no fds, and serves
+/// nothing, so waiting out ESRCH would never converge.
 pub fn pid_confirmed_dead(pid: i32) -> bool {
     let result = unsafe { libc::kill(pid, 0) };
-    result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    if result != 0 {
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    }
+    pid_is_zombie(pid)
 }
 
 /// Every file a session leaves beside its name: the socket, the wire-version
@@ -4094,7 +4084,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 83);
+        assert_eq!(PROTO_VERSION, 84);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
@@ -4384,6 +4374,8 @@ mod tests {
                 area: (24, 80),
                 agents: vec![
                     AgentRow {
+                        spawned_by_name: None,
+                        lineage_reason: None,
                         harness: None,
                         model: None,
                         route: None,
@@ -4439,6 +4431,8 @@ mod tests {
                         pane_activity: None,
                     },
                     AgentRow {
+                        spawned_by_name: None,
+                        lineage_reason: None,
                         harness: None,
                         model: None,
                         route: None,
@@ -4584,6 +4578,11 @@ mod tests {
     // the same rule; the RetireSession entries ride the moved lists.
     #[path = "control_roundtrip_tests.rs"]
     mod control_roundtrip_tests;
+    // The zombie-read family: an unreaped exit reads as dead on both
+    // helpers pinned here, so the two-call `|| pid_is_zombie` dance at the
+    // callers never needs repeating.
+    #[path = "pid_zombie_tests.rs"]
+    mod pid_zombie_tests;
 
     #[test]
     fn proto_session_name_cannot_escape_mux_dir() {

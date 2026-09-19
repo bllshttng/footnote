@@ -29,6 +29,23 @@ import pytest
 
 from fno.backlog import advance as adv
 
+
+@pytest.fixture(autouse=True)
+def _no_native_claim_verdicts(monkeypatch):
+    """The lane-fill door sweeps native claim verdicts, admits through the
+    spawn gate, and releases slots through claims.core - all through the
+    binary, which the changed-smoke runner has none of; these tests study
+    the spawn argv. The stub answers what the real sweep answers for an
+    isolated empty root (every requested key free) and the gate rides its
+    documented env off-switch."""
+    def _free(keys=None, **_kw):
+        return {k: {"key": k, "state": "free"} for k in (keys or ())}
+
+    monkeypatch.setattr("fno.claims.verdict.claim_verdicts", _free)
+    monkeypatch.setattr("fno.claims.core.claim_verdicts", _free)
+    monkeypatch.setattr("fno.agents.naming._mint", lambda *a, **k: "wk-projection-lane")
+    monkeypatch.setenv("FNO_SPAWN_GATE", "0")
+
 BRIEF_SENTINEL = "brief-sentinel-7f31 blueprint-not-target"
 
 
@@ -110,6 +127,10 @@ def _write_graph(
         "domain": "code",
         "priority": "p1",
         "difficulty": difficulty,
+        # The seam gate (x-8fb2) refuses an unpinned spawn, and CI runs with
+        # no routing config, so the grid declines with an empty chain and the
+        # pin must ride the node itself.
+        "model": "glm-5.3-flash[1m]",
         "cwd": cwd,
         "created_at": "2026-09-07T00:00:00+00:00",
         "touched_at": "2026-09-07T00:00:00+00:00",

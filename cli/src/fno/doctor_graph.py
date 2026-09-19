@@ -50,19 +50,6 @@ def _keeper_gaps(client) -> list[str]:
     return list(client.request("backend_gate", {}).get("gaps") or [])
 
 
-def _keepers() -> str:
-    from fno import paths
-    from fno.graph.store import _Keeper
-
-    backends = []
-    for sock in sorted(paths.state_dir().rglob("*.store.sock")):
-        try:
-            backends.append(str(_Keeper(sock).identify().get("store_backend", "unknown")))
-        except Exception as exc:  # noqa: BLE001 - report, never crash
-            backends.append(f"unreachable: {exc}")
-    return "{" + ", ".join(f"'{b}'" for b in backends) + "}"
-
-
 def _flip(target: str) -> None:
     from fno import paths
     from fno.graph.store import _client_for
@@ -90,7 +77,22 @@ def _flip(target: str) -> None:
         set_config_value("graph.read_source", target, scope="global")
     except Exception as exc:  # noqa: BLE001 - keeper flipped; name the remedy
         typer.echo(f"graph backend: keeper flipped but graph.read_source not written ({exc}); run `fno config set graph.read_source {target}`", err=True)
-    typer.echo(f"backend={target} keepers={_keepers()}")
+    typer.echo(f"backend={target}")
+
+
+def _illegal_canonical_keepers(client, backend) -> "list[tuple[int, int]]":
+    """Store keepers on the canonical graph, read through the store's own
+    `keeper_scan` op; legality rides the backend this verb already fetched
+    plus the configured read_source. A hit is a stale binary or a
+    hand-spawn; the status verb refuses and names the collector."""
+    from fno.agents.keeper_lane import graph_read_source
+
+    if graph_read_source() != "sqlite" or backend != "sqlite":
+        return []
+    return [
+        (int(row["pid"]), int(row.get("rss_kb") or 0))
+        for row in client.request("keeper_scan", {}).get("keepers") or []
+    ]
 
 
 @graph_app.command("backend")
@@ -111,8 +113,20 @@ def graph_backend(
         since_text = since.strftime("%Y-%m-%d") if since else "never"
         days = (datetime.now(timezone.utc) - since).days if since else 0
         typer.echo(
-            f"backend={state.get('backend')} since={since_text} days={days} keepers={_keepers()}"
+            f"backend={state.get('backend')} since={since_text} days={days}"
         )
+        illegal = _illegal_canonical_keepers(client, state.get("backend"))
+        for pid, rss_kb in illegal:
+            gb = rss_kb / (1024 * 1024)
+            typer.echo(
+                f"refused: resident keeper pid {pid} holds the canonical graph "
+                f"({gb:.2f} GB RSS) while backend=sqlite; collect it: "
+                f"fno agents watchdog --only keeper --apply-all",
+                err=True,
+            )
+        if illegal:
+            raise typer.Exit(1)
+        typer.echo("keepers: fno agents watchdog --only keeper")
         gaps = _keeper_gaps(client)
         if gaps:
             for gap in gaps:

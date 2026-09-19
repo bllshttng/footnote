@@ -119,7 +119,7 @@ NO_VERIFY_PATTERNS = [
 # regex form was a bypass in one direction and a false refusal in the other.
 ALLOWED_GIT_SUBCOMMANDS = {
     "status", "log", "diff", "branch", "checkout", "fetch", "pull", "add",
-    "commit", "stash", "show", "config", "remote", "tag",
+    "commit", "stash", "show", "config", "remote", "tag", "grep",
 }
 
 def _default_state():
@@ -266,6 +266,11 @@ def push_debounce_refusal(command, branch):
     the wait over. Every failure path allows. `FNO_PUSH_NOW=1` allows and
     leaves an event row, so a bypass is recoverable from the journal rather
     than invisible.
+
+    The verb's own internal push never re-enters this hook: the hook reads
+    the Bash command string, and `fno do pr push` is not a `git push` at
+    position 0, so the verb is the one door that is never double-gated. A
+    rename to anything starting `git push` would silently deadlock it.
     """
     if os.environ.get("FNO_PUSH_NOW") == "1":
         _emit_push_bypass_event(branch)
@@ -276,9 +281,10 @@ def push_debounce_refusal(command, branch):
         if 0 <= age < PUSH_DEBOUNCE_SECONDS:
             return (
                 f"[fno push debounce] this branch was pushed {int(age)}s ago and "
-                f"GitHub may not have registered its run yet. Wait with "
-                f"`fno do pr wait <n> --until settled`, then push once. "
-                f"FNO_PUSH_NOW=1 bypasses and records the bypass."
+                f"GitHub may not have registered its run yet. Run "
+                f"`fno do pr push` - it reads the real check state and pushes "
+                f"once the branch is safe. FNO_PUSH_NOW=1 bypasses and records "
+                f"the bypass."
             )
     except OSError:
         pass
@@ -1755,8 +1761,10 @@ def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=()):
         f"[fno closure trailer] branch segments that fit the node-id grammar: "
         f"{', '.join(ids)}. check-pr-node-closure reds this PR unless the body "
         f"claims at least one REAL node.\n"
-        f"Generate the line (graph-checked, with contained_in descendants) via "
-        f"`fno do pr closure-trailer <node-id>` and paste its output.\n"
+        f"Generate the ONE line (graph-checked, with contained_in descendants) "
+        f"via `fno do pr closure-trailer <node-id> --extra <id> [...]` and "
+        f"paste its output; the gate reads only the last Backlog-Closure "
+        f"line, so replace every line in the body with this one.\n"
         f"Do NOT paste a candidate from this message: a segment can match the "
         f"grammar without being a node, and one unknown id voids the whole "
         f"binding at merge.\n"

@@ -54,15 +54,70 @@ def _declare(monkeypatch: pytest.MonkeyPatch, rows: list) -> None:
     monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
 
 
+def _pin_capacity(monkeypatch, claude=None, codex=None, extra=None, active=None):
+    """Pin the capacity readings the verb judges lanes with.
+
+    The Python capacity read was deleted (x-1c38): the verb computes it from
+    the runtime-state file, so a hermetic one rides in through env instead of
+    a monkeypatched Python function. claude/codex pin one account record each
+    (`cl-a` for claude, `cx-a` for codex); None leaves the harness with no
+    record, which reads unknown. `extra` adds per-account readings as
+    {harness: {account: state}} (a dict value may carry resets_at). `active`
+    writes identity stamps as {harness: account}. Returns (config, state)
+    paths so a test can move capacity mid-flight.
+    """
+    import json
+    import os
+    import tempfile
+    import time as _time
+
+    d = tempfile.mkdtemp(prefix="fno-cap-")
+    records = []
+    for harness, spec in (("claude", claude), ("codex", codex)):
+        if spec is not None:
+            records.append((f"{'cl' if harness == 'claude' else 'cx'}-a", harness, spec))
+    for harness, accounts in (extra or {}).items():
+        for account, spec in accounts.items():
+            records.append((account, harness, spec))
+    cfg = os.path.join(d, "config.toml")
+    with open(cfg, "w") as f:
+        f.write(f"state_dir = '{d}'\n")
+        for account, harness, _spec in records:
+            f.write(f'[[accounts.records]]\nid = "{account}"\nharness = "{harness}"\n')
+    now = _time.time()
+
+    def row(spec) -> dict:
+        if isinstance(spec, dict):
+            state, resets = spec.get("state", "ok"), spec.get("resets_at")
+        else:
+            state, resets = spec, None
+        pct = {"ok": 5.0, "low": 95.0}.get(state, 100.0)
+        return {
+            "probed_at": now,
+            "partial": False,
+            "windows": [{"label": "daily", "used_pct": pct, "resets_at": resets}],
+        }
+
+    state = os.path.join(d, "state.json")
+    with open(state, "w") as f:
+        f.write(json.dumps({"usage": {a: row(spec) for a, _h, spec in records}}))
+    for harness, account in (active or {}).items():
+        os.makedirs(os.path.join(d, "providers"), exist_ok=True)
+        with open(os.path.join(d, "providers", f".active-{harness}"), "w") as f:
+            f.write(account)
+    monkeypatch.setenv("FNO_CONFIG", cfg)
+    monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", state)
+    return cfg, state
+
+
 def _invoke_inventory(
     monkeypatch: pytest.MonkeyPatch, capacity: dict | None = None
 ) -> str:
     from typer.testing import CliRunner
 
-    from fno import route_resolve as rr
     from fno.route_cli import route_app
 
-    monkeypatch.setattr(rr, "runtime_capacity", lambda **kw: (capacity or {}))
+    _pin_capacity(monkeypatch, **(capacity or {}))
     res = CliRunner().invoke(route_app, ["inventory"])
     assert res.exit_code == 0, res.output
     return res.output

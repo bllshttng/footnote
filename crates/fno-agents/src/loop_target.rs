@@ -276,6 +276,9 @@ pub(crate) fn exit_code_for_reason(reason: &TerminationReason) -> i32 {
         // what a wrapper reads to see it declined the autonomous merge.
         | TerminationReason::DoneUnreviewed
         | TerminationReason::NoWork => 0,
+        // HeldOnQuestion: a clean stop for input, exit 0 - the loop did its
+        // job by stopping once with the question named; it is not a failure.
+        TerminationReason::HeldOnQuestion => 0,
         TerminationReason::Budget | TerminationReason::NoProgress | TerminationReason::Aborted => 1,
         TerminationReason::Interrupted => 130,
     }

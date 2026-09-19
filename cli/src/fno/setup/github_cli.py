@@ -124,21 +124,33 @@ def worker_environment(base: Mapping[str, str]) -> dict[str, str]:
         return env
     delegate = Path(found)
     try:
-        if delegate.is_file() and _is_wrapper(delegate):
-            env[_PROXY_DIR_ENV] = str(delegate.parent.resolve())
+        inherited_shim = delegate.is_file() and _is_wrapper(delegate)
+    except OSError:
+        inherited_shim = False
+    if inherited_shim:
+        parent = delegate.parent.resolve()
+        keep = bool(requested_dir) or parent != fallback_proxy_dir().resolve()
+        if not keep:
+            # The temp shim is reapable: move the lineage to the durable home,
+            # and keep the temp one only when that home cannot be installed.
+            try:
+                result = ensure_proxy(real_gh=delegate)
+            except Exception:
+                keep = True
+        if keep:
+            env[_PROXY_DIR_ENV] = str(parent)
             env.pop("FNO_REAL_GH", None)
             return env
-    except OSError:
-        pass
-    try:
-        result = ensure_proxy(
-            directory=Path(requested_dir) if requested_dir else None,
-            real_gh=delegate,
-        )
-    except Exception:
-        if requested_dir:
-            raise
-        result = ensure_proxy(directory=fallback_proxy_dir(), real_gh=delegate)
+    else:
+        try:
+            result = ensure_proxy(
+                directory=Path(requested_dir) if requested_dir else None,
+                real_gh=delegate,
+            )
+        except Exception:
+            if requested_dir:
+                raise
+            result = ensure_proxy(directory=fallback_proxy_dir(), real_gh=delegate)
     old_path = env.get("PATH", "")
     env["PATH"] = str(result.proxy.parent) + (os.pathsep + old_path if old_path else "")
     env[_PROXY_DIR_ENV] = str(result.proxy.parent.resolve())

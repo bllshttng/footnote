@@ -377,12 +377,7 @@ It does not deliver relief from the re-review treadmill, and the measurement say
 Of the 22 head-to-head transitions observed across PRs 824-831, **2 carry forward**.
 The other 20 are genuine code change, measured against each PR's true base.
 
-An earlier pass measured 63% and was wrong.
-Merged PRs' three-dot diff against the current `origin/main` is empty, and the hash of the empty string equals itself.
-Twelve transitions were matching an absence against an absence.
-So a carry requires a positive match between two SUCCESSFULLY COMPUTED identities.
-An empty code diff yields no identity at all.
-`freshness_two_absent_identities_never_match` is the standing guard.
+An earlier pass measured 63% and was wrong. Merged PRs' three-dot diff against the current `origin/main` is empty, and the hash of the empty string equals itself. Twelve transitions were matching an absence against an absence. So a carry requires a positive match between two SUCCESSFULLY COMPUTED identities. An empty three-dot diff yields no identity at all. `freshness_two_absent_identities_never_match` is the standing guard.
 
 What the rule does deliver is rebase-invariance.
 It fires at the mandatory pre-merge rebase, where losing an attestation costs most.
@@ -392,8 +387,8 @@ It is not "five re-reviews become one".
 **An unused-import removal still costs a full re-review.**
 `fix(tracker): drop unused json import (ruff F401)` changes a `.py` file.
 That is code under any classifier that does not parse Python, and an AST dependency for one commit shape is not worth it.
-A documentation-only PR never carries an attestation either.
-With no code in the diff there is no identity to match, which is the fail-closed direction.
+
+If a documentation-only PR's own diff is readable and non-empty, the PR has an empty code identity. That identity carries a docs-only advance or a rebase. A move between a docs-only diff and a code-bearing diff never carries, in either direction. A merged PR's three-dot diff is empty, so it still yields no identity, and the 2-of-22 guard above holds.
 
 **`carried_docs_only` inherits `is_documentation_path`, and that classifier calls every `.md` file documentation.** In this repo `skills/*/SKILL.md`, `agents/*.md`, and `AGENTS.md` are behavior, not prose. So a skill rewritten after a review carries the earlier verdict forward as fresh coverage. This is deliberate for now, because it matches the existing payload classifier. A `.md`-only PR already skips review gating entirely, so the carry rule is not what introduced the gap. Narrowing it is a real behavior change and has to move in lockstep with the Python mirror in `_merge._is_documentation_path`.
 
@@ -535,6 +530,8 @@ NO `--fix` remains the review contract. The author applies findings and re-attes
 ## The pass condition and the four verdict states
 
 The merge gate's pass condition is disposition-complete at the head, not clean. The attestation chain's ranges must tile `merge_base..head`. Every finding in the chain must be terminal. Terminal means fixed with the fix delta reviewed. It also means non-blocking by the gate's own class re-derivation. It means declined with corroboration the author cannot mint alone. And it means waived by the override label. The producer's own `findings_blocking` count is never the answer. The gate re-derives from the per-finding primitives. A hand-written event claiming zero blocking over a CONFIRMED finding is refused.
+
+A rebase replaces every sha on the branch, so a tiling keyed by sha alone resets coverage on every rebase the merge gate forces. When `review_freshness` proves the attestation's pinned head still is the current head by content identity, the producer carries the tile. The proof is git content on both sides, base divided out. Only a whole-range verdict grants the carry: `fresh`, `carried_base_sync`, `carried_docs_only`, `carried_subset`, or `carried_interdiff` at zero lines. `carried_interdiff` above zero still counts as a review under law d-608344c1, and still grants no tile: a tile asserts every shipping line was read. Each carry is named on the row as `{head, freshness}` in `range_tiling.carried`.
 
 `fno do pr coverage-check` answers one of three states. COVERED is exit 0: the chain tiles with no open finding, or the configured rounds are spent. REFUSED is exit 3, and the refusal names the failing conjunct and the rounds remaining. UNANSWERED is exit 4, a named instrument failure, never a verdict. There is no exit 5. At the cap the review phase is complete: open findings stay in the PR conversation and the PR merges on green CI, hard findings included. The operator lever is `config.review.max_rounds`. The git-protection hook's refusal set is `{3}`.
 

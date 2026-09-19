@@ -2,6 +2,9 @@
 //! and what names a rollout file. Moved out of client_verbs.rs, which is
 //! shrink-only; the re-export there keeps every existing caller.
 
+/// The codex home the way codex itself resolves it: `$CODEX_HOME` when set,
+/// else `~/.codex`. Both codex store readers must resolve the same home, or
+/// one of them reads a store the worker never writes.
 pub(crate) fn codex_home() -> Option<std::path::PathBuf> {
     if let Ok(h) = std::env::var("CODEX_HOME") {
         if !h.is_empty() {
@@ -46,4 +49,15 @@ pub(crate) fn codex_rollout_index(root: Option<&std::path::Path>) -> Option<Vec<
                 })
                 .collect()
         })
+}
+
+/// Rung 4's freshness read against a prebuilt [`codex_rollout_index`]: any
+/// rollout for `session_id` written within the window proves the worker is
+/// advancing. Fail closed: an absent or unreadable store built no index, and
+/// a miss inside one is not-fresh - both read `Unknown`, which keeps.
+pub(crate) fn codex_rollout_fresh(index: &[(String, u64)], session_id: &str, now: u64) -> bool {
+    index.iter().any(|(name, mtime)| {
+        codex_rollout_matches(name, session_id)
+            && now.saturating_sub(*mtime) <= crate::client_verbs::CODEX_ROLLOUT_FRESH_SECS
+    })
 }

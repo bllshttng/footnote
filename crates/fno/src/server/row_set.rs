@@ -70,13 +70,15 @@ impl Core {
                                 route: a.route.clone(),
                                 spawned_by_session: a.spawned_by_session.clone(),
                                 lineage_kind: a.lineage_kind.clone(),
+                                spawned_by_name: a.spawned_by_name.clone(),
+                                lineage_reason: a.lineage_reason.clone(),
                                 harness_session_id: a.harness_session_id.clone(),
                                 squad: Some(squad.id),
                                 name: a.name.clone(),
                                 pane_id: Some(pid),
                                 // Derived every build from the open portals; the row
                                 // stores no index of its own.
-                                portal: self.portal_of(Some(pid)),
+                                portal: self.portal_marker(Some(pid)),
                                 badge: if exited { None } else { a.badge },
                                 reason: if exited { None } else { a.reason.clone() },
                                 exited,
@@ -137,6 +139,8 @@ impl Core {
                                 route: None,
                                 spawned_by_session: None,
                                 lineage_kind: None,
+                                spawned_by_name: None,
+                                lineage_reason: None,
                                 harness_session_id: None,
                                 squad: Some(squad.id),
                                 name: pane_label(
@@ -148,7 +152,7 @@ impl Core {
                                 pane_id: Some(pid),
                                 // Derived every build from the open portals; the row
                                 // stores no index of its own.
-                                portal: self.portal_of(Some(pid)),
+                                portal: self.portal_marker(Some(pid)),
                                 badge: None,
                                 reason: None,
                                 exited: pane_dead
@@ -235,6 +239,8 @@ impl Core {
                         route: a.route.clone(),
                         spawned_by_session: a.spawned_by_session.clone(),
                         lineage_kind: a.lineage_kind.clone(),
+                        spawned_by_name: a.spawned_by_name.clone(),
+                        lineage_reason: a.lineage_reason.clone(),
                         harness_session_id: a.harness_session_id.clone(),
                         squad,
                         name: a.name.clone(),
@@ -302,6 +308,8 @@ impl Core {
                         route: a.route.clone(),
                         spawned_by_session: a.spawned_by_session.clone(),
                         lineage_kind: a.lineage_kind.clone(),
+                        spawned_by_name: a.spawned_by_name.clone(),
+                        lineage_reason: a.lineage_reason.clone(),
                         harness_session_id: a.harness_session_id.clone(),
                         squad,
                         name: a.name.clone(),
@@ -446,6 +454,8 @@ impl Core {
                 route: None,
                 spawned_by_session: None,
                 lineage_kind: None,
+                spawned_by_name: None,
+                lineage_reason: None,
                 harness_session_id: None,
                 squad,
                 name: r.name.clone(),

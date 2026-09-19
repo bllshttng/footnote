@@ -53,11 +53,11 @@ def _refusing_run_gate(calls: list, reason: str):
 
 def test_wait_retries_a_waitable_reason_until_the_deadline(monkeypatch):
     calls: list = []
-    monkeypatch.setattr(spawn_gate, "run_gate", _refusing_run_gate(calls, "load_backstop"))
+    monkeypatch.setattr(spawn_gate, "run_gate", _refusing_run_gate(calls, "ram_floor"))
     result = _spawn("spawn", "-H", "claude", "--substrate", "bg", "--wait", "0.05s", "hi")
     assert result.exit_code == EXIT_LOAD_REFUSED
     assert len(calls) >= 2, "a --wait shorter than the retry sleep still retries at least once"
-    assert "load_backstop" in result.stderr
+    assert "ram_floor" in result.stderr
 
 
 def test_wait_exits_at_once_on_an_unrelated_reason(monkeypatch):

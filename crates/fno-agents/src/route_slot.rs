@@ -294,6 +294,26 @@ fn row_capacity(row: &Value, harness_detail: Option<&Value>) -> (String, String,
     }
 }
 
+/// How many planned lanes the walk would judge unknown on an outdated
+/// reading: state `unknown` with window `stale` or `absent`. The refresh
+/// gate's trigger count; a lane missing its declared row counts, because the
+/// walk would skip it unknown all the same.
+fn outdated_lane_count(
+    plan: &[(String, String)],
+    rows: &Map<String, Value>,
+    capacity: &Value,
+) -> usize {
+    plan.iter()
+        .filter(|(_, row_name)| rows.contains_key(row_name))
+        .filter_map(|(_, row_name)| rows.get(row_name))
+        .filter(|r| {
+            let harness = row_value(r, "harness");
+            let (state, window, _age) = row_capacity(r, capacity.get(&harness));
+            state == "unknown" && (window == "stale" || window == "absent")
+        })
+        .count()
+}
+
 /// `never` when nothing was observed (the positive marker: an empty field is
 /// indistinguishable from a dropped token), otherwise the age floored to its
 /// coarsest unit under a day.
@@ -458,7 +478,15 @@ fn order_candidates(mut rows: Vec<InvRow>, objective: &str, prefer_harness: &str
 /// inventory under a live capacity snapshot. Receipts are the Python
 /// resolver's, verbatim.
 fn grid_leg(payload: &Value, _rung_base: &str, chain: &mut Vec<Value>) -> Value {
-    let capacity = payload.get("capacity").cloned().unwrap_or(json!({}));
+    let capacity = match payload.get("capacity") {
+        Some(v) => v.clone(),
+        None => crate::route_capacity::capacity(
+            &payload.get("inventory").cloned().unwrap_or(json!({})),
+            &slot_cwd(),
+            slot_now(),
+            None,
+        ),
+    };
     let node = payload.get("node").cloned().unwrap_or(Value::Null);
     let band_raw = node
         .get("difficulty")
@@ -770,6 +798,17 @@ fn tier_none(chain: Vec<Value>) -> Value {
     json!({"status": "none", "model": Value::Null, "chain": chain})
 }
 
+/// The lanes shape guard both legs share: a scalar lanes is named the same
+/// way everywhere, so no feed can turn it into a false "declares no lanes".
+fn lanes_list_fault(rung_base: &str, lanes_raw: &Value) -> Option<String> {
+    if lanes_raw.is_array() || lanes_raw.is_null() {
+        return None;
+    }
+    Some(format!(
+        "slot=config {rung_base}.lanes must be a list; got {lanes_raw}"
+    ))
+}
+
 /// The readout leg: every planned lane's live capacity state, for display.
 /// No selection, no terminal; a lane naming no row reads no-such-row.
 fn states_leg(payload: &Value) -> Value {
@@ -777,7 +816,15 @@ fn states_leg(payload: &Value) -> Value {
         .get("rung_base")
         .and_then(Value::as_str)
         .unwrap_or("agents.profiles");
-    let capacity = payload.get("capacity").cloned().unwrap_or(json!({}));
+    let capacity = match payload.get("capacity") {
+        Some(v) => v.clone(),
+        None => crate::route_capacity::capacity(
+            &payload.get("inventory").cloned().unwrap_or(json!({})),
+            &slot_cwd(),
+            slot_now(),
+            None,
+        ),
+    };
     let profile = payload.get("profile").cloned().unwrap_or(Value::Null);
     let lanes_raw = payload.get("lanes_raw").cloned().unwrap_or(json!([]));
     let mut chain: Vec<Value> = Vec::new();
@@ -808,6 +855,13 @@ fn states_leg(payload: &Value) -> Value {
         let mut slot_payload = payload.clone();
         if let Some(obj) = slot_payload.as_object_mut() {
             obj.remove("mode");
+            // The readout never refreshes: display judges on current
+            // evidence, and its preview walk must not probe either.
+            obj.remove("capacity_refresh");
+            // The walk reuses the map this readout computed instead of
+            // reading the state file a second time.
+            obj.entry("capacity".to_string())
+                .or_insert_with(|| capacity.clone());
         }
         let slot_out = resolve_slot_payload(&slot_payload);
         let candidate = slot_out.get("candidate");
@@ -955,6 +1009,15 @@ fn states_leg(payload: &Value) -> Value {
             }
         }
     }
+    if let Some(fault) = lanes_list_fault(rung_base, &lanes_raw) {
+        chain.push(json!(fault));
+        return with_facts(json!({
+            "status": "states", "lane_states": [], "chain": chain,
+            "on_exhausted": on_exhausted, "on_low": on_low,
+            "on_unknown": on_unknown,
+            "would_take": would_take, "routing": routing,
+        }));
+    }
     let lanes_arr = lanes_raw.as_array().cloned().unwrap_or_default();
     if lanes_arr.is_empty() {
         // The no-lanes verdict: what a spawn would fall back to. No walk ran,
@@ -1076,14 +1139,37 @@ fn payload_fingerprint(payload: &Value) -> String {
 }
 
 pub fn resolve_slot_payload(payload: &Value) -> Value {
-    let mut out = resolve_slot_walk(payload);
+    let mut judged: Option<Value> = None;
+    let mut out = resolve_slot_walk(payload, &mut judged);
     if let Some(obj) = out.as_object_mut() {
         obj.insert("fingerprint".into(), json!(payload_fingerprint(payload)));
+        // The summary explain used to build in Python, read straight off the
+        // map the walk judged lanes with.
+        if let Some(cap) = judged {
+            obj.insert(
+                "capacity".into(),
+                crate::route_capacity::capacity_summary(&cap),
+            );
+        }
     }
     out
 }
 
-fn resolve_slot_walk(payload: &Value) -> Value {
+/// The cwd the verb's own capacity read resolves config against: the process
+/// cwd Python invoked the binary with.
+fn slot_cwd() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+/// The epoch seconds the capacity read judges evidence freshness by.
+fn slot_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
     let mut chain: Vec<Value> = Vec::new();
     let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
     if mode == "tier" {
@@ -1098,7 +1184,21 @@ fn resolve_slot_walk(payload: &Value) -> Value {
         .unwrap_or("agents.profiles")
         .to_string();
     let profile = payload.get("profile").cloned().unwrap_or(Value::Null);
-    let capacity = payload.get("capacity").cloned().unwrap_or(json!({}));
+    // An explicit capacity stays honored (the existing Rust tests' seam); a
+    // payload without one is computed here, from the same state file and
+    // config the Python resolver used to read.
+    let (mut capacity, capacity_computed) = match payload.get("capacity") {
+        Some(v) => (v.clone(), false),
+        None => (
+            crate::route_capacity::capacity(
+                &payload.get("inventory").cloned().unwrap_or(json!({})),
+                &slot_cwd(),
+                slot_now(),
+                None,
+            ),
+            true,
+        ),
+    };
     let gate_bypassed = payload
         .get("gate_bypassed")
         .and_then(Value::as_bool)
@@ -1241,14 +1341,11 @@ fn resolve_slot_walk(payload: &Value) -> Value {
         }
     }
 
-    let lanes_arr = lanes_raw.as_array().cloned().unwrap_or_default();
-    let lanes_is_list = lanes_raw.is_array() || lanes_raw.is_null();
-    if !lanes_is_list {
-        chain.push(json!(format!(
-            "slot=config {rung_base}.lanes must be a list; got {lanes_raw}"
-        )));
+    if let Some(fault) = lanes_list_fault(&rung_base, &lanes_raw) {
+        chain.push(json!(fault));
         return none(chain);
     }
+    let lanes_arr = lanes_raw.as_array().cloned().unwrap_or_default();
 
     chain.extend(prefix);
 
@@ -1472,6 +1569,38 @@ fn resolve_slot_walk(payload: &Value) -> Value {
             return none(chain);
         }
     };
+
+    // --- refresh gate ---------------------------------------------------------
+    // A lane the walk would skip on an outdated reading (unknown with a stale
+    // or never-probed window) gets ONE refresh before the judging loop: a
+    // skipped lane never launches, so nothing else would ever probe it. The
+    // dispatch seam arms this; display and explicit-capacity payloads never
+    // refresh.
+    let capacity_refresh_armed = capacity_computed
+        && payload
+            .get("capacity_refresh")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    if capacity_refresh_armed && on_unknown == "skip" {
+        let outdated = outdated_lane_count(&plan, &rows, &capacity);
+        if outdated > 0 {
+            chain.push(json!(
+                match crate::route_capacity::refresh_usage_readings(&slot_cwd()) {
+                    Some(refreshed) => {
+                        capacity = crate::route_capacity::capacity(
+                            &payload.get("inventory").cloned().unwrap_or(json!({})),
+                            &slot_cwd(),
+                            slot_now(),
+                            Some(&refreshed),
+                        );
+                        format!("slot refresh accounts usage ({outdated} lanes outdated)")
+                    }
+                    None => "slot refresh unavailable".to_string(),
+                }
+            ));
+        }
+    }
+    *judged = Some(capacity.clone());
     let sorted_rows: Vec<String> = {
         let mut names: Vec<String> = rows.keys().cloned().collect();
         names.sort();
@@ -1630,6 +1759,12 @@ fn resolve_slot_walk(payload: &Value) -> Value {
                     continue;
                 }
             }
+        } else {
+            chain.push(json!(format!(
+                "slot note {} uncapped ({})",
+                lane_label(rung, row_name),
+                vendor.as_deref().unwrap_or("no vendor declared"),
+            )));
         }
         let harness_detail = capacity.get(&harness);
         let evidence = harness_detail
@@ -1810,24 +1945,7 @@ fn resolve_slot_walk(payload: &Value) -> Value {
         // The structured refusal the seam prints verbatim (exit 78): the walk
         // owns the lanes, reasons and reset time, so it composes the payload
         // instead of the consumer re-parsing chain lines.
-        let lanes: Vec<Value> = chain
-            .iter()
-            .filter_map(|line| {
-                let rest = line.as_str()?.strip_prefix("slot skip ")?;
-                // The label is the lane's rung and, when it differs, its row
-                // name: the same lane_label the skip line was built with.
-                let mut tokens = rest.splitn(3, ' ');
-                let first = tokens.next().unwrap_or("");
-                let second = tokens.next();
-                let remainder = tokens.next();
-                let (name, reason) = match (second, remainder) {
-                    (Some(n), Some(r)) => (n, r),
-                    (Some(n), None) => (n, "exhausted"),
-                    (None, _) => (first, "exhausted"),
-                };
-                Some(json!({"name": name, "reason": reason}))
-            })
-            .collect();
+        let lanes = lanes_from_chain(&chain);
         let mut queue_refusal = json!({
             "status": "refused",
             "reason": "slot_exhausted",
@@ -2051,6 +2169,29 @@ fn parse_age_seconds(label: &str) -> Option<f64> {
     }
 }
 
+/// One object per `slot skip` chain line. The fold `exhausted_payload` ships,
+/// shared with the refusal journal row so both name the same lanes.
+fn lanes_from_chain(chain: &[Value]) -> Vec<Value> {
+    chain
+        .iter()
+        .filter_map(|line| {
+            let rest = line.as_str()?.strip_prefix("slot skip ")?;
+            // The label is the lane's rung and, when it differs, its row
+            // name: the same lane_label the skip line was built with.
+            let mut tokens = rest.splitn(3, ' ');
+            let first = tokens.next().unwrap_or("");
+            let second = tokens.next();
+            let remainder = tokens.next();
+            let (name, reason) = match (second, remainder) {
+                (Some(n), Some(r)) => (n, r),
+                (Some(n), None) => (n, "exhausted"),
+                (None, _) => (first, "exhausted"),
+            };
+            Some(json!({"name": name, "reason": reason}))
+        })
+        .collect()
+}
+
 /// Capacity terminals keep the receipt vocabulary verbatim while naming their
 /// kind for machine consumers. A policy hold is never described as a spent
 /// quota, so the verdict word differs from the reason kind.
@@ -2132,6 +2273,7 @@ pub fn run_route_slot_capture(args: &[String]) -> (i32, String, String) {
         return run_route_slot_journal(&payload);
     }
     let out = resolve_slot_payload(&payload);
+    journal_routing_refusal(&payload, &out);
     (0, format!("{out}\n"), String::new())
 }
 
@@ -2166,6 +2308,55 @@ fn read_route_slot_payload(args: &[String]) -> Result<Value, (i32, String, Strin
         .map_err(|e| (2, String::new(), format!("route-slot: bad payload: {e}\n")))
 }
 
+/// The append half every journal write shares: stamp ts and kind, serialize
+/// one flat envelope line (`kind` plus flattened fields), create the parent
+/// dir, append. The journal op passes `spawn_defaults_applied` and surfaces
+/// every failure; the refusal emit passes its own kind and ignores them.
+fn append_journal_line(
+    path: &std::path::Path,
+    mut record: serde_json::Map<String, Value>,
+    kind: &str,
+) -> Result<(), (i32, String, String)> {
+    record.insert("ts".into(), Value::String(crate::events::now_rfc3339()));
+    record.insert("kind".into(), Value::String(kind.to_string()));
+    let mut line = match serde_json::to_string(&Value::Object(record)) {
+        Ok(l) => l,
+        Err(e) => {
+            return Err((
+                1,
+                String::new(),
+                format!("route-slot journal: serialize failed: {e}\n"),
+            ))
+        }
+    };
+    line.push('\n');
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            return Err((
+                1,
+                String::new(),
+                format!("route-slot journal: open failed: {e}\n"),
+            ))
+        }
+    };
+    match std::io::Write::write_all(&mut file, line.as_bytes()) {
+        Ok(()) => Ok(()),
+        Err(e) => Err((
+            1,
+            String::new(),
+            format!("route-slot journal: write failed: {e}\n"),
+        )),
+    }
+}
+
 /// `route-slot journal`: append one spawn_defaults_applied receipt to the
 /// agents event journal. The WRITE belongs to the verb; the row keeps
 /// the flat envelope (`kind` plus flattened fields) every reader of this event
@@ -2182,7 +2373,7 @@ pub fn run_route_slot_journal(payload: &Value) -> (i32, String, String) {
             )
         }
     };
-    let mut record = match payload.get("event").and_then(Value::as_object) {
+    let record = match payload.get("event").and_then(Value::as_object) {
         Some(m) => m.clone(),
         None => {
             return (
@@ -2192,51 +2383,90 @@ pub fn run_route_slot_journal(payload: &Value) -> (i32, String, String) {
             )
         }
     };
-    record.insert("ts".into(), Value::String(crate::events::now_rfc3339()));
-    record.insert(
-        "kind".into(),
-        Value::String("spawn_defaults_applied".to_string()),
-    );
-    let mut line = match serde_json::to_string(&Value::Object(record)) {
-        Ok(l) => l,
-        Err(e) => {
-            return (
-                1,
-                String::new(),
-                format!("route-slot journal: serialize failed: {e}\n"),
-            )
-        }
-    };
-    line.push('\n');
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let mut file = match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        Ok(f) => f,
-        Err(e) => {
-            return (
-                1,
-                String::new(),
-                format!("route-slot journal: open failed: {e}\n"),
-            )
-        }
-    };
-    match std::io::Write::write_all(&mut file, line.as_bytes()) {
+    match append_journal_line(&path, record, "spawn_defaults_applied") {
         Ok(()) => (
             0,
             format!("journal: spawn_defaults_applied -> {}\n", path.display()),
             String::new(),
         ),
-        Err(e) => (
-            1,
-            String::new(),
-            format!("route-slot journal: write failed: {e}\n"),
-        ),
+        Err(fail) => fail,
     }
+}
+
+/// A spawn that launches leaves a `spawn_defaults_applied` row; a spawn the
+/// lane walk refuses left nothing, which is the asymmetry this closes. One
+/// `spawn_gate_refused` row per refusal, `gate: "routing"` so a query
+/// separates it from the Python gate's rows. Best effort, always: a dead
+/// journal never blocks a spawn and never changes a refusal.
+fn journal_routing_refusal(payload: &Value, out: &Value) {
+    let refused = out.get("candidate").map(Value::is_null).unwrap_or(false)
+        && matches!(
+            out.get("verdict").and_then(Value::as_str),
+            Some("capacity-held") | Some("policy-held")
+        );
+    if !refused {
+        return;
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    // Canonicalize like `state_path::run`: /var vs /private/var must never
+    // mint two spaces.
+    let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+    let Some(path) = crate::state_path::resolve("events", &cwd) else {
+        return;
+    };
+    let queue = out.get("reason_kind").and_then(Value::as_str) == Some("capacity-queue");
+    let (reason, detail) = if let Some(t) = out.get("refusal_terminal") {
+        (
+            t.get("class").and_then(Value::as_str).unwrap_or("unknown"),
+            t.get("text").and_then(Value::as_str).unwrap_or(""),
+        )
+    } else if let Some(p) = out.get("exhausted_payload") {
+        // The queue terminal composes its structured payload instead of a
+        // refusal_terminal; its reason rides there and the chain's last line
+        // is the human detail.
+        (
+            p.get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("slot_exhausted"),
+            out.get("chain")
+                .and_then(Value::as_array)
+                .and_then(|c| c.last())
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        )
+    } else {
+        ("unknown", "")
+    };
+    let chain = out
+        .get("chain")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut record = serde_json::Map::new();
+    record.insert("reason".into(), json!(reason));
+    record.insert("detail".into(), json!(detail));
+    record.insert("gate".into(), json!("routing"));
+    if let Some(vb) = payload.get("rung_base").and_then(Value::as_str) {
+        record.insert(
+            "verb".into(),
+            json!(vb.strip_prefix("agents.profiles.").unwrap_or(vb)),
+        );
+    }
+    record.insert("lanes".into(), Value::Array(lanes_from_chain(chain)));
+    record.insert("exit_code".into(), json!(if queue { 78 } else { 2 }));
+    if let Some(v) = payload.get("substrate").filter(|v| !v.is_null()) {
+        record.insert("substrate".into(), v.clone());
+    }
+    // plan_path rides nested in node_payload, not at the payload top level.
+    if let Some(v) = payload
+        .get("node")
+        .and_then(|n| n.get("plan_path"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        record.insert("plan_path".into(), json!(v));
+    }
+    let _ = append_journal_line(&path, record, "spawn_gate_refused");
 }
 
 /// `route-slot audit`: read-only completion evidence for the routing policy
@@ -2831,6 +3061,195 @@ mod tests {
             .collect()
     }
 
+    fn capture_file(dir: &std::path::Path, payload: &Value) -> (i32, String, String) {
+        let path = dir.join("payload.json");
+        std::fs::write(&path, serde_json::to_string(payload).unwrap()).unwrap();
+        run_route_slot_capture(&[path.display().to_string()])
+    }
+
+    fn journal_rows(journal: &std::path::Path) -> Vec<Value> {
+        std::fs::read_to_string(journal)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("journal line parses"))
+            .collect()
+    }
+
+    /// Pins `FNO_EVENTS_PATH` for one test and restores the prior value on
+    /// drop; the claims lock serializes env access across the suite.
+    struct EventsPin(Option<std::ffi::OsString>);
+
+    impl EventsPin {
+        fn at(p: &std::path::Path) -> Self {
+            let prior = std::env::var_os("FNO_EVENTS_PATH");
+            std::env::set_var("FNO_EVENTS_PATH", p);
+            Self(prior)
+        }
+    }
+
+    impl Drop for EventsPin {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(v) => std::env::set_var("FNO_EVENTS_PATH", v),
+                None => std::env::remove_var("FNO_EVENTS_PATH"),
+            }
+        }
+    }
+
+    fn exhausted_capacity() -> Value {
+        json!({
+            "capacity": {"claude": {"state": "exhausted", "window": "lock",
+                                    "accounts": {"zai-main": "exhausted"},
+                                    "sources": {"zai-main": "lock"},
+                                    "observed_at": {"zai-main": now_epoch() - 47.0 * 60.0},
+                                    "evidence": {}, "resets": {}}},
+        })
+    }
+
+    #[test]
+    fn a_refused_spawn_leaves_one_routing_refusal_row() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let journal = dir.path().join("events.jsonl");
+        let _pin = EventsPin::at(&journal);
+
+        let (code, _, _) = capture_file(dir.path(), &payload(exhausted_capacity()));
+        assert_eq!(
+            code, 0,
+            "the verb still exits 0; the transport owns the refusal exit"
+        );
+
+        let rows = journal_rows(&journal);
+        assert_eq!(rows.len(), 1, "exactly one row per refusal: {rows:?}");
+        let row = &rows[0];
+        assert_eq!(row["kind"], "spawn_gate_refused");
+        assert_eq!(row["gate"], "routing");
+        assert_eq!(row["reason"], "exhausted-refuse");
+        assert_eq!(row["verb"], "target");
+        assert_eq!(row["exit_code"], 2);
+        let detail = row["detail"].as_str().unwrap_or("");
+        assert!(
+            detail.contains("every configured lane is exhausted"),
+            "detail: {detail}"
+        );
+        let lanes = row["lanes"].as_array().expect("lanes array");
+        assert_eq!(lanes.len(), 2, "one entry per slot-skip line: {lanes:?}");
+        assert!(
+            lanes.iter().all(|l| l["reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("capacity=exhausted")),
+            "lanes: {lanes:?}"
+        );
+    }
+
+    #[test]
+    fn a_queued_refusal_rows_exit_78_and_the_payload_reason() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let journal = dir.path().join("events.jsonl");
+        let _pin = EventsPin::at(&journal);
+
+        let (code, _, _) = capture_file(
+            dir.path(),
+            &payload(json!({
+                "profile": {"on_exhausted": "queue"},
+                "capacity": {"claude": {"state": "exhausted", "window": "lock",
+                                        "accounts": {"zai-main": "exhausted"},
+                                        "evidence": {}, "resets": {}}},
+            })),
+        );
+        assert_eq!(code, 0);
+
+        let rows = journal_rows(&journal);
+        assert_eq!(rows.len(), 1, "rows: {rows:?}");
+        assert_eq!(rows[0]["exit_code"], 78);
+        assert_eq!(rows[0]["reason"], "slot_exhausted");
+        assert_eq!(rows[0]["gate"], "routing");
+    }
+
+    #[test]
+    fn an_admitted_spawn_and_an_audit_write_no_refusal_row() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let journal = dir.path().join("events.jsonl");
+        let _pin = EventsPin::at(&journal);
+
+        // The healthy payload resolves a candidate: no refusal, no row.
+        let (code, out, _) = capture_file(dir.path(), &payload(json!({})));
+        assert_eq!(code, 0);
+        assert!(out.contains("\"candidate\":{"), "out: {out}");
+        assert!(journal_rows(&journal).is_empty(), "admits never journal");
+
+        // The audit read is reached before the resolve, so it must not
+        // journal either.
+        let snap = dir.path().join("snap.json");
+        std::fs::write(&snap, "{}").unwrap();
+        let _ = run_route_slot_capture(&[
+            "audit".to_string(),
+            "--snapshot".to_string(),
+            snap.display().to_string(),
+        ]);
+        assert!(journal_rows(&journal).is_empty(), "audits never journal");
+    }
+
+    #[test]
+    fn a_dead_journal_never_changes_a_refusal() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Baseline: a writable journal in the same temp space, so the only
+        // difference between the runs is the journal's writability.
+        let live = dir.path().join("live.jsonl");
+        {
+            let _pin = EventsPin::at(&live);
+            capture_file(dir.path(), &payload(exhausted_capacity()));
+        }
+        // A journal path whose parent is a file: every append fails.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "x").unwrap();
+        let dead = blocker.join("events.jsonl");
+        let _pin = EventsPin::at(&dead);
+        let with_dead = capture_file(dir.path(), &payload(exhausted_capacity()));
+
+        let baseline = {
+            let _pin = EventsPin::at(&live);
+            capture_file(dir.path(), &payload(exhausted_capacity()))
+        };
+        assert_eq!(baseline, with_dead, "output must not depend on the journal");
+    }
+
+    #[test]
+    fn the_journal_op_keeps_its_spawn_defaults_applied_kind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let journal = dir.path().join("j.jsonl");
+        let (code, stdout, _) = capture_file(
+            dir.path(),
+            &json!({
+                "op": "journal",
+                "path": journal.display().to_string(),
+                "event": {"verb": "target"},
+            }),
+        );
+        assert_eq!(code, 0);
+        assert!(
+            stdout.contains("spawn_defaults_applied"),
+            "stdout: {stdout}"
+        );
+        let rows = journal_rows(&journal);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["kind"], "spawn_defaults_applied");
+    }
+
     #[test]
     fn audit_accepts_both_json_spellings() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3282,10 +3701,9 @@ mod tests {
         let out = resolve_slot_payload(&payload(json!({})));
         assert_eq!(out["status"], "pick");
         assert_eq!(out["candidate"]["model"], "glm");
-        assert_eq!(
-            chain_of(&out)[1],
-            "slot agents.profiles.target.lanes[0] flash-x capacity=ok window=w"
-        );
+        assert!(chain_of(&out)
+            .iter()
+            .any(|l| l == "slot agents.profiles.target.lanes[0] flash-x capacity=ok window=w"));
     }
 
     #[test]
@@ -3309,10 +3727,10 @@ mod tests {
         })));
         assert_eq!(out["status"], "pick");
         let chain = chain_of(&out);
-        assert!(
-            chain[1].starts_with("slot agents.profiles.target.lanes[0] ")
-                && !chain[1].contains("lanes[0] agents.profiles")
-        );
+        assert!(chain
+            .iter()
+            .any(|l| l.starts_with("slot agents.profiles.target.lanes[0] ")));
+        assert!(!chain.iter().any(|l| l.contains("lanes[0] agents.profiles")));
     }
 
     #[test]
@@ -3352,6 +3770,16 @@ mod tests {
             "lanes_raw": "flash-x",
         })));
         assert_eq!(out["status"], "none");
+        assert!(chain_of(&out)[0].contains("must be a list"));
+    }
+
+    #[test]
+    fn states_non_list_lanes_is_a_config_fault() {
+        let out = resolve_slot_payload(&payload(json!({
+            "mode": "states",
+            "lanes_raw": "flash-x",
+        })));
+        assert_eq!(out["status"], "states");
         assert!(chain_of(&out)[0].contains("must be a list"));
     }
 
@@ -3424,6 +3852,42 @@ mod tests {
         assert_eq!(out["status"], "pick");
         let chain = chain_of(&out);
         assert!(chain.iter().any(|l| l.contains("provider zai at 2 of 2")));
+    }
+
+    #[test]
+    fn a_capped_lane_draining_names_the_uncapped_lane_it_falls_to() {
+        // The cap block once skipped a no-vendor lane with no line at all:
+        // a capped-and-full lane drained onto the uncapped tail silently
+        // (the receipt could not answer "why THIS model"). Both lines must
+        // now appear, and the pick must still be the uncapped lane.
+        let out = resolve_slot_payload(&payload(json!({
+            "vendor_counts": {"zai": 20}, "vendor_caps": {"zai": 20},
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["lane"], "sonnet-x");
+        let chain = chain_of(&out);
+        assert!(chain.iter().any(|l| l.contains(
+            "slot skip agents.profiles.target.lanes[0] flash-x provider zai at 20 of 20"
+        )));
+        assert!(chain.iter().any(|l| l.contains(
+            "slot note agents.profiles.target.lanes[1] sonnet-x uncapped (no vendor declared)"
+        )));
+    }
+
+    #[test]
+    fn fully_capped_lanes_print_no_uncapped_note() {
+        let out = resolve_slot_payload(&payload(json!({
+            "declared_rows": {
+                "flash-x": {"name": "flash-x", "harness": "claude", "model": "glm",
+                            "band": "low", "account": "zai-main", "route": "zai/glm"},
+                "sonnet-x": {"name": "sonnet-x", "harness": "claude", "model": "sonnet",
+                             "route": "anthropic/sonnet"},
+            },
+            "vendor_counts": {"zai": 1, "anthropic": 1},
+            "vendor_caps": {"zai": 2, "anthropic": 2},
+        })));
+        assert_eq!(out["status"], "pick");
+        assert!(!chain_of(&out).iter().any(|l| l.contains("uncapped")));
     }
 
     // -------------------------------------------------------------------
@@ -4161,5 +4625,231 @@ mod tests {
         assert_eq!(sessions[0]["account"], "zai-main");
         assert_eq!(sessions[0]["receipt_fingerprint"], "fp1");
         assert_eq!(sessions[0]["view_records"].as_array().unwrap().len(), 1);
+    }
+
+    // --- computed capacity + the refresh gate --------------------------------
+
+    use crate::claims;
+
+    /// A hermetic config + runtime-state env: FNO_CONFIG pins the sole config
+    /// candidate (no canonical/global tier), FNO_RUNTIME_STATE_PATH pins the
+    /// state file. Drop clears both.
+    struct CapacityEnv {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        dir: tempfile::TempDir,
+    }
+
+    impl CapacityEnv {
+        /// `fno_bin` pins the refresh subprocess: the stub script's path, or
+        /// None to leave no FNO_BIN in the environment.
+        fn new(state_json: &str, fno_bin: Option<&str>) -> Self {
+            let guard = claims::test_env_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let dir = tempfile::tempdir().expect("tempdir");
+            let cfg = dir.path().join("config.toml");
+            std::fs::write(&cfg, format!("state_dir = '{}'\n", dir.path().display())).unwrap();
+            let state = dir.path().join("state.json");
+            std::fs::write(&state, state_json).unwrap();
+            std::env::set_var("FNO_CONFIG", &cfg);
+            std::env::set_var("FNO_RUNTIME_STATE_PATH", &state);
+            match fno_bin {
+                Some(path) => std::env::set_var("FNO_BIN", path),
+                None => std::env::remove_var("FNO_BIN"),
+            }
+            // The claude fallback lane names its account, so the identity
+            // check reads the slot stamp: makers is materialized, no taint.
+            let providers = dir.path().join("providers");
+            std::fs::create_dir_all(&providers).unwrap();
+            std::fs::write(providers.join(".active-claude"), "makers").unwrap();
+            Self { _guard: guard, dir }
+        }
+    }
+
+    impl Drop for CapacityEnv {
+        fn drop(&mut self) {
+            std::env::remove_var("FNO_CONFIG");
+            std::env::remove_var("FNO_RUNTIME_STATE_PATH");
+        }
+    }
+
+    fn slot_env_payload(overrides: Value) -> Value {
+        let mut base = json!({
+            "rung_base": "agents.profiles.target",
+            "lanes_raw": ["codex-luna", "sonnet-x"],
+            "declared_rows": {
+                "codex-luna": {"name": "codex-luna", "harness": "codex",
+                               "model": "gpt-5.6-luna", "band": "high",
+                               "account": "codex", "route": "codex/gpt-5.6-luna"},
+                "sonnet-x": {"name": "sonnet-x", "harness": "claude",
+                             "model": "claude-sonnet-5", "account": "makers"},
+            },
+            "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy",
+                        "on_unknown": "skip", "by_difficulty": {}},
+            "node": null,
+            "vendor_counts": {}, "vendor_caps": {}, "vendor_count_errors": {},
+            "thread_seatable": {}, "substrate": null, "permission_mode": null,
+            "constrain_harness": null,
+            "explicit_lane": false, "gate_bypassed": false,
+            "inventory": {"declared": false, "rows": [
+                {"name": "codex-luna", "harness": "codex", "model": "gpt-5.6-luna",
+                 "account": "codex"},
+                {"name": "sonnet-x", "harness": "claude", "model": "claude-sonnet-5",
+                 "account": "makers"},
+            ]},
+        });
+        if let (Some(base_obj), Some(ovr)) = (base.as_object_mut(), overrides.as_object()) {
+            for (k, v) in ovr {
+                base_obj.insert(k.clone(), v.clone());
+            }
+        }
+        base
+    }
+
+    fn now_secs() -> f64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+    }
+
+    fn fresh_codex_row() -> String {
+        format!(
+            r#"{{"codex": {{"source": "probe", "probed_at": {:.0}, "partial": false, "windows": [{{"label": "weekly", "used_pct": 70.0, "resets_at": null}}]}}}}"#,
+            now_secs()
+        )
+    }
+
+    fn write_refresh_stub(dir: &std::path::Path, body: &str, marker: &std::path::Path) -> String {
+        let script = dir.join("refresh-stub.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s' '{}' > {}\nprintf '%s' '{}'\n",
+                body,
+                marker.display(),
+                body
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script.display().to_string()
+    }
+
+    fn makers_row() -> String {
+        format!(
+            r#"{{"probed_at": {:.0}, "partial": false, "windows": [{{"label": "daily", "used_pct": 10.0, "resets_at": null}}]}}"#,
+            now_secs()
+        )
+    }
+
+    fn stale_codex_row() -> String {
+        format!(
+            r#"{{"probed_at": {:.0}, "partial": false, "windows": [{{"label": "weekly", "used_pct": 5.0, "resets_at": null}}]}}"#,
+            now_secs() - 600.0
+        )
+    }
+
+    /// State file: the claude fallback account fresh, codex stale or absent.
+    fn state_json(codex_row: Option<&str>) -> String {
+        match codex_row {
+            Some(r) => format!(
+                r#"{{"usage": {{"codex": {}, "makers": {}}}}}"#,
+                r,
+                makers_row()
+            ),
+            None => format!(r#"{{"usage": {{"makers": {}}}}}"#, makers_row()),
+        }
+    }
+
+    /// AC5-HP: a stale codex reading is refreshed once and the fresh reading
+    /// decides the pick: lanes[0] codex-luna instead of the sonnet fallthrough.
+    #[test]
+    fn refresh_gate_probes_a_stale_lane_and_the_pick_uses_the_fresh_reading() {
+        let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
+        let marker = env.dir.path().join("marker");
+        let stub = write_refresh_stub(env.dir.path(), &fresh_codex_row(), &marker);
+        std::env::set_var("FNO_BIN", &stub);
+        let out = resolve_slot_payload(&slot_env_payload(json!({
+            "capacity_refresh": true,
+        })));
+        assert_eq!(out["status"], "pick", "chain: {:?}", out["chain"]);
+        assert_eq!(out["candidate"]["lane"], "codex-luna");
+        let chain = chain_of(&out);
+        assert!(
+            chain
+                .iter()
+                .any(|l| l.starts_with("slot refresh accounts usage (")),
+            "chain: {chain:?}"
+        );
+        assert_eq!(out["candidate"]["evidence"]["window"], "window");
+    }
+
+    /// AC6-EDGE: a never-probed (absent) account takes the same refresh: the
+    /// most outdated case IS the never-probed case.
+    #[test]
+    fn refresh_gate_covers_a_never_probed_account() {
+        let env = CapacityEnv::new(&state_json(None), None);
+        let marker = env.dir.path().join("marker");
+        let stub = write_refresh_stub(env.dir.path(), &fresh_codex_row(), &marker);
+        std::env::set_var("FNO_BIN", &stub);
+        let out = resolve_slot_payload(&slot_env_payload(json!({
+            "capacity_refresh": true,
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["lane"], "codex-luna");
+    }
+
+    /// AC7-HP: without capacity_refresh the refresh stub never runs; the
+    /// positive-control run with the flag proves the marker would be written.
+    #[test]
+    fn no_refresh_flag_means_no_probe() {
+        let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
+        let marker = env.dir.path().join("marker");
+        let stub = write_refresh_stub(
+            env.dir.path(),
+            r#"{"codex": {"source": "probe", "probed_at": 0, "partial": false, "windows": []}}"#,
+            &marker,
+        );
+        std::env::set_var("FNO_BIN", &stub);
+        // Negative control: no capacity_refresh -> the stub never runs.
+        let out = resolve_slot_payload(&slot_env_payload(json!({})));
+        assert_eq!(out["status"], "pick", "the fresh claude fallback answers");
+        assert_eq!(out["candidate"]["lane"], "sonnet-x");
+        assert!(!marker.exists(), "the refresh ran without the flag");
+        // Positive control: the same payload with the flag writes the marker.
+        let out = resolve_slot_payload(&slot_env_payload(json!({
+            "capacity_refresh": true,
+        })));
+        assert_eq!(out["status"], "pick");
+        assert!(marker.exists(), "the stub never ran under the flag");
+    }
+
+    /// AC8-EDGE: the probe answers but cannot read the account
+    /// (auth-unsupported): the lane is still skipped, and the chain names
+    /// refresh:<reason> so the config smell is visible.
+    #[test]
+    fn a_lane_the_probe_cannot_read_stays_skipped_and_names_the_reason() {
+        let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
+        let marker = env.dir.path().join("marker");
+        let stub = write_refresh_stub(
+            env.dir.path(),
+            r#"{"codex": {"state": "unknown", "reason": "auth-unsupported"}}"#,
+            &marker,
+        );
+        std::env::set_var("FNO_BIN", &stub);
+        let out = resolve_slot_payload(&slot_env_payload(json!({
+            "capacity_refresh": true,
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["lane"], "sonnet-x");
+        let chain = chain_of(&out);
+        assert!(
+            chain
+                .iter()
+                .any(|l| l.contains("source=refresh:auth-unsupported")),
+            "chain: {chain:?}"
+        );
     }
 }

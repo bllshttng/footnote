@@ -8,6 +8,8 @@ fn agent_hit_resolves_pane_then_attach_then_notice() {
     // The shared seam (x-653d): a keyboard goto and a mouse click resolve an
     // agent to the SAME ChromeHit. pane > attach > notice.
     let hosted = AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -161,6 +163,8 @@ fn agent_hit_resumes_a_resumable_paneless_row() {
     // still wins while a claude bg row is live and carries a jobId;
     // resumable takes the dead-and-nameless cases the notice used to eat.
     let row = AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -237,6 +241,8 @@ fn agent_hit_watch_only_reaches_the_thread_pane() {
     // placement gestures (picker `p`, menu splits, open-here, drag) still
     // pin a persisted pane when the operator wants one.
     let row = AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,

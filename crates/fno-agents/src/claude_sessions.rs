@@ -13,7 +13,8 @@ use serde_json::Value;
 ///
 /// Resume keeps its own inline copy of rungs 1 and 3 because it must also
 /// read the truth VALUE (`done`/`stalled` route the relaunch arm, which the
-/// verdict type has no room for); its behavior is pinned identical by tests.
+/// verdict type has no room for); its behavior is pinned identical by tests,
+/// except that the ladder's rung 3 is silent on an exit-proven row.
 pub fn row_liveness(entry: &crate::state::RegistryEntry, claude_home: &ClaudeHome) -> RowLiveness {
     let sockets = sessions_socket_index(claude_home);
     row_liveness_indexed(entry, &sockets)
@@ -72,4 +73,62 @@ pub(crate) fn row_liveness_indexed(
     sockets: &std::collections::HashMap<String, String>,
 ) -> RowLiveness {
     row_liveness_with_indexed(entry, sockets, None, family1_truth_state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{InsideLegReport, InsideLegState, RegistryEntry};
+    use crate::AgentStatus;
+
+    fn claude_row(status: AgentStatus) -> RegistryEntry {
+        RegistryEntry {
+            name: "row".into(),
+            legacy_provider: "claude".into(),
+            status,
+            claude_session_uuid: Some("3228ccad-c078-4b53-a8c9-7199b831eae4".into()),
+            ..Default::default()
+        }
+    }
+
+    fn ladder(entry: &RegistryEntry) -> RowLiveness {
+        let no_sockets = std::collections::HashMap::new();
+        row_liveness_with_indexed(entry, &no_sockets, None, |_| Some("working".into()))
+    }
+
+    // Measured 2026-09-14: 7 of 23 stored-exited rows served alive because a
+    // transcript tail still read `working` long after the worker stopped.
+    #[test]
+    fn a_working_transcript_does_not_outrank_a_recorded_exit() {
+        assert_eq!(
+            ladder(&claude_row(AgentStatus::Exited)),
+            RowLiveness::Unknown
+        );
+        let mut stamped = claude_row(AgentStatus::Orphaned);
+        stamped.exited_at = Some("2026-08-01T00:00:02Z".into());
+        assert_eq!(ladder(&stamped), RowLiveness::Unknown);
+    }
+
+    #[test]
+    fn a_working_transcript_still_proves_a_row_with_no_exit_proof() {
+        assert_eq!(ladder(&claude_row(AgentStatus::Live)), RowLiveness::Alive);
+        // A revive that set Live but kept an old stamp is not an exit proof.
+        let mut revived = claude_row(AgentStatus::Live);
+        revived.exited_at = Some("2026-08-01T00:00:02Z".into());
+        assert_eq!(ladder(&revived), RowLiveness::Alive);
+    }
+
+    #[test]
+    fn a_heartbeat_past_the_exit_stamp_still_resurrects_an_exited_row() {
+        let mut e = claude_row(AgentStatus::Exited);
+        e.exited_at = Some("2026-08-01T00:00:02Z".into());
+        e.inside_leg = Some(InsideLegReport {
+            state: InsideLegState::Working,
+            seq: 3,
+            reason: None,
+            received_at: "2026-08-01T00:00:30Z".into(),
+            ttl_ms: None,
+        });
+        assert_eq!(ladder(&e), RowLiveness::Alive);
+    }
 }

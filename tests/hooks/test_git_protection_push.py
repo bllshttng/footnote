@@ -345,6 +345,30 @@ def test_substitution_inside_single_quotes_is_not_executed():
     assert _git_segments('fno agents mail send x \'see "$(git push origin main)"\'') == []
 
 
+# --- `git grep` carrying a guarded pattern is an allowlisted READ -------------
+# Segments arrive shlex-rejoined with quotes stripped, so `git grep -n -E
+# 'git push' -- .` used to read as a push to main: token[1] was `grep`, which
+# was never added to the positional allowlist, and the pattern TEXT then
+# matched the push regex. git grep cannot write; commit and log got this fix
+# for the same class, grep was simply missed.
+
+
+def test_git_grep_carrying_a_push_pattern_is_allowed():
+    out = _run_hook("git grep -n -E 'git push' -- .")
+    assert out.get("permissionDecision") != "deny", out
+
+
+def test_git_grep_is_positionally_allowlisted():
+    assert git_protection.is_allowed_git_command("git grep -n -E 'git push' -- .")
+
+
+def test_push_to_main_still_denied_beside_the_grep_allow():
+    _on_main("feature/x")
+    assert _git_segments("git push origin main")
+    assert git_protection.is_push_to_protected_branch(
+        "git push origin main") == (True, "main")
+
+
 if __name__ == "__main__":
     for _name, _fn in sorted(globals().items()):
         if _name.startswith("test_") and callable(_fn):

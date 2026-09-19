@@ -274,7 +274,7 @@ test "$reply" = "$marker"
 uv run --project cli fno-py agents list --json | jq -e --arg sid "$sid" '.agents | any(.harness == "codex" and .harness_session_id == $sid and .last_message_at != null)'
 ```
 - **agy** emits plain text with no parseable session ID, so it is **stateless**: the live pane works while attached, but there is nothing to re-enter after it settles. `ask`-by-name is refused; use a fresh `--once`.
-- **opencode** is pane-hostable with a readiness detector and badge manifest. Its `ses_` session id is captured at spawn (a best-effort store lookup; an ambiguous or missed capture leaves the row live-only), probed for store membership, and resumable via `opencode --session <id>`. The fno plugin exposes the footnote verbs in opencode's command palette AND headlessly, so dispatch renders the native `/fno:verb` (not a prose brief). The headless spawn routes it through `opencode run --command fno:verb <args>` (a bare `run <message>` treats a leading slash as prose - verified against opencode v1.14.50), so a rendered slash command actually invokes the plugin command.
+- **opencode** is pane-hostable with a readiness detector and badge manifest. Its `ses_` session id is captured at spawn through a best-effort store lookup. An ambiguous or missed capture leaves the row live-only. The row is probed for store membership and resumable via `opencode --session <id>`. The fno install registers the footnote verbs as `fno:<verb>.md` command files in opencode's global config dir. The names appear in the command palette AND headlessly. Dispatch renders the native `/fno:verb`, not a prose brief. The headless spawn routes it through `opencode run --command fno:verb <args>`. A bare `run <message>` treats a leading slash as prose (verified against opencode v1.14.50). The routing makes a rendered slash command actually invoke the command.
 
 ## Dispatch command surface
 
@@ -283,7 +283,7 @@ This table shows how autonomous dispatch renders a footnote `/verb` for each har
 | Harness | Rendered invocation | Notes |
 |---|---|---|
 | claude, agy | `/verb ...` | Native slash command (verbatim). |
-| opencode | `/fno:verb ...` | Plugin-namespaced palette + `opencode run --command`. |
+| opencode | `/fno:verb ...` | Global command-file namespace: the install writes `fno:<verb>.md` files into `~/.config/opencode/command/`, and headless dispatch routes them through `opencode run --command fno:<verb>`. |
 | codex | `$fno:verb ...` | `codex exec` expands the plugin skill. |
 | gemini | **refused** | Deprecated; the dispatch lane is a loud error naming its successor (agy). No prose build brief is generated. |
 

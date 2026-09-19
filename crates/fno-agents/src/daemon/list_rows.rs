@@ -248,6 +248,7 @@ fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>>
 /// assert the same rules.
 pub(super) fn apply_row_contradiction(
     row: &mut Map<String, Value>,
+    exited_at: Option<&str>,
     now: chrono::DateTime<chrono::Utc>,
 ) {
     // The falsifier as it ARRIVED, snapshotted before any rule below rewrites
@@ -279,7 +280,16 @@ pub(super) fn apply_row_contradiction(
         row.get("status").and_then(Value::as_str),
         Some("orphaned" | "exited")
     );
-    if terminal && event_at.is_some() && reconciled_at.is_some() && event_at > reconciled_at {
+    // An exit-recorded verdict dates from the exit stamp. The reconcile stamp
+    // is rewritten every sweep tick, so a later event could never beat it.
+    let verdict_at = if incoming_basis == "exit-recorded" {
+        exited_at
+            .and_then(|s| row_timestamp(Some(&json!(s))))
+            .or(reconciled_at)
+    } else {
+        reconciled_at
+    };
+    if terminal && event_at.is_some() && verdict_at.is_some() && event_at > verdict_at {
         row.insert("status".into(), json!("unknown"));
         row.insert("basis".into(), json!("stale-verdict-fresher-event"));
     }
@@ -773,7 +783,9 @@ mod tests {
         .with_timezone(&chrono::Utc);
         for case in fixture["cases"].as_array().expect("cases is an array") {
             let mut row = case["row"].as_object().expect("row is an object").clone();
-            apply_row_contradiction(&mut row, now);
+            let exited_at = row.remove("exited_at");
+            apply_row_contradiction(&mut row, exited_at.as_ref().and_then(Value::as_str), now);
+            assert!(!row.contains_key("exited_at"), "case={}", case["name"]);
             // Where the two lanes legitimately differ - the Rust
             // projection never runs the claude live-status probe, so its
             // no-contradiction basis reads `not-probed` where Python renders

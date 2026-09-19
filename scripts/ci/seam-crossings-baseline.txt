@@ -11,8 +11,6 @@ crossing	crates/fno-agents/src/bin/client.rs	4607	let mut cmd = Command::new(fno
 crossing	crates/fno-agents/src/blueprint_judge.rs	104	return match Command::new("fno").args(["help", "--all"]).output() {
 crossing	crates/fno-agents/src/blueprint_judge.rs	220	let out = Command::new("fno")
 crossing	crates/fno-agents/src/client_verbs.rs	2535	let mut command = std::process::Command::new("fno");
-crossing	crates/fno-agents/src/daemon.rs	1060	let out = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/daemon.rs	1174	let mut cmd = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/daemon.rs	2266	let mut cmd = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/daemon.rs	2355	std::process::Command::new("fno")
 crossing	crates/fno-agents/src/daemon.rs	5988	let mut child = match std::process::Command::new("fno")
@@ -82,7 +80,6 @@ crossing	crates/fno/src/yard_overlay.rs	49	fn fno_bin() -> PathBuf {
 crossing	crates/fno/src/yard_overlay.rs	50	crate::server::fno_bin()
 crossing	crates/fno/src/yard_overlay.rs	57	let mut command = crate::process_admission::tokio_command(fno_bin());
 resolver	crates/fno-agents/src/census.rs	675	fn resolve_fno() -> Option<PathBuf> {
-resolver	crates/fno-agents/src/claims.rs	2757	fn durable_session_pid() -> Option<i32> {
 resolver	crates/fno-agents/src/daemon.rs	1911	pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonError> {
 resolver	crates/fno-agents/src/delivery_completion.rs	142	pub fn evaluate_manifest(cwd: &Path, plan_path: Option<&str>, events: &Path) -> DeliveryCompletion {
 resolver	crates/fno-agents/src/graph_keeper.rs	607	fn run_render_pass() -> Result<(), (i32, String)> {
@@ -93,12 +90,12 @@ resolver	crates/fno-agents/src/loopcheck.rs	3159	fn best_effort_notify(title: &s
 resolver	crates/fno-agents/src/loopcheck.rs	7567	pub(crate) fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
 resolver	crates/fno-agents/src/loopcheck.rs	7964	pub(crate) fn decide_with_payload(
 resolver	crates/fno-agents/src/loopcheck.rs	10245	fn build_block_reason(
+resolver	crates/fno-agents/src/opencode_install.rs	61	fn resolve_source(cwd: &Path) -> Result<PathBuf, String> {
 resolver	crates/fno-agents/src/operator_notice.rs	33	pub fn notify_operator(title: &str, body: &str, pointer: Option<&str>) -> bool {
 resolver	crates/fno-agents/src/operator_notice.rs	85	pub fn notify_operator_confirmed(title: &str, body: &str, pointer: Option<&str>) -> bool {
 resolver	crates/fno-agents/src/plugin_install.rs	158	fn build_stage(source_root: &Path, stage_parent: &Path) -> Result<(PathBuf, usize), String> {
 resolver	crates/fno-agents/src/plugin_install.rs	394	fn restage_stage(source_dir: &Path, stage_parent: &Path) -> Result<RestageOutcome, String> {
-resolver	crates/fno-agents/src/plugin_install.rs	653	pub fn run_plugin_install(args: &[String]) -> i32 {
-resolver	crates/fno-agents/src/provider_cap_verbs.rs	287	fn run_fno(args: &[&str], cwd: Option<&std::path::Path>, timeout: std::time::Duration) -> bool {
+resolver	crates/fno-agents/src/provider_cap_verbs.rs	294	pub(crate) fn run_fno_output(
 resolver	crates/fno-agents/src/provider_cap_verbs.rs	322	fn real_deps() -> crate::provider_cap::LeaveDeps {
 resolver	crates/fno-agents/src/reclaim.rs	114	fn plugin_cache_copies() -> Vec<PathBuf> {
 resolver	crates/fno-agents/src/scrape.rs	174	pub fn fno_bin() -> std::ffi::OsString {

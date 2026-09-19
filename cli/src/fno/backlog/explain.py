@@ -243,23 +243,22 @@ def routing_for(node: Optional[dict]) -> dict:
     profile_verb = ((verb or "target").strip().lstrip("/")) or "target"
     try:
         inventory = route_resolve.resolve_inventory()
-        capacity = dict(route_resolve.runtime_capacity(inventory=inventory))
+        # Display, never a probe: the summary rides the verb's answer now.
+        meta: dict = {}
         candidate, chain, verdict = route_resolve.resolve_slot(
             profile_verb,
             node,
-            capacity,
+            None,
             role=role,
             inventory=inventory,
+            meta=meta,
         )
     except Exception as exc:  # noqa: BLE001 - an unreadable grid is reported
         return {
             "chain": [f"grid unreadable: {exc}"], "candidate": None, "inputs": inputs,
             "routing": "unarmed", "skipped": [],
         }
-    inputs["capacity"] = {
-        harness: (state.get("state") if isinstance(state, dict) else state)
-        for harness, state in capacity.items()
-    }
+    inputs["capacity"] = meta.get("capacity") or {}
     # The verdict reads the same terminal the spawn seam refuses on: a policy
     # refusal is held, capacity is held, and neither is "exhausted dispatch".
     return {

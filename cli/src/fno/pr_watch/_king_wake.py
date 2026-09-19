@@ -396,9 +396,25 @@ def _dispatch_walk(
     address: Optional[str] = None,
     detail: Optional[str] = None,
     successor: bool = False,
-) -> None:
+) -> bool:
     """Spawn the wake-mode walk, detached. The address and the diff travel on
-    the command line: the fresh session cannot derive either itself."""
+    the command line: the fresh session cannot derive either itself.
+
+    Neither can it derive a model: the argv carries the crown manifest's pin,
+    and a manifest without one refuses the walk - an unpinned king respawn
+    bills the account default model."""
+    from fno.king.state import parse_manifest
+
+    model = (parse_manifest(target.manifest).get("model") or "").strip()
+    log = target.manifest.with_suffix(".md.wake.log")
+    if not model:
+        with log.open("ab") as sink:
+            sink.write(
+                f"king-wake refused {target.scope}: the crown manifest carries "
+                "no model pin; re-crown pinned, never respawn on the account "
+                "default.\n".encode("utf-8")
+            )
+        return False
     argv = [
         binary,
         "loop",
@@ -407,6 +423,8 @@ def _dispatch_walk(
         "king",
         "--scope",
         target.scope,
+        "--model",
+        model,
         "--wake",
         "--wake-reason",
         reason,
@@ -419,7 +437,6 @@ def _dispatch_walk(
         argv += ["--wake-detail", detail]
     if successor:
         argv += ["--wake-successor"]
-    log = target.manifest.with_suffix(".md.wake.log")
     with log.open("ab") as sink:
         subprocess.Popen(  # noqa: S603 - fixed argv, no shell
             argv,
@@ -428,18 +445,21 @@ def _dispatch_walk(
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+    return True
 
 
 #: A pass stops under 15s left (one truth read measured 10.4s) rather than
 #: being cut mid-read and losing every crown before it.
 _KING_STEP_FLOOR_S = 15.0
 
-_WAKE_ENTRIES_MEMO: dict = {"ident": None, "entries": None}
+_GRAPH_ENTRIES_MEMO: dict = {"ident": None, "entries": None}
 
 
-def _graph_entries_for_wake() -> list:
-    """The wake's graph read, one real read per graph identity: an unchanged
-    graph is byte-identical, so the memo is not staleness."""
+def graph_entries(path: Optional[Path] = None) -> list:
+    """The tick's graph read, one real read per graph identity: an unchanged
+    graph is byte-identical, so the memo is not staleness. Serves every
+    phase that needs entries - sweep discovery and the wake alike - so the
+    15 MB store is read once per tick, not once per phase."""
     from fno.graph.api import wire_rows
     from fno.king import drain_cache
     from fno.paths import graph_json
@@ -448,12 +468,13 @@ def _graph_entries_for_wake() -> list:
     try:
         if active_backend_name() != "graph":
             return []
-        ident = drain_cache.graph_ident(graph_json())
-        if ident is not None and _WAKE_ENTRIES_MEMO["ident"] == ident:
-            return _WAKE_ENTRIES_MEMO["entries"]
-        entries = wire_rows(path=graph_json())
+        gpath = path or graph_json()
+        ident = drain_cache.graph_ident(gpath)
+        if ident is not None and _GRAPH_ENTRIES_MEMO["ident"] == ident:
+            return _GRAPH_ENTRIES_MEMO["entries"]
+        entries = wire_rows(path=gpath)
         if ident is not None:
-            _WAKE_ENTRIES_MEMO.update(ident=ident, entries=entries)
+            _GRAPH_ENTRIES_MEMO.update(ident=ident, entries=entries)
         return entries
     except Exception:  # noqa: BLE001 - an unreadable graph is no signal
         return []
@@ -503,7 +524,7 @@ def run_king_wake(
 
         answered_fn = read_answered_questions
     if entries_fn is None:
-        entries_fn = _graph_entries_for_wake
+        entries_fn = graph_entries
 
     entries: Optional[list] = None
     if admit_fn is None:
@@ -702,10 +723,11 @@ def run_king_wake(
         window_count = verdict.count
         if dispatch_fn is not None:
             dispatch_fn(target, reason, wake_address, wake_detail, holder_gone)
+            spawned = True
         else:
             import shutil
 
-            _dispatch_walk(
+            spawned = _dispatch_walk(
                 target,
                 reason,
                 shutil.which("fno-agents") or "fno-agents",
@@ -713,7 +735,22 @@ def run_king_wake(
                 wake_detail,
                 holder_gone,
             )
-        if holder_gone:
+            if not spawned:
+                # A refused spawn still spent a wake bill; the feed must say
+                # why nothing launched, not leave it in the wake log alone.
+                refusal = "manifest-carries-no-model-pin"
+                emit(
+                    "king_wake_refused",
+                    {
+                        "scope": target.scope,
+                        "refusal": refusal,
+                        "reason": reason,
+                        "window_count": window_count,
+                        "ceiling": ceiling,
+                    },
+                )
+                summary["refused"].append({"scope": target.scope, "refusal": refusal})
+        if holder_gone and spawned:
             # The new session does not exist yet; its trail is the walk's journal.
             from fno.king.state import parse_manifest as _pm
 

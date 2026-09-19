@@ -39,12 +39,14 @@ pub(super) async fn spawn_codex_thread_lane(
     // Both spellings, resolved by one reader. Reading `yolo` alone dropped
     // `permission_mode` silently and started bounded, which downgrades the very
     // posture the caller was naming; an unrecognized value is refused here
-    // rather than degraded, for the same reason.
-    let yolo = match crate::codex_thread::resolve_thread_posture(
+    // rather than degraded, for the same reason. The posture stays TYPED from
+    // here on: both halves ride the start frame, the registry row and the
+    // resume, never a bool.
+    let posture = match crate::codex_thread::resolve_thread_posture(
         req.params.get("yolo").and_then(Value::as_bool),
         req.params.get("permission_mode").and_then(Value::as_str),
     ) {
-        Ok(yolo) => yolo,
+        Ok(posture) => posture,
         Err(reason) => return thread_spawn_refusal(ctx, req, name, provider, &reason),
     };
     let effort = req.params.get("effort").and_then(Value::as_str);
@@ -111,7 +113,7 @@ pub(super) async fn spawn_codex_thread_lane(
     let driver = match crate::codex_thread::CodexThread::start_with_state_dirs(
         cwd.to_path_buf(),
         model,
-        yolo,
+        &posture,
         effort,
         &state_dirs,
         Some(&carry.config),
@@ -133,7 +135,6 @@ pub(super) async fn spawn_codex_thread_lane(
         &driver,
         model,
         effort,
-        yolo,
         node,
         req.params.get("account").and_then(Value::as_str),
         &harness_args,
@@ -226,24 +227,23 @@ pub(super) async fn spawn_codex_thread_lane(
     // (crates/fno/src/server.rs parse_spawn_receipts) drops any agent_spawned
     // event without both, which is how a thread worker could lose its only
     // resume fallback before the row is reaped.
-    // `substrate` and `cwd` are load-bearing: the mux restore receipt parser
-    // (crates/fno/src/server.rs parse_spawn_receipts) drops any agent_spawned
-    // event without both, which is how a thread worker could lose its only
-    // resume fallback before the row is reaped.
     let _ = ctx.emitter.emit(
         "agent_spawned",
-        &json!({
-            "name": name,
-            "provider": "codex",
-            "harness": "codex",
-            "harness_session_id": session_id,
-            "short_id": "",
-            "status": "live",
-            "lane": "thread",
-            "substrate": "thread",
-            "cwd": cwd.to_string_lossy(),
-            "node": node,
-        }),
+        &crate::spawn_edge::birth_event(
+            name,
+            &crate::codex_thread_entry::thread_lineage(&req.params, provenance),
+            json!({
+                "provider": "codex",
+                "harness": "codex",
+                "harness_session_id": session_id,
+                "short_id": "",
+                "status": "live",
+                "lane": "thread",
+                "substrate": "thread",
+                "cwd": cwd.to_string_lossy(),
+                "node": node,
+            }),
+        ),
     );
     Response::ok(
         req.id,

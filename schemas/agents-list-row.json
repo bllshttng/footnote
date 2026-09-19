@@ -127,6 +127,7 @@
       "pid_start_time",
       "related_session_id",
       "requested_effort",
+      "requested_permission_mode",
       "requested_provider",
       "resolved_sandbox",
       "route_provider_id",
@@ -139,8 +140,42 @@
       "spawned_by_cwd",
       "spawned_by_harness",
       "spawned_by_session",
-      "stop"
+      "stop",
+      "turn_policy_source"
     ]
   },
-  "known_gaps": {}
+  "known_gaps": {},
+  "population_contract": {
+    "$comment": "A zero population on a snapshot is not a dead writer when a code path writes the field only under conditions this row type rarely meets, or only while a runtime state is active. Each entry declares: mode (conditional = event-scoped, transient = active-runtime-scoped), surface (which coverage readings the entry covers), the writer that proves the field is wired, and the behavior test that exercises it. Zero is valid ONLY for a named mode; it never means the field was removed or unwired. The live coverage evaluator partitions contract-covered zeroes into conditional_zero and transient_zero instead of dead_fields; a field absent from this contract stays a dead-field finding.",
+    "forked_from_session_id": {
+      "mode": "conditional",
+      "surface": "persisted_and_projected",
+      "writer": "record_session_observation branch classification and RegistryEntry::fork_for_session",
+      "test": "cli/tests/agents/test_session_lineage.py"
+    },
+    "predecessor_session_ids": {
+      "mode": "conditional",
+      "surface": "persisted_and_projected",
+      "writer": "record_session_observation succession classification and fork_lineage.predecessor_ids",
+      "test": "cli/tests/agents/test_session_lineage.py"
+    },
+    "live_status": {
+      "mode": "conditional",
+      "surface": "projected",
+      "writer": "read.py Claude supervisor enrichment; Rust list preserves null by design",
+      "test": "cli/tests/agents/test_read.py"
+    },
+    "live_status_basis": {
+      "mode": "conditional",
+      "surface": "projected",
+      "writer": "row_contradiction.project_row when a fired falsifier supersedes a supervisor token",
+      "test": "cli/tests/agents/test_read.py"
+    },
+    "delivery_policy": {
+      "mode": "transient",
+      "surface": "persisted_and_projected",
+      "writer": "fno agents mail hold while a busy-mode hold is active",
+      "test": "cli/tests/unit/test_mail_hold.py"
+    }
+  }
 }

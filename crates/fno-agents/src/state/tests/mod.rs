@@ -2505,3 +2505,75 @@ fn backfill_fno_id_needs_a_session_id() {
     e.backfill_fno_id();
     assert_eq!(e.fno_id, None);
 }
+
+#[test]
+fn update_registry_stamps_a_transition_into_exited() {
+    let dir = tmpdir("exit-stamp");
+    let path = dir.join("registry.json");
+    update_registry(&path, |r| r.entries.push(sample_entry("stops"))).unwrap();
+    update_registry(&path, |r| {
+        r.find_mut("stops").unwrap().status = AgentStatus::Exited;
+    })
+    .unwrap();
+    let reg = load_registry(&path).unwrap();
+    let stamp = reg.entries[0]
+        .exited_at
+        .as_deref()
+        .expect("exited_at stamped");
+    assert!(rfc3339_like_to_secs(stamp).is_some(), "stamp={stamp}");
+    // A reconciliation can change Exited to another terminal status before a
+    // follow-up ask revives the row; the old stamp must not survive the revive.
+    update_registry(&path, |r| {
+        r.find_mut("stops").unwrap().status = AgentStatus::Orphaned;
+    })
+    .unwrap();
+    update_registry(&path, |r| {
+        r.find_mut("stops").unwrap().status = AgentStatus::Live;
+    })
+    .unwrap();
+    assert_eq!(load_registry(&path).unwrap().entries[0].exited_at, None);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn update_registry_never_dates_an_old_exit_and_keeps_a_closure_stamp() {
+    let dir = tmpdir("exit-stamp-edge");
+    let path = dir.join("registry.json");
+    let mut old = sample_entry("old-exit");
+    old.status = AgentStatus::Exited;
+    let mut stamped = sample_entry("self-stamped");
+    stamped.session_id = Some("uuid-2".into());
+    stamped.codex_session_id = Some("uuid-2".into());
+    update_registry(&path, |r| {
+        r.entries.push(old);
+        r.entries.push(stamped);
+    })
+    .unwrap();
+    // The seeding write dated the pushed row; clear it to model a legacy
+    // row stored exited with no stamp.
+    update_registry(&path, |r| {
+        r.find_mut("old-exit").unwrap().exited_at = None;
+    })
+    .unwrap();
+    update_registry(&path, |r| {
+        let e = r.find_mut("self-stamped").unwrap();
+        e.status = AgentStatus::Exited;
+        e.exited_at = Some("2026-08-01T00:00:02Z".into());
+    })
+    .unwrap();
+    let reg = load_registry(&path).unwrap();
+    let stamp = |n: &str| {
+        reg.entries
+            .iter()
+            .find(|e| e.name == n)
+            .unwrap()
+            .exited_at
+            .clone()
+    };
+    assert_eq!(stamp("old-exit"), None);
+    assert_eq!(
+        stamp("self-stamped").as_deref(),
+        Some("2026-08-01T00:00:02Z")
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

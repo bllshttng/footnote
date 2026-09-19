@@ -56,7 +56,7 @@ impl Lane {
 
 /// Recursive byte count that never follows a symlink out of the tree it was
 /// given: a link's target is someone else's tree, not this path's bulk.
-fn tree_bytes(path: &Path) -> u64 {
+pub(crate) fn tree_bytes(path: &Path) -> u64 {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(_) => return 0,
@@ -296,6 +296,50 @@ fn uv_prune_apply() -> bool {
     }
 }
 
+/// Every root this run's cargo-build-dirs lane sweeps: every registry root,
+/// plus the cwd's canonical repo when `include_cwd_root` says so. That extra
+/// root is a HAND-run convenience only (a person typing `fno doctor reclaim
+/// --apply` from inside a repo wants that repo swept even if it never
+/// registered) - the daemon's own daily tick passes `false` so an arbitrary
+/// launch cwd, real or a test's, never adds a sweep root the registry did
+/// not already name.
+fn cargo_build_dirs_roots(home: &AgentsHome, include_cwd_root: bool) -> Vec<String> {
+    let mut roots = crate::daemon::worktree_sweep::registry_repo_roots(home);
+    if include_cwd_root {
+        if let Some(repo) = canonical_repo_root(&std::env::current_dir().unwrap_or_default()) {
+            let repo = repo.to_string_lossy().into_owned();
+            if !roots.contains(&repo) {
+                roots.push(repo);
+            }
+        }
+    }
+    roots
+}
+
+/// The build-base lane: `cargo_build_dirs::sweep` per root from
+/// [`cargo_build_dirs_roots`]. Roots with no `crates/*/Cargo.toml` are
+/// skipped - sweeping a manifest-less root under a shared base could only
+/// ever misjudge rows it cannot resolve. The note carries each root's summary
+/// line; bytes are reclaimed (apply) or projected (dry run).
+fn cargo_build_dirs_lane(home: &AgentsHome, apply: bool, include_cwd_root: bool) -> Lane {
+    let mut lane = Lane::new("cargo_build_dirs", Vec::new());
+    let roots = cargo_build_dirs_roots(home, include_cwd_root);
+    let mut notes: Vec<String> = Vec::new();
+    for root in roots {
+        let root = PathBuf::from(&root);
+        if crate::cargo_build_dirs::workspace_manifests(&root).is_empty() {
+            continue;
+        }
+        let rep = crate::cargo_build_dirs::sweep(&root, apply, SystemTime::now());
+        lane.bytes += rep.projected_bytes;
+        if let Some(summary) = rep.lines.last() {
+            notes.push(summary.clone());
+        }
+    }
+    lane.note = notes.join("; ");
+    lane
+}
+
 fn write_receipt(home: &AgentsHome, lanes: &[Lane]) -> std::io::Result<()> {
     let path = receipt_path(home);
     if let Some(parent) = path.parent() {
@@ -347,7 +391,11 @@ fn now_stamp() -> String {
 
 /// The daemon's daily gate: run `--apply` when the receipt is missing or
 /// older than a day. Receipt and effect are one file, so a crashed child
-/// simply reads as stale on the next tick.
+/// simply reads as stale on the next tick. Goes straight to
+/// [`run_reclaim_lanes`] with `include_cwd_root = false`: the daemon's launch
+/// cwd is not a repo a person asked to sweep, it is wherever the process
+/// happened to start (a test's checkout, an arbitrary shell) - the cwd
+/// fallback in `cargo_build_dirs_roots` is a hand-run convenience only.
 pub fn maybe_run_daily(home: &AgentsHome) {
     let stale = match std::fs::metadata(receipt_path(home)) {
         Ok(meta) => meta
@@ -359,11 +407,45 @@ pub fn maybe_run_daily(home: &AgentsHome) {
         Err(_) => true,
     };
     if stale {
-        let _ = run_reclaim(&["--apply".to_string()], home);
+        run_reclaim_lanes(home, true, false, false);
     }
 }
 
 pub fn run_reclaim(args: &[String], home: &AgentsHome) -> i32 {
+    // Leading subcommands. `remove-for <tree> [--json]` is the best-effort
+    // tree-removal reclaim; it never errors. `cargo-build-dirs [--apply]`
+    // runs only the build-base lane for the cwd's canonical repo.
+    match args.first().map(String::as_str) {
+        Some("remove-for") => {
+            let Some(tree) = args.get(1) else {
+                eprintln!("fno doctor reclaim remove-for: usage: remove-for <tree> [--json]");
+                return 2;
+            };
+            let json = args.iter().skip(2).any(|a| crate::json_output::is_flag(a));
+            let removed = crate::cargo_build_dirs::remove_for(Path::new(tree));
+            if json {
+                println!("{{\"removed\": {removed}}}");
+            } else {
+                println!("removed {removed} build dir(s)");
+            }
+            return 0;
+        }
+        // `occupancy-login`: the idle login shell verdict (R6). An argument of
+        // the reclaim action, never a new action (law d-fe66560a); the
+        // occupancy bridge shells here before the Python classifier.
+        Some("occupancy-login") => {
+            return crate::occupancy_login::run(&args[1..]);
+        }
+        Some("cargo-build-dirs") => {
+            let apply = args.iter().skip(1).any(|a| a == "--apply");
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let root = canonical_repo_root(&cwd).unwrap_or(cwd);
+            crate::cargo_build_dirs::sweep(&root, apply, SystemTime::now());
+            return 0;
+        }
+        _ => {}
+    }
+
     let mut apply = false;
     let mut verbose = false;
     for arg in args {
@@ -376,7 +458,16 @@ pub fn run_reclaim(args: &[String], home: &AgentsHome) -> i32 {
             }
         }
     }
+    // A hand run: the cwd is wherever the person typing this ran it from, so
+    // the cargo-build-dirs lane sweeps that repo too even if unregistered.
+    run_reclaim_lanes(home, apply, verbose, true)
+}
 
+/// The full lane set (every `run_reclaim` lane but the leading subcommands),
+/// shared by the hand-run CLI path and the daemon's daily tick. Only
+/// `include_cwd_root` differs between the two callers - see
+/// [`cargo_build_dirs_roots`].
+fn run_reclaim_lanes(home: &AgentsHome, apply: bool, verbose: bool, include_cwd_root: bool) -> i32 {
     let mut lanes = vec![
         Lane::new("plugin_cache_build_copies", plugin_cache_copies()),
         Lane::new("leaked_test_homes", leaked_test_homes()),
@@ -391,6 +482,7 @@ pub fn run_reclaim(args: &[String], home: &AgentsHome) -> i32 {
             }
         }
     }
+    lanes.push(cargo_build_dirs_lane(home, apply, include_cwd_root));
     let mut uv = Lane::new("uv_cache_prune", Vec::new());
     match uv_cache_dir() {
         None => uv.note = "uv not found".to_string(),
@@ -451,13 +543,14 @@ pub fn run_reclaim(args: &[String], home: &AgentsHome) -> i32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Serializes the tests that repoint the process-global env: a concurrent
     /// reader can catch the root mid-flip and sweep the REAL temp dir (the
-    /// same ENV_LOCK shape king_board's HOME_LOCK uses).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// same ENV_LOCK shape king_board's HOME_LOCK uses). Shared with
+    /// cargo_build_dirs' tests, which mutate the same vars.
+    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn temp_lane_root(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("fno-reclaim-{tag}-{}", std::process::id()));
@@ -545,5 +638,153 @@ mod tests {
         std::env::remove_var("FNO_RECLAIM_TEMP_ROOT");
         assert_eq!(found, vec![junk]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// AC6: the daily run's receipt carries the lane's reclaimed bytes and
+    /// the orphan hash dir is gone. Registry seed + fake cargo + sandbox
+    /// bases, per cargo_build_dirs' harness.
+    #[test]
+    fn apply_runs_the_cargo_build_dirs_lane_and_receipts_the_bytes() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = temp_lane_root("cargo-lane");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join("crates/fake")).unwrap();
+        std::fs::write(
+            repo.join("crates/fake/Cargo.toml"),
+            "[package]\nname = 'fakepkg'\nversion = '0.1.0'\n",
+        )
+        .unwrap();
+        let fno_base = root.join("fno-base");
+        let fb_base = root.join("fb-base");
+        std::fs::create_dir_all(&fno_base).unwrap();
+        std::fs::create_dir_all(&fb_base).unwrap();
+        // Fake cargo keyed on CARGO_BUILD_BUILD_DIR, like the sibling suite.
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let script = root.join("bin/cargo");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nif [ -n \"$CARGO_BUILD_BUILD_DIR\" ]; then\n\
+             printf '{\"build_directory\":\"%s\",\"packages\":[{\"name\":\"fakepkg\"}]}\\n' \"$CBD_FNO\"\n\
+             else\n\
+             printf '{\"build_directory\":\"%s\",\"packages\":[{\"name\":\"fakepkg\"}]}\\n' \"$CBD_FB\"\n\
+             fi\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // One orphan: fingerprinted, quiet 7h, no tree resolves to it.
+        let orphan = fb_base.join("00").join("cafefe12");
+        std::fs::create_dir_all(orphan.join("debug/deps")).unwrap();
+        std::fs::create_dir_all(orphan.join("debug/.fingerprint")).unwrap();
+        std::fs::write(orphan.join("CACHEDIR.TAG"), b"Signature: x\n").unwrap();
+        std::fs::write(orphan.join("debug/deps/payload"), vec![0u8; 4096]).unwrap();
+        std::fs::write(orphan.join("debug/.fingerprint/fakepkg-beef"), b"").unwrap();
+        let expected = tree_bytes(&orphan);
+        let old = SystemTime::now() - Duration::from_secs(7 * 3600);
+        for entry in ["", "debug", "debug/deps", "debug/.fingerprint"] {
+            let p = if entry.is_empty() {
+                orphan.clone()
+            } else {
+                orphan.join(entry)
+            };
+            let file = std::fs::File::options().read(true).open(&p).unwrap();
+            file.set_times(std::fs::FileTimes::new().set_modified(old))
+                .unwrap();
+        }
+        for name in [
+            "debug/deps/payload",
+            "debug/.fingerprint/fakepkg-beef",
+            "CACHEDIR.TAG",
+        ] {
+            let file = std::fs::File::options()
+                .read(true)
+                .open(orphan.join(name))
+                .unwrap();
+            file.set_times(std::fs::FileTimes::new().set_modified(old))
+                .unwrap();
+        }
+
+        let state = temp_lane_root("cargo-lane-state");
+        std::env::set_var("FNO_RECLAIM_TEMP_ROOT", &root);
+        std::env::set_var("FNO_RECLAIM_STATE_ROOT", &state);
+        std::env::set_var("CARGO", &script);
+        std::env::set_var("CBD_FNO", fno_base.join("00").join("aaaa11"));
+        std::env::set_var("CBD_FB", fb_base.join("00").join("bbbb22"));
+        std::env::set_var("FNO_CARGO_TARGETS_BASE", &fno_base);
+        // Seed the registry so the lane finds the sandbox repo without a chdir.
+        let home = AgentsHome::at(state.join("agents"));
+        home.ensure_root().unwrap();
+        std::fs::write(
+            home.registry_json(),
+            serde_json::to_string(&serde_json::json!({
+                "entries": [{"name": "seed", "cwd": repo.display().to_string()}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let rc = run_reclaim(&["--apply".to_string()], &home);
+
+        std::env::remove_var("FNO_RECLAIM_TEMP_ROOT");
+        std::env::remove_var("FNO_RECLAIM_STATE_ROOT");
+        std::env::remove_var("CARGO");
+        std::env::remove_var("CBD_FNO");
+        std::env::remove_var("CBD_FB");
+        std::env::remove_var("FNO_CARGO_TARGETS_BASE");
+        assert_eq!(rc, 0);
+        assert!(!orphan.exists(), "the orphan hash dir is reaped");
+        let receipt: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(state.join("reclaim/last-run.json")).unwrap(),
+        )
+        .unwrap();
+        let bytes = receipt["lanes"]["cargo_build_dirs"]["bytes"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(bytes, expected, "receipt carries the reclaimed bytes");
+        assert!(
+            receipt["lanes"]["cargo_build_dirs"]["note"]
+                .as_str()
+                .unwrap()
+                .contains("cargo-build-dirs mode=apply"),
+            "the note names each root's summary line"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    /// The incident this guards against: a test daemon's first idle tick ran
+    /// `maybe_run_daily` with its cwd still inside the real checkout, and
+    /// `cargo_build_dirs_lane` added that checkout as a sweep root the
+    /// registry never named. With an empty registry the cwd fallback is the
+    /// ONLY way a root can appear, so `include_cwd_root = false` (the
+    /// daemon's own path) must come back empty every time, whatever the
+    /// process's actual cwd is.
+    #[test]
+    fn cargo_build_dirs_roots_excludes_cwd_unless_asked() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let state = temp_lane_root("cargo-roots");
+        let home = AgentsHome::at(state.join("agents"));
+        home.ensure_root().unwrap();
+        std::fs::write(
+            home.registry_json(),
+            serde_json::to_string(&serde_json::json!({"entries": []})).unwrap(),
+        )
+        .unwrap();
+
+        let daemon_roots = cargo_build_dirs_roots(&home, false);
+        let hand_roots = cargo_build_dirs_roots(&home, true);
+
+        assert!(
+            daemon_roots.is_empty(),
+            "the daemon path must never add the cwd repo root: {daemon_roots:?}"
+        );
+        if let Some(this_repo) = canonical_repo_root(&std::env::current_dir().unwrap()) {
+            assert!(
+                hand_roots.contains(&this_repo.to_string_lossy().into_owned()),
+                "a hand run still sweeps its own cwd repo: {hand_roots:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&state);
     }
 }

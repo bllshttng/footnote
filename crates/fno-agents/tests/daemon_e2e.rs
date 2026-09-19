@@ -131,6 +131,10 @@ fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> DaemonChild {
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
         .env("FNO_EVENTS_PATH", home.root().join(".fno/events.jsonl"))
+        // Outside any git checkout, so the daily reclaim sweep's cargo-build-dirs
+        // lane (`crate::reclaim::maybe_run_daily`) finds no workspace manifest to
+        // resolve and never reaches the real machine's build base.
+        .current_dir(home.root())
         .stderr(std::process::Stdio::from(stderr));
     let child = cmd.spawn().expect("daemon spawns");
     common::wait_for_path(&home.supervisor_sock(), Duration::from_secs(10));
@@ -153,6 +157,10 @@ fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> DaemonChild {
         .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
         .env("FNO_EVENTS_PATH", home.root().join(".fno/events.jsonl"))
+        // Outside any git checkout, so the daily reclaim sweep's cargo-build-dirs
+        // lane (`crate::reclaim::maybe_run_daily`) finds no workspace manifest to
+        // resolve and never reaches the real machine's build base.
+        .current_dir(home.root())
         .stderr(std::process::Stdio::from(stderr));
     for (k, v) in extra {
         cmd.env(k, v);
@@ -373,7 +381,7 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
     // The sweep now runs concurrently with the accept loop (x-ef7f), so a served
     // RPC no longer implies it has landed. This test is about WHAT the sweep
     // settles, not when, so wait for the sweep's own event before reading.
-    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", common::RECONCILE_BUDGET);
 
     let resp = call(
         &home,
@@ -440,7 +448,7 @@ async fn startup_reconcile_failure_degrades_to_serving() {
     let mut daemon = start_daemon_env(&home, &[("FNO_AGENTS_FAIL_STARTUP_RECONCILE", "1")]);
     // Concurrent sweep (x-ef7f): wait for the failure to land before asserting
     // on what it did or did not write.
-    common::wait_for_event(&home, "startup_reconcile_failed", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_failed", common::RECONCILE_BUDGET);
 
     // The daemon still serves despite the failed startup sweep (did not abort).
     let resp = call(
@@ -543,7 +551,7 @@ async fn cold_start_serves_while_the_startup_sweep_is_still_running() {
          runs; took {served_at:?}"
     );
 
-    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(60));
+    common::wait_for_event(&home, "startup_reconcile_done", common::RECONCILE_BUDGET);
     let done_at = t0.elapsed();
     // The sweep cannot finish before its own delay elapses, so this reading
     // proves it was still running when the response came back. Both readings
@@ -654,7 +662,7 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
 
     let mut incumbent = start_daemon(&home);
     let incumbent_pid = incumbent.id();
-    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", common::RECONCILE_BUDGET);
     // The pid-confirmed termination needs the incumbent REAPED, not only
     // dead: this test process is the parent, so an unwaited child lingers as
     // a zombie and kill(pid, 0) answers alive through the whole grace. A
@@ -728,7 +736,7 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
         "the restarted daemon rejected the positive probe: {:?}",
         post_restart.error()
     );
-    wait_for_successor_reconcile_order(&home, outcome.new_pid, Duration::from_secs(10));
+    wait_for_successor_reconcile_order(&home, outcome.new_pid, common::RECONCILE_BUDGET);
     println!(
         "daemon_restart_served_during_sweep successor_pid={} rows={} answered={} teardown_casualties={}",
         outcome.new_pid, rows, answered, teardown_casualties
@@ -978,7 +986,7 @@ fn a_daemon_restart_over_a_loss_shaped_registry_loses_no_rows() {
     seed_loss_shaped_registry(&home);
 
     let child = start_daemon(&home);
-    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", common::RECONCILE_BUDGET);
     drop(child);
 
     let reg = state::load_registry(&home.registry_json()).unwrap();
@@ -1020,7 +1028,7 @@ fn a_future_schema_registry_is_refused_not_dropped_on_restart() {
     // The sweep reads the store, computes changes, then refuses the write.
     // The meta-event substitution still names the intended kind, so the
     // substring matches either the plain or the capped form.
-    common::wait_for_event(&home, "startup_reconcile_failed", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_failed", common::RECONCILE_BUDGET);
     drop(child);
 
     assert_eq!(
@@ -1082,6 +1090,72 @@ fn daemon_idle_exits_over_terminal_rows_and_says_why() {
     assert_eq!(exited["data"]["reason"], json!("idle"));
     assert_eq!(exited["data"]["clean"], json!(true));
     std::fs::remove_dir_all(home.root()).ok();
+}
+
+#[test]
+fn daemon_on_sandbox_home_starts_no_active_backlog_supervisor() {
+    // The leak shape this guards: a daemon on a throwaway home must not start
+    // the active-backlog supervisor, whose targets resolve from the real cwd
+    // and real graph - it would work the operator's board from a tempdir and
+    // pin ab_live true forever, so the daemon never idle-exits. One
+    // fleet_scope row names the scope; zero arm rows say the supervisor never
+    // ran; the daemon then exits idle.
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let cwd = std::env::temp_dir().join(format!("fnoe-sandbox-cwd-{}", std::process::id()));
+    std::fs::create_dir_all(cwd.join(".fno")).unwrap();
+    std::fs::write(
+        cwd.join(".fno/config.toml"),
+        "[active_backlog]\nenabled = true\n",
+    )
+    .unwrap();
+
+    let seen = common::count_events(&home, "daemon_started");
+    let stderr =
+        std::fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
+    let mut cmd = Command::new(DAEMON_BIN);
+    cmd.env("FNO_AGENTS_HOME", home.root())
+        .envs(fno_agents::test_run::self_owner_env())
+        .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
+        .env("FNO_AGENTS_IDLE_EXIT_SECS", "3")
+        .env("FNO_EVENTS_PATH", home.root().join(".fno/events.jsonl"))
+        .current_dir(&cwd)
+        .stderr(std::process::Stdio::from(stderr));
+    let mut daemon = DaemonChild(cmd.spawn().expect("daemon spawns"));
+    let pid = daemon.id();
+    common::wait_for_path(&home.supervisor_sock(), Duration::from_secs(10));
+    common::wait_for_event_count(&home, "daemon_started", seen + 1, Duration::from_secs(10));
+
+    // Exactly one scope row, naming its home: a missing row is never read as
+    // evidence of scope.
+    common::wait_for_event(&home, "daemon_fleet_scope", Duration::from_secs(10));
+    let scope = last_event_of(&home, "daemon_fleet_scope").expect("fleet_scope row");
+    assert_eq!(scope["data"]["scope"], json!("sandbox"));
+    assert_eq!(common::count_events(&home, "daemon_fleet_scope"), 1);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while last_event_of(&home, "daemon_shutting_down")
+        .and_then(|e| e["data"]["reason"].as_str().map(str::to_string))
+        != Some("idle".to_string())
+    {
+        assert!(
+            Instant::now() < deadline,
+            "sandbox daemon never idle-exited"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let _ = daemon.wait();
+    assert!(!pid_alive(pid), "the daemon is gone");
+    // On the unguarded tree the supervisor's first tick row lands within ~3s
+    // of start, long before the 5s idle tick; process death closes the window
+    // for more.
+    assert_eq!(
+        common::count_events(&home, "\"arm\":\"active_backlog\""),
+        0,
+        "a sandbox home starts no active-backlog supervisor"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+    std::fs::remove_dir_all(&cwd).ok();
 }
 
 #[test]
@@ -1623,7 +1697,10 @@ async fn restart_force_recovers_a_wedged_holder() {
         "the failure names the wedge shape: {stderr}"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(10),
+        started.elapsed() < Duration::from_secs(30),
+        // 30s, not 10s: the bound proves the failure is bounded, never a
+        // hang, and a loaded machine (load average in the hundreds) needs
+        // the headroom to spawn the child at all.
         "the injected deadline bounded the failure"
     );
 
@@ -2057,7 +2134,7 @@ async fn registry_list_refuses_over_a_broken_registered_lane() {
     // the suite runs fast enough to reach the write before the sweep. Its
     // sibling `registry_lookup_distinguishes_unreadable_from_absent` already
     // waits for this event, which is why the same shape is stable there.
-    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", common::RECONCILE_BUDGET);
 
     // Break the registered lane out from under the running daemon.
     write_divergent_registry(&home);
@@ -2126,7 +2203,7 @@ async fn registry_lookup_distinguishes_unreadable_from_absent() {
     // OWN completion marker, and a marker that never arrives FAILS the test
     // instead of silently proceeding - a silent timeout here converts "did
     // not wait" into "lookup succeeded".
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + common::RECONCILE_BUDGET;
     loop {
         let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
         if events.contains("startup_reconcile_done") || events.contains("startup_reconcile_failed")
@@ -2430,7 +2507,7 @@ async fn cold_start_settles_a_failed_codex_thread_resume_to_orphaned() {
 
     // The recovery pass runs asynchronously after startup; poll the registry
     // until the row settles (or the bound expires).
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + common::RECONCILE_BUDGET;
     let status = loop {
         let reg = state::load_registry(&home.registry_json()).unwrap();
         let Some(entry) = reg.find("thread-gone") else {

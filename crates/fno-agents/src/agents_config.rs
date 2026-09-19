@@ -467,6 +467,44 @@ pub fn retire_interval_s(cwd: &Path, grace_secs: u64) -> u64 {
 /// specimen was over three hours old; a younger deps binary may be a live run.
 pub const DEFAULT_ORPHAN_MIN_ELAPSED_SECS: u64 = 900;
 
+/// Default open-work retire window (change 2): an OPEN-work row whose
+/// transcript has been quiet this long is no longer evidenced by its node.
+/// Well above the 900 s retire grace on purpose - an open node is a real
+/// claim until a full day of silence says otherwise - and resolvable from
+/// `agents.reap.open_work_retire_s`.
+pub const DEFAULT_OPEN_WORK_RETIRE_SECS: u64 = 86_400;
+
+/// Resolve `agents.reap.open_work_retire_s` for the registry sweep, same
+/// precedence + fail-open degrade as [`retire_grace_secs`]: an unparseable or
+/// zero value degrades to the default rather than reaping every open row on
+/// a config typo. `$FNO_AGENTS_OPEN_WORK_RETIRE_SECS` is a global test/tuning
+/// override.
+pub fn open_work_retire_secs(cwd: &Path) -> u64 {
+    if let Some(v) = non_empty_env("FNO_AGENTS_OPEN_WORK_RETIRE_SECS")
+        .and_then(|s| s.to_str().and_then(|s| s.trim().parse::<u64>().ok()))
+        .filter(|v| *v > 0)
+    {
+        return v;
+    }
+    resolve(cwd, table_open_work_retire_s).unwrap_or(DEFAULT_OPEN_WORK_RETIRE_SECS)
+}
+
+fn table_open_work_retire_s(t: &toml::Table) -> Option<u64> {
+    t.get("agents")?
+        .as_table()?
+        .get("reap")?
+        .as_table()?
+        .get("open_work_retire_s")?
+        .as_integer()
+        .and_then(|i| u64::try_from(i).ok())
+        .filter(|v| *v > 0)
+}
+
+#[cfg(test)]
+pub(crate) fn read_open_work_retire_s(content: &str) -> Option<u64> {
+    table_open_work_retire_s(&parse_config(content)?)
+}
+
 /// Resolve `test.orphan_min_elapsed_seconds` for the orphan-reap sweep, same
 /// precedence + fail-open degrade as [`retire_grace_secs`].
 pub fn orphan_min_elapsed_secs(cwd: &Path) -> u64 {
@@ -621,10 +659,6 @@ pub const DEFAULT_MAX_SWAP_PCT: f64 = 90.0;
 /// an attribution gap widens the share to an interval bounded above
 /// by the machine's measured CPU. Matches the Pydantic default.
 pub const DEFAULT_MAX_FLEET_CPU_SHARE: f64 = 0.5;
-/// Default absolute machine backstop: refuse above this times the CPU count no
-/// matter whose load it is, because pure fleet-share admits onto a box already
-/// thrashing from foreign work. `<= 0` disables. Matches the Pydantic default.
-pub const DEFAULT_HARD_MAX_LOAD_PER_CPU: f64 = 40.0;
 /// Default freshness window for a single-flight answer. Matches the Pydantic
 /// default.
 pub const DEFAULT_SINGLE_FLIGHT_TTL_S: u64 = 10;
@@ -726,13 +760,6 @@ pub fn max_fleet_cpu_share(cwd: &Path) -> f64 {
     resolve_agents_value(cwd, "max_fleet_cpu_share")
         .and_then(|raw| raw.parse::<f64>().ok())
         .unwrap_or(DEFAULT_MAX_FLEET_CPU_SHARE)
-}
-
-/// Resolve `agents.hard_max_load_per_cpu`. Unparseable coerces to the default.
-pub fn hard_max_load_per_cpu(cwd: &Path) -> f64 {
-    resolve_agents_value(cwd, "hard_max_load_per_cpu")
-        .and_then(|raw| raw.parse::<f64>().ok())
-        .unwrap_or(DEFAULT_HARD_MAX_LOAD_PER_CPU)
 }
 
 /// Resolve `agents.single_flight_ttl_seconds`: how long one child's written
@@ -1012,6 +1039,9 @@ pub fn auto_merge_strategy(cwd: &Path) -> String {
 
 /// Resolve `[auto_merge] require_fresh_ci` (default ON). A malformed or absent
 /// value falls back to the safe default so a config typo cannot reopen stale CI.
+/// The healer (`fno-agents pr-heal --all --apply`) is the actor that runs the
+/// stale remedy (`fno do pr push` on a conflicting PR or the merge-slot
+/// holder), so arming the check no longer holds a merge no one unblocks.
 pub fn auto_merge_require_fresh_ci(cwd: &Path) -> bool {
     resolve(cwd, |t| {
         t.get("auto_merge")?
@@ -1560,6 +1590,32 @@ mod tests {
         assert_eq!(read_roster_scope("[reap]\nroster_scope = \"all\"\n"), None);
         // A sibling key inside agents.reap does not answer for roster_scope.
         assert_eq!(read_roster_scope("[agents.reap]\nretain_days = 3\n"), None);
+    }
+
+    // change 2: the open-work window reads agents.reap and fails open
+    // to the default - a zero would reap every open row on the next sweep,
+    // so it is a typo, never a setting.
+    #[test]
+    fn open_work_retire_s_reads_agents_reap_and_coerces_zero_to_default() {
+        assert_eq!(
+            read_open_work_retire_s("[agents.reap]\nopen_work_retire_s = 3600\n"),
+            Some(3600)
+        );
+        // No block, wrong block, sibling key: all absence.
+        assert_eq!(read_open_work_retire_s("schema_version = 1\n"), None);
+        assert_eq!(
+            read_open_work_retire_s("[reap]\nopen_work_retire_s = 3600\n"),
+            None
+        );
+        // Zero and negative coerce to None, so the resolver's default wins.
+        assert_eq!(
+            read_open_work_retire_s("[agents.reap]\nopen_work_retire_s = 0\n"),
+            None
+        );
+        assert_eq!(
+            open_work_retire_secs(Path::new("/nonexistent-open-work")),
+            DEFAULT_OPEN_WORK_RETIRE_SECS
+        );
     }
 
     #[test]

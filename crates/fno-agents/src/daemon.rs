@@ -34,10 +34,13 @@ mod rm_refusal_detail;
 mod rm_teardown;
 pub(crate) mod roster_death;
 mod stop_refusal_detail;
+pub(crate) mod store_socket_sweep;
+pub(crate) mod worktree_sweep;
 pub(crate) use self::blocking_bound::directory_bytes;
 use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 use self::roster_death::claude_row_provably_absent;
 pub(crate) use self::roster_death::{claude_row_id, pid_is_gone};
+pub(crate) use self::store_socket_sweep::store_socket_sweep;
 mod list_rows;
 use self::list_rows::{
     activity_basis_from_truth, apply_row_contradiction, attention_sort_key, basis_word_from_truth,
@@ -223,13 +226,6 @@ fn codex_thread_resume_identity(
         return Err(format!("codex thread row '{}' is missing cwd", entry.name));
     }
     Ok(Some((session_id.to_string(), PathBuf::from(cwd))))
-}
-
-/// Whether the row was launched with the danger-full-access posture (
-/// v19): the resume lane applies it so a daemon restart cannot silently demote
-/// a yolo worker to workspace-write. `None` (pre-v19 rows) reads safe.
-fn entry_posture_is_full_access(entry: &RegistryEntry) -> bool {
-    entry.sandbox_posture.as_deref() == Some("danger-full-access")
 }
 
 pub(crate) fn is_codex_thread_entry(entry: &RegistryEntry) -> bool {
@@ -583,307 +579,6 @@ pub fn process_start_time(_pid: u32) -> Option<u64> {
     None
 }
 
-/// Distinct canonical repo roots the registry knows about, deduplicated.
-///
-/// A linked worktree is not its own repo, so its rows fold into the checkout
-/// that owns them and the sweep runs once per repo rather than once per row.
-fn registry_repo_roots(home: &AgentsHome) -> Vec<String> {
-    let Ok(loaded) = state::load_registry(&home.registry_json()) else {
-        return Vec::new();
-    };
-    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for e in &loaded.entries {
-        let root = if e.project_root.is_empty() {
-            e.cwd.clone()
-        } else {
-            e.project_root.clone()
-        };
-        if !root.is_empty() && std::path::Path::new(&root).is_dir() {
-            seen.insert(root);
-        }
-    }
-    // The request read spans the rotated generation too (merge_reap's reader),
-    // so a repo whose only request rotated aside stays in the roots.
-    for repo in crate::merge_reap::merge_cleanup_request_repos(home) {
-        if std::path::Path::new(&repo).is_dir() {
-            seen.insert(repo);
-        }
-    }
-    seen.into_iter().collect()
-}
-
-/// How long between worktree report sweeps. A 24-hour reap order spans at
-/// least three complete windows even when its mint cannot clear the stamp.
-const WORKTREE_SWEEP_INTERVAL_SECS: u64 = 21_600;
-
-/// How long between stale-question reconciles. Stale rows are measured in
-/// hundreds of hours, so the interval bounds discovery lag, not freshness:
-/// a row that crosses the wake ceiling waits at most one interval before a
-/// human is told. Identity-keyed dedupe lives in the verb, so an eager run
-/// costs one sweep and changes nothing.
-const STALE_SWEEP_INTERVAL_SECS: i64 = 21_600;
-
-/// One fleet's stale-sweep reading, parsed from the verb's JSON line.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StaleSweepReport {
-    pub stale: usize,
-    pub oldest_h: i64,
-    pub outcome: String,
-}
-
-/// Parse the JSON object `fno agents stale-escalate --json` prints on stdout.
-///
-/// The scheduled invocation passes `--json`, so stdout is ONE JSON line whose
-/// `summary` field happens to carry a `Summary: ...` string - the line itself
-/// never starts with it. Parse the object's fields, not that embedded text.
-///
-/// Returns `None` rather than a zeroed report when no readable object is
-/// present. A sweep that could not read its own output must not report
-/// "0 stale", which is indistinguishable from a clean machine: an absence has
-/// two explanations and a count must only ever come from a real reading. The
-/// outcome word rides along because on the refused path the count is NOT a
-/// real reading - the event must be able to say so rather than fabricate a
-/// measured zero.
-pub fn parse_stale_sweep(stdout: &str) -> Option<StaleSweepReport> {
-    let line = stdout
-        .lines()
-        .map(str::trim_start)
-        .find(|l| l.starts_with('{'))?;
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    Some(StaleSweepReport {
-        stale: usize::try_from(value.get("stale_count")?.as_u64()?).ok()?,
-        oldest_h: value.get("oldest_h")?.as_i64()?,
-        outcome: value.get("outcome")?.as_str()?.to_string(),
-    })
-}
-
-/// Stale-question reconcile on a 6h floor: report-only, no apply mode.
-///
-/// Rows past the wake ceiling are the watchdog's needs-human bucket - no
-/// action lane may take them - so the durable question channel is the only
-/// surface they reach. This sweep is its trigger; the verb inside reconciles
-/// one question to the measured set, so a re-run is a duplicate no-op unless
-/// the set changed. Removal stays everywhere it already was: this fn takes no
-/// apply flag and shells no action verb, and the run closure is injected so
-/// the policy is testable without shelling out.
-///
-/// Emits one `stale_sweep` event per run, INCLUDING on outcome `none` or
-/// `duplicate`: a tick that stays silent when it finds nothing cannot be told
-/// from a tick that never ran.
-pub fn stale_sweep(
-    home: &AgentsHome,
-    emitter: &EventEmitter,
-    now: i64,
-    run: &dyn Fn() -> Option<String>,
-) -> usize {
-    let stamp = home.root().join("stale-escalate.stamp");
-    let last = std::fs::read_to_string(&stamp)
-        .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .unwrap_or(0);
-    if now.saturating_sub(last) < STALE_SWEEP_INTERVAL_SECS {
-        return 0;
-    }
-    // the sweep's only child is `agents stale-escalate --json`, so an
-    // effective dispatch pause suspends the sweep without consuming its
-    // cadence: no closure call, no stamp write, and a positive skip row so
-    // intentional silence cannot read as a dead arm. The row is paced by a
-    // SIDECAR stamp at the sweep's own interval - the real stamp stays
-    // untouched, so a due sweep stays due - because the idle tick reaches
-    // this arm every ~5s and an unpaced row would grow events.jsonl by
-    // ~17k rows/day for the length of the incident. On clear the next due
-    // tick runs normally. Serve-only liveness is NOT behind this gate - its
-    // call site sits before this arm and stays eligible while dispatch polls
-    // are held (AC3-LIVENESS).
-    let pause = crate::loops_pause::dispatch_pause();
-    if pause.is_paused() {
-        let skip_stamp = home.root().join("stale-escalate.skipstamp");
-        let last_skip = std::fs::read_to_string(&skip_stamp)
-            .ok()
-            .and_then(|s| s.trim().parse::<i64>().ok())
-            .unwrap_or(0);
-        if now.saturating_sub(last_skip) >= STALE_SWEEP_INTERVAL_SECS {
-            let _ = emitter.emit(
-                "stale_sweep",
-                &json!({
-                    "outcome": "skipped",
-                    "reason": pause.skip_reason(),
-                    "detail": pause.detail(),
-                }),
-            );
-            let _ = std::fs::write(&skip_stamp, now.to_string());
-        }
-        return 0;
-    }
-    let outcome = match run().as_deref().and_then(parse_stale_sweep) {
-        Some(r) => {
-            let _ = emitter.emit(
-                "stale_sweep",
-                &json!({
-                    "stale_count": r.stale,
-                    "oldest_h": r.oldest_h,
-                    "outcome": r.outcome,
-                }),
-            );
-            1
-        }
-        None => {
-            let _ = emitter.emit("stale_sweep", &json!({"error": "unreadable-summary"}));
-            0
-        }
-    };
-    let _ = std::fs::write(&stamp, now.to_string());
-    outcome
-}
-
-/// One repo's worktree-sweep reading, parsed from the verb's `Summary:` line.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct WorktreeSweepReport {
-    pub eligible: usize,
-    pub kept: usize,
-    pub dirty: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorktreeSweepOutput {
-    pub exit_code: Option<i32>,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorktreeSweepOrderRead {
-    pub standing: Option<bool>,
-    pub exit_code: Option<i32>,
-    pub stderr: String,
-}
-
-impl From<bool> for WorktreeSweepOrderRead {
-    fn from(standing: bool) -> Self {
-        Self {
-            standing: Some(standing),
-            exit_code: Some(0),
-            stderr: String::new(),
-        }
-    }
-}
-
-/// Parse `fno agents workspace worktree cleanup --merged`'s summary line.
-///
-/// Returns `None` rather than a zeroed report when the line is absent. A sweep
-/// that could not read its own output must not report "0 eligible, 0 dirty",
-/// which is indistinguishable from a clean machine: an absence has two
-/// explanations and a count must only ever come from a real reading.
-///
-/// The verb differs by mode (`would archive` dry-run vs `archived` apply), so
-/// the eligible count reads from whichever the line carries.
-pub fn parse_worktree_sweep(stdout: &str) -> Option<WorktreeSweepReport> {
-    let line = stdout
-        .lines()
-        .find(|l| l.trim_start().starts_with("Summary:"))?;
-    let num_before = |needle: &str| -> Option<usize> {
-        let idx = line.find(needle)?;
-        line[..idx].split_whitespace().last()?.parse().ok()
-    };
-    let eligible = num_before(" would archive").or_else(|| num_before(" archived"))?;
-    Some(WorktreeSweepReport {
-        eligible,
-        kept: num_before(" kept (")?,
-        dirty: num_before(" dirty")?,
-    })
-}
-
-/// Worktree sweep, one line per repo, on a 6h floor: report-only until a
-/// merge-minted cleanup request stands, then applying.
-///
-/// A timer tick proves nothing on its own, so an unearned tick still only
-/// REPORTS. Removal is merge-triggered: `fno do pr merge` (and the post-merge
-/// ritual, as its second mint site) writes the `merge_cleanup_requested`
-/// envelope, and while a pending request stands for a repository (`orders`
-/// injects that scoped read) that repository's pass runs with `--apply`. The
-/// primary consumer is the merge reaper (merge_reap.rs), which stops the
-/// harness, drops the rows, and takes the tree; this sweep only catches what
-/// that pass leaves behind. The sweep's own guards - reapable, live claim,
-/// rooted processes - still decide tree by tree. There is no config knob,
-/// because two off-switches for one decision strand whoever flips the wrong
-/// one.
-///
-/// `orders` and `run` are injected so the policy is testable without shelling
-/// out.
-pub fn worktree_sweep(
-    home: &AgentsHome,
-    emitter: &EventEmitter,
-    now: i64,
-    roots: &[String],
-    orders: &dyn Fn(&str) -> WorktreeSweepOrderRead,
-    run: &dyn Fn(&str, bool) -> WorktreeSweepOutput,
-) -> usize {
-    let stamp = home.root().join("worktree-sweep.stamp");
-    let last = std::fs::read_to_string(&stamp)
-        .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .unwrap_or(0);
-    if now.saturating_sub(last) < WORKTREE_SWEEP_INTERVAL_SECS as i64 {
-        return 0;
-    }
-    let mut swept = 0;
-    for root in roots {
-        let order_read = orders(root);
-        let Some(apply) = order_read.standing else {
-            let stderr = order_read.stderr.lines().next().unwrap_or("");
-            let _ = emitter.emit(
-                "worktree_sweep",
-                &json!({
-                    "repo": root,
-                    "error": "unreadable-orders",
-                    "exit_code": order_read.exit_code,
-                    "stderr": stderr,
-                }),
-            );
-            continue;
-        };
-        let mode = if apply { "apply-orders" } else { "report-only" };
-        // Emit for EVERY repo, including the ones that read zero. A tick that
-        // stays silent when it finds nothing cannot be told from a tick that
-        // never ran, and this sweep exists precisely to surface what the
-        // ritual missed.
-        let output = run(root, apply);
-        let report = (output.exit_code == Some(0))
-            .then(|| parse_worktree_sweep(&output.stdout))
-            .flatten();
-        match report {
-            Some(r) => {
-                let _ = emitter.emit(
-                    "worktree_sweep",
-                    &json!({
-                        "repo": root,
-                        "eligible": r.eligible,
-                        "kept": r.kept,
-                        "dirty": r.dirty,
-                        "mode": mode,
-                    }),
-                );
-                swept += 1;
-            }
-            None => {
-                let stderr = output.stderr.lines().next().unwrap_or("");
-                let _ = emitter.emit(
-                    "worktree_sweep",
-                    &json!({
-                        "repo": root,
-                        "mode": mode,
-                        "error": "unreadable-summary",
-                        "exit_code": output.exit_code,
-                        "stderr": stderr,
-                    }),
-                );
-            }
-        }
-    }
-    let _ = std::fs::write(&stamp, now.to_string());
-    swept
-}
-
 pub(crate) use crate::gc_inventory::index_tree;
 // the pane kill and its absence vocabulary moved to pane_stop.rs
 // with the stop helper that now shares them.
@@ -960,13 +655,10 @@ pub(crate) fn run_claude_rm_in(
             Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => {
                 let code = status.code().unwrap_or(-1);
-                let output = child.wait_with_output().ok();
-                let detail = output
-                    .as_ref()
-                    .map(|output| String::from_utf8_lossy(&output.stderr))
-                    .unwrap_or_default();
+                let detail =
+                    crate::truth_probe::drain_to_detail(&mut child, Duration::from_secs(2));
                 // retired-ok: reports the shellout this code ran and its exit code; tells no reader to run it.
-                return Err(format!("claude rm exited {code}: {}", detail.trim()));
+                return Err(format!("claude rm exited {code}: {detail}"));
             }
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20));
@@ -1024,24 +716,6 @@ pub(crate) fn cascade_codex_index(
     }
 }
 
-/// Is `cwd` a LINKED git worktree, as opposed to the canonical checkout or a
-/// plain directory?
-///
-/// A linked worktree's `.git` is a FILE containing a `gitdir:` pointer; the
-/// canonical checkout's `.git` is a directory. That difference is the whole
-/// test, it needs no subprocess, and it is what separates a row that owns
-/// something removable from one that merely ran somewhere.
-///
-/// Fails closed in the useful direction: a path we cannot read is "owns
-/// nothing", so its row is judged on terminal status and grace alone rather
-/// than pinned forever by a cleanliness answer that could never arrive.
-pub(crate) fn is_linked_worktree(cwd: &str) -> bool {
-    if cwd.is_empty() {
-        return false;
-    }
-    std::path::Path::new(cwd).join(".git").is_file()
-}
-
 /// Can this worktree-owning row's `cwd` be removed without destroying work?
 /// `Some(true)` yes, `Some(false)` no, `None` the probe could not determine it
 /// -> the caller fails closed and keeps the row.
@@ -1057,25 +731,14 @@ pub(crate) fn is_linked_worktree(cwd: &str) -> bool {
 /// indistinguishable from any other non-answer, so every unknown degrades to
 /// `None` and the row is kept. That is exactly the prior behaviour.
 pub(crate) fn worktree_clean_probe(cwd: &str) -> Option<bool> {
-    let out = std::process::Command::new("fno")
-        .current_dir(cwd)
-        .args(["agents", "workspace", "worktree", "reapable", cwd])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    if out.status.success() {
-        // Never read a bare exit 0 as permission: an empty stdout (a shim that
-        // swallowed the verb) would otherwise reap a live worktree.
-        return if text.contains("reapable=yes") {
-            Some(true)
-        } else {
-            None
-        };
+    // In-process since the gate port: same answers the shelled verb
+    // gave, without a subprocess per row. A probe that cannot answer
+    // (probe-failed) reads None -> the caller keeps the row, fail closed.
+    let v = crate::worktree_reapable::reapable(cwd);
+    if v.reason == "probe-failed" {
+        return None;
     }
-    if text.contains("reapable=no") {
-        return Some(false);
-    }
-    None
+    Some(v.reapable)
 }
 
 /// The reapable gate's answer for a removed row's worktree: the
@@ -1092,117 +755,27 @@ const RM_SUBPROCESS_TIMEOUT_SECS: u64 = 60;
 
 use crate::bounded_cmd::output_with_timeout;
 
-/// Is the worktree's branch merged into the repo's main line? The rm door's
-/// half of the third bucket: the `--merged` sweep merge-filters BEFORE its
-/// gate, and this caller has no such pre-filter, so it asks here. `None`:
-/// nothing names the work or the main line (detached HEAD, no main ref, git
-/// error) - the caller keeps the tree. Mirrors
-/// `fno.worktree_reapable.branch_merged`, the Python door's same question.
-pub(crate) fn branch_merged(cwd: &str) -> Option<bool> {
-    let mut bases = vec!["origin/main".to_string(), "main".to_string()];
-    if let Some(out) = output_with_timeout(
-        {
-            let mut cmd = std::process::Command::new("git");
-            cmd.current_dir(cwd)
-                .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
-            cmd
-        },
-        RM_SUBPROCESS_TIMEOUT_SECS,
-    ) {
-        let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if out.status.success() && !head.is_empty() {
-            bases.insert(0, head);
-        }
-    }
-    let mut base: Option<String> = None;
-    for candidate in &bases {
-        let known = output_with_timeout(
-            {
-                let mut cmd = std::process::Command::new("git");
-                cmd.current_dir(cwd)
-                    .args(["rev-parse", "--verify", "--quiet", candidate]);
-                cmd
-            },
-            RM_SUBPROCESS_TIMEOUT_SECS,
-        );
-        if known.is_some_and(|out| out.status.success()) {
-            base = Some(candidate.clone());
-            break;
-        }
-    }
-    let base = base?;
-    let branch = output_with_timeout(
-        {
-            let mut cmd = std::process::Command::new("git");
-            cmd.current_dir(cwd).args(["branch", "--show-current"]);
-            cmd
-        },
-        RM_SUBPROCESS_TIMEOUT_SECS,
-    )?;
-    if !branch.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
-    if branch.is_empty() {
-        return None;
-    }
-    let merged = output_with_timeout(
-        {
-            let mut cmd = std::process::Command::new("git");
-            cmd.current_dir(cwd)
-                .args(["merge-base", "--is-ancestor", &branch, &base]);
-            cmd
-        },
-        RM_SUBPROCESS_TIMEOUT_SECS,
-    )?;
-    match merged.status.code() {
-        Some(0) => Some(true),
-        Some(1) => Some(false),
-        _ => None,
-    }
-}
+pub(crate) use crate::worktree_reapable::{branch_merged, is_linked_worktree};
 
-/// Ask `fno agents workspace worktree reapable` - the same verb the `--merged`
-/// sweep, `archive-worktree.sh` and the GC probe ask - and read BOTH the
-/// literal marker and the reason, so a kept tree's receipt can name why. A
-/// `yes` then meets the merge check, because this door has no sweep-style
-/// pre-filter: a clean-but-unmerged branch is exactly where abandoned-but-real
-/// work lives, and the contract keeps it for a human.
+/// The gate, in-process since the port: the module runs the same
+/// git probes the shelled `fno agents workspace worktree reapable` ran, so
+/// the rm door keeps its answers without a subprocess per row. A `yes` then
+/// meets the merge check, because this door has no sweep-style pre-filter:
+/// a clean-but-unmerged branch is exactly where abandoned-but-real work
+/// lives, and the contract keeps it for a human.
 fn worktree_gate(cwd: &str) -> WorktreeGate {
-    let out = match output_with_timeout(
-        {
-            let mut cmd = std::process::Command::new("fno");
-            cmd.args(["agents", "workspace", "worktree", "reapable", cwd]);
-            cmd
-        },
-        RM_SUBPROCESS_TIMEOUT_SECS,
-    ) {
-        Some(out) => out,
-        None => {
-            return WorktreeGate::Unanswerable("the reapable probe could not run".into());
-        }
-    };
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let reason = |fallback: &str| -> String {
-        text.split("reason=")
-            .nth(1)
-            .and_then(|r| r.split_whitespace().next())
-            .unwrap_or(fallback)
-            .to_string()
-    };
-    // The literal marker, never a bare exit code a shim could swallow - the
-    // same double permission `worktree_clean_probe` needs.
-    if out.status.success() && text.contains("reapable=yes") {
+    let v = crate::worktree_reapable::reapable(cwd);
+    if v.reason == "probe-failed" {
+        return WorktreeGate::Unanswerable("the reapable probe could not answer".into());
+    }
+    if v.reapable {
         return match branch_merged(cwd) {
             Some(true) => WorktreeGate::Reapable,
             Some(false) => WorktreeGate::Blocked("clean but the branch is not merged".into()),
             None => WorktreeGate::Unanswerable("the merged-branch probe could not answer".into()),
         };
     }
-    if text.contains("reapable=no") {
-        return WorktreeGate::Blocked(reason("blocked"));
-    }
-    WorktreeGate::Unanswerable("the reapable probe could not answer".into())
+    WorktreeGate::Blocked(v.reason)
 }
 
 /// A human removed ONE named row: its worktree goes with it, through the
@@ -2004,10 +1577,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         match keeper_registry_sweep(&home_sweep, &emitter_sweep) {
                             Ok(report) => {
                                 // Store-socket hygiene rides the same startup
-                                // pass: dead store sockets unlinked, live
-                                // ones untouched. Non-fatal by posture.
-                                let store_unlinked =
-                                    store_socket_sweep(&home_sweep, &emitter_sweep);
+                                // pass: dead store sockets and orphaned seat
+                                // locks unlinked, live ones untouched.
+                                // Non-fatal by posture.
+                                let store_swept = store_socket_sweep(&home_sweep, &emitter_sweep);
                                 let _ = emitter_sweep.emit(
                                     "keeper_sweep_done",
                                     &json!({
@@ -2016,7 +1589,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                                         "dead": report.dead.len(),
                                         "wedged": report.wedged.len(),
                                         "superseded": report.superseded.len(),
-                                        "store_unlinked": store_unlinked,
+                                        "store_unlinked": store_swept.sockets,
+                                        "store_locks_unlinked": store_swept.locks,
                                     }),
                                 );
                             }
@@ -2095,16 +1669,22 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     });
     schedule_codex_thread_recovery(Arc::clone(&ctx));
 
-    // Active-backlog drain supervisor (node). Opt-in via
-    // config.active_backlog; the supervisor resolves its own enabled targets and
-    // stays dormant (live=false) when none, so this is byte-for-byte today's
-    // behavior unless an operator turns it on. Started AFTER the Serving
-    // transition (recovery is already complete here). `ab_live` keeps the daemon
-    // out of idle-exit while >=1 project is enabled; `ab_shutdown` winds the task
-    // down between ticks on daemon shutdown.
+    // Active-backlog drain supervisor, opt-in via config.active_backlog.
+    // `ab_live` keeps the daemon out of idle-exit while work is enabled;
+    // `ab_shutdown` winds the task down on daemon shutdown.
     let ab_live = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let ab_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let ab_handle = {
+    let sandbox = ctx.home.is_sandbox();
+    let _ = ctx.emitter.emit(
+        "daemon_fleet_scope",
+        &json!({"scope": if sandbox { "sandbox" } else { "shared" }, "home": ctx.home.root()}),
+    );
+    // A sandbox home starts no supervisor: its targets resolve from the real
+    // cwd and real graph, so it would work the operator's board from a
+    // tempdir and pin ab_live true forever.
+    let ab_handle = if sandbox {
+        tokio::spawn(std::future::ready(()))
+    } else {
         let fno_bin = std::env::var("FNO_BIN").unwrap_or_else(|_| "fno".to_string());
         let ab_emitter = EventEmitter::new(ctx.home.events_jsonl(), "active-backlog");
         let live = Arc::clone(&ab_live);
@@ -2119,15 +1699,12 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let mut idle_check = tokio::time::interval(Duration::from_secs(5));
     idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_activity = Instant::now();
-    // Screen-manifest scrape gate: at most one sweep in flight (a slow mux
-    // stalls its own sweep, never the loop or a pile-up of sweeps).
+    // Screen-manifest scrape gate: a slow mux stalls only its own sweep.
     let scrape_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Terminal-stop sweep gate: same one-in-flight discipline; a large
-    // marker set must never serialize inline and starve accept()/SIGTERM.
+    // Terminal-stop gate: a large marker set never serializes inline.
     let terminal_stop_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worktree_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Orphaned-test-binary reap gate: same one-in-flight discipline. The verb
-    // it shells to runs ps + a kill, so it never runs on the core loop.
+    // Orphaned-test-binary reap gate: shells ps + a kill, off the core loop.
     let orphan_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut last_orphan_sweep = Instant::now();
     let liveness_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2159,6 +1736,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // beside it. The verb dedupes on outcome identity, so an extra run is a
     // no-op; the gate exists so a slow fleet probe never stacks.
     let stale_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Park sweep: same one-in-flight discipline. The verb is idempotent on a
+    // store nobody touched, so an extra run is a no-op; the gate exists so a
+    // slow head probe never stacks.
+    let park_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let idle_probe_verdict: Arc<
         std::sync::Mutex<Option<(bool, Instant, Option<std::time::SystemTime>)>>,
     > = Arc::new(std::sync::Mutex::new(None));
@@ -2256,9 +1837,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     let grace_cwd = ctx.opts.agents_config_cwd.clone();
                     tokio::task::spawn_blocking(move || {
                         let _gate = SweepGate(flag);
-                        let roots = registry_repo_roots(&home);
+                        let roots = worktree_sweep::registry_repo_roots(&home);
                         let now = now_epoch_secs();
-                        worktree_sweep(&home, &emitter, now, &roots, &|root| {
+                        worktree_sweep::worktree_sweep(&home, &emitter, now, &roots, &|root| {
                             // A pending merge-cleanup request is the standing
                             // order: the pass applies while one waits.
                             crate::merge_reap::merge_cleanup_requested(&home, root).into()
@@ -2273,12 +1854,12 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                                 cmd.arg("--apply");
                             }
                             match cmd.output() {
-                                Ok(output) => WorktreeSweepOutput {
+                                Ok(output) => worktree_sweep::WorktreeSweepOutput {
                                     exit_code: output.status.code(),
                                     stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                                     stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
                                 },
-                                Err(error) => WorktreeSweepOutput {
+                                Err(error) => worktree_sweep::WorktreeSweepOutput {
                                     exit_code: None,
                                     stdout: String::new(),
                                     stderr: error.to_string(),
@@ -2361,19 +1942,31 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         });
                     });
                 }
-                // An enabled active-backlog project keeps the daemon resident even
-                // when the board is drained (OQ1 Option A): idle-exit must never
-                // kill a live drain supervisor.
+                // Park sweep, the arm beside `stale_sweep`: same doc comment
+                // there covers the one-in-flight shape. The run closure walks
+                // every repo root the registry knows, so parked rows of other
+                // repos are un-parked from THEIR checkout (the head probe resolves PR numbers against the repo).
+                if !park_sweep_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    let flag = Arc::clone(&park_sweep_in_flight);
+                    let home = ctx.home.clone();
+                    let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
+                    tokio::task::spawn_blocking(move || {
+                        let _gate = SweepGate(flag);
+                        park_sweep(&home, &emitter, now_epoch_secs(), &|| {
+                            sweeps::sweep_all_roots(&home)
+                        });
+                    });
+                }
+                crate::question_sweep::daemon_tick(&ctx.home, now_epoch_secs());
+                // An enabled active-backlog project keeps the daemon resident
+                // (OQ1 Option A): idle-exit must never kill a live supervisor.
                 let ab_active = ab_live.load(std::sync::atomic::Ordering::SeqCst);
                 if !ab_active && last_activity.elapsed() >= ctx.opts.idle_exit {
-                    // The liveness read (a CONNECT probe per socket candidate)
-                    // is blocking I/O, so it runs OFF the select arm like the
-                    // sweeps above, never inline: an in-arm probe against a
-                    // wedged worker's filling backlog is the
-                    // unreachable-AND-unstoppable shape this loop's rule
-                    // exists to prevent. One probe in flight; the exit fires
-                    // on the tick that reads a completed no-live-worker
-                    // verdict, so the worst case is one extra 5s tick.
+                    // The liveness read (blocking CONNECT probes) runs OFF the
+                    // select arm: an in-arm probe against a wedged worker's
+                    // filling backlog is the unreachable-AND-unstoppable shape
+                    // this loop's rule exists to prevent. One probe in flight;
+                    // exit fires on its verdict: worst case one extra 5s tick.
                     if !idle_probe_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
                         let flag = Arc::clone(&idle_probe_in_flight);
                         let home = ctx.home.clone();
@@ -3419,17 +3012,12 @@ async fn spawn_claude_stream_lane(
     // Registered live: the worker now owns the claim (its own SessionClaimGuard
     // releases it on orphan/exit), so the daemon must not release on drop.
     claim_guard.disarm();
-    let _ = ctx.emitter.emit(
-        "agent_spawned",
-        &json!({
-            "name": name,
-            "provider": "claude",
-            "short_id": short_id,
-            "lane": "stream",
-            "session_uuid": uuid,
-            "node": req.params.get("node").and_then(Value::as_str),
-        }),
+    let birth = crate::spawn_edge::birth_event(
+        name,
+        &crate::state::Lineage::from_request(&req.params),
+        json!({"provider": "claude", "short_id": short_id, "lane": "stream", "session_uuid": uuid, "node": req.params.get("node").and_then(Value::as_str)}),
     );
+    let _ = ctx.emitter.emit("agent_spawned", &birth);
 
     Response::ok(
         req.id,
@@ -5093,7 +4681,7 @@ where
                     // The rule's one live carrier is Python's
                     // `spawn_gate.census` (`fno agents top`), which measures
                     // liveness itself and renders the stored token.
-                    apply_row_contradiction(object, chrono::Utc::now());
+                    apply_row_contradiction(object, e.exited_at.as_deref(), chrono::Utc::now());
                     object.remove("pid_start_time");
                 }
                 row
@@ -5768,7 +5356,9 @@ async fn worker_down_within(sock: &std::path::Path, budget: Duration) -> bool {
 /// two very different reasons: the process is dead (ESRCH), or it is alive but
 /// unsignalable (EPERM) / recycled. Using it as a death oracle turns "I cannot
 /// tell" into "it stopped", which reports a clean stop over a process that is
-/// still running. Only ESRCH is death.
+/// still running. Only ESRCH is death - except the zombie, which is dead but
+/// not yet reaped: `kill(pid, 0)` keeps succeeding while it holds no fds and
+/// serves nothing, so `census::pid_is_zombie` decides that arm.
 fn pid_confirmed_dead(pid: u32) -> bool {
     if pid <= 1 || pid > i32::MAX as u32 {
         // Never signalled in the first place, so nothing is running on our behalf.
@@ -5776,7 +5366,8 @@ fn pid_confirmed_dead(pid: u32) -> bool {
     }
     // SAFETY: signal 0 is an existence/permission probe only, no signal is sent.
     if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
-        return false; // reachable => alive
+        // Reachable => alive, unless it is a zombie: dead-but-unreaped.
+        return crate::census::pid_is_zombie(pid);
     }
     std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
@@ -6068,19 +5659,17 @@ fn cleanup_king_manifest(entry: &state::RegistryEntry) {
     {
         return;
     }
-    let path = std::path::Path::new(&entry.cwd)
-        .join(".fno")
-        .join("kings")
-        .join(format!("{scope}.md"));
+    let Some(kings) = crate::paths::space_dir_opt(std::path::Path::new(&entry.cwd)) else {
+        return;
+    };
+    let path = kings.join("kings").join(format!("{scope}.md"));
     // Owner guard, the Rust half of Python remove_king_manifest's
     // expected_harness_session_id: a successor crowned over this scope after
     // the row went terminal can have re-armed the manifest with ITS session
     // id, and deleting unconditionally would disarm that live king. Skip only
     // on a PROVEN foreign owner (the manifest names a different session id);
     // an id-less or matching manifest deletes on the registry's own authority,
-    // which is what rm acts on. The cwd join stays entry-relative: a
-    // subdirectory cwd may miss the repo-root manifest and leave a stale
-    // file, which is the same safe direction.
+    // which is what rm acts on.
     if let Ok(content) = std::fs::read_to_string(&path) {
         let current = content
             .lines()
@@ -6970,110 +6559,6 @@ fn lane_b_keeper_dir(home: &AgentsHome) -> PathBuf {
         .unwrap_or(home.root())
         .join("mux")
         .join("threads")
-}
-
-/// Stale store-socket hygiene: the store keeper unlinks its socket
-/// on every clean exit, so a socket file nobody answers is a kill -9
-/// leftover. The graph client self-heals a dead socket (its
-/// connect-before-bind removes the stale file and rebinds), so this walk is
-/// tidiness plus an honest dead count, never liveness authority: a socket
-/// with a live listener is left exactly as found, and an unreadable one is
-/// left for the process-table reaper (keeper_lane) rather than guessed at.
-///
-/// A state-root SIBLING socket is unlinked only when its graph file is gone
-/// too: a rebind requires a client, a client requires the graph, so with the
-/// graph absent no keeper can ever be behind the path and the probe-then-
-/// unlink race with a self-healing client cannot happen. A sibling whose
-/// graph still lives stays for the client's own connect-before-bind. The
-/// hashed temp root is different: its contents are ours by construction and
-/// its graph names are hashed away, so the probe alone decides.
-pub fn store_socket_sweep(home: &AgentsHome, emitter: &EventEmitter) -> usize {
-    // SAFETY: getuid reads a per-process kernel value; it cannot fail or race.
-    let uid = unsafe { libc::getuid() };
-    store_socket_sweep_in(
-        home,
-        std::env::temp_dir().join(format!("fno-store-{uid}")),
-        emitter,
-    )
-}
-
-/// The parameterized core, so tests point the hashed root at their own tree
-/// instead of sweeping the machine's real one.
-pub fn store_socket_sweep_in(
-    home: &AgentsHome,
-    temp_root: std::path::PathBuf,
-    emitter: &EventEmitter,
-) -> usize {
-    let state_root = home.root().parent().unwrap_or(home.root()).to_path_buf();
-    let dirs = vec![state_root, temp_root.clone()];
-    let mut unlinked = 0;
-    for dir in dirs {
-        let in_temp_root = dir == temp_root;
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let is_store_sock = if in_temp_root {
-                // The hashed root is ours by construction: every .sock in it
-                // is a store socket.
-                name.starts_with(".fno-store-") && name.ends_with(".sock")
-            } else {
-                name.ends_with(".store.sock")
-            };
-            if !is_store_sock {
-                continue;
-            }
-            let path = entry.path();
-            // Sibling ownership rule: `<name>.store.sock` is only ours to
-            // unlink when `<name>` (its graph) is gone. With the graph
-            // present, a client rebind is always one connection away and
-            // unlinking here could steal a socket a keeper just bound.
-            if !in_temp_root {
-                let graph = path.with_file_name(
-                    path.file_name()
-                        .map(|n| {
-                            n.to_string_lossy()
-                                .trim_end_matches(".store.sock")
-                                .to_string()
-                        })
-                        .unwrap_or_default(),
-                );
-                if graph.exists() {
-                    continue;
-                }
-            }
-            let dead = match std::os::unix::net::UnixStream::connect(&path) {
-                Ok(stream) => {
-                    // A live keeper is behind it: leave the socket alone.
-                    drop(stream);
-                    false
-                }
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::ConnectionRefused
-                        || e.kind() == std::io::ErrorKind::NotFound
-                        // macOS answers ENOTSOCK when the path is not a
-                        // socket at all (Linux says ECONNREFUSED); either
-                        // way nothing can ever be listening behind it, so
-                        // the litter is safe to unlink.
-                        || e.raw_os_error() == Some(libc::ENOTSOCK) =>
-                {
-                    true
-                }
-                Err(_) => false, // unreadable is not dead; the reaper owns that verdict
-            };
-            if dead && std::fs::remove_file(&path).is_ok() {
-                unlinked += 1;
-                let _ = emitter.emit(
-                    "store_socket_unlinked",
-                    &json!({"path": path.to_string_lossy()}),
-                );
-            }
-        }
-    }
-    unlinked
 }
 
 /// One planned row mutation out of the sweep. `bound_socket`/`bound_session`
@@ -8429,6 +7914,18 @@ fn fill_random(buf: &mut [u8]) {
     }
 }
 
+/// The interval-gated maintenance sweeps (stale questions, park records),
+/// split out for the file budget; each is stamp-gated and pause-aware.
+pub(crate) mod sweeps;
+pub(crate) use sweeps::{park_sweep, stale_sweep};
+#[cfg(test)]
+pub(crate) use sweeps::{parse_stale_sweep, PARK_SWEEP_INTERVAL_SECS, STALE_SWEEP_INTERVAL_SECS};
+
 #[cfg(test)]
 #[path = "daemon_tests.rs"]
 mod tests;
+// Declared beside tests (not inside daemon_tests.rs): that aggregator is
+// over the file budget and may only shrink.
+#[cfg(test)]
+#[path = "daemon/tests/pid_zombie_tests.rs"]
+mod pid_zombie_tests;

@@ -125,6 +125,7 @@ fn open_store(store: &Path) -> Result<Connection, String> {
          PRAGMA synchronous=FULL;
          CREATE TABLE IF NOT EXISTS events (
              row_hash BLOB PRIMARY KEY NOT NULL,
+             seq INTEGER NOT NULL UNIQUE,
              ts_ms INTEGER NOT NULL,
              type TEXT NOT NULL,
              source TEXT NOT NULL,
@@ -133,6 +134,7 @@ fn open_store(store: &Path) -> Result<Connection, String> {
              line TEXT NOT NULL
          ) WITHOUT ROWID;
          CREATE INDEX IF NOT EXISTS events_scope_type_ts ON events(scope, type, ts_ms);
+         CREATE INDEX IF NOT EXISTS events_type_ts ON events(type, ts_ms);
          CREATE TABLE IF NOT EXISTS ingest_cursor (
              dev INTEGER NOT NULL,
              ino INTEGER NOT NULL,
@@ -148,7 +150,37 @@ fn open_store(store: &Path) -> Result<Connection, String> {
          );"
     ))
     .map_err(|e| format!("{}: {e}", store.display()))?;
+    ensure_sequence_column(&conn)?;
     Ok(conn)
+}
+
+/// Add append order to stores created by the pre-sequence branch build.
+/// Existing equal-timestamp rows have already lost their original order, so
+/// the migration uses a deterministic hash tie-break; every new ingest is
+/// exact from this point forward.
+fn ensure_sequence_column(conn: &Connection) -> Result<(), String> {
+    let has_seq: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('events') WHERE name = 'seq'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if has_seq == 0 {
+        conn.execute_batch(
+            "ALTER TABLE events ADD COLUMN seq INTEGER;
+             WITH ranked AS (
+                 SELECT row_hash, row_number() OVER (ORDER BY ts_ms, row_hash) AS n
+                 FROM events
+             )
+             UPDATE events SET seq = (
+                 SELECT n FROM ranked WHERE ranked.row_hash = events.row_hash
+             );",
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    conn.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS events_seq ON events(seq);")
+        .map_err(|e| e.to_string())
 }
 
 /// Read-only handle for history readers; a failure names the store path.
@@ -158,6 +190,73 @@ pub(crate) fn open_read(store: &Path) -> Result<Connection, String> {
     conn.busy_timeout(Duration::from_secs(5))
         .map_err(|e| e.to_string())?;
     Ok(conn)
+}
+
+/// Every review-evidence row type a loopcheck parser reads from journal text.
+/// One list, so a call site picks a source, never a vocabulary.
+pub(crate) const REVIEW_EVENT_TYPES: &[&str] = &[
+    "review_attestation",
+    "review_coverage",
+    "review_finding",
+    "review_finding_resolved",
+    "review_invocation",
+];
+
+/// The journal text for `types`, complete across rotation generations.
+///
+/// Rotation ingests a generation into the store before the rename, so the
+/// store holds every row that left the live file. The text is those rows (the
+/// store rows whose line is not in the live file, oldest first) followed by
+/// the live file verbatim. The live generation reads exactly as it always
+/// did: append order, identical rows and an unterminated tail all survive.
+/// The read never syncs, so a reader never writes. Any store failure reads
+/// the live file alone, which never tightens a gate.
+pub(crate) fn journal_text(journal: &Path, types: &[&str]) -> String {
+    let live = live_journal(journal);
+    let live_text = std::fs::read_to_string(&live).unwrap_or_default();
+    let store = store_path(&live);
+    if !store.is_file() {
+        return live_text;
+    }
+    let in_live: std::collections::HashSet<Vec<u8>> = live_text
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| Sha256::digest(l.as_bytes()).to_vec())
+        .collect();
+    let history = open_read(&store).ok().and_then(|conn| {
+        let placeholders = (1..=types.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        // Corrupt and typeless rows store with an empty type; parsers count
+        // our own corrupted rows for their notices.
+        let sql = format!(
+            "SELECT row_hash, line FROM events WHERE type IN ({placeholders}, '') ORDER BY seq"
+        );
+        let mut stmt = conn.prepare(&sql).ok()?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(types), |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
+            })
+            .ok()?
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        Some(rows)
+    });
+    let mut text = String::new();
+    for (hash, line) in history.unwrap_or_default() {
+        if !in_live.contains(&hash) {
+            text.push_str(&line);
+            text.push('\n');
+        }
+    }
+    text.push_str(&live_text);
+    text
+}
+
+/// [`journal_text`] for the review-evidence rows every review reader parses.
+pub(crate) fn review_text(journal: &Path) -> String {
+    journal_text(journal, REVIEW_EVENT_TYPES)
 }
 
 fn ingest_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, String> {
@@ -197,6 +296,11 @@ fn ingest_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, 
     // Only complete lines: a tail without its newline belongs to the next sync.
     let complete_end = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     let mut tally = FileTally::default();
+    let mut next_seq: i64 = tx
+        .query_row("SELECT COALESCE(MAX(seq), 0) + 1 FROM events", [], |r| {
+            r.get(0)
+        })
+        .map_err(|e| e.to_string())?;
     for line_bytes in bytes[start..complete_end].split(|&b| b == b'\n') {
         let line_bytes = line_bytes.strip_suffix(b"\r").unwrap_or(line_bytes);
         if line_bytes.is_empty() {
@@ -214,12 +318,13 @@ fn ingest_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, 
         let inserted = tx
             .execute(
                 "INSERT OR IGNORE INTO events
-                     (row_hash, ts_ms, type, source, scope, reject_reason, line)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![row_hash, ts_ms, ty, source, scope, reject, line],
+                     (row_hash, seq, ts_ms, type, source, scope, reject_reason, line)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![row_hash, next_seq, ts_ms, ty, source, scope, reject, line],
             )
             .map_err(|e| format!("{}: {e}", path.display()))?;
         tally.ingested += inserted as u64;
+        next_seq += 1;
     }
     tx.execute(
         "INSERT INTO ingest_cursor (dev, ino, head_hash, \"offset\", path, updated_ms)
@@ -539,6 +644,115 @@ mod tests {
         let err = sync(&live).unwrap_err();
         assert!(err.contains("ephemeral"), "err: {err}");
         assert!(!store_path(&live).exists(), "no store was created");
+    }
+
+    /// A journal whose review row rotated out: live lacks it, `.1` holds it.
+    fn rotated_review_journal(dir: &Path) -> PathBuf {
+        let live = journal(dir, "events.jsonl");
+        append(
+            &live,
+            &[
+                json!({"ts": "2026-09-15T08:26:07Z", "type": "review_attestation",
+                     "source": "test", "data": {"reviewer": "code-review",
+                     "branch": "feature/x", "head_sha": "abc1234", "verdict": "pass"}}),
+            ],
+        );
+        let blob = "x".repeat(4096);
+        let filler: Vec<_> = (0..2100)
+            .map(|n| {
+                json!({"ts": "2026-09-15T08:30:00Z", "type": "generation_marker",
+                            "source": "test", "data": {"n": n, "blob": blob}})
+            })
+            .collect();
+        append(&live, &filler);
+        crate::events::EventEmitter::new(&live, "test")
+            .emit("operator_decision", &json!({"decision_id": "d-1"}))
+            .unwrap();
+        let live_text = std::fs::read_to_string(&live).unwrap();
+        let rotated_text = std::fs::read_to_string(dir.join("events.jsonl.1")).unwrap();
+        assert!(
+            !live_text.contains("abc1234"),
+            "the row rotated out of the live file"
+        );
+        assert!(
+            rotated_text.contains("abc1234"),
+            "the rotated generation holds it"
+        );
+        live
+    }
+
+    #[test]
+    fn journal_text_reads_a_row_that_rotated_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = rotated_review_journal(dir.path());
+        let text = journal_text(&live, REVIEW_EVENT_TYPES);
+        assert_eq!(text.matches("abc1234").count(), 1);
+        assert!(
+            !text.contains("generation_marker"),
+            "history carries only the asked types"
+        );
+        // A sync puts the live tail in the store too; it still reads once.
+        sync(&live).unwrap();
+        assert_eq!(journal_text(&live, REVIEW_EVENT_TYPES), text);
+        assert_eq!(
+            crate::review_summary::summary_line(&text, "feature/x", "abc1234").as_deref(),
+            Some("Reviewed at abc1234: 1 rounds, 0 findings disposed."),
+        );
+        // The round counter the review_coverage row carries: 0 on the live
+        // file alone, 1 on the generation-complete text.
+        let live_only = std::fs::read_to_string(&live).unwrap();
+        let rounds =
+            |t: &str| crate::loopcheck::rounds_since_last_pass(t, "feature/x", "abc1234", None);
+        assert_eq!(rounds(&live_only), 0);
+        assert_eq!(rounds(&text), 1);
+    }
+
+    #[test]
+    fn journal_text_preserves_append_order_for_equal_timestamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = journal(dir.path(), "events.jsonl");
+        let rotated = journal(dir.path(), "events.jsonl.1");
+        let a = json!({"ts": "2026-09-15T08:26:07Z", "type": "review_attestation",
+            "source": "test", "data": {"reviewer": "reviewer-a", "verdict": "pass"}});
+        let b = json!({"ts": "2026-09-15T08:26:07Z", "type": "review_attestation",
+            "source": "test", "data": {"reviewer": "reviewer-b", "verdict": "fail"}});
+        // Put the larger hash first: the old WITHOUT ROWID table returned equal
+        // timestamps in primary-key hash order and therefore reversed these.
+        let (first, second) = if Sha256::digest(a.to_string().as_bytes())
+            > Sha256::digest(b.to_string().as_bytes())
+        {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        let first_name = first["data"]["reviewer"].as_str().unwrap().to_string();
+        let second_name = second["data"]["reviewer"].as_str().unwrap().to_string();
+        append(&rotated, &[first, second]);
+        sync(&live).unwrap();
+
+        let text = review_text(&live);
+        assert!(
+            text.find(&first_name).unwrap() < text.find(&second_name).unwrap(),
+            "same-second verdicts must retain append order: {text}"
+        );
+    }
+
+    #[test]
+    fn journal_text_falls_back_to_the_live_file_when_the_store_breaks() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = journal(dir.path(), "events.jsonl");
+        append(&live, &[checkin("2026-09-10T12:00:00Z", "x-aaaa", "live")]);
+        std::fs::create_dir(dir.path().join("events.db")).unwrap();
+        let text = journal_text(&live, REVIEW_EVENT_TYPES);
+        assert_eq!(text, std::fs::read_to_string(&live).unwrap());
+    }
+
+    #[test]
+    fn journal_text_creates_no_store_for_an_absent_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = journal(dir.path(), "events.jsonl");
+        assert_eq!(journal_text(&live, REVIEW_EVENT_TYPES), "");
+        assert!(!store_path(&live).exists());
     }
 
     #[test]

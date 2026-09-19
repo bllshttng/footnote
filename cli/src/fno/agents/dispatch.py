@@ -67,7 +67,7 @@ from fno.config._dispatch_verbs import is_verb_seed
 from fno.agents.lane_heal import lane_heal as _lane_heal
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
-from fno.agents.keeper_thread import complete_launch_argv, mint_session_id
+from fno.agents.keeper_thread import _mint_thread_session_id, complete_launch_argv
 from fno.harness_names import unknown_thread_harness_message
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.reachability import mux_ref_names_a_pane
@@ -958,19 +958,6 @@ def _keeper_identify(sock: Path, timeout_sec: float = 10.0) -> dict:
     raise TimeoutError(f"no keeper answered Identify on {sock}: {last_err}")
 
 
-def _mint_thread_session_id(
-    harness: str, cwd: Path, requested: Optional[str] = None
-) -> str:
-    """The harness session id a keeper thread launches on, fixed BEFORE launch.
-
-    The per-harness shapes live in :func:`fno.agents.keeper_thread.
-    mint_session_id`; the caller-assigned default is here because a UUIDv4 is
-    not a harness fact.
-    """
-    minted = mint_session_id(harness, cwd, requested)
-    return minted if minted is not None else str(uuid.uuid4())
-
-
 def _keeper_pid_start_time(pid: int) -> Optional[int]:
     """The keeper's process-start token, read while the spawner owns it.
 
@@ -1063,7 +1050,13 @@ def _lane_b_thread_spawn(
             )
 
         session_id = _mint_thread_session_id(
-            harness, cwd, requested=resume_session_id
+            harness,
+            cwd,
+            requested=resume_session_id,
+            model=model,
+            effort=effort,
+            permission_mode=permission_mode,
+            yolo=yolo,
         )
         try:
             argv = render_session_argv(harness, "interactive_create", session_id)
@@ -1671,11 +1664,8 @@ def _claude_create_path(
     # silent substitution is named, not remembered. A fresh spawn with no sample
     # yet probes `no-model-yet` and stays silent (an unanswered probe is not a
     # verdict); a REVIVE reads history, so its answer is deterministic here.
-    # an inherited lineage model is part of the request, so the probe
-    # sees it instead of reading a real substitution as no request at all.
+    requested_token = model or route_model
     src = lineage_row
-    lineage_model = fork_lineage.inherited_model(src, model, route_model)
-    requested_token = model or route_model or lineage_model
     substitution: Optional[dict] = None
     verified_model: Optional[str] = None
     if requested_token and session_uuid:
@@ -2823,6 +2813,10 @@ def dispatch_spawn(
                         file=sys.stderr,
                     )
 
+            if harness == "claude" and resume_session_id and not model:
+                model, effort, route_model = fork_lineage.resume_axes(
+                    lineage_row, resume_session_id, effort, route_model, routed=bool(route_env)
+                )
             # 4a2. Build the dispatch context so the create helpers' emits
             # (agent_ask_started/agent_ask_done) carry the same request_id /
             # caller / from_name attribution the old dispatch_ask create
@@ -6519,12 +6513,9 @@ def _roster_entry_for_session(session_uuid: str) -> Optional["AgentEntry"]:
             raise RegistryVersionError(
                 "registry forward read is incomplete; routed wake cannot be classified"
             )
-        for entry in loaded:
-            if getattr(entry, "harness_session_id", None) == session_uuid:
-                return entry
+        return fork_lineage.lineage_row_for(loaded, session_uuid)
     except OSError:
         return None
-    return None
 
 
 def _respawn_claude_session(short_id: str) -> int:
@@ -6838,6 +6829,8 @@ def wake_and_deliver(
         return True, short
     except GateRefused as exc:
         return False, f"spawn-exit-{exc.code}"
+    except fork_lineage.ResumeUnpinned as exc:
+        return False, f"wake-unpinned({exc})"
     except DispatchAskError as exc:
         # Exit 11 is the writer claim refusing: another writer holds the
         # transcript, so the session is not actually asleep. Exit 2 is the name
@@ -6888,7 +6881,7 @@ def wake_drain_agent(
 def wake_if_asleep_claude(token: str) -> tuple[bool, Optional[str]]:
     """Resolve ``token`` to a resumable-but-asleep claude session and wake it to
     drain its own inbox (US9). Returns ``(True, short_id)`` on a revival, else
-    ``(False, None)`` - the token is a project name, a non-claude/ambiguous
+    ``(False, detail)`` - the token is a project name, a non-claude/ambiguous
     token, or the wake refused (the session is actually live, or another wake is
     in flight). Best-effort: a resolver or spawn error never raises.
 
@@ -6916,7 +6909,7 @@ def wake_if_asleep_claude(token: str) -> tuple[bool, Optional[str]]:
         delivered, detail = wake_drain_agent(reachable.session_id, cwd=cwd)
     except (OSError, RuntimeError):
         return False, None
-    return (True, detail) if delivered else (False, None)
+    return (True, detail) if delivered else (False, detail)
 
 
 def _mail_inject_codex(

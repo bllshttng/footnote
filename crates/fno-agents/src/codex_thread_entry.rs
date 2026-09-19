@@ -9,6 +9,24 @@ use crate::AgentStatus;
 pub(crate) fn git_grant_for_cwd(cwd: &Path) -> Option<String> {
     crate::provider::git_common_dir(cwd)
 }
+/// The one lineage read for the codex thread door: a door-proved origin
+/// outranks the raw request edge; an edge-less request stamps the reason
+/// instead of a silent null. The row and the birth event both derive
+/// through here, so they can never name different parents.
+pub(crate) fn thread_lineage(
+    spawn_params: &serde_json::Value,
+    provenance: Option<&crate::spawn_contract::SpawnProvenance>,
+) -> Lineage {
+    match provenance {
+        Some(p) => match crate::spawn_contract::compatibility_parent(&p.origin) {
+            (Some(session), Some(harness), Some(cwd)) => {
+                Lineage::captured((Some(session), Some(harness), Some(cwd)))
+            }
+            _ => Lineage::from_request(spawn_params),
+        },
+        None => Lineage::from_request(spawn_params),
+    }
+}
 /// Build the registry row for a Codex app-server thread. Codex has no fno
 /// short id: the full harness session id is both the resume handle and the
 /// canonical registry identity.
@@ -18,29 +36,22 @@ pub(crate) fn build_codex_thread_entry(
     driver: &crate::codex_thread::CodexThread,
     model: Option<&str>,
     effort: Option<&str>,
-    yolo: bool,
     node: Option<&str>,
     account: Option<&str>,
     harness_args: &[String],
     spawn_params: &serde_json::Value,
     provenance: Option<&crate::spawn_contract::SpawnProvenance>,
 ) -> RegistryEntry {
+    // The typed posture the lane resolved and the driver carries. Reading it
+    // off the driver (not a parallel param) means the row can never disagree
+    // with the frame the thread was started with.
+    let posture = driver.requested_posture();
     let cwd_s = cwd.to_string_lossy().into_owned();
     let session_id = driver.thread_id().to_string();
     // The daemon's env is scrubbed, so the parent edge rides the spawn
     // REQUEST the client stamped from its own ambient markers - the same
-    // trust the `node` field already gets. A door-proved origin outranks
-    // the raw edge; an edge-less request stamps the reason instead of a
-    // silent null.
-    let spawned_by = match provenance {
-        Some(p) => match crate::spawn_contract::compatibility_parent(&p.origin) {
-            (Some(session), Some(harness), Some(cwd)) => {
-                Lineage::captured((Some(session), Some(harness), Some(cwd)))
-            }
-            _ => Lineage::from_request(spawn_params),
-        },
-        None => Lineage::from_request(spawn_params),
-    };
+    // trust the `node` field already gets.
+    let spawned_by = thread_lineage(spawn_params, provenance);
     let mut entry = RegistryEntry {
         node: node.filter(|node| !node.is_empty()).map(str::to_string),
         // v25: the route axes this lane actually used. When the spawn request
@@ -117,17 +128,19 @@ pub(crate) fn build_codex_thread_entry(
         fno_id: Some(session_id.clone()),
         delivery_policy: None,
         // v19: the posture the spawn REQUESTED, which is what `thread/resume`
-        // re-applies across a daemon restart. Derived from `yolo` on purpose:
-        // it answers "what did we ask for", and the resume lane needs the
-        // request, not the outcome.
-        sandbox_posture: Some(
-            if yolo {
-                "danger-full-access"
-            } else {
-                "workspace-write"
-            }
-            .to_string(),
-        ),
+        // re-applies across a daemon restart. Read off the typed posture the
+        // lane resolved: both halves survive, so a read-only row can no longer
+        // be minted from a bool that read write access into everything.
+        sandbox_posture: Some(posture.sandbox.as_scalar().to_string()),
+        // v35: the operator's exact mode string, verbatim, beside the name
+        // above - the name loses the approval half, and the resume replays
+        // this. Empty when the spawn named no mode (the bare yolo bool or the
+        // bounded default).
+        requested_permission_mode: Some(posture.requested.clone()).filter(|r| !r.is_empty()),
+        // v35: where the current turn's policy came from - the server's
+        // resolved posture, or this row's own request replayed because the
+        // server named no sandbox.
+        turn_policy_source: Some(driver.turn_policy_source().to_string()),
         // v29: the posture the server RESOLVED, beside the request above. The
         // two disagree and that is the whole reason this column exists: a
         // `yolo` thread asks for full access and the app-server can keep its

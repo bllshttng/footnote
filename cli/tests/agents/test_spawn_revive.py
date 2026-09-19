@@ -47,7 +47,10 @@ def workdir_claude(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _seed_row(name: str, short_id: str, uuid, node: str | None = None) -> None:
+def _seed_row(
+    name: str, short_id: str, uuid, node: str | None = None,
+    requested_model: str | None = "claude-opus-5",
+) -> None:
     row = AgentEntry(
         name=name,
         harness="claude",
@@ -56,6 +59,7 @@ def _seed_row(name: str, short_id: str, uuid, node: str | None = None) -> None:
         short_id=short_id,
         harness_session_id=uuid,
         node=node,
+        requested_model=requested_model,
     )
     update_registry(lambda entries: entries + [row])
 
@@ -269,7 +273,9 @@ def test_spawn_resume_fork_carries_provider_and_model_axes(
     assert forked.node == "x-256c"
     assert forked.provider == "zai"
     assert forked.model == "glm-5.3-flash[1m]"
-    assert forked.model_basis == "verified"
+    # The pin answers from the row's request; the fork is verified only when
+    # its own substitution probe observes the model it actually got.
+    assert forked.model_basis == "requested"
     assert forked.requested_model == "glm-5.3-flash[1m]"
     assert forked.requested_provider == "zai"
     assert forked.route_provider_id == "zai"

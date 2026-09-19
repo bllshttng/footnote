@@ -301,6 +301,16 @@ _READ_FLOOR_S = 15.0
 _FIRE_FLOOR_S = 30.0
 
 
+def _admission_refused_rcs() -> tuple[int, ...]:
+    """The admission gate's own refusal codes, imported lazily so the
+    harness layer stays off this module's launchd hot path. A refusal is
+    not a failed attempt: is_error=False carries that upstream so the
+    caller never burns a retry on a fire that never started."""
+    from fno.agents.spawn_gate import EXIT_FLEET_STOP, EXIT_FLEET_STOP_UNAVAILABLE
+
+    return (EXIT_FLEET_STOP, EXIT_FLEET_STOP_UNAVAILABLE)
+
+
 def fire_skill(
     verb: Literal["check"],
     pr_number: int,
@@ -393,6 +403,11 @@ def fire_skill(
         return DispatchResult(ok=False, rc=-1, is_error=True, raw="")
 
     raw = result.stdout or ""
+
+    # The admission gate's own refusal codes: a durable stop answered the
+    # fire, not a failed attempt.
+    if result.returncode in _admission_refused_rcs():
+        return DispatchResult(ok=False, rc=result.returncode, is_error=False, raw=raw)
 
     if result.returncode != 0:
         log.warning(
@@ -506,6 +521,14 @@ def _ritual_timeout() -> float:
     if left is None:
         return 300.0
     return min(300.0, left - 10)
+
+
+#: Partial-work notes a phase body writes as it runs (the scan loop writes
+#: "scanned=N of M" per rich read), so a deadline cut hands back what the
+#: phase did instead of evaporating with its locals. The tick's _run_phase
+#: clears the phase's entry before each run and reads it on the cut path;
+#: module-level because the alarm can fire anywhere inside a body.
+SCAN_PROGRESS: dict[str, str] = {}
 
 
 def tick(
@@ -679,22 +702,23 @@ def _run_tick(
 ) -> TickResult:
     """Inner tick body (called once tick lock is held)."""
     from fno.graph._reconcile import ReconcileError
-    from fno.graph.api import wire_rows
     from fno.paths import graph_json as default_graph_json
     from fno.pr_watch import decide
+    from fno.pr_watch._king_wake import graph_entries
     from fno.pr_watch._state import WatermarkStore, make_watermark_key
 
     gpath = graph_path or default_graph_json()
     set_tick_phase("discover")
-    from fno.tracker import active_backend_name
 
     # PR discovery needs the done-at-PR-green grace window (recently closed
     # nodes still watched through merge), which list_open() cannot serve -
     # closed items are outside its contract by design. An external tracker
     # backend has no equivalent yet, so this tick degrades to "nothing to
     # sweep" rather than reading the wrong store (mirrors _catchup_roots'
-    # existing no-graph degrade for the same daemon).
-    entries = wire_rows(path=gpath) if active_backend_name() == "graph" and gpath.exists() else []
+    # existing no-graph degrade for the same daemon). graph_entries is the
+    # tick's one ident-keyed memo: sweep discovery and king_wake share a
+    # single real read of the 15 MB store instead of queueing on it twice.
+    entries = graph_entries(gpath) if gpath.exists() else []
     candidates = discover_fn(entries)
 
     store = WatermarkStore(path=store_path)
@@ -929,6 +953,9 @@ def _run_tick(
                 obs = read_pr_state_fn(cand, reviewers=reviewers)
                 swept.add(key)
                 merge_scan_scanned += 1
+                SCAN_PROGRESS["sweep"] = (
+                    f"scanned={merge_scan_scanned} of {len(candidates)}"
+                )
                 failed.discard(key)
             except ReconcileError as exc:
                 log.warning("pr-watch: gh query failed for PR #%d: %s", pr, exc)
@@ -1040,6 +1067,7 @@ def _run_tick(
 
             elif decision.kind in ("merge", "review") and _ritual_timeout() >= _FIRE_FLOOR_S:
                 dispatch_ok = False
+                refused = False
                 dispatch_extra: dict[str, Any] = {}
                 if decision.kind == "merge":
                     _finish_queue_merge(cand.repo_dir, pr, emit)
@@ -1103,6 +1131,7 @@ def _run_tick(
                 else:
                     result = fire_skill_fn("check", pr, cand.repo_dir, node_id=cand.node_id)
                     dispatch_ok = result.ok
+                    refused = not result.ok and not result.is_error
 
                 if dispatch_ok:
                     acted += 1
@@ -1116,6 +1145,12 @@ def _run_tick(
                     else:
                         store.set(key, entry)
                     emit("pr_watch_dispatched", {"kind": decision.kind, "pr": pr, **dispatch_extra})
+                elif refused:
+                    # The admission gate refused the fire: not an attempt, so
+                    # no retry is burned and the park ledger stays untouched.
+                    # The next clear tick re-fires.
+                    emit("pr_watch_skipped", {"pr": pr, "reason": "admission-refused"})
+                    skipped += 1
                 else:
                     # Dispatch failed: bump retry counter (safe with None/non-int stored value)
                     try:
@@ -1287,6 +1322,18 @@ def run_execute_queue(
                     entry["last_seen_state"] = "NOT_OPEN"
                 store.set(key, entry)
                 _grant("held", pr, cand, grant_fields, reason=reason)
+                if reason.startswith("checks are red"):
+                    # A red hold never clears by retrying: the healer or the
+                    # worker owns the next push, so park with the why instead
+                    # of re-running the whole merge chain every tick. The park
+                    # sweep resumes the row on the next head change.
+                    entry["parked"] = "checks-red"
+                    store.set(key, entry)
+                    emit("pr_watch_parked", {"pr": pr, "reason": "checks-red"})
+                    _notify_parked_pr(
+                        notify, pr, cand.repo_slug, prior_retries,
+                        "durable-grant merge",
+                    )
             else:
                 counts["failed"] += 1
                 _grant("failed", pr, cand, grant_fields, exit_code=rc, reason=reason)

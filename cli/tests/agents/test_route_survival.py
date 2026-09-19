@@ -1118,6 +1118,7 @@ def test_matrix_spawn_resume_default_control_inherits_default(
                 harness="claude",
                 harness_session_id="sess-1",
                 launch_account="default",
+                requested_model="claude-opus-5",
             )
         ]
     )

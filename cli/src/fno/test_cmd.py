@@ -331,17 +331,9 @@ def _child_env(root: Path) -> dict:
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = src + (os.pathsep + existing if existing else "")
     env["RTK_DISABLED"] = "1"  # never let rtk re-wrap the child run
-    # Cargo intermediates go under the SANDBOX's state root, never the
-    # operator's real one and never the checkout's target/. Computed from the
-    # sandbox, not cargo_build_dir_value(): that reads the PARENT's state
-    # root, and a value pointing at ~/.fno/cargo-build makes every cargo
-    # invocation inside a test write into operator state - the exact write
-    # the state canary refuses. Matches what the child itself would resolve
-    # (its HOME is the sandbox home). Set AFTER neutralise, which scrubs a
-    # developer's own value as ambient state.
-    env["CARGO_BUILD_BUILD_DIR"] = (
-        f"{_sandbox() / 'home' / '.fno' / 'cargo-build'}/{{workspace-path-hash}}"
-    )
+    # Cargo intermediates are pinned by neutralise itself: _child_env runs
+    # against the same _sandbox(), so the value is identical here and in the
+    # shell/cargo trees (x-19f1).
     # TMPDIR is deliberately left ambient. The fence allows journal roots
     # under TMPDIR (fno.events._hermetic_allowed_roots), and the sandbox is
     # created by mkdtemp under that same TMPDIR, so every sandbox path is
@@ -1549,16 +1541,24 @@ def select_changed(root: Path, paths: Sequence[str]) -> tuple[list[dict], list[s
 # the packet counts as a failure - so selecting one without its build step
 # produces a false red instead of feedback. The registry already owns the
 # build; selection has to carry it along.
-_RUST_BIN_MARKER = "target/debug/fno-agents"
+_RUST_BIN_MARKERS = (
+    "target/debug/fno-agents",
+    # A harness may resolve the binary through the env pin or the release
+    # fallback instead of spelling the debug path (test_loop_check_shim.sh);
+    # each spelling is a real dependency on a binary being present.
+    "target/release/fno-agents",
+    "FNO_AGENTS_BIN",
+)
 _RUST_BUILD_STEP = "Build fno-agents debug binary (for journey tests)"
 _CLAIM_DOOR_NAME = "fno-agents-claim-door"
 
 
 def _needs_rust_binary(root: Path, rel: str) -> bool:
     try:
-        return _RUST_BIN_MARKER in (root / rel).read_text(encoding="utf-8", errors="replace")
+        text = (root / rel).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
+    return any(marker in text for marker in _RUST_BIN_MARKERS)
 
 
 def _changed_steps(root: Path, selections: Sequence[dict]) -> list[tuple[str, str, str]]:

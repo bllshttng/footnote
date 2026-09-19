@@ -249,6 +249,8 @@ class BlueprintBlock(BaseModel):
 
     max_prs_per_epic: int = 4
 
+    python_repair_added_lines: int = Field(default=30, ge=0)
+
     @field_validator("max_prs_per_epic")
     @classmethod
     def max_prs_per_epic_positive(cls, v: int) -> int:
@@ -2252,8 +2254,7 @@ class AgentsBlock(SweepKeys):
     # Spawn-gate scalars degrade to safe defaults: max_live caps the roster
     # union as the BACKSTOP behind the RAM floor (min_free_gb) and the CPU
     # axis (LD1); provider_limits caps lanes and fan-out; admission
-    # decides on max_fleet_cpu_share every spawn; hard_max_load_per_cpu is the
-    # absolute backstop on 15-minute load (max_load_per_cpu: deprecated LD2).
+    # decides on max_fleet_cpu_share every spawn (max_load_per_cpu: deprecated LD2).
     max_live: int = 3
     max_live_per_territory: int = 4  # team cap; contract in the registry
     provider_limits: dict[str, ProviderBudget] = Field(
@@ -2269,7 +2270,6 @@ class AgentsBlock(SweepKeys):
     # fleet's CPU share (max_fleet_cpu_share), never on a load trigger.
     max_load_per_cpu: float = 8.0
     max_fleet_cpu_share: float = 0.5
-    hard_max_load_per_cpu: float = 40.0
     worker_qos: str = "utility"
     # Unset derives the sustained-CPU threshold from measured capacity.
     footprint_sustained_cpu_cores: Optional[float] = None
@@ -2458,17 +2458,9 @@ class AgentsBlock(SweepKeys):
 
         Same contract as :meth:`_coerce_max_load_per_cpu`. <= 0 is VALID and
         means the gate refuses on any fleet attribution at all, which is
-        the strictest setting rather than a disabled one; the backstop
-        (``hard_max_load_per_cpu``) is the knob that turns the load check off.
+        the strictest setting rather than a disabled one.
         """
         return _finite_or(v, 0.5)
-
-    @field_validator("hard_max_load_per_cpu", mode="before")
-    @classmethod
-    def _coerce_hard_max_load_per_cpu(cls, v: object) -> object:
-        """Coerce an unparseable backstop to the default (40.0); never raise.
-        <= 0 disables the backstop and leaves the governor alone in charge."""
-        return _finite_or(v, 40.0)
 
     @field_validator("worker_qos", mode="before")
     @classmethod

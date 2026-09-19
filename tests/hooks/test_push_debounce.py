@@ -63,6 +63,7 @@ def test_a_fresh_stamp_refuses(tmp_path, monkeypatch):
     )
     assert reason is not None
     assert "pushed 0s ago" in reason
+    assert "fno do pr push" in reason, "the refusal names the guarded push verb"
 
 
 def test_an_expired_stamp_allows(tmp_path, monkeypatch):

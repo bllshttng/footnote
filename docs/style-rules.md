@@ -182,7 +182,9 @@ Replaced by one placeholder token, so they cost one word:
 
 ## The escape
 
-Add a `style-exception:` line with a reason to bypass one body. An empty reason does not count. The escape scopes to the whole unit, so reaching for it is a decision. The receipt prints the reason, so the bypass is never silent.
+Add a `style-exception:` line with a reason to bypass one body. An empty reason does not count. On a mail body, a PR body, or a `--files` run, the escape scopes to the whole unit, so reaching for it is a decision. The receipt prints the reason, so the bypass is never silent.
+
+A `--diff-base` run reads every added line, marker or not. A marker at the top of a file cannot scope a line that someone writes later.
 
 Quoting a word is not a bypass. A banned word inside double quotes or backticks is a mention, not a use. The masking pass turns the quoted span into one placeholder token before any rule runs. So `"should"` names the word without tripping rule 3. Reach for this before the `style-exception` line: it scopes to one word, the exception scopes to a whole body.
 
@@ -192,7 +194,8 @@ Set `FNO_STYLE_ENFORCE` to 0 to disable the check in an emergency.
 
 - `fno agents mail send` rejects a body that breaks the rules.
 - Run `fno doctor lint style --surface pr-body --stdin` to check a PR body by hand.
-- Run `fno doctor lint style --surface markdown --files <paths> --diff-base <base>` to check changed Markdown by hand.
+- Run `fno doctor lint style --surface markdown --diff-base <base>` to check every changed Markdown file by hand. Add `--files <paths>` to narrow it.
+- Every run prints how many lines it read. A run that read zero lines because every input carried a marker exits 2.
 - A PR comment has no chokepoint. Run `fno doctor lint style --surface comment --stdin` yourself.
 - Add `--fix` to rewrite the mechanical set. A semicolon splits into two sentences, and a wrapped paragraph rejoins into one physical line. Any residue needs an author, and residue exits 1.
 

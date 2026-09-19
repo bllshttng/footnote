@@ -28,7 +28,7 @@
 //! adapter that shape was also drawn from has since been deleted, so no
 //! Python counterpart remains for that provider.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::envelope::{Envelope, JsonEnvelope, NoEnvelope};
@@ -489,10 +489,16 @@ fn footnote_verbs() -> std::collections::HashSet<String> {
 }
 
 fn read_footnote_verbs() -> std::collections::HashSet<String> {
-    let mut verbs = std::collections::HashSet::new();
     let Some(root) = plugin_root() else {
-        return verbs;
+        return Default::default();
     };
+    read_verbs_from(&root)
+}
+
+/// The roster from ONE resolved root, so the installer reads the same
+/// surface as the seed renderers instead of carrying a second list.
+pub(crate) fn read_verbs_from(root: &Path) -> std::collections::HashSet<String> {
+    let mut verbs = std::collections::HashSet::new();
     if let Ok(entries) = std::fs::read_dir(root.join("skills")) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -1286,7 +1292,7 @@ impl ProviderWithPty for AgyProvider {
 /// the footnote verbs, so a rendered `/fno:verb args` must ride `opencode run
 /// --command fno:verb <args>` to actually invoke the command (/ codex P1).
 /// A non-slash prompt (a plain `ask`/build message) passes through unchanged.
-pub(crate) fn opencode_run_tail(message: &str) -> Vec<String> {
+pub fn opencode_run_tail(message: &str) -> Vec<String> {
     if let Some(rest) = message.strip_prefix('/') {
         let mut parts = rest.splitn(2, ' ');
         // `/fno:target --no-merge x` -> --command fno:target, then the args as

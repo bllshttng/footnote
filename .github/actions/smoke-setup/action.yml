@@ -97,3 +97,18 @@ runs:
         CARGO_BUILD_BUILD_DIR="$PWD/crates/fno-agents/target" cargo build --manifest-path crates/fno-agents/Cargo.toml
         test -x "$PWD/crates/fno-agents/target/debug/fno-agents"
         echo "FNO_AGENTS_FRONT=$PWD/crates/fno-agents/target/debug/fno-agents" >> "$GITHUB_ENV"
+
+    - name: Build the fno mux binary
+      # The cache above restores crates/fno/target across runs; a lockfile-hash
+      # miss falls back to an older prefix match (restore-keys), which can hand
+      # back a `fno` binary built from a stale commit. Individual smoke tests
+      # (e.g. tests/mux-restart-spares-live-panes.sh) only build it when the
+      # path is missing, not when it is merely old, so a stale restore silently
+      # ships a binary that predates the source it is meant to test. Clean and
+      # rebuild every run, the same discipline the fno-agents front already
+      # gets above.
+      shell: bash
+      run: |
+        cargo clean -p fno --manifest-path crates/fno/Cargo.toml
+        CARGO_BUILD_BUILD_DIR="$PWD/crates/fno/target" cargo build --manifest-path crates/fno/Cargo.toml --bin fno
+        test -x "$PWD/crates/fno/target/debug/fno"

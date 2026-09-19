@@ -33,8 +33,12 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::additional_prs::PrStamp;
+pub(crate) use crate::additional_prs::PrState;
 use crate::events::EventEmitter;
-use crate::gc::{gc_decide, row_handle, tree_action, GcAction, GcRow, KeepReason, TreeAction};
+use crate::gc::{
+    gc_decide, row_handle, row_label, tree_action, GcAction, GcRow, KeepReason, TreeAction,
+};
 use crate::graph_store::{self, WorkState};
 use crate::node_route;
 use crate::paths::AgentsHome;
@@ -110,6 +114,12 @@ pub struct GcSummary {
     /// done; the first open one, and the provenance source that resolved it,
     /// so a sessions-join keep is distinguishable from a name-pattern keep.
     pub kept_open_work: Vec<(String, String, String, String)>,
+    /// `(id, node, status, reader)` (change 2): open work whose
+    /// transcript is quiet INSIDE the open-work window. The keep names the
+    /// stale node pinning the row; quiet past the window the row falls to
+    /// the grace gate and would retire, so a reader can tell an aging keep
+    /// from one with no clock.
+    pub kept_open_work_stale: Vec<(String, String, String, String)>,
     /// `(id, age_s)`: the transcript was written inside the grace window.
     pub kept_active: Vec<(String, i64)>,
     /// `(id, detail)`: the fresh truth probe answered nothing
@@ -291,6 +301,7 @@ impl GcSummary {
             + self.kept_pr_contradicts.len()
             + self.kept_planning_unclosed.len()
             + self.kept_open_work.len()
+            + self.kept_open_work_stale.len()
             + self.kept_active.len()
             + self.kept_probe_unread.len()
             + self.kept_transcript_unresolved.len()
@@ -424,10 +435,10 @@ pub struct GraphRead {
     /// against, so no second id read exists.
     pub statuses: HashMap<String, String>,
     /// Node id -> (merge_status, additional_prs total, additional_prs still
-    /// open by recorded state) (change 7). The confirm step
-    /// reads positive PR-state evidence from it; a missing merge_status is
-    /// recorded as unrecorded, never asserted unmerged, and an additional PR
-    /// whose state is unrecorded still counts as open.
+    /// open under the three settle rules in [`crate::additional_prs`]). The
+    /// confirm step reads positive PR-state evidence from it; a missing
+    /// merge_status is recorded as unrecorded, never asserted unmerged, and
+    /// an additional PR no rule settles still counts as open.
     pub pr_state: HashMap<String, (Option<String>, usize, usize)>,
     /// Node id -> recorded `pr_number` (Locked Decision 1). `None` when the
     /// node carries no PR; absent when the node itself is unknown.
@@ -622,6 +633,7 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
     let mut pr_state: HashMap<String, (Option<String>, usize, usize)> = HashMap::new();
     let mut pr_number: HashMap<String, Option<u64>> = HashMap::new();
     let mut do_nodes: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    let primaries = crate::additional_prs::primary_index(&entries);
     for entry in &entries {
         let Some(node_id) = graph_store::entry_id(entry) else {
             continue;
@@ -645,7 +657,7 @@ pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
             .unwrap_or_default();
         let additional_open = additional
             .iter()
-            .filter(|extra| additional_pr_recorded_open(extra))
+            .filter(|extra| crate::additional_prs::additional_pr_open(extra, node_id, &primaries))
             .count();
         pr_state.insert(
             node_id.to_string(),
@@ -782,53 +794,24 @@ pub struct StaleDoRow {
     pub session_id: String,
 }
 
-/// Whether an `additional_prs` entry is still open by RECORDED state alone
-/// (change 7). Only an entry whose own `merge_status` reads `merged`
-/// has settled; an entry with no recorded state is still open - absence is
-/// never read as merged, the same fail-closed direction the node-level
-/// confirm takes. Nothing here queries a live tracker: recording the state
-/// at merge time is `fno do pr merge`'s job (`_sync_graph_merge_status`).
-pub(crate) fn additional_pr_recorded_open(extra: &Value) -> bool {
-    extra.get("merge_status").and_then(Value::as_str) != Some("merged")
-}
-
 /// Locked Decision 2's one REST read: `gh api repos/{owner}/{repo}/pulls/<n>`
 /// in the row's cwd. `Some(true)` open, `Some(false)` merged or closed,
 /// `None` unreadable - and an unreadable answer keeps the row. Bounded 30s;
 /// the caller caches per PR per pass, so steady state pays nothing.
 pub(crate) fn gh_pr_is_open(pr: u64, cwd: &str) -> Option<bool> {
     let path = format!("repos/{{owner}}/{{repo}}/pulls/{pr}");
-    let out = crate::loopcheck::bounded_read(
-        "gh".as_ref(),
-        &["api", &path],
-        Path::new(cwd),
-        "gc-sweep",
-        std::time::Duration::from_secs(30),
-    )
-    .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
-    if v.get("merged_at").and_then(Value::as_str).is_some() {
-        return Some(false);
-    }
-    match v.get("state").and_then(Value::as_str) {
-        Some("open") => Some(true),
-        Some("closed") => Some(false),
-        _ => None,
-    }
+    crate::additional_prs::gh_pr_state(&path, cwd).map(|state| state == PrState::Open)
 }
 
 /// Every open do row sitting on a settled node. Every clause is a positive
 /// marker: `status == "done"`; `merge_status == "merged"`, a field written
 /// only when a caller resolved MERGED from `gh`, so its absence has two
 /// explanations and neither is asserted here; and no `additional_prs` entry
-/// still open by recorded state - presence alone never holds the row, an
-/// entry whose recorded merge state says merged does not either, and an
-/// UNRECORDED entry does (change 7).
+/// still open under the three settle rules ([`crate::additional_prs`]) -
+/// presence alone never holds the row, and an entry no rule settles does.
 pub(crate) fn stale_open_do_rows(entries: &[Value]) -> Vec<StaleDoRow> {
     let mut stale = Vec::new();
+    let primaries = crate::additional_prs::primary_index(entries);
     for entry in entries {
         let Some(node_id) = graph_store::entry_id(entry) else {
             continue;
@@ -842,7 +825,11 @@ pub(crate) fn stale_open_do_rows(entries: &[Value]) -> Vec<StaleDoRow> {
         let holds_pr = entry
             .get("additional_prs")
             .and_then(Value::as_array)
-            .is_some_and(|a| a.iter().any(|extra| additional_pr_recorded_open(extra)));
+            .is_some_and(|a| {
+                a.iter().any(|extra| {
+                    crate::additional_prs::additional_pr_open(extra, node_id, &primaries)
+                })
+            });
         if holds_pr {
             continue;
         }
@@ -897,11 +884,22 @@ pub(crate) fn plan_stale_do_rows(home: &AgentsHome) -> Vec<StaleDoRow> {
 /// attempt. The fill runs fill-if-absent over a fresh read each attempt, so
 /// a retry never overwrites an `ended_at` another writer just added.
 pub(crate) fn settle_stale_do_rows(home: &AgentsHome) -> (Vec<StaleDoRow>, Vec<(String, String)>) {
+    let mut read = crate::additional_prs::gh_pr_state_reader();
+    settle_stale_do_rows_with(home, &mut read)
+}
+
+/// [`settle_stale_do_rows`] over a caller-supplied reader: tests stage
+/// their answers here, so no test touches the network.
+pub(crate) fn settle_stale_do_rows_with(
+    home: &AgentsHome,
+    read: &mut dyn FnMut(&str, &str) -> Option<PrState>,
+) -> (Vec<StaleDoRow>, Vec<(String, String)>) {
+    let mut refusals = crate::additional_prs::stamp_pass(home, read);
     let path = graph_path(home);
     const SETTLE_ATTEMPTS: usize = 5;
     for attempt in 0..SETTLE_ATTEMPTS {
         match settle_attempt(&path) {
-            Ok(settled) => return (settled, Vec::new()),
+            Ok(settled) => return (settled, refusals),
             Err(SettleRefusal::Retry(err)) if attempt + 1 < SETTLE_ATTEMPTS => {
                 let _ = err;
                 std::thread::sleep(std::time::Duration::from_millis(settle_backoff_ms(attempt)));
@@ -909,10 +907,12 @@ pub(crate) fn settle_stale_do_rows(home: &AgentsHome) -> (Vec<StaleDoRow>, Vec<(
             Err(SettleRefusal::Retry(err)) => {
                 let reason =
                     format!("settle write refused: {err} (after {SETTLE_ATTEMPTS} attempts)");
-                return (Vec::new(), vec![(String::new(), reason)]);
+                refusals.push((String::new(), reason));
+                return (Vec::new(), refusals);
             }
             Err(SettleRefusal::Fatal(reason)) => {
-                return (Vec::new(), vec![(String::new(), reason)])
+                refusals.push((String::new(), reason));
+                return (Vec::new(), refusals);
             }
         }
     }
@@ -955,6 +955,10 @@ fn settle_attempt(path: &std::path::Path) -> Result<Vec<StaleDoRow>, SettleRefus
     }
     let mut settled = Vec::new();
     for row in &stale {
+        // The instant comes from the transcript tail, not from now(): a sweep
+        // running hours late must not record a finish at the wrong time.
+        // None falls through to now() inside session_end, and ended_by still
+        // declares the stamp as inferred.
         match crate::backlog::api::session_end(
             &store,
             &row.node,
@@ -962,6 +966,7 @@ fn settle_attempt(path: &std::path::Path) -> Result<Vec<StaleDoRow>, SettleRefus
             "reap-sweep",
             Some("do"),
             Some(&row.harness),
+            crate::claude_adopt::transcript_stamp(&row.session_id).as_deref(),
         ) {
             Ok(payload) if payload.success => settled.push(row.clone()),
             Ok(_) => {}
@@ -989,6 +994,8 @@ enum SettleRefusal {
 fn settle_one_do_row(home: &AgentsHome, node: &str, session_id: &str) -> Result<bool, String> {
     let store = crate::backlog::api::Store::new(&graph_path(home));
     const ATTEMPTS: usize = 5;
+    // The tail instant is stable across attempts; probe once, not per retry.
+    let tail = crate::claude_adopt::transcript_stamp(session_id);
     for attempt in 0..ATTEMPTS {
         // The same eligibility the batch settle applies: the pair must sit
         // in the current stale set, re-read fresh each attempt. The matching
@@ -1009,6 +1016,7 @@ fn settle_one_do_row(home: &AgentsHome, node: &str, session_id: &str) -> Result<
             "reap-release",
             Some("do"),
             Some(&harness),
+            tail.as_deref(),
         ) {
             Ok(payload) if payload.success => return Ok(true),
             Ok(_) => return Ok(false),
@@ -1040,7 +1048,11 @@ fn release_basis_prefix(reason: &str, age_s: Option<i64>, detail: &str) -> Strin
 /// Drop each planned settle from the dry-run graph read, so the rehearsal
 /// reports the outcome the real pass would produce: a planned row no longer
 /// counts open.
-pub(crate) fn without_settled(mut graph: GraphRead, planned: &[StaleDoRow]) -> GraphRead {
+pub(crate) fn without_settled(
+    mut graph: GraphRead,
+    planned: &[StaleDoRow],
+    stamps: &[PrStamp],
+) -> GraphRead {
     for row in planned {
         let key = row.session_id.to_ascii_lowercase();
         if let Some(nodes) = graph.open_do.get_mut(&key) {
@@ -1048,6 +1060,11 @@ pub(crate) fn without_settled(mut graph: GraphRead, planned: &[StaleDoRow]) -> G
             if nodes.is_empty() {
                 graph.open_do.remove(&key);
             }
+        }
+    }
+    for stamp in stamps {
+        if let Some((_, _, open)) = graph.pr_state.get_mut(&stamp.node) {
+            *open = open.saturating_sub(1);
         }
     }
     graph
@@ -1065,6 +1082,7 @@ pub(crate) fn read_graph_node_states(
     home: &AgentsHome,
 ) -> Option<HashMap<String, (String, Option<String>, usize)>> {
     let entries = read_graph_rows(home)?;
+    let primaries = crate::additional_prs::primary_index(&entries);
     let mut states = HashMap::new();
     for entry in entries {
         let Some(id) = graph_store::entry_id(&entry) else {
@@ -1077,7 +1095,7 @@ pub(crate) fn read_graph_node_states(
             .unwrap_or_default();
         let additional_open = additional
             .iter()
-            .filter(|extra| additional_pr_recorded_open(extra))
+            .filter(|extra| crate::additional_prs::additional_pr_open(extra, id, &primaries))
             .count();
         states.insert(
             id.to_string(),
@@ -1609,6 +1627,13 @@ pub(crate) fn run_with_release(
     release: Option<&Release>,
 ) -> GcSummary {
     let mut summary = GcSummary::default();
+    // change 2: the open-work window, resolved once per pass beside
+    // the grace the caller handed in. The daemon and the verb both resolve
+    // grace against the process cwd, so this reads the same config ladder
+    // without a new parameter threaded through every caller.
+    let open_work_retire_s =
+        crate::agents_config::open_work_retire_secs(&std::env::current_dir().unwrap_or_default())
+            as i64;
     // The retention pass runs on EVERY sweep, before the empty-registry early
     // return: receipts age out on their own clock. Any receipt this pass goes
     // on to write carries `reaped_at` of now, so it can never be this
@@ -1767,7 +1792,7 @@ pub(crate) fn run_with_release(
     }
 
     for (e, staged_row) in registry.entries.iter().zip(staged.iter()) {
-        let id = row_handle(e);
+        let id = row_label(e);
         if e.origin.as_deref() == Some("operator") {
             summary.kept_operator.push(id);
             continue;
@@ -2109,6 +2134,7 @@ pub(crate) fn run_with_release(
             peer_drives_pr,
             pr_settled,
             origin_corpse: !is_spawn,
+            open_work_retire_s,
         };
         let (mut action, mut reason) = gc_decide(&row, grace_secs);
         // d-81c6da7e: a release matched to the planning hold answers the
@@ -2175,6 +2201,17 @@ pub(crate) fn run_with_release(
                         .unwrap_or("sessions")
                         .to_string();
                     summary.kept_open_work.push((id, node, status, reader))
+                }
+                Some(KeepReason::OpenWorkStale { node, status }) => {
+                    let reader = verdict
+                        .route
+                        .source
+                        .map(|s| s.as_str())
+                        .unwrap_or("sessions")
+                        .to_string();
+                    summary
+                        .kept_open_work_stale
+                        .push((id, node, status, reader))
                 }
                 Some(KeepReason::Active { age_s }) => summary.kept_active.push((id, age_s)),
                 Some(KeepReason::TranscriptUnresolved) => {
@@ -2287,7 +2324,7 @@ pub(crate) fn run_with_release(
         // child's tree.
         if !sid.is_empty() && row.session_terminal.is_none() {
             if let Some(child) = crate::spawn_edge::live_child_of(e, &registry.entries) {
-                summary.kept_live_descendants.push((id, row_handle(child)));
+                summary.kept_live_descendants.push((id, row_label(child)));
                 continue;
             }
         }
@@ -2788,7 +2825,7 @@ pub(crate) fn run_with_release(
             .filter(|e| e.cwd == cwd && !to_retire.contains_key(&e.name))
             .min_by_key(|e| &e.name);
         if let Some(occupant) = occupant {
-            let holder = row_handle(occupant);
+            let holder = row_label(occupant);
             for name in names {
                 if let Some(order) = to_retire.get_mut(&name) {
                     order.tree = TreeAction::None;
@@ -3198,7 +3235,7 @@ pub(crate) fn commit_retirements(
                 order.tree = TreeAction::None;
                 report
                     .kept_shared_tree
-                    .push((order.id.clone(), row_handle(occupant)));
+                    .push((order.id.clone(), row_label(occupant)));
             }
         }
         r.entries.retain(|e| {
@@ -4810,7 +4847,19 @@ mod tests {
         seed_store(&home, vec![one_stale_do_entry("x-settle")]);
         assert_eq!(plan_stale_do_rows(&home).len(), 1);
 
+        // The settle now asks the transcript tail for the instant, which
+        // resolves the claims root and the projects dir; pin both so the
+        // hermetic guard holds and the lookup answers None (the fill falls
+        // through to now()).
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::paths::pin_test_claims_root(&base);
+        let projects = base.join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, &projects);
         let (settled, refusals) = settle_stale_do_rows(&home);
+        std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
         assert!(refusals.is_empty(), "refusals: {refusals:?}");
         assert_eq!(settled.len(), 1);
         assert_eq!(settled[0].session_id, "s-open");

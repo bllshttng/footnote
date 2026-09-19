@@ -25,6 +25,35 @@ run() {
   PR_BODY="$body" PR_HEAD_REF="$ref" bash "$GATE" >/dev/null 2>&1
 }
 
+# run_err <body> <head_ref> <errfile>; captures stderr for content assertions.
+run_err() {
+  local body="$1"; local ref="$2"; local errfile="$3"
+  PR_BODY="$body" PR_HEAD_REF="$ref" bash "$GATE" >/dev/null 2>"$errfile"
+}
+
+# run_err fails: a two-line body must hear that only the LAST line counts.
+ERR=$(mktemp)
+if run_err $'Backlog-Closure: x-aaaa\nBacklog-Closure: x-bbbb' "feature/x-aaaa" "$ERR"; then
+  fail "two-line body should fail"
+fi
+for want in "2 Backlog-Closure lines" "x-bbbb" "x-aaaa" "--extra"; do
+  grep -q -e "$want" "$ERR" || fail "two-line refusal should name '$want'"
+done
+pass "two-line refusal names the count, the id read, the id wanted, and --extra"
+
+# run_err fails: a body with no trailer still says how many lines it read.
+if run_err "Fixes the thing." "feature/x-aaaa" "$ERR"; then
+  fail "no-trailer body should fail"
+fi
+grep -q "0 Backlog-Closure lines" "$ERR" || fail "no-trailer refusal should say '0 Backlog-Closure lines'"
+pass "no-trailer refusal names the zero count"
+
+# The shipped workflow's remedy must name --extra, or a reader steered to it
+# by the gate's annotation learns the singular form again.
+grep -q -- '--extra' "${SCRIPT_DIR}/../../.github/workflows/pr-node-closure.yml" \
+  || fail "pr-node-closure.yml remedy should name --extra"
+pass "workflow remedy names --extra"
+
 # target: the branch's own node id is exactly claimed.
 run "Fixes the thing.
 

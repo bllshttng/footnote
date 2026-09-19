@@ -19,7 +19,7 @@ const DEFAULT_CHECKIN_SECS: i64 = 14400;
 /// The window is three check-in intervals (Python `verdict_counts`).
 const WINDOW_INTERVALS: i64 = 3;
 /// The default compaction ceiling (`config.king.compaction_ceiling`).
-const DEFAULT_COMPACTION_CEILING: i64 = 3;
+pub(crate) const DEFAULT_COMPACTION_CEILING: i64 = 3;
 
 /// The registry statuses Python reads as terminal (`registry.TERMINAL_STATUSES`).
 fn row_status_word(status: &AgentStatus) -> Option<&'static str> {
@@ -478,8 +478,17 @@ mod tests {
     #[test]
     fn checkin_interval_defaults_to_four_hours_and_window_to_twelve() {
         let dir = tmp("default-interval");
+        // Pin FNO_CONFIG: a live global config carrying king.checkin_interval
+        // (or a prior test's leaked path) must not answer for the default.
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", dir.join("config.toml"));
         // Keep the Python KingBlock default in _king.py aligned with this leg.
-        assert_eq!(checkin_interval_secs(&dir), 14400);
+        let got = checkin_interval_secs(&dir);
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        assert_eq!(got, 14400);
         assert_eq!(window_display(WINDOW_INTERVALS * 14400), "12h");
     }
 

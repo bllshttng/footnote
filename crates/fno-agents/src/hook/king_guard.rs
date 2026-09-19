@@ -2,12 +2,12 @@
 //!
 //! Port of `hooks/king-delegation-guard.sh` policy: a session whose registry
 //! row carries a crown and whose reign manifest declares shape `court` is
-//! refused Edit/Write/NotebookEdit and shell writes to source. Write-path
-//! allowlist, never delegation advice: a crowned session may author its plans
-//! dir, crown handoff doc, escalations dir, and auto-memory; anything else
-//! fail-closes. Any failure to READ (payload, registry, manifest, config)
-//! allows - the never-block contract - except escalations, whose unresolved
-//! resolver turns off only that carve-out.
+//! refused Edit/Write/NotebookEdit and shell writes to source. Inverted
+//! predicate, never delegation advice: SOURCE is any path realpath-inside
+//! the repo root, except the repo's `.fno` state tree; everything else - the
+//! vault wherever it lives, memory wherever the harness keeps it - allows.
+//! Any failure to READ (payload, registry, manifest, config) allows - the
+//! never-block contract.
 //!
 //! The one behavior change the blueprint names: a missing `fno-agents`
 //! binary now allows with one stderr line (the wrapper's business), and the
@@ -141,16 +141,10 @@ pub fn run(_args: &[String]) -> i32 {
         return allow("");
     }
 
-    // 8. Allowed roots. Plans/handoff unresolvable ALLOWS everything (the
-    //    never-block contract); escalations unresolved only turns off itself.
-    let Some(plans_dir) = plans_content_dir(&cwd) else {
-        return allow("plans resolver unresolved; allowing");
-    };
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let Some(handoff) = crown_handoff_path(&cwd, home.as_deref(), crown_scope, &sid) else {
-        return allow("handoff resolver unresolved; allowing");
-    };
-    let escalations = crate::escalation::dir(&cwd);
+    // 8. The repo root is the only DENY region. Realpath containment has no
+    //    unresolvable state, so the never-block contract needs no escape
+    //    hatch here: outside the repo allows, whatever it is.
+    let repo_root = crate::paths::worktree_repo_root(&cwd);
 
     // 9. Limb carve-outs (checked after the roots resolve, like the shell).
     let agent_id = payload
@@ -175,13 +169,9 @@ pub fn run(_args: &[String]) -> i32 {
         ));
     }
 
-    // 10. Decide: the write-path allowlist, one predicate for every tool.
-    let allowed = |t: &str| {
-        in_plans(t, &cwd, &plans_dir)
-            || real_eq(t, &cwd, &handoff)
-            || in_memory(t, &cwd, home.as_deref())
-            || real_prefix(t, &cwd, &escalations)
-    };
+    // 10. Decide: deny SOURCE, allow everything else, one predicate for
+    //     every tool.
+    let allowed = |t: &str| !write_denied(t, &cwd, &repo_root);
     let denied: Option<String> = match tool {
         "Edit" | "Write" | "NotebookEdit" => {
             let file = ti
@@ -201,23 +191,21 @@ pub fn run(_args: &[String]) -> i32 {
         return allow("");
     };
     if mode == "warn" {
-        eprintln!("{}", deny_text(&denied, &plans_dir, &handoff, &escalations));
+        eprintln!("{}", deny_text(&denied, &repo_root));
         return allow("");
     }
-    let text = deny_text(&denied, &plans_dir, &handoff, &escalations);
+    let text = deny_text(&denied, &repo_root);
     eprint!("{text}");
     super::emit_block(&text)
 }
 
-/// The two-line refusal, byte-identical to the shell's `_deny_text`.
-fn deny_text(target: &str, plans: &Path, handoff: &Path, escalations: &Path) -> String {
+/// The two-line refusal. The shell twin is a pure exec shim, so this text is
+/// the only copy of the rule it enforces.
+fn deny_text(target: &str, repo_root: &Path) -> String {
     format!(
-        "king-delegation-guard: write target '{target}' is outside the allowed roots for a crowned session.\n\
-         Allowed roots: the plans directory ({plans}), the crown handoff doc ({handoff}), the escalations directory ({escalations}), and auto-memory ({home}/.claude/projects/*/memory/).\n",
-        plans = plans.display(),
-        handoff = handoff.display(),
-        escalations = escalations.display(),
-        home = std::env::var("HOME").unwrap_or_else(|_| "~".to_string()),
+        "king-delegation-guard: write target '{target}' is inside the repo ({repo}), and a crowned session does not write SOURCE.\n\
+         A king operates the machine and does not author it: deploy and repair verbs (fno config plugin install, fno doctor update) run, build output and everything outside the repo allow, repo source does not. Delegate the edit or escalate.\n",
+        repo = repo_root.display(),
     )
 }
 
@@ -236,17 +224,19 @@ fn emit_telemetry(cwd: &Path, tool: &str, denied: bool) {
 
 // ── Shell write classification (the tokenizer port) ──────────────────────────
 
-/// Write targets a Bash command binds, classified the way the shell saw them:
-/// redirects, tee/sponge/truncate operands, cp/mv/install destinations, dd
-/// of=, in-place sed/perl files, ed/ex files. A `shlex::split` failure means
-/// no targets (a malformed shell never executes).
+/// Write targets a Bash command binds: redirects, tee/sponge/truncate
+/// operands, cp/mv/install destinations, dd of=, in-place sed/perl files,
+/// ed/ex files. A `lex` failure (unterminated quote) means no targets - a
+/// malformed shell never executes.
 fn write_targets(command: &str) -> Vec<String> {
-    let Some(tokens) = shlex::split(command) else {
+    let Some(tokens) = lex(command) else {
         return Vec::new();
     };
     // Python's re.fullmatch over `[&\d]+`: a token made only of `&` and digits.
     let is_fd = |t: &str| !t.is_empty() && t.bytes().all(|b| b == b'&' || b.is_ascii_digit());
-    let bound = |t: &str| matches!(t, ";" | "|" | "&&" | "||" | "&");
+    let bound = |t: &str| {
+        matches!(t, ";" | ";;" | "|" | "||" | "&&" | "&" | "(" | ")" | "\n") || t.starts_with('<')
+    };
     let flush = |verb: &Option<String>, pool: &[String], targets: &mut Vec<String>| {
         let Some(verb) = verb else {
             return;
@@ -291,6 +281,7 @@ fn write_targets(command: &str) -> Vec<String> {
     let mut pool: Vec<String> = Vec::new();
     let mut nxt = false;
     let mut val = false;
+    let mut at_command = true;
     for tok in &tokens {
         if bound(tok) {
             flush(&verb, &pool, &mut targets);
@@ -298,55 +289,60 @@ fn write_targets(command: &str) -> Vec<String> {
             pool.clear();
             nxt = false;
             val = false;
+            at_command = true;
         } else if nxt {
             nxt = false;
-            if !bound(tok) && !tok.contains('>') && !is_fd(tok) {
-                targets.push(tok.clone());
+            // Only a lexer-glued closer (NUL-marked) is substitution syntax;
+            // a quoted or escaped literal closer is part of the path. Closers
+            // and markers interleave when substitutions nest, so a marked
+            // word trims the combined set from the end.
+            let w = if tok.contains('\u{0}') {
+                tok.trim_end_matches([')', '`', '\u{0}'])
+            } else {
+                tok.as_str()
+            };
+            if !w.contains('>') && !is_fd(w) {
+                targets.push(w.to_string());
             }
         } else if is_redirect(tok) {
+            // `lex` emits redirects as their own tokens (`2>`, `>`, `>>`,
+            // `>&`, `&>`, `>|`, `>`!), so every shape here just arms `nxt`
+            // and the next word is judged as the redirect target.
             let rest = tok.trim_start_matches(|c: char| c.is_ascii_digit());
-            if let Some(stripped) = rest.strip_prefix("&>") {
-                if stripped.is_empty() {
-                    nxt = true;
-                } else {
-                    targets.push(stripped.to_string());
-                }
-            } else if rest == ">&" {
+            let plain = rest.strip_prefix('&').unwrap_or(rest);
+            if rest == "&>" || matches!(plain, ">" | ">>" | ">|" | ">!" | ">&") {
                 nxt = true;
-            } else {
-                let plain = rest.trim_start_matches('&');
-                if matches!(plain, ">" | ">>" | ">|" | ">!") {
-                    nxt = true;
-                } else {
-                    let body = plain
-                        .trim_start_matches('>')
-                        .trim_end_matches([';', '|', '&']);
-                    if !body.is_empty() && !is_fd(body) {
-                        targets.push(body.to_string());
-                    }
-                }
             }
         } else if val {
             val = false;
-        } else if verb.is_none() {
-            if matches!(
-                tok.as_str(),
-                "tee"
-                    | "sponge"
-                    | "truncate"
-                    | "cp"
-                    | "mv"
-                    | "install"
-                    | "dd"
-                    | "sed"
-                    | "perl"
-                    | "ed"
-                    | "ex"
-            ) {
-                verb = Some(tok.clone());
-                pool.clear();
+        } else if at_command {
+            // The verb table only applies in command position, so `install`
+            // in `fno config plugin install claude` stays a positional word.
+            // An assignment (`B=/path mv a b`) and a wrapper word (sudo, env,
+            // command, nohup, time) hand command position to the next word.
+            if !is_assignment(tok)
+                && !matches!(tok.as_str(), "sudo" | "env" | "command" | "nohup" | "time")
+            {
+                at_command = false;
+                if matches!(
+                    tok.as_str(),
+                    "tee"
+                        | "sponge"
+                        | "truncate"
+                        | "cp"
+                        | "mv"
+                        | "install"
+                        | "dd"
+                        | "sed"
+                        | "perl"
+                        | "ed"
+                        | "ex"
+                ) {
+                    verb = Some(tok.clone());
+                    pool.clear();
+                }
             }
-        } else {
+        } else if verb.is_some() {
             if matches!(tok.as_str(), "-e" | "-f" | "-i") {
                 val = true;
             }
@@ -354,8 +350,201 @@ fn write_targets(command: &str) -> Vec<String> {
         }
     }
     flush(&verb, &pool, &mut targets);
+    // The verb-operand flush saw the glued closers too; strip them here so
+    // `N=$(cmd | tee out.txt)` names `out.txt`, not `out.txt)`. A word with
+    // no marker keeps its literal trailing closers.
+    for t in &mut targets {
+        if t.contains('\u{0}') {
+            let n = t.trim_end_matches([')', '`', '\u{0}']).len();
+            t.truncate(n);
+        }
+    }
     targets.retain(|t| !t.is_empty());
     targets
+}
+
+/// Lex a command into words and operator tokens; `None` on an unterminated
+/// quote (a malformed shell never executes). Unlike `shlex::split`, unquoted
+/// `;` `|` `&` `(` `)` newline and redirects arrive as their own tokens, so
+/// `2>&1|tail` can never read as one word.
+///
+/// `<<DELIM`/`<<-DELIM` heredoc bodies are swallowed whole, never re-lexed as
+/// more shell text - unless the reading command is a shell (bash/sh/zsh), in
+/// which case the body is lexed again and its tokens spliced in, so `bash
+/// <<EOF` still judges a real write in its body, but a heredoc mailed as a
+/// file body never donates a phantom write target.
+fn lex(command: &str) -> Option<Vec<String>> {
+    let mut toks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    // Glued `(`/`)` inside a word: an open command substitution survives a
+    // whitespace split (`$(pick x)` lexes as `$(pick` + `x)`), so a depth
+    // counter, not the current word, decides whether `)` is literal.
+    let mut subst = 0usize;
+    let mut bt = 0usize;
+    // Set right after a `<<`/`<<-` token: (strip_tabs, reader_is_shell), for
+    // the newline arm to act on once the delimiter word lands in `toks`.
+    let mut heredoc: Option<(bool, bool)> = None;
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if let Some(&n) = chars.peek() {
+                    cur.push(n);
+                    chars.next();
+                } else {
+                    cur.push('\\');
+                }
+            }
+            '\'' => loop {
+                match chars.next() {
+                    Some('\'') => break,
+                    Some(ch) => cur.push(ch),
+                    None => return None,
+                }
+            },
+            '"' => loop {
+                match chars.next() {
+                    Some('"') => break,
+                    // Inside double quotes a backslash keeps its special
+                    // meaning only before these four characters.
+                    Some('\\') if matches!(chars.peek(), Some('"' | '\\' | '$' | '`')) => {
+                        cur.push(chars.next()?);
+                    }
+                    Some(ch) => cur.push(ch),
+                    None => return None,
+                }
+            },
+            ' ' | '\t' | '\r' => {
+                if !cur.is_empty() {
+                    toks.push(std::mem::take(&mut cur));
+                }
+            }
+            ';' | '|' | '&' | '\n' => {
+                if !cur.is_empty() {
+                    toks.push(std::mem::take(&mut cur));
+                }
+                if c == '\n' && heredoc.is_some() {
+                    let (strip_tabs, reader_is_shell) = heredoc.take().unwrap();
+                    let delim = toks.last().cloned().unwrap_or_default();
+                    let mut body = String::new();
+                    let mut line = String::new();
+                    while let Some(bc) = chars.next() {
+                        if bc != '\n' {
+                            line.push(bc);
+                            continue;
+                        }
+                        let bare = if strip_tabs {
+                            line.trim_start_matches('\t')
+                        } else {
+                            &line[..]
+                        };
+                        if bare == delim {
+                            break;
+                        }
+                        body.push_str(&line);
+                        body.push('\n');
+                        line.clear();
+                    }
+                    if reader_is_shell {
+                        if let Some(sub) = lex(&body) {
+                            toks.extend(sub);
+                        }
+                    }
+                    toks.push("\n".to_string());
+                    continue;
+                }
+                let mut op = c.to_string();
+                while chars.peek() == Some(&c) {
+                    op.push(c);
+                    chars.next();
+                }
+                // `&>` redirects both streams; it is not the background `&`.
+                if c == '&' && chars.peek() == Some(&'>') {
+                    chars.next();
+                    op.push('>');
+                }
+                toks.push(op);
+            }
+            '(' | ')' => {
+                // Parens are operators at a word boundary; inside a word
+                // they are literal while a `$(...)` substitution is open,
+                // so `$(mktemp)` stays one word.
+                if c == '(' && !cur.is_empty() {
+                    cur.push(c);
+                    subst += 1;
+                } else if c == ')' && subst > 0 {
+                    cur.push(c);
+                    // NUL marks a lexer-glued closer; a quoted literal never
+                    // carries one, so a target trim can tell them apart.
+                    cur.push('\u{0}');
+                    subst -= 1;
+                } else {
+                    if !cur.is_empty() {
+                        toks.push(std::mem::take(&mut cur));
+                    }
+                    toks.push(c.to_string());
+                }
+            }
+            '`' => {
+                // An unquoted backtick is a command-substitution delimiter,
+                // exactly like the `$( ` opener: open glues into the word,
+                // close glues with the marker.
+                if bt > 0 {
+                    cur.push(c);
+                    cur.push('\u{0}');
+                    bt -= 1;
+                } else {
+                    cur.push(c);
+                    bt += 1;
+                }
+            }
+            '<' | '>' => {
+                let mut redir = String::new();
+                if c == '>' && !cur.is_empty() && cur.bytes().all(|b| b.is_ascii_digit()) {
+                    // The digits are the fd prefix of `2>`.
+                    redir.push_str(&cur);
+                    cur.clear();
+                } else if !cur.is_empty() {
+                    toks.push(std::mem::take(&mut cur));
+                }
+                redir.push(c);
+                while matches!(chars.peek(), Some('>' | '<' | '&' | '|' | '!')) {
+                    redir.push(chars.next()?);
+                }
+                if redir == "<<" && chars.peek() == Some(&'-') {
+                    redir.push('-');
+                    chars.next();
+                }
+                // The reader is just the word right before `<<DELIM`: real
+                // heredocs are always `bash <<EOF`, never preceded by a
+                // redirect target, so the immediate predecessor suffices.
+                if redir == "<<" || redir == "<<-" {
+                    let shell = toks.last().is_some_and(|t| {
+                        matches!(t.rsplit('/').next().unwrap_or(t), "bash" | "sh" | "zsh")
+                    });
+                    heredoc = Some((redir == "<<-", shell));
+                }
+                toks.push(redir);
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        toks.push(cur);
+    }
+    Some(toks)
+}
+
+/// `^[A-Za-z_][A-Za-z0-9_]*=`: a leading assignment keeps command position,
+/// so `B=/path mv a b` is a mv, not a command named `B=/path`.
+fn is_assignment(t: &str) -> bool {
+    let Some(eq) = t.find('=') else {
+        return false;
+    };
+    let name = &t[..eq];
+    let mut ch = name.chars();
+    matches!(ch.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && ch.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// `^\d*&?>`: optional leading fd digits, optional `&`, then a redirect.
@@ -420,120 +609,6 @@ fn resolve_sid(payload_sid: &str, transcript: &str) -> String {
     sid
 }
 
-// ── Allowed roots ────────────────────────────────────────────────────────────
-
-/// `cli/src/fno/paths.py` `plans_content_dir` port: `.claude/settings*.json`
-/// tiers, then `plans_dir` (default `.fno/plans/` -> the space's plans dir).
-/// `None` = unresolvable (the caller allows everything, never blocks).
-fn plans_content_dir(cwd: &Path) -> Option<PathBuf> {
-    let root = crate::paths::worktree_repo_root(cwd);
-    for name in ["settings.local.json", "settings.json"] {
-        let parsed = std::fs::read_to_string(root.join(".claude").join(name))
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-        if let Some(raw) = parsed
-            .as_ref()
-            .and_then(|v| v.get("plansDirectory"))
-            .and_then(Value::as_str)
-        {
-            if !raw.is_empty() {
-                let p = PathBuf::from(raw);
-                return Some(if p.is_absolute() { p } else { root.join(p) });
-            }
-        }
-    }
-    plans_dir(cwd)
-}
-
-/// `plans_dir` port: config `plans_dir`, default `.fno/plans/` -> the space's
-/// plans dir; plain-relative values anchor at the repo root; template or
-/// absolute values expand ~, {vault}, {project} (unresolvable -> None).
-fn plans_dir(cwd: &Path) -> Option<PathBuf> {
-    let raw = config_lookup(cwd, &["plans_dir"])
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_else(|| ".fno/plans/".to_string());
-    if raw == ".fno/plans/" {
-        return Some(crate::paths::space_dir(cwd).join("plans"));
-    }
-    let leading = raw.trim_start();
-    if !leading.is_empty() && !leading.starts_with(['/', '~']) && !raw.contains(['$', '{']) {
-        return Some(
-            crate::paths::worktree_repo_root(cwd)
-                .join(raw)
-                .components()
-                .collect::<PathBuf>(),
-        );
-    }
-    // Template form: ~, {vault}, {project} over the finalize.rs helpers;
-    // None when an {...} token stays unresolved.
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let project = crate::finalize::resolve_project_name(None, home.as_deref(), cwd);
-    let expanded = crate::finalize::expand_handoffs_template(&raw, home.as_deref(), &project)?;
-    // `{vault}` reaches here only as a literal-brace token: expansion refuses
-    // unknown tokens, so resolve the vault root the way Python's _resolve did.
-    if expanded.to_string_lossy().contains('{') {
-        let candidates = vec![
-            cwd.join(".fno/config.toml"),
-            home.clone()?.join(".fno/config.toml"),
-        ];
-        let vault = crate::finalize::resolve_obsidian_vault(&candidates)?;
-        let vroot = crate::finalize::resolve_vault_root(&vault, home.as_deref())?;
-        let raw = expanded
-            .to_string_lossy()
-            .replace("{vault}", &vroot.to_string_lossy());
-        return (!raw.contains('{')).then(|| PathBuf::from(raw));
-    }
-    Some(expanded)
-}
-
-/// The crown handoff doc path (paths_cli.py `handoff` port): the scope form
-/// names `crown-<sanitized scope>` and takes the NEWEST existing `*-<key>.md`
-/// in the handoffs dir; the session form is today's `<YYYYMMDD>-<first 8 of
-/// the sid>.md`. Unresolvable dir -> None (the caller allows).
-fn crown_handoff_path(cwd: &Path, home: Option<&Path>, scope: &str, sid: &str) -> Option<PathBuf> {
-    let dir = crate::finalize::resolve_handoffs_dir(None, None, cwd, home);
-    let today = chrono::Local::now().format("%Y%m%d");
-    if !scope.is_empty() {
-        let key = format!("crown-{}", crate::king_checkin::sanitize_scope_key(scope));
-        // The glob `*-<key>.md` takes ANY prefix, empty included; a bare
-        // `sibling<key>.md` without the separator must not match.
-        let newest: Option<(PathBuf, std::time::SystemTime)> = std::fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|entry| {
-                let p = entry.path();
-                let name = p.file_name()?.to_string_lossy().into_owned();
-                if name.starts_with('.') {
-                    return None;
-                }
-                let stem = name.strip_suffix(".md")?;
-                if !stem
-                    .strip_suffix(&key)
-                    .is_none_or(|head| head.ends_with('-') || head.is_empty())
-                {
-                    return None;
-                }
-                let mtime = entry
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                Some((p, mtime))
-            })
-            .fold(None, |best, (p, mtime)| match best {
-                best @ Some((_, b)) if mtime <= b => best,
-                _ => Some((p, mtime)),
-            });
-        return Some(
-            newest
-                .map(|(p, _)| p)
-                .unwrap_or_else(|| dir.join(format!("{today}-{key}.md"))),
-        );
-    }
-    let key: String = sid.chars().take(8).collect();
-    Some(dir.join(format!("{today}-{key}.md")))
-}
-
 // ── Containment ──────────────────────────────────────────────────────────────
 
 /// Lexical normalization (Python's os.path.normpath): collapse //, . and ..
@@ -591,41 +666,36 @@ fn real_of(p: &str, cwd: &Path) -> PathBuf {
     normpath(&joined)
 }
 
-/// Plans containment (normpath, not realpath - the shell compared normpaths).
-fn in_plans(p: &str, cwd: &Path, plans: &Path) -> bool {
-    let p = normpath(&abs_join(p, cwd));
-    let d = normpath(plans);
-    p == d || p.starts_with(&d)
-}
-
-/// Handoff containment: realpath equality (the vault symlink must not split
-/// the two spellings).
-fn real_eq(p: &str, cwd: &Path, target: &Path) -> bool {
-    real_of(p, cwd) == real_of(&target.to_string_lossy(), cwd)
-}
-
-/// Escalations containment: realpath prefix.
+/// Realpath prefix containment.
 fn real_prefix(p: &str, cwd: &Path, root: &Path) -> bool {
     let p = real_of(p, cwd);
     let root = real_of(&root.to_string_lossy(), cwd);
     p == root || p.starts_with(&root)
 }
 
-/// Memory carve-out: exactly `$HOME/.claude/projects/<project>/memory/**`.
-fn in_memory(p: &str, cwd: &Path, home: Option<&Path>) -> bool {
-    home.is_some_and(|home| {
-        let root = real_of(
-            &home.join(".claude").join("projects").to_string_lossy(),
-            cwd,
-        );
-        let p = real_of(p, cwd);
-        p.starts_with(&root)
-            && p.strip_prefix(&root)
-                .unwrap()
-                .components()
-                .nth(1)
-                .is_some_and(|c| c.as_os_str() == "memory")
-    })
+/// The inverted step-10 predicate (2026-09-17 ruling): SOURCE is any path
+/// realpath-inside the repo root, with carve-outs for the repo's `.fno`
+/// state tree and for build output. The vault is not source; a write
+/// outside the repo allows wherever it lands.
+fn write_denied(t: &str, cwd: &Path, repo_root: &Path) -> bool {
+    real_prefix(t, cwd, repo_root)
+        && !real_prefix(t, cwd, &repo_root.join(".fno"))
+        && !is_build_output(t, cwd)
+}
+
+/// A path whose nearest ancestor directory holds a `CACHEDIR.TAG` is build
+/// output, not source. Cargo target dirs sit inside the repo and outside
+/// `.fno`; matched by the tag file, never by the name `target`, which is
+/// also a source directory name (`.claude/rules/worktrees.md`).
+fn is_build_output(t: &str, cwd: &Path) -> bool {
+    let mut dir = real_of(t, cwd).parent().map(Path::to_path_buf);
+    while let Some(d) = dir {
+        if d.join("CACHEDIR.TAG").is_file() {
+            return true;
+        }
+        dir = d.parent().map(Path::to_path_buf);
+    }
+    false
 }
 
 // ── Limb signatures ──────────────────────────────────────────────────────────
@@ -728,17 +798,51 @@ mod tests {
             targets("cmd 2>&1 | tee").is_empty(),
             "fd dup is not a write"
         );
+        // A dup inside a command substitution: `lex` glues the closers
+        // into the word while `$( ` is open, so `1)` must still read as fd.
+        assert!(
+            targets("N=$(cmd 2>&1)").is_empty(),
+            "subst dup is not a write"
+        );
+        assert!(
+            targets("N=`cmd 2>&1`").is_empty(),
+            "backtick dup is not a write"
+        );
+        assert!(
+            targets("N=$(a $(b 2>&1))").is_empty(),
+            "nested subst dup is not a write"
+        );
+        assert!(
+            targets("N=$(cmd >&2)").is_empty(),
+            "reversed dup is not a write"
+        );
+        assert_eq!(
+            targets("X=$(cmd > out.txt)"),
+            vec!["out.txt"],
+            "a real write inside a substitution still binds"
+        );
+        assert_eq!(
+            targets("N=$(cmd | tee out.txt)"),
+            vec!["out.txt"],
+            "tee inside a substitution still binds"
+        );
+        assert_eq!(
+            targets("printf x > '1)'"),
+            vec!["1)"],
+            "a quoted literal closer is part of the path"
+        );
         // Quoted "a > b" is one word, not an operator.
         assert!(targets("echo \"a > b\"").is_empty());
     }
 
     #[test]
     fn verb_operands_bind() {
-        // The shell policy took EVERY tee operand as a write, including stdin
-        // redirection words (`<`, the file): over-broad by design, fail-closed.
+        // `<` now lexes as a read operator, so the stdin file is no
+        // longer bound as a tee write (deliberate narrowing of the old
+        // over-broad rule; the real writes still bind).
         assert_eq!(
             targets("tee /tmp/x /tmp/y < /tmp/in"),
-            vec!["/tmp/x", "/tmp/y", "<", "/tmp/in"]
+            vec!["/tmp/x", "/tmp/y"]
         );
         // `-s`'s value is treated as a file too (the shell policy never
         // modelled option values; over-broad, fail-closed).
@@ -765,6 +869,108 @@ mod tests {
     #[test]
     fn malformed_shell_never_judged() {
         assert!(targets("echo 'unterminated").is_empty());
+        assert!(targets("echo \"unterminated").is_empty());
+    }
+
+    /// A cwd-only helper for the heredoc specimens below: session cwd is
+    /// already the repo root, so a relative path resolves inside it exactly
+    /// as a real crowned session would see it.
+    fn bash_allowed_in(repo: &Path, cmd: &str) -> bool {
+        targets(cmd).iter().all(|t| !write_denied(t, repo, repo))
+    }
+
+    #[test]
+    fn heredoc_append_to_job_tmp_allows() {
+        // Regression: a heredoc body that happens to quote a shell command
+        // as prose (a mail draft showing `cat > payload-e9d6.txt` as an
+        // example) must not donate that relative path as a write target.
+        let repo = std::env::temp_dir().join(format!("kgd-heredoc-jobtmp-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&repo);
+        let cmd = "cat >> /Users/bb16/.claude/jobs/X/tmp/payload.txt <<'EOF'\n\
+                   run: cat > payload-e9d6.txt\nEOF";
+        assert!(
+            bash_allowed_in(&repo, cmd),
+            "a heredoc body must not donate a phantom write target"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn heredoc_body_naming_a_repo_path_still_allows() {
+        // The body names a real repo path next to a write-verb word (`cp`);
+        // `cat` never reads its own stdin as commands, so the whole body is
+        // inert text, not a `cp` invocation to classify.
+        let repo = std::env::temp_dir().join(format!("kgd-heredoc-body-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&repo);
+        let cmd = "cat >> /tmp/out.txt <<'EOF'\n\
+                   example: cp notes.txt crates/fno-agents/src/lib.rs\nEOF";
+        assert!(bash_allowed_in(&repo, cmd));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn shell_reading_heredoc_body_still_refuses_a_real_write() {
+        // `bash <<'EOF'` DOES read its stdin as commands, so a real write
+        // inside that body still refuses.
+        let repo = std::env::temp_dir().join(format!("kgd-heredoc-shell-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&repo);
+        let cmd = "bash <<'EOF'\ncat > crates/fno-agents/src/lib.rs\nEOF";
+        assert!(!bash_allowed_in(&repo, cmd));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn plain_in_repo_heredoc_write_still_refuses() {
+        // A heredoc attached to the command's OWN redirect, not its body,
+        // still refuses - the heredoc parsing never loosens a real write.
+        let repo = std::env::temp_dir().join(format!("kgd-heredoc-plain-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&repo);
+        let cmd = "cat > crates/fno-agents/src/lib.rs <<'EOF'\nbody\nEOF";
+        assert!(!bash_allowed_in(&repo, cmd));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn operators_and_positionals_never_bind() {
+        // Crown-session specimens, refused on main, each a subcommand
+        // argument or fd
+        // duplication, never a path the command writes.
+        assert!(targets("fno config plugin install claude").is_empty());
+        assert!(targets("brew install jq").is_empty());
+        assert!(targets("npm install --save-dev x").is_empty());
+        assert!(
+            targets("/usr/bin/git fetch origin pull/2175/head --quiet 2>&1|tail -1").is_empty()
+        );
+        // `;` glued to a word is a boundary: the printf operand never joins
+        // the mv operand pool.
+        assert_eq!(
+            targets("B=x; mv a b; ls -l c; printf '{}' | bash h.sh"),
+            vec!["b"]
+        );
+        // A subshell boundary flushes the pool like `;` does.
+        assert_eq!(targets("(cd /tmp && mv a b)"), vec!["b"]);
+        // Command substitution stays one word: no phantom operand.
+        assert_eq!(targets("cp $(mktemp) /tmp/d"), vec!["/tmp/d"]);
+        // An open substitution survives a whitespace split: the real
+        // destination binds, never a fragment inside `$( )`.
+        assert_eq!(targets("mv $(pick_build x) /tmp/out"), vec!["/tmp/out"]);
+        assert_eq!(targets("mv $(a $(b) c) /tmp/z"), vec!["/tmp/z"]);
+    }
+
+    #[test]
+    fn command_position_still_binds_real_writes() {
+        // A genuine redirect binds, today and after (positive control).
+        assert_eq!(
+            targets("echo hi > cli/src/fno/x.py"),
+            vec!["cli/src/fno/x.py"]
+        );
+        // A real `install` in command position binds its destination.
+        assert_eq!(targets("install -d /tmp/x"), vec!["/tmp/x"]);
+        // The keep words hand command position to the write verb.
+        assert_eq!(targets("sudo mv a /tmp/b"), vec!["/tmp/b"]);
+        assert_eq!(targets("command mv a /tmp/b"), vec!["/tmp/b"]);
+        assert_eq!(targets("env FOO=bar cp /tmp/a /tmp/b"), vec!["/tmp/b"]);
+        assert_eq!(targets("B=/path mv a b"), vec!["b"]);
     }
 
     #[test]
@@ -813,5 +1019,92 @@ mod tests {
         let km = crate::loopcheck::parse_king_manifest(content).expect("parses");
         assert_eq!(km.shape, "court");
         assert_eq!(km.harness_session_id.as_deref(), Some("sess-king"));
+    }
+
+    /// Fixture: a repo checkout plus a vault OUTSIDE it; the internal
+    /// symlink is what a vault-backed checkout looks like on disk.
+    struct Roots {
+        base: PathBuf,
+        repo: PathBuf,
+    }
+
+    fn roots(tag: &str) -> Roots {
+        let base = std::env::temp_dir().join(format!("kgd-{tag}-{}", std::process::id()));
+        Roots {
+            repo: base.join("repo"),
+            base,
+        }
+    }
+
+    fn allowed(r: &Roots, target: &Path) -> bool {
+        !write_denied(&target.to_string_lossy(), &r.base, &r.repo)
+    }
+
+    #[test]
+    fn vault_via_internal_symlink_is_allowed() {
+        // Required test 1: the vault is not source. A write through the
+        // internal symlink resolves outside the repo and allows.
+        let r = roots("symlink");
+        let _ = std::fs::create_dir_all(r.repo.join("cli/src"));
+        let _ = std::fs::create_dir_all(r.base.join("vault/fno/analysis"));
+        let _ = std::os::unix::fs::symlink(r.base.join("vault"), r.repo.join("internal"));
+        assert!(allowed(&r, &r.repo.join("internal/fno/analysis/foo.json")));
+        let _ = std::fs::remove_dir_all(&r.base);
+    }
+
+    #[test]
+    fn source_write_is_denied() {
+        // Required test 2: the guard exists to stop a king writing SOURCE.
+        let r = roots("source");
+        assert!(!allowed(&r, &r.repo.join("cli/src/fno/anything.py")));
+        assert!(!allowed(&r, &r.repo.join("crates/fno-agents/src/lib.rs")));
+        let _ = std::fs::remove_dir_all(&r.base);
+    }
+
+    #[test]
+    fn repo_dotfno_state_is_allowed() {
+        // Required test 3: the carve-out keeps the default .fno/plans path
+        // writable for a vault-less user.
+        let r = roots("dotfno");
+        assert!(allowed(&r, &r.repo.join(".fno/plans/foo.md")));
+        let _ = std::fs::remove_dir_all(&r.base);
+    }
+
+    #[test]
+    fn build_output_with_cachedir_tag_is_allowed() {
+        // Build output inside the repo is not source, matched by the
+        // CACHEDIR.TAG file, never by the directory name (a name-based sweep
+        // once deleted 66 real `target` source dirs).
+        let r = roots("cachedir");
+        let bin = r.repo.join("crates/fno-agents/target/debug/fno-agents");
+        let _ = std::fs::create_dir_all(bin.parent().unwrap());
+        let _ = std::fs::write(
+            r.repo.join("crates/fno-agents/target/CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        );
+        assert!(allowed(&r, &bin));
+        // A name-alike source dir with no tag above it stays refused.
+        assert!(!allowed(&r, &r.repo.join("skills/target/SKILL.md")));
+        let _ = std::fs::remove_dir_all(&r.base);
+    }
+
+    #[test]
+    fn refusal_names_the_rule_in_two_lines() {
+        let text = deny_text("cli/src/fno/x.py", Path::new("/repo"));
+        assert_eq!(text.lines().count(), 2, "two lines: {text:?}");
+        assert!(text.contains("operates the machine and does not author it"));
+        assert!(text.contains("fno config plugin install"));
+        assert!(text.contains("Delegate the edit or escalate"));
+    }
+
+    #[test]
+    fn no_vault_still_answers_denies_source_allows_outside() {
+        // Required test 4: no vault configured anywhere - the predicate only
+        // knows the repo root, so the guard answers the same: source denies,
+        // anything outside allows.
+        let r = roots("novault");
+        assert!(!allowed(&r, &r.repo.join("cli/src/fno/anything.py")));
+        assert!(allowed(&r, &r.base.join("anywhere/else/foo.md")));
+        let _ = std::fs::remove_dir_all(&r.base);
     }
 }

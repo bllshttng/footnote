@@ -26,6 +26,8 @@ fn nav_filter_state_composes_with_text() {
     // so a [blocked] chip leaves only the blocked agent.
     let mut v = two_pane_view();
     v.layout.agents = vec![AgentRow {
+        spawned_by_name: None,
+        lineage_reason: None,
         harness: None,
         model: None,
         route: None,
@@ -208,6 +210,8 @@ fn nav_rows_fold_done_through_the_seen_bit() {
     let mut v = two_pane_view();
     v.layout.agents = vec![
         AgentRow {
+            spawned_by_name: None,
+            lineage_reason: None,
             harness: None,
             model: None,
             route: None,
@@ -247,6 +251,8 @@ fn nav_rows_fold_done_through_the_seen_bit() {
             pane_activity: None,
         },
         AgentRow {
+            spawned_by_name: None,
+            lineage_reason: None,
             harness: None,
             model: None,
             route: None,

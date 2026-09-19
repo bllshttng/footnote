@@ -40,6 +40,8 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         harness: None,
         model: None,
         route: None,
+        spawned_by_name: None,
+        lineage_reason: None,
         squad: Some(7),
         name: registry.name.clone(),
         pane_id: None,
@@ -104,6 +106,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         peer_drives_pr: false,
         pr_settled: false,
         origin_corpse: false,
+        open_work_retire_s: fno_agents::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
     };
     assert_eq!(gc_decide(&live, 900).0, GcAction::Keep);
     assert_eq!(

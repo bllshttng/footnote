@@ -26,8 +26,10 @@ The tiling primitive already existed. The tab menu offers Join Left, Join Right,
 |---|---|
 | CLI, spawn | `fno agents spawn --substrate thread --portal N` (one call; `--tab`/`--split` honored on a fresh open), or `fno mux thread <name> --portal N`. Omitted is portal 0. |
 | CLI, default spawn | A bare `fno agents spawn` seats a thread wherever the harness seats one and, from inside a mux, opens portal 0 on it automatically. `--portal N` names another index. |
+| CLI, an existing row | `fno mux thread <key>` shows one live paneless row through a portal (or focuses the portal it already has) and never creates, resumes, or duplicates a worker. `<key>` is the agent name, or the full `session` id `fno agents whoami` prints: a thread-shaped Codex row answers to the full id, Claude to its printed `short_id`. The match is exact, no prefix and no substring; those tiers belong to `fno mux view`, `fno mux where` and `fno mux pane focus`. Zero matches, or several rows answering the same key, refuse and spawn no worker. |
 | Sideline, portal 0 | Enter (or a click) on a paneless live row. |
-| Sideline, a new portal | `P` opens the next free index. |
+| Sideline, a new portal | `P` opens the portal picker. Enter or `t` on the `+` row opens the next free index in a new tab. shift+HJKL on the `+` row opens it as a split beside the focused pane. |
+| Sideline, an already-shown row | The row's portal takes focus with Enter, or `fno mux thread reseat <name> --portal N` moves it to another index. |
 | Layout | The existing Join actions tile open portals. |
 
 The one-call spawn form, its geometry rules, and its refusals are documented in [fno-agents-spawn.md](../guides/fno-agents-spawn.md).
@@ -55,6 +57,12 @@ Three gestures fill a held seat. Focusing the seat pane runs the row's reach, wh
 Liveness is counted from `panes`, not from `portals.len()`. An entry left stale-naming a closed pane is deliberate. The reach reads its remembered tab id, so a replacement viewer lands back where the operator had it. That is what the single slot always did. Counting entries instead lets a dead row disarm the swap for a real portal.
 
 **The `>=1-pane` invariant needs nothing added.** Its only statement lives in `sweep_dead_sideline` and compiles to `panes.len() <= 1`, a whole-session pane count. Portals are panes, so N portals move away from that floor rather than toward it. A portal-specific invariant is a second, weaker rule competing with a guard that already holds.
+
+## A portal follows the session its viewer shows
+
+A claude viewer can switch sessions inside its own TUI, and fno is never told. The server reads the seat's OSC title once a second. A title that names one free row moves the row key, the attach mapping and the pane name to that row. A title that names no single free row drops the claim, so no row wears a seat that shows something else. A seat whose key names no single row also wears no `◫` marker, so the picker does not list it.
+
+Only claude viewer seats are followed, gated on the attach program in the seat's `cmd`. Plain attach panes and other harnesses are not, and a title naming a row another portal shows never steals it.
 
 ## Wire
 

@@ -129,14 +129,14 @@ const HELP: &str = "fno-agents finalize - terminal-only side-effect writer (step
 Usage: fno-agents finalize --state <target-state.md> --cwd <project-root> --reason <TerminationReason> \\\n\
                            [--transcript <transcript.jsonl>] [--events <p>] [--global-events <p>] \\\n\
                            [--settings <p>] [--handoffs-dir <p>] [--postmortems-dir <p>]\n\
-Reason values: DonePRGreen|DoneAdvisory|DoneDelivery|DoneBatched|DoneAwaitingMerge|DoneAwaitingReview|DonePlanned|NoWork|Budget|NoProgress|Interrupted|Aborted";
+Reason values: DonePRGreen|DoneAdvisory|DoneDelivery|DoneBatched|DoneAwaitingMerge|DoneAwaitingReview|DonePlanned|NoWork|Budget|NoProgress|HeldOnQuestion|Interrupted|Aborted";
 
 // ── manifest fields finalize reads directly ────────────────────────────────
 
 /// The three manifest fields finalize needs itself (everything else is read by
 /// the shelled Python helpers from the same manifest path).
 #[derive(Debug, Default)]
-struct ManifestFields {
+pub(crate) struct ManifestFields {
     /// Target-minted session id: idempotency key, handoff filename, event data.
     session_id: Option<String>,
     /// Canonical target-minted id, retained separately so it wins regardless of
@@ -149,7 +149,7 @@ struct ManifestFields {
     /// Feature title for the handoff header.
     input: Option<String>,
     /// Backlog node id (lives in the manifest BODY, below the frontmatter).
-    graph_node_id: Option<String>,
+    pub(crate) graph_node_id: Option<String>,
     /// Harness (conversation) session id captured at init: the do-stamp's
     /// identity-continuity input, passed through to the Python primitive.
     harness_session_id: Option<String>,
@@ -210,7 +210,7 @@ fn ends_quoted_scalar(line: &str) -> bool {
 /// Scan the WHOLE manifest (frontmatter AND body) for the keys we need.
 /// `graph_node_id`/`target_claim_*` live below the closing `---`, so a
 /// frontmatter-only parse (like loop-check's) would miss them.
-fn parse_manifest_fields(content: &str) -> ManifestFields {
+pub(crate) fn parse_manifest_fields(content: &str) -> ManifestFields {
     let mut m = ManifestFields::default();
     // Init writes the run's raw argument as `input: "<...>"` (init:839), so a
     // MULTI-LINE argument spills real newlines into the manifest and every
@@ -407,6 +407,35 @@ fn count_run_tasks(project_events: &Path, run: &str) -> (u64, u64, u64) {
     (started, done, failed)
 }
 
+/// True when this run already has a run_summary carrying `reason`. Finalize
+/// re-runs on every stop of a session parked at a non-ship terminal, and each
+/// fire used to emit + push a fresh copy (one king got 14 mails in 67 minutes
+/// for a single DoneAwaitingMerge run). Keys on run PLUS reason so a session
+/// that hits Budget and then resumes to DoneAwaitingMerge still reports the
+/// new terminal. Streaming read, same shape as `count_run_tasks`; a missing
+/// or unreadable log is a false (emit and push as before).
+fn run_summary_already_emitted(project_events: &Path, run: &str, reason: &str) -> bool {
+    use std::io::BufRead;
+    if let Ok(file) = fs::File::open(project_events) {
+        let mut reader = std::io::BufReader::new(file);
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap_or(0) > 0 {
+            if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                if v.get("type").and_then(|t| t.as_str()) == Some("run_summary")
+                    && v.get("run").and_then(|r| r.as_str()) == Some(run)
+                    && v.pointer("/data/termination_reason")
+                        .and_then(|r| r.as_str())
+                        == Some(reason)
+                {
+                    return true;
+                }
+            }
+            line.clear();
+        }
+    }
+    false
+}
+
 /// Append a pre-built extended envelope through the shared Branch-A mutex.
 /// Non-fatal: a write failure logs and returns, never wedging finalize.
 fn append_envelope(path: &Path, envelope: &Value) {
@@ -594,7 +623,8 @@ pub fn run_finalize(args: &[String]) -> i32 {
         // early-return here and never reach the always-run tail. A session that
         // hits Budget and then resumes to DoneAwaitingMerge would silently lose
         // its do stamp - the same "correct wiring, missing coverage" failure this
-        // backstop exists to fix. Everything downstream is idempotent.
+        // backstop exists to fix. Ledger, stamps and handoff are idempotent;
+        // the run_summary emit and push are deduped by run and reason.
         Some(false) if !ship && !predicates.do_stamp_terminal => {
             eprintln!(
                 "finalize: session {session_id} ledger already recorded (non-ship); early-return"
@@ -887,16 +917,22 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // authoritative and the push leg (task 1.4) rides it. gh is shelled for the
     // PR url only on a ship terminal.
     let run_summary_pr = if legacy_ship { gh_pr_url(&cwd) } else { None };
-    emit_run_summary(
-        &project_events,
-        &global_events,
-        &session_id,
-        m.graph_node_id.as_deref(),
-        ship,
-        &reason,
-        run_summary_pr.as_deref(),
-    );
-    push_run_summary_to_parent(&session_id, m.graph_node_id.as_deref(), &reason);
+    if run_summary_already_emitted(&project_events, &session_id, &reason) {
+        eprintln!(
+            "finalize: run_summary for {session_id} ({reason}) already emitted; emit and push skipped"
+        );
+    } else {
+        emit_run_summary(
+            &project_events,
+            &global_events,
+            &session_id,
+            m.graph_node_id.as_deref(),
+            ship,
+            &reason,
+            run_summary_pr.as_deref(),
+        );
+        push_run_summary_to_parent(&session_id, m.graph_node_id.as_deref(), &reason);
+    }
 
     // ── node<->PR pr_number backstop stamp ────────────────────────
     // Runs in the always-run tail (first fire of every reason), so it stamps
@@ -2260,6 +2296,7 @@ fn arm_auto_merge(cwd: &Path, approved: bool, source: Option<&str>) -> (bool, Op
             // the same event journal the owner does.
             covered_head: None,
             decide_only: false,
+            authority: None,
         },
     );
     match outcome {
@@ -3086,6 +3123,46 @@ fn append_corrections_pointer(home: Option<&Path>, postmortem: &Path, reason: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_summary_already_emitted_matches_run_and_reason() {
+        // Only a run_summary for THIS run AND this reason satisfies the gate:
+        // another reason (Budget then DoneAwaitingMerge) or another run still
+        // reports. A malformed line must not abort the scan.
+        let dir = std::env::temp_dir().join(format!("fin-rse-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let log = dir.join("events.jsonl");
+        fs::write(
+            &log,
+            concat!(
+                r#"{"type":"session_finalized","run":"R1","data":{"session_id":"S1","ship":false}}"#,
+                "\n",
+                r#"{"type":"run_summary","run":"R1","data":{"termination_reason":"Budget"}}"#,
+                "\n",
+                "not json\n",
+                r#"{"type":"run_summary","run":"R2","data":{"termination_reason":"DoneAwaitingMerge"}}"#,
+                "\n",
+                r#"{"type":"run_summary","run":"R1","data":{"termination_reason":"DoneAwaitingMerge"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        assert!(run_summary_already_emitted(&log, "R1", "DoneAwaitingMerge"));
+        assert!(!run_summary_already_emitted(&log, "R1", "DonePRGreen"));
+        assert!(!run_summary_already_emitted(&log, "R2", "Budget"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_summary_already_emitted_missing_file_is_false() {
+        // A missing log is a false, so the first fire emits and pushes as
+        // before (AC3-ERR).
+        assert!(!run_summary_already_emitted(
+            Path::new("/nonexistent/fin-rse-missing/events.jsonl"),
+            "R1",
+            "DoneAwaitingMerge"
+        ));
+    }
 
     #[test]
     fn parse_args_required_and_optional() {

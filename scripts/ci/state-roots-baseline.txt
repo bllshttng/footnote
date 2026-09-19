@@ -99,6 +99,7 @@ A	crates/fno-agents/src/loopcheck/authorship.rs	target-state.md	unowned	the mani
 A	crates/fno-agents/src/gc_sweep.rs	ledger.json	unowned	best-effort ledger enrichment for the reap receipt (moved from daemon.rs with the sweep); the receipt stands on the row when the path is overridden.
 A	crates/fno-agents/src/graph_get.rs	graph.json	unowned	same class as crates/fno/src/backlog_view.rs below; no Rust resolver exists yet for graph.json.
 A	crates/fno-agents/src/manifest_lookup.rs	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
+A	crates/fno-agents/src/worktree_reapable.rs	target-state.md	unowned	the done-node arm reads ANOTHER worktree's manifest by name (same class as manifest_lookup.rs beside this line); target-state.md has NO resolver today, so this site drains when that resolver lands.
 A	crates/fno-agents/src/state_path.rs	target-state.md	unowned	this module IS the hook-facing resolver; the hand-built line is the one-release legacy checkout fallback and drains when it retires.
 A	crates/fno-agents/src/paths.rs	ledger.json	unowned	paths.rs IS the resolver module; the hand-built line is the ledger_path legacy checkout migration anchor and drains when it retires.
 A	crates/fno-agents/src/spawn_gate.rs	claims	unowned	call the resolver STATE_FILES names for this file.

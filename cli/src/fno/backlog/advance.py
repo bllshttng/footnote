@@ -1722,18 +1722,18 @@ def _grid_lane_for(
         from fno import route_resolve
 
         inventory = route_resolve.resolve_inventory()
-        capacity: dict[str, object] = dict(
-            route_resolve.runtime_capacity(inventory=inventory)
-        )
         profile_verb = ((verb or "target").strip().lstrip("/")) or "target"
         candidate, chain, _verdict = route_resolve.resolve_slot(
             profile_verb,
             node,
-            capacity,
+            None,
             inventory=inventory,
             explicit_model_value=model,
+            # The dispatch seam refreshes: a stale or never-probed lane
+            # reading is probed once before the walk skips the lane.
+            capacity_refresh=True,
         )
-    except Exception as exc:  # noqa: BLE001 - unknown capacity spawns on defaults
+    except Exception as exc:  # noqa: BLE001 - the decline text feeds the spawn seam's refusal
         return None, None, None, None, f"grid=unreadable ({str(exc)[:80]})"
     # The chain's last element is the terminal reason on every path, so it is
     # surfaced verbatim rather than reformatted - the strings are the existing

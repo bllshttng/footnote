@@ -706,25 +706,25 @@ fn is_deferred_blocker(blocker: &Value) -> bool {
 /// instead of looping). `Ok` carries the effective entry and id; `Err`
 /// carries the last id visited when the chain hits a missing row or
 /// overruns the hop bound.
-fn effective_blocker(
-    blocker: &Value,
+fn effective_blocker<'a>(
+    blocker: &'a Value,
     blocker_id: &str,
-    by_id: &std::collections::HashMap<String, Value>,
-) -> Result<(Value, String), String> {
+    by_id: &std::collections::HashMap<&str, &'a Value>,
+) -> Result<(&'a Value, String), String> {
     const MAX_CHAIN_HOPS: usize = 8;
-    let mut current = blocker.clone();
-    let mut current_id = blocker_id.to_string();
+    let mut current = blocker;
+    let mut current_id = blocker_id;
     for _ in 0..MAX_CHAIN_HOPS {
         let Some(next_id) = current.get("superseded_by").and_then(Value::as_str) else {
-            return Ok((current, current_id));
+            return Ok((current, current_id.to_string()));
         };
-        let Some(next) = by_id.get(next_id).cloned() else {
+        let Some(next) = by_id.get(next_id) else {
             return Err(next_id.to_string());
         };
-        current_id = next_id.to_string();
-        current = next;
+        current_id = next_id;
+        current = *next;
     }
-    Err(current_id) // overrun: a chain this long is a cycle in disguise
+    Err(current_id.to_string()) // overrun: a chain this long is a cycle in disguise
 }
 
 /// Read-time dependency readiness for one entry: never a boolean
@@ -734,7 +734,7 @@ fn effective_blocker(
 /// kind of its own (statuses stays blocked for both).
 pub fn compute_readiness(
     entry: &Value,
-    by_id: &std::collections::HashMap<String, Value>,
+    by_id: &std::collections::HashMap<&str, &Value>,
 ) -> (String, Option<String>) {
     let Some(blockers) = entry.get("blocked_by").and_then(Value::as_array) else {
         return ("ready".to_string(), None);
@@ -762,7 +762,7 @@ pub fn compute_readiness(
                 .map(|v| v.is_null())
                 .unwrap_or(true)
             {
-                if is_deferred_blocker(&effective) {
+                if is_deferred_blocker(effective) {
                     return ("blocked-by-deferred".to_string(), Some(effective_id));
                 }
                 return ("blocked-by".to_string(), Some(effective_id));
@@ -815,115 +815,129 @@ pub fn settle_blocked_by_edges(
     let by_id = index_by_id(&entries);
     let mut receipts: Vec<Value> = Vec::new();
     let mut changes: std::collections::BTreeMap<String, Vec<Value>> = Default::default();
-    for e in entries.iter_mut() {
-        if !is_dict(e) || !is_open_entry(e) {
-            continue;
-        }
-        let Some(blockers) = e.get("blocked_by").and_then(Value::as_array) else {
-            continue;
-        };
-        if blockers.is_empty() {
-            continue;
-        }
-        // An id-less row is malformed: the change map keys on the node id, so
-        // no caller could apply its settlement - emit nothing, touch nothing.
-        let Some(node_id) = entry_id(e) else {
-            continue;
-        };
-        let node_id = node_id.to_string();
-        let mut settled: Vec<Value> = Vec::with_capacity(blockers.len());
-        let mut changed = false;
-        for blocker_id in blockers {
-            let Some(bid) = blocker_id.as_str() else {
-                settled.push(blocker_id.clone());
-                continue;
-            };
-            let Some(target) = by_id.get(bid) else {
-                receipts.push(json_receipt(
-                    "blocked_by_held",
-                    &node_id,
-                    bid,
-                    "blocker missing from graph",
-                ));
-                settled.push(blocker_id.clone());
-                continue;
-            };
-            if !target
-                .get("completed_at")
-                .map(|v| v.is_null())
-                .unwrap_or(true)
-            {
-                receipts.push(json_receipt(
-                    "blocked_by_pruned",
-                    &node_id,
-                    bid,
-                    "blocker done",
-                ));
-                changed = true;
-                continue;
+    // Pass 1 computes every settlement against the pre-sweep rows (the old
+    // cloned index read the same pre-sweep list, never a half-settled one);
+    // pass 2 applies. The receipts keep their emission order either way.
+    let settled_lists: Vec<Option<Vec<Value>>> = entries
+        .iter()
+        .map(|e| {
+            if !is_dict(e) || !is_open_entry(e) {
+                return None;
             }
-            if target
-                .get("superseded_by")
-                .and_then(Value::as_str)
-                .is_none()
-            {
-                if is_deferred_blocker(target) {
+            let Some(blockers) = e.get("blocked_by").and_then(Value::as_array) else {
+                return None;
+            };
+            if blockers.is_empty() {
+                return None;
+            }
+            // An id-less row is malformed: the change map keys on the node
+            // id, so no caller could apply its settlement - emit nothing,
+            // touch nothing.
+            let Some(node_id) = entry_id(e) else {
+                return None;
+            };
+            let node_id = node_id.to_string();
+            let mut settled: Vec<Value> = Vec::with_capacity(blockers.len());
+            let mut changed = false;
+            for blocker_id in blockers {
+                let Some(bid) = blocker_id.as_str() else {
+                    settled.push(blocker_id.clone());
+                    continue;
+                };
+                let Some(target) = by_id.get(bid) else {
                     receipts.push(json_receipt(
                         "blocked_by_held",
                         &node_id,
                         bid,
-                        "blocker deferred",
-                    ));
-                    settled.push(blocker_id.clone());
-                } else {
-                    settled.push(blocker_id.clone());
-                }
-                continue;
-            }
-            let (effective, effective_id) = match effective_blocker(target, bid, &by_id) {
-                Ok(pair) => pair,
-                Err(last_id) => {
-                    receipts.push(json_receipt(
-                        "blocked_by_held",
-                        &node_id,
-                        bid,
-                        &format!("supersession chain stops at {last_id}"),
+                        "blocker missing from graph",
                     ));
                     settled.push(blocker_id.clone());
                     continue;
+                };
+                if !target
+                    .get("completed_at")
+                    .map(|v| v.is_null())
+                    .unwrap_or(true)
+                {
+                    receipts.push(json_receipt(
+                        "blocked_by_pruned",
+                        &node_id,
+                        bid,
+                        "blocker done",
+                    ));
+                    changed = true;
+                    continue;
                 }
-            };
-            if effective
-                .get("completed_at")
-                .map(|v| v.is_null())
-                .unwrap_or(true)
-            {
-                let already_named = settled
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .any(|s| s == effective_id);
-                if !already_named {
-                    settled.push(Value::String(effective_id.clone()));
+                if target
+                    .get("superseded_by")
+                    .and_then(Value::as_str)
+                    .is_none()
+                {
+                    if is_deferred_blocker(target) {
+                        receipts.push(json_receipt(
+                            "blocked_by_held",
+                            &node_id,
+                            bid,
+                            "blocker deferred",
+                        ));
+                        settled.push(blocker_id.clone());
+                    } else {
+                        settled.push(blocker_id.clone());
+                    }
+                    continue;
                 }
-                receipts.push(json_receipt(
-                    "blocked_by_rewired",
-                    &node_id,
-                    bid,
-                    "blocker superseded; edge now names the live successor",
-                ));
-                changed = true;
-            } else {
-                receipts.push(json_receipt(
-                    "blocked_by_pruned",
-                    &node_id,
-                    bid,
-                    &format!("superseded by {effective_id}, which is done"),
-                ));
-                changed = true;
+                let (effective, effective_id) = match effective_blocker(target, bid, &by_id) {
+                    Ok(pair) => pair,
+                    Err(last_id) => {
+                        receipts.push(json_receipt(
+                            "blocked_by_held",
+                            &node_id,
+                            bid,
+                            &format!("supersession chain stops at {last_id}"),
+                        ));
+                        settled.push(blocker_id.clone());
+                        continue;
+                    }
+                };
+                if effective
+                    .get("completed_at")
+                    .map(|v| v.is_null())
+                    .unwrap_or(true)
+                {
+                    let already_named = settled
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .any(|s| s == effective_id);
+                    if !already_named {
+                        settled.push(Value::String(effective_id.clone()));
+                    }
+                    receipts.push(json_receipt(
+                        "blocked_by_rewired",
+                        &node_id,
+                        bid,
+                        "blocker superseded; edge now names the live successor",
+                    ));
+                    changed = true;
+                } else {
+                    receipts.push(json_receipt(
+                        "blocked_by_pruned",
+                        &node_id,
+                        bid,
+                        &format!("superseded by {effective_id}, which is done"),
+                    ));
+                    changed = true;
+                }
             }
-        }
-        if changed {
-            changes.insert(node_id.clone(), settled.clone());
+            if changed {
+                changes.insert(node_id, settled.clone());
+                Some(settled)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for (e, settled) in entries.iter_mut().zip(settled_lists) {
+        if let Some(settled) = settled {
             e.as_object_mut()
                 .unwrap()
                 .insert("blocked_by".to_string(), Value::Array(settled));
@@ -941,7 +955,7 @@ fn json_receipt(kind: &str, node: &str, blocker: &str, reason: &str) -> Value {
 /// else overlays compute_readiness.
 pub fn readiness_status(
     entry: &Value,
-    by_id: &std::collections::HashMap<String, Value>,
+    by_id: &std::collections::HashMap<&str, &Value>,
 ) -> (Option<String>, Option<String>) {
     let status = entry.get("status").and_then(Value::as_str);
     if let Some(s) = status {
@@ -962,23 +976,57 @@ pub fn readiness_status(
     )
 }
 
-fn index_by_id(entries: &[Value]) -> std::collections::HashMap<String, Value> {
+/// The borrowed id index: one `&Value` per row, no copy of any row. The
+/// cache's entries are shared `Arc` data; a read-side overlay must not
+/// clone a full graph to look up a handful of blockers.
+pub(crate) fn index_by_id(entries: &[Value]) -> std::collections::HashMap<&str, &Value> {
     entries
         .iter()
         .filter(|e| is_dict(e))
-        .filter_map(|e| entry_id(e).map(|i| (i.to_string(), e.clone())))
+        .filter_map(|e| entry_id(e).map(|i| (i, e)))
         .collect()
+}
+
+/// The overlay's field half for one row: status + blocked_reason derived
+/// from a borrowed id index, written in the same order the full overlay
+/// has always used.
+pub(crate) fn overlay_entry(entry: &mut Value, by_id: &std::collections::HashMap<&str, &Value>) {
+    if !is_dict(entry) {
+        return;
+    }
+    let (status, reason) = readiness_status(entry, by_id);
+    let obj = entry.as_object_mut().unwrap();
+    obj.insert(
+        "status".to_string(),
+        status.map(Value::String).unwrap_or(Value::Null),
+    );
+    obj.insert(
+        "blocked_reason".to_string(),
+        reason.map(Value::String).unwrap_or(Value::Null),
+    );
 }
 
 /// Overlay read-time dependency readiness onto `status`/`blocked_reason`
 /// (store._apply_readiness_overlay).
 pub fn apply_readiness_overlay(entries: &mut [Value]) {
     let by_id = index_by_id(entries);
-    for e in entries.iter_mut() {
+    // Compute first against the pre-overlay rows, mutate after the index
+    // borrow ends: every overlay answer must come from the same list the
+    // old cloned index read, not from half-overlaid rows.
+    let computed: Vec<(Option<String>, Option<String>)> = entries
+        .iter()
+        .map(|e| {
+            if is_dict(e) {
+                readiness_status(e, &by_id)
+            } else {
+                (None, None)
+            }
+        })
+        .collect();
+    for (e, (status, reason)) in entries.iter_mut().zip(computed) {
         if !is_dict(e) {
             continue;
         }
-        let (status, reason) = readiness_status(e, &by_id);
         let obj = e.as_object_mut().unwrap();
         obj.insert(
             "status".to_string(),
@@ -3481,8 +3529,8 @@ mod tests {
         assert!(matches!(read_raw(&graph), Ok(RawRead::Entries(_))));
     }
 
-    fn readiness_fixture(entries: Vec<Value>) -> std::collections::HashMap<String, Value> {
-        index_by_id(&entries)
+    fn readiness_fixture(entries: &[Value]) -> std::collections::HashMap<&str, &Value> {
+        index_by_id(entries)
     }
 
     #[test]
@@ -3494,7 +3542,7 @@ mod tests {
             json!({"id": "ab-2", "superseded_by": "ab-3"}),
             json!({"id": "ab-3", "completed_at": "2026-09-01T00:00:00Z"}),
         ];
-        let by_id = readiness_fixture(entries);
+        let by_id = readiness_fixture(&entries);
         let a = json!({"id": "ab-1", "blocked_by": ["ab-2"]});
         assert_eq!(compute_readiness(&a, &by_id), ("ready".to_string(), None));
     }
@@ -3506,7 +3554,7 @@ mod tests {
             json!({"id": "ab-2", "superseded_by": "ab-3"}),
             json!({"id": "ab-3"}),
         ];
-        let by_id = readiness_fixture(entries);
+        let by_id = readiness_fixture(&entries);
         let a = json!({"id": "ab-1", "blocked_by": ["ab-2"]});
         assert_eq!(
             compute_readiness(&a, &by_id),
@@ -3516,7 +3564,7 @@ mod tests {
 
     #[test]
     fn readiness_marks_a_deferred_blocker_and_never_loops_a_cycle() {
-        let by_id = readiness_fixture(vec![
+        let rows = vec![
             json!({"id": "ab-1", "blocked_by": ["ab-2"]}),
             json!({"id": "ab-2", "deferred_at": "2026-08-01T00:00:00Z"}),
             // A ring of nine rows, each superseding into the next: the chase
@@ -3531,7 +3579,8 @@ mod tests {
             json!({"id": "ab-c7", "superseded_by": "ab-c8"}),
             json!({"id": "ab-c8", "superseded_by": "ab-c9"}),
             json!({"id": "ab-c9", "superseded_by": "ab-c1"}),
-        ]);
+        ];
+        let by_id = readiness_fixture(&rows);
         let a = json!({"id": "ab-1", "blocked_by": ["ab-2"]});
         assert_eq!(
             compute_readiness(&a, &by_id),

@@ -235,9 +235,7 @@ fn review_config(cwd: &Path) -> (Option<String>, Option<String>) {
 fn newest_head_attestation(journals: &[PathBuf], head: &str) -> Option<Value> {
     let mut newest: Option<(String, Value)> = None;
     for path in journals {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue;
-        };
+        let text = crate::events_store::journal_text(path, &["review_attestation"]);
         for line in text.lines() {
             let Ok(row) = serde_json::from_str::<Value>(line) else {
                 continue;

@@ -98,6 +98,60 @@ def test_an_unreadable_registry_leaves_every_keeper() -> None:
     assert "registry unreadable" in reason
 
 
+# --- the legality and size arms ---------------------------------------------
+
+
+def test_a_store_keeper_on_a_sqlite_graph_is_reapable(monkeypatch) -> None:
+    """A resident store keeper whose graph reads sqlite while config reads
+    sqlite must not exist: the clients serve by exec. The verdict is REAP
+    even over a live listener, because the process itself is the fault."""
+    monkeypatch.setattr(kl, "store_backend_of", lambda g: "sqlite")
+    monkeypatch.setattr(kl, "graph_read_source", lambda: "sqlite")
+    verdict, reason = kl.keeper_verdict(
+        _obs(lane="store", graph=Path("/state/graph.json"), sock_state=kl.LISTENER)
+    )
+    assert verdict == kl.REAP
+    assert "backend=sqlite" in reason
+
+
+def test_legality_reads_both_sides_before_it_reaps(monkeypatch) -> None:
+    """A sqlite db with a json rollback config (or an unreadable config) is
+    the designed rollback state, never a leak."""
+    monkeypatch.setattr(kl, "store_backend_of", lambda g: "sqlite")
+    monkeypatch.setattr(kl, "graph_read_source", lambda: "json")
+    verdict, _ = kl.keeper_verdict(
+        _obs(lane="store", graph=Path("/state/graph.json"), sock_state=kl.LISTENER)
+    )
+    assert verdict == kl.LEAVE
+
+
+def test_an_illegal_keeper_yields_to_a_registry_claim(monkeypatch) -> None:
+    """The fail-closed claim arm outranks the legality arm: claimed work is
+    never killed, whatever the keeper holds."""
+    monkeypatch.setattr(kl, "store_backend_of", lambda g: "sqlite")
+    monkeypatch.setattr(kl, "graph_read_source", lambda: "sqlite")
+    verdict, reason = kl.keeper_verdict(
+        _obs(lane="store", graph=Path("/state/graph.json"), claimed_by="worker-x")
+    )
+    assert verdict == kl.LEAVE
+    assert "worker-x" in reason
+
+
+def test_rss_over_the_bound_is_reapable_with_its_size(monkeypatch) -> None:
+    """A keeper ballooning past the documented bound is named with its size -
+    silence is not the only signal (2026-09-17: 1.25 GB at age 7 minutes)."""
+    monkeypatch.setenv("FNO_STORE_KEEPER_RSS_KB", "200000")
+    verdict, reason = kl.keeper_verdict(_obs(rss_kb=300_000, sock_state=kl.LISTENER))
+    assert verdict == kl.REAP
+    assert "0.29 GB" in reason
+    # Under the bound, the socket arm decides again.
+    verdict, _ = kl.keeper_verdict(_obs(rss_kb=100_000, sock_state=kl.LISTENER))
+    assert verdict == kl.LEAVE
+    # An unreadable RSS never reaps on the size arm.
+    verdict, _ = kl.keeper_verdict(_obs(rss_kb=None, sock_state=kl.LISTENER))
+    assert verdict == kl.LEAVE
+
+
 # --- discovery over injected rows -------------------------------------------
 
 

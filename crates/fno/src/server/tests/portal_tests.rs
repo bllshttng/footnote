@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::server::portal_reach::portal_replay_placement;
+
 // ---- (x-8f9d) portals: the one thread pane becomes an addressable set --
 
 /// The reach command naming an explicit portal index.
@@ -1437,6 +1439,224 @@ fn portal_fresh_open_honors_caller_tab_and_split() {
     );
 }
 
+/// The new-portal reach the `P` picker's shift+HJKL sends: allocate the
+/// index, split beside the viewed workspace.
+fn portal_new_split_cmd(id: &str) -> Command {
+    Command::AttachAgent {
+        id: id.into(),
+        placement: PanePlacement {
+            portal_new: true,
+            split: Some(Dir::Right),
+            target: PaneTarget::SquadId(1),
+            ..Default::default()
+        },
+    }
+}
+
+#[test]
+fn portal_new_split_lands_beside_the_focused_pane() {
+    // (x-4572, AC2-HP + AC2-EDGE) A new-portal reach with split Right lands
+    // in the TARGET tab beside its shell - no tab added - and the STALE
+    // reuse of that index keeps the direction: the open-close-split-again
+    // loop splits right twice, never falling to place_with's Down default.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, p1, mut rx) = thread_core();
+    core.agents = vec![
+        bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+        bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+    ];
+    let tabs_before = core.session.squad(1).unwrap().tabs.len();
+
+    // The split reach first, while tab 1 is the viewed tab: a placement
+    // naming no tab splits beside the squad's ACTIVE tab, so the AC's
+    // precondition is "the viewed tab holds the shell".
+    core.command(client_id, portal_new_split_cmd("deadbee1"));
+
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    assert_eq!(
+        core.portals.get(&0).map(|e| e.tab),
+        Some(1),
+        "the split lands in the targeted tab"
+    );
+    assert_eq!(
+        core.session.squad(1).unwrap().tabs.len(),
+        tabs_before,
+        "no tab is added"
+    );
+    {
+        let tab = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == 1)
+            .unwrap();
+        match &tab.root {
+            Node::Branch { axis, .. } => {
+                assert_eq!(*axis, crate::tree::Axis::Horizontal, "a RIGHT split");
+            }
+            other => panic!("expected a split root, got {other:?}"),
+        }
+        let mut leaves = tree::leaves(&tab.root);
+        leaves.sort_unstable();
+        let mut expected = vec![p1, seat];
+        expected.sort_unstable();
+        assert_eq!(leaves, expected, "beside the shell, nothing else moved");
+    }
+    assert!(
+        !drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("tab full")),
+        "a split with room never falls back"
+    );
+
+    // AC2-EDGE: a second portal now, so the split portal (0) is not the
+    // last index - the reuse scan has a live index to skip. It opens
+    // unplaced (a fresh tab of its own). portal_new, not the thread_pane
+    // alias: that alias names portal 0, which is live and would repoint.
+    core.command(
+        client_id,
+        Command::AttachAgent {
+            id: "deadbee2".into(),
+            placement: PanePlacement {
+                portal_new: true,
+                ..Default::default()
+            },
+        },
+    );
+    assert_eq!(core.portals.get(&1).map(|e| e.tab), Some(2));
+    // Close the split seat while portal 1 stays live. The reuse of
+    // index 0 remembers tab 1; the caller's direction must survive it.
+    let stale_seat = core.portals.get(&0).unwrap().seat;
+    core.close_pane(stale_seat);
+    core.command(client_id, portal_new_split_cmd("deadbee1"));
+    let seat2 = core.portals.get(&0).expect("portal 0 reused").seat;
+    assert_ne!(seat2, stale_seat, "a fresh viewer took the seat");
+    assert_eq!(
+        core.portals.get(&0).map(|e| e.tab),
+        Some(1),
+        "the reused index lands in the remembered tab"
+    );
+    let tab = core
+        .session
+        .squad(1)
+        .unwrap()
+        .tabs
+        .iter()
+        .find(|t| t.id == 1)
+        .unwrap();
+    match &tab.root {
+        Node::Branch { axis, .. } => {
+            assert_eq!(
+                *axis,
+                crate::tree::Axis::Horizontal,
+                "the remembered tab keeps the caller's RIGHT, not a Down default"
+            );
+        }
+        other => panic!("expected a split root, got {other:?}"),
+    }
+    let mut leaves = tree::leaves(&tab.root);
+    leaves.sort_unstable();
+    let mut expected = vec![p1, seat2];
+    expected.sort_unstable();
+    assert_eq!(leaves, expected, "beside the shell again");
+}
+
+#[tokio::test]
+async fn portal_new_split_on_a_claude_row_survives_the_reentry_replay() {
+    // (x-4572, AC2-ERR) A claude row's first reach pass parks; the replay
+    // carries the placement the Drive arm built. That replay must name the
+    // portal AND keep the caller's split and target, or every claude-row
+    // split silently becomes a new tab - the common case.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, p1, _rx) = thread_core();
+    core.agents = vec![claude_row("claude-row", "deadbee1")];
+    let caller = PanePlacement {
+        portal_new: true,
+        split: Some(Dir::Right),
+        target: PaneTarget::SquadId(1),
+        ..Default::default()
+    };
+    let replay = portal_replay_placement(&caller, 0);
+    assert_eq!(replay.portal, Some(0), "the replay names the reached index");
+    assert!(!replay.portal_new);
+    assert_eq!(replay.split, caller.split, "the split survives");
+    assert_eq!(replay.target, caller.target, "the target survives");
+
+    let panes_before = core.panes.len();
+    core.command(
+        client_id,
+        Command::AttachAgent {
+            id: "deadbee1".into(),
+            placement: caller,
+        },
+    );
+    assert!(core.portals.is_empty(), "the parked reach opens no portal");
+    assert_eq!(
+        core.panes.len(),
+        panes_before,
+        "the parked reach opens no pane"
+    );
+
+    core.handle(CoreMsg::ReentryPlanReady {
+        id: client_id,
+        request: Box::new(ReentrySpawnRequest::Attach {
+            attach_id: "deadbee1".into(),
+            placement: portal_replay_placement(
+                &PanePlacement {
+                    portal_new: true,
+                    split: Some(Dir::Right),
+                    target: PaneTarget::SquadId(1),
+                    ..Default::default()
+                },
+                0,
+            ),
+        }),
+        verdict: Ok(ReentryVerdict {
+            argv: vec!["/bin/cat".into()],
+            env: vec![],
+            config_dir: None,
+            mechanism: None,
+        }),
+    });
+
+    let seat = core
+        .portals
+        .get(&0)
+        .expect("the replay opens portal 0")
+        .seat;
+    assert_eq!(
+        core.portals.get(&0).map(|e| e.tab),
+        Some(1),
+        "the replayed split lands in the targeted tab, not a new one"
+    );
+    assert_eq!(core.session.squad(1).unwrap().tabs.len(), 1);
+    let tab = core
+        .session
+        .squad(1)
+        .unwrap()
+        .tabs
+        .iter()
+        .find(|t| t.id == 1)
+        .unwrap();
+    match &tab.root {
+        Node::Branch { axis, .. } => {
+            assert_eq!(*axis, crate::tree::Axis::Horizontal, "beside the shell");
+        }
+        other => panic!("expected a split root, got {other:?}"),
+    }
+    let mut leaves = tree::leaves(&tab.root);
+    leaves.sort_unstable();
+    let mut expected = vec![p1, seat];
+    expected.sort_unstable();
+    assert_eq!(
+        leaves, expected,
+        "the replayed split lands beside the shell"
+    );
+    core.reap_pane(seat); // don't leak the stand-in child
+}
+
 #[test]
 fn portal_repoint_keeps_its_geometry_and_says_so() {
     // (x-9b60, AC2-REG) A portal with a live viewer owns its geometry: a
@@ -2512,4 +2732,222 @@ fn collect_until_portal_closed(rx: &mut mpsc::Receiver<ServerMsg>, needle: &str)
         }
     }
     None
+}
+
+// ---- (x-3cea) a portal seat follows the session its claude viewer shows --
+
+/// Feed the seat pane an OSC title like a live claude viewer emits.
+fn feed_seat_title(core: &mut Core, seat: u64, title: &str) {
+    core.panes
+        .get_mut(&seat)
+        .unwrap()
+        .vt
+        .feed(format!("\x1b]0;{title}\x07").as_bytes());
+}
+
+#[test]
+fn a_portal_follows_the_session_its_viewer_title_names() {
+    // AC2-HP: a claude viewer switches from A to B inside its own TUI; the
+    // 1s follow repoints the slot, the attach mapping and the pane name to
+    // B, and a second tick is a no-op.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![
+        bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+        bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+    ];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    drain_notices(&mut rx);
+    feed_seat_title(&mut core, seat, "◐ target-b");
+
+    core.follow_portal_viewer_titles();
+
+    assert_eq!(core.portals[&0].row_key, "deadbee2", "the slot claims B");
+    assert_eq!(core.attached.get("deadbee2"), Some(&seat), "B maps it");
+    assert!(
+        !core.attached.contains_key("deadbee1"),
+        "A holds no mapping"
+    );
+    assert_eq!(core.panes[&seat].name.as_deref(), Some("target-b"));
+    let rows = core.agent_rows();
+    let b = rows.iter().find(|r| r.name == "target-b").expect("row B");
+    assert_eq!(b.pane_id, Some(seat), "B wears the seat");
+    assert_eq!(b.portal, Some(0), "B carries the marker");
+    let a = rows.iter().find(|r| r.name == "target-a").expect("row A");
+    assert_eq!(a.pane_id, None, "A is paneless");
+    assert!(
+        drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("portal 0 now shows target-b")),
+        "the follow says so"
+    );
+
+    core.follow_portal_viewer_titles();
+    assert!(
+        !drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("now shows")),
+        "the second tick emits no notice"
+    );
+    core.reap_pane(seat);
+}
+
+#[test]
+fn a_title_naming_no_single_row_drops_the_claim() {
+    // AC2-ERR: a title naming two rows drops the claim instead of guessing;
+    // the seat keeps the title text as its key with nothing wearing it, a
+    // second tick is silent, and a later unambiguous title claims its row.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![
+        bg_row("twin", "/tmp/seen", Some("deadbee1")),
+        bg_row("twin", "/tmp/seen", Some("deadbee3")),
+    ];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    drain_notices(&mut rx);
+    feed_seat_title(&mut core, seat, "✳ twin");
+
+    core.follow_portal_viewer_titles();
+
+    assert!(
+        !core.attached.values().any(|p| *p == seat),
+        "no row claims the seat"
+    );
+    assert_eq!(core.portals[&0].row_key, "twin", "the key is the title");
+    assert_eq!(core.panes[&seat].name.as_deref(), Some("twin"));
+    assert!(
+        core.agent_rows().iter().all(|r| r.portal != Some(0)),
+        "no row carries the portal marker"
+    );
+    assert!(
+        drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("portal 0 now shows twin")),
+        "the drop says so"
+    );
+
+    core.follow_portal_viewer_titles();
+    assert!(
+        !drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("now shows")),
+        "the second tick is silent"
+    );
+
+    core.agents
+        .push(bg_row("solo", "/tmp/seen", Some("deadbee4")));
+    feed_seat_title(&mut core, seat, "solo");
+    core.follow_portal_viewer_titles();
+    assert_eq!(
+        core.attached.get("deadbee4"),
+        Some(&seat),
+        "an unclaimed seat is not stuck"
+    );
+    core.reap_pane(seat);
+}
+
+#[test]
+fn a_glyph_only_title_leaves_the_seat_alone() {
+    // AC2-EDGE: a bare spinner frame names no session. The seat keeps its
+    // row instead of unclaiming onto the glyph.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    drain_notices(&mut rx);
+    feed_seat_title(&mut core, seat, "◐");
+
+    core.follow_portal_viewer_titles();
+
+    assert_eq!(core.portals[&0].row_key, "deadbee1", "the row is kept");
+    assert_eq!(core.attached.get("deadbee1"), Some(&seat));
+    assert_eq!(core.panes[&seat].name.as_deref(), Some("target-a"));
+    assert!(
+        !drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("now shows")),
+        "a glyph-only title is silent"
+    );
+    core.reap_pane(seat);
+}
+
+#[test]
+fn a_portal_whose_title_names_its_own_row_is_left_alone() {
+    // AC2-EDGE: the seated row named by `name`, by `harness_title`, an
+    // unset title, a held stand-in seat and a non-claude viewer seat all
+    // leave the slot, the mapping and the pane name untouched, with no
+    // notice.
+    fn undisturbed(core: &Core, seat: u64) {
+        assert_eq!(core.portals[&0].row_key, "deadbee1");
+        assert_eq!(core.attached.get("deadbee1"), Some(&seat));
+        assert_eq!(core.panes[&seat].name.as_deref(), Some("target-a"));
+    }
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, mut rx) = thread_core();
+    let mut aliased = bg_row("target-a", "/tmp/seen", Some("deadbee1"));
+    aliased.harness_title = Some("alias-a".to_string());
+    core.agents = vec![aliased];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    drain_notices(&mut rx);
+
+    core.follow_portal_viewer_titles(); // no title at all
+    undisturbed(&core, seat);
+    feed_seat_title(&mut core, seat, "◐ target-a"); // the seated row by name
+    core.follow_portal_viewer_titles();
+    undisturbed(&core, seat);
+    feed_seat_title(&mut core, seat, "alias-a"); // the seated row by harness title
+    core.follow_portal_viewer_titles();
+    undisturbed(&core, seat);
+    core.panes.get_mut(&seat).unwrap().cmd = None; // a held stand-in
+    feed_seat_title(&mut core, seat, "◐ target-b");
+    core.follow_portal_viewer_titles();
+    undisturbed(&core, seat);
+    core.panes.get_mut(&seat).unwrap().cmd = Some("sh".into()); // not the attach program
+    core.follow_portal_viewer_titles();
+    undisturbed(&core, seat);
+    assert!(
+        !drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("now shows")),
+        "an agreeing seat is silent"
+    );
+    core.reap_pane(seat);
+}
+
+#[test]
+fn a_title_naming_a_row_another_portal_shows_does_not_steal_it() {
+    // AC2-EDGE: portal 1 already shows B; portal 0's viewer switches to B.
+    // Portal 1 keeps its row, its mapping and its pane name; portal 0 drops
+    // its claim rather than minting a second viewer.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, _p1, _rx) = thread_core();
+    core.agents = vec![
+        bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+        bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+    ];
+    core.command(client_id, portal_reach_cmd("deadbee1", 0));
+    core.command(client_id, portal_reach_cmd("deadbee2", 1));
+    let seat0 = core.portals.get(&0).expect("portal 0 open").seat;
+    let seat1 = core.portals.get(&1).expect("portal 1 open").seat;
+    feed_seat_title(&mut core, seat0, "◐ target-b");
+
+    core.follow_portal_viewer_titles();
+
+    assert_eq!(core.portals[&1].row_key, "deadbee2", "portal 1 keeps B");
+    assert_eq!(core.attached.get("deadbee2"), Some(&seat1));
+    assert_eq!(core.panes[&seat1].name.as_deref(), Some("target-b"));
+    assert_eq!(
+        core.portals[&0].row_key, "target-b",
+        "portal 0 drops its claim"
+    );
+    assert!(
+        !core.attached.values().any(|p| *p == seat0),
+        "portal 0's seat is unclaimed"
+    );
+    core.reap_pane(seat0);
+    core.reap_pane(seat1);
 }

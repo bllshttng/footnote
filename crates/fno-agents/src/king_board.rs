@@ -112,6 +112,35 @@ fn worked_node_ids(read: &SourceRead) -> HashSet<String> {
         .collect()
 }
 
+/// Split held nodes out of the ready feed: an open question whose `blocks`
+/// names a node keeps it off the board's ready list and under the `held`
+/// source with the question id. Pure so the split is testable; the
+/// held map is `needs::held_nodes` over the question journals. A ready feed
+/// that never answered passes through untouched - the split never reads an
+/// unreadable source as held-free.
+fn partition_held(
+    ready: SourceRead,
+    held: &std::collections::BTreeMap<String, String>,
+) -> (SourceRead, Vec<Value>) {
+    if held.is_empty() || !ready.is_ok() {
+        return (ready, Vec::new());
+    }
+    let (mut kept, mut held_rows) = (Vec::new(), Vec::new());
+    for mut row in ready.rows() {
+        let id = row.get("id").and_then(Value::as_str).unwrap_or("");
+        match held.get(id) {
+            Some(qid) => {
+                if let Some(obj) = row.as_object_mut() {
+                    obj.insert("question_id".to_string(), json!(qid));
+                }
+                held_rows.push(row);
+            }
+            None => kept.push(row),
+        }
+    }
+    (SourceRead::ok(Value::Array(kept)), held_rows)
+}
+
 // ---------------------------------------------------------------------------
 // SourceRead: one source's answer, or the reason there is no answer
 // ---------------------------------------------------------------------------
@@ -181,6 +210,19 @@ pub(crate) fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 
 pub(crate) fn s_i64(v: &Value, key: &str) -> Option<i64> {
     v.get(key).and_then(Value::as_i64)
+}
+
+/// node -> the node claim's acquired_at (epoch ms) for the distress
+/// staleness compare. A row without a `node:`-prefixed key, or whose
+/// acquired_at is absent or non-numeric, contributes nothing.
+pub(crate) fn claim_acquired_at_by_node(claim_rows: &[Value]) -> HashMap<String, i64> {
+    claim_rows
+        .iter()
+        .filter_map(|row| {
+            let node = s_str(row, "key")?.strip_prefix("node:")?;
+            Some((node.to_string(), s_i64(row, "acquired_at")?))
+        })
+        .collect()
 }
 
 /// Python `bool()` over a JSON value: null/false/empty-string/zero/empty
@@ -440,7 +482,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             HashMap::new(),
         ),
         Some(_) => {
-            let (mut read, name_to_token) = read_driver_rows();
+            let (mut read, name_to_token) = read_driver_rows(entries.as_deref());
             let mut tokens: Vec<String> = Vec::new();
             if let Some(rows) = read.payload.as_mut().and_then(Value::as_array_mut) {
                 // PR-bound non-terminal nodes ride first: the cap spends the
@@ -478,6 +520,16 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     // slices were derived above in the reference's order.
     let entries_ref = entries.as_deref();
     let cwd_for_threads = cwd.clone();
+    // Held nodes: ONE fold over the question journals, computed once
+    // and read by the ready partition below. Fail-open: an unreadable journal
+    // is an empty map, the same posture the question scans elsewhere take.
+    // catch_unwind like the blocked-child read below: the fold resolves the
+    // state root, which panics under a test process with no declared root,
+    // and this function never panics on a source.
+    let held_map = std::panic::catch_unwind(|| {
+        crate::needs::held_nodes(&crate::needs::question_journals(&home_dot_fno(), &cwd))
+    })
+    .unwrap_or_default();
     let (
         prs,
         pr_nodes,
@@ -679,6 +731,21 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 .join()
                 .unwrap_or(SourceRead::err("ready: reader panicked")),
         };
+        // An open question whose blocks names the node holds it out of ready
+        //; the held rows land under a `held` source beside `ready`.
+        let (ready, held_rows) = partition_held(ready, &held_map);
+        if !held_rows.is_empty() {
+            sources.insert(
+                "held".to_string(),
+                json!({
+                    "ok": true,
+                    "truncated": false,
+                    "error": "",
+                    "count": held_rows.len(),
+                    "rows": held_rows,
+                }),
+            );
+        }
         let outstanding = match t_outstanding {
             None => SourceRead::err(budget.spent_error()),
             Some(h) => h
@@ -899,6 +966,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                         let candidates = queues::resolve_blocked_child_candidates(
                             rows,
                             &claim_state_by_node,
+                            &claim_acquired_at_by_node(&claim_rows),
                             &status_by_node,
                             blocked_child_grace_minutes(&cwd),
                             now_secs_board() as i64,
@@ -991,6 +1059,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         undispatched,
         blocked_child,
         entries,
+        held: held_map,
         warnings,
         autonomous_merge: autonomous_merge_enabled(&cwd),
         scope_ids,
@@ -1007,16 +1076,19 @@ pub fn read_board(opts: &BoardOpts) -> Value {
 /// read of the shared registry (`state::load_registry`); a missing file is an
 /// empty roster (a store with no workers is a positive empty answer, not a
 /// fault), a corrupt one is a failed read the consuming queues render loudly.
-/// Also returns a name-to-token map over EVERY registry entry, whatever its
-/// status: the worked feed's worker labels are names, and an orphaned row's
-/// transcript can still answer for the worker it names.
-fn read_driver_rows() -> (SourceRead, HashMap<String, String>) {
+/// A row's node is its registry `node` stamp when it carries one, else the
+/// graph join (`graph_session_nodes`) over the entries the board already
+/// holds. Also returns a name-to-token map over EVERY registry entry,
+/// whatever its status: the worked feed's worker labels are names, and an
+/// orphaned row's transcript can still answer for the worker it names.
+fn read_driver_rows(entries: Option<&[Value]>) -> (SourceRead, HashMap<String, String>) {
     let Some(home) = crate::paths::AgentsHome::from_env_opt() else {
         return (SourceRead::ok(json!([])), HashMap::new());
     };
     let path = home.registry_json();
     match crate::state::load_registry(&path) {
         Ok(registry) => {
+            let session_nodes = graph_session_nodes(entries);
             let mut name_to_token: HashMap<String, String> = HashMap::new();
             for e in &registry.entries {
                 name_to_token.entry(e.name.clone()).or_insert_with(|| {
@@ -1030,7 +1102,12 @@ fn read_driver_rows() -> (SourceRead, HashMap<String, String>) {
                 .iter()
                 .filter(|e| is_live_driver_status(e.status))
                 .filter_map(|e| {
-                    let node = e.node.as_deref()?;
+                    let node = e.node.as_deref().or_else(|| {
+                        e.harness_session_id
+                            .as_deref()
+                            .and_then(|sid| session_nodes.get(sid))
+                            .map(String::as_str)
+                    })?;
                     let token = e
                         .harness_session_id
                         .clone()
@@ -1045,6 +1122,73 @@ fn read_driver_rows() -> (SourceRead, HashMap<String, String>) {
             HashMap::new(),
         ),
     }
+}
+
+/// session id -> node id, joined from the graph entries the board already
+/// holds. The registry `node` stamp is the fast path and it is mostly
+/// absent: 6 of 31 rows carried it on 2026-09-17, so a join on it alone
+/// leaves the documented primary driver signal blind for four rows in five.
+///
+/// An OPEN phase row means the session is working that node. A CLOSED one
+/// means the session finished that PHASE, which is not the same claim as
+/// "this PR has no driver": the measured specimen (2026-09-17) closed its do
+/// row at 06:19Z and the same session drove PR 2126 for fourteen more hours.
+/// So a closed row still names the node when the node carries a PR, and
+/// never otherwise: a PR-less node whose planner closed its row must stay
+/// dispatchable (the closed-planner ruling pinned by
+/// cli/tests/unit/test_live_worked_nodes.py::test_xdead_a_closed_phase_row_skips_its_worker).
+/// A ship row is a PR-link event, never occupancy, and the existing readers
+/// skip it. The truth probe still decides Active vs Unmeasured downstream: a
+/// recovered row that probes dead folds to nothing, so a genuinely parked PR
+/// stays named.
+fn graph_session_nodes(entries: Option<&[Value]>) -> HashMap<String, String> {
+    let mut map: HashMap<String, String> = HashMap::new();
+    let Some(entries) = entries else {
+        return map;
+    };
+    // An OPEN phase row is positive occupancy and outranks a closed one: a
+    // session that closed its do row on one node and opened one on another
+    // must land on the open node, so open rows join first and the closed-row
+    // inference only fills sessions no open row claims.
+    let admissions = |want_open: bool, map: &mut HashMap<String, String>| {
+        for node in entries {
+            if TERMINAL_RUNGS.contains(&s_str(node, "status").unwrap_or("")) {
+                continue;
+            }
+            let Some(node_id) = s_str(node, "id").map(str::to_string) else {
+                continue;
+            };
+            let pr_bound = node_has_pr(node);
+            for row in node
+                .get("sessions")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let Some(phase) = row.get("phase").and_then(Value::as_str) else {
+                    continue;
+                };
+                if phase == "ship" {
+                    continue;
+                }
+                let Some(session_id) = row
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                else {
+                    continue;
+                };
+                let open = crate::graph_store::is_open_phase_row(row, phase);
+                if open == want_open && (open || pr_bound) {
+                    map.entry(session_id.to_string())
+                        .or_insert_with(|| node_id.clone());
+                }
+            }
+        }
+    };
+    admissions(true, &mut map);
+    admissions(false, &mut map);
+    map
 }
 
 /// A registry row counts as a driver candidate only while its status sits in
@@ -1161,6 +1305,54 @@ mod tests {
         SourceRead::ok(payload)
     }
 
+    #[test]
+    fn held_partition_moves_the_row_and_names_the_question() {
+        //  acceptance: a ready node an open question blocks is absent
+        // from ready and present under held with the question id.
+        let ready = ok_read(json!([
+            {"id": "x-free", "priority": "p1", "title": "free"},
+            {"id": "x-hold", "priority": "p1", "title": "held one"}
+        ]));
+        let held: std::collections::BTreeMap<String, String> =
+            [("x-hold".to_string(), "q-1".to_string())]
+                .into_iter()
+                .collect();
+        let (ready, held_rows) = partition_held(ready, &held);
+        let ids: Vec<String> = ready
+            .rows()
+            .iter()
+            .filter_map(|r| r.get("id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        assert_eq!(ids, vec!["x-free".to_string()]);
+        assert_eq!(held_rows.len(), 1);
+        assert_eq!(held_rows[0]["id"], json!("x-hold"));
+        assert_eq!(held_rows[0]["question_id"], json!("q-1"));
+    }
+
+    #[test]
+    fn held_partition_passes_through_when_nothing_is_held() {
+        let ready = ok_read(json!([{"id": "x-free"}]));
+        let held: std::collections::BTreeMap<String, String> = Default::default();
+        let (ready, held_rows) = partition_held(ready, &held);
+        assert_eq!(ready.rows().len(), 1);
+        assert!(held_rows.is_empty());
+    }
+
+    #[test]
+    fn held_partition_never_reads_an_unreadable_ready_as_held_free() {
+        // A failed ready read must stay a failed read: the split never
+        // manufactures an ok-empty feed out of an error.
+        let ready = SourceRead::err("ready: reader panicked");
+        let held: std::collections::BTreeMap<String, String> =
+            [("x-hold".to_string(), "q-1".to_string())]
+                .into_iter()
+                .collect();
+        let (ready, held_rows) = partition_held(ready, &held);
+        assert!(!ready.is_ok());
+        assert!(held_rows.is_empty());
+    }
+
     fn inputs_with(ready: Value, claims: Value, claimed_nodes: Value) -> BoardInputs {
         BoardInputs {
             ready: ok_read(ready),
@@ -1179,6 +1371,7 @@ mod tests {
             lane: ok_read(Value::Array(Vec::new())),
             undispatched: ok_read(Value::Array(Vec::new())),
             entries: None,
+            held: Default::default(),
             warnings: Vec::new(),
             autonomous_merge: false,
             scope_ids: None,
@@ -2275,7 +2468,7 @@ mod tests {
             registry.entries.push(exited_row);
         })
         .unwrap();
-        let (read, name_to_token) = read_driver_rows();
+        let (read, name_to_token) = read_driver_rows(None);
         std::env::remove_var("FNO_AGENTS_HOME");
         assert!(read.is_ok(), "{read:?}");
         let rows = read.payload.unwrap().as_array().unwrap().clone();
@@ -2290,6 +2483,204 @@ mod tests {
             .filter_map(|r| r.get("node").and_then(Value::as_str))
             .collect();
         assert_eq!(nodes, vec!["x-live"], "{rows:?}");
+    }
+
+    fn live_unstamped_row(name: &str, session: &str) -> crate::state::RegistryEntry {
+        crate::state::RegistryEntry {
+            name: name.to_string(),
+            node: None,
+            status: crate::AgentStatus::Live,
+            harness: Some("claude".to_string()),
+            harness_session_id: Some(session.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn phase_row(phase: &str, session: &str, ended_at: Option<&str>) -> Value {
+        let mut row = json!({
+            "phase": phase,
+            "harness": "claude",
+            "session_id": session,
+            "started_at": "2026-09-17T01:00:00Z",
+        });
+        if let Some(ended) = ended_at {
+            row["ended_at"] = json!(ended);
+        }
+        row
+    }
+
+    #[test]
+    fn an_unstamped_live_row_resolves_through_an_open_graph_row() {
+        // The stamp is absent on four registry rows in five (measured
+        // 2026-09-17: 6 of 31). A live row whose session id sits on a
+        // non-terminal entry's OPEN phase row is that entry's driver.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = HOME_LOCK.lock().unwrap();
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
+        let dir = tempfile::tempdir().unwrap();
+        crate::paths::pin_test_claims_root(dir.path());
+        let agents_home = dir.path().join(".fno").join("agents");
+        std::env::set_var("FNO_AGENTS_HOME", &agents_home);
+        let path = agents_home.join("registry.json");
+        crate::state::update_registry(&path, |registry| {
+            registry
+                .entries
+                .push(live_unstamped_row("t-open-worker", "uuid-open"));
+        })
+        .unwrap();
+        let entries = vec![json!({
+            "id": "x-open",
+            "status": "in_progress",
+            "sessions": [phase_row("do", "uuid-open", None)],
+        })];
+        let (read, _) = read_driver_rows(Some(&entries));
+        std::env::remove_var("FNO_AGENTS_HOME");
+        assert!(read.is_ok(), "{read:?}");
+        let rows = read.payload.unwrap().as_array().unwrap().clone();
+        let nodes: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| r.get("node").and_then(Value::as_str))
+            .collect();
+        assert_eq!(nodes, vec!["x-open"], "{rows:?}");
+    }
+
+    #[test]
+    fn a_closed_do_row_pins_only_a_pr_bound_node() {
+        // A closed phase row is "that PHASE finished", not "no driver": on a
+        // PR-bound node the same session kept driving for hours after the
+        // row closed (measured 2026-09-17, PR 2126). The PR keeps the join
+        // alive; a PR-less node whose planner closed its row stays
+        // dispatchable (the closed-planner ruling).
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = HOME_LOCK.lock().unwrap();
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
+        let dir = tempfile::tempdir().unwrap();
+        crate::paths::pin_test_claims_root(dir.path());
+        let agents_home = dir.path().join(".fno").join("agents");
+        std::env::set_var("FNO_AGENTS_HOME", &agents_home);
+        let path = agents_home.join("registry.json");
+        crate::state::update_registry(&path, |registry| {
+            registry
+                .entries
+                .push(live_unstamped_row("t-pr-worker", "uuid-closed"));
+            registry
+                .entries
+                .push(live_unstamped_row("t-plan-worker", "uuid-closed2"));
+        })
+        .unwrap();
+        let entries = vec![
+            json!({
+                "id": "x-pr",
+                "status": "in_review",
+                "pr_number": 2126,
+                "sessions": [phase_row("do", "uuid-closed", Some("2026-09-17T06:19:07Z"))],
+            }),
+            json!({
+                "id": "x-nopr",
+                "status": "ready",
+                "sessions": [phase_row("think", "uuid-closed2", Some("2026-09-17T05:00:00Z"))],
+            }),
+        ];
+        let (read, _) = read_driver_rows(Some(&entries));
+        std::env::remove_var("FNO_AGENTS_HOME");
+        assert!(read.is_ok(), "{read:?}");
+        let rows = read.payload.unwrap().as_array().unwrap().clone();
+        let nodes: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| r.get("node").and_then(Value::as_str))
+            .collect();
+        assert_eq!(nodes, vec!["x-pr"], "{rows:?}");
+    }
+
+    #[test]
+    fn an_open_row_outranks_a_closed_one_on_another_node() {
+        // One live session closed its do row on a PR-bound node and opened
+        // one on another node: the join must land on the open node, so the
+        // abandoned node keeps its undriven_pr instead of borrowing a driver
+        // it no longer has.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = HOME_LOCK.lock().unwrap();
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
+        let dir = tempfile::tempdir().unwrap();
+        crate::paths::pin_test_claims_root(dir.path());
+        let agents_home = dir.path().join(".fno").join("agents");
+        std::env::set_var("FNO_AGENTS_HOME", &agents_home);
+        let path = agents_home.join("registry.json");
+        crate::state::update_registry(&path, |registry| {
+            registry
+                .entries
+                .push(live_unstamped_row("t-moved-worker", "uuid-move"));
+        })
+        .unwrap();
+        let entries = vec![
+            json!({
+                "id": "x-old",
+                "status": "in_review",
+                "pr_number": 2126,
+                "sessions": [phase_row("do", "uuid-move", Some("2026-09-17T06:19:07Z"))],
+            }),
+            json!({
+                "id": "x-now",
+                "status": "in_progress",
+                "sessions": [phase_row("do", "uuid-move", None)],
+            }),
+        ];
+        let (read, _) = read_driver_rows(Some(&entries));
+        std::env::remove_var("FNO_AGENTS_HOME");
+        assert!(read.is_ok(), "{read:?}");
+        let rows = read.payload.unwrap().as_array().unwrap().clone();
+        let nodes: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| r.get("node").and_then(Value::as_str))
+            .collect();
+        assert_eq!(nodes, vec!["x-now"], "{rows:?}");
+    }
+
+    #[test]
+    fn the_stamp_wins_over_the_graph_join() {
+        // A row that already carries `node` is never re-resolved: the stamp
+        // wins and the graph is not consulted for it.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = HOME_LOCK.lock().unwrap();
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
+        let dir = tempfile::tempdir().unwrap();
+        crate::paths::pin_test_claims_root(dir.path());
+        let agents_home = dir.path().join(".fno").join("agents");
+        std::env::set_var("FNO_AGENTS_HOME", &agents_home);
+        let path = agents_home.join("registry.json");
+        crate::state::update_registry(&path, |registry| {
+            registry.entries.push(crate::state::RegistryEntry {
+                name: "t-stamped-worker".to_string(),
+                node: Some("x-stamped".to_string()),
+                status: crate::AgentStatus::Live,
+                harness: Some("claude".to_string()),
+                harness_session_id: Some("uuid-stamp".to_string()),
+                ..Default::default()
+            });
+        })
+        .unwrap();
+        let entries = vec![json!({
+            "id": "x-graph",
+            "status": "in_progress",
+            "sessions": [phase_row("do", "uuid-stamp", None)],
+        })];
+        let (read, _) = read_driver_rows(Some(&entries));
+        std::env::remove_var("FNO_AGENTS_HOME");
+        assert!(read.is_ok(), "{read:?}");
+        let rows = read.payload.unwrap().as_array().unwrap().clone();
+        let nodes: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| r.get("node").and_then(Value::as_str))
+            .collect();
+        assert_eq!(nodes, vec!["x-stamped"], "{rows:?}");
     }
 
     #[test]
@@ -2450,5 +2841,23 @@ mod tests {
             parsed.unreadable_sources,
             "the killed source must read as unreadable"
         );
+    }
+
+    #[test]
+    fn claim_acquired_at_map_skips_non_node_keys_and_bad_values() {
+        // The staleness compare reads this map; a role-prefixed key or an
+        // absent/non-numeric acquired_at contributes nothing, never an
+        // error.
+        let rows = vec![
+            serde_json::json!({"key": "node:x-1", "acquired_at": 1_760_000_000_000i64}),
+            serde_json::json!({"key": "node:x-2"}),
+            serde_json::json!({"key": "node:x-3", "acquired_at": "oops"}),
+            serde_json::json!({"key": "pane:x-9", "acquired_at": 7}),
+        ];
+        let m = claim_acquired_at_by_node(&rows);
+        assert_eq!(m.get("x-1"), Some(&1_760_000_000_000));
+        assert!(!m.contains_key("x-2"), "absent acquired_at: skip");
+        assert!(!m.contains_key("x-3"), "non-numeric acquired_at: skip");
+        assert_eq!(m.len(), 1, "a role-prefixed key is not a node");
     }
 }

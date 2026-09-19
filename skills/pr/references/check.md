@@ -329,9 +329,11 @@ git commit -m "fix(review): address feedback"
 ### 7. Push Updates
 
 ```bash
-# Push all fixes
-git push
+# Fetch, rebase onto origin/main, preflight, push once
+fno do pr push
 ```
+
+The push is refused with exit 2 while CI still runs on the previous head. It names the running check: wait with `fno do pr wait <n> --until settled`, then re-run. Exit 3 names a refusal to fix. A conflict leaves the rebase in progress: resolve it, run `fno do pr rebase --continue`, then re-run the push. Exit 1 means preflight is red, do not ship the updates.
 
 ### 8. Reply Per-Thread, Then Post the Consolidated Summary
 

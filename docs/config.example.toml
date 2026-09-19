@@ -107,6 +107,8 @@ on_unavailable = "refuse"
 [blueprint]
 # Default cap on group PRs per decomposed epic; an epic plan-doc's max_children frontmatter overrides it per-epic and --max-prs may only tighten it.
 max_prs_per_epic = 4
+# Added lines a king-approved repair may add to cli/src/fno Python under law d-a9cddc93 (default 30). Added lines only: deletions do not offset, so larger work ports to crates/ even when it deletes more than it adds. Read by the plan gate in validate-plan.sh and by the push-time tally in check-file-budget.sh.
+python_repair_added_lines = 30
 
 [backlog]
 # Prefix for minted node IDs (<=7 chars; not cv-/fu-/tgt-).
@@ -313,8 +315,6 @@ max_swap_pct = 90.0
 max_load_per_cpu = 8.0
 # Share of CPU capacity the fleet may hold, checked on EVERY spawn (default 0.5). An attribution gap widens the share to an interval bounded above by the whole machine's measured CPU: over by its own attributed work the gate holds and re-samples; the ceiling inside the interval refuses and names both bounds plus the gap; above the interval the gate admits and says the reading was an upper bound. Leave 0.5 unless the box is dedicated, then 0.6.
 max_fleet_cpu_share = 0.5
-# Absolute machine backstop for spawn preflight, read on the FIFTEEN-minute load average: refuse above this factor times the CPU count regardless of whose load it is (<= 0 disables; default 40). Fifteen minutes because the backstop should fire only on a box that has been dying for a while, not on a transient spike. Leave it alone.
-hard_max_load_per_cpu = 40.0
 # Worker CPU/IO priority: utility (background QoS, default) or off.
 worker_qos = "utility"
 # Absolute override for the doctor footprint sustained-CPU threshold, in cores. Unset, the threshold derives from measured CPU capacity (a fraction per core) instead of an absolute constant that asked a 12-core machine's fleet to idle at 8%.
@@ -481,7 +481,7 @@ conflict_resolution = "opus"
 remediation = "attempt"
 
 [auto_heal]
-# Arm the pr-watch tick's heal phase: run the CI heal drive loop (pr-heal --all --apply, in Rust) over every red open PR each tick. Default false until the loop is measured on real PRs.
+# Arm the CI healer: each tick spawns one detached pr-heal --all --apply drive loop over every project root, off the tick's own budget. Default false. Measured 2026-09-16 over 15 red open PRs: 1 push, 3 cancelled-run reruns, 11 escalations, 0 failures inherited from main. Arm with: fno config set auto_heal.enabled true.
 enabled = false
 
 [pr_watch]

@@ -317,6 +317,11 @@ RUST_CLIENT_VERBS = frozenset(
         # in client.rs (no daemon RPC); hidden `fno agents` surface. Parity-synced.
         "capabilities",
         "target-family",
+        # The permission-posture and sandbox-verdict owners behind the
+        # spawn seam: payload JSON in via fno.rust_binary.verb_call, one
+        # answer envelope out; no Python impl, no `fno agents` routing.
+        "permission-tokens",
+        "sandbox-probe",
     }
 )
 
@@ -549,6 +554,8 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "compaction": "Compaction stamps: mark --session <id> writes the PreCompact stamp the provider-cap actor reads (best-effort, always exits 0); status --session <id> reads the stamp against the transcript's own boundary. The hook calls the binary directly.",
     "capabilities": "One harness's config-independent capability contract: <harness> [--json] prints map_version, harness, then that harness's table; an unknown harness exits 2 naming the declared list.",
     "target-family": "Merge-posture family test: --message <m> prints family when the message's first token is a /target-family spelling, other otherwise; exit 0 either way.",
+    "permission-tokens": "The permission-posture owner: payload {provider, mode, substrate} in, the {mappable, tokens} answer out; invoked by the spawn seam via fno.rust_binary.verb_call, not `fno agents` routing.",
+    "sandbox-probe": "The codex sandbox verdict owner: payload {cwd, mode} in, the {verdict, blocked, note} envelope out; invoked by fno.agents.sandbox_probe, not `fno agents` routing.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises. Every other
@@ -691,7 +698,10 @@ def _refuse_codex_spawn_with_unreachable_tools(args: Sequence[str]) -> None:
         return
     from fno.agents.sandbox_probe import EXIT_SANDBOX_UNREACHABLE, probe_codex_sandbox
 
-    probe = probe_codex_sandbox(Path(_spawn_flag_value(args, "--cwd", "-c") or Path.cwd()))
+    probe = probe_codex_sandbox(
+        Path(_spawn_flag_value(args, "--cwd", "-c") or Path.cwd()),
+        mode=_spawn_flag_value(args, "--permission-mode"),
+    )
     if probe.verdict == "unknown":
         print(f"sandbox-probe: could not judge the codex sandbox ({probe.note}); launching unprobed",
               file=sys.stderr)

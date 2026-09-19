@@ -159,6 +159,20 @@ _plan_node_id() {
     printf '%s' "$line"
 }
 
+# The node id encoded by the plan's own filename, by the same trailing
+# -<prefix>-<hex>.md rule cli/src/fno/paths.py plan_filename_node_id applies.
+# A name that only mentions an id mid-slug is not a filename-encoded id.
+_plan_filename_node_id() {
+    local base
+    base=$(basename "$1")
+    printf '%s' "$base" | awk '
+        match($0, /-[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}\.md$/) {
+            print substr($0, RSTART + 1, RLENGTH - 4)
+            exit
+        }
+    '
+}
+
 # The decision ids the plan's frontmatter acknowledges, one per line. The
 # stage-law check reads the same set the node-decision rows check against.
 _acknowledged_ids() {
@@ -912,6 +926,13 @@ check_consolidation_file() {
     # `ConsolidationBlock` model already pins can only ever diverge from it,
     # so there is now one implementation and bash keeps only what is policy.
     local _src="" python_bin="" source_root="" delegate_out="" delegate_rc=0
+    # The plan names no node id, so the decisions rows below have no subject
+    # and cannot run. Say NOT CHECKED here, in bash, where the absence is
+    # readable - the delegate's W channel is fail-closed, for a damaged
+    # index, not for a plan that names no node.
+    if [[ -z "$(_plan_node_id "$file")" ]] || [[ ! "$(_plan_node_id "$file")" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
+        warn "$label: decisions_acknowledged check NOT CHECKED (no well-formed node:/claims: id in frontmatter) - not a pass"
+    fi
     _src="$(_fno_source_python)"
     if [[ -n "$_src" ]]; then
         python_bin="${_src%%|*}"
@@ -1249,7 +1270,9 @@ PYEOF
     local stage_law_gate_date="2026-09-16"
     local stage_node
     stage_node=$(_plan_node_id "$file")
-    if [[ "$stage_node" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
+    if [[ -z "$stage_node" ]]; then
+        warn "$label: stage-law check NOT CHECKED (no node:/claims: id in frontmatter) - not a pass"
+    elif [[ "$stage_node" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
         local stage_bin
         stage_bin=$(resolve_agents_bin)
         if [[ -z "$stage_bin" ]]; then
@@ -1323,6 +1346,52 @@ elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
     # Folder plans carry the frontmatter in 00-INDEX.md; the gate's "every
     # plan" scope includes them, so do not silently skip the check.
     check_consolidation_file "$PLAN_DIR/00-INDEX.md" "$(basename "$PLAN_DIR")/00-INDEX.md"
+fi
+
+# -------------------------------------------------------------------
+# Plan Node Binding: a filename-encoded id with no frontmatter key
+# -------------------------------------------------------------------
+# The node-seeded save rule and rename-plan-to-node-id.sh both write a
+# trailing -<node-id>.md into the plan's name. A file carrying one but naming
+# no node:/claims: key in its frontmatter was written FOR that node and binds
+# to nothing: plan_path stays unset, the node stays idea, and both id-keyed
+# gates above skip it. The name makes the intent testable, so test it.
+
+check_node_binding_file() {
+    local file="$1" label="$2"
+    # The day this check's PR opens. Plans created before it could not have
+    # read the rule, so they warn; same-day and later plans must key.
+    local binding_gate_date="2026-09-19"
+    local fm_node fn_node created
+    fm_node=$(_plan_node_id "$file")
+    fn_node=$(_plan_filename_node_id "$file")
+    if [[ -z "$fm_node" && -n "$fn_node" ]]; then
+        created=$(_plan_created_date "$file")
+        if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            created=$(_plan_name_date "$file")
+        fi
+        if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            error "$label: the filename names $fn_node but no node:/claims: key does, and no readable date tells this plan from a pre-gate one - add node: $fn_node to the frontmatter"
+        elif [[ "$created" < "$binding_gate_date" ]]; then
+            warn "$label: the filename names $fn_node but no node:/claims: key does (created $created, before the $binding_gate_date gate) - backfill one before the next blueprint of this node"
+        else
+            error "$label: the filename names $fn_node but no node:/claims: key does - the plan binds to nothing and the node-id gates skip it. Add node: $fn_node to the frontmatter"
+        fi
+    else
+        if [[ -n "$fm_node" && ! "$fm_node" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
+            # A malformed id mutes the id-keyed gates exactly like an absent
+            # one, so it gets the same NOT CHECKED voice, not a clean OK.
+            warn "$label: the node:/claims: id in frontmatter is malformed - the id-keyed gates run NOT CHECKED against it. Use one well-formed id like ${fn_node:-x-abc123}"
+        fi
+        ok "plan node binding: frontmatter id ${fm_node:-<none>}, filename id ${fn_node:-<none>}"
+    fi
+}
+
+echo ""
+echo "--- Plan Node Binding ---"
+
+if [[ -f "$PLAN_DIR" ]]; then
+    check_node_binding_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"
 fi
 
 # -------------------------------------------------------------------
@@ -1471,6 +1540,19 @@ check_python_rows_file() {
         END { exit(found ? 0 : 1) }' "$file" && has_crates_row=1
 
     local path act word id
+    # One plan is one PR, and the ruling's ceiling is the PR's: every Grant
+    # row declares the added lines it spends as +N, and the rows are summed
+    # against the budget. Missing, empty or non-numeric config answers fall
+    # back to the ruling's starting value, so a checkout without the key
+    # still gates. The budget is read only when a Grant row exists, so the
+    # common Port/Delete plan pays no fno subprocess.
+    local grant_budget=30 declared grant_total=0
+    # || true: the read fails on a checkout whose fno predates the key, which
+    # is the fallback case, never a reason to skip the plan's other findings.
+    if grep -qi 'grant' <<< "$rows"; then
+        grant_budget=$(fno config get blueprint.python_repair_added_lines 2>/dev/null | sed -n 1p || true)
+        [[ "$grant_budget" =~ ^[0-9]+$ ]] || grant_budget=30
+    fi
     while IFS=$'\t' read -r path act; do
         [[ -z "$path" ]] && continue
         word=$(printf '%s' "$act" | sed -E 's/^[^A-Za-z]*//; s/[^A-Za-z].*$//' | tr '[:upper:]' '[:lower:]')
@@ -1482,11 +1564,20 @@ check_python_rows_file() {
                 id=$(printf '%s' "$act" | grep -oE 'd-[0-9a-f]{8}' | sed -n 1p || true)
                 if [[ -z "$id" ]] || ! fno backlog decisions "$id" 2>/dev/null | grep -qE "^LIVE[[:space:]].*$id"; then
                     findings+=("$path is a Grant, but ${id:-no decision id} reads no LIVE line in fno backlog decisions ${id:-<id>}")
+                fi
+                declared=$(printf '%s' "$act" | grep -oE '\+[0-9]+' | sed -n 1p || true)
+                if [[ -z "$declared" ]]; then
+                    findings+=("$path is a Grant naming $id with no declared size - write the row as Grant $id +N naming the added lines the ruling's budget covers, so the rows can be summed")
+                else
+                    grant_total=$((grant_total + ${declared#+}))
                 fi ;;
             *)
-                findings+=("$path is '$act'. New code lands in crates/, and cli/src/fno Python is only ported or deleted. Mark the row Port (with the crates/ row it lands in), Delete, or Grant d-XXXXXXXX naming a live operator ruling, or move the change to crates/") ;;
+                findings+=("$path is '$act'. New code lands in crates/, and cli/src/fno Python is only ported or deleted. Mark the row Port (with the crates/ row it lands in), Delete, or Grant d-XXXXXXXX +N naming a live operator ruling and the added lines it covers, or move the change to crates/") ;;
         esac
     done <<< "$rows"
+    if (( grant_total > grant_budget )); then
+        findings+=("the Grant rows declare +$grant_total added cli/src/fno lines against a budget of $grant_budget (config blueprint.python_repair_added_lines) - port the change to crates/, or cut it under the budget")
+    fi
     local s
     while IFS= read -r s; do
         [[ -z "$s" ]] && continue

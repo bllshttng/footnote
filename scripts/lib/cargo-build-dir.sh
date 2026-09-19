@@ -6,55 +6,45 @@
 # therefore orphans its hash dir until a later sweep reaches it. Resolution
 # reads the workspace manifest, so the removal must happen BEFORE the
 # checkout is deleted; every caller (hooks/worktree-remove.sh,
-# scripts/setup/archive-worktree.sh, scripts/lib/worktree-lifecycle.sh,
-# crates/fno-agents merge_reap) invokes this just before `git worktree
-# remove`. Best-effort by contract: an unreadable resolution leaves the dir
-# to the sweep, never fails the removal.
+# scripts/setup/archive-worktree.sh, scripts/lib/worktree-lifecycle.sh)
+# invokes this just before `git worktree remove`. Best-effort by contract: an
+# unreadable resolution leaves the dir to the sweep, never fails the removal.
+#
+# The ownership answer (which base, which tag, which fingerprint) lives in
+# crates/fno-agents/src/cargo_build_dirs.rs; this shim only forwards to the
+# `reclaim remove-for` subcommand through the shared binary resolver.
 
-# Where cargo intermediates live: FNO_CARGO_TARGETS_BASE override, else
-# config.paths.cargo_targets_base, else <state>/cargo-build. Mirrors
-# _cargo_build_base in worktree-lifecycle.sh, kept local because that script
-# is a command dispatcher and cannot be sourced.
-cargo_build_dir_base() {
-    local raw=""
-    if [[ -n "${FNO_CARGO_TARGETS_BASE:-}" ]]; then
-        printf '%s\n' "${FNO_CARGO_TARGETS_BASE/#\~/$HOME}"
-        return 0
-    fi
-    if command -v fno >/dev/null 2>&1; then
-        raw="$(fno config get config.paths.cargo_targets_base 2>/dev/null || true)"
-    fi
-    [[ "$raw" == "null" || -z "$raw" ]] && raw="${STATE_DIR:-$HOME/.fno}/cargo-build"
-    printf '%s\n' "${raw/#\~/$HOME}"
-}
+# The fno-agents binary resolver, shared with the hooks. The canonical copy is
+# hooks/lib/agents-bin.sh; this same-shape inline fallback covers a partial
+# deploy whose hooks tree is not beside the scripts tree.
+if [[ -f "${BASH_SOURCE[0]%/*}/../../hooks/lib/agents-bin.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${BASH_SOURCE[0]%/*}/../../hooks/lib/agents-bin.sh"
+else
+    fno_agents_bin() {
+        local root="${1:-.}"
+        if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
+            printf '%s' "$FNO_AGENTS_BIN"
+        elif [[ -x "$root/crates/fno-agents/target/release/fno-agents" ]]; then
+            printf '%s' "$root/crates/fno-agents/target/release/fno-agents"
+        elif [[ -x "$root/crates/fno-agents/target/debug/fno-agents" ]]; then
+            printf '%s' "$root/crates/fno-agents/target/debug/fno-agents"
+        else
+            command -v fno-agents || printf ''
+        fi
+    }
+fi
 
 cargo_build_dir_remove_for_wt() {
-    local wt="$1" manifest resolved resolved_p base_p found=0
-    base_p="$(cd -- "$(cargo_build_dir_base)" 2>/dev/null && pwd -P)" || return 1
-    for manifest in "$wt"/crates/*/Cargo.toml; do
-        [[ -f "$manifest" ]] || continue
-        resolved="$(cargo metadata --format-version 1 --no-deps --manifest-path "$manifest" 2>/dev/null \
-            | grep -o '"build_directory"[[:space:]]*:[[:space:]]*"[^"]*"' \
-            | sed 's/.*:[[:space:]]*"//; s/"$//')" || continue
-        [[ -d "$resolved" ]] || continue
-        # Owned iff under the managed build base AND carrying cargo's
-        # CACHEDIR.TAG - the same two conjuncts the sweep deletes under.
-        # Both sides normalised through pwd -P: /tmp is a symlink to
-        # /private/tmp, and a logical path never matches a physical prefix.
-        resolved_p="$(cd -- "$resolved" 2>/dev/null && pwd -P)" || continue
-        [[ -f "$resolved_p/CACHEDIR.TAG" ]] || continue
-        case "$resolved_p/" in
-            "$base_p/"*) ;;
-            *) continue ;;
-        esac
-        # Sanctioned disposable delete (docs/architecture/disposable-deletes.md):
-        # a bare rm on a trash-aliased host relocates the bytes instead of
-        # reclaiming them.
-        if { command -p rm -rf "$resolved_p" 2>/dev/null || /bin/rm -rf "$resolved_p"; } && [[ ! -e "$resolved_p" ]]; then
-            found=1
-        fi
-    done
-    [[ "$found" -eq 1 ]]
+    local wt="$1" bin
+    # Best-effort delegation: a missing binary (FNO_AGENTS_BIN pointing
+    # nowhere included) leaves the dir to the sweep and returns success, so
+    # the caller's removal always proceeds.
+    bin="$(fno_agents_bin "$wt")"
+    if [[ -n "$bin" ]]; then
+        "$bin" reclaim remove-for "$wt" >/dev/null 2>&1 || true
+    fi
+    return 0
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

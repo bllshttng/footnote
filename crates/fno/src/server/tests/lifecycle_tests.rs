@@ -30,18 +30,20 @@ fn lifecycle_resolution_prefers_identity_over_label() {
 }
 
 #[test]
-fn lifecycle_identity_never_resolves_an_external_row() {
-    // An external row is managed from its own session; identity resolution
-    // must not let a keypress bypass the external gate.
+fn lifecycle_identity_never_resolves_an_identityless_external_row() {
+    // The external refusal keys on OWNERSHIP: a row with no registry
+    // identity at all (a synthesized foreign row) is managed from its own
+    // session, and neither the label nor a carried id may act on it. A row
+    // that carries ids is an fno registry row (the upgraded orphan) and
+    // resolves like any other.
     let mut core = empty_core();
-    let mut row = exited_claude_row("ext", Some("22222222-2222-4222-8222-222222222222"));
+    let mut row = exited_claude_row("ext", None);
     row.external = true;
-    row.harness_session_id = Some("22222222-2222-4222-8222-222222222222".into());
     core.agents = vec![row];
     assert!(
         core.resolve_lifecycle_target("ext", Some("22222222-2222-4222-8222-222222222222"))
             .is_err(),
-        "an external row is refused even by exact session id"
+        "an identityless external row is refused even by a carried id"
     );
 }
 

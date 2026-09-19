@@ -449,6 +449,18 @@ class AgentEntry:
     # carries onto every turn; the posture alone does not say what it reached.
     resolved_sandbox: Optional[str] = None
     granted_writable_roots: list[str] = field(default_factory=list)
+    # v35: the operator's exact permission_mode string, verbatim as typed
+    # ("read-only:on-request", "yolo", "full-auto"); None when the spawn named
+    # no mode. A resume replays this string, which `sandbox_posture` (the
+    # resolved NAME of the sandbox half) cannot stand in for: it loses the
+    # approval half. Schema mirror only - the Python side carries no
+    # permission logic, so a read-modify-write preserves the Rust stamp.
+    requested_permission_mode: Optional[str] = None
+    # v35: where the current turn's sandboxPolicy came from - "resolved"
+    # (echoed server posture) or "requested" (replayed row request). None on
+    # rows that predate the column; readers show "unknown", never a posture
+    # name.
+    turn_policy_source: Optional[str] = None
     # the CAUSE of the spawn, distinct from spawned_by_* above (which
     # identify WHO called `fno agents spawn`, not WHY). An automated dispatcher
     # sets FNO_SPAWN_TRIGGER before shelling out so the subprocess's own

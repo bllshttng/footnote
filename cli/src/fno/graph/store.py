@@ -274,86 +274,6 @@ def _is_canonical(path: Path) -> bool:
         return False
 
 
-def _spawn_keeper(path: Path) -> subprocess.Popen:
-    """Spawn a store keeper for `path`, detached from this process's group."""
-    binary = _worker_binary()
-    if binary is None:
-        raise StoreUnavailable(
-            STATE_SPAWN_FAILED,
-            "fno-agents-worker not found (set FNO_AGENTS_WORKER or install the runtime)",
-        )
-    sock = store_socket_for(path)
-    argv = [
-        str(binary),
-        "--store-keeper",
-        "--sock",
-        str(sock),
-        "--graph",
-        str(path),
-        "--session",
-        f"store-{os.getpid()}",
-        "--lock-timeout-secs",
-        str(_LOCK_TIMEOUT_SECS),
-    ]
-    if _is_canonical(path):
-        from fno import paths as _paths
-
-        argv.extend(["--events", str(_paths.project_events_json())])
-        argv.append("--canonical")
-    proc = subprocess.Popen(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    # The ledger every test-session reaper reads: a keeper is detached and
-    # outlives its spawner by design, so the spawn that created it owes the
-    # teardown an addressable handle. The Popen is kept, not just the pid:
-    # poll() reaps the exited child, which a kill(pid, 0) liveness probe
-    # cannot do (a zombie answers).
-    _SPAWNED_KEEPERS[proc.pid] = (proc, sock)
-    return proc
-
-
-_SPAWNED_KEEPERS: "dict[int, tuple[subprocess.Popen, Path]]" = {}
-
-
-def reap_spawned_keepers(timeout: float = 10.0) -> "list[int]":
-    """Stop this process's detached keepers; return survivors after timeout."""
-    import signal
-    import time as _time
-
-    for proc, _sock in list(_SPAWNED_KEEPERS.values()):
-        if proc.poll() is None:
-            try:
-                proc.send_signal(signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-    deadline = _time.monotonic() + timeout
-    while _SPAWNED_KEEPERS and _time.monotonic() < deadline:
-        for pid in list(_SPAWNED_KEEPERS):
-            proc, _sock = _SPAWNED_KEEPERS[pid]
-            if proc.poll() is not None:
-                del _SPAWNED_KEEPERS[pid]
-        if _SPAWNED_KEEPERS:
-            _time.sleep(0.05)
-    survivors = list(_SPAWNED_KEEPERS)
-    _SPAWNED_KEEPERS.clear()
-    return survivors
-
-
-def drain_exited_keepers() -> int:
-    """Collect exited keeper children and return how many were reaped."""
-    reaped = 0
-    for pid in list(_SPAWNED_KEEPERS):
-        proc, _sock = _SPAWNED_KEEPERS[pid]
-        if proc.poll() is not None:
-            del _SPAWNED_KEEPERS[pid]
-            reaped += 1
-    return reaped
-
-
 def _orphaned_keeper_pids() -> "list[int]":
     """Live pids advertising a store keeper whose graph tree (file AND parent
     dir) is gone: the sweep's candidate scan, factored out so a test can
@@ -615,11 +535,103 @@ class _Keeper:
         self._control(_TAG_SHUTDOWN, _TAG_RESPONSE)
 
 
+# Wall-clock bound for one --store-exec request; a hung child cannot outlive it.
+_EXEC_TIMEOUT_S = 60.0
+
+
+class _ExecClient(_Keeper):
+    """One-shot transport: every request execs `--store-exec` and the child
+    exits, so a request-driven leak has no process to grow in. A lost write
+    raises `WriteUnconfirmed` - no process survives to answer write_status.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        # No `sock`: nothing on this transport connects, and the inherited
+        # helpers answer through `request` alone.
+
+    def request(self, method: str, params: dict) -> Any:
+        is_write = method in {"commit", "commit_rows", "op", "api"}
+        request_params = {**params, "request_id": uuid.uuid4().hex} if is_write else params
+        binary = _worker_binary()
+        if binary is None:
+            raise StoreUnavailable(
+                STATE_SPAWN_FAILED,
+                "fno-agents-worker not found (set FNO_AGENTS_WORKER or install the runtime)",
+            )
+        argv = [
+            str(binary),
+            "--store-exec",
+            "--graph",
+            str(self.path),
+            "--lock-timeout-secs",
+            str(_LOCK_TIMEOUT_SECS),
+        ]
+        if _is_canonical(self.path):
+            from fno import paths as _paths
+
+            argv.extend(["--events", str(_paths.project_events_json())])
+            argv.append("--canonical")
+        try:
+            # Popen, not run(): the CLI test suites stub subprocess.run as
+            # their git/gh seam and would answer the store's own request with
+            # an empty rc-1 reply; Popen is the module's unstubbed primitive.
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:  # the request was never sent
+            raise StoreUnavailable(STATE_SPAWN_FAILED, str(exc)) from None
+        try:
+            out, _ = proc.communicate(
+                json.dumps({"id": 1, "method": method, "params": request_params}).encode(),
+                timeout=_EXEC_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            failure = StoreUnavailable(
+                STATE_UNREACHABLE, f"store-exec timed out after {_EXEC_TIMEOUT_S}s"
+            )
+            if is_write:
+                raise WriteUnconfirmed(
+                    failure.state, f"{failure.detail}; the write was not confirmed"
+                ) from None
+            raise failure from None
+        except OSError as exc:  # the pipe broke mid-request
+            proc.kill()
+            proc.wait()
+            raise StoreUnavailable(STATE_SPAWN_FAILED, str(exc)) from None
+        if not out:
+            detail = f"store-exec exited with code {proc.returncode} and no reply"
+            if is_write:
+                raise WriteUnconfirmed(
+                    STATE_UNCONFIRMED, f"{detail}; read the graph before retrying"
+                ) from None
+            raise StoreUnavailable(
+                STATE_SPAWN_FAILED,
+                f"{detail}; is fno-agents-worker current? `fno doctor` names lag",
+            ) from None
+        try:
+            reply = json.loads(out.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise StoreUnavailable(STATE_UNREACHABLE, f"store-exec reply is not JSON: {exc}") from None
+        if reply.get("ok"):
+            return reply.get("result")
+        error = reply.get("error") or {}
+        _raise_store_error(error.get("kind", "invalid"), str(error.get("message", error)))
+
+    def shutdown(self) -> None:
+        pass  # one-shot: nothing resident to shut down
+
+
 def shutdown_keeper(path: Path) -> None:
     """Ask `path`'s keeper to exit, best-effort; a bootstrap lookup must leave nothing the session reaper counts as a leak."""
     try:
         _client_for(path).shutdown()
-    except Exception:  # noqa: BLE001 - a refusing keeper is the caller's absence
+    except Exception:  # noqa: BLE001 - a refusing store is the caller's absence
         pass
 
 
@@ -636,8 +648,13 @@ def _recv_exact(stream: socket.socket, length: int) -> bytes:
     return bytes(buf)
 
 
-def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
-    """Connect to `path`'s keeper, spawning only for a positively dead socket."""
+def _client_for(path: Path, *, spawn: bool = True) -> "_Keeper | _ExecClient":
+    """Connect to `path`'s keeper; when nothing is listening, serve by exec.
+    A live keeper is still preferred (old binaries spawn them); the
+    spawn-needed branch no longer mints one, because a resident keeper's
+    memory grows with requests served. An unreachable store still raises
+    StoreUnavailable - never an empty graph.
+    """
     path = Path(path)
     sock = store_socket_for(path)
     keeper = _Keeper(sock)
@@ -648,36 +665,7 @@ def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
     except StoreUnavailable as exc:
         if not spawn or exc.state not in (STATE_ABSENT, STATE_NO_LISTENER):
             raise
-    proc = _spawn_keeper(path)
-    deadline = time.monotonic() + 10.0
-    last: StoreUnavailable | None = None
-    while time.monotonic() < deadline:
-        if proc.poll() is not None and proc.returncode != 3:
-            # Our spawned worker died before binding (a stale binary without
-            # the store lane, or an unexpected crash). Probe once: a live
-            # listener means the seat is taken by a valid keeper and the
-            # request can ride it; still dead means our binary is the
-            # problem, and that never justifies waiting out the clock.
-            try:
-                probe = keeper._connect()
-                probe.close()
-                return keeper
-            except StoreUnavailable as exc:
-                raise StoreUnavailable(
-                    STATE_SPAWN_FAILED,
-                    f"keeper exited immediately with code {proc.returncode} "
-                    f"({proc.args!r}); is fno-agents-worker current? "
-                    "`fno doctor` names lag",
-                ) from exc
-        # Exit 3 (EXIT_SEAT_OWNED): an incumbent holds the seat; keep polling.
-        try:
-            probe = keeper._connect()
-            probe.close()
-            return keeper
-        except StoreUnavailable as exc:
-            last = exc
-            time.sleep(0.05)
-    raise last or StoreUnavailable(STATE_SILENT, "keeper never answered")
+    return _ExecClient(path)
 
 
 def _raise_store_error(kind: str, message: str) -> None:
@@ -820,8 +808,18 @@ def set_related(entries: list[dict], node_id: str, desired: list[str]) -> None:
     Symmetry is stored on both endpoints, not derived. Mutates ``entries``
     in place (both halves land in the caller's ``locked_mutate_graph`` call,
     so a half-written edge aborts the mutation before anything persists).
+
+    The keeper returns fresh dicts. Copy them into the existing ones, so a
+    caller that holds a row keeps writing to the row that persists.
     """
     out = _pure(entries, "set_related", {"node_id": node_id, "desired": desired})
+    held = {e.get("id"): e for e in entries}
+    for i, row in enumerate(out):
+        old = held.get(row.get("id"))
+        if old is not None:
+            old.clear()
+            old.update(row)
+            out[i] = old
     entries[:] = out
 
 
@@ -1862,12 +1860,12 @@ def reap_open_session_record(
 ) -> dict:
     """Close one exact open observer-owned session row and report settlement.
 
-    ``do`` REMOVES the row (an open do window wedges node status in_progress,
-    so after death the honest state is "no do window"); every other phase
-    FILLS ``ended_at`` and keeps the row (a reviewer session's provenance did
-    happen); ``all`` applies both semantics to every open row carrying the
-    identity. The fill value defaults to the reap instant, an UPPER BOUND on
-    the true end. ``node_id=None`` is the death-cascade form: every node
+    Every phase, ``do`` included, FILLS ``ended_at`` and keeps the row: a
+    filled row is not open, so node status un-wedges exactly as the retired
+    do-removal did, and the session provenance survives. The fill value
+    defaults to the reap instant, an UPPER BOUND on the true end;
+    ``abandoned_leg`` passes the transcript tail instant instead.
+    ``node_id=None`` is the death-cascade form: every node
     holding an open row for the identity settles, and the receipt's
     ``node_ids`` names them."""
     if phase != "all" and phase not in _SESSION_PHASES:

@@ -214,6 +214,69 @@ def test_high_severity_when_superset(tmp_path):
     assert cols[0].recommended_action == "supersede"
 
 
+def test_absorb_requires_half_the_wider_surface(tmp_path):
+    from fno.graph.collision import find_collisions
+
+    # 3 shared of 6 and 5: exactly the bar on the wider side; the older
+    # other plan still absorbs the newer candidate
+    cand = _write_quick_plan(
+        tmp_path / "cand.md",
+        ["src/a.py", "src/b.py", "src/c.py", "src/d.py", "src/e.py", "src/f.py"],
+    )
+    other = _write_quick_plan(tmp_path / "other.md", ["src/a.py", "src/b.py", "src/c.py", "src/g.py", "src/h.py"])
+    graph: list[dict] = []
+    _seed_node(graph, id_="ab-other", plan_path=str(other), created_at="2026-04-27T00:00:00+00:00")
+    _seed_node(graph, id_="ab-cand", plan_path=str(cand), created_at="2026-04-28T00:00:00+00:00")
+
+    cols = find_collisions(cand, graph, self_id="ab-cand")
+    assert len(cols) == 1
+    assert cols[0].recommended_action == "absorb"
+    assert cols[0].severity == "high"
+
+
+def test_one_shared_file_of_six_and_two_never_absorbs(tmp_path):
+    from fno.graph.collision import find_collisions
+
+    # 1 shared of 6 and 2: over half of the NARROWER side, under half the
+    # wider one - coordinate, never absorb
+    cand = _write_quick_plan(
+        tmp_path / "cand.md",
+        ["src/a.py", "src/b.py", "src/c.py", "src/d.py", "src/e.py", "src/f.py"],
+    )
+    other = _write_quick_plan(tmp_path / "other.md", ["src/a.py", "src/z.py"])
+    graph: list[dict] = []
+    _seed_node(graph, id_="ab-other", plan_path=str(other), created_at="2026-04-27T00:00:00+00:00")
+    _seed_node(graph, id_="ab-cand", plan_path=str(cand), created_at="2026-04-28T00:00:00+00:00")
+
+    cols = find_collisions(cand, graph, self_id="ab-cand")
+    assert len(cols) == 1
+    assert cols[0].recommended_action == "coordinate"
+    assert cols[0].severity == "high"
+
+
+def test_subset_below_half_the_wider_side_coordinates(tmp_path):
+    from fno.graph.collision import find_collisions
+
+    # 2 shared of 2 and 13: a strict subset under half the wider surface
+    # is coordinate in both directions, never absorb or supersede
+    cand = _write_quick_plan(tmp_path / "cand.md", ["src/a.py", "src/b.py"])
+    other_files = ["src/a.py", "src/b.py"] + [f"src/n{i}.py" for i in range(11)]
+    other = _write_quick_plan(tmp_path / "other.md", other_files)
+    graph: list[dict] = []
+    _seed_node(graph, id_="ab-other", plan_path=str(other), created_at="2026-04-27T00:00:00+00:00")
+    _seed_node(graph, id_="ab-cand", plan_path=str(cand), created_at="2026-04-28T00:00:00+00:00")
+
+    cols = find_collisions(cand, graph, self_id="ab-cand")
+    assert len(cols) == 1
+    assert cols[0].recommended_action == "coordinate"
+    assert cols[0].severity == "high"
+
+    cols_rev = find_collisions(other, graph, self_id="ab-other")
+    assert len(cols_rev) == 1
+    assert cols_rev[0].recommended_action == "coordinate"
+    assert cols_rev[0].severity == "high"
+
+
 def test_medium_severity_partial_overlap(tmp_path):
     from fno.graph.collision import find_collisions
 
@@ -991,14 +1054,19 @@ def test_triage_health_failure_prone(tmp_graph, tmp_path):
 
 def test_triage_health_shows_evals_line_when_history_exists(tmp_graph, tmp_path, monkeypatch):
     """The evals consumer: triage health surfaces regression rate + flakes when
-    eval history exists (US4). A regression-tier task with a failure flags the
-    alarm; evals is advisory and never changes the health exit code."""
+    eval history exists (US4). A regression-tier task with a failure inside the
+    recent window flags the alarm, which reads only that window; evals is
+    advisory and never changes the health exit code."""
     import fno.paths as _paths
+    from datetime import datetime, timedelta, timezone
     from fno.evals import history as _eh
 
     hist = tmp_path / "evals-history.jsonl"
-    _eh.append_row(hist, {"task_id": "r", "tier": "regression", "pass": True})
-    _eh.append_row(hist, {"task_id": "r", "tier": "regression", "pass": False})
+    now = datetime.now(timezone.utc)
+    _eh.append_row(hist, {"task_id": "r", "tier": "regression", "pass": True,
+                          "ts": (now - timedelta(hours=2)).isoformat().replace("+00:00", "Z")})
+    _eh.append_row(hist, {"task_id": "r", "tier": "regression", "pass": False,
+                          "ts": (now - timedelta(hours=1)).isoformat().replace("+00:00", "Z")})
     monkeypatch.setattr(_paths, "evals_history", lambda: hist)
 
     res = _invoke("backlog", "triage", "health", "--all", "--json")

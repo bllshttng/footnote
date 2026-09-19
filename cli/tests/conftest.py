@@ -18,6 +18,28 @@ import fno.doctor_cli  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
+def _reset_project_resolve_cache():
+    """Clear the project-name resolver's cache before and after every test.
+
+    ``fno.projects.resolve`` caches ``~/.fno/config.toml`` in a module-level
+    dict on first use and never invalidates it. Several tests point
+    ``SETTINGS_PATH`` at a tmp fixture and call ``_clear_cache()`` before
+    reading, but not after, so the fixture's project map (e.g. ``etl`` ->
+    some canonical name) survives into whatever test runs next in the same
+    xdist worker. That flaked
+    ``test_project_scope_compiles_to_the_project_union`` in smoke-pytest
+    shard 8: a leaked ``etl`` alias from an unrelated test made a raw
+    ``etl`` project no longer match its own canonicalization. Autouse so a
+    future test with the same shape does not need to remember this itself.
+    """
+    from fno.projects import resolve as proj_resolve
+
+    proj_resolve._clear_cache()
+    yield
+    proj_resolve._clear_cache()
+
+
+@pytest.fixture(autouse=True)
 def _quiet_gh_budget(monkeypatch):
     """Keep every test off the real fleet GitHub request ledger.
 
@@ -355,9 +377,6 @@ def _reap_session_processes(tmp_path_factory):
 
     yield
 
-    from fno.graph.store import reap_spawned_keepers
-
-    survivors = reap_spawned_keepers(timeout=15.0)
     # This session's own pid, not the default: a leak still parented by THIS
     # worker has a readable cwd only when the worker is the named reaper, and
     # a worker-parented child is exactly the leak that never reaches ppid 1.
@@ -375,10 +394,8 @@ def _reap_session_processes(tmp_path_factory):
     while census_rooted([str(basetemp)]) and time.monotonic() < grace_end:
         time.sleep(0.5)
     rooted = reap_rooted([str(basetemp)], reaper=os.getpid())
-    assert not survivors and not rooted, (
-        f"{len(survivors)} store keeper(s) outlived the test session "
-        f"(pids {sorted(survivors)[:10]}); the spawn ledger must drain to "
-        f"zero. {len(rooted)} process tree(s) stayed rooted in this "
+    assert not rooted, (
+        f"{len(rooted)} process tree(s) stayed rooted in this "
         f"session's tmp tree: "
         + "; ".join(
             f"pid {r['pid']} at {r['cwd']} "
@@ -387,25 +404,6 @@ def _reap_session_processes(tmp_path_factory):
         )
     )
 
-
-@pytest.fixture(autouse=True)
-def _drain_exited_keepers():
-    """Reap exited store keepers between tests, not only at session end.
-
-    The session reaper above runs ONCE, at teardown, and an exited child stays
-    in the process table as a zombie until someone collects its status - so
-    every keeper that self-exits mid-run holds a table slot under its xdist
-    worker pid until the whole session ends. Measured 2026-09-03: ~52 zombie
-    keepers per minute under four workers, 549 zombies at 31% of the process
-    table, with two suites running. Draining around every test bounds the
-    corpse window to one test; the session reaper above stays as the SIGTERM
-    backstop for keepers still LIVE at teardown, and its assert stays.
-    """
-    from fno.graph.store import drain_exited_keepers
-
-    drain_exited_keepers()
-    yield
-    drain_exited_keepers()
 
 @pytest.fixture(autouse=True)
 def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
@@ -476,7 +474,7 @@ def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
     # cursor_agent (module constant) / pi.rpc_argv / grok.acp_argv / kimi
     # (inline argv, no constant to import).
     provider_bins = {
-        "claude", "codex", "pi", "grok", "kimi",
+        "claude", "codex", "pi", "grok", "kimi", "dsh",
         _agy.AGY_BINARY, _cursor.CURSOR_AGENT_BINARY,
     }
 
@@ -820,7 +818,9 @@ def _reset_config_state() -> None:
 # The per-test clearer registry is retired: every cached state reader keys on
 # its declared root (test_cached_state_surface enforces a root parameter or a
 # recorded reason), so there is nothing left to clear per test.
-HERMETIC_CACHED_STATE_CLEARERS: tuple[tuple[str, str], ...] = ()
+HERMETIC_CACHED_STATE_CLEARERS: tuple[tuple[str, str], ...] = (
+    ("fno.claims.session_pid", "_session_identity"),
+)
 
 
 MINIMAL_TARGET_STATE = """\
@@ -955,6 +955,55 @@ def _no_live_evidence_gate(monkeypatch):
     from fno import decide
 
     monkeypatch.setattr(decide, "_evidence_gate", _passthrough)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_resume_pin(monkeypatch):
+    """Hermetic default for the resume-pin transport.
+
+    dispatch_spawn's unpinned-claude-resume seam asks the Rust resume-pin
+    owner through `fork_lineage.spawn_axes_call`, and in a dev environment
+    that resolver can find a real installed binary whose answer depends on
+    the machine's registry and transcripts. The default answers from the
+    payload's own row (requested_model, else model; routed answers ride
+    route_model) and refuses a rowless unpinned resume; tests that need a
+    different answer re-stub `fork_lineage.spawn_axes_call` and win.
+    """
+    import fno.agents.fork_lineage as fork_lineage
+
+    real = fork_lineage.spawn_axes_call
+
+    def _answer(payload):
+        pin = payload.get("resume_pin")
+        if pin is None:
+            return real(payload)
+        row = pin.get("row") or {}
+        model = row.get("requested_model") or row.get("model")
+        if model is None:
+            # A routed resume never refuses; the route owns the argv model.
+            if pin.get("routed"):
+                return {
+                    "model": None,
+                    "effort": row.get("effort"),
+                    "route_model": None,
+                    "source": "registry",
+                }
+            return {"refusal": "stubbed: no model on the row"}
+        if pin.get("routed"):
+            return {
+                "model": None,
+                "effort": row.get("effort"),
+                "route_model": model,
+                "source": "registry",
+            }
+        return {
+            "model": model,
+            "effort": row.get("effort"),
+            "route_model": None,
+            "source": "registry",
+        }
+
+    monkeypatch.setattr(fork_lineage, "spawn_axes_call", _answer)
 
 
 def checkout_fno_agents_binary():

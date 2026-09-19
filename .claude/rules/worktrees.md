@@ -1,8 +1,8 @@
 # Worktree convention
 
-The single place that says where git worktrees go and what to do after creating one. Skill defaults that place them elsewhere lose to this rule.
+The single place saying where git worktrees go and what to do after creating one. Skill defaults that place them elsewhere lose to this rule.
 
-Read [worktree-mechanics](../../docs/architecture/worktree-mechanics.md) for hook internals, removal, cargo storage, and the Bash isolation map. Before editing the `WorktreeCreate` hook: a non-zero exit on the wrong payload shape CREATES the worktree you meant to block. In a worktree, Bash refuses `$` expansion, `$(...)`, and loops. Use `printenv`, fno verbs, or `bash <file>`.
+Read [worktree-mechanics](../../docs/architecture/worktree-mechanics.md) for hook internals, removal, cargo storage, and Bash isolation map. Before editing the `WorktreeCreate` hook: a non-zero exit on the wrong payload shape CREATES the worktree you meant to block. In a worktree, Bash refuses `$` expansion, `$(...)`, and loops. Use `printenv`, fno verbs, or `bash <file>`.
 
 ## The rule
 
@@ -11,7 +11,7 @@ Read [worktree-mechanics](../../docs/architecture/worktree-mechanics.md) for hoo
 - **Unset (OSS-neutral default):** harness-native `<repo>/.claude/worktrees/<name>` (gitignored, search-clean). No config needed.
 - **`config.paths.worktrees_base: <dir>`:** worktrees land at `<dir>/<repo>/<name>` (`<repo>` = `basename $(git rev-parse --show-toplevel)`).
 - **`worktree.use_conductor_canonical: true` is DEPRECATED:** acts as `worktrees_base = ~/conductor/workspaces`. Prefer `worktrees_base`.
-- Cargo output lives in TWO places per checkout. Final binaries sit in `crates/*/target`. Intermediates sit in the build base, one hash dir per workspace root, so sibling builds never share the artifact lock. Details in [worktree-mechanics](../../docs/architecture/worktree-mechanics.md). Never name-match target dirs: `cli/src/fno/target`, `skills/target`, and `tests/target` are source dirs. A 2026-09-02 name-based sweep deleted 66 across 26 worktrees. Match cargo dirs by `CACHEDIR.TAG` on the nearest ancestor, by `crates/*/target`, or by a tagged build-base hash dir.
+- Cargo output lives in TWO places per checkout. Final binaries sit in `crates/*/target`. Intermediates land in the fno build base (`paths.cargo_targets_base`, default `~/.fno/cargo-build`), or in `~/.cargo/build` when the env is unset. `fno doctor reclaim` lane `cargo_build_dirs` sweeps both daily, and matches by `CACHEDIR.TAG`, base, and member fingerprint, never by name. Details in [worktree-mechanics](../../docs/architecture/worktree-mechanics.md). Never name-match target dirs: `cli/src/fno/target`, `skills/target`, and `tests/target` are source dirs. A 2026-09-02 name-based sweep deleted 66 across 26 worktrees.
 
 ## Creating and entering one
 
@@ -29,21 +29,22 @@ Setup links shared state from canonical: vault symlink, gitignored `.claude/` su
 
 ## Removal
 
-The removal contract, missing until 174 trees piled up (74 GB). Three buckets, one trigger, one gate:
+The removal contract, missing until 174 trees piled up (74 GB). Four buckets, one trigger, one gate:
 
-- **DIRTY** - the merge reaper takes a done-and-merged tree whatever its git status; unpushed HEAD still holds (law d-cfcf5a8e).
+- **DIRTY** - the merge reaper takes a done-and-merged tree whatever its git status; unpushed HEAD holds (law d-cfcf5a8e).
+- **done-node** - the merged sweep prunes a finished, clean, 48h+ tree; branch kept.
 - **clean + unmerged** - never auto-pruned. Report the branch so a human judges (open PR or abandoned work).
-- **clean + merged** - prune the TREE, keep the BRANCH. The tree is a checkout. The branch is the work.
-- **unborn** - a branch with no commit of its own is never a merged branch, whatever the merge-base says. Inside the setup window the gate refuses it (`reason=unborn`, row `kept (unborn)`), so a fresh dispatch survives setup. Predicate and rationale: [worktree-mechanics](../../docs/architecture/worktree-mechanics.md).
-- **Trigger: MERGE, never node-done.** Mint sites: `fno do pr merge`, the post-merge ritual; the daemon reaper pays after a grace window.
+- **clean + merged** - prune the TREE, keep the BRANCH.
+- **unborn** - a branch with no commit of its own is never merged, whatever the merge-base says. Setup refuses it (`reason=unborn`, row `kept (unborn)`), so a fresh dispatch survives. Detail: [worktree-mechanics](../../docs/architecture/worktree-mechanics.md).
+- **Trigger: MERGE, never node-done.** Fires: `fno do pr merge`, the post-merge ritual; the daemon reaper pays after a grace window.
 - **Gate: `reapable`** (`fno agents workspace worktree reapable`) enforces the buckets, not each caller.
-- **Backstop: the daemon's daily `cleanup --merged` sweep** - the ritual only sees its own PRs.
+- **Backstop: the daemon's daily `cleanup --merged` sweep** - the ritual sees its own PRs.
 
-Verb: `fno agents workspace worktree cleanup --merged` (dry-run default, `--apply` executes, from canonical). Orders, guards, and events in [worktree-mechanics](../../docs/architecture/worktree-mechanics.md).
+Verb: `fno agents workspace worktree cleanup --merged` (dry-run default, `--apply` executes, from canonical). Detail: [worktree-mechanics](../../docs/architecture/worktree-mechanics.md).
 
 ## Per-project worktree policy
 
-Every code-payload dispatch routes through `fno agents workspace worktree ensure`, which resolves a `worktree` policy.
+Every code-payload dispatch routes through `fno agents workspace worktree ensure`, resolving a `worktree` policy.
 Precedence: per-project `work.workspaces.<slug>.projects[].worktree` > global `config.worktree.policy` > built-in `harness-native`.
 
 - **`never`** - launch in place on the canonical checkout (for projects whose tree IS the product, e.g. an Obsidian vault). ensure prints the repo root, exit 0; callers skip `setup-worktree.sh`; the location gate treats the protected branch as `ok`.

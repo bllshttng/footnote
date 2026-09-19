@@ -134,6 +134,13 @@ pub struct GcRow {
     /// ESRCH. The origin gate skips such a row, so it is judged like any
     /// other row; every downstream gate still applies.
     pub origin_corpse: bool,
+    /// The open-work window (change 2): how long an OPEN-work row may
+    /// sit transcript-quiet before its node stops counting as evidence of a
+    /// live session. Quiet past it, the row falls to the same grace gate a
+    /// done row takes; inside it, the keep names the pinning node. Resolved
+    /// from `agents.reap.open_work_retire_s`, defaulting well above the
+    /// ordinary grace.
+    pub open_work_retire_s: i64,
 }
 
 impl GcRow {
@@ -212,6 +219,11 @@ pub enum KeepReason {
     PlanningUnclosed { node: String, status: String },
     /// At least one named node is not done; the first open one is reported.
     OpenWork { node: String, status: String },
+    /// Open work whose transcript is quiet INSIDE the open-work window
+    /// (change 2): the row keeps for now, but the keep has a clock -
+    /// quiet past the window falls to the grace gate - and it names the
+    /// stale node pinning it, so an operator can act on the node.
+    OpenWorkStale { node: String, status: String },
     /// The transcript was written inside the grace window: the session is
     /// live in the only sense the law allows. A terminal harness state
     /// overrides it (the roster's `done` is not a turn boundary), and so
@@ -248,6 +260,9 @@ impl KeepReason {
                 "planning assignment not finished by this session"
             }
             KeepReason::OpenWork { .. } => "open work",
+            KeepReason::OpenWorkStale { .. } => {
+                "open work inside the retire window: the stale node pins the row"
+            }
             KeepReason::Active { .. } => "active",
             KeepReason::TranscriptUnresolved => "transcript unresolved",
             KeepReason::GraphUnreadable => "graph unreadable",
@@ -308,7 +323,7 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
             // fno never stopped the row. The grace gate supplies the quiet
             // conjunct, so a done-and-quiet row with no node releases, and
             // a row that never reported done keeps exactly as before.
-            if row.turn_ended {
+            if row.turn_ended || row.session_released() {
                 grace_gate(row, grace_secs)
             } else {
                 (GcAction::Keep, Some(KeepReason::NoProvenance))
@@ -394,13 +409,31 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
             if row.session_released() {
                 return grace_gate(row, grace_secs);
             }
-            (
-                GcAction::Keep,
-                Some(KeepReason::OpenWork {
-                    node: node.clone(),
-                    status: status.clone(),
-                }),
-            )
+            // change 2: open NODE state alone is not evidence a
+            // SESSION is alive, and inside this window neither is an open
+            // node plus quiet. A row quiet past the open-work window falls
+            // to the same grace gate a released row takes; a row inside it
+            // keeps, and the keep names the node pinning it, so an operator
+            // can act on the node rather than on the row. An UNRESOLVED
+            // transcript has no clock to age past anything, so it keeps
+            // under the unchanged open-work reason.
+            match row.transcript_age_s {
+                Some(age) if age > row.open_work_retire_s => grace_gate(row, grace_secs),
+                Some(_) => (
+                    GcAction::Keep,
+                    Some(KeepReason::OpenWorkStale {
+                        node: node.clone(),
+                        status: status.clone(),
+                    }),
+                ),
+                None => (
+                    GcAction::Keep,
+                    Some(KeepReason::OpenWork {
+                        node: node.clone(),
+                        status: status.clone(),
+                    }),
+                ),
+            }
         }
         WorkState::AllDone { .. } => grace_gate(row, grace_secs),
     }
@@ -447,7 +480,28 @@ pub fn tree_action(row: &GcRow) -> TreeAction {
 /// resolves a row by short_id or by name, so the fallback is a real handle,
 /// not a display string. Written once so the sweep never probes under one
 /// name and reports under another.
-pub(crate) fn row_handle(e: &crate::state::RegistryEntry) -> String {
+pub fn row_handle(e: &crate::state::RegistryEntry) -> String {
+    // The session id resolves for BOTH populations (`fno agents truth`
+    // answers a full harness session id for registry and roster rows alike);
+    // an fno short id resolves for registry rows only, so a roster-only
+    // row probed under its short id always answered not-found and the
+    // sweep built for it could never age one.
+    if let Some(sid) = e.harness_session_id.as_deref().filter(|s| !s.is_empty()) {
+        return sid.to_string();
+    }
+    if e.short_id.is_empty() {
+        e.name.clone()
+    } else {
+        e.short_id.clone()
+    }
+}
+
+/// The label a sweep REPORTS a row under: the short id, falling back to the
+/// name - the operator-facing identity every summary bucket, hold, and
+/// release ruling keys on. change 1 split this from [`row_handle`],
+/// the PROBE handle: the probe must ask the harness session id, while the
+/// report keeps the handle an operator (and `reap --release`) already holds.
+pub fn row_label(e: &crate::state::RegistryEntry) -> String {
     if e.short_id.is_empty() {
         e.name.clone()
     } else {
@@ -462,7 +516,7 @@ pub(crate) fn row_handle(e: &crate::state::RegistryEntry) -> String {
 /// max +240 h). A handle the probe cannot resolve is absent from the map, and
 /// the sweep reads absence as `None`: an unresolved transcript is never a
 /// quiet one.
-pub(crate) fn probe_entry_ages(
+pub fn probe_entry_ages(
     entries: &[&crate::state::RegistryEntry],
 ) -> std::collections::HashMap<String, Option<i64>> {
     let handles: Vec<String> = entries.iter().map(|e| row_handle(e)).collect();
@@ -473,16 +527,6 @@ pub(crate) fn probe_entry_ages(
         .into_iter()
         .map(|(handle, probe)| (handle, probe.last_activity_age_s.map(|a| a as i64)))
         .collect()
-}
-
-/// Per-row arm of the same seam, for the reapers whose loop shape predates the
-/// batch: one single-flighted probe answers this row only. `pub` because the
-/// client binary's pair leg rides it too.
-pub fn probe_row_age(entry: &crate::state::RegistryEntry) -> Option<i64> {
-    probe_entry_ages(&[entry])
-        .get(&row_handle(entry))
-        .copied()
-        .flatten()
 }
 
 // --- the sweep shells -------------------------------------------------------
@@ -613,9 +657,10 @@ pub fn gc_sweep_release(
 pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSummary {
     // The settle plan is read-only, and the rehearsal subtracts it from the
     // graph read so the report shows the outcome the real pass would produce.
-    let planned = gc_sweep::plan_stale_do_rows(home);
+    let mut pr_reader = crate::additional_prs::gh_pr_state_reader();
+    let (planned, stamps) = crate::additional_prs::plan_settle(home, &mut pr_reader);
     let read = |h: &AgentsHome| {
-        gc_sweep::read_graph_entries(h).map(|g| gc_sweep::without_settled(g, &planned))
+        gc_sweep::read_graph_entries(h).map(|g| gc_sweep::without_settled(g, &planned, &stamps))
     };
     // Never emitted to in dry-run mode (the whole write+emit tail is skipped),
     // so an unused placeholder path satisfies the shared signature.
@@ -2229,6 +2274,7 @@ mod tests {
             peer_drives_pr: false,
             pr_settled: false,
             origin_corpse: false,
+            open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
         }
     }
 
@@ -2313,7 +2359,7 @@ mod tests {
             gc_decide(&unplannable, GRACE),
             (
                 GcAction::Keep,
-                Some(KeepReason::OpenWork {
+                Some(KeepReason::OpenWorkStale {
                     node: "x-cccc".into(),
                     status: "ready".into(),
                 })
@@ -2912,6 +2958,27 @@ mod tests {
             gc_decide(&open, GRACE),
             (
                 GcAction::Keep,
+                Some(KeepReason::OpenWorkStale {
+                    node: "N3".into(),
+                    status: "in_review".into()
+                })
+            )
+        );
+        // change 2: an open row with NO transcript age has no clock,
+        // so it keeps under the unchanged open-work reason - it can never
+        // age past the window, and absence is never quiet.
+        let unclocked = GcRow {
+            work: WorkState::Open {
+                node: "N3".into(),
+                status: "in_review".into(),
+            },
+            transcript_age_s: None,
+            ..retiring()
+        };
+        assert_eq!(
+            gc_decide(&unclocked, GRACE),
+            (
+                GcAction::Keep,
                 Some(KeepReason::OpenWork {
                     node: "N3".into(),
                     status: "in_review".into()
@@ -3143,7 +3210,7 @@ mod tests {
         }
         assert!(matches!(
             gc_decide(&open_row("in_review"), GRACE),
-            (GcAction::Keep, Some(KeepReason::OpenWork { .. }))
+            (GcAction::Keep, Some(KeepReason::OpenWorkStale { .. }))
         ));
     }
 
@@ -3253,8 +3320,87 @@ mod tests {
         let row = open_row("in_review");
         assert!(matches!(
             gc_decide(&row, GRACE),
-            (GcAction::Keep, Some(KeepReason::OpenWork { .. }))
+            (GcAction::Keep, Some(KeepReason::OpenWorkStale { .. }))
         ));
+    }
+
+    /// change 2, AC2-EDGE: an Open row quiet PAST the open-work
+    /// window falls to the grace gate and retires; the same row INSIDE the
+    /// window keeps, and the keep names its pinning node.
+    #[test]
+    fn an_open_row_past_the_open_work_window_retires() {
+        let row = GcRow {
+            transcript_age_s: Some(crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64 + 1),
+            ..open_row("in_progress")
+        };
+        assert_eq!(gc_decide(&row, GRACE), (GcAction::Retire, None));
+        let inside = GcRow {
+            transcript_age_s: Some(crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64 - 1),
+            ..open_row("in_progress")
+        };
+        assert_eq!(
+            gc_decide(&inside, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::OpenWorkStale {
+                    node: "N1".into(),
+                    status: "in_progress".into()
+                })
+            )
+        );
+    }
+
+    /// change 2, AC2-HP: a NoProvenance row whose SESSION carries a
+    /// terminal state but which never reported a finished turn reaches the
+    /// grace gate - a quiet row past the grace retires instead of keeping
+    /// forever on the missing turn marker.
+    #[test]
+    fn a_terminal_session_releases_a_no_provenance_row_without_turn_ended() {
+        let row = GcRow {
+            work: WorkState::NoProvenance,
+            session_terminal: Some("done".into()),
+            ..retiring()
+        };
+        assert_eq!(gc_decide(&row, GRACE), (GcAction::Retire, None));
+        // The release still lands in the grace gate: the turn-ended release
+        // keeps its quiet conjunct, so a row inside the grace keeps as
+        // active (the terminal override, not this widened arm, is what
+        // retires a young terminal row).
+        let young = GcRow {
+            work: WorkState::NoProvenance,
+            turn_ended: true,
+            transcript_age_s: Some(10),
+            ..retiring()
+        };
+        assert_eq!(
+            gc_decide(&young, GRACE),
+            (GcAction::Keep, Some(KeepReason::Active { age_s: 10 }))
+        );
+    }
+
+    /// change 1: the handle a row is probed under prefers the
+    /// harness session id - `fno agents truth` resolves a full session id
+    /// for registry AND roster rows alike, while a short id resolves for
+    /// registry rows only. A registry row with no session id falls back to
+    /// its short id, so the registry sweep keeps answering as it does today
+    /// (AC1-EDGE).
+    #[test]
+    fn row_handle_prefers_the_session_id_and_falls_back_to_short_id() {
+        let roster_only = crate::state::RegistryEntry::new(
+            Some("11111111-2222-4333-8444-555555555555".to_string()),
+            crate::state::Lineage::unproven("test"),
+        );
+        assert_eq!(
+            crate::gc::row_handle(&roster_only),
+            "11111111-2222-4333-8444-555555555555"
+        );
+        let mut e = crate::state::RegistryEntry::default();
+        e.harness_session_id = None;
+        e.short_id = "ab12cd34".into();
+        assert_eq!(crate::gc::row_handle(&e), "ab12cd34");
+        e.short_id = String::new();
+        e.name = "worker-1".into();
+        assert_eq!(crate::gc::row_handle(&e), "worker-1");
     }
 
     /// An adopted orphan row named on no node survives the sweep:
@@ -3286,6 +3432,7 @@ mod tests {
             peer_drives_pr: false,
             pr_settled: false,
             origin_corpse: false,
+            open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
         };
         assert_eq!(gc_decide(&row, 60).0, GcAction::Keep);
     }
@@ -3319,6 +3466,7 @@ mod tests {
             peer_drives_pr: false,
             pr_settled: false,
             origin_corpse: false,
+            open_work_retire_s: crate::agents_config::DEFAULT_OPEN_WORK_RETIRE_SECS as i64,
         }
     }
 

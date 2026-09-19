@@ -213,6 +213,8 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
         fh = None
     budget_s = float(r) if (r := os.environ.get("FNO_FLIGHT_BUDGET_S", "")).replace(".", "", 1).isdigit() else _FLIGHT_BUDGET_DEFAULT_S
     parent_pid = int(p) if (p := os.environ.get("FNO_DIE_WITH_PARENT", "")).isdigit() else None
+    if parent_pid is not None and (ppid := os.getppid()) != parent_pid:
+        parent_pid = ppid  # inherited stale var (a merge pid): watch the real parent instead
     start = time.monotonic()
     claim_file = claim_path(flight.key, root=flight.root or claims_root_for(flight.key))
 

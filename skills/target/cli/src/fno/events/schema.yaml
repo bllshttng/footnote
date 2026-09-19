@@ -46,7 +46,7 @@ envelope:
       # (worker:<id>, stream-worker:<id>) are pattern sources, validated by
       # both the Python and bash validators via the `patterns` list below
       # (previously only the parity-script layer checked them).
-      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, python, agents, observer, skill_diff, active-backlog, approvals, bash, config, pr-heal, cli]
+      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, python, agents, observer, skill_diff, active-backlog, approvals, bash, config, pr-heal, cli, pr-park]
       patterns:
         - '^(worker|stream-worker):.+$'
       description: "Producer identity; consumers route on this. A fixed-string source from the enum, or a per-agent worker matching one of `patterns`."
@@ -588,6 +588,18 @@ event_types:
               items:
                 type: string
               description: "reviewed_head_sha of every range that participated in the chain. A local_attestation verdict whose reviewed_sha is here counts as Reviewed when tiled is true, whatever its single-sha freshness says."
+            carried:
+              type: array
+              items:
+                type: object
+                properties:
+                  head:
+                    type: string
+                    description: "The attestation's pinned data.head_sha, which the rebase removed from the branch's ancestry."
+                  freshness:
+                    type: string
+                    description: "The review_freshness label that granted the carry (fresh, carried_base_sync, carried_docs_only, carried_subset, or carried_interdiff(n=0, cap))."
+              description: "Attestation heads whose tiles survived a head move on content identity, each with the review_freshness label that granted it: the three-dot code-diff identity (base divided out on both sides) proved the whole merge_base..head delta unchanged, so the recorded review still covers every shipping line. Fail-closed: granted only on a whole-range proof, never on Stale, a failure, or an interdiff above zero; a carried head also appears in chain_heads, and dropped still names the ranges the rebase removed."
         rounds_used:
           type: integer
           description: "Review rounds across the whole life of the PR (a round is one reviewed HEAD, so two verdicts at one unchanged head are one round; CI failures, lint failures and rebases are not rounds; a pass is one round like any verdict and refunds nothing). Computed by the Rust producer from the same chain, same scoping as the tiling walk, as the max of BOTH axes where both were read (attestation rounds and distinct GitHub-App reviewed commits); a healthy covered PR may carry the events axis alone, because the reviews read is paid only where it can change the answer. Re-derived by every gate surface before it refuses or blocks - never trusted off this row for a gate decision."
@@ -2931,6 +2943,21 @@ event_types:
         error:
           type: string
 
+  - name: question_sweep
+    description: "The daemon's question sweep ran on its interval floor and closed the node-closed questions it found, appending one empty-answer row per question to the provider cap (a non-empty answer would arm the unrecorded-decision gate against the asking session for a decision nobody made). Emitted for every run including outcome none, so a quiet run is never mistaken for a sweep that did not run."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        closed:
+          type: integer
+        outcome:
+          type: string
+        ids:
+          type: array
+          items:
+            type: string
+
   - name: bg_worker_terminal_stopped
     description: "A fire-and-forget `claude --bg` /target|/think worker that finalize marked terminal was `claude stop`ped by the daemon terminal-stop sweep, so its slot frees instead of parking at an idle prompt forever."
     sources: [daemon]
@@ -3460,7 +3487,7 @@ event_types:
       properties:
         guard:
           type: string
-          description: "Guard name: graph-write-protect, worktree-write-protect, join-partition-write-guard, plan-location-guard, git-protection, or bg-process-guard."
+          description: "Guard name: graph-write-protect, worktree-write-protect, generated-write-guard, join-partition-write-guard, plan-location-guard, git-protection, or bg-process-guard."
         decision:
           type: string
           enum: [allow, block]
@@ -4856,7 +4883,7 @@ event_types:
           description: "GitHub PR number."
         reason:
           type: string
-          description: "Why this PR was skipped: 'no-checkout' (repo_dir missing/absent), 'claimed' (live node: or walker: claim), 'locked' (another merge holds the per-PR lock), 'no-watermark' (no watcher row), 'merged' (an overlapping tick merged it), 'parked' (retries exhausted), 'not-open' (the listing saw it merged or closed), 'execute-budget' (too little merge-phase slice left)."
+          description: "Why this PR was skipped: 'no-checkout' (repo_dir missing/absent), 'claimed' (live node: or walker: claim), 'locked' (another merge holds the per-PR lock), 'no-watermark' (no watcher row), 'merged' (an overlapping tick merged it), 'parked' (retries exhausted), 'not-open' (the listing saw it merged or closed), 'execute-budget' (too little merge-phase slice left), 'admission-refused' (the spawn gate refused the fire; not an attempt, so no retry burned)."
 
   - name: pr_watch_dispatch_failed
     description: "A headless claude skill fired by the PR-state watcher returned an error (rc != 0, is_error:true, or non-JSON stdout). The PR will be retried on the next tick."
@@ -4883,6 +4910,37 @@ event_types:
         reason:
           type: string
           description: "Why the PR was parked: 'closed', 'max-age', 'retries-exhausted', or decide()'s park reason."
+
+  - name: pr_watch_unparked
+    description: "A parked PR resumes polling: retries reset to 0, either by hand (fno-agents pr-park unpark, the king row's verb) or by the sweep (head moved or 24h old)."
+    sources: [pr-park, daemon]
+    data:
+      required: [pr, by]
+      properties:
+        pr:
+          type: integer
+          description: "GitHub PR number."
+        by:
+          type: string
+          description: "Who un-parked it: 'manual' (fno-agents pr-park unpark) or 'sweep'."
+
+  - name: park_sweep
+    description: "The daemon's park sweep on its 6h floor: fno-agents pr-park sweep ran over the registry's repo roots, un-parking open rows whose PR head moved or whose park passed 24h, and marking finished rows handled. Emitted for every run including a zero-count one, so a quiet run is never mistaken for a sweep that did not run."
+    sources: [daemon]
+    data:
+      required: [outcome]
+      properties:
+        outcome:
+          type: string
+          description: "'ok' when the sweep ran; 'skipped' names why it did not; 'error' when the store could not be read."
+        unparked:
+          type: integer
+        handled:
+          type: integer
+        total:
+          type: integer
+        reason:
+          type: string
 
   - name: pr_watch_tick
     description: "Heartbeat and positive sweep receipt emitted at the end of every successful PR-state watcher poll interval, including quiet ticks with no actionable PRs."
@@ -4988,7 +5046,7 @@ event_types:
         outcome:
           type: string
           enum: [ok, degraded, disabled, lock_held, quota_skip, timeout, error, paused]
-          description: "ok = sweep completed with zero repo failures; degraded = completed with at least one; paused = the global loop pause held before settings or sweep; the rest never minted a pr_watch_tick."
+          description: "ok = sweep completed with zero repo failures; degraded = completed with at least one; paused = historical, minted by the tick entry gate this schema outlived; the rest never minted a pr_watch_tick."
         duration_s:
           type: number
           description: "Wall-clock seconds from tick entry to this record."
@@ -5046,6 +5104,9 @@ event_types:
     data:
       required: [seen, unknown, dry_run]
       properties:
+        root:
+          type: string
+          description: "The project root this row's cycle ran over; one process writes one row per root."
         seen:
           type: integer
           description: "Open PRs the loop examined this cycle."
@@ -5076,6 +5137,9 @@ event_types:
         skip_read_error:
           type: integer
           description: "PRs the world would not answer (read failures)."
+        skip_deadline:
+          type: integer
+          description: "PRs past the root's slice of the 480s drive budget; they wait for the next tick."
         still_red:
           type: integer
           description: "PRs acted on that remain red (escalations or read errors after apply)."
@@ -5085,6 +5149,57 @@ event_types:
         dry_run:
           type: boolean
           description: "True for a --all --apply --dry-run rehearsal: nothing changed, nothing pushed, no question filed."
+
+  - name: pr_heal_flake
+    description: "CI heal drive loop: one row per check classified a flake and guarded, so a rerun of the same (sha, run id, check) is skipped instead of rerun forever. Rust-emitted into the global journal."
+    sources: [pr-heal, daemon]
+    data:
+      required: [key, sha, run_id, check]
+      properties:
+        key:
+          type: string
+          description: "The dedup key of the flake guard this row staged."
+        sha:
+          type: string
+          description: "The head commit whose run flapped."
+        run_id:
+          type: string
+          description: "The CI run id the flaky check belongs to."
+        check:
+          type: string
+          description: "The check name that flapped."
+        node_id:
+          type: string
+          description: "The backlog node named on the PR branch, when one resolved."
+
+  - name: pr_heal_pr
+    description: "CI heal drive loop: one row per acted-on PR recording which remedy ran and why. Rust-emitted into the global journal."
+    sources: [pr-heal, daemon]
+    data:
+      required: [pr, action, reason]
+      properties:
+        pr:
+          type: integer
+          description: "The acted-on PR number."
+        action:
+          type: string
+          description: "The remedy applied (rerun, escalate, comment, ...)."
+        reason:
+          type: string
+          description: "Why that remedy was chosen, from the finding's signature."
+
+  - name: daemon_fleet_scope
+    description: "Daemon startup scope declaration: whether this daemon owns a sandbox home or the operator's shared home. Readers key fleet gating and board routing off it instead of probing paths."
+    sources: [daemon]
+    data:
+      required: [scope, home]
+      properties:
+        scope:
+          type: string
+          description: "sandbox when the daemon runs on a temp-rooted home, shared otherwise."
+        home:
+          type: string
+          description: "The state root the daemon resolved."
 
   - name: recovery_nudge
     description: "Session auto-recovery injected a resume nudge into a footnote-launched bg session that was idle-but-incomplete after an abnormal turn termination."
@@ -5619,8 +5734,8 @@ event_types:
           description: "The historical session's real session_id - no new ID scheme is minted for corpus items."
         dimension:
           type: string
-          enum: [structural_validity, collision_free, shipped_outcome, finding_precision, first_try_green, converged, persona, surface_fit, uncovered_case, deletable, duplication, epic_fit, mission_fit, customer_fit, code_truth]
-          description: "Which rubric dimension this finding scores. structural_validity was RETIRED 2026-09-12 : the failure-modes heading it graded is no longer refused, so it is kept in this enum only so historical events validate, and it is never emitted again. collision_free/shipped_outcome are the blueprint code dimensions (fold.BLUEPRINT_DIMENSIONS); persona/surface_fit/uncovered_case/deletable/duplication are the five question dimensions and epic_fit/mission_fit/customer_fit/code_truth the four source dimensions of the blueprint judge (JUDGE_DIMENSIONS in crates/fno-agents/src/blueprint_judge.rs, model-graded, never replayable); finding_precision is the review dimension (sweep-only, per Review Amendment A2); shipped_outcome/first_try_green/converged are the PR-anchored target dimensions (sweep-only)."
+          enum: [structural_validity, collision_free, shipped_outcome, finding_precision, first_try_green, converged, persona, surface_fit, uncovered_case, deletable, duplication, epic_fit, mission_fit, customer_fit, code_truth, competitive_fit, ship_quality, partner_challenge, reproduced, root_cause, sibling_callers, regression_test]
+          description: "Which rubric dimension this finding scores. structural_validity was RETIRED 2026-09-12 : the failure-modes heading it graded is no longer refused, so it is kept in this enum only so historical events validate, and it is never emitted again. collision_free/shipped_outcome are the blueprint code dimensions (fold.BLUEPRINT_DIMENSIONS); the blueprint judge asks a plan the dimensions its node's kind calls for (JUDGE_DIMENSIONS in crates/fno-agents/src/blueprint_judge.rs, model-graded, never replayable): the shared pack every plan answers (surface_fit/deletable/duplication/epic_fit/mission_fit/code_truth), the product pack a feature, epic or roadmap node answers (persona/uncovered_case/customer_fit/competitive_fit/ship_quality/partner_challenge), and the cause pack a bug node answers instead (reproduced/root_cause/sibling_callers/regression_test); finding_precision is the review dimension (sweep-only, per Review Amendment A2); shipped_outcome/first_try_green/converged are the PR-anchored target dimensions (sweep-only)."
         verdict:
           type: string
           enum: [pass, degraded, fail]
@@ -5998,6 +6113,15 @@ event_types:
 
   - name: store_socket_unlinked
     description: "A store-keeper socket that positively proved dead (refused, vanished, or not a socket) was unlinked from the state root or the hashed temp root at daemon start; a live listener is left as found."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        path:
+          type: string
+
+  - name: store_seat_lock_unlinked
+    description: "An orphaned store seat lock (<sock>.sock.lock whose socket is gone) was unlinked from the hashed temp root at daemon start while its flock was held; a lock another process still holds is left as found."
     sources: [daemon]
     data:
       required: []

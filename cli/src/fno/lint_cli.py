@@ -1139,9 +1139,13 @@ def style(
     With --fix the mechanical rules are rewritten through the same path the
     check reads; unfixable residue exits 1.
 
-    Exit 0 clean, 1 with violations, 2 on bad usage OR on a parser failure in
-    this gate. That second 2 fires when git and this verb disagree about how
-    many lines a file added, in either direction, which is never something to
+    Every run prints how many lines it read. A --diff-base run reads every
+    added markdown line in the diff, marker or not.
+
+    Exit 0 clean, 1 with violations, 2 on bad usage, on a --files or --stdin
+    run that read zero lines because every input carried a style-exception,
+    OR on a parser failure in this gate. The parser failure fires when git and
+    this verb disagree about how many lines a file added, in either direction, which is never something to
     annotate in the file. Reading FEWER than git counted is the case that
     matters and the case the first version of this guard missed.
     """
@@ -1164,17 +1168,12 @@ def style(
         raise typer.Exit(2)
 
     if diff_base is not None:
-        violations, inspected, changed, unexplained, exempted = _style_added_lines(
+        violations, inspected, changed, unexplained = _style_added_lines(
             diff_base, files
         )
         typer.echo(
             f"style: inspected {inspected} added line(s) across {changed} changed file(s)."
         )
-        # Named, not counted. A skipped file still counts as changed while
-        # adding nothing to inspected, so the line above reads identically
-        # whether the file had nothing to inspect or was never read at all.
-        # Naming it lets a reader judge the exception; a count cannot.
-        _style_skip_receipt(exempted)
         if unexplained:
             # Reported AFTER the violations below, never instead of them.
             # Raising here discarded every real finding in the same run: a PR
@@ -1186,7 +1185,9 @@ def style(
             # exit 2 for. Exiting 1 filed it as a finding against the author.
             # The paths are named, because "1 file(s)" is not investigable.
             if violations:
-                typer.echo(style_mod.format_violations(violations), err=True)
+                typer.echo(
+                    style_mod.format_violations(violations, surface=surface), err=True
+                )
             typer.echo(
                 "style: git and this gate disagree about how many lines these "
                 "file(s) added, so some added lines went unread. That is a "
@@ -1200,11 +1201,16 @@ def style(
         import sys
 
         text = sys.stdin.read()
+        # Receipts go to stderr here, because --fix hands the body back on stdout.
         if style_mod.has_exception(text):
-            _style_skip_receipt(["<stdin>"])
+            _style_skip_receipt(["<stdin>"], err=True)
             if fix:
                 sys.stdout.write(text)
-            raise typer.Exit(0)
+            _style_refuse_zero_read()
+        typer.echo(
+            f"style: inspected {len(text.splitlines())} line(s) across 1 input(s).",
+            err=True,
+        )
         if fix:
             # The write-back mirrors the read path: stdout for stdin, in place
             # for files. Residue flows to the common tail, which exits 1.
@@ -1215,11 +1221,13 @@ def style(
     elif files:
         violations = []
         skipped: list[str] = []
+        read_lines = 0
         for path in files:
             text = path.read_text(encoding="utf-8")
             if style_mod.has_exception(text):
                 skipped.append(str(path))
                 continue
+            read_lines += len(text.splitlines())
             if fix:
                 fixed, residue = style_mod.fix(text, surface=surface)
                 if fixed != text:
@@ -1228,6 +1236,12 @@ def style(
             else:
                 violations.extend(style_mod.check(text, surface=surface))
         _style_skip_receipt(skipped)
+        typer.echo(
+            f"style: inspected {read_lines} line(s) across "
+            f"{len(files) - len(skipped)} input(s)."
+        )
+        if skipped and read_lines == 0:
+            _style_refuse_zero_read()
     else:
         typer.echo("style: pass --stdin, --files, or --diff-base.", err=True)
         raise typer.Exit(2)
@@ -1388,38 +1402,38 @@ def _existed_at_base(rel: str, diff_base: str, repo: Path) -> bool:
     return probe.returncode == 0
 
 
-def _style_skip_receipt(names: list[str]) -> None:
-    """Name what a style-exception skipped, on every branch that can skip.
-
-    A skipped input reads exactly like a clean one: silence and exit 0. The
-    guarantee is worth nothing on the one branch that happens to print it, so
-    all three callers route through here.
-    """
+def _style_skip_receipt(names: list[str], *, err: bool = False) -> None:
+    """Name what a style-exception skipped, on both branches that can skip."""
     if not names:
         return
     typer.echo(
         f"style: skipped {len(names)} input(s) by style-exception, "
-        "so no line in them was read:\n  " + "\n  ".join(names)
+        "so no line in them was read:\n  " + "\n  ".join(names),
+        err=err,
     )
+
+
+def _style_refuse_zero_read() -> None:
+    """Exit 2 when every line was skipped: a run that read nothing vouches for nothing."""
+    typer.echo(
+        "style: read 0 lines, because every input carried a style-exception, "
+        "so nothing was checked.",
+        err=True,
+    )
+    raise typer.Exit(2)
 
 
 def _style_added_lines(
     diff_base: str, paths: Optional[list[Path]]
-) -> "tuple[list, int, int, list[str], list[str]]":
-    """Return (violations, added-lines, changed-files, unexplained, exempted).
+) -> "tuple[list, int, int, list[str]]":
+    """Return (violations, added-lines, changed-files, unexplained).
 
-    Per file: a whole-file style-exception marker exempts it; otherwise only the
-    ADDED lines since diff_base are checked. A bad diff-base fails loud (exit 2),
-    not open: a malformed base that inspects nothing is the absence the pitfalls
-    corpus names, indistinguishable from "no violations found".
-
-    ``exempted`` collects the PATHS skipped by a whole-file style-exception
-    marker. They are named on the receipt because the count alone cannot say
-    it happened: a skipped file still lands in ``changed`` while contributing
-    nothing to ``inspected``, so "0 added line(s) across 1 changed file(s)"
-    reads the same for a file with nothing to inspect and a file that was
-    never read. That is the absence-versus-outcome collapse the rest of this
-    function guards against, inside the receipt rather than the scan.
+    Per changed markdown file anywhere in the repo, only the ADDED lines since
+    diff_base are checked. A style-exception marker does not skip a file here:
+    a marker at the top of a file cannot scope a line written later, so its
+    only effect in this mode was to hide new lines. A bad diff-base fails loud
+    (exit 2), not open: a malformed base that inspects nothing is the absence
+    the pitfalls corpus names, indistinguishable from "no violations found".
 
     ``unexplained`` collects the PATHS of changed files where GIT and this
     parser disagree about the added-line count. That is an instrument failure
@@ -1440,11 +1454,9 @@ def _style_added_lines(
         repo,
         label=f"bad diff-base {diff_base!r}",
     )
-    scope = (
-        _repo_scope(paths, repo, diff_base)
-        if paths
-        else ["docs", "skills", "agents"]
-    )
+    # No --files means the whole diff. A fixed directory list here missed
+    # rules files, commands, and root markdown without a word.
+    scope = _repo_scope(paths, repo, diff_base) if paths else []
     diff_files = _run_git(
         _pinned_diff_argv("--name-only", f"{diff_base}...HEAD", "--", *scope),
         repo,
@@ -1502,7 +1514,6 @@ def _style_added_lines(
     violations = []
     inspected = 0
     unexplained: list[str] = []
-    exempted: list[str] = []
     for rel in changed:
         full = repo / rel
         if not full.is_file():
@@ -1515,9 +1526,6 @@ def _style_added_lines(
                 unexplained.append(rel)
             continue
         whole = full.read_text(encoding="utf-8")
-        if style_mod.has_exception(whole):
-            exempted.append(rel)
-            continue
         nums = _git_added_line_nums(rel, diff_base, repo, renames.get(rel))
         inspected += len(nums)
         if nums:
@@ -1543,7 +1551,7 @@ def _style_added_lines(
             # Paths are collected rather than counted, since a count is not
             # investigable.
             unexplained.append(rel)
-    return violations, inspected, len(changed), unexplained, exempted
+    return violations, inspected, len(changed), unexplained
 
 
 def _git_added_line_nums(
@@ -1775,11 +1783,95 @@ def _is_populated(value: Any) -> bool:
     return value is not None and value != "" and value != [] and value != {}
 
 
-def _live_field_coverage(entries: list[Any]) -> dict[str, Any]:
+def _population_contract(repo_root: Path) -> tuple[dict[str, dict[str, str]], list[str]]:
+    """Read the schema's population_contract block.
+
+    Returns the valid entries and one error per malformed or incomplete one.
+    An entry with an error is never coverage: its field stays a dead-field
+    finding, and the errors themselves are findings.
+    """
+    schema_path = repo_root / "schemas" / "agents-list-row.json"
+    errors: list[str] = []
+    try:
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, [f"population contract unreadable: {exc}"]
+    block = schema.get("population_contract") if isinstance(schema, dict) else None
+    if block is None:
+        return {}, []
+    if not isinstance(block, dict):
+        return {}, ["population_contract is not an object"]
+    contract: dict[str, dict[str, str]] = {}
+    for name, entry in block.items():
+        if name.startswith("$"):
+            continue
+        if not isinstance(entry, dict):
+            errors.append(f"{name}: entry is not an object")
+            continue
+        mode = entry.get("mode")
+        surface = entry.get("surface")
+        writer = entry.get("writer")
+        test = entry.get("test")
+        if mode not in ("conditional", "transient") or surface not in (
+            "persisted",
+            "projected",
+            "persisted_and_projected",
+        ):
+            errors.append(
+                f"{name}: mode must be conditional or transient; surface must "
+                "be persisted, projected, or persisted_and_projected"
+            )
+            continue
+        if not (
+            isinstance(writer, str)
+            and writer.strip()
+            and isinstance(test, str)
+            and test.strip()
+        ):
+            errors.append(f"{name}: writer and test evidence are required")
+            continue
+        contract[name] = {"mode": mode, "surface": surface,
+                          "writer": writer, "test": test}
+    return contract, errors
+
+
+def _partition_zeroes(
+    dead: list[str],
+    counts: dict[str, int],
+    contract: dict[str, dict[str, str]],
+    reading: str,
+) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Split zero-population fields into real dead fields and contract reports."""
+    conditional: dict[str, dict[str, Any]] = {}
+    transient: dict[str, dict[str, Any]] = {}
+    real_dead: list[str] = []
+    for name in dead:
+        entry = contract.get(name)
+        surface = entry.get("surface") if entry else None
+        if entry is None or not (
+            surface == "persisted_and_projected" or surface == reading
+        ):
+            real_dead.append(name)
+            continue
+        report: dict[str, Any] = dict(entry)
+        report["count"] = counts.get(name, 0)
+        bucket = conditional if entry["mode"] == "conditional" else transient
+        bucket[name] = report
+    return real_dead, conditional, transient
+
+
+def _live_field_coverage(
+    entries: list[Any],
+    population_contract: dict[str, dict[str, str]] | None = None,
+    contract_errors: list[str] | None = None,
+) -> dict[str, Any]:
     from dataclasses import asdict, fields
 
     from fno.agents.format import serialize_entry
     from fno.agents.registry import AgentEntry
+
+    contract = population_contract or {}
+    errors = sorted(contract_errors or [])
 
     if not entries:
         return {"status": "unmeasured", "detail": "zero persisted rows"}
@@ -1810,24 +1902,35 @@ def _live_field_coverage(entries: list[Any]) -> dict[str, Any]:
         name: sum(_is_populated(row.get(name)) for row in projected_rows)
         for name in projected_fields
     }
-    persisted_dead = sorted(
+    persisted_zeroes = sorted(
         name for name, count in persisted_counts.items() if count == 0
     )
-    projected_dead = sorted(
+    projected_zeroes = sorted(
         name for name, count in projected_counts.items() if count == 0
     )
+    persisted_dead, persisted_cond, persisted_trans = _partition_zeroes(
+        persisted_zeroes, persisted_counts, contract, "persisted")
+    projected_dead, projected_cond, projected_trans = _partition_zeroes(
+        projected_zeroes, projected_counts, contract, "projected")
     return {
-        "status": "findings" if persisted_dead or projected_dead else "ok",
+        "status": (
+            "findings" if persisted_dead or projected_dead or errors else "ok"
+        ),
         "anchors": anchors,
+        "contract_errors": errors,
         "persisted": {
             "total": len(persisted_rows),
             "counts": persisted_counts,
             "dead_fields": persisted_dead,
+            "conditional_zero": persisted_cond,
+            "transient_zero": persisted_trans,
         },
         "projected": {
             "total": len(projected_rows),
             "counts": projected_counts,
             "dead_fields": projected_dead,
+            "conditional_zero": projected_cond,
+            "transient_zero": projected_trans,
         },
     }
 
@@ -1853,8 +1956,9 @@ def field_coverage(live: bool = False, as_json: bool = False) -> None:
     if live and exit_code != 2:
         from fno.agents.registry import RegistryVersionError, load_registry
 
+        contract, contract_errors = _population_contract(Path(resolve_repo_root()))
         try:
-            live_result = _live_field_coverage(load_registry())
+            live_result = _live_field_coverage(load_registry(), contract, contract_errors)
         except (OSError, ValueError, RegistryVersionError) as exc:
             live_result = {"status": "unmeasured", "detail": str(exc)}
         payload.update(live_result)
@@ -1885,14 +1989,15 @@ def field_coverage(live: bool = False, as_json: bool = False) -> None:
             if payload["status"] == "unmeasured":
                 typer.echo(f"live field coverage: UNMEASURED: {payload['detail']}")
             elif "persisted" in payload:
-                typer.echo(
-                    "persisted dead fields: "
-                    + ", ".join(payload["persisted"]["dead_fields"])
-                )
-                typer.echo(
-                    "projected dead fields: "
-                    + ", ".join(payload["projected"]["dead_fields"])
-                )
+                for error in payload.get("contract_errors", []):
+                    typer.echo(f"population contract error: {error}")
+                for reading in ("persisted", "projected"):
+                    section = payload[reading]
+                    typer.echo(f"{reading} dead fields: "
+                               + ", ".join(section["dead_fields"]))
+                    for bucket in ("conditional_zero", "transient_zero"):
+                        typer.echo(f"{reading} {bucket.replace('_', ' ')}: "
+                                   + ", ".join(sorted(section[bucket])))
 
     if exit_code:
         raise typer.Exit(code=exit_code)

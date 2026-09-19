@@ -249,13 +249,13 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
     from fno.graph.store import recompute_statuses_via_store
 
     recomputed = recompute_statuses_via_store(entries)
-    # Write back IN PLACE, both list slots and per-row dicts: callers hold
-    # references to individual entry objects and must see the derivation
-    # without re-reading the return value.
-    for old, new in zip(entries, recomputed):
+    # Write back IN PLACE: callers hold row dicts, so the list keeps those
+    # dicts and each one takes the derived values.
+    for i, (old, new) in enumerate(zip(entries, recomputed)):
         if isinstance(old, dict) and isinstance(new, dict):
             old.clear()
             old.update(new)
+            recomputed[i] = old
     entries[:] = recomputed
     return entries
 

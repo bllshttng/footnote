@@ -19,8 +19,7 @@ from typing import Any, Optional, Sequence
 from fno.agents.dispatch import DispatchAskError
 from fno.agents.harnesses._acp import (
     AcpStdioSession,
-    error_detail as _acp_error_detail,
-    initialize_params,
+    initialize_params,  # noqa: F401  (re-exported for the contract test)
     iter_jsonl,  # noqa: F401  (re-exported for the contract test)
 )
 
@@ -123,6 +122,7 @@ class KimiAcpSession(AcpStdioSession):
     """A live ``kimi acp`` process with correlated ACP requests."""
 
     tool = "kimi"
+    agent_name = "Kimi Code CLI"
 
     def __init__(
         self,
@@ -161,60 +161,20 @@ class KimiAcpSession(AcpStdioSession):
                 break
         return self.stderr_text
 
-    def initialize(self) -> dict[str, Any]:
-        response = self.request("initialize", initialize_params())
-        result = self.result(response, "initialize")
-        agent_info = result.get("agentInfo")
-        agent_name = agent_info.get("name") if isinstance(agent_info, dict) else None
-        if result.get("protocolVersion") != 1 or agent_name != "Kimi Code CLI":
-            raise RuntimeError(
-                "kimi ACP initialize did not return the positive protocolVersion 1 "
-                f"and agentInfo.name 'Kimi Code CLI' markers (got "
-                f"protocolVersion={result.get('protocolVersion')!r}, "
-                f"agentInfo.name={agent_name!r})"
-            )
-        return result
+    def _is_auth_error(self, detail: str) -> bool:
+        return is_auth_error(detail)
 
-    def session_new(self, add_dirs: Optional[Sequence[Path | str]] = None) -> str:
-        """Create a session and return the id kimi MINTED.
+    def _auth_refusal(self, detail: str) -> DispatchAskError:
+        # The stderr half is the diagnostic half: the JSON-RPC message alone
+        # names no condition. Wait the bounded moment so the line is actually
+        # in hand before composing the refusal.
+        stderr = self._settled_stderr()
+        if stderr:
+            detail = f"{detail}; stderr: {stderr}"
+        return KimiAuthenticationRequired(detail)
 
-        The returned id is the binding: it is handed back synchronously on the
-        correlated response, so it is provable rather than scraped. The caller
-        records it; nothing fno chose names a kimi session.
-        """
-        response = self.request("session/new", session_new_params(self.cwd, add_dirs))
-        error = response.get("error")
-        if isinstance(error, dict):
-            detail = _acp_error_detail(error)
-            if is_auth_error(detail):
-                # The stderr half is the diagnostic half: the JSON-RPC message
-                # alone names no condition. Wait the bounded moment so the
-                # line is actually in hand before composing the refusal.
-                stderr = self._settled_stderr()
-                if stderr:
-                    detail = f"{detail}; stderr: {stderr}"
-                raise KimiAuthenticationRequired(detail)
-        result = self.result(response, "session/new")
-        session_id = result.get("sessionId")
-        if not isinstance(session_id, str) or not session_id:
-            raise RuntimeError("kimi ACP session/new returned no positive sessionId marker")
-        self.session_id = session_id
-        return session_id
-
-    def session_resume(self, session_id: str) -> dict[str, Any]:
-        """Resume a minted session by the id kimi itself handed back."""
-        response = self.request(
-            "session/resume",
-            {"sessionId": session_id, "cwd": str(self.cwd), "mcpServers": []},
-        )
-        return self.result(response, "session/resume")
-
-    def session_close(self, session_id: str) -> dict[str, Any]:
-        # Measured 2026-08-31 against 0.38.0 unauthenticated: closing an
-        # unknown id answers an empty success rather than an error, so this
-        # call never proves the id existed.
-        response = self.request("session/close", {"sessionId": session_id})
-        return self.result(response, "session/close")
+    def session_new(self, add_dirs: Optional[Sequence[Path | str]] = None) -> str:  # type: ignore[override]
+        return super().session_new(session_new_params(self.cwd, add_dirs))
 
     def session_delete(self, session_id: str) -> dict[str, Any]:
         # Measured 2026-08-31 against 0.38.0 unauthenticated: delete validates

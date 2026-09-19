@@ -19,11 +19,11 @@ Severity model (configurable; see ``_load_thresholds``):
     low    -> shared count == 1 (no further overlap signals)
 
 Action inference (deterministic):
-    candidate_files subset other_files -> absorb (older plan covers everything)
-    other_files     subset candidate    -> supersede (new plan covers more)
-    shared >= 50% of both sides         -> absorb if other is older + has more, else coordinate
-    severity == low                     -> coordinate with split rationale appended
-    everything else                     -> coordinate (both ship; rebase second to land)
+    shared < 50% of the wider surface -> coordinate
+    shared >= 50% of the wider surface AND candidate subset other_files -> absorb (older plan covers everything)
+    shared >= 50% of the wider surface AND other_files subset candidate -> supersede (new plan covers more)
+    shared >= 50% of the wider surface AND other is older -> absorb
+    everything else -> coordinate (both ship; rebase second to land)
 """
 from __future__ import annotations
 
@@ -521,26 +521,22 @@ def _infer_action(
     severity: Severity,
 ) -> Action:
     """Infer the recommended action from set relationships and ages."""
-    if candidate and candidate < other:  # strict subset
-        return "absorb"
-    if other and other < candidate:
-        return "supersede"
     shared = candidate & other
-    min_set = min(len(candidate), len(other)) or 1
-    if shared and (len(shared) / min_set) >= 0.5:
-        # Both sides share half-or-more of their smaller side. Prefer
-        # absorption into the older plan unless they were created in the
-        # same hour (in which case coordination is the safer call - we
-        # don't have enough signal to pick which one wins).
-        if other_created_at and candidate_created_at:
-            if other_created_at < candidate_created_at:
-                return "absorb"
+    if not shared:
         return "coordinate"
-    if severity == "low":
-        # Low severity gets a coordinate recommendation; the rationale
-        # appended to the message points at "split into a shared dependency"
-        # as the cleaner long-term move.
+    # Half of the WIDER surface, which is what "50% of both sides" means. The
+    # narrower side is always satisfied by a small plan inside a large one, so
+    # dividing by it recommends folding a two-file bug into a thirteen-file
+    # feature that happens to open the same files.
+    widest = max(len(candidate), len(other)) or 1
+    if (len(shared) / widest) < 0.5:
         return "coordinate"
+    if candidate < other:
+        return "absorb"
+    if other < candidate:
+        return "supersede"
+    if other_created_at and candidate_created_at and other_created_at < candidate_created_at:
+        return "absorb"
     return "coordinate"
 
 

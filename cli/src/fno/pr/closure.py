@@ -18,7 +18,6 @@ from __future__ import annotations
 import copy
 import re
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
@@ -136,39 +135,33 @@ def branch_node_ids(head_ref: str) -> list[str]:
 
 
 def known_node_ids() -> frozenset[str]:
-    """Every id the graph actually carries; empty when it cannot be read.
+    """Every id the graph actually carries; raises when the graph cannot be read.
 
-    Empty is the SAFE direction. With nothing verified, no branch-derived
-    candidate is claimed and the CI gate reds loudly, which a human can see and
-    act on. The alternative is a trailer naming an id the graph does not carry:
-    that PASSES CI, and then ``bind_closure_claims`` refuses the WHOLE binding
-    at merge, so the real node never closes and nothing says so.
+    A read failure propagates, it never reads as empty. Measured 2026-09-16:
+    empty looked safe because a trailer-less PR reds the CI gate loudly, but
+    three PRs went red with no named cause and the dead reader answered exactly
+    like a missing node. Now the exception stops the ``gh pr create`` path and
+    names the read. Empty is reserved for the one safe case: an external
+    tracker backend, where graph.json is not the delivery record and nothing is
+    claimed.
     """
-    try:
-        from fno.graph import api as graph_api
-        from fno.paths import graph_json
-        from fno.tracker import active_backend_name
+    from fno.graph import api as graph_api
+    from fno.paths import graph_json
+    from fno.tracker import active_backend_name
 
-        if active_backend_name() != "graph":
-            # graph.json is not the delivery record of truth under an external
-            # tracker, which is the same posture `fno do pr closure-trailer` takes
-            # there. Nothing to verify against, so nothing is claimed.
-            return frozenset()
-        return frozenset(
-            e["id"]
-            for e in (
-                n.model_dump(by_alias=True)
-                for n in graph_api.nodes(include_archived=True, path=graph_json()).nodes
-            )
-            if isinstance(e, dict) and isinstance(e.get("id"), str)
-        )
-    except Exception as exc:
-        # Say so. Returning empty silently turns the producer into a no-op:
-        # no trailer is written, the PR opens, and the only symptom is a red
-        # gate that names the branch rather than the read that failed.
-        print(f"fno: closure trailer cannot read the graph ({exc}); "
-              f"claiming no branch-derived node", file=sys.stderr)
+    if active_backend_name() != "graph":
+        # graph.json is not the delivery record of truth under an external
+        # tracker, which is the same posture `fno do pr closure-trailer` takes
+        # there. Nothing to verify against, so nothing is claimed.
         return frozenset()
+    return frozenset(
+        e["id"]
+        for e in (
+            n.model_dump(by_alias=True)
+            for n in graph_api.nodes(include_archived=True, path=graph_json()).nodes
+        )
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    )
 
 
 class BranchResolutionError(Exception):
@@ -245,7 +238,9 @@ def ensure_closure_trailer(
     The one call a `gh pr create` path makes so the CI gate never reds a PR over
     a line the generator could have written. Returns the body unchanged when the
     ref names no node or the last trailer already claims them all, so a caller
-    applies it unconditionally and a re-run changes nothing.
+    applies it unconditionally and a re-run changes nothing. A graph read that
+    fails RAISES (through ``known_node_ids``): a dead reader stops the PR, it
+    never opens one untrailered.
 
     Appends rather than rewrites: ``parse_closure_trailer`` and the gate both
     read the LAST trailer line, so a new final line wins without touching what

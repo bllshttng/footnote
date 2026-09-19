@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
 # Unit tests for hooks/king-delegation-guard.sh: a crowned court session is
-# refused Edit/Write/NotebookEdit and shell writes to source, while its plans
-# dir, crown handoff doc, escalations dir and auto-memory stay writable.
+# refused Edit/Write/NotebookEdit and shell writes to SOURCE. The predicate is
+# inverted (2026-09-17 ruling): SOURCE is any path realpath-inside the repo
+# root except the repo's .fno state tree; everything outside the repo - the
+# vault wherever it lives, the crown handoff doc, escalations notes,
+# auto-memory - allows, and there is no enumeration of exempt trees anymore.
 #
 # The policy moved into crates/fno-agents/src/hook/king_guard.rs and
-# the script became an exec wrapper, so the fixtures are real files the
-# native guard reads (registry.json under FNO_AGENTS_HOME, the court manifest
-# under the space's kings/, config.toml at the payload cwd) instead of stubbed
-# verb outputs. Every pre-port case keeps its semantics; the stub positive
-# control became a no-subprocess canary (the native guard must spawn no `fno`).
+# the script became a probe-and-relay wrapper (never exec: a candidate that
+# lacks the hook verb falls through instead of refusing every tool), so the
+# fixtures are real files the native guard reads (registry.json under
+# FNO_AGENTS_HOME, the court manifest under the space's kings/, config.toml at
+# the payload cwd) instead of stubbed verb outputs. Every pre-port case keeps
+# its semantics; the stub positive control became a no-subprocess canary (the
+# native guard must spawn no `fno`).
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 KGD="$REPO_ROOT/hooks/king-delegation-guard.sh"
 [[ -f "$KGD" ]] || { echo "FAIL: guard not found at $KGD" >&2; exit 1; }
-# Same resolution order as the wrapper: env, release, debug. A sibling leg
+# Same resolution order as the wrapper: PATH, env, release, debug. A sibling leg
 # of the packet (preflight, the cargo-isolation tests) may have cleaned the
 # target dir between provisioning and this run: rebuild the debug binary
 # quietly rather than fail on an artifact the environment is documented to
@@ -54,7 +59,12 @@ printf '%s\n' "$*" >> "$KGD_FNO_CALLS"
 exit 1
 STUB
 chmod +x "$TMP/bin/fno"
-export PATH="$TMP/bin:$PATH"
+# The wrapper tries the deployed PATH binary first; pin that slot to the same
+# BIN verified below so the suite tests policy, not the operator's installed
+# version.
+mkdir -p "$TMP/realbin"
+ln -s "$BIN" "$TMP/realbin/fno-agents"
+export PATH="$TMP/realbin:$PATH"
 export KGD_FNO_CALLS="$TMP/fno-calls.log"
 : > "$KGD_FNO_CALLS"
 
@@ -125,10 +135,11 @@ OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
 REASON="$(printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason // empty')"
 if [[ $RC -eq 0 ]] && echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
    && printf '%s' "$REASON" | grep -qF "$SRC_FILE" \
-   && printf '%s' "$REASON" | grep -qF "$TMP/plans" \
+   && printf '%s' "$REASON" | grep -qF "does not write SOURCE" \
+   && printf '%s' "$REASON" | grep -qF "inside the repo" \
    && ! printf '%s' "$REASON" | grep -qiE "spawn|advance" \
    && echo "$OUT" | jq -e '.decision == "block"' >/dev/null 2>&1; then
-  pass "AC1: crowned court Edit denied, reason names the path + allowed roots, no delegation verbs"
+  pass "AC1: crowned court Edit denied, reason names the path + the source rule, no delegation verbs"
 else
   fail "AC1: rc=$RC out=${OUT:0:300} err=$(cat "$TMP/stderr.txt")"
 fi
@@ -166,7 +177,7 @@ clear_knob
 set_knob warn
 OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
 ERR="$(cat "$TMP/stderr.txt")"
-[[ $RC -eq 0 && "$OUT" == "{}" && "$ERR" == *"$SRC_FILE"* && "$ERR" == *"outside the allowed roots"* ]] \
+[[ $RC -eq 0 && "$OUT" == "{}" && "$ERR" == *"$SRC_FILE"* && "$ERR" == *"does not write SOURCE"* ]] \
   && pass "AC2: knob warn names the path on stderr and allows" \
   || fail "AC2: knob warn rc=$RC out=$OUT err=$ERR"
 clear_knob
@@ -256,11 +267,18 @@ OUT="$(run_guard "$(bash_payload "printf ruling | tee -a $KGD_HANDOFF")")"; RC=$
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "handoff: tee append allowed" \
   || fail "handoff tee rc=$RC out=$OUT"
 
-# A sibling under the same directory is NOT the resolved doc: still denied.
+# A sibling under the same directory is not the resolved doc; under the
+# inverted predicate the boundary is the repo, so an out-of-repo sibling
+# allows while its in-repo twin stays source.
 OUT="$(run_guard "$(bash_payload "echo x > $TMP/handoffs/evil.md")")"; RC=$?
-echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-  && pass "handoff: sibling path still denied" \
+[[ $RC -eq 0 && "$OUT" == "{}" ]] \
+  && pass "handoff: out-of-repo sibling of the canon doc allows" \
   || fail "handoff sibling rc=$RC out=${OUT:0:300}"
+
+OUT="$(run_guard "$(bash_payload "echo x > $TMP/repo/handoffs/evil.md")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "handoff: in-repo sibling of the doc name stays denied" \
+  || fail "handoff in-repo sibling rc=$RC out=${OUT:0:300}"
 
 OUT="$(run_guard "$(bash_payload "sed -i s/a/b/ $TMP/repo/src/x.py")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
@@ -313,13 +331,19 @@ OUT="$(run_guard "$(bash_payload "cp $TMP/brief.md $KGD_HANDOFF")")"; RC=$?
 
 mkdir -p "$TMP/vaultdir/briefs"
 OUT="$(run_guard "$(bash_payload "cp $TMP/brief.md $TMP/vaultdir/briefs/b.md")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] \
+  && pass "vault: cp to a tree outside the repo allows" \
+  || fail "vault cp rc=$RC out=${OUT:0:300}"
+
+# The cp-shaped deny survives for an in-repo destination: source, named.
+OUT="$(run_guard "$(bash_payload "cp $TMP/brief.md $TMP/repo/src/evil.py")")"; RC=$?
 REASON="$(printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason // empty')"
 if echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-   && printf '%s' "$REASON" | grep -qF "vaultdir/briefs/b.md" \
+   && printf '%s' "$REASON" | grep -qF "repo/src/evil.py" \
    && ! printf '%s' "$REASON" | grep -qiE "spawn|advance"; then
-  pass "vault: cp outside the roots denied, reason names the path, no delegation verbs"
+  pass "vault: cp into the repo denied, reason names the path, no delegation verbs"
 else
-  fail "vault cp rc=$RC out=${OUT:0:300}"
+  fail "vault cp in-repo rc=$RC out=${OUT:0:300}"
 fi
 
 # ── Limb carve-out: a Task subagent of this very court is a limb, not the king.
@@ -396,21 +420,21 @@ OUT="$(run_guard "$(bash_payload "echo ruling >> $MEMDIR/MEMORY.md")")"; RC=$?
   && pass "memory: Bash append into MEMORY.md allowed" \
   || fail "memory append rc=$RC out=$OUT"
 
-# A sibling in the project dir but outside memory/ is still implementation
-# surface: denied. So is a stray directly under the projects root.
+# Under the inverted predicate the memory tree allows because it sits outside
+# the repo - not because it is enumerated. The boundary lives inside the repo:
+# a memory-shaped tree UNDER the repo root is still source.
 OUT="$(run_guard "$(edit_payload "$MEMPROJ/notes.md")")"; RC=$?
-echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-  && pass "memory: project-dir sibling outside memory/ denied" \
+[[ $RC -eq 0 && "$OUT" == "{}" ]] \
+  && pass "memory: project-dir sibling outside the repo allows" \
   || fail "memory sibling rc=$RC out=${OUT:0:300}"
 
-OUT="$(run_guard "$(edit_payload "$HOME/.claude/projects/stray.md")")"; RC=$?
+OUT="$(run_guard "$(edit_payload "$TMP/repo/.claude/projects/stray.md")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-  && pass "memory: stray directly under projects root denied" \
+  && pass "memory: repo-resident memory-lookalike stays denied" \
   || fail "memory stray rc=$RC out=${OUT:0:300}"
 
-# ── Escalations carve-out: an escalation note is the superuser-tier lane a
-# king files. The dir resolves through the vault pin; a lookalike tree that is
-# NOT the resolved root stays fail-closed.
+# ── Escalations: the superuser-tier lane a king files. Under the inverted
+# predicate its notes allow because the vault sits outside the repo.
 OUT="$(run_guard "$(printf '{"tool_name":"Write","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"file_path":"%s","content":"note"}}' "$SID" "$TMP/repo" "$ESCALATIONS/20260915-0900-token.md")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] \
   && pass "escalations: court Write of an escalation note allowed" \
@@ -421,21 +445,17 @@ OUT="$(run_guard "$(bash_payload "echo question >> $ESCALATIONS/20260915-0900-to
   && pass "escalations: Bash append into an escalation note allowed" \
   || fail "escalations append rc=$RC out=$OUT"
 
-# A write in a lookalike internal/ tree outside the resolved escalations root
-# stays implementation surface: denied, with the escalations directory named
-# among the allowed roots.
-OUT="$(run_guard "$(edit_payload "$TMP/internal/fno/decisions/x.md")")"; RC=$?
+# A lookalike internal/ tree is denied the moment it lives INSIDE the repo:
+# the guard matches the resolved path against the repo root, never a prefix
+# of the string.
+OUT="$(run_guard "$(edit_payload "$TMP/repo/internal/fno/decisions/x.md")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-  && echo "$OUT" | grep -q 'escalations directory' \
-  && pass "escalations: write outside the dir denied, refusal names it" \
+  && pass "escalations: in-repo lookalike tree denied" \
   || fail "escalations outside rc=$RC out=${OUT:0:300}"
 
-# The lookalike escalations TREE itself (a path that only resembles the
-# resolved root) is denied too: the guard matches the resolved path, never a
-# prefix of the string.
-OUT="$(run_guard "$(edit_payload "$TMP/internal/fno/escalations/escape.md")")"; RC=$?
+OUT="$(run_guard "$(edit_payload "$TMP/repo/internal/fno/escalations/escape.md")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-  && pass "escalations: lookalike tree keeps the guard fail-closed" \
+  && pass "escalations: in-repo lookalike escalations tree denied" \
   || fail "escalations lookalike rc=$RC out=${OUT:0:300}"
 
 # ── Third limb signature: the live claude payload carries no agent_id and its
@@ -471,6 +491,61 @@ OUT="$(run_guard "$(edit_payload_t "$SRC_FILE" "$PARENT_TRANS")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
   && pass "limb: orphaned open spawn with later tool_use denied" \
   || fail "limb orphan rc=$RC out=${OUT:0:300}"
+
+# ── Stale-binary fallthrough: a binary without the hook verb must never ──────
+# wedge the session. Live outage 2026-09-17: 19 worktree builds
+# predated the verb; the old exec answered "unknown verb" and refused every
+# tool in those sessions.
+mkdir -p "$TMP/stalebin"
+cat > "$TMP/stalebin/fno-agents" <<'STALE'
+#!/usr/bin/env bash
+printf '%s\n' "fno-agents: unknown verb: hook (expected --emit-schema|...)"
+exit 2
+STALE
+chmod +x "$TMP/stalebin/fno-agents"
+
+registry_fixture "$CROWNED"
+manifest_fixture court
+
+# A stale PATH binary falls through to the env override: the court Edit is
+# still denied by a real policy decision, and the hook still exits 0.
+export FNO_AGENTS_BIN="$BIN"
+OUT="$(PATH="$TMP/stalebin:$PATH" run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "stale: unknown-verb PATH binary falls through, court Edit still denied" \
+  || fail "stale fallthrough rc=$RC out=${OUT:0:300}"
+unset FNO_AGENTS_BIN
+
+# A stale binary with no good binary behind it fail-opens: the session keeps
+# its tools. This is the exact outage shape, which used to exit 2 on every
+# call; run from a cwd with no in-tree build so nothing else can answer.
+mkdir -p "$TMP/bare"
+( cd "$TMP/bare" && printf '%s' "$(edit_payload "$SRC_FILE")" \
+    | FNO_AGENTS_BIN= PATH="$TMP/stalebin:/usr/bin:/bin" bash "$KGD" ) \
+    > "$TMP/stale-out.txt" 2>"$TMP/stale-err.txt"; RC=$?
+OUT="$(cat "$TMP/stale-out.txt")"
+ERR="$(cat "$TMP/stale-err.txt")"
+[[ $RC -eq 0 && "$OUT" == "{}" && "$ERR" == *"allowing"* ]] \
+  && pass "stale: no good binary fail-opens, session keeps its tools" \
+  || fail "stale fail-open rc=$RC out=$OUT err=$ERR"
+
+# The deployed PATH binary outranks an in-tree build even when the in-tree
+# build is healthy: policy comes from the installed release, not the branch.
+mkdir -p "$TMP/pathbin" "$TMP/repo/crates/fno-agents/target/debug"
+cat > "$TMP/pathbin/fno-agents" <<'PATHSTUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"stub":"path"}'
+PATHSTUB
+cat > "$TMP/repo/crates/fno-agents/target/debug/fno-agents" <<'DEBUGSTUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"stub":"debug"}'
+DEBUGSTUB
+chmod +x "$TMP/pathbin/fno-agents" "$TMP/repo/crates/fno-agents/target/debug/fno-agents"
+OUT="$( cd "$TMP/repo" && printf '%s' '{"tool_name":"Edit"}' \
+    | PATH="$TMP/pathbin:$PATH" bash "$KGD" 2>/dev/null )"
+[[ "$OUT" == '{"stub":"path"}' ]] \
+  && pass "order: deployed PATH binary outranks a healthy in-tree build" \
+  || fail "order rc out=$OUT"
 
 # Positive control 1: the binary runs at all, so every PASS above is real.
 "$BIN" version >/dev/null 2>&1 \

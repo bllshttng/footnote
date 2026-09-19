@@ -73,8 +73,72 @@ t02_sccache_absent_ordinary_compile_silent() {
   rm -rf "$stub_dir"
 }
 
+t03_compile_asks_admission_and_probe_does_not() {
+  local stub_dir calls rc
+  stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
+  calls="$stub_dir/calls.txt"
+  cat > "$stub_dir/fno-agents" <<STUB
+#!/usr/bin/env bash
+echo "\$*" >> "$calls"
+STUB
+  chmod +x "$stub_dir/fno-agents"
+
+  PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" /bin/echo -vV >/dev/null 2>&1
+  PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" /bin/echo --print=cfg >/dev/null 2>&1
+  [[ -s "$calls" ]] && { fail "T03: a probe asked for admission: $(cat "$calls")"; rm -rf "$stub_dir"; return; }
+
+  PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" /bin/echo compiling >/dev/null 2>&1
+  rc=$?
+  [[ "$rc" -eq 0 ]] || { fail "T03: expected rc=0, got $rc"; rm -rf "$stub_dir"; return; }
+  grep -q "^test-run build-admit --cargo-pid [0-9][0-9]* --worktree ${REPO_ROOT}\$" "$calls" \
+    || { fail "T03: compile did not ask admission as expected: $(cat "$calls")"; rm -rf "$stub_dir"; return; }
+  pass "T03 a compile asks build admission; -vV and --print probes do not"
+  rm -rf "$stub_dir"
+}
+
+t04_admission_failure_builds_anyway() {
+  local stub_dir out_file err_file rc
+  stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
+  printf '#!/usr/bin/env bash\necho called >> "%s/calls.txt"\nexit 2\n' "$stub_dir" > "$stub_dir/fno-agents"
+  chmod +x "$stub_dir/fno-agents"
+  out_file="$stub_dir/out.txt"
+  err_file="$stub_dir/err.txt"
+
+  # The wrapper's parent is this shell, standing in for cargo.
+  TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" /bin/echo compiling >"$out_file" 2>"$err_file"
+  rc=$?
+  [[ "$rc" -eq 0 ]] || { fail "T04: expected rc=0, got $rc"; rm -rf "$stub_dir"; return; }
+  grep -q "compiling" "$out_file" || { fail "T04: the compile did not run"; rm -rf "$stub_dir"; return; }
+  grep -q "build admission unavailable (exit 2)" "$err_file" \
+    || { fail "T04: stderr does not name the unadmitted build: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
+  TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" /bin/echo compiling >"$out_file" 2>"$err_file"
+  [[ "$(wc -l < "$stub_dir/calls.txt" | tr -d ' ')" == "1" ]] \
+    || { fail "T04: a second compile under the same cargo asked again"; rm -rf "$stub_dir"; return; }
+  [[ -s "$err_file" ]] && { fail "T04: the second compile repeated the warning: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
+  pass "T04 a failing admission is named once per cargo and every compile still runs"
+  rm -rf "$stub_dir"
+}
+
+t05_signalled_admission_compiles_nothing() {
+  local stub_dir out_file rc
+  stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
+  printf '#!/usr/bin/env bash\nexit 130\n' > "$stub_dir/fno-agents"
+  chmod +x "$stub_dir/fno-agents"
+  out_file="$stub_dir/out.txt"
+
+  TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" /bin/echo compiling >"$out_file" 2>/dev/null
+  rc=$?
+  [[ "$rc" -eq 130 ]] || { fail "T05: expected rc=130, got $rc"; rm -rf "$stub_dir"; return; }
+  grep -q "compiling" "$out_file" && { fail "T05: a signalled wait still compiled"; rm -rf "$stub_dir"; return; }
+  pass "T05 a wait stopped by a signal exits with it and compiles nothing"
+  rm -rf "$stub_dir"
+}
+
 t01_sccache_present_announces_on_probe
 t02_sccache_absent_ordinary_compile_silent
+t03_compile_asks_admission_and_probe_does_not
+t04_admission_failure_builds_anyway
+t05_signalled_admission_compiles_nothing
 
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then

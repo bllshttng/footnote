@@ -1315,8 +1315,8 @@ fn synthesized_name(short: &str) -> String {
 }
 
 /// Build the registry row for an orphan adopted from a target manifest. Harness-
-/// generic ([`crate::claude_adopt::mint_adopted_entry`] is claude+RosterWorker-
-/// specific): the harness-appropriate session id comes from the manifest, claude
+/// generic (the retired `claude_adopt` mint was claude+RosterWorker-specific):
+/// the harness-appropriate session id comes from the manifest, claude
 /// also records the full uuid for its dead-arm `claude --resume`, and `fno_id`
 /// links the row to its node. `status: Idle`, no pid, default `exec` host_mode:
 /// a registered-but-not-driven row the GC keeps (non-terminal, no confirmed-dead
@@ -1620,7 +1620,10 @@ pub enum RowLiveness {
 ///    probe answered `Unknown` for the codex majority of the registry forever.
 /// 3. **Transcript truth state** (claude rows): `working`, `watching` or
 ///    `your-move` is life. `done` is a TURN state, not a process state, and
-///    answers nothing here.
+///    answers nothing here. The rung is silent on an exit-proven row (an
+///    exit stamp or a stored `Exited`): a transcript tail reads `working`
+///    for up to two hours after its worker stops, so it would resurrect the
+///    row. Rung 4 makes the same trade.
 /// 4. **Codex rollout freshness** (codex rows): the session's rollout
 ///    jsonl under `~/.codex/sessions/` written within
 ///    [`CODEX_ROLLOUT_FRESH_SECS`] proves the worker is still advancing. The
@@ -1637,31 +1640,17 @@ pub enum RowLiveness {
 /// proves nothing - it falls through to `Unknown`, which keeps. The window
 /// only decides whether the sweep NAMES the row live; absence never
 /// authorizes a reap, so no value here can open a removal path.
-const CODEX_ROLLOUT_FRESH_SECS: u64 = 1800;
+pub(crate) const CODEX_ROLLOUT_FRESH_SECS: u64 = 1800;
 
-/// The codex home the way codex itself resolves it: `$CODEX_HOME` when set,
-/// else `~/.codex` (the `codex_app_server_socket_path` convention). Both codex
-/// store readers - rung 4's freshness index and `HarnessStoreIndex`'s
-/// existence index - must resolve the same home, or one of them reads a store
-/// the worker never writes.
-// codex store helpers (codex_home, codex_rollout_matches, codex_rollout_index)
-// moved to `codex_store.rs`; the re-export below keeps every existing caller.
-pub(crate) use crate::codex_store::{codex_home, codex_rollout_index, codex_rollout_matches};
+// codex store helpers moved to `codex_store.rs`; the re-export keeps every
+// existing caller.
+pub(crate) use crate::codex_store::{
+    codex_home, codex_rollout_fresh, codex_rollout_index, codex_rollout_matches,
+};
 
 // sessions_socket_index and the row_liveness family moved to
 // `claude_sessions.rs`; the re-export keeps every existing caller.
 pub use crate::claude_sessions::{row_liveness, sessions_socket_index};
-
-/// Rung 4's freshness read against a prebuilt [`codex_rollout_index`]: any
-/// rollout for `session_id` written within the window proves the worker is
-/// advancing. Fail closed: an absent or unreadable store built no index, and
-/// a miss inside one is not-fresh - both read `Unknown`, which keeps.
-pub(crate) fn codex_rollout_fresh(index: &[(String, u64)], session_id: &str, now: u64) -> bool {
-    index.iter().any(|(name, mtime)| {
-        codex_rollout_matches(name, session_id)
-            && now.saturating_sub(*mtime) <= CODEX_ROLLOUT_FRESH_SECS
-    })
-}
 
 /// [`row_liveness`] with the truth-state read injected, mirroring
 /// `claude_resume_argv_with_truth`'s seam so tests can stage transcript reads
@@ -1754,7 +1743,10 @@ where
             return RowLiveness::Alive;
         }
     }
-    if let Some(handle) = crate::daemon::row_truth_handle(entry) {
+    // A drive-eligible row is not exit-proven by a stamp a revive left behind.
+    let exit_proven = entry.status == crate::AgentStatus::Exited
+        || (entry.exited_at.is_some() && !entry.status.is_drive_eligible());
+    if let Some(handle) = crate::daemon::row_truth_handle(entry).filter(|_| !exit_proven) {
         if matches!(
             truth_fn(&handle).as_deref(),
             Some("working" | "watching" | "your-move")
@@ -4226,14 +4218,16 @@ mod tests {
             "119e3c52-62bf-43b4-b3c4-3c7ce659f802"
         );
 
-        // A row carrying neither still resolves to empty, so the callers'
-        // is_empty refusals keep firing.
+        // A row carrying neither resolves to empty; callers' is_empty refusals keep firing.
         let bare = serde_json::json!({ "harness": "pi", "short_id": "" });
         assert_eq!(resume_session_id(&bare, "pi"), "");
     }
 
     #[test]
     fn session_id_field_and_resume_argv_match_python() {
+        // Pin ambient dispatch dirs empty; they fold into the codex grant and
+        // break the byte-identity argv pinned below.
+        std::env::remove_var("FNO_WORKER_ADD_DIRS");
         assert_eq!(session_id_field("claude"), Some("short_id"));
         assert_eq!(session_id_field("codex"), Some("harness_session_id"));
         assert_eq!(session_id_field("gemini"), Some("harness_session_id"));
@@ -4242,11 +4236,9 @@ mod tests {
         assert_eq!(session_id_field("cursor-agent"), Some("harness_session_id"));
         assert_eq!(session_id_field("unknown"), None);
 
-        // --cd lands the resume in the row's own tree instead of the session
-        // directory codex defaults to. It sits with the -c grant BEFORE the
-        // subcommand, where codex's globals go. Kept byte-identical to Python
-        // `_build_resume_argv`; `test_rust_verb_parity.py` fails on drift, so
-        // token ORDER is load-bearing here, not just membership.
+        // --cd lands the resume in the row's own tree, beside the -c grant
+        // BEFORE the subcommand where codex's globals go; token ORDER is
+        // load-bearing (byte-identical to Python `_build_resume_argv`).
         assert_eq!(
             build_resume_argv("codex", "uuid-1", Some("/path/that/does/not/exist")),
             Some(vec![

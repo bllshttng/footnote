@@ -387,6 +387,10 @@ dual_owner_kinds = {
     # the Python hand leg (`fno doctor event emit`) can still write a row,
     # the same generic-emit shape as reign_checkin above.
     "king_term",
+    # pr_watch_unparked: the Rust pr-park action is the one emitter; the
+    # Python side carries it in schema.yaml for the validator and
+    # `doctor event find`, the way the scratch pair above does.
+    "pr_watch_unparked",
 }
 collisions -= dual_owner_kinds
 if collisions:

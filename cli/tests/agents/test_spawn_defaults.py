@@ -135,7 +135,6 @@ def _grid_candidate(monkeypatch, candidate, chain):
         sd, "_grid_node", lambda toks, env=None: {"id": "x-test", "difficulty": "high"}
     )
     monkeypatch.setattr(rr, "resolve_inventory", lambda: _Inv())
-    monkeypatch.setattr(rr, "runtime_capacity", lambda inventory=None: {})
     monkeypatch.setattr(rr, "resolve_slot", lambda *a, **k: (candidate, chain, "unarmed"))
 
 
@@ -310,7 +309,7 @@ def _stub_route_slot(monkeypatch: pytest.MonkeyPatch, decision: dict) -> list[di
 
     seen: list[dict] = []
 
-    def _call(payload: dict) -> dict:
+    def _call(payload: dict, **_: object) -> dict:
         seen.append(payload)
         if "op" in payload:
             return {"status": "ok"}
@@ -346,7 +345,7 @@ def test_strict_seam_refuses_when_the_decision_is_unavailable(
 
     import fno.route_slot_client as rsc
 
-    def _unavailable(payload: dict) -> dict:
+    def _unavailable(payload: dict, **_: object) -> dict:
         raise rsc.RouteSlotUnavailable("binary missing")
 
     monkeypatch.setattr(rsc, "route_slot_call", _unavailable)

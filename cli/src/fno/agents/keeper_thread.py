@@ -7,6 +7,7 @@ the measurement behind each row: docs/architecture/thread-lanes.md.
 """
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -62,15 +63,21 @@ def _trust_agy_folder(cwd: Path) -> bool:
     return _ensure_agy_folder_trusted(cwd)
 
 
-def mint_session_id(harness: str, cwd: Path, requested: Optional[str]) -> Optional[str]:
+def mint_session_id(
+    harness: str,
+    cwd: Path,
+    requested: Optional[str],
+    *,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+    permission_mode: Optional[str] = None,
+    yolo: bool = False,
+) -> Optional[str]:
     """The harness-minted id for a keeper thread, or ``None`` for the
-    caller-assigned default.
-
-    The row's ``session_binding.strategy`` says whether a mint is REQUIRED and
-    the mint itself is per-harness code, so the two are checked against each
-    other below. Either way the id exists before any worker starts. A requested
-    id (``spawn --resume``) is VALIDATED, never minted: a truncated one names a
-    rival conversation.
+    caller-assigned default. The row's ``session_binding.strategy`` says
+    whether a mint is REQUIRED and the mint itself is per-harness code. A
+    requested id is VALIDATED, never minted. The agy mint is a real turn,
+    so it carries the spawn's axes.
     """
     if harness == "cursor-agent":
         from fno.agents.harnesses.cursor_agent import _require_chat_id, create_chat
@@ -84,7 +91,53 @@ def mint_session_id(harness: str, cwd: Path, requested: Optional[str]) -> Option
         # The mint runs a real turn in the spawn's own cwd, so an untrusted
         # folder would put a modal in front of the mint too.
         _trust_agy_folder(Path(cwd))
-        return create_conversation(cwd)
+        return create_conversation(
+            cwd,
+            model=model,
+            effort=effort,
+            permission_mode=permission_mode,
+            yolo=yolo,
+        )
+    from fno.agents.harness_map import capabilities
+
+    binding = capabilities(harness).get("session_binding") or {}
+    if binding.get("strategy") == "callee-minted-read-back":
+        from fno.agents.dispatch import DispatchAskError
+
+        raise DispatchAskError(
+            f"{harness} declares session_binding.strategy = "
+            "callee-minted-read-back but fno has no mint for it; the "
+            "caller-assigned UUIDv4 fallback launches the keeper on an id the "
+            "harness never adopts, and Identify reports that fabricated id",
+            exit_code=2,
+        )
+    return requested
+
+
+def _mint_thread_session_id(
+    harness: str,
+    cwd: Path,
+    requested: Optional[str] = None,
+    *,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+    permission_mode: Optional[str] = None,
+    yolo: bool = False,
+) -> str:
+    """The harness session id a keeper thread launches on, fixed BEFORE
+    launch: :func:`mint_session_id` plus the caller-assigned UUIDv4 default.
+    The launch axes ride along because a harness whose mint is a real model
+    turn (agy) launches it on the spawn's selected axes."""
+    minted = mint_session_id(
+        harness,
+        cwd,
+        requested,
+        model=model,
+        effort=effort,
+        permission_mode=permission_mode,
+        yolo=yolo,
+    )
+    return minted if minted is not None else str(uuid.uuid4())
     from fno.agents.harness_map import capabilities
 
     binding = capabilities(harness).get("session_binding") or {}
@@ -115,19 +168,17 @@ def complete_launch_argv(
     """The declared create form plus the axes this harness's PANE arm appends.
     One ORDER serves every lane: flag order is not how a binary launches."""
     from fno.agents.dispatch import DispatchAskError
-    from fno.agents.mux_spawn import effort_tokens, permission_pane_tokens
+    from fno.agents.mux_spawn import effort_tokens
     from fno.agents.writable_dirs import add_dir_tokens, worker_writable_dirs
 
     arm = keeper_arm(harness)
     if arm is None:
         return argv
-    bypass = arm.get("bypass_flag")
-    if arm.get("bypass_always") and bypass:
-        argv = [*argv, bypass]
-    if permission_mode:
-        argv = [*argv, *permission_pane_tokens(harness, permission_mode)]
-    elif yolo and bypass and not arm.get("bypass_always"):
-        argv = [*argv, bypass]
+    # The bypass/mode decision is the Rust owner's: an explicit mode REPLACES
+    # an always-on bypass; the lane default is the row's bypass posture.
+    from fno.agents.spawn_axes_client import keeper_posture
+
+    argv = [*argv, *keeper_posture(harness, "thread", permission_mode, yolo)]
     if arm.get("takes_model") and model:
         argv = [*argv, "--model", model]
     if arm.get("takes_effort") and effort:

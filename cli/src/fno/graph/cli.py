@@ -9095,13 +9095,11 @@ def _reconcile_once(
                         (entry for entry in _entries if entry.get("id") == h.node_id),
                         None,
                     )
-                    if current is None or not node_is_open(current) or node_pr_refs(current):
+                    if current is None or not node_is_open(current) or (node_pr_refs(current) and h.verdict != "rebind"):
                         continue
                     result = bind_pr_rows(
-                        _entries,
-                        [h.node_id],
-                        pr_number=h.pr_number,
-                        pr_url=h.pr_url,
+                        _entries, [h.node_id], pr_number=h.pr_number,
+                        pr_url=h.pr_url, rebind=h.verdict == "rebind",
                     )
                     if result.outcome == "bound" and result.bound_ids:
                         _kept.append({"node": h.node_id, "pr": h.pr_number, "url": h.pr_url})
@@ -9936,13 +9934,13 @@ def _reconcile_once(
         try:
             from fno.pr._sync_canonical import run_sync_catchup
 
-            _cu = run_sync_catchup()
+            _cu = run_sync_catchup(echo=not json_out)
             sync_catchup = {
-                "outcome": _cu.outcome, "stale": _cu.stale,
-                "pr_number": _cu.pr_number, "swept": _cu.swept, "detail": _cu.detail,
+                "outcome": _cu["outcome"], "stale": _cu.get("stale", False),
+                "pr_number": _cu.get("pr_number"), "swept": _cu.get("swept", 0), "detail": _cu.get("detail", ""),
             }
-            if _cu.outcome not in ("disabled", "fresh") and not json_out:
-                typer.echo(f"sync catch-up: {_cu.outcome}", err=True)
+            if _cu["outcome"] not in ("disabled", "fresh") and not json_out:
+                typer.echo(f"sync catch-up: {_cu['outcome']}", err=True)
         except Exception as _cu_exc:  # noqa: BLE001 - never abort the sweep
             sync_catchup = {"outcome": "error", "detail": str(_cu_exc)[:200]}
             if not json_out:

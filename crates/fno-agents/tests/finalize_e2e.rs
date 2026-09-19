@@ -461,6 +461,23 @@ fn handoff_files(env: &Env) -> Vec<PathBuf> {
         .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
         .unwrap_or_default()
 }
+
+/// Count run_summary rows for one run in an events log (envelope-level `run`,
+/// the join `count_run_tasks` and `run_summary_already_emitted` use).
+fn count_run_summary(p: &Path, run: &str) -> usize {
+    events_text(p)
+        .lines()
+        .filter(|l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .ok()
+                .map(|v| {
+                    v.get("type").and_then(|t| t.as_str()) == Some("run_summary")
+                        && v.get("run").and_then(|r| r.as_str()) == Some(run)
+                })
+                .unwrap_or(false)
+        })
+        .count()
+}
 fn postmortem_files(env: &Env) -> Vec<PathBuf> {
     fs::read_dir(&env.postmortems)
         .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
@@ -1327,6 +1344,58 @@ fn finalize_skips_stamp_when_no_pr() {
     assert!(
         !calls(&env).contains("fno backlog update"),
         "no open PR -> no pr_number stamp call"
+    );
+}
+
+/// Run-summary dedup: a session parked at DoneAwaitingMerge re-runs finalize
+/// on every stop; only the first fire for a (run, reason) pair emits and
+/// pushes. A changed reason (Budget then DoneAwaitingMerge) pushes again.
+#[test]
+fn run_summary_push_runs_once_across_repeat_fires() {
+    let env = setup("S-dedup", false);
+    for _ in 0..3 {
+        let out = run_finalize_shimmed(&env, "DoneAwaitingMerge", GH_PR_358);
+        assert!(out.status.success());
+    }
+    let c = calls(&env);
+    assert_eq!(
+        c.matches("push-parent --type run_summary").count(),
+        1,
+        "exactly one run_summary push across three fires: {c}"
+    );
+    assert_eq!(
+        count_run_summary(&env.events, "S-dedup"),
+        1,
+        "exactly one run_summary row across three fires"
+    );
+}
+
+#[test]
+fn run_summary_pushes_again_when_reason_changes() {
+    let env = setup("S-bdg", false);
+    let budget = run_finalize_shimmed(&env, "Budget", GH_PR_358);
+    assert!(budget.status.success());
+    let dam = run_finalize_shimmed(&env, "DoneAwaitingMerge", GH_PR_358);
+    assert!(dam.status.success());
+    let c = calls(&env);
+    let push_lines: Vec<&str> = c
+        .lines()
+        .filter(|l| l.contains("push-parent --type run_summary"))
+        .collect();
+    assert_eq!(
+        push_lines.len(),
+        2,
+        "Budget then DoneAwaitingMerge pushes twice: {}",
+        calls(&env)
+    );
+    assert!(push_lines.iter().any(|l| l.contains("--reason Budget")));
+    assert!(push_lines
+        .iter()
+        .any(|l| l.contains("--reason DoneAwaitingMerge")));
+    assert_eq!(
+        count_run_summary(&env.events, "S-bdg"),
+        2,
+        "both rows are in the log; the emit is deduped with the push"
     );
 }
 

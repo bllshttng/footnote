@@ -1359,7 +1359,6 @@ def _emit_merge_cleanup_request(
     is not a legal outcome: a merge that mints nothing must say why."""
     from fno.agents.events import emit_merge_cleanup_requested, rows_for_cleanup
     from fno.graph._reconcile import repo_slug_from_url
-    from fno.worktree_reapable import is_linked_worktree
 
     res = _gh(["pr", "view", str(pr_number), "--json", "state,headRefName,url,mergedAt"], cwd)
     if not res.ok:
@@ -1391,7 +1390,10 @@ def _emit_merge_cleanup_request(
         return
     branch = meta["headRefName"]
     repo, project = _merge_request_repo_and_project(cwd)
-    worktree = cwd if is_linked_worktree(cwd) else None
+    # A linked worktree's `.git` is a FILE; the canonical checkout's is a
+    # directory. Inlined from the deleted Python gate: one line, so
+    # the import that kept a second implementation alive went with it.
+    worktree = cwd if (Path(cwd) / ".git").is_file() else None
     emit_merge_cleanup_requested(
         repo=repo,
         project=project,
@@ -2207,6 +2209,7 @@ def run_merge(
             timeout_s=timeout_s,
             accept_flake=accept_flake,
             flake=flake,
+            authority=authority,
         )
 
 
@@ -2241,6 +2244,7 @@ def _authorized_merge(
     covered_head: str = "",
     decide_only: bool = False,
     timeout_s: float = 300.0,
+    authority: str = "manifest",
 ) -> dict:
     """Ask the one authorized-merge operation, in fno-agents.
 
@@ -2261,6 +2265,7 @@ def _authorized_merge(
         "auto_merge_source": source,
         "require_checks": bool(require_checks),
         "decide_only": bool(decide_only),
+        "authority": authority,
     }
     if approved is not None:
         payload["approved"] = bool(approved)
@@ -2321,6 +2326,7 @@ def _do_merge(
     timeout_s: float = 300.0,
     accept_flake: bool = False,
     flake: Optional[dict] = None,
+    authority: str = "manifest",
 ) -> int:
     """Steps (3)-(4): authorize through the one owner, then run the effect.
 
@@ -2337,6 +2343,7 @@ def _do_merge(
         "source": auto_merge_source,
         "require_checks": auto_merge.require_checks_pass,
         "covered_head": covered_pin(pr_number, repo, covered_head),
+        "authority": authority,
     }
 
     # Authorize BEFORE publishing anything. The coverage status greens the head

@@ -369,16 +369,70 @@ def _slot_settings(rows):
     )
 
 
+def _pin_capacity(monkeypatch, claude=None, codex=None, extra=None, active=None):
+    """Pin the capacity readings the verb judges lanes with.
+
+    The Python capacity read was deleted (x-1c38): the verb computes it from
+    the runtime-state file, so a hermetic one rides in through env instead of
+    a monkeypatched Python function. claude/codex pin one account record each
+    (`cl-a` for claude, `cx-a` for codex); None leaves the harness with no
+    record, which reads unknown. `extra` adds per-account readings as
+    {harness: {account: state}} (a dict value may carry resets_at). `active`
+    writes identity stamps as {harness: account}. Returns (config, state)
+    paths so a test can move capacity mid-flight.
+    """
+    import json
+    import os
+    import tempfile
+    import time as _time
+
+    d = tempfile.mkdtemp(prefix="fno-cap-")
+    records = []
+    for harness, spec in (("claude", claude), ("codex", codex)):
+        if spec is not None:
+            records.append((f"{'cl' if harness == 'claude' else 'cx'}-a", harness, spec))
+    for harness, accounts in (extra or {}).items():
+        for account, spec in accounts.items():
+            records.append((account, harness, spec))
+    cfg = os.path.join(d, "config.toml")
+    with open(cfg, "w") as f:
+        f.write(f"state_dir = '{d}'\n")
+        for account, harness, _spec in records:
+            f.write(f'[[accounts.records]]\nid = "{account}"\nharness = "{harness}"\n')
+    now = _time.time()
+
+    def row(spec) -> dict:
+        if isinstance(spec, dict):
+            state, resets = spec.get("state", "ok"), spec.get("resets_at")
+        else:
+            state, resets = spec, None
+        pct = {"ok": 5.0, "low": 95.0}.get(state, 100.0)
+        return {
+            "probed_at": now,
+            "partial": False,
+            "windows": [{"label": "daily", "used_pct": pct, "resets_at": resets}],
+        }
+
+    state = os.path.join(d, "state.json")
+    with open(state, "w") as f:
+        f.write(json.dumps({"usage": {a: row(spec) for a, _h, spec in records}}))
+    for harness, account in (active or {}).items():
+        os.makedirs(os.path.join(d, "providers"), exist_ok=True)
+        with open(os.path.join(d, "providers", f".active-{harness}"), "w") as f:
+            f.write(account)
+    monkeypatch.setenv("FNO_CONFIG", cfg)
+    monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", state)
+    return cfg, state
+
+
 @requires_rust
 def test_inventory_prints_slots_with_live_capacity(monkeypatch) -> None:
     """AC4-HP: the slots section names each lane's live capacity state and the
     lane a spawn would take RIGHT NOW - and the answer moves when capacity
     moves."""
-    from fno import route_resolve as rr
-
     _declare(monkeypatch, _SLOT_ROWS)
     monkeypatch.setattr("fno.config.load_settings", lambda: _slot_settings(_SLOT_ROWS))
-    monkeypatch.setattr(rr, "runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     res = runner.invoke(route_app, ["inventory"])
     assert res.exit_code == 0
     assert "slots:" in res.output
@@ -390,9 +444,7 @@ def test_inventory_prints_slots_with_live_capacity(monkeypatch) -> None:
     assert "routing=armed" in res.output
 
     # the lane whose harness reads exhausted skips; the next lane answers
-    monkeypatch.setattr(
-        rr, "runtime_capacity", lambda **kw: {"claude": "exhausted", "codex": "ok"}
-    )
+    _pin_capacity(monkeypatch, claude="exhausted", codex="ok")
     res = runner.invoke(route_app, ["inventory"])
     assert "lanes[0] flash-zai capacity=exhausted" in res.output
     assert "would take agents.profiles.target.lanes[1] luna-codex" in res.output
@@ -400,11 +452,9 @@ def test_inventory_prints_slots_with_live_capacity(monkeypatch) -> None:
 
 @requires_rust
 def test_inventory_json_carries_slots(monkeypatch) -> None:
-    from fno import route_resolve as rr
-
     _declare(monkeypatch, _SLOT_ROWS)
     monkeypatch.setattr("fno.config.load_settings", lambda: _slot_settings(_SLOT_ROWS))
-    monkeypatch.setattr(rr, "runtime_capacity", lambda **kw: {})
+    _pin_capacity(monkeypatch)
     res = runner.invoke(route_app, ["inventory", "--json"])
     assert res.exit_code == 0
     payload = json.loads(res.output)

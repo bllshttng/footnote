@@ -253,7 +253,7 @@ fn ac4_hp_three_row_marker_retires_prunes_and_names_every_keep() {
     );
     assert_eq!(summary.pruned.len(), 1, "{:?}", summary.pruned);
     assert_eq!(
-        summary.kept_open_work,
+        summary.kept_open_work_stale,
         vec![(
             "rowb".to_string(),
             "N3".to_string(),
@@ -3482,7 +3482,9 @@ fn settle_then_run(
             0,
             true,
             0,
-            &|h| gc_sweep::read_graph_entries(h).map(|g| gc_sweep::without_settled(g, &planned)),
+            &|h| {
+                gc_sweep::read_graph_entries(h).map(|g| gc_sweep::without_settled(g, &planned, &[]))
+            },
             transcripts,
             &staged_ages(transcripts),
             &|_| true,
@@ -3498,7 +3500,10 @@ fn settle_then_run(
             .collect();
         summary
     } else {
-        let (settled, refused) = gc_sweep::settle_stale_do_rows(home);
+        let mut read = |_path: &str, _cwd: &str| -> Option<gc_sweep::PrState> {
+            panic!("no existing settle_then_run test may reach GitHub");
+        };
+        let (settled, refused) = gc_sweep::settle_stale_do_rows_with(home, &mut read);
         let mut summary = gc_sweep::run(
             home,
             emitter,
@@ -4798,6 +4803,11 @@ fn ac8_stage_stops_the_claude_thread_before_the_surface_removal() {
 /// fixtures above are the shared seams.
 #[path = "gc_receipts/blueprint_retirement.rs"]
 mod blueprint_retirement;
+
+/// The additional-PR settle families (tasks 1.1 and 1.2): the three graph
+/// rules, the one-GitHub-read stamp, and the pass that applies it.
+#[path = "gc_receipts/additional_pr_settle.rs"]
+mod additional_pr_settle;
 
 /// The retirement-removes-the-session families: the production active-surface
 /// seam runs for real against a fake `claude` on PATH.

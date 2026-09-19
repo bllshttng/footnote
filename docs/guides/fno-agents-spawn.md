@@ -170,9 +170,9 @@ Every refusal below exits 2 before the worker starts, and each message names the
 
 ### Give a running worker a portal
 
-A thread that already runs gets a portal later with `fno mux thread <name> --portal N`. Omit the index there and the verb uses portal 0. In the sideline, Enter on a paneless live row opens portal 0, and `P` opens the next free index.
+A thread that already runs gets a portal later with `fno mux thread <key>`. Omit `--portal N` there and the verb uses portal 0. `<key>` is the agent name, or the full `session` id `fno agents whoami` prints. A thread-shaped Codex row answers to the full id. Claude answers to its printed `short_id`. The door matches one live row exactly and never creates, resumes, or duplicates a worker. Zero matches, or several rows answering the same key, refuse and spawn no worker. The broad selector tiers belong to `fno mux view`, `fno mux where` and `fno mux pane focus`, not to this door. In the sideline, Enter on a paneless live row opens portal 0. `P` opens the next free index. A row already shown through a portal takes focus with Enter. `fno mux thread reseat <name> --portal N` moves it to another index.
 
-Portals are never persisted. If the mux server restarts, every portal is gone and every thread keeps running. Spawn again with `--portal`, or open a portal by hand.
+Portals persist across a restart as slots, not live panes. The restored seat sits held-idle while the thread keeps running. A reach, a focus, or an explicit `fno mux workspace restore` fills it. The mechanism is the first rule under "Three rules that are easy to get wrong" in [portals.md](../architecture/portals.md).
 
 The index map, the one-row-one-viewer rule, and restore pruning live in [portals.md](../architecture/portals.md).
 

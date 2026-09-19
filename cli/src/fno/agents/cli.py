@@ -1639,7 +1639,14 @@ def cmd_spawn(
     # substrate maps every provider, so it's exempt here. The codex
     # thread lane is exempt too: the shared app-server resolves the posture
     # (resolve_thread_posture), so a mapped mode rides it natively.
-    codex_thread_lane = harness == "codex" and substrate in ("thread", "bg") and not once
+    # The capability table decides, through the one Rust vocabulary (see
+    # codex_posture.rs): a codex thread lane carries a mapped mode when the
+    # table declares the lane AND the mode resolves in codex's own words. An
+    # unavailable owner reads false, which degrades to the refusal below -
+    # never a guessed yes.
+    from fno.agents.permission_axis import codex_thread_lane_carries
+
+    codex_thread_lane = codex_thread_lane_carries(harness, substrate, once, permission_mode)
     if (
         permission_mode is not None
         and harness != "claude"
@@ -2139,6 +2146,35 @@ def cmd_spawn(
                 raise typer.Exit(code=2)
             route_provider = recorded_provider
 
+    # The write policy resolves BEFORE the substrate branch so a pane spawn
+    # refuses instead of silently dropping the enforcement it was handed.
+    # Claude-only for the same reason: the sandbox block composes into the
+    # claude --settings payload, so another harness would take the flag and
+    # enforce nothing - the exact partial-jail this option exists to prevent.
+    # It also sits above the node guard and the gate: an exit here holds no
+    # claim, so it cannot strand one.
+    sandbox_settings: dict[str, object] | None = None
+    if sandbox_write_policy:
+        if substrate == "pane" and not once:
+            print(
+                "--sandbox-write-policy needs the thread substrate: a pane "
+                "spawn's --settings slot is reserved by the mux hook server, "
+                "so a pane cannot carry the OS write allowlist.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        if harness != "claude":
+            print(
+                f"--sandbox-write-policy composes into the claude --settings "
+                f"payload; harness {harness!r} would carry the flag and "
+                f"enforce nothing. Drop the flag or spawn claude.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        from fno.agents.model_routing import load_sandbox_write_policy
+
+        sandbox_settings = load_sandbox_write_policy(sandbox_write_policy)
+
     # The node guard sits BELOW the resume-provider resolution on purpose:
     # it acquires `dispatch:<id>` (and the handover `node:<id>`), and every
     # exit above it strands those keys for their whole TTL with nothing
@@ -2319,33 +2355,6 @@ def cmd_spawn(
     # the same scoping contract FNO_NODE is pinned to.
     prov_prev["FNO_WORKER_NAME"] = os.environ.get("FNO_WORKER_NAME")
     os.environ["FNO_WORKER_NAME"] = name
-
-    # The write policy resolves BEFORE the substrate branch so a pane spawn
-    # refuses instead of silently dropping the enforcement it was handed.
-    # Claude-only for the same reason: the sandbox block composes into the
-    # claude --settings payload, so another harness would take the flag and
-    # enforce nothing - the exact partial-jail this option exists to prevent.
-    sandbox_settings: dict[str, object] | None = None
-    if sandbox_write_policy:
-        if substrate == "pane" and not once:
-            print(
-                "--sandbox-write-policy needs the thread substrate: a pane "
-                "spawn's --settings slot is reserved by the mux hook server, "
-                "so a pane cannot carry the OS write allowlist.",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
-        if harness != "claude":
-            print(
-                f"--sandbox-write-policy composes into the claude --settings "
-                f"payload; harness {harness!r} would carry the flag and "
-                f"enforce nothing. Drop the flag or spawn claude.",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
-        from fno.agents.model_routing import load_sandbox_write_policy
-
-        sandbox_settings = load_sandbox_write_policy(sandbox_write_policy)
 
     # `--once` is the pre-substrate spelling of headless (the Rust client maps
     # it to --substrate headless): it always means a one-shot, never a pane.
