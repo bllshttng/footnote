@@ -52,7 +52,9 @@ fn kill_server(sock: &Path) {
 /// (done + in-flight) and three trees (done slot, in-flight slot, plain
 /// shell).
 fn write_fixture(iso: &Path) {
-    let graph = r#"{"entries":[{"id":"x-done","status":"done","sessions":[{"harness":"codex","session_id":"done-sess"}]}]}"#;
+    // The typed seed import drops a row it cannot represent, so the entry
+    // carries the fields the model requires.
+    let graph = r#"{"entries":[{"id":"x-done","slug":"x-done","title":"x-done","type":"feature","status":"done","priority":"p2","sessions":[{"harness":"codex","phase":"review","session_id":"done-sess"}]}]}"#;
     std::fs::write(iso.join("iso-graph.json"), graph).unwrap();
     let home = iso.join("home");
     std::fs::create_dir_all(home.join(".fno")).unwrap();

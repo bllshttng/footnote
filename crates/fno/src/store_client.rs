@@ -449,11 +449,15 @@ pub fn rows(graph: &Path) -> Result<Vec<Value>, String> {
 /// plus its write-ahead log). Every committed write appends to the log, so
 /// the stamp moves on every backlog mutation - two stats per tick, never a
 /// keeper exec, or the idle server pays a process spawn a second for a
-/// number it can stat for free.
+/// number it can stat for free. A missing store reads as the zero stamp,
+/// not as None: the reader's first tick must differ from its no-stamp-yet
+/// cache or the board never publishes its first (empty) card set.
 pub fn store_stamp(graph: &Path) -> Option<(i64, u64)> {
     let db = graph.with_extension("db");
     let wal = db.with_extension("db-wal");
-    let md = std::fs::metadata(&db).ok()?;
+    let Ok(md) = std::fs::metadata(&db) else {
+        return Some((0, 0));
+    };
     let modified = md.modified().ok()?;
     let mut secs = modified
         .duration_since(std::time::UNIX_EPOCH)
