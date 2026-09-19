@@ -56,14 +56,6 @@ impl SplicePiece {
             SplicePiece::Inline(bytes) => stream.write_all(bytes),
         }
     }
-
-    #[cfg(test)]
-    fn bytes(&self) -> Vec<u8> {
-        match self {
-            SplicePiece::Shared(bytes) => bytes.as_ref().clone(),
-            SplicePiece::Inline(bytes) => bytes.clone(),
-        }
-    }
 }
 
 impl SplicedReply {
@@ -119,23 +111,6 @@ impl SplicedReply {
         }
         stream.write_all(&suffix)?;
         stream.flush()
-    }
-
-    /// The assembled frame, for the byte-equality tests only.
-    #[cfg(test)]
-    pub(super) fn frame(&self) -> Vec<u8> {
-        let (prefix, pieces, suffix) = self.pieces();
-        let mut out = Vec::new();
-        let payload_len =
-            prefix.len() + pieces.iter().map(SplicePiece::len).sum::<usize>() + suffix.len();
-        out.push(TAG_RESPONSE);
-        out.extend_from_slice(&(payload_len as u32).to_le_bytes());
-        out.extend_from_slice(&prefix);
-        for piece in &pieces {
-            out.extend_from_slice(&piece.bytes());
-        }
-        out.extend_from_slice(&suffix);
-        out
     }
 }
 
