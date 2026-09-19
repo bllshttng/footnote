@@ -329,19 +329,9 @@ fn quiet_of(dir: &Path, now: SystemTime) -> Duration {
         let Ok(meta) = std::fs::symlink_metadata(dir) else {
             return;
         };
-        // mtime alone misses a directory only ever read from, never written
-        // to again after the build that made it - a `cargo test` run reads
-        // `deps/` without touching its mtime. atime is the weaker of the two
-        // (many mounts throttle it via relatime) but costs nothing extra to
-        // check, so take whichever of the pair is newer.
         if let Ok(m) = meta.modified() {
             if m > *acc {
                 *acc = m;
-            }
-        }
-        if let Ok(a) = meta.accessed() {
-            if a > *acc {
-                *acc = a;
             }
         }
         if depth == 0 {
@@ -483,46 +473,59 @@ fn remove_empty_shard(dir: &Path) -> bool {
 /// `cargo` can't be spawned to order (the name comes from the executed
 /// file's own path, not argv0 or a script's shebang target), so the seam is
 /// what lets a test drive the tree-to-shard mapping below deterministically.
-fn live_cargo_cwds() -> Vec<PathBuf> {
+///
+/// `Err` only when `lsof` itself could not be run (missing binary): a normal
+/// "no cargo running right now" read is `Ok(vec![])`, never an error.
+fn live_cargo_cwds() -> Result<Vec<PathBuf>, ()> {
     if let Ok(raw) = std::env::var("FNO_TEST_LIVE_CARGO_CWDS") {
-        return raw
+        return Ok(raw
             .split(':')
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
-            .collect();
+            .collect());
     }
     let Ok(output) = Command::new("lsof")
         .args(["-a", "-d", "cwd", "-c", "cargo", "-Fn"])
         .output()
     else {
-        return Vec::new();
+        return Err(());
     };
-    String::from_utf8_lossy(&output.stdout)
+    Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| line.strip_prefix('n'))
         .map(PathBuf::from)
-        .collect()
+        .collect())
 }
 
-/// Every hash dir a live cargo command might still need. `cargo test` drops
-/// its `.cargo-lock` once compiling ends, so the flock reads free for the
-/// whole run phase - the gap between one test binary exiting and the next
-/// one starting has no lock and no open file under the dir the cap lane is
-/// about to judge. The live process's cwd is the only signal left: whichever
-/// registered tree it falls under has a cargo command in flight, so every
-/// dir that tree's manifests resolve to stays off the cap lane's table.
-fn live_shards(trees: &[PathBuf], fno_base: &Path) -> BTreeSet<PathBuf> {
+/// Every hash dir a live cargo command might still need, plus whether the
+/// read can be trusted. `cargo test` drops its `.cargo-lock` once compiling
+/// ends, so the flock reads free for the whole run phase - the gap between
+/// one test binary exiting and the next one starting has no lock and no open
+/// file under the dir the cap lane is about to judge. The live process's cwd
+/// is the only signal left: whichever registered tree it falls under has a
+/// cargo command in flight, so every dir that tree's manifests resolve to
+/// stays off the cap lane's table. A cwd can sit under more than one
+/// registered tree - a nested `.claude/worktrees/<name>` inside its own
+/// checkout - so the LONGEST matching tree owns it, never the first one
+/// `git worktree list` happens to print (that would always be the main
+/// checkout). `Err` when `lsof` failed to run or a live cwd's own tree
+/// cannot answer its manifests: either way the returned set may be missing
+/// entries, so the caller must fail closed rather than trust an empty one.
+fn live_shards(trees: &[PathBuf], fno_base: &Path) -> Result<BTreeSet<PathBuf>, ()> {
     let mut shards = BTreeSet::new();
-    for cwd in live_cargo_cwds() {
+    for cwd in live_cargo_cwds()? {
         let cwd = phys(&cwd);
-        let Some(tree) = trees.iter().find(|t| cwd.starts_with(phys(t))) else {
+        let tree = trees
+            .iter()
+            .filter(|t| cwd.starts_with(phys(t)))
+            .max_by_key(|t| phys(t).as_os_str().len());
+        let Some(tree) = tree else {
             continue;
         };
-        if let Ok(answer) = answer_tree(tree, fno_base) {
-            shards.extend(answer.dirs.iter().map(|d| phys(d)));
-        }
+        let answer = answer_tree(tree, fno_base).map_err(|_| ())?;
+        shards.extend(answer.dirs.iter().map(|d| phys(d)));
     }
-    shards
+    Ok(shards)
 }
 
 // --- free space --------------------------------------------------------------
@@ -618,8 +621,13 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
     // The live process itself is the only signal left standing: whichever
     // tree its cwd falls under is a tree with a cargo command in flight, so
     // every dir that tree's manifests resolve to is off the table this
-    // sweep, cap pressure or not.
-    let live = live_shards(&trees, &fno_base);
+    // sweep, cap pressure or not. An unreadable live set (`live_reliable =
+    // false`) is never treated as "nothing is live" - the cap lane falls
+    // back to the far more conservative `FRESH_SECS` floor instead.
+    let (live, live_reliable) = match live_shards(&trees, &fno_base) {
+        Ok(shards) => (shards, true),
+        Err(()) => (BTreeSet::new(), false),
+    };
 
     let mut rows: Vec<Row> = Vec::new();
     for base in &bases {
@@ -729,9 +737,20 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
 
     // Cap: while the bytes actually left exceed the effective ceiling, reap
     // owned rows least recently used first, rows past CAP_MIN_QUIET_SECS
-    // included. The flock, the live-cargo check, and that floor are the only
-    // vetoes here (no FRESH_SECS recheck), and a refused row never ends the
-    // loop - the next-oldest candidate still goes.
+    // included - FRESH_SECS instead when the live-cargo read cannot be
+    // trusted, since an empty live set is then not proof nothing is live.
+    // The flock, the live-cargo check, and that floor are the only vetoes
+    // here (no FRESH_SECS recheck on TOP of that in the trustworthy case),
+    // and a refused row never ends the loop - the next-oldest candidate
+    // still goes. Both the live set and each candidate's own quiet are
+    // re-read right before its `guard_remove`: the walk above and the
+    // orphan/age deletes both take real time, and a cargo command starting
+    // mid-sweep is exactly the gap this lane exists to close.
+    let cap_floor_secs = if live_reliable {
+        CAP_MIN_QUIET_SECS
+    } else {
+        FRESH_SECS
+    };
     let mut remaining = if apply {
         before_bytes.saturating_sub(rep.reclaimed_bytes)
     } else {
@@ -745,7 +764,7 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
                 (r.under_fno || r.membership)
                     && !planned.contains(i)
                     && !live.contains(&phys(&r.path))
-                    && r.quiet >= Duration::from_secs(CAP_MIN_QUIET_SECS)
+                    && r.quiet >= Duration::from_secs(cap_floor_secs)
             })
             .map(|(i, _)| i)
             .collect();
@@ -755,8 +774,22 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
                 break;
             }
             let row = &rows[i];
-            let outcome = if apply {
-                guard_remove(&row.path, SystemTime::now(), false)
+            let now2 = SystemTime::now();
+            let (recheck_live, recheck_reliable) = match live_shards(&trees, &fno_base) {
+                Ok(shards) => (shards, true),
+                Err(()) => (BTreeSet::new(), false),
+            };
+            let recheck_floor = if recheck_reliable {
+                CAP_MIN_QUIET_SECS
+            } else {
+                FRESH_SECS
+            };
+            let outcome = if recheck_live.contains(&phys(&row.path)) {
+                Err("cargo-live")
+            } else if quiet_of(&row.path, now2) < Duration::from_secs(recheck_floor) {
+                Err("build-in-progress")
+            } else if apply {
+                guard_remove(&row.path, now2, false)
             } else {
                 take_locks(&row.path).map(|_| ())
             };
@@ -936,13 +969,7 @@ mod tests {
         let old = SystemTime::now() - Duration::from_secs(secs);
         fn walk(path: &Path, old: SystemTime) {
             if let Ok(file) = std::fs::File::options().read(true).open(path) {
-                // quiet_of now takes the newer of mtime and atime, so a
-                // fixture backdating only mtime would still read as fresh.
-                let _ = file.set_times(
-                    std::fs::FileTimes::new()
-                        .set_modified(old)
-                        .set_accessed(old),
-                );
+                let _ = file.set_times(std::fs::FileTimes::new().set_modified(old));
             }
             if let Ok(entries) = std::fs::read_dir(path) {
                 for entry in entries.flatten() {
@@ -1336,8 +1363,11 @@ mod tests {
         let env = setup("caplive", "never-broken");
         // The fake cargo always answers CBD_FNO_ANSWER for this tree, so
         // this is the exact dir a live cargo process running from
-        // `env.root` would own.
-        let live = plant(&env.fno_base, "00", "aaaa11", 0, false);
+        // `env.root` would own. Quiet past CAP_MIN_QUIET_SECS, and OLDER
+        // than `other`, so the oldest-first sort would pick this row before
+        // `other` if the live veto ever broke - at quiet 0 the floor alone
+        // would save it, and the veto itself would go untested.
+        let live = plant(&env.fno_base, "00", "aaaa11", 2 * 3600, false);
         let other = plant(&env.fno_base, "00", "other01", 3600, false);
         let unit = crate::reclaim::tree_bytes(&live);
         std::env::set_var("FNO_CARGO_FREE_BYTES", unit.to_string());
@@ -1359,6 +1389,39 @@ mod tests {
         let summary = rep.lines.last().unwrap();
         assert!(summary.contains("cap_exceeded=true"), "{summary}");
         assert!(summary.contains("cap_held=cargo-live:1"), "{summary}");
+    }
+
+    /// AC-ERR: a live cargo cwd whose OWN tree cannot answer its manifests
+    /// makes the live read itself untrustworthy - an empty live set is then
+    /// not proof nothing is live. The cap lane must fail closed to
+    /// `FRESH_SECS`, not fall back to the far shorter `CAP_MIN_QUIET_SECS`
+    /// floor a trustworthy read would use.
+    #[test]
+    fn an_unreadable_live_tree_falls_the_cap_floor_back_to_fresh_secs() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("livefail", "broken");
+        std::fs::create_dir_all(env.root.join("crates/broken")).unwrap();
+        std::fs::write(
+            env.root.join("crates/broken/Cargo.toml"),
+            "[package]\nname = 'broken'\nversion = '0.1.0'\n",
+        )
+        .unwrap();
+        // A live cargo cwd inside `env.root` itself: `answer_tree` cannot
+        // answer this tree (the broken manifest), so `live_shards` comes
+        // back `Err`, not an empty `Ok`.
+        std::env::set_var("FNO_TEST_LIVE_CARGO_CWDS", &env.root);
+        // Quiet past CAP_MIN_QUIET_SECS but short of FRESH_SECS: a
+        // trustworthy live read would let the cap lane reap this row.
+        let row = plant(&env.fno_base, "00", "cafe5678", 1000, false);
+        std::env::set_var("FNO_CARGO_FREE_BYTES", "0");
+
+        let rep = sweep(&env.root, true, SystemTime::now());
+
+        assert!(
+            row.exists(),
+            "an unreadable live read must fail closed to FRESH_SECS, not CAP_MIN_QUIET_SECS"
+        );
+        assert_eq!(rep.reaped, 0, "{rep:?}");
     }
 
     /// Defense in depth: with no live cargo process detected at all (`lsof`
