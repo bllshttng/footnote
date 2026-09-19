@@ -268,6 +268,28 @@ def test_next_error_skips_never_guesses(iso, monkeypatch):
     assert res.decision == "skipped" and res.reason == "next-error"
 
 
+def test_select_unmeasured_skips_with_its_own_reason(iso, monkeypatch):
+    monkeypatch.setenv("FNO_AUTO_CONTINUE", "1")
+    spawned = []
+
+    def unmeasured(project):
+        raise adv.SelectUnmeasured("project=fno bound=120s: selection stalled")
+
+    monkeypatch.setattr(adv, "_next_node", unmeasured)
+    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: spawned.append(a))
+
+    res = adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
+
+    assert res.decision == "skipped" and res.reason == "select-unmeasured"
+    assert spawned == []
+    rows = [json.loads(line) for line in iso.read_text().splitlines()]
+    skipped = [row for row in rows if row["type"] == "advance_skipped"]
+    ticks = [row for row in rows if row["type"] == "control_plane_tick"]
+    assert skipped[0]["data"]["reason"] == "select-unmeasured"
+    assert ticks[0]["data"]["skip_reason"] == "select-unmeasured"
+    assert "project=fno bound=120s" in ticks[0]["data"]["detail"]
+
+
 def test_walker_live_suppresses(iso, monkeypatch):
     """AC2-EDGE: a live walk owns the project -> skip."""
     _hold(adv._walker_key())
@@ -2235,65 +2257,6 @@ def test_lane_ready_frontier_recovers_observer_miss_and_records_divergence(
 
 
 # ---------------------------------------------------------------------------
-# _next_node: _resolved_cwd enrichment (codex P2 - launch from mapped root)
-# ---------------------------------------------------------------------------
-
-
-def test_next_node_enriches_resolved_cwd(monkeypatch):
-    """`fno backlog next` omits _resolved_cwd; _next_node fetches it via get so
-    the worker launches from the mapped project root."""
-    calls = []
-
-    def fake_run(cmd, **kw):
-        passthrough = _naming_passthrough(cmd, **kw)
-        if passthrough is not None:
-            return passthrough
-        calls.append(cmd[:3])
-        if cmd[:3] == ["fno-py", "backlog", "next"]:
-            return _FakeProc(0, json.dumps({"id": "ab-2222aaaa", "cwd": "/raw"}))
-        if cmd[:3] == ["fno-py", "backlog", "get"]:
-            return _FakeProc(0, json.dumps(
-                {"id": "ab-2222aaaa", "cwd": "/raw", "_resolved_cwd": "/mapped/root"}))
-        return _FakeProc(1)
-
-    monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    node = adv._next_node("fno")
-    assert node["_resolved_cwd"] == "/mapped/root"
-    assert ["fno-py", "backlog", "get"] in calls
-
-
-def test_next_node_get_failure_is_nonfatal(monkeypatch):
-    def fake_run(cmd, **kw):
-        passthrough = _naming_passthrough(cmd, **kw)
-        if passthrough is not None:
-            return passthrough
-        if cmd[:3] == ["fno-py", "backlog", "next"]:
-            return _FakeProc(0, json.dumps({"id": "ab-2222aaaa", "cwd": "/raw"}))
-        return _FakeProc(1, "", "get exploded")
-
-    monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    node = adv._next_node("fno")
-    assert node["id"] == "ab-2222aaaa"  # still returns; _spawn_worker falls back to .cwd
-    assert not node.get("_resolved_cwd")
-
-
-def test_next_node_skips_get_when_already_resolved(monkeypatch):
-    calls = []
-
-    def fake_run(cmd, **kw):
-        passthrough = _naming_passthrough(cmd, **kw)
-        if passthrough is not None:
-            return passthrough
-        calls.append(cmd[:3])
-        return _FakeProc(0, json.dumps(
-            {"id": "ab-2222aaaa", "cwd": "/raw", "_resolved_cwd": "/already"}))
-
-    monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    node = adv._next_node("fno")
-    assert node["_resolved_cwd"] == "/already"
-    assert ["fno-py", "backlog", "get"] not in calls  # no redundant get
-
-
 # ---------------------------------------------------------------------------
 # advance_dependents: cross-project successor dispatch (G1 / AC5-FR)
 # ---------------------------------------------------------------------------
@@ -4006,20 +3969,24 @@ def test_spawn_worker_planless_without_difficulty_refuses(iso, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _undispatched_nodes: the observer timeout names what was being read (x-be7f)
+# _undispatched_nodes: the Rust receipt owns the bound
 # ---------------------------------------------------------------------------
 
 
 def test_undispatched_observer_timeout_names_command_and_budget(monkeypatch):
-    def fake_run(cmd, **kwargs):
-        passthrough = _naming_passthrough(cmd, **kwargs)
-        if passthrough is not None:
-            return passthrough
-        raise _subprocess_module.TimeoutExpired(cmd, 60)
+    def fake_call(verb, args, *, timeout):
+        assert verb == "select-read"
+        assert args == ["undispatched", "--project", "fno"]
+        assert timeout is None
+        return None, {
+            "status": "unmeasured",
+            "reason": "select-unmeasured",
+            "detail": "project=fno bound=120s: fno backlog undispatched did not answer inside its 120s budget; the arm_watch heal lane retries it",
+        }
 
-    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    monkeypatch.setattr("fno.rust_binary.call_binary_json", fake_call)
 
-    with pytest.raises(RuntimeError, match=r"60s budget: .*backlog undispatched"):
+    with pytest.raises(adv.SelectUnmeasured, match=r"backlog undispatched.*120s"):
         adv._undispatched_nodes("fno")
 
 
