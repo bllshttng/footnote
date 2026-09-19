@@ -68,7 +68,7 @@ from pathlib import Path
 from typing import Any, Iterator, Optional, Sequence
 
 from fno.agents.dispatch import DispatchAskError
-from fno.agents.spawn_axes_client import SpawnAxesUnavailable, pi_session_lookup
+from fno.agents.spawn_axes_client import SpawnAxesUnavailable, spawn_axes_call
 
 # pi's provider and model for this fleet. Both are always passed: see trap 3 in
 # the module docstring. Env overrides so a different subscription needs no
@@ -182,7 +182,9 @@ def lookup_sessions(cwd: Path | str, session_id: str) -> SessionLookup:
     marks a turn attempted and failed, often the one a human needs.
     """
     try:
-        answer = pi_session_lookup(str(cwd), session_id)
+        answer = spawn_axes_call(
+            {"pi_session_lookup": {"cwd": str(cwd), "session_id": session_id}}
+        )
     except SpawnAxesUnavailable:
         return SessionLookup(
             state="unknown",
