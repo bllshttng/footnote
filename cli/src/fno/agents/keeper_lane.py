@@ -238,7 +238,7 @@ def keeper_verdict(obs: KeeperObs, *, grace_s: Optional[float] = None) -> tuple[
         and graph_read_source() == "sqlite"
     ):
         return REAP, (
-            f"{obs.graph} reads backend=sqlite while graph.read_source=sqlite - "
+            f"{obs.graph} reads backend=sqlite and the store reads sqlite - "
             "a resident keeper must not exist there (clients serve by exec)"
         )
     if obs.sock_state not in REAPABLE_SOCK_STATES:
