@@ -125,11 +125,14 @@ pub(crate) fn read_blocked_rows(path: &Path) -> Result<Vec<BlockedRow>, String> 
 /// exactly the split `build_board` uses for every other queue's inputs.
 /// "Released" reads the CURRENT claim only: this scan carries no prior
 /// holder to diff against, so gone or dead-stated counts as released and
-/// still-live does not. Returns `(row, age_minutes)` - the survivors still
+/// still-live does not. A row whose node's claim was acquired strictly after
+/// the row's own ts is stale: the hand that raised it has left. An unparsable
+/// ts never convicts. Returns `(row, age_minutes)` - the survivors still
 /// need the ONE batched mail-answered check the caller makes.
 pub(crate) fn resolve_blocked_child_candidates(
     rows: Vec<BlockedRow>,
     claim_state_by_node: &HashMap<String, String>,
+    claim_acquired_at_by_node: &HashMap<String, i64>,
     status_by_node: &HashMap<String, String>,
     grace_minutes: i64,
     now_s: i64,
@@ -161,9 +164,25 @@ pub(crate) fn resolve_blocked_child_candidates(
         if closed || claim_released {
             continue;
         }
-        let row_epoch = crate::tick_ledger::parse_rfc3339_unix(&row.ts)
-            .map(|s| s as i64)
-            .unwrap_or(now_s);
+        // A claim taken after the row is a new hand; the raising worker's
+        // distress does not bind it. Strictly after keeps a same-second row
+        // (a worker can claim and hit distress inside one second). Fail
+        // open: an unparsable ts never convicts. acquired_at is epoch
+        // MILLISECONDS; row ts is seconds.
+        let row_epoch_opt = crate::tick_ledger::parse_rfc3339_unix(&row.ts).map(|s| s as i64);
+        let stale_holder = match (
+            row_epoch_opt,
+            row.node
+                .as_deref()
+                .and_then(|n| claim_acquired_at_by_node.get(n)),
+        ) {
+            (Some(row_s), Some(acq_ms)) => acq_ms / 1000 > row_s,
+            _ => false,
+        };
+        if stale_holder {
+            continue;
+        }
+        let row_epoch = row_epoch_opt.unwrap_or(now_s);
         let age_minutes = (now_s - row_epoch) / 60;
         if age_minutes < grace_minutes {
             continue;
@@ -1905,8 +1924,14 @@ mod tests {
         let rows = vec![blocked("2026-09-08T00:00:00Z", "cx-1", "x-closed")];
         let mut status = HashMap::new();
         status.insert("x-closed".to_string(), "done".to_string());
-        let candidates =
-            resolve_blocked_child_candidates(rows, &HashMap::new(), &status, 30, 10_000_000_000);
+        let candidates = resolve_blocked_child_candidates(
+            rows,
+            &HashMap::new(),
+            &HashMap::new(),
+            &status,
+            30,
+            10_000_000_000,
+        );
         assert!(
             candidates.is_empty(),
             "a done node must not need a mail spawn"
@@ -1918,8 +1943,14 @@ mod tests {
         let rows = vec![blocked("2026-09-08T00:00:00Z", "cx-1", "x-released")];
         let mut claims = HashMap::new();
         claims.insert("x-released".to_string(), "stale".to_string());
-        let candidates =
-            resolve_blocked_child_candidates(rows, &claims, &HashMap::new(), 30, 10_000_000_000);
+        let candidates = resolve_blocked_child_candidates(
+            rows,
+            &claims,
+            &HashMap::new(),
+            &HashMap::new(),
+            30,
+            10_000_000_000,
+        );
         assert!(
             candidates.is_empty(),
             "a released claim must not need a mail spawn"
@@ -1934,8 +1965,14 @@ mod tests {
         claims.insert("x-live".to_string(), "live".to_string());
         let row_epoch =
             crate::tick_ledger::parse_rfc3339_unix("2026-09-08T00:00:00Z").unwrap() as i64;
-        let candidates =
-            resolve_blocked_child_candidates(rows, &claims, &HashMap::new(), 30, row_epoch + 600);
+        let candidates = resolve_blocked_child_candidates(
+            rows,
+            &claims,
+            &HashMap::new(),
+            &HashMap::new(),
+            30,
+            row_epoch + 600,
+        );
         assert!(
             candidates.is_empty(),
             "10 minutes old must not clear a 30-minute grace"
@@ -1953,6 +1990,7 @@ mod tests {
             rows,
             &claims,
             &HashMap::new(),
+            &HashMap::new(),
             30,
             row_epoch + 45 * 60,
         );
@@ -1969,7 +2007,14 @@ mod tests {
         let mut claims = HashMap::new();
         claims.insert("x-a".to_string(), "live".to_string());
         let now = crate::tick_ledger::parse_rfc3339_unix("2026-09-08T02:00:00Z").unwrap() as i64;
-        let candidates = resolve_blocked_child_candidates(rows, &claims, &HashMap::new(), 30, now);
+        let candidates = resolve_blocked_child_candidates(
+            rows,
+            &claims,
+            &HashMap::new(),
+            &HashMap::new(),
+            30,
+            now,
+        );
         assert_eq!(
             candidates.len(),
             1,
@@ -1978,6 +2023,85 @@ mod tests {
         assert_eq!(
             candidates[0].0.ts, "2026-09-08T00:00:00Z",
             "the OLDEST row wins"
+        );
+    }
+
+    #[test]
+    fn a_claim_taken_after_the_row_reads_stale_not_blocked() {
+        // AC2-HP: a live claim acquired after the row ts is a new hand; the
+        // old worker's distress does not bind it, so the row stays off the
+        // board even past grace with a live claim.
+        let rows = vec![blocked("2026-09-08T00:00:00Z", "cx-1", "x-cccc")];
+        let mut claims = HashMap::new();
+        claims.insert("x-cccc".to_string(), "live".to_string());
+        let mut acquired = HashMap::new();
+        let row_s = crate::tick_ledger::parse_rfc3339_unix("2026-09-08T00:00:00Z").unwrap() as i64;
+        acquired.insert("x-cccc".to_string(), (row_s + 1) * 1000);
+        let candidates = resolve_blocked_child_candidates(
+            rows,
+            &claims,
+            &acquired,
+            &HashMap::new(),
+            30,
+            row_s + 45 * 60,
+        );
+        assert!(
+            candidates.is_empty(),
+            "a claim taken after the row is a new hand: {} candidate(s)",
+            candidates.len()
+        );
+    }
+
+    #[test]
+    fn a_claim_taken_before_the_row_keeps_it_on_the_board() {
+        // AC2-ERR + AC2-EDGE, the units guard: a claim acquired 1 second
+        // before the row is the SAME hand still holding, so the row
+        // survives. A raw milliseconds-against-seconds compare would read
+        // every claim as "after" and empty the queue.
+        let rows = vec![blocked("2026-09-08T00:00:00Z", "cx-1", "x-live")];
+        let mut claims = HashMap::new();
+        claims.insert("x-live".to_string(), "live".to_string());
+        let mut acquired = HashMap::new();
+        let row_s = crate::tick_ledger::parse_rfc3339_unix("2026-09-08T00:00:00Z").unwrap() as i64;
+        acquired.insert("x-live".to_string(), (row_s - 1) * 1000);
+        let candidates = resolve_blocked_child_candidates(
+            rows,
+            &claims,
+            &acquired,
+            &HashMap::new(),
+            30,
+            row_s + 45 * 60,
+        );
+        assert_eq!(
+            candidates.len(),
+            1,
+            "the same hand 1s before the row never drops it"
+        );
+    }
+
+    #[test]
+    fn an_unparsable_row_ts_is_never_convicted_by_staleness() {
+        // AC2-EDGE2, fail open: if the staleness check read ts as
+        // unwrap_or(now_s), a claim acquired after now_s would convict a
+        // row whose ts does not parse. Grace 0 lets the row through every
+        // other filter, so only staleness could drop it here.
+        let rows = vec![blocked("not-a-timestamp", "cx-1", "x-live")];
+        let mut claims = HashMap::new();
+        claims.insert("x-live".to_string(), "live".to_string());
+        let mut acquired = HashMap::new();
+        acquired.insert("x-live".to_string(), (10_000_000_000 + 600) * 1000);
+        let candidates = resolve_blocked_child_candidates(
+            rows,
+            &claims,
+            &acquired,
+            &HashMap::new(),
+            0,
+            10_000_000_000,
+        );
+        assert_eq!(
+            candidates.len(),
+            1,
+            "an unparsable ts never convicts, whatever the claim's acquired_at"
         );
     }
 
