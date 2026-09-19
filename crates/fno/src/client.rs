@@ -1030,14 +1030,11 @@ struct View {
     feed_offset: usize,
     hover_feed_border: bool,
     feed_drag: Option<SidelineDrag>,
-    /// The node detail overlay over a backlog card (Enter on a card): the
-    /// node's sessions with a derived launch action per row, its plan, its
-    /// king, its notes and decisions, folded off-loop from `fno backlog
-    /// get`. `None` closed; the fold/kick/render behavior lives in
+    /// The node detail overlay (Enter on a card): sessions with a derived
+    /// launch per row, king, plan, notes. `None` closed; behavior in
     /// `node_detail`.
     node_detail: Option<node_detail::NodeDetailOverlay>,
-    /// Pending escape bytes in node-detail mode (same split-arrow safety as
-    /// [`View::feed_esc`]).
+    /// Pending escape bytes in node-detail mode ([`View::feed_esc`] safety).
     node_detail_esc: Vec<u8>,
     /// The event-derived needs-me leg: the last `fno-agents needs` fold
     /// result while the overlay is open (`None` = live-only, not yet fetched
@@ -1714,10 +1711,8 @@ enum MenuAction {
     Focus,
     /// Open the read-only peek overlay.
     Peek,
-    /// The card menu's Plan entry: the dispatch door pinned to the
-    /// architect sub-agent with the blueprint message. The server's
-    /// readiness re-check and the door's spawn gate answer as always; a
-    /// refusal is the visible outcome, never a synthesized launch.
+    /// The card menu's Plan entry: the dispatch door pinned to the architect
+    /// sub-agent with the blueprint message (gates answer as always).
     PlanSpawn,
     /// Toggle the git working-diff pane for this row's worktree.
     Diff,
@@ -1975,17 +1970,9 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
 /// one up in about a minute, and the guards it applies (containers, batching,
 /// stale candidates, project scope) are not modeled here, so the hint promises
 /// nothing.
-/// The one card label: `<id> <slug>`, id FIRST - the id is the handle every
-/// verb takes, so it leads and the slug reads after it. An empty slug renders
-/// the id alone. Every paint site folds through this so the four rows cannot
-/// drift apart again.
-fn card_label(c: &BacklogCard) -> String {
-    if c.slug.is_empty() {
-        c.id.clone()
-    } else {
-        format!("{} {}", c.id, c.slug)
-    }
-}
+/// The one card label, id first (backlog_view owns the shape); every client
+/// paint site folds through it.
+use crate::backlog_view::card_label;
 
 fn build_card_menu(
     card: &BacklogCard,
@@ -2027,9 +2014,7 @@ fn build_card_menu(
     // LD7: a node with no plan is greyed (state can change; the item will
     // apply later). Obsidian off is absent instead - no state change in this
     // menu can unlock it, so a permanently-greyed item would advertise a
-    // capability nothing here can turn on. The Plan entry sits ahead of it:
-    // a blueprint for the node, spawned through the dispatch door pinned to
-    // the architect sub-agent; the door's spawn gate answers as always.
+    // capability nothing here can turn on.
     match crate::link::plan_link(card.plan_path.as_deref().map(Path::new), obsidian) {
         crate::link::PlanLink::Unavailable(crate::link::PlanUnavailable::NoPlan) => {
             rows.push(PopupRow::Entry {
@@ -6515,28 +6500,9 @@ impl View {
                 &self.theme,
                 None,
             );
-        } else if let Some(nd) = &self.node_detail {
-            // Node detail (Enter on a card): the node's sessions, king,
-            // plan and notes, from the last fold. Drawn above nav in the
-            // same overlay pass as peek.
-            let lines = node_detail::overlay_lines(
-                nd,
-                &self.layout.agents,
-                overlay_dims.1.saturating_sub(chrome::Chrome::FRAME_COLS),
-            );
-            let chrome =
-                chrome::Chrome::new(&nd.node_id, Anchor::Center).footer("enter/a act · esc close");
-            draw_lines_overlay(
-                &mut cells,
-                rows,
-                cols,
-                overlay_origin,
-                overlay_dims,
-                &chrome,
-                &lines,
-                &self.theme,
-                node_detail::selected_line(nd),
-            );
+        } else if self.node_detail.is_some() {
+            // Node detail (Enter on a card): drawn by its own module.
+            self.draw_node_detail(&mut cells, rows, cols, overlay_origin, overlay_dims);
         } else if let Some(nav) = &self.nav {
             // navigator: the filtered flat catalog + query/chip line. Rows
             // recompute per frame from the live layout (no cache), so a push
@@ -10553,9 +10519,8 @@ async fn attach_and_run(
     let (feed_tx, mut feed_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, crate::feed_overlay::FoldResult)>();
 
-    // the node detail fold, the feed leg's exact shape - off the UI loop,
-    // gen-tagged, one fold in flight; a result for a closed/superseded
-    // overlay is discarded.
+    // the node detail fold: the feed leg's shape (off-loop, gen-tagged,
+    // single-flight).
     let (detail_tx, mut detail_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, node_detail::FoldResult)>();
 
@@ -11289,9 +11254,7 @@ async fn attach_and_run(
                 }
             }
             Some((gen, outcome)) = detail_rx.recv() => {
-                // a node-detail fold landed; apply only to the still-open,
-                // same-generation overlay (a result for a closed/superseded
-                // open is discarded, the feed arm's contract, one consumer).
+                // a node-detail fold landed (the feed arm's contract).
                 node_detail::apply_fold(&mut view, gen, outcome);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
@@ -12460,10 +12423,8 @@ async fn handle_stdin(
         return portal_pick_keys(view, &passthrough, sock_w).await;
     }
     if view.node_detail.is_some() {
-        // The node detail overlay (Enter on a card): routed before the
-        // selector, same precedence slot as peek - it sits ON TOP, its keys
-        // (j/k, a/r, Enter, Esc) never leak to the selector underneath, and
-        // Esc drops back one layer.
+        // Node detail (Enter on a card): peek's precedence slot - its keys
+        // never leak to the selector underneath; Esc drops back one layer.
         return node_detail::detail_keys(view, &passthrough, sock_w).await;
     }
     if view.peek.is_some() {
@@ -13259,25 +13220,10 @@ async fn execute_row_menu_action(
             .map_err(|e| format!("backlog verb send failed: {e}"))?;
             return Ok(());
         }
-        // The card menu's Plan entry: the dispatch door pinned to the
-        // architect sub-agent and the blueprint message. The card must
-        // still be in the feed (the server re-checks freshness anyway);
-        // the door's spawn gate answers as always, and its refusal
-        // renders verbatim through the dispatch notice path.
+        // The card menu's Plan entry (the body lives in node_detail).
         (MenuTarget::Card(node), MenuAction::PlanSpawn) => {
-            if !view.layout.backlog.iter().any(|c| c.id == node) {
-                view.set_notice(format!("{node} is no longer in the backlog"));
-                return Ok(());
-            }
-            write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::DispatchPlan {
-                    node,
-                    account: view.active_account.clone(),
-                }),
-            )
-            .await
-            .map_err(|e| format!("plan spawn send failed: {e}"))?;
+            let account = view.active_account.clone();
+            node_detail::plan_spawn_send(view, node, account, sock_w).await?;
             return Ok(());
         }
         // Open a Backlog card's plan. Re-resolved at execute (not carried from
@@ -14796,13 +14742,9 @@ async fn selector_apply_row_action(
     cur: usize,
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<(), String> {
-    // Enter on a backlog card opens the node detail overlay - the card's
-    // menu (float/defer/open plan/plan) stays on `m` and right-click. The
-    // selector stays open underneath, so Esc from the detail drops back
-    // into it.
-    if let Some(DisplayRow::Card(c)) = view.display_rows().get(cur) {
-        let id = c.id.clone();
-        node_detail::open_for(view, id);
+    // Enter on a backlog card opens the node detail overlay; the card's
+    // menu stays on `m` and right-click. The selector stays open underneath.
+    if node_detail::open_from_selector(view, cur) {
         return Ok(());
     }
     // row_action resolves against the CURRENT catalog (AC6-FR) and returns an
@@ -16491,6 +16433,10 @@ mod update_modal_tests;
 #[cfg(test)]
 #[path = "client_tests/node_detail_tests.rs"]
 mod node_detail_tests;
+
+#[cfg(test)]
+#[path = "client_tests/backlog_lane_tests.rs"]
+mod backlog_lane_tests;
 
 #[cfg(test)]
 #[path = "client_tests/feed_view_tests.rs"]

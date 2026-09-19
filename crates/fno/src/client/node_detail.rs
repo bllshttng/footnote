@@ -494,6 +494,79 @@ pub(crate) async fn detail_keys(
     Ok(StdinFlow::Continue)
 }
 
+/// The compose-pass draw (the peek branch's shape): one call from the
+/// client's overlay chain, the geometry and chrome owned here so client.rs
+/// keeps one line, not this pane's body.
+impl View {
+    pub(super) fn draw_node_detail(
+        &self,
+        cells: &mut [Cell],
+        rows: usize,
+        cols: usize,
+        origin: (usize, usize),
+        dims: (usize, usize),
+    ) {
+        let Some(nd) = &self.node_detail else {
+            return;
+        };
+        let lines = overlay_lines(
+            nd,
+            &self.layout.agents,
+            dims.1.saturating_sub(crate::chrome::Chrome::FRAME_COLS),
+        );
+        let chrome = crate::chrome::Chrome::new(&nd.node_id, crate::popup::Anchor::Center)
+            .footer("enter/a act · esc close");
+        super::draw_lines_overlay(
+            cells,
+            rows,
+            cols,
+            origin,
+            dims,
+            &chrome,
+            &lines,
+            &self.theme,
+            selected_line(nd),
+        );
+    }
+}
+
+/// Enter on a backlog card opens the node detail overlay - the card's menu
+/// (float/defer/open plan/plan) stays on `m` and right-click. The selector
+/// stays open underneath, so Esc from the detail drops back into it. True
+/// when the overlay opened.
+pub(crate) fn open_from_selector(view: &mut View, cur: usize) -> bool {
+    let rows = view.display_rows();
+    let id = match rows.get(cur) {
+        Some(DisplayRow::Card(c)) => c.id.clone(),
+        _ => return false,
+    };
+    open_for(view, id);
+    true
+}
+
+/// The card menu's Plan entry: the dispatch door pinned to the architect
+/// sub-agent and the blueprint message. The card must still be in the feed
+/// (the server re-checks freshness anyway); the door's spawn gate answers
+/// as always, and its refusal renders verbatim through the dispatch notice
+/// path.
+pub(crate) async fn plan_spawn_send(
+    view: &mut View,
+    node: String,
+    account: Option<String>,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    if !view.layout.backlog.iter().any(|c| c.id == node) {
+        view.set_notice(format!("{node} is no longer in the backlog"));
+        return Ok(());
+    }
+    write_msg(
+        sock_w,
+        &ClientMsg::Command(Command::DispatchPlan { node, account }),
+    )
+    .await
+    .map_err(|e| format!("plan spawn send failed: {e}"))
+}
+
 fn move_sel(view: &mut View, down: bool) {
     let Some(o) = view.node_detail.as_mut() else {
         return;

@@ -187,6 +187,42 @@ fn launch_timeout() -> Duration {
 }
 
 impl super::Core {
+    /// One targeted card launch - dispatch or plan - the shared gate both
+    /// wire commands run. Readiness re-checks against the server's OWN
+    /// backlog snapshot (codex peer review): the client gates its confirm to
+    /// a ready card, but the server's snapshot is fresher, so a card that
+    /// went blocked/in-flight between publish and click is refused or routed
+    /// here, never started down a path prefix+g would skip. A stale
+    /// DISPATCH routes to the live work (focus/attach); a stale PLAN refuses
+    /// plainly - the routing arms answer "where is the work", and a
+    /// blueprint for worked work is not asked for twice.
+    pub(super) fn dispatch_card(
+        &mut self,
+        client_id: u64,
+        node: String,
+        account: Option<String>,
+        plan: bool,
+    ) -> super::Flow {
+        if super::card_ready_to_dispatch(&self.backlog, &node) {
+            self.dispatch_next(client_id, Some(node), account, plan);
+        } else if plan {
+            self.notice(client_id, "card not ready to dispatch");
+        } else if let Some(route) = self.inflight_route(&node) {
+            // The client's Layout was stale, but the server can route it:
+            // focus/attach instead of refusing (AC2-ERR). The recursion
+            // reuses the FocusPane/AttachAgent gates verbatim (catalog
+            // membership, jobId shape), so this adds no second spawn path.
+            return self.command(client_id, route);
+        } else if let Some(hint) = self.inflight_hint(&node) {
+            // In flight but unroutable: say where the work is, the same
+            // copy a routed v18 card click would show.
+            self.notice(client_id, hint);
+        } else {
+            self.notice(client_id, "card not ready to dispatch");
+        }
+        super::Flow::Continue
+    }
+
     /// "Grab work" (prefix+g): dispatch the next ready backlog node into
     /// a new pane. Board selection is `fno backlog next`; the launch is the door
     /// (`fno agents spawn`), shelled OFF the core loop in a detached

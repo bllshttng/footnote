@@ -11448,51 +11448,10 @@ impl Core {
                 Flow::Continue
             }
             Command::DispatchNode { node, account } => {
-                // Targeted work-queue dispatch (a clicked card). Reuses
-                // the prefix+g flow pinned to the card's node; the claim race
-                // (already-worked node bounces `already dispatching`) and lane
-                // cap live in the door (`fno agents spawn`). Routes through
-                // CoreMsg::Command, so the read-only-observer refusal already
-                // fired upstream.
-                //
-                // Re-check readiness against the server's OWN backlog snapshot
-                // (codex peer review): the client already gates the confirm to a
-                // ready card, but the server's snapshot is fresher, so a card that
-                // went blocked/in-flight between the client's Layout and the click
-                // is refused here - it must not start work prefix+g would never
-                // pick. An unknown or non-ready id fails closed to a notice, like
-                // the other catalog-named commands (and covers an empty id).
-                if card_ready_to_dispatch(&self.backlog, &node) {
-                    self.dispatch_next(client_id, Some(node), account, false);
-                } else if let Some(route) = self.inflight_route(&node) {
-                    // The client's Layout was stale: the card went in-flight
-                    // between publish and click, but the server can route it -
-                    // focus/attach instead of refusing (AC2-ERR). The
-                    // recursion reuses the FocusPane/AttachAgent gates verbatim
-                    // (catalog membership, jobId shape), so this adds no second
-                    // spawn path.
-                    return self.command(client_id, route);
-                } else if let Some(hint) = self.inflight_hint(&node) {
-                    // In flight but unroutable: say where the work is, the
-                    // same copy a routed v18 card click would show.
-                    self.notice(client_id, hint);
-                } else {
-                    self.notice(client_id, "card not ready to dispatch");
-                }
-                Flow::Continue
+                self.dispatch_card(client_id, node, account, false)
             }
             Command::DispatchPlan { node, account } => {
-                // The card menu's Plan entry: the SAME readiness re-check and
-                // in-flight routing as a dispatch, but the spawn pins the
-                // architect sub-agent and the blueprint message. The spawn
-                // gate behind the door still answers - a refusal here is the
-                // product, never a synthesized launch.
-                if card_ready_to_dispatch(&self.backlog, &node) {
-                    self.dispatch_next(client_id, Some(node), account, true);
-                } else {
-                    self.notice(client_id, "card not ready to dispatch");
-                }
-                Flow::Continue
+                self.dispatch_card(client_id, node, account, true)
             }
             Command::NewSquad { name, origin } => {
                 // Explicit named-workspace creation (Unit 2). A blank/whitespace

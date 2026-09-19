@@ -10259,7 +10259,7 @@ fn backlog_layout(cards: Vec<BacklogCard>, total: usize) -> LayoutView {
     layout
 }
 
-fn bcard(id: &str, state: CardState) -> BacklogCard {
+pub(super) fn bcard(id: &str, state: CardState) -> BacklogCard {
     BacklogCard {
         id: id.into(),
         slug: format!("{id}-slug"),
@@ -10500,79 +10500,6 @@ fn float_hint_only_on_ready_cards() {
     };
     assert_eq!(hint_of(CardState::Ready), "may dispatch");
     assert_eq!(hint_of(CardState::Blocked), "");
-}
-
-#[test]
-fn card_menu_open_plan_follows_ld7_grey_versus_absent() {
-    let mut card = bcard("x-a", CardState::Ready);
-    let off = crate::digest_overlay::ObsidianCfg::default();
-    let on = crate::digest_overlay::ObsidianCfg {
-        enabled: true,
-        // Absolute, so resolution never depends on the test host's HOME.
-        vault: Some("/tmp/vault".into()),
-    };
-
-    // Obsidian disabled: the item cannot apply no matter what the operator
-    // does in this menu, so LD7 says absent, never greyed. Rows: Header,
-    // Rule, Float, Defer, Plan.
-    card.plan_path = Some("/tmp/vault/plans/x-a.md".into());
-    let m = build_card_menu(&card, &off, Anchor::Center);
-    assert_eq!(
-        m.popup.rows.len(),
-        5,
-        "no open-plan row when obsidian is off"
-    );
-    assert_eq!(
-        m.actions.len(),
-        3,
-        "no OpenPlan action when obsidian is off"
-    );
-
-    // No plan_path: state can change (a plan can be added later), so LD7
-    // says greyed with the reason, not absent.
-    card.plan_path = None;
-    let m = build_card_menu(&card, &on, Anchor::Center);
-    match &m.popup.rows[5] {
-        PopupRow::Entry {
-            label,
-            hint,
-            enabled,
-            ..
-        } => {
-            assert_eq!(label, "Open plan");
-            assert_eq!(hint, "no plan");
-            assert!(!enabled);
-        }
-        other => panic!("expected the open-plan entry, got {other:?}"),
-    }
-    assert_eq!(
-        m.actions.len(),
-        3,
-        "a disabled entry contributes no action slot"
-    );
-
-    // Plan present and obsidian on: enabled, and the fourth action lines up
-    // with the fourth selectable target (after the Plan entry).
-    card.plan_path = Some("/tmp/vault/plans/x-a.md".into());
-    let m = build_card_menu(&card, &on, Anchor::Center);
-    match &m.popup.rows[5] {
-        PopupRow::Entry { label, enabled, .. } => {
-            assert_eq!(label, "Open plan");
-            assert!(enabled);
-        }
-        other => panic!("expected the open-plan entry, got {other:?}"),
-    }
-    assert_eq!(m.actions.len(), 4);
-    assert_eq!(m.actions[3], MenuAction::OpenPlan);
-    // The Plan entry rides between Defer and Open plan, action-aligned.
-    match &m.popup.rows[4] {
-        PopupRow::Entry { label, enabled, .. } => {
-            assert_eq!(label, "Plan");
-            assert!(enabled);
-        }
-        other => panic!("expected the plan entry, got {other:?}"),
-    }
-    assert_eq!(m.actions[2], MenuAction::PlanSpawn);
 }
 
 #[test]
@@ -18121,65 +18048,3 @@ mod confirm_tests;
 
 #[path = "client_tests/lineage_paint_tests.rs"]
 mod lineage_paint_tests;
-
-#[test]
-fn card_label_leads_with_the_id() {
-    // AC1: the id is the handle every verb takes, so it leads and the slug
-    // follows; an empty slug renders the id alone.
-    let mk = |id: &str, slug: &str| -> String {
-        card_label(&BacklogCard {
-            id: id.into(),
-            slug: slug.into(),
-            priority: "p1".into(),
-            state: CardState::Ready,
-            pane_id: None,
-            attach_id: None,
-            where_hint: None,
-            project: None,
-            lane: None,
-            plan_path: None,
-            head: false,
-        })
-    };
-    assert_eq!(
-        mk("x-85a0", "agent-native-backlog-view"),
-        "x-85a0 agent-native-backlog-view"
-    );
-    assert_eq!(mk("x-2", ""), "x-2");
-}
-
-#[test]
-fn the_backlog_header_states_its_scope() {
-    // AC2: the scope reason rides under the header as the section's subline.
-    let mut view = two_pane_view();
-    view.layout.backlog = vec![BacklogCard {
-        id: "x-1".into(),
-        slug: "feat".into(),
-        priority: "p1".into(),
-        state: CardState::Ready,
-        pane_id: None,
-        attach_id: None,
-        where_hint: None,
-        project: None,
-        lane: None,
-        plan_path: None,
-        head: false,
-    }];
-    view.expand_pull_sections();
-    let rows = view.display_rows();
-    let hdr = rows
-        .iter()
-        .position(|r| matches!(r, DisplayRow::Header { label, .. } if label.contains("backlog")))
-        .expect("the backlog header paints");
-    match rows.get(hdr + 1) {
-        Some(DisplayRow::Sub(s)) => assert!(
-            s.starts_with("scope: "),
-            "the subline names the scope, got: {s}"
-        ),
-        other => panic!(
-            "the scope subline is not the row under the backlog header at {} (got {:?})",
-            hdr + 1,
-            other.is_some()
-        ),
-    }
-}

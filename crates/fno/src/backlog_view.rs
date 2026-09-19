@@ -362,6 +362,18 @@ pub fn board_scope_reason() -> String {
     board_scope_from_spawn_env().1
 }
 
+/// The one card label: `<id> <slug>`, id FIRST - the id is the handle every
+/// verb takes, so it leads and the slug reads after it. An empty slug renders
+/// the id alone. Every client paint site folds through this so the rows
+/// cannot drift apart.
+pub fn card_label(c: &crate::proto::BacklogCard) -> String {
+    if c.slug.is_empty() {
+        c.id.clone()
+    } else {
+        format!("{} {}", c.id, c.slug)
+    }
+}
+
 /// Resolve the board scope once, at CLIENT spawn time (and for `mux doctor`).
 ///
 /// Ladder, first hit wins:
