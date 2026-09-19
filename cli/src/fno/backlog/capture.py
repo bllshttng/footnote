@@ -1318,27 +1318,20 @@ def _count_session_events(
     """Count events whose type is in ``event_types`` for ``session_id``.
 
     Takes a tuple so readers can dual-accept the ``capture_*`` vocabulary and
-    the legacy ``inbox_*`` one (events.jsonl is append-only history; rows
+    the legacy ``inbox_*`` one (the store is append-only history; rows
     written by a pre-rename binary keep their old type forever).
     """
-    events_path = Path(events_path)
-    if not events_path.exists():
+    from fno.events.store_client import query_rows
+
+    try:
+        rows = query_rows(Path(events_path), types=list(event_types))
+    except Exception:
         return 0
-    n = 0
-    # Iterate line-by-line rather than read_text().splitlines() so the whole
-    # events log is never held in memory (it grows unbounded over a project's life).
-    with events_path.open(encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                evt = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if evt.get("type") in event_types and (evt.get("data") or {}).get("session_id") == session_id:
-                n += 1
-    return n
+    return sum(
+        1
+        for row in rows
+        if (row.get("data") or {}).get("session_id") == session_id
+    )
 
 
 def count_capture_adds(session_id: str, events_path: Path) -> int:
