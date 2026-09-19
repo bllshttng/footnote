@@ -7058,27 +7058,15 @@ fn append_loop_event(path: &Path, event_type: &str, data: serde_json::Value) {
         eprintln!("loop-check: failed to serialize event {event_type}");
         return;
     };
-    let mut retried_after_timeout = false;
-    loop {
-        match crate::claims::append_event_line(path, &event, std::time::Duration::from_secs(2)) {
-            Ok(()) => return,
-            Err(error)
-                if error.contains("events.jsonl lock timeout")
-                    && crate::claims::event_maintenance_active(path) =>
-            {
-                crate::claims::wait_for_event_maintenance(path);
-            }
-            Err(error) if error.contains("events.jsonl lock timeout") && !retried_after_timeout => {
-                retried_after_timeout = true;
-            }
-            Err(error) => {
-                eprintln!(
-                    "loop-check: failed to write event {event_type} to {}: {error}",
-                    path.display()
-                );
-                return;
-            }
-        }
+    // One store commit is the acknowledgement: the journal lock-timeout and
+    // maintenance retry legs retired with the mutex they served.
+    if let Err(error) =
+        crate::claims::append_event_line(path, &event, std::time::Duration::from_secs(2))
+    {
+        eprintln!(
+            "loop-check: failed to write event {event_type} to {}: {error}",
+            path.display()
+        );
     }
 }
 

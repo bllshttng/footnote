@@ -1640,7 +1640,7 @@ fn flush_buffered_inside_leg_drains_onto_row_under_seq_gate() {
     // event. A newer report that raced onto the row's store path first is NOT
     // regressed (codex P2: highest-seq-wins survives the flush).
     let home = tmp_home("inside-leg-flush");
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let report = |seq| state::InsideLegReport {
         state: state::InsideLegState::Working,
         seq,
@@ -2811,30 +2811,6 @@ pub(super) fn test_ctx(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
     Ctx {
         emitter: EventEmitter::new(events_path, "daemon"),
         home,
-        opts: DaemonOptions {
-            idle_exit: Duration::from_secs(1800),
-            worker_bin,
-            reconcile_on_start: true,
-            agents_config_cwd: PathBuf::from("/dev/null"),
-            // Off in tests: a unit test must never spawn a real `fno inbox notify`.
-            notify_on_blocked: false,
-            notify_on_done: false,
-        },
-        started_at: std::time::Instant::now(),
-        exe_fingerprint: crate::drift::ExeFingerprint::current(),
-        pid_start_time: process_start_time(std::process::id()),
-        pending_inside_leg: std::sync::Mutex::new(std::collections::HashMap::new()),
-        codex_threads: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-    }
-}
-
-/// Like `test_ctx` but wires the emitter to `home.events_jsonl()` so
-/// that tests checking emitted events can read them back with `read_events`.
-fn test_ctx_with_events(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
-    let events_path = home.events_jsonl();
-    Ctx {
-        home,
-        emitter: EventEmitter::new(events_path, "daemon"),
         opts: DaemonOptions {
             idle_exit: Duration::from_secs(1800),
             worker_bin,
@@ -4231,7 +4207,7 @@ async fn switchboard_drives_b_and_mirrors_into_a() {
     seed_stream_row(&home, "B", "swB");
     let _a = start_stream_worker(&home, "swA", FAKE_STREAM_EMITTER).await;
     let _b = start_stream_worker(&home, "swB", FAKE_STREAM_EMITTER).await;
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent-worker"));
 
     let req = Request::new(
         1,
@@ -4404,7 +4380,7 @@ done
         restamp_done.display()
     );
     let _b = start_stream_worker(&home, "swB", &script).await;
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent-worker"));
 
     let registry_path = home.registry_json();
     let restamp_signal = turn_started.clone();
@@ -4754,7 +4730,7 @@ async fn handle_ask_resolves_a_full_session_id_to_the_named_row() {
 fn handle_report_stores_on_matching_row() {
     let home = tmp_home("report-store");
     seed_stream_row(&home, "worker-A", "repA"); // claude_session_uuid = uuid-repA
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let req = Request::new(
         1,
         "agent.report",
@@ -4796,7 +4772,7 @@ fn handle_report_marks_a_matching_model_as_verified() {
         r.entries[0].model_basis = Some("requested".into());
     })
     .unwrap();
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let resp = handle_report(
         &ctx,
         &Request::new(
@@ -4836,7 +4812,7 @@ fn handle_report_capability_flip_clears_screen_state() {
         });
     })
     .unwrap();
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let resp = handle_report(
         &ctx,
         &Request::new(
@@ -4875,7 +4851,7 @@ fn handle_report_blocked_stores_reason_and_clears_screen_state() {
         });
     })
     .unwrap();
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let resp = handle_report(
         &ctx,
         &Request::new(
@@ -4907,7 +4883,7 @@ fn handle_report_blocked_stores_reason_and_clears_screen_state() {
 fn handle_report_drops_stale_seq() {
     let home = tmp_home("report-stale");
     seed_stream_row(&home, "worker-A", "repB");
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     // seq=2 stored, then a reordered seq=1 arrives.
     let _ = handle_report(
         &ctx,
@@ -4948,7 +4924,7 @@ fn handle_report_drops_stale_seq() {
 #[test]
 fn handle_report_buffers_early_push_for_unknown_session() {
     let home = tmp_home("report-unknown");
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let resp = handle_report(
         &ctx,
         &Request::new(

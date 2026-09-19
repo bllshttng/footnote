@@ -2879,11 +2879,6 @@ fn resume_through_run_inside_a_runtime_refuses_16_without_panicking() {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    // The crate-wide env lock: this swap races every lock-free reader of
-    // these vars (a gc test resolving CODEX_HOME read the stub here).
-    let _env = crate::claims::test_env_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let _restore = ResumeEnvGuard {
         home: std::env::var_os("FNO_AGENTS_HOME"),
         codex_home: std::env::var_os("CODEX_HOME"),
