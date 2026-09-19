@@ -52,37 +52,144 @@ fn env_or(key: &str, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
-/// pi's session store root, `PI_HOME`-relative when that is set.
-pub fn pi_sessions_root() -> PathBuf {
-    let home = std::env::var("PI_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("{}/.pi", std::env::var("HOME").unwrap_or_default()));
-    PathBuf::from(home).join("agent").join("sessions")
+/// pi's agent dir: `PI_CODING_AGENT_DIR` when set, a leading `~` expanded,
+/// else `$HOME/.pi/agent`. That env var is the one pi itself reads; the
+/// `PI_HOME` this module's readers honored before is read by no pi code at
+/// all, so a relocated install read the wrong tree on every store question.
+pub fn pi_agent_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("PI_CODING_AGENT_DIR") {
+        let dir = dir.trim();
+        if !dir.is_empty() {
+            if let Some(rest) = dir.strip_prefix("~/") {
+                return PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(rest);
+            }
+            return PathBuf::from(dir);
+        }
+    }
+    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        .join(".pi")
+        .join("agent")
 }
 
-/// pi's on-disk encoding of a working directory: every path separator becomes a
-/// single `-`, and the result is fenced with `--` at both ends.
+/// How a session store lays sessions out. pi's default store scopes one
+/// directory per cwd; a set session dir (`--session-dir`,
+/// `PI_CODING_AGENT_SESSION_DIR`, settings `sessionDir`) is FLAT: pi uses it
+/// as-is and never appends the cwd segment, so matching a session to a cwd
+/// means reading each candidate file's header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreLayout {
+    /// `<root>/--<cwd>--/<ts>_<id>.jsonl`, pi's default layout.
+    CwdScoped,
+    /// `<root>/<ts>_<id>.jsonl`, each file's header carrying its cwd.
+    Flat,
+}
+
+/// pi's session store as THIS fno process resolves it: where it lives, how it
+/// lays sessions out, and which input decided that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiStore {
+    pub root: PathBuf,
+    pub layout: StoreLayout,
+    pub source: &'static str,
+}
+
+impl PiStore {
+    /// A CwdScoped store at `root`: the scratch shape a test injects.
+    pub fn cwd_scoped(root: PathBuf) -> PiStore {
+        PiStore {
+            root,
+            layout: StoreLayout::CwdScoped,
+            source: "test",
+        }
+    }
+}
+
+/// Resolve pi's session store the way pi itself does, for one `cwd`:
 ///
-/// Derived from live directories rather than from pi's source:
+/// 1. `PI_CODING_AGENT_SESSION_DIR` (flat, source `env`).
+/// 2. `<cwd>/.pi/settings.json` naming `sessionDir`: an `Err`, because pi
+///    honors a project setting only after its own project-trust decision,
+///    which fno cannot read. Reporting a store here could read a store pi
+///    is not using.
+/// 3. `<agent dir>/settings.json` naming `sessionDir` (flat, source
+///    `settings`; a relative value joins to `cwd`).
+/// 4. `<agent dir>/sessions` (cwd-scoped, source `default`).
+///
+/// An unparseable settings file is an `Err` naming the file and the serde
+/// position: reading past a damaged input could answer from a store pi is
+/// not using.
+pub fn pi_store(cwd: &Path) -> Result<PiStore, String> {
+    if let Ok(dir) = std::env::var("PI_CODING_AGENT_SESSION_DIR") {
+        if !dir.trim().is_empty() {
+            return Ok(PiStore {
+                root: PathBuf::from(dir),
+                layout: StoreLayout::Flat,
+                source: "env",
+            });
+        }
+    }
+    let project = cwd.join(".pi").join("settings.json");
+    if let Some(value) = read_session_dir_setting(&project)? {
+        return Err(format!(
+            "{} names sessionDir {value:?}; pi decides this through project trust; fno cannot read that decision",
+            project.display()
+        ));
+    }
+    let global = pi_agent_dir().join("settings.json");
+    if let Some(value) = read_session_dir_setting(&global)? {
+        let path = PathBuf::from(&value);
+        let root = if path.is_relative() {
+            cwd.join(path)
+        } else {
+            path
+        };
+        return Ok(PiStore {
+            root,
+            layout: StoreLayout::Flat,
+            source: "settings",
+        });
+    }
+    Ok(PiStore {
+        root: pi_agent_dir().join("sessions"),
+        layout: StoreLayout::CwdScoped,
+        source: "default",
+    })
+}
+
+/// `sessionDir` from a settings file: `Ok(None)` when the file is absent or
+/// names none, an `Err` when it exists but does not parse.
+fn read_session_dir_setting(path: &Path) -> Result<Option<String>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{} is unreadable: {e}", path.display())),
+    };
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("{} is not valid JSON: {e}", path.display()))?;
+    Ok(value
+        .get("sessionDir")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string()))
+}
+
+/// pi's on-disk encoding of a working directory: every path separator and the
+/// colon become a single `-`, and the result is fenced with `--` at both ends.
+///
+/// Derived from live directories and pi's own encoder:
 ///
 /// ```text
 /// /Users/bb16/code/footnote/footnote  -> --Users-bb16-code-footnote-footnote--
 /// /private/tmp                        -> --private-tmp--
+/// /a/b:c                              -> --a-b-c--
 /// ```
 ///
 /// A third observed directory, a probe run under a dot-prefixed component,
 /// showed that a DOT inside a component survives unchanged: only the
-/// separators are rewritten.
+/// separators and the colon are rewritten.
 pub fn encode_cwd(cwd: &Path) -> String {
     let raw = cwd.to_string_lossy();
-    let body = raw.trim_start_matches('/').replace('/', "-");
+    let body = raw.trim_start_matches('/').replace(['/', '\\', ':'], "-");
     format!("--{body}--")
-}
-
-/// The cwd-scoped directory pi keeps `cwd`'s sessions in.
-pub fn session_dir(cwd: &Path) -> PathBuf {
-    pi_sessions_root().join(encode_cwd(cwd))
 }
 
 /// What a lookup of one `(cwd, session_id)` pair found on disk.
@@ -125,7 +232,26 @@ pub enum SessionLookup {
 /// the "fuller" file discards the one that errored, which is usually the one a
 /// human needs to read.
 pub fn lookup_sessions(cwd: &Path, session_id: &str) -> SessionLookup {
-    lookup_sessions_under(&pi_sessions_root(), cwd, session_id)
+    let store = match pi_store(cwd) {
+        Ok(store) => store,
+        Err(reason) => {
+            return SessionLookup::Unknown {
+                dir: pi_agent_dir().join("sessions"),
+                reason,
+            }
+        }
+    };
+    lookup_sessions_in(&store, cwd, session_id)
+}
+
+/// [`lookup_sessions`] against an explicitly resolved [`PiStore`], so a caller
+/// that already holds the resolved store (keeper mail confirm, tests) reads
+/// with the same matching rules rather than resolving twice.
+pub fn lookup_sessions_in(store: &PiStore, cwd: &Path, session_id: &str) -> SessionLookup {
+    match store.layout {
+        StoreLayout::CwdScoped => lookup_sessions_under(&store.root, cwd, session_id),
+        StoreLayout::Flat => flat_lookup(&store.root, cwd, session_id),
+    }
 }
 
 /// [`lookup_sessions`] against an explicit sessions root, so a caller that
@@ -160,6 +286,80 @@ pub fn lookup_sessions_under(root: &Path, cwd: &Path, session_id: &str) -> Sessi
         },
         _ => SessionLookup::Duplicate { files },
     }
+}
+
+/// The cap on how much of a flat-store file a header read may take. The
+/// header is the file's first record; anything past one line is session body.
+const HEADER_READ_CAP: u64 = 64 * 1024;
+
+/// A flat store holds every cwd's sessions side by side, so a file matches
+/// only when its HEADER's `cwd` equals the asked cwd. Only each candidate's
+/// first line is read (64 KiB cap). A header that cannot be read or parsed is
+/// `Unknown` naming the file: we cannot prove the parseable siblings are the
+/// only matches, and a wrong `one` would green-light a resume onto a session
+/// that is not the one asked about.
+fn flat_lookup(root: &Path, cwd: &Path, session_id: &str) -> SessionLookup {
+    let suffix = format!("_{session_id}.jsonl");
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return SessionLookup::Unknown {
+                dir: root.to_path_buf(),
+                reason: error.to_string(),
+            }
+        }
+    };
+    let mut candidates: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(&suffix))
+        })
+        .collect();
+    candidates.sort();
+    let asked = cwd.to_string_lossy();
+    let mut matched: Vec<PathBuf> = Vec::new();
+    for path in candidates {
+        let header = match read_first_line(&path, HEADER_READ_CAP) {
+            Ok(header) => header,
+            Err(error) => {
+                return SessionLookup::Unknown {
+                    dir: root.to_path_buf(),
+                    reason: format!("cannot read session header in {}: {error}", path.display()),
+                }
+            }
+        };
+        let parsed: serde_json::Value = match serde_json::from_str(&header) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return SessionLookup::Unknown {
+                    dir: root.to_path_buf(),
+                    reason: format!("unparseable session header in {}: {error}", path.display()),
+                }
+            }
+        };
+        if parsed.get("cwd").and_then(|c| c.as_str()) == Some(asked.as_ref()) {
+            matched.push(path);
+        }
+    }
+    match matched.len() {
+        0 => SessionLookup::None,
+        1 => SessionLookup::One {
+            file: matched.remove(0),
+        },
+        _ => SessionLookup::Duplicate { files: matched },
+    }
+}
+
+/// The first line of a file, reading at most `cap` bytes.
+fn read_first_line(path: &Path, cap: u64) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path)?.take(cap).read_to_end(&mut buf)?;
+    let end = buf.iter().position(|&b| b == b'\n').unwrap_or(buf.len());
+    Ok(String::from_utf8_lossy(&buf[..end]).into_owned())
 }
 
 /// The refusal a resume owes an ambiguous id, or `None` when there is nothing
@@ -299,6 +499,9 @@ mod tests {
             encode_cwd(Path::new("/home/u/.local/tmp/piprobe")),
             "--home-u-.local-tmp-piprobe--"
         );
+        // The colon rewrites like a separator: pi's own encoder rewrites it,
+        // so a cwd carrying one must not encode differently here.
+        assert_eq!(encode_cwd(Path::new("/a/b:c")), "--a-b-c--");
     }
 
     #[test]
@@ -316,7 +519,7 @@ mod tests {
     fn an_unreadable_directory_reads_unknown_and_not_none() {
         let tmp = std::env::temp_dir().join(format!("pi-lookup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::set_var("PI_HOME", tmp.join("nonexistent-pi-home"));
+        std::env::set_var("PI_CODING_AGENT_DIR", tmp.join("nonexistent-agent-dir"));
         let lookup = lookup_sessions(Path::new("/repo"), "s-1");
         assert!(
             matches!(lookup, SessionLookup::Unknown { .. }),
@@ -326,7 +529,7 @@ mod tests {
             duplicate_resume_refusal(Path::new("/repo"), "s-1", &lookup),
             None
         );
-        std::env::remove_var("PI_HOME");
+        std::env::remove_var("PI_CODING_AGENT_DIR");
     }
 
     /// The refusal names EVERY session with its timestamp and selects none.
