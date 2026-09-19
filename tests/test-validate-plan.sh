@@ -307,9 +307,11 @@ cat > "$PLAN_SEMANTIC" <<'HEREDOC'
 status: ready
 created: 2026-07-25
 project: fno
+node: x-a11b003
 consolidation:
   outcome: proceed_alone
   proceed_alone_against: []
+  decisions_acknowledged: []
 surface:
   question: "Does the semantic execution contract validate?"
   sweep: "bash tests/test-validate-plan.sh"
@@ -342,7 +344,24 @@ tasks:
     acceptance: [AC7]
 ```
 HEREDOC
-OUTPUT=$(bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1)
+# A keyed plan activates the stage-law gate, so AC7a runs it against a stub
+# that lists zero laws; the fixture must keep producing zero warnings.
+SEMLAWBIN="$TMPDIR_BASE/semlawbin"
+mkdir -p "$SEMLAWBIN"
+cat > "$SEMLAWBIN/fno-agents" <<'STUB'
+#!/bin/bash
+if [[ "${1:-}" == "law-match" ]]; then
+    printf '%s' '{"ok":true,"stage":"blueprint","hook_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"## Law governing blueprint\n\nThese live operator rulings govern the blueprint you are starting.\n"}}}'
+    exit 0
+fi
+if [[ "${1:-}" == "surface-check" ]]; then
+    # A clean surface receipt: zero findings, nothing on stdout.
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$SEMLAWBIN/fno-agents"
+OUTPUT=$(FNO_AGENTS_BIN="$SEMLAWBIN/fno-agents" bash "$VALIDATE" "$PLAN_SEMANTIC" 2>&1)
 if ! grep -q "WARN:" <<< "$OUTPUT"; then
     pass "AC7a: Semantic plan needs no task/wave/critical-path headings"
 else
@@ -1149,6 +1168,76 @@ if ! grep -q "d-a11b0002" <<< "$OUTPUT"; then
     pass "AC11k: acknowledged stage law prints nothing"
 else
     fail "AC11k: expected no d-a11b0002 finding: $OUTPUT"
+fi
+
+# AC12: Plan Node Binding. A filename-encoded node id with no node:/claims:
+# key in the frontmatter binds to nothing and mutes both id-keyed gates, and
+# every gate skip must say NOT CHECKED instead of reading green.
+PLAN_BIND_A="$TMPDIR_BASE/20990101-binding-a-x-dcc5.md"
+cat > "$PLAN_BIND_A" <<'EOF'
+---
+project: fno
+status: ready
+kind: quick-plan
+created: 2099-01-01
+difficulty: low
+join: manual
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
+kill_criteria:
+  - name: iteration_ceiling
+    predicate: iteration > 15
+    reason: "too many"
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `crates/fno-agents/src/mail.rs` | Modify |
+EOF
+OUTPUT=$(bash "$VALIDATE" "$PLAN_BIND_A" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "the filename names x-dcc5 but no node:/claims: key does" <<< "$OUTPUT"; then
+    pass "AC12a: filename id with no frontmatter key errors naming the id"
+else
+    fail "AC12a: expected the binding ERROR: $OUTPUT"
+fi
+
+# AC12b: the same plan carrying the key is clean of binding findings and of
+# the two NOT CHECKED warnings.
+PLAN_BIND_B="$TMPDIR_BASE/20990101-binding-b-x-dcc5.md"
+sed 's/^join: manual$/join: manual\nnode: x-dcc5\ndecisions_acknowledged: []/' "$PLAN_BIND_A" > "$PLAN_BIND_B"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_BIND_B" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if ! grep -q "filename names x-dcc5" <<< "$OUTPUT" \
+    && ! grep -q "no node:/claims: id in frontmatter" <<< "$OUTPUT"; then
+    pass "AC12b: keyed plan prints no binding error and no NOT CHECKED warning"
+else
+    fail "AC12b: expected a clean binding section: $OUTPUT"
+fi
+
+# AC12c: an id-less filename with no key stays legal but warns NOT CHECKED
+# from both id-keyed gates.
+PLAN_BIND_C="$TMPDIR_BASE/20990101-binding-c.md"
+sed 's/binding-a-x-dcc5\.md/binding-c.md/' "$PLAN_BIND_A" > "$PLAN_BIND_C"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_BIND_C" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "decisions_acknowledged check NOT CHECKED" <<< "$OUTPUT" \
+    && grep -q "stage-law check NOT CHECKED" <<< "$OUTPUT" \
+    && ! grep -q "filename names" <<< "$OUTPUT"; then
+    pass "AC12c: key-less id-less plan warns NOT CHECKED from both gates"
+else
+    fail "AC12c: expected both NOT CHECKED warnings and no binding finding: $OUTPUT"
+fi
+
+# AC12d: a pre-gate plan warns with its created date instead of erroring.
+PLAN_BIND_D="$TMPDIR_BASE/20990101-binding-d-x-dcc5.md"
+sed 's/binding-a-x-dcc5\.md/binding-d-x-dcc5.md/; s/^created: 2099-01-01$/created: 2020-01-01/' "$PLAN_BIND_A" > "$PLAN_BIND_D"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_BIND_D" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "the filename names x-dcc5 but no node:/claims: key does (created 2020-01-01, before the" <<< "$OUTPUT" \
+    && ! grep -q "ERROR.*filename names" <<< "$OUTPUT"; then
+    pass "AC12d: pre-gate plan warns with its created date"
+else
+    fail "AC12d: expected the pre-gate WARN: $OUTPUT"
 fi
 
 # --- Summary ---

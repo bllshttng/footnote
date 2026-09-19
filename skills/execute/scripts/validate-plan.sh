@@ -159,6 +159,20 @@ _plan_node_id() {
     printf '%s' "$line"
 }
 
+# The node id encoded by the plan's own filename, by the same trailing
+# -<prefix>-<hex>.md rule cli/src/fno/paths.py plan_filename_node_id applies.
+# A name that only mentions an id mid-slug is not a filename-encoded id.
+_plan_filename_node_id() {
+    local base
+    base=$(basename "$1")
+    printf '%s' "$base" | awk '
+        match($0, /-[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}\.md$/) {
+            print substr($0, RSTART + 1, RLENGTH - 4)
+            exit
+        }
+    '
+}
+
 # The decision ids the plan's frontmatter acknowledges, one per line. The
 # stage-law check reads the same set the node-decision rows check against.
 _acknowledged_ids() {
@@ -912,6 +926,13 @@ check_consolidation_file() {
     # `ConsolidationBlock` model already pins can only ever diverge from it,
     # so there is now one implementation and bash keeps only what is policy.
     local _src="" python_bin="" source_root="" delegate_out="" delegate_rc=0
+    # The plan names no node id, so the decisions rows below have no subject
+    # and cannot run. Say NOT CHECKED here, in bash, where the absence is
+    # readable - the delegate's W channel is fail-closed, for a damaged
+    # index, not for a plan that names no node.
+    if [[ -z "$(_plan_node_id "$file")" ]]; then
+        warn "$label: decisions_acknowledged check NOT CHECKED (no node:/claims: id in frontmatter) - not a pass"
+    fi
     _src="$(_fno_source_python)"
     if [[ -n "$_src" ]]; then
         python_bin="${_src%%|*}"
@@ -1249,7 +1270,9 @@ PYEOF
     local stage_law_gate_date="2026-09-16"
     local stage_node
     stage_node=$(_plan_node_id "$file")
-    if [[ "$stage_node" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
+    if [[ -z "$stage_node" ]]; then
+        warn "$label: stage-law check NOT CHECKED (no node:/claims: id in frontmatter) - not a pass"
+    elif [[ "$stage_node" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
         local stage_bin
         stage_bin=$(resolve_agents_bin)
         if [[ -z "$stage_bin" ]]; then
@@ -1323,6 +1346,47 @@ elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
     # Folder plans carry the frontmatter in 00-INDEX.md; the gate's "every
     # plan" scope includes them, so do not silently skip the check.
     check_consolidation_file "$PLAN_DIR/00-INDEX.md" "$(basename "$PLAN_DIR")/00-INDEX.md"
+fi
+
+# -------------------------------------------------------------------
+# Plan Node Binding: a filename-encoded id with no frontmatter key
+# -------------------------------------------------------------------
+# The node-seeded save rule and rename-plan-to-node-id.sh both write a
+# trailing -<node-id>.md into the plan's name. A file carrying one but naming
+# no node:/claims: key in its frontmatter was written FOR that node and binds
+# to nothing: plan_path stays unset, the node stays idea, and both id-keyed
+# gates above skip it. The name makes the intent testable, so test it.
+
+check_node_binding_file() {
+    local file="$1" label="$2"
+    # The day this check's PR opens. Plans created before it could not have
+    # read the rule, so they warn; same-day and later plans must key.
+    local binding_gate_date="2026-09-19"
+    local fm_node fn_node created
+    fm_node=$(_plan_node_id "$file")
+    fn_node=$(_plan_filename_node_id "$file")
+    if [[ -z "$fm_node" && -n "$fn_node" ]]; then
+        created=$(_plan_created_date "$file")
+        if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            created=$(_plan_name_date "$file")
+        fi
+        if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            error "$label: the filename names $fn_node but no node:/claims: key does, and no readable date tells this plan from a pre-gate one - add node: $fn_node to the frontmatter"
+        elif [[ "$created" < "$binding_gate_date" ]]; then
+            warn "$label: the filename names $fn_node but no node:/claims: key does (created $created, before the $binding_gate_date gate) - backfill one before the next blueprint of this node"
+        else
+            error "$label: the filename names $fn_node but no node:/claims: key does - the plan binds to nothing and the node-id gates skip it. Add node: $fn_node to the frontmatter"
+        fi
+    else
+        ok "plan node binding: frontmatter id ${fm_node:-<none>}, filename id ${fn_node:-<none>}"
+    fi
+}
+
+echo ""
+echo "--- Plan Node Binding ---"
+
+if [[ -f "$PLAN_DIR" ]]; then
+    check_node_binding_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"
 fi
 
 # -------------------------------------------------------------------

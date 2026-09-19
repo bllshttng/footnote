@@ -37,6 +37,7 @@ check_contains "T1: renamed line names the node-bearing path" "renamed $NEW1" "$
 check_file "$NEW1" "T1: node-bearing file exists"
 check_nofile "$P1" "T1: id-less original is gone"
 check_contains "T1: plan_path repoint issued" "backlog update x-8af8 --plan-path $NEW1" "$(cat "$SBX1/fno-log")"
+check_contains "T1: frontmatter keyed with the minted id" "node: x-8af8" "$(cat "$NEW1")"
 
 # --- Test 2: idempotent - a plan already ending -<node>.md is a no-op ---
 SBX2="$(make_sbx)"
@@ -68,6 +69,24 @@ check_contains "T4: existing target untouched" "existing" "$(cat "$CLASH")"
 # --- Test 5: missing file / args -> non-fatal skip ---
 OUT5="$(bash "$SCRIPT" "" "" 2>&1)"; check_contains "T5: missing args skip" "skipped reason=missing-args" "$OUT5"
 OUT5B="$(bash "$SCRIPT" "/no/such/plan.md" "x-8af8" 2>&1)"; check_contains "T5b: missing file skip" "skipped reason=plan-not-found" "$OUT5B"
+
+# --- Test 6: a keyed plan gains no duplicate key ---
+SBX6="$(make_sbx)"
+P6="$SBX6/plans/2026-07-11-keyed.md"
+printf '%s\n' "---" "claims: x-8af8" "status: ready" "---" "# body" > "$P6"
+OUT6="$(run "$SBX6" "$P6" "x-8af8")"
+NEW6="$SBX6/plans/2026-07-11-keyed-x-8af8.md"
+check_contains "T6: rename succeeded" "renamed $NEW6" "$OUT6"
+NEW6_LINES=$(grep -cE '^(node|claims):' "$NEW6")
+[ "$NEW6_LINES" -eq 1 ] && ok "T6: no duplicate id key written" || bad "T6: expected one id key, found $NEW6_LINES"
+
+# --- Test 7: a body-only file with no frontmatter still renames, unkeyed ---
+SBX7="$(make_sbx)"
+P7="$SBX7/plans/2026-07-11-bare.md"
+printf '# body only\n' > "$P7"
+OUT7="$(run "$SBX7" "$P7" "x-8af8")"
+check_contains "T7: bare plan renamed" "renamed $SBX7/plans/2026-07-11-bare-x-8af8.md" "$OUT7"
+grep -q '^node:' "$SBX7/plans/2026-07-11-bare-x-8af8.md" && bad "T7: key invented without frontmatter" || ok "T7: no key invented without frontmatter"
 
 echo ""
 echo "Results: $pass passed, $fail failed"
