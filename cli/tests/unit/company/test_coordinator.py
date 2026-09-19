@@ -111,8 +111,11 @@ def test_ac1_commit_creates_no_file_outside_graph_and_kanban(tmp_path: Path) -> 
     commit(proposal, graph_path=graph, project="fno", now=NOW)
     created = {p.name for p in tmp_path.iterdir()}
     # graph.db plus its Kanban/html projections (the render may also create a
-    # spaces/ sibling dir); a backup/lock may also exist.
+    # spaces/ sibling dir); a backup/lock may also exist. The conftest
+    # sandbox owns the .fno state dir and is platform, not commit output.
     assert "graph.db" in created
+    created.discard(".fno")
+    created.discard(".fno-home")  # the conftest HOME-pin sandbox
     assert all(
         name.startswith("graph")
         or name == "spaces"

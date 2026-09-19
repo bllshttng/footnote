@@ -63,7 +63,7 @@ def test_default_node_resolver_tolerates_graph_read_failure(monkeypatch):
     def _boom():
         raise RuntimeError("corrupt graph")
 
-    monkeypatch.setattr(store, "read_graph", _boom)
+    monkeypatch.setattr(store, "read_graph_strict", _boom)
     assert _default_node_resolver("fno-x") is None
 
 

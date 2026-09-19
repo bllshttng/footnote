@@ -130,17 +130,23 @@ def _sandbox_graph_store(tmp_path, monkeypatch):
     ``commit_rows_via_store`` call site, a stray keeper spawn) then imports,
     stamps, or writes the real graph through this checkout's binary.
     Measured 2026-09-18: a worktree status verb resolved a branch-built
-    worker against the live path and stamped it. The pin rides ``FNO_CONFIG``
-    at the settings layer, so a test that installs its own settings (the
-    paths-machinery tests) overrides this one cleanly, and autouse because
-    the touch happens below any test that triggers it.
+    worker against the live path and stamped it. Autouse because the touch
+    happens below any test that triggers it.
+
+    The pin rides HOME: the state_dir default derives from it, and every
+    test that installs its own home (the pr-watch, sidecar and worktree
+    fixtures) overwrites this one cleanly. A settings-file pin (FNO_CONFIG
+    or the global-slot override) instead would hide the repo-local and
+    HOME-pinned configs whole test files install and read back. Config
+    VALUES from a dev checkout's real repo-local config can still reach an
+    unpinned test; only CI sees the fully-empty config. The canonical-root
+    candidate is suppressed with the loader's own hermetic switch, so a
+    linked worktree's real config cannot outrank the tmp home either.
     """
-    settings_file = tmp_path / ".fno-sandbox-settings.yaml"
-    settings_file.write_text(
-        f'schema_version: 1\nconfig:\n  state_dir: "{tmp_path / ".fno"}"\n',
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
+    home = tmp_path / ".fno-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("FNO_NO_CANONICAL_CONFIG", "1")
 
 
 @pytest.fixture

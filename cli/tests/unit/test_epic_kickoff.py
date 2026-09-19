@@ -37,7 +37,13 @@ def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def _events(p: Path) -> list[dict]:
     if not p.exists():
         return []
-    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+    # The agents-telemetry dialect (kind-keyed) shares this journal under
+    # the sandbox; only schema rows (type-keyed) are decisions.
+    return [
+        json.loads(line)
+        for line in p.read_text().splitlines()
+        if line.strip() and "type" in json.loads(line)
+    ]
 
 
 def _write_graph(tmp_path: Path, entries: list[dict], monkeypatch) -> Path:
