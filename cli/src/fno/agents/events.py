@@ -81,9 +81,17 @@ def emit(kind: str, *, path: Optional[Path] = None, **data: Any) -> None:
     # Put ts and kind LAST so a stray data={"ts": ..., "kind": ...} kwarg
     # cannot overwrite the canonical fields. The dict's order-preserving
     # right-to-left merge gives the mandatory fields final say.
-    record = {**data, "ts": _utc_now_iso(), "kind": kind}
-    records = [record]
+    ts = _utc_now_iso()
+    record = {**data, "ts": ts, "kind": kind}
     diagnostic = " ".join(str(value) for value in data.values())
+    # The store commit is the write boundary. The envelope carries the
+    # canonical fields (type/source/data) for SQL-side readers; the legacy
+    # top-level keys (kind + flattened kwargs) ride along because committed
+    # rows round-trip them verbatim, which keeps every kind-keyed reader on
+    # the shared history working through the same rows.
+    records = [
+        {**record, "type": kind, "source": "agents", "data": dict(data)}
+    ]
     if kind != "provider_rate_limited" and "429" in diagnostic and "1313" in diagnostic:
         records.append(
             {
@@ -92,24 +100,24 @@ def emit(kind: str, *, path: Optional[Path] = None, **data: Any) -> None:
                 "observed_at": record["ts"],
                 "ts": _utc_now_iso(),
                 "kind": "provider_rate_limited",
+                "type": "provider_rate_limited",
+                "source": "agents",
+                "data": {
+                    "provider": data.get("route_provider") or data.get("provider") or "unknown",
+                    "account": data.get("account") or data.get("account_id"),
+                },
             }
         )
-    line = "".join(
-        json.dumps(item, sort_keys=False, separators=(",", ":")) + "\n"
-        for item in records
-    )
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # 'a' mode is atomic for single writes <= PIPE_BUF (4096 on
-        # macOS / Linux); a single JSONL record is well under that, so
-        # concurrent emit() calls interleave at line boundaries.
-        with open(target, "a", encoding="utf-8") as fh:
-            fh.write(line)
-    except OSError as exc:
-        print(
-            f"fno agents: warning: events.emit({kind!r}) to {target}: {exc}",
-            file=sys.stderr,
-        )
+    from fno.events.store_client import EventStoreUnavailable, emit_envelope
+
+    for item in records:
+        try:
+            emit_envelope(item, target)
+        except (EventStoreUnavailable, OSError) as exc:
+            print(
+                f"fno agents: warning: events.emit({kind!r}) to {target}: {exc}",
+                file=sys.stderr,
+            )
 
 
 def emit_with_context(

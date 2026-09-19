@@ -162,10 +162,23 @@ def add_finding(
 def _scan(events_path: Optional[Path]) -> list[dict[str, Any]]:
     import json
 
+    from fno.events.store_client import native_rows
+
     path = _events_path(events_path)
+    committed = native_rows(path)
+    if committed is not None:
+        out: list[dict[str, Any]] = []
+        for line in committed:
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                # A structurally-unparseable row is our own writer's output;
+                # skip it for listing (loop-check surfaces the malformed count).
+                continue
+        return out
     if not path.is_file():
         return []
-    out: list[dict[str, Any]] = []
+    out = []
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
