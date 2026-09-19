@@ -386,7 +386,7 @@ if [ "$1" = "agents" ] && [ "$2" = "truth" ]; then
     printf '{{'
     first=1
     for h in $(printf '%s' "$4" | /usr/bin/tr ',' ' '); do
-      if [ "$h" = "{S4}" ]; then
+      if [ "$h" = "{S4}" ] || [ "$h" = "{U4}" ]; then
         row='{{"state":"working","last_activity_age_s":2}}'
       else
         row='{{"state":"stalled","last_activity_age_s":100000}}'
@@ -395,7 +395,7 @@ if [ "$1" = "agents" ] && [ "$2" = "truth" ]; then
       printf '"%s":%s' "$h" "$row"
     done
     printf '}}\n'
-  elif [ "$3" = "{S4}" ]; then
+  elif [ "$3" = "{S4}" ] || [ "$3" = "{U4}" ]; then
     printf '{{"state":"working","last_activity_age_s":2}}\n'
   else
     printf '{{"state":"stalled","last_activity_age_s":100000}}\n'
@@ -409,6 +409,7 @@ fi
 exit 2
 "#,
             S4 = S4,
+            U4 = U4,
         )
         .as_str(),
     );

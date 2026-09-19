@@ -655,6 +655,11 @@ class TestControlPlaneArmRows:
         fno_dir.mkdir(parents=True)
         monkeypatch.setenv("HOME", str(fake_home))
         monkeypatch.setenv("PR_WATCH_FIRE_CMD", "true")
+        # Fleet-tail cadence: the watchdog phase runs on the interval
+        # bucket's slot 2. Pin the bucket or a single-tick invocation runs
+        # the phase on only one tick in three and the arm row reads
+        # off_cadence instead of the lane verdict this test asserts.
+        monkeypatch.setattr("time.time", lambda: 1201.0)
         try:
             from fno.config import load_settings
         except Exception:

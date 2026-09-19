@@ -54,6 +54,7 @@ fn repo_with_stale_base(tmp: &std::path::Path) -> std::path::PathBuf {
 
 fn run_verb(cwd: &std::path::Path) -> (i32, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+        .envs(fno_agents::test_run::self_owner_env())
         .args([
             "pr-rebase",
             "--base=origin/main",

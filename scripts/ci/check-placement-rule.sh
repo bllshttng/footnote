@@ -99,6 +99,10 @@
 #      CLAUDE_CONFIG_DIR, or the repair proves the pinned account and stamps
 #      it onto the shared slot. test_managed.py is its test and asserts on
 #      exactly that path, again under tmp_path.
+#      test_run.rs's hold-marker tests build fixture checkouts under a
+#      TempDir, including a nested `.claude/worktrees/x` path, to prove a
+#      nested checkout never reads its parent's hold. Fixture paths only;
+#      footnote stores nothing under any real .claude.
 #      The mux Connections UI (crates/fno/src/connections_view.rs) belongs
 #      here too: its login-wizard default config dir `~/.claude-<id>` is a
 #      per-account CLAUDE_CONFIG_DIR (a Claude Code config dir, not footnote
@@ -293,6 +297,7 @@ crates/fno-agents/src/scratch.rs
 crates/fno-agents/src/session_start_bytes.rs
 crates/fno-agents/src/state.rs
 crates/fno-agents/src/stream_worker.rs
+crates/fno-agents/src/test_run.rs
 crates/fno-agents/src/bin/client.rs
 crates/fno-agents/tests/claude_ask_dispatch.rs
 crates/fno-agents/tests/claude_ask_parity.rs

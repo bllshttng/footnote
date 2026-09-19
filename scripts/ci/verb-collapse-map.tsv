@@ -93,6 +93,7 @@ agents pane-identity	T1	agents pane-identity	0
 agents newest-assistant-text	T1	agents newest-assistant-text	6
 agents peek	T1	agents peek	29
 agents ping	T1	agents ping	3
+agents permission-tokens	T1	agents permission-tokens	0
 agents probe-run	T1	agents probe-run	3
 agents provider-cap	T1	agents provider-cap	3
 agents reap	T1	agents reap	15
@@ -108,6 +109,7 @@ agents restart	T1	agents restart	6
 agents resume	KEEP	agents resume	43	deliberate readability slack for a high-traffic distinct operation
 agents retask	T1	agents retask	2
 agents review-coverage	T1	agents review-coverage	34
+agents sandbox-probe	T1	agents sandbox-probe	0
 agents rm	KEEP	agents rm	56	deliberate readability slack for a high-traffic distinct operation
 agents roles context	T1	agents roles context	2
 agents roles ls	T1	agents roles ls	1
@@ -341,6 +343,7 @@ do pr merge	T1	do pr merge	55
 do pr merge-result-check	T1	do pr merge-result-check	0
 do pr next-receipt-generation	T1	do pr next-receipt-generation	0
 do pr publish-review	T1	do pr publish-review	0
+do pr push	T1	do pr push	7
 do pr rebase	T1	do pr rebase	21
 do pr review-hold	T1	do pr review-hold	0
 do pr ritual	T1	do pr ritual	24
@@ -506,6 +509,7 @@ pr merge	KEEP	pr merge	55	deliberate readability slack for a high-traffic distin
 pr merge-result-check	T1	pr merge-result-check	0
 pr next-receipt-generation	T1	pr next-receipt-generation	0
 pr publish-review	T1	pr publish-review	4
+pr push	T1	pr push	7
 pr rebase	T1	pr rebase	21
 pr review-hold	T1	pr review-hold	0
 pr ritual	T1	pr ritual	24

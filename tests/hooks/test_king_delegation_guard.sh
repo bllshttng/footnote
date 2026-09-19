@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Unit tests for hooks/king-delegation-guard.sh: a crowned court session is
-# refused Edit/Write/NotebookEdit and shell writes to source, while its plans
-# dir, crown handoff doc, escalations dir and auto-memory stay writable.
+# refused Edit/Write/NotebookEdit and shell writes to SOURCE. The predicate is
+# inverted (2026-09-17 ruling): SOURCE is any path realpath-inside the repo
+# root except the repo's .fno state tree; everything outside the repo - the
+# vault wherever it lives, the crown handoff doc, escalations notes,
+# auto-memory - allows, and there is no enumeration of exempt trees anymore.
 #
 # The policy moved into crates/fno-agents/src/hook/king_guard.rs and
 # the script became a probe-and-relay wrapper (never exec: a candidate that
@@ -132,10 +135,11 @@ OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
 REASON="$(printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason // empty')"
 if [[ $RC -eq 0 ]] && echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
    && printf '%s' "$REASON" | grep -qF "$SRC_FILE" \
-   && printf '%s' "$REASON" | grep -qF "$TMP/plans" \
+   && printf '%s' "$REASON" | grep -qF "does not write SOURCE" \
+   && printf '%s' "$REASON" | grep -qF "inside the repo" \
    && ! printf '%s' "$REASON" | grep -qiE "spawn|advance" \
    && echo "$OUT" | jq -e '.decision == "block"' >/dev/null 2>&1; then
-  pass "AC1: crowned court Edit denied, reason names the path + allowed roots, no delegation verbs"
+  pass "AC1: crowned court Edit denied, reason names the path + the source rule, no delegation verbs"
 else
   fail "AC1: rc=$RC out=${OUT:0:300} err=$(cat "$TMP/stderr.txt")"
 fi
@@ -173,7 +177,7 @@ clear_knob
 set_knob warn
 OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
 ERR="$(cat "$TMP/stderr.txt")"
-[[ $RC -eq 0 && "$OUT" == "{}" && "$ERR" == *"$SRC_FILE"* && "$ERR" == *"outside the allowed roots"* ]] \
+[[ $RC -eq 0 && "$OUT" == "{}" && "$ERR" == *"$SRC_FILE"* && "$ERR" == *"does not write SOURCE"* ]] \
   && pass "AC2: knob warn names the path on stderr and allows" \
   || fail "AC2: knob warn rc=$RC out=$OUT err=$ERR"
 clear_knob
@@ -263,11 +267,18 @@ OUT="$(run_guard "$(bash_payload "printf ruling | tee -a $KGD_HANDOFF")")"; RC=$
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "handoff: tee append allowed" \
   || fail "handoff tee rc=$RC out=$OUT"
 
-# A sibling under the same directory is NOT the resolved doc: still denied.
+# A sibling under the same directory is not the resolved doc; under the
+# inverted predicate the boundary is the repo, so an out-of-repo sibling
+# allows while its in-repo twin stays source.
 OUT="$(run_guard "$(bash_payload "echo x > $TMP/handoffs/evil.md")")"; RC=$?
-echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-  && pass "handoff: sibling path still denied" \
+[[ $RC -eq 0 && "$OUT" == "{}" ]] \
+  && pass "handoff: out-of-repo sibling of the canon doc allows" \
   || fail "handoff sibling rc=$RC out=${OUT:0:300}"
+
+OUT="$(run_guard "$(bash_payload "echo x > $TMP/repo/handoffs/evil.md")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "handoff: in-repo sibling of the doc name stays denied" \
+  || fail "handoff in-repo sibling rc=$RC out=${OUT:0:300}"
 
 OUT="$(run_guard "$(bash_payload "sed -i s/a/b/ $TMP/repo/src/x.py")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
@@ -320,13 +331,19 @@ OUT="$(run_guard "$(bash_payload "cp $TMP/brief.md $KGD_HANDOFF")")"; RC=$?
 
 mkdir -p "$TMP/vaultdir/briefs"
 OUT="$(run_guard "$(bash_payload "cp $TMP/brief.md $TMP/vaultdir/briefs/b.md")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] \
+  && pass "vault: cp to a tree outside the repo allows" \
+  || fail "vault cp rc=$RC out=${OUT:0:300}"
+
+# The cp-shaped deny survives for an in-repo destination: source, named.
+OUT="$(run_guard "$(bash_payload "cp $TMP/brief.md $TMP/repo/src/evil.py")")"; RC=$?
 REASON="$(printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason // empty')"
 if echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-   && printf '%s' "$REASON" | grep -qF "vaultdir/briefs/b.md" \
+   && printf '%s' "$REASON" | grep -qF "repo/src/evil.py" \
    && ! printf '%s' "$REASON" | grep -qiE "spawn|advance"; then
-  pass "vault: cp outside the roots denied, reason names the path, no delegation verbs"
+  pass "vault: cp into the repo denied, reason names the path, no delegation verbs"
 else
-  fail "vault cp rc=$RC out=${OUT:0:300}"
+  fail "vault cp in-repo rc=$RC out=${OUT:0:300}"
 fi
 
 # ── Limb carve-out: a Task subagent of this very court is a limb, not the king.
@@ -403,21 +420,21 @@ OUT="$(run_guard "$(bash_payload "echo ruling >> $MEMDIR/MEMORY.md")")"; RC=$?
   && pass "memory: Bash append into MEMORY.md allowed" \
   || fail "memory append rc=$RC out=$OUT"
 
-# A sibling in the project dir but outside memory/ is still implementation
-# surface: denied. So is a stray directly under the projects root.
+# Under the inverted predicate the memory tree allows because it sits outside
+# the repo - not because it is enumerated. The boundary lives inside the repo:
+# a memory-shaped tree UNDER the repo root is still source.
 OUT="$(run_guard "$(edit_payload "$MEMPROJ/notes.md")")"; RC=$?
-echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-  && pass "memory: project-dir sibling outside memory/ denied" \
+[[ $RC -eq 0 && "$OUT" == "{}" ]] \
+  && pass "memory: project-dir sibling outside the repo allows" \
   || fail "memory sibling rc=$RC out=${OUT:0:300}"
 
-OUT="$(run_guard "$(edit_payload "$HOME/.claude/projects/stray.md")")"; RC=$?
+OUT="$(run_guard "$(edit_payload "$TMP/repo/.claude/projects/stray.md")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-  && pass "memory: stray directly under projects root denied" \
+  && pass "memory: repo-resident memory-lookalike stays denied" \
   || fail "memory stray rc=$RC out=${OUT:0:300}"
 
-# ── Escalations carve-out: an escalation note is the superuser-tier lane a
-# king files. The dir resolves through the vault pin; a lookalike tree that is
-# NOT the resolved root stays fail-closed.
+# ── Escalations: the superuser-tier lane a king files. Under the inverted
+# predicate its notes allow because the vault sits outside the repo.
 OUT="$(run_guard "$(printf '{"tool_name":"Write","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"file_path":"%s","content":"note"}}' "$SID" "$TMP/repo" "$ESCALATIONS/20260915-0900-token.md")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] \
   && pass "escalations: court Write of an escalation note allowed" \
@@ -428,21 +445,17 @@ OUT="$(run_guard "$(bash_payload "echo question >> $ESCALATIONS/20260915-0900-to
   && pass "escalations: Bash append into an escalation note allowed" \
   || fail "escalations append rc=$RC out=$OUT"
 
-# A write in a lookalike internal/ tree outside the resolved escalations root
-# stays implementation surface: denied, with the escalations directory named
-# among the allowed roots.
-OUT="$(run_guard "$(edit_payload "$TMP/internal/fno/decisions/x.md")")"; RC=$?
+# A lookalike internal/ tree is denied the moment it lives INSIDE the repo:
+# the guard matches the resolved path against the repo root, never a prefix
+# of the string.
+OUT="$(run_guard "$(edit_payload "$TMP/repo/internal/fno/decisions/x.md")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-  && echo "$OUT" | grep -q 'escalations directory' \
-  && pass "escalations: write outside the dir denied, refusal names it" \
+  && pass "escalations: in-repo lookalike tree denied" \
   || fail "escalations outside rc=$RC out=${OUT:0:300}"
 
-# The lookalike escalations TREE itself (a path that only resembles the
-# resolved root) is denied too: the guard matches the resolved path, never a
-# prefix of the string.
-OUT="$(run_guard "$(edit_payload "$TMP/internal/fno/escalations/escape.md")")"; RC=$?
+OUT="$(run_guard "$(edit_payload "$TMP/repo/internal/fno/escalations/escape.md")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-  && pass "escalations: lookalike tree keeps the guard fail-closed" \
+  && pass "escalations: in-repo lookalike escalations tree denied" \
   || fail "escalations lookalike rc=$RC out=${OUT:0:300}"
 
 # ── Third limb signature: the live claude payload carries no agent_id and its

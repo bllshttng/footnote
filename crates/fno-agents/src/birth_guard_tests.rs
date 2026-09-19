@@ -182,8 +182,10 @@ fn the_builder_home_is_exempt_but_every_other_crates_file_is_scanned() {
 
 /// An emit-kind site sits near an emit call: `.emit(` (the emitter shape
 /// three doors share) or `emit_event(` (the pairs shape opencode_serve
-/// takes). "emitter.emit(" contains the former; "emit_event(" matches only
-/// the latter, so the two alternatives cover both shapes.
+/// takes). The word emitter followed by `emit(` covers the former;
+/// `emit_event(` matches only the latter, so the two alternatives cover
+/// both shapes. (This comment deliberately quotes no call-with-a-literal
+/// form: the emit-kind scanner reads one out of it and reds the pin test.)
 fn is_emit_line(l: &str) -> bool {
     l.contains("emit(") || l.contains("emit_event(")
 }
