@@ -3,10 +3,10 @@
 //! plan, open plan). Moved out of `client_tests.rs` with the lane change
 //! they assert - the file is over budget and may only shrink.
 
-use crate::vt::frame_text;
 use super::tests::{bcard, blocked_row, two_pane_view, view_with_agents};
 use super::*;
 use crate::backlog_view::card_label;
+use crate::vt::frame_text;
 
 #[test]
 fn a_pr_row_names_the_session_driving_it() {
