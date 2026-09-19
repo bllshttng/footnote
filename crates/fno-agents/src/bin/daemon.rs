@@ -111,11 +111,25 @@ fn main() {
     }
     // Retirement sweep config: resolve config.agents.retire_grace_s
     // and reap-receipt retention (env > FNO_CONFIG > project > global >
-    // defaults) at sweep time -- the idle tick reads this cwd, not a
-    // pre-resolved Duration. The daemon's cwd is where it was lazy-started; a
+    // defaults) at sweep time -- the idle tick reads opts.agents_config_cwd
+    // (the anchor pinned below), not a pre-resolved Duration. A
     // global ~/.fno knob is read via the global fallback regardless.
-    opts.agents_config_cwd =
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    // Pin the daemon's cwd for life, before any child can inherit it. The
+    // daemon keeps whoever lazy-started it as its cwd; when that dir is a
+    // worktree the merge reaper later deletes it, and every child spawned
+    // without an explicit cwd then fails: roster reads exit 1 and
+    // reconcile-style runs hit FileNotFoundError in os.getcwd, each cured
+    // only by a manual restart. The canonical checkout is never reaped, so
+    // anchor there; outside any repo, the agents home.
+    let _ = home.ensure_root();
+    let launch_dir = std::env::current_dir().ok();
+    let anchor = daemon_anchor(launch_dir.as_deref(), home.root());
+    match std::env::set_current_dir(&anchor) {
+        Ok(()) => opts.agents_config_cwd = anchor,
+        Err(e) => {
+            eprintln!("fno-agents-daemon: cannot enter {}: {e}", anchor.display());
+        }
+    }
     // Badge -> OS notification knobs: config.mux.notify_on_blocked
     // (default ON) / notify_on_done (default OFF), read from the same cwd.
     opts.notify_on_blocked =
@@ -173,6 +187,22 @@ fn leaked_dispatch_pin(value: Option<&std::ffi::OsStr>) -> bool {
     value.is_some_and(|v| v.to_string_lossy().trim().eq_ignore_ascii_case("python"))
 }
 
+/// The dir the daemon runs in for life. A worktree gets reaped under a live
+/// daemon; its canonical checkout does not. Outside a repo, or when the
+/// launch dir cannot be read, the agents home is the anchor. A relative home
+/// resolves against the launch cwd, so entering it would move the dir out
+/// from under itself: keep the launch cwd there.
+fn daemon_anchor(launch: Option<&std::path::Path>, home: &std::path::Path) -> std::path::PathBuf {
+    if let Some(root) = launch.and_then(fno_agents::paths::canonical_repo_root) {
+        return root;
+    }
+    if home.is_absolute() {
+        home.to_path_buf()
+    } else {
+        launch.unwrap_or(std::path::Path::new(".")).to_path_buf()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +231,89 @@ mod tests {
         assert_eq!(parse_home_arg(&s(&[])), None);
         assert_eq!(parse_home_arg(&s(&["--once"])), None);
         assert_eq!(parse_home_arg(&s(&["--home"])), None);
+    }
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "fno-daemon-anchor-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        p
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} in {dir:?} did not run: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} in {dir:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+
+    fn git_available() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok()
+    }
+
+    #[test]
+    fn daemon_anchor_resolves_the_canonical_root_from_a_linked_worktree() {
+        if !git_available() {
+            return;
+        }
+        let base = tmp_dir("wt");
+        let main = base.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q"]);
+        git(&main, &["config", "user.email", "t@t"]);
+        git(&main, &["config", "user.name", "t"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let linked = base.join("wt");
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                linked.to_str().unwrap(),
+                "-b",
+                "feat",
+            ],
+        );
+        let home = base.join("home");
+        assert_eq!(
+            daemon_anchor(Some(&linked), &home),
+            std::fs::canonicalize(&main).unwrap()
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn daemon_anchor_falls_back_to_the_home_outside_a_repo() {
+        let base = tmp_dir("nogit");
+        std::fs::create_dir_all(&base).unwrap();
+        let home = base.join("home");
+        assert_eq!(daemon_anchor(Some(&base), &home), home);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn daemon_anchor_falls_back_to_the_home_when_launch_is_unknown() {
+        let home = tmp_dir("unknown-home");
+        assert_eq!(daemon_anchor(None, &home), home);
     }
 }

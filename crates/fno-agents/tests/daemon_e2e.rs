@@ -148,6 +148,13 @@ fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> DaemonChild {
 /// an artificially-seeded mid-flight source row intact for a promote-admission
 /// assertion.
 fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> DaemonChild {
+    start_daemon_env_in(home, home.root(), extra)
+}
+
+/// [`start_daemon_env`] with an explicit launch cwd: the daemon keeps whoever
+/// started it as its cwd, and the cwd-pin test needs a launch from inside a
+/// git worktree to prove the pin.
+fn start_daemon_env_in(home: &AgentsHome, dir: &Path, extra: &[(&str, &str)]) -> DaemonChild {
     let seen = common::count_events(home, "daemon_started");
     let stderr =
         std::fs::File::create(home.root().join("daemon.stderr")).expect("daemon.stderr creates");
@@ -160,7 +167,7 @@ fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> DaemonChild {
         // Outside any git checkout, so the daily reclaim sweep's cargo-build-dirs
         // lane (`crate::reclaim::maybe_run_daily`) finds no workspace manifest to
         // resolve and never reaches the real machine's build base.
-        .current_dir(home.root())
+        .current_dir(dir)
         .stderr(std::process::Stdio::from(stderr));
     for (k, v) in extra {
         cmd.env(k, v);
@@ -2558,4 +2565,110 @@ async fn status_json_carries_the_drift_label() {
         "a drift label rides status --json, got {label}"
     );
     std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// AC1-HP: a daemon launched from inside a linked worktree keeps serving after
+/// that worktree is reaped, because main() pins its cwd to the canonical
+/// checkout before any child can inherit it. Fails on pre-pin code: the daemon
+/// holds the removed worktree as its cwd for life, and every child spawned
+/// without an explicit cwd dies with it (x-96a0, x-8681).
+#[tokio::test]
+async fn daemon_cwd_survives_a_reaped_launch_worktree() {
+    fn e2e_git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} in {dir:?} did not run: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} in {dir:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    if Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+
+    let base = std::env::temp_dir().join(format!(
+        "fnoe-cwd-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let repo = base.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    e2e_git(&repo, &["init", "-q"]);
+    e2e_git(&repo, &["config", "user.email", "t@t"]);
+    e2e_git(&repo, &["config", "user.name", "t"]);
+    e2e_git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    let wt = base.join("wt");
+    e2e_git(
+        &repo,
+        &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "wt"],
+    );
+
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let daemon = start_daemon_env_in(&home, &wt, &[]);
+
+    // The reaper deletes the launch worktree under the live daemon.
+    e2e_git(
+        &repo,
+        &["worktree", "remove", "--force", wt.to_str().unwrap()],
+    );
+    assert!(!wt.exists(), "fixture worktree must actually be gone");
+
+    let cwd = process_cwd(daemon.id()).expect("daemon cwd is readable");
+    let want = std::fs::canonicalize(&repo).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(&cwd)
+            .ok()
+            .as_deref()
+            .map(Path::to_path_buf),
+        Some(want.clone()),
+        "daemon cwd must be the canonical checkout, got {:?} (repo {:?})",
+        cwd,
+        want
+    );
+
+    let served =
+        fno_agents::client::call_if_running(&home, &Request::new(1, "agent.status", json!({})))
+            .await
+            .expect("daemon still serves agent.status after its launch worktree was reaped");
+    assert!(
+        served.result().is_some(),
+        "agent.status must answer a result, got {:?}",
+        served
+    );
+
+    drop(daemon);
+    std::fs::remove_dir_all(&home.root()).ok();
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// The kernel's view of a pid's cwd: `/proc/<pid>/cwd` on Linux, one lsof read
+/// on macOS. The name lsof prints can be a stale name-cache entry after a
+/// delete, so the caller canonicalizes before comparison.
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let out = Command::new("lsof")
+            .args(["-a", "-d", "cwd", "-p", &pid.to_string(), "-Fn"])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix('n'))
+            .map(PathBuf::from)
+    }
 }
