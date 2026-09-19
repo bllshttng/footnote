@@ -45,4 +45,3 @@ def test_humanize_age_caps_the_day_count_at_three_digits():
 
 def test_humanize_age_renders_absent_as_question_mark_not_zero():
     assert _humanize_age(None) == "   ?"
-
