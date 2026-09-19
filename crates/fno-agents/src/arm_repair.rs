@@ -305,8 +305,8 @@ fn classify(row: &mut ArmStatus, facts: &RepairFacts) {
 
 fn select_unmeasured_repair(detail: &str) -> String {
     let project = detail
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix("project="))
+        .split_once("project=")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
         .filter(|project| *project != "-")
         .unwrap_or("");
     if project.is_empty() {
@@ -461,8 +461,8 @@ pub fn heal(
             .detail
             .as_deref()
             .unwrap_or("")
-            .split_whitespace()
-            .find_map(|part| part.strip_prefix("project="))
+            .split_once("project=")
+            .and_then(|(_, rest)| rest.split_whitespace().next())
             .unwrap_or("-");
         let action = format!("advance:{project}");
         let ok = run(&action);
@@ -735,7 +735,10 @@ mod tests {
         let mut ac = row("auto_continue", SCHED_DAEMON);
         ac.failing = true;
         ac.skip_reason = Some("select-unmeasured".into());
-        ac.detail = Some("project=fno bound=120s: selection stalled".into());
+        ac.detail = Some(
+            "closed=x-1 node=- reason=select-unmeasured detail=project=fno bound=120s: selection stalled"
+                .into(),
+        );
         let mut rows = vec![ac];
         annotate(&mut rows, &facts(false));
         let ac = &rows[0];
@@ -755,7 +758,10 @@ mod tests {
         let mut ac = row("auto_continue", SCHED_DAEMON);
         ac.failing = true;
         ac.cause = Some("select_unmeasured".into());
-        ac.detail = Some("project=fno bound=120s: selection stalled".into());
+        ac.detail = Some(
+            "closed=x-1 node=- reason=select-unmeasured detail=project=fno bound=120s: selection stalled"
+                .into(),
+        );
         let rows = vec![ac];
         let mut runs = Vec::new();
         let first = heal(&rows, &[], true, &store, 0, 1800, &mut |action| {
