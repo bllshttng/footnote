@@ -352,6 +352,39 @@ fn with_binding_harness(args: Vec<String>, harness: &str, sid: &str) -> Vec<Stri
 }
 
 #[test]
+fn a_space_manifest_binds_through_its_recorded_owner_cwd() {
+    let home = HomeGuard::new();
+    let cwd_dir = TempDir::new().unwrap();
+    let cwd = cwd_dir.path();
+    // The manifest lives under a DIFFERENT tree (the state space), the way
+    // the state verb resolves it in production; it records its checkout.
+    let space = TempDir::new().unwrap();
+    home.seed_registry(&[]);
+    let manifest_path = space.path().join("target-state.md");
+    let mut m = manifest_bound("pi", "pi-sess-1", "x-715e");
+    m.insert_str(
+        m.find("---\n").map(|i| i + 4).unwrap_or(0),
+        &format!("owner_cwd: \"{}\"\n", cwd.display()),
+    );
+    fs::write(&manifest_path, m).unwrap();
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(&transcript_path, transcript("no promise yet")).unwrap();
+
+    let (code, out) = run_loop_check_capture(&with_binding_harness(
+        base_args(&manifest_path, &transcript_path, cwd),
+        "pi",
+        "pi-sess-1",
+    ));
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_ne!(
+        v["decision"], "refuse",
+        "the recorded checkout must bind: {out}"
+    );
+    assert_eq!(code, 0);
+    let _ = &home;
+}
+
+#[test]
 fn manifest_bound_pi_session_is_owner_and_gates_unchanged() {
     let home = HomeGuard::new();
     let cwd_dir = TempDir::new().unwrap();
