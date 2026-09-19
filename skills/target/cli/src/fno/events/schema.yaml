@@ -6114,6 +6114,15 @@ event_types:
         path:
           type: string
 
+  - name: store_seat_lock_unlinked
+    description: "An orphaned store seat lock (<sock>.sock.lock whose socket is gone) was unlinked from the hashed temp root at daemon start while its flock was held; a lock another process still holds is left as found."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        path:
+          type: string
+
   - name: keeper_socket_silent_no_row
     description: "A keeper socket accepted the Identify probe but never answered, and no registry row is bound to it."
     sources: [daemon]

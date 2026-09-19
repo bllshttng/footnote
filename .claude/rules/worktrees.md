@@ -1,8 +1,8 @@
 # Worktree convention
 
-The single place that says where git worktrees go and what to do after creating one. Skill defaults that place them elsewhere lose to this rule.
+The single place saying where git worktrees go and what to do after creating one. Skill defaults that place them elsewhere lose to this rule.
 
-Read [worktree-mechanics](../../docs/architecture/worktree-mechanics.md) for hook internals, removal, cargo storage, and the Bash isolation map. Before editing the `WorktreeCreate` hook: a non-zero exit on the wrong payload shape CREATES the worktree you meant to block. In a worktree, Bash refuses `$` expansion, `$(...)`, and loops. Use `printenv`, fno verbs, or `bash <file>`.
+Read [worktree-mechanics](../../docs/architecture/worktree-mechanics.md) for hook internals, removal, cargo storage, and Bash isolation map. Before editing the `WorktreeCreate` hook: a non-zero exit on the wrong payload shape CREATES the worktree you meant to block. In a worktree, Bash refuses `$` expansion, `$(...)`, and loops. Use `printenv`, fno verbs, or `bash <file>`.
 
 ## The rule
 
@@ -43,7 +43,7 @@ Verb: `fno agents workspace worktree cleanup --merged` (dry-run default, `--appl
 
 ## Per-project worktree policy
 
-Every code-payload dispatch routes through `fno agents workspace worktree ensure`, which resolves a `worktree` policy.
+Every code-payload dispatch routes through `fno agents workspace worktree ensure`, resolving a `worktree` policy.
 Precedence: per-project `work.workspaces.<slug>.projects[].worktree` > global `config.worktree.policy` > built-in `harness-native`.
 
 - **`never`** - launch in place on the canonical checkout (for projects whose tree IS the product, e.g. an Obsidian vault). ensure prints the repo root, exit 0; callers skip `setup-worktree.sh`; the location gate treats the protected branch as `ok`.

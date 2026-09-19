@@ -960,11 +960,13 @@ pub fn adopt_keeper_socket(
     }))
 }
 
-/// Launch the keeper process for one pane. Plain pipes (the conversation
-/// lives on the keeper's OWN pty); the keeper setsid's itself out of this
-/// process group before anything else.
+/// Build the keeper command for one pane: argv and stdio, unspawned. Split
+/// from `launch_keeper` so tests can inspect the command shape (the
+/// cfg(test) owner env) without forking a process. Plain pipes (the
+/// conversation lives on the keeper's OWN pty); the keeper setsid's itself
+/// out of this process group before anything else.
 #[allow(clippy::too_many_arguments)]
-fn launch_keeper(
+fn keeper_command(
     keeper_bin: &std::path::Path,
     sock_path: &std::path::Path,
     session: &str,
@@ -973,7 +975,7 @@ fn launch_keeper(
     cols: u16,
     cwd: Option<&std::path::Path>,
     argv: &[String],
-) -> Result<std::process::Child, PtyError> {
+) -> std::process::Command {
     let mut cmd = std::process::Command::new(keeper_bin);
     cmd.args([
         "--pane",
@@ -994,11 +996,34 @@ fn launch_keeper(
         "--",
     ]);
     cmd.args(argv);
+    // stderr inherits: a keeper startup failure reaches the server's log.
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
-    // stderr inherits: a keeper startup failure reaches the server's log.
-    // Same fork discipline as the portable-pty path: never overlap a fork
-    // with another spawn's fork window.
+    // In-process unit tests reach this builder directly (Core::run_pane):
+    // stamp the test owner so the keeper's watchdog reaps it when the test
+    // process exits, instead of orphaning it at ppid 1. The shipped server
+    // and the integration binaries skip this arm.
+    #[cfg(test)]
+    cmd.envs(crate::test_owner::self_owner_env());
+    cmd
+}
+
+/// Launch the keeper for one pane: build the command, then spawn under the
+/// fork guard (never overlap a fork with another spawn's fork window).
+#[allow(clippy::too_many_arguments)]
+fn launch_keeper(
+    keeper_bin: &std::path::Path,
+    sock_path: &std::path::Path,
+    session: &str,
+    pane_id: u64,
+    rows: u16,
+    cols: u16,
+    cwd: Option<&std::path::Path>,
+    argv: &[String],
+) -> Result<std::process::Child, PtyError> {
+    let mut cmd = keeper_command(
+        keeper_bin, sock_path, session, pane_id, rows, cols, cwd, argv,
+    );
     let _fork = fork_guard();
     cmd.spawn().map_err(|e| {
         PtyError::Spawn(format!(
@@ -1915,6 +1940,42 @@ fn spawn_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeper_command_carries_the_test_owner_env() {
+        // AC7: under cfg(test) the builder stamps the owner identity the
+        // worker watchdog reads, so the keeper reaps when the test process
+        // exits. No keeper binary is needed to assert the command shape.
+        let cmd = keeper_command(
+            std::path::Path::new("fno-agents-worker"),
+            std::path::Path::new("/tmp/keeper-command-test.sock"),
+            "test",
+            7,
+            24,
+            80,
+            None,
+            &["/bin/cat".to_string()],
+        );
+        let envs: std::collections::HashMap<String, String> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| {
+                v.map(|v| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            envs.get("FNO_TEST_OWNER_PID").map(String::as_str),
+            Some(std::process::id().to_string()).as_deref(),
+        );
+        assert!(
+            envs.contains_key("FNO_TEST_OWNER_BIRTH"),
+            "the birth token rides beside the pid"
+        );
+    }
 
     /// Kills and reaps a spawned pane on every exit path, panic and
     /// early-return included. The echo-probe tests used to drop the
