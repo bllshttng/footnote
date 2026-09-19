@@ -238,32 +238,27 @@ fn first_positional(tokens: &[String], value_flags: &[&str]) -> Option<usize> {
     None
 }
 
-/// (basename, rest) of the command `uv run ...` or `uv tool run ...`
-/// dispatches. rest is the argv AFTER the dispatched command, so a
-/// `python -m pytest` behind `uv run python` is still visible.
-fn uv_target(argv: &[String]) -> (Option<String>, Vec<String>) {
+/// True when a `uv ... run ...` argv dispatches a raw pytest. uv's own flag
+/// and value table keeps growing (`--group` today, another tomorrow), and a
+/// guard must not track it, so past `run` (and `tool run`) the WHOLE argv
+/// is scanned: any token named pytest, or a python followed by `-m
+/// pytest`, refuses. The bias is toward refusing a guard-shaped miss.
+fn uv_run_dispatches_pytest(argv: &[String]) -> bool {
     let Some(i) = first_positional(argv, UV_VALUE_FLAGS) else {
-        return (None, Vec::new());
+        return false;
     };
     let sub = basename(&argv[i]);
-    let mut rest: Vec<String> = argv[i + 1..].to_vec();
-    let sub = if sub == "tool" {
-        let Some(j) = first_positional(&rest, UV_VALUE_FLAGS) else {
-            return (Some(sub.to_string()), Vec::new());
-        };
-        let s = basename(&rest[j]).to_string();
-        rest = rest[j + 1..].to_vec();
-        s
+    let after_sub: &[String] = if sub == "tool" {
+        match first_positional(&argv[i + 1..], UV_VALUE_FLAGS) {
+            Some(j) if basename(&argv[i + 1 + j]) == "run" => &argv[i + j + 2..],
+            _ => return false,
+        }
+    } else if sub == "run" {
+        &argv[i + 1..]
     } else {
-        sub.to_string()
+        return false;
     };
-    if sub != "run" {
-        return (Some(sub), rest);
-    }
-    match first_positional(&rest, UV_VALUE_FLAGS) {
-        Some(m) => (Some(basename(&rest[m]).to_string()), rest[m + 1..].to_vec()),
-        None => (Some("run".to_string()), Vec::new()),
-    }
+    after_sub.iter().any(|t| basename(t) == "pytest") || has_dash_m_module(after_sub, "pytest")
 }
 
 /// (basename, rest) for `uvx ...` (uv tool run shorthand).
@@ -274,46 +269,38 @@ fn uvx_target(argv: &[String]) -> (Option<String>, Vec<String>) {
     }
 }
 
-/// The first positional of a cargo invocation: `cargo -C wt test` -> test.
-/// A `+toolchain` token is neither a flag nor the subcommand.
-fn cargo_subcommand(argv: &[String]) -> Option<String> {
-    let mut skip = false;
+/// True when a cargo invocation runs the test suite: the subcommand `test`
+/// or its advertised alias `t` (cargo --help lists `test, t`). Cargo's
+/// global flag table also grows (`--color always test`), so like the uv
+/// door the whole argv is scanned for the word; the bias is toward
+/// refusing a guard-shaped miss. A `+toolchain` token is neither a flag
+/// nor the subcommand, and `--` ends the scan.
+fn cargo_runs_tests(argv: &[String]) -> bool {
     for tok in argv {
-        if skip {
-            skip = false;
-            continue;
-        }
         if tok == "--" {
-            return None;
+            return false;
         }
         if tok.starts_with('+') {
             continue;
         }
-        if tok.starts_with('-') && tok.len() > 1 {
-            skip = CARGO_VALUE_FLAGS.contains(&tok.as_str());
-            continue;
+        let base = basename(tok);
+        if base == "test" || base == "t" {
+            return true;
         }
-        return Some(basename(tok).to_string());
     }
-    None
+    false
 }
 
 /// Which raw run sits at this command position, if any.
 fn refused_head(head: &str, argv: &[String]) -> Option<Kind> {
-    if head == "pytest" {
+    if head == "pytest" || head == "py.test" {
         return Some(Kind::Pytest);
     }
     if is_python(head) && has_dash_m_module(argv, "pytest") {
         return Some(Kind::Pytest);
     }
-    if head == "uv" {
-        let (target, rest) = uv_target(argv);
-        if target.as_deref() == Some("pytest") {
-            return Some(Kind::Pytest);
-        }
-        if target.map(|t| is_python(&t)).unwrap_or(false) && has_dash_m_module(&rest, "pytest") {
-            return Some(Kind::Pytest);
-        }
+    if head == "uv" && uv_run_dispatches_pytest(argv) {
+        return Some(Kind::Pytest);
     }
     if head == "uvx" {
         let (target, _) = uvx_target(argv);
@@ -321,7 +308,7 @@ fn refused_head(head: &str, argv: &[String]) -> Option<Kind> {
             return Some(Kind::Pytest);
         }
     }
-    if head == "cargo" && cargo_subcommand(argv).as_deref() == Some("test") {
+    if head == "cargo" && cargo_runs_tests(argv) {
         return Some(Kind::Cargo);
     }
     None
@@ -378,11 +365,15 @@ fn head_of(segment: &[String], greedy: bool) -> Option<(String, Vec<String>)> {
             }
             continue;
         }
-        let is_assignment = {
-            let mut ch = tok.chars();
-            matches!(ch.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-                && ch.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '=')
-                && tok.contains('=')
+        // Only the NAME before the first '=' is validated; the value is free
+        // text (`FOO=bar/baz` is an assignment, `https://x` is not).
+        let is_assignment = match tok.split_once('=') {
+            Some((name, _)) => {
+                let mut ch = name.chars();
+                matches!(ch.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+                    && ch.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            }
+            None => false,
         };
         if is_assignment {
             i += 1;
@@ -698,5 +689,54 @@ mod tests {
     fn uv_value_flag_then_pytest_refused() {
         let root = footnote_root();
         assert!(decide("uv run --with pytest-xdist pytest -q", root.path()).is_some());
+    }
+
+    #[test]
+    fn assignment_value_with_punctuation_refused() {
+        let root = footnote_root();
+        assert!(decide("FOO=bar/baz:1.0-x pytest -q", root.path()).is_some());
+    }
+
+    #[test]
+    fn non_assignment_word_with_slash_allows() {
+        let root = footnote_root();
+        assert!(decide("echo https://example.com pytest", root.path()).is_none());
+    }
+
+    #[test]
+    fn uv_group_flag_then_pytest_refused() {
+        let root = footnote_root();
+        assert!(decide("uv run --group dev pytest -q", root.path()).is_some());
+    }
+
+    #[test]
+    fn cargo_color_flag_then_test_refused() {
+        let root = footnote_root();
+        assert!(decide("cargo --color always test", root.path()).is_some());
+    }
+
+    #[test]
+    fn cargo_t_alias_refused() {
+        let root = footnote_root();
+        assert!(decide("cargo t", root.path()).is_some());
+    }
+
+    #[test]
+    fn cargo_b_alias_allows() {
+        let root = footnote_root();
+        assert!(decide("cargo b --release", root.path()).is_none());
+    }
+
+    #[test]
+    fn py_test_entry_point_refused() {
+        let root = footnote_root();
+        assert!(decide("py.test -q", root.path()).is_some());
+    }
+
+    #[test]
+    fn nextest_after_typed_flag_allows() {
+        // `cargo nextest run` never spells the word test as a bare token.
+        let root = footnote_root();
+        assert!(decide("cargo nextest run", root.path()).is_none());
     }
 }
