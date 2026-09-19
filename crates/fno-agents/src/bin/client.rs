@@ -533,8 +533,8 @@ async fn run(args: Vec<String>) -> i32 {
     // (see test_run.rs doc). Direct dispatch, no daemon RPC - a test run must
     // not depend on a live daemon to clean up after itself. Same `matches!`
     // treatment as `probe-run`/`state` so it stays out of CLIENT_VERB_USAGE /
-    // RUST_CLIENT_VERBS and the routable-verb parity guard: this is not an
-    // `fno agents` verb, `cli/src/fno/test_runner.py` is its only caller.
+    // RUST_CLIENT_VERBS and the routable-verb parity guard: not an `fno
+    // agents` verb; callers are `cli/src/fno/test_runner.py` and the wrapper.
     if verb == "test-run" {
         return fno_agents::test_run::run_test_run(&args[1..]);
     }
