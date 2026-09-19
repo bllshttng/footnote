@@ -1499,22 +1499,25 @@ def test_dispatch_send_emits_send_events(tmp_path: Path, monkeypatch) -> None:
         cwd=cwd,
     )
 
-    events_log = paths.state_dir() / "events.jsonl"
-    assert events_log.exists(), "events.jsonl must be written"
-    body = events_log.read_text(encoding="utf-8")
+    from tests._event_rows import event_rows
 
-    assert "agent_send_started" in body, "agent_send_started not in events"
-    assert "agent_send_done" in body, "agent_send_done not in events"
+    records = event_rows(paths.state_dir() / "events.jsonl")
+    types = [r.get("kind") or r.get("type") for r in records]
+    assert "agent_send_started" in types, "agent_send_started not in events"
+    assert "agent_send_done" in types, "agent_send_done not in events"
 
-    # Verify the done event has a delivery field
-    for line in body.splitlines():
-        record = json.loads(line)
-        if record.get("kind") == "agent_send_done":
-            assert "delivery" in record, "agent_send_done must carry 'delivery' field"
-            assert record["delivery"] in ("hosted", "durable")
+    # Verify the done event has a delivery field (top level or in data)
+    for record in records:
+        if (record.get("kind") or record.get("type")) == "agent_send_done":
+            payload = {
+                **(record.get("data") or {}),
+                **{k: v for k, v in record.items() if k != "data"},
+            }
+            assert "delivery" in payload, "agent_send_done must carry 'delivery' field"
+            assert payload["delivery"] in ("hosted", "durable")
             break
     else:
-        pytest.fail("agent_send_done event not found in events.jsonl")
+        pytest.fail("agent_send_done event not found in events")
 
 
 def test_dispatch_send_reports_registry_stamp_failure_after_hosted_delivery(
@@ -3040,16 +3043,17 @@ def test_dispatch_send_lock_timeout_books_the_queue_as_a_success(
     )
     assert result.delivery == "durable"
 
-    events_log = paths.state_dir() / "events.jsonl"
-    body = events_log.read_text(encoding="utf-8") if events_log.exists() else ""
+    from tests._event_rows import event_rows
+
+    records = event_rows(paths.state_dir() / "events.jsonl")
     done = [
-        json.loads(line)
-        for line in body.splitlines()
-        if json.loads(line).get("kind") == "agent_send_done"
+        r for r in records
+        if (r.get("kind") or r.get("type")) == "agent_send_done"
     ]
-    assert done, f"a queued send must emit agent_send_done: {body}"
-    assert done[-1]["delivery"] == "durable"
-    assert done[-1].get("reason") == "agent-lock-timeout"
+    assert done, f"a queued send must emit agent_send_done: {records}"
+    payload = {**(done[-1].get("data") or {}), **done[-1]}
+    assert payload.get("delivery") == "durable"
+    assert payload.get("reason") == "agent-lock-timeout"
 
     after = load_registry(paths.agents_registry_path())
     assert after[0].last_message_at is not None, "last_message_at must be stamped"
