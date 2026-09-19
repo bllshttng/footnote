@@ -75,3 +75,11 @@ def agy_mint_argv(
     }
     argv = _answer_or_raise(spawn_axes_call({"agy_mint": ask}), "argv")
     return [str(t) for t in argv]
+
+
+def pi_session_lookup(cwd: str, session_id: str) -> dict[str, Any]:
+    """What a ``(cwd, session_id)`` pair resolves to in pi's session store,
+    from the Rust owner: ``state`` is one of ``unknown|none|one|duplicate``,
+    with ``files``, ``directory`` and ``reason`` as they carry."""
+    ask = {"cwd": str(cwd), "session_id": session_id}
+    return spawn_axes_call({"pi_session_lookup": ask})
