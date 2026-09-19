@@ -5,6 +5,7 @@
 //! the CHILD's pid, and a keeper whose child exits unlinks its socket and
 //! exits. Every assertion names a pid; a survivor count proves nothing.
 
+use fno::pty::KEEPER_PROTOCOL_VERSION;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -178,7 +179,11 @@ fn pane_keeper_outlives_parent() {
         "keeper pid {keeper_pid} must survive its launcher"
     );
     let reply = identify(&sock);
-    assert_eq!(reply["v"], 1, "protocol version rides the reply: {reply}");
+    assert_eq!(
+        reply["v"],
+        u64::from(KEEPER_PROTOCOL_VERSION),
+        "protocol version rides the reply: {reply}"
+    );
     let child_pid = reply["child_pid"].as_u64().expect("child_pid in reply") as u32;
     assert_ne!(child_pid, 0, "the child pid is a real pid");
     assert_ne!(
@@ -288,7 +293,11 @@ fn keeper_lane_flag_runs_and_answers_the_session_id() {
     );
     let _keeper = KillGuard(keeper_pid);
     let reply = identify(&sock);
-    assert_eq!(reply["v"], 1, "protocol version rides the reply: {reply}");
+    assert_eq!(
+        reply["v"],
+        u64::from(KEEPER_PROTOCOL_VERSION),
+        "protocol version rides the reply: {reply}"
+    );
     assert_eq!(
         reply["session_id"], "sid-lane-b-1",
         "the id fno minted before launch rides the reply: {reply}"
