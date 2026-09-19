@@ -28,6 +28,12 @@ from types import SimpleNamespace
 import pytest
 
 from fno.backlog import advance as adv
+from fno.rust_binary import find_dev_binary
+
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -316,6 +322,7 @@ def test_field_absent_node_dict_refuses_naming_the_loss(iso, monkeypatch):
     assert "dispatch_verb" in failed[0]["data"]["error"]
 
 
+@requires_rust
 def test_lane_fill_declared_verb_reaches_spawn_argv(iso, monkeypatch):
     """The lane-fill door (`_ready_nodes` -> `dispatch_lanes`) shells the same
     `fno backlog ready` surface, so it eats declared verbs identically."""
