@@ -4542,10 +4542,11 @@ def doctor_command(
             # the worktree.
             pin = update._resolve_source_pin(source)
             if pin is None or pin.get("decision") == "refuse":
+                rpath = (pin or {}).get("path") or src
+                reason = (pin or {}).get("refusal") or "source checkout unproven or refused"
                 typer.echo(
                     "fno doctor: --fix refused: source "
-                    f"{pin.get('path') or src} failed the source-pin gate: "
-                    f"{pin.get('refusal') or 'source checkout unproven or refused'}.",
+                    f"{rpath} failed the source-pin gate: {reason}.",
                     err=True,
                 )
                 raise typer.Exit(1)
