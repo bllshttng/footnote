@@ -562,7 +562,7 @@ fn mypy_re() -> Regex {
 /// Pytest's short-summary node ids. The job runs with `cli/` as its working
 /// directory, so the paths are `tests/...`, never `cli/tests/...`; a repro
 /// built from the raw path only runs from `cli`.
-fn pytest_nodeids(log: &str) -> Vec<String> {
+pub(crate) fn pytest_nodeids(log: &str) -> Vec<String> {
     let re = Regex::new(r"(?m)^FAILED (\S+::\S+)").expect("static regex");
     let mut ids: Vec<String> = Vec::new();
     for caps in re.captures_iter(log) {
@@ -583,7 +583,7 @@ fn pytest_nodeids(log: &str) -> Vec<String> {
 const PYTEST_REPRO_CAP: usize = 5;
 
 /// The cargo tests that failed, from `test <path> ... FAILED`.
-fn cargo_test_names(log: &str) -> Vec<String> {
+pub(crate) fn cargo_test_names(log: &str) -> Vec<String> {
     let re = Regex::new(r"(?m)^test (\S+) \.\.\. FAILED").expect("static regex");
     re.captures_iter(log).map(|c| c[1].to_string()).collect()
 }
