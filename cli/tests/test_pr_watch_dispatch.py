@@ -4111,6 +4111,44 @@ class TestDurableGrantExecution:
         assert entry["parked"] == "checks-red"
         assert entry["retries"] == 0
 
+    def test_red_hold_parks_on_outcome_prefixed_reason(self, tmp_path, monkeypatch):
+        """The authorized-merge receipt renders as 'held: checks are red; ...'
+        (outcome word prefixed onto the owner's detail), so the park must match
+        past the prefix or a red PR re-runs the merge chain every tick."""
+        deps = _make_tick_deps(tmp_path, candidates=[])
+        self._seed_entries(tmp_path, [1])
+        self._fake_merge(
+            monkeypatch, 2,
+            reason="held: checks are red; the healer or the worker owns the next push",
+        )
+        counts = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
+
+        assert counts == {"executed": 0, "held": 1, "failed": 0, "skipped": 0}
+        parked = [e for e in deps["events"] if e["type"] == "pr_watch_parked"]
+        assert any(e["data"]["reason"] == "checks-red" for e in parked)
+        from fno.pr_watch._state import WatermarkStore
+
+        entry = WatermarkStore(path=tmp_path / "state.json").get("owner/repo#1")
+        assert entry["parked"] == "checks-red"
+
+    def test_already_terminal_on_outcome_prefixed_reason(self, tmp_path, monkeypatch):
+        """Same prefix defeats the ALREADY_TERMINAL exemption: 'held: PR
+        already merged; ...' must mark the row NOT_OPEN, never retry."""
+        deps = _make_tick_deps(tmp_path, candidates=[])
+        self._seed_entries(tmp_path, [1])
+        self._fake_merge(
+            monkeypatch, 2,
+            reason="held: PR already merged; nothing to merge ",
+        )
+        counts = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
+
+        assert counts == {"executed": 0, "held": 1, "failed": 0, "skipped": 0}
+        from fno.pr_watch._state import WatermarkStore
+
+        entry = WatermarkStore(path=tmp_path / "state.json").get("owner/repo#1")
+        assert entry["last_seen_state"] == "NOT_OPEN"
+        assert not entry.get("parked")
+
     def test_failed_consumes_budget_and_parks_at_max(self, tmp_path, monkeypatch):
         deps = _make_tick_deps(tmp_path, candidates=[])
         self._seed_entries(tmp_path, [1])

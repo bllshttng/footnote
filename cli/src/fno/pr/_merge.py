@@ -2303,6 +2303,15 @@ _OUTCOME_EMIT = {
 }
 
 
+def reason_after_outcome(reason: str) -> str:
+    """The reason past a leading "<outcome>: " prefix: the authorized-merge
+    renderer writes "<outcome>: <detail>", so readers matching bare prefixes
+    ("checks are red", ALREADY_TERMINAL) must match past the word.
+    """
+    word, sep, rest = reason.partition(": ")
+    return rest if sep and word in _OUTCOME_EMIT else reason
+
+
 def _emit_authorized_outcome(pr_number: int, receipt: dict, strategy: str) -> int:
     """Render one authorized-merge receipt onto this verb's surface."""
     outcome = str(receipt.get("outcome") or "unknown")
