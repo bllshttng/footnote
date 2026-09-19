@@ -2789,6 +2789,7 @@ def test_codex_app_server_report_live_listener_reads_present(tmp_path, monkeypat
 
 
 def test_plugin_cache_no_source_is_unknown(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor, "_cargo_bin_path", lambda: "fno-agents-stub")
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: None)
     report = doctor._plugin_cache_report()
     assert report["status"] == "unknown"
