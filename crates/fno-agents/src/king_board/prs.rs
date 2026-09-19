@@ -2,6 +2,7 @@
 use super::budget::{fno_py_cmd, run_json, run_with_timeout};
 use super::queues::NODE_ID_BODY;
 use super::{s_i64, s_str, SourceRead, LEGACY_DEFER_PREFIX, TERMINAL_RUNGS};
+use crate::graph_store::entry_id;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -551,6 +552,16 @@ fn classify_pr_bindings(rows: &[Value], entries: &[Value]) -> (Vec<Value>, Vec<S
         bound.push(row);
     }
     (bound, warnings)
+}
+
+/// Ids of every entry whose PR bindings contain `pr` (working graph plus
+/// archive; duplicates possible, harmless: the same claim is re-read).
+pub(crate) fn nodes_binding_pr<'a>(entries: &'a [Value], pr: i64) -> Vec<&'a str> {
+    entries
+        .iter()
+        .filter(|e| node_pr_refs(e).iter().any(|(n, _)| *n == pr))
+        .filter_map(|e| entry_id(e))
+        .collect()
 }
 
 /// (pr_number, pr_url) pairs for a node, primary first, deduped
