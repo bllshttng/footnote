@@ -7,7 +7,7 @@
 use fno_agents::loopcheck::run_loop_check_capture;
 use serde_json::Value;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------

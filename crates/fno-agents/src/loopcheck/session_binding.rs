@@ -155,10 +155,10 @@ pub(super) fn gate(parsed: &LoopCheckArgs) -> Gate {
             row.harness_session_id.clone().unwrap_or_default(),
         );
     }
-    if let (Some(row_node), Some(manifest_node)) = (&row.node, manifest_node(&parsed.state_path)) {
-        if row_node != &manifest_node {
+    if let (Some(row_node), Some(m_node)) = (&row.node, &m_node) {
+        if row_node != m_node {
             return refuse(
-                format!("node mismatch: row claims {row_node}, manifest binds {manifest_node}"),
+                format!("node mismatch: row claims {row_node}, manifest binds {m_node}"),
                 row.harness_session_id.clone().unwrap_or_default(),
             );
         }
