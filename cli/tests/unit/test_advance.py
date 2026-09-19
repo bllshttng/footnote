@@ -1335,6 +1335,10 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
     node = {
         "id": "x-dec1", "slug": "decline-pin", "difficulty": "high",
         "priority": "p1", "dispatch_verb": "", "cwd": str(tmp_path),
+        # A model pin: the subject is the harness pin, not model resolution,
+        # which refuses every unpinned dispatch once the routing inventory
+        # is empty (the default on a machine with no config).
+        "model": "test-pin-model",
     }
     _pin_state = _pin_capacity(monkeypatch, claude="exhausted", codex="exhausted")[1]
 
