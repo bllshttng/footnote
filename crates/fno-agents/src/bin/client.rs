@@ -931,6 +931,11 @@ async fn run(args: Vec<String>) -> i32 {
     if matches!(verb, "pr-push") {
         return fno_agents::pr_push::run_push(&args[1..]);
     }
+    // `pr-body-check`: run the repo's own body guards against a composed
+    // body file before `gh pr create`; binary-direct, daemon-free.
+    if matches!(verb, "pr-body-check") {
+        return fno_agents::pr_body_check::run(&args[1..]);
+    }
     if matches!(verb, "pr-rebase") {
         return fno_agents::pr_rebase::run_rebase(&args[1..]);
     }

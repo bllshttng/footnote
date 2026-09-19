@@ -26,6 +26,7 @@ pub(crate) async fn run_dispatch_one(
     session: &str,
     node: Option<&str>,
     account: Option<&str>,
+    plan: bool,
 ) -> String {
     let dispatch_timeout = crate::dispatch_launch::dispatch_timeout();
     let deadline = tokio::time::Instant::now() + dispatch_timeout;
@@ -58,14 +59,19 @@ pub(crate) async fn run_dispatch_one(
 
     // Step 3: the door launches. The argv builder is pure and unit-pinned; no
     // --harness/--model/--route and no message ride, so the grid picks the
-    // lane and the door renders the seed.
-    let argv = crate::dispatch_launch::dispatch_spawn_argv(
-        &fno,
-        &node_id,
-        session,
-        account,
-        parent.as_deref(),
-    );
+    // lane and the door renders the seed. A plan spawn pins the architect
+    // sub-agent and the blueprint message on the SAME door flags.
+    let argv = if plan {
+        crate::dispatch_launch::plan_spawn_argv(&fno, &node_id, session, account, parent.as_deref())
+    } else {
+        crate::dispatch_launch::dispatch_spawn_argv(
+            &fno,
+            &node_id,
+            session,
+            account,
+            parent.as_deref(),
+        )
+    };
     let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
     // Step 4: the outcome maps to the operator's one-liner. Both streams are
     // captured - the door's refusal receipt lives on stderr.
@@ -181,6 +187,42 @@ fn launch_timeout() -> Duration {
 }
 
 impl super::Core {
+    /// One targeted card launch - dispatch or plan - the shared gate both
+    /// wire commands run. Readiness re-checks against the server's OWN
+    /// backlog snapshot (codex peer review): the client gates its confirm to
+    /// a ready card, but the server's snapshot is fresher, so a card that
+    /// went blocked/in-flight between publish and click is refused or routed
+    /// here, never started down a path prefix+g would skip. A stale
+    /// DISPATCH routes to the live work (focus/attach); a stale PLAN refuses
+    /// plainly - the routing arms answer "where is the work", and a
+    /// blueprint for worked work is not asked for twice.
+    pub(super) fn dispatch_card(
+        &mut self,
+        client_id: u64,
+        node: String,
+        account: Option<String>,
+        plan: bool,
+    ) -> super::Flow {
+        if super::card_ready_to_dispatch(&self.backlog, &node) {
+            self.dispatch_next(client_id, Some(node), account, plan);
+        } else if plan {
+            self.notice(client_id, "card not ready to dispatch");
+        } else if let Some(route) = self.inflight_route(&node) {
+            // The client's Layout was stale, but the server can route it:
+            // focus/attach instead of refusing (AC2-ERR). The recursion
+            // reuses the FocusPane/AttachAgent gates verbatim (catalog
+            // membership, jobId shape), so this adds no second spawn path.
+            return self.command(client_id, route);
+        } else if let Some(hint) = self.inflight_hint(&node) {
+            // In flight but unroutable: say where the work is, the same
+            // copy a routed v18 card click would show.
+            self.notice(client_id, hint);
+        } else {
+            self.notice(client_id, "card not ready to dispatch");
+        }
+        super::Flow::Continue
+    }
+
     /// "Grab work" (prefix+g): dispatch the next ready backlog node into
     /// a new pane. Board selection is `fno backlog next`; the launch is the door
     /// (`fno agents spawn`), shelled OFF the core loop in a detached
@@ -188,11 +230,18 @@ impl super::Core {
     /// appears through the existing registry reader; the outcome (dispatched /
     /// no-work / refusal / failure) routes back as `DispatchResult` for a
     /// one-line notice. (move from `server.rs`.)
-    pub(super) fn dispatch_next(&mut self, id: u64, node: Option<String>, account: Option<String>) {
+    pub(super) fn dispatch_next(
+        &mut self,
+        id: u64,
+        node: Option<String>,
+        account: Option<String>,
+        plan: bool,
+    ) {
         let session = self.session_name.clone();
         let core_tx = self.self_tx.clone();
         tokio::spawn(async move {
-            let notice = run_dispatch_one(&session, node.as_deref(), account.as_deref()).await;
+            let notice =
+                run_dispatch_one(&session, node.as_deref(), account.as_deref(), plan).await;
             let _ = core_tx
                 .send(super::CoreMsg::DispatchResult { id, notice })
                 .await;

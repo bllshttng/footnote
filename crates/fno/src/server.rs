@@ -1008,6 +1008,8 @@ pub(crate) enum CoreMsg {
         holders: HashMap<String, String>,
         /// node id -> pr_number, from the same graph read as `cards`.
         prs: HashMap<String, u64>,
+        /// node id -> driving session short id, from the same graph read.
+        drivers: HashMap<String, String>,
         /// Active missions, from the same graph read as `cards`.
         missions: backlog_view::MissionMap,
     },
@@ -2017,6 +2019,9 @@ pub(crate) struct Core {
     /// layout time (holder name -> node -> pr) into `AgentRow.pr` for the peek
     /// header's `PR #N` label.
     backlog_pr: HashMap<String, u64>,
+    /// node id -> driving session short id; joined at layout time into
+    /// `AgentRow.pr_session_short` (the PR row's attach handle).
+    backlog_driver: HashMap<String, String>,
     /// Active missions, from the off-loop graph reader; grouped into
     /// synthetic "mission squad" headers at layout time.
     missions: backlog_view::MissionMap,
@@ -11448,38 +11453,10 @@ impl Core {
                 Flow::Continue
             }
             Command::DispatchNode { node, account } => {
-                // Targeted work-queue dispatch (a clicked card). Reuses
-                // the prefix+g flow pinned to the card's node; the claim race
-                // (already-worked node bounces `already dispatching`) and lane
-                // cap live in the door (`fno agents spawn`). Routes through
-                // CoreMsg::Command, so the read-only-observer refusal already
-                // fired upstream.
-                //
-                // Re-check readiness against the server's OWN backlog snapshot
-                // (codex peer review): the client already gates the confirm to a
-                // ready card, but the server's snapshot is fresher, so a card that
-                // went blocked/in-flight between the client's Layout and the click
-                // is refused here - it must not start work prefix+g would never
-                // pick. An unknown or non-ready id fails closed to a notice, like
-                // the other catalog-named commands (and covers an empty id).
-                if card_ready_to_dispatch(&self.backlog, &node) {
-                    self.dispatch_next(client_id, Some(node), account);
-                } else if let Some(route) = self.inflight_route(&node) {
-                    // The client's Layout was stale: the card went in-flight
-                    // between publish and click, but the server can route it -
-                    // focus/attach instead of refusing (AC2-ERR). The
-                    // recursion reuses the FocusPane/AttachAgent gates verbatim
-                    // (catalog membership, jobId shape), so this adds no second
-                    // spawn path.
-                    return self.command(client_id, route);
-                } else if let Some(hint) = self.inflight_hint(&node) {
-                    // In flight but unroutable: say where the work is, the
-                    // same copy a routed v18 card click would show.
-                    self.notice(client_id, hint);
-                } else {
-                    self.notice(client_id, "card not ready to dispatch");
-                }
-                Flow::Continue
+                self.dispatch_card(client_id, node, account, false)
+            }
+            Command::DispatchPlan { node, account } => {
+                self.dispatch_card(client_id, node, account, true)
             }
             Command::NewSquad { name, origin } => {
                 // Explicit named-workspace creation (Unit 2). A blank/whitespace
@@ -12460,7 +12437,7 @@ impl Core {
                 Flow::Continue
             }
             CoreMsg::DispatchNext { id, account } => {
-                self.dispatch_next(id, None, account);
+                self.dispatch_next(id, None, account, false);
                 Flow::Continue
             }
             CoreMsg::DispatchResult { id, notice } => {
@@ -13279,6 +13256,7 @@ impl Core {
                 stale,
                 holders,
                 prs,
+                drivers,
                 missions,
             } => {
                 // Same as AgentRows: only sideline data moved, so push the
@@ -13288,6 +13266,7 @@ impl Core {
                 self.backlog_stale = stale;
                 self.backlog_holders = holders;
                 self.backlog_pr = prs;
+                self.backlog_driver = drivers;
                 self.missions = missions;
                 self.push_layout(false);
                 Flow::Continue
@@ -13594,6 +13573,7 @@ async fn serve(
         backlog_stale: false,
         backlog_holders: HashMap::new(),
         backlog_pr: HashMap::new(),
+        backlog_driver: HashMap::new(),
         missions: backlog_view::MissionMap::default(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
