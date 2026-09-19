@@ -14579,7 +14579,11 @@ git_bounded();";
                 "\n",
                 r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail","branch":"feature/x"}}"#,
                 "\n",
-                r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
+                // A distinct ts: the re-run pass is a NEW row, and the
+                // store's byte-dedupe would otherwise drop it as a repeat
+                // of the first, leaving the fail as the latest verdict.
+                r#"{"ts":"2026-01-01T00:00:01Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
+                "\n",
             ),
         )
         .unwrap();

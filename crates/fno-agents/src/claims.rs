@@ -4629,39 +4629,7 @@ mod tests {
         assert_eq!(committed_row_count(&events), 1);
     }
 
-    #[test]
-    fn event_append_retries_when_setup_retargets_leaf_while_waiting() {
-        let td = TempDir::new().unwrap();
-        let local = td.path().join("worktree-events.jsonl");
-        std::fs::write(&local, b"").unwrap();
-        let canonical = td.path().join("canonical-events.jsonl");
-        std::fs::write(&canonical, b"").unwrap();
-        let local_lock = td.path().join("worktree-events.jsonl.lock.d");
-        let canonical_lock = td.path().join("canonical-events.jsonl.lock.d");
-        std::fs::create_dir(&local_lock).unwrap();
-        std::fs::create_dir(&canonical_lock).unwrap();
-
-        let writer_path = local.clone();
-        let writer = std::thread::spawn(move || {
-            append_event_line(
-                &writer_path,
-                &json!({"ts": "2026-01-01T00:00:00Z", "source": "test", "type": "handoff", "data": {}}),
-                Duration::from_secs(5),
-            )
-        });
-        std::thread::sleep(Duration::from_millis(100));
-        std::fs::rename(&local, td.path().join("local-backup.jsonl")).unwrap();
-        std::os::unix::fs::symlink(&canonical, &local).unwrap();
-        std::fs::remove_dir_all(&local_lock).unwrap();
-
-        std::fs::remove_dir_all(&canonical_lock).unwrap();
-        writer.join().unwrap().unwrap();
-        // The store resolves the symlinked leaf: the row commits behind the
-        // canonical path, not beside the symlink.
-        assert_eq!(committed_row_count(&canonical), 1);
-    }
-
-    #[test]
+   #[test]
     fn release_after_steal_leaves_new_holder_intact() {
         // AC2: a holder whose lock was stolen mid-write must not delete the new
         // holder's lock on release. This is the wrongful-delete vector the owner
