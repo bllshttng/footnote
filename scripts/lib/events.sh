@@ -172,6 +172,18 @@ _append_bounded_event() {
     # fallback line.
     local bin="${FNO_BIN:-}"
     if [[ -z "$bin" ]]; then
+        # The checkout build outranks PATH, matching store_client's policy: a
+        # test tree never answers through a stale installed binary.
+        local src_root profile
+        src_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+        for profile in debug release; do
+            if [[ -x "$src_root/crates/fno/target/$profile/fno" ]]; then
+                bin="$src_root/crates/fno/target/$profile/fno"
+                break
+            fi
+        done
+    fi
+    if [[ -z "$bin" ]]; then
         bin=$(command -v fno 2>/dev/null) || return 1
     fi
     printf '%s' "$event" | "$bin" doctor event emit-envelope --events "$events_path" >/dev/null 2>&1
