@@ -291,7 +291,7 @@ gh pr create \
   --body-file .fno/pr-body.md
 ```
 
-On exit 1 fix the body and rerun the check; never open the PR; the CI guards read the PR body field, so no commit can fix a body failure.
+On exit 1, fix the body and rerun the check. Never open the PR: the CI guards read the PR body field, so no commit can fix a body failure.
 
 **Capture PR number** from the output URL (e.g., `/pull/105` → `105`).
 
