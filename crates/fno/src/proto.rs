@@ -2907,6 +2907,7 @@ impl TestMuxDir {
             std::process::id(),
             std::thread::current().id()
         ));
+        crate::test_keeper_cleanup::reap(&dir);
         let _ = std::fs::remove_dir_all(&dir);
         Self(dir)
     }
@@ -2915,6 +2916,7 @@ impl TestMuxDir {
 #[cfg(test)]
 impl Drop for TestMuxDir {
     fn drop(&mut self) {
+        crate::test_keeper_cleanup::reap(&self.0);
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }

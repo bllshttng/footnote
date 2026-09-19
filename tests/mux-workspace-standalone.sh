@@ -45,10 +45,38 @@ mkdir -p "$SENT"
 
 S1="wsa-$UNIQ"
 S2="wsc-$UNIQ"
+
+keeper_pids_for_tmp() {
+  ps -axo pid=,command= 2>/dev/null | awk -v tmp="$1" '
+    index($0, tmp) && $2 ~ /fno-agents-worker$/ && $3 == "--pane" { print $1 }
+  '
+}
+
+reap_tmp_keepers() {
+  local tmp_dir="$1"
+  local pids
+  pids="$(keeper_pids_for_tmp "$tmp_dir")"
+  for pid in $pids; do
+    kill -9 "$pid" 2>/dev/null || true
+  done
+  for _ in {1..100}; do
+    pids="$(keeper_pids_for_tmp "$tmp_dir")"
+    [ -z "$pids" ] && return 0
+    sleep 0.05
+  done
+  log "FAIL: pane keepers still name $tmp_dir: $pids"
+  return 1
+}
+
 cleanup() {
+  local exit_status=$?
   [ -n "${S1:-}" ] && FNO_SERVER="$S1" "$FNO" mux kill-server >/dev/null 2>&1
   [ -n "${S2:-}" ] && FNO_SERVER="$S2" "$FNO" mux kill-server >/dev/null 2>&1
+  if ! reap_tmp_keepers "$TMP_ROOT"; then
+    exit_status=1
+  fi
   rm -rf "$TMP_ROOT"
+  return "$exit_status"
 }
 trap cleanup EXIT
 
