@@ -50,8 +50,11 @@ fi
 # Key the frontmatter with the minted id when the plan names none. The
 # filename alone encodes the id only for humans; the validator's node-id
 # gates and the graph readers read the frontmatter, and a name-without-key
-# plan fails the Plan Node Binding check on every later validation.
-if ! grep -qE '^(node|claims):' "$new"; then
+# plan fails the Plan Node Binding check on every later validation. The
+# probe reads the frontmatter block only: a body line starting `node:` is
+# prose, not a key.
+fm_key=$(awk '/^---[[:space:]]*$/{c++; next} c<2 && /^(node|claims):/{print "y"; exit}' "$new")
+if [[ -z "$fm_key" ]]; then
   tmp="$new.tmp"
   if awk -v id="$NODE" '
       /^---[[:space:]]*$/ && !done { print; print "node: " id; done=1; next }

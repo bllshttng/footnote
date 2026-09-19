@@ -91,6 +91,15 @@ check 'added lines under the budget pass' 0 'cli/src/fno added +12, budget 30'
 fresh; lines 12 grow >> cli/src/fno/keep.py; commit
 check 'the env override moves the budget' 1 'budget 5' PY_ADDED_BUDGET=5
 
+fresh; lines 12 grow >> cli/src/fno/keep.py; commit
+out="$(PY_ADDED_BUDGET=garbage bash "$GATE" 2>&1)"; got=$?
+if [[ "$got" -eq 2 && "$out" == *"PY_ADDED_BUDGET must be a number"* ]]; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  printf 'FAIL: garbage env is refused loudly\nexit %s\n%s\n' "$got" "$out"
+fi
+
 # A config answer moves the budget when no env override is set.
 CONFIGBIN="$(mktemp -d)"
 cat > "$CONFIGBIN/fno" <<'STUB'

@@ -84,12 +84,20 @@ BUDGET="${FILE_BUDGET_LINES:-5000}"
 # Added-line budget for the cli/src/fno Python tree. Deletions do not offset:
 # the repair law sets the ceiling on ADDED lines, never the net. Resolution
 # order: the env override, then the config key on a machine with fno, then
-# the law's starting value.
+# the law's starting value. An env override is caller configuration, so
+# garbage there is refused loudly; only the config read falls back silently.
 PY_ADDED_BUDGET="${PY_ADDED_BUDGET:-}"
-if [[ -z "$PY_ADDED_BUDGET" ]] && command -v fno >/dev/null 2>&1; then
-    PY_ADDED_BUDGET="$(fno config get blueprint.python_repair_added_lines 2>/dev/null | sed -n 1p || true)"
+if [[ -n "$PY_ADDED_BUDGET" ]]; then
+    case "$PY_ADDED_BUDGET" in '' | *[!0-9]*)
+        echo "check-file-budget: PY_ADDED_BUDGET must be a number, got '$PY_ADDED_BUDGET'" >&2
+        exit 2 ;;
+    esac
+else
+    if command -v fno >/dev/null 2>&1; then
+        PY_ADDED_BUDGET="$(fno config get blueprint.python_repair_added_lines 2>/dev/null | sed -n 1p || true)"
+    fi
+    [[ "$PY_ADDED_BUDGET" =~ ^[0-9]+$ ]] || PY_ADDED_BUDGET=30
 fi
-[[ "$PY_ADDED_BUDGET" =~ ^[0-9]+$ ]] || PY_ADDED_BUDGET=30
 # An env override is caller configuration, so garbage there is refused loudly -
 # under set -e a non-numeric value would otherwise kill the arithmetic test with
 # no output at all.

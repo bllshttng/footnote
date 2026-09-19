@@ -88,6 +88,15 @@ OUT7="$(run "$SBX7" "$P7" "x-8af8")"
 check_contains "T7: bare plan renamed" "renamed $SBX7/plans/2026-07-11-bare-x-8af8.md" "$OUT7"
 grep -q '^node:' "$SBX7/plans/2026-07-11-bare-x-8af8.md" && bad "T7: key invented without frontmatter" || ok "T7: no key invented without frontmatter"
 
+# --- Test 8: a body line mentioning node: is prose, not a key ---
+SBX8="$(make_sbx)"
+P8="$SBX8/plans/2026-07-11-prose.md"
+printf '%s\n' "---" "status: ready" "---" "# body" "" "node: x-1111 is prose at line start" > "$P8"
+OUT8="$(run "$SBX8" "$P8" "x-8af8")"
+NEW8="$SBX8/plans/2026-07-11-prose-x-8af8.md"
+check_contains "T8: rename succeeded" "renamed $NEW8" "$OUT8"
+grep -q '^node: x-8af8$' "$NEW8" && ok "T8: frontmatter keyed despite prose line" || bad "T8: prose line suppressed the key write"
+
 echo ""
 echo "Results: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
