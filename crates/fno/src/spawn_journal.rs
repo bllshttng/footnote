@@ -103,16 +103,22 @@ impl DetachedPane {
                 .is_none_or(|id| agent_harness_session_id(agent) == Some(id))
     }
 
+    /// The join a detach-time snapshot keeps against its stored member. The
+    /// snapshot's identity narrows the member, never the reverse: the member's
+    /// harness facts are backfilled from the registry AFTER the pane was
+    /// spawned (a detach inside that first tick captures no identity), so a
+    /// snapshot captured identity-less must still join the member it was
+    /// created from once the enrichment lands.
     pub(crate) fn matches_member(&self, member: &crate::squad_store::StoredMember) -> bool {
         member.worker.as_deref() == Some(self.name.as_str())
-            && member
+            && self
                 .harness
                 .as_deref()
-                .is_none_or(|h| self.harness.as_deref() == Some(h))
-            && member
+                .is_none_or(|h| member.harness.as_deref() == Some(h))
+            && self
                 .harness_session_id
                 .as_deref()
-                .is_none_or(|id| self.harness_session_id.as_deref() == Some(id))
+                .is_none_or(|id| member.harness_session_id.as_deref() == Some(id))
     }
 }
 
