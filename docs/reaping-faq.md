@@ -347,7 +347,7 @@ Every top-level key of `fno agents reap --json`, one row each. The dry run rende
 | `open_pr_nudge` | `would nudge {id} ({action})` | [the nudge ladder](#the-nudge-ladder) |
 | `schema_skew` | `registry schema v{on_disk} is ahead of the v{understood} this fno understands: ...` | [Read the answer](#read-the-answer) |
 | `dry_run` | the `(dry-run: no changes made)` marker | [A dry run and a real run answer different questions](#a-dry-run-and-a-real-run-answer-different-questions) |
-| `inventory` | projection, no line: the census of sessions and store roots this pass read | [Read the answer](#read-the-answer) |
+| `inventory` | projection, no line: the census of sessions and store roots this pass read; present only when `--dry-run --json` runs, and a live `--json` object omits it (`client.rs` `run_reap`) | [Read the answer](#read-the-answer) |
 | `mux` | `mux sweep (ran|unread|skipped by --no-mux)` | [Ten programs stop or remove a session](#ten-programs-stop-or-remove-a-session) |
 
 ## One table: the reason, the act, the check
