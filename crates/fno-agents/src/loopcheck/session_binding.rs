@@ -239,13 +239,12 @@ fn manifest_owner(parsed: &LoopCheckArgs, harness: &str, asked: &str) -> Option<
     // manifest lives under the state root, never inside the checkout it
     // binds. A legacy manifest that names no owner_cwd falls back to its own
     // directory (the in-repo layout, where the manifest sat in the checkout).
-    let checkout = scan_manifest_field(&content, "owner_cwd")
-        .or_else(|| {
-            parsed
-                .state_path
-                .parent()
-                .map(|p| p.to_string_lossy().into_owned())
-        });
+    let checkout = scan_manifest_field(&content, "owner_cwd").or_else(|| {
+        parsed
+            .state_path
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+    });
     let Some(checkout) = checkout else {
         return None;
     };
