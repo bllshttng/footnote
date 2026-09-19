@@ -237,7 +237,7 @@ def emit_gate_escape(
         raise ValueError("emit_gate_escape: pass pr XOR dedup_key, not both")
 
     resolved: Optional[Path] = Path(events_path) if events_path is not None else None
-    from fno.events import ValidationError, _build, append_event
+    from fno.events import ValidationError, _build
 
     try:
         event = _build("gate_escape", source, _escape_data(reason, pr, node_id, detail, dedup_key))
@@ -249,7 +249,9 @@ def emit_gate_escape(
             resolved = canonical_events_path(cwd)
         if already_emitted(resolved, reason, pr=pr, dedup_key=dedup_key):
             return None
-        append_event(event, events_path=resolved)
+        from fno.events.store_client import emit_envelope
+
+        emit_envelope(event, resolved)
         return resolved
     except Exception as exc:  # AC1-FR: any runtime failure fails OPEN
         record_emit_failure(

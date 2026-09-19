@@ -58,10 +58,9 @@ def _write_state(cwd: Path, *, session_id: str, status: str = "IN_PROGRESS", pr_
 
 
 def _events(cwd: Path) -> list[dict]:
-    f = cwd / ".fno" / "events.jsonl"
-    if not f.exists():
-        return []
-    return [json.loads(line) for line in f.read_text().splitlines() if line.strip()]
+    from tests._event_rows import event_rows
+
+    return event_rows(cwd / ".fno" / "events.jsonl")
 
 
 def _record(cwd: Path | None, *, session_id: str | None = "sid-1", pr_number: int = 42) -> MergeDriftRecord:
@@ -178,12 +177,12 @@ def test_emit_is_non_fatal_when_append_event_raises(tmp_path, monkeypatch):
     cwd = tmp_path / "repo"
     _write_state(cwd, session_id="sid-1")
 
-    import fno.events as events
+    import fno.events.store_client as store_client
 
     def _boom(*a, **k):
         raise OSError("disk full")
 
-    monkeypatch.setattr(events, "append_event", _boom)
+    monkeypatch.setattr(store_client, "emit_envelope", _boom)
     # Must not raise; returns None.
     assert emit_session_satisfied_for_record(_record(cwd)) is None
 
