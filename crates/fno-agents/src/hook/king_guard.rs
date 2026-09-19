@@ -292,9 +292,15 @@ fn write_targets(command: &str) -> Vec<String> {
             at_command = true;
         } else if nxt {
             nxt = false;
-            // A `)` glued into the word by an open `$( ` (and the matching
-            // backtick) is a substitution closer, not part of the path.
-            let w = tok.trim_end_matches([')', '`']);
+            // Only a lexer-glued closer (NUL-marked) is substitution syntax;
+            // a quoted or escaped literal closer is part of the path. Closers
+            // and markers interleave when substitutions nest, so a marked
+            // word trims the combined set from the end.
+            let w = if tok.contains('\u{0}') {
+                tok.trim_end_matches([')', '`', '\u{0}'])
+            } else {
+                tok.as_str()
+            };
             if !w.contains('>') && !is_fd(w) {
                 targets.push(w.to_string());
             }
@@ -345,9 +351,13 @@ fn write_targets(command: &str) -> Vec<String> {
     }
     flush(&verb, &pool, &mut targets);
     // The verb-operand flush saw the glued closers too; strip them here so
-    // `N=$(cmd | tee out.txt)` names `out.txt`, not `out.txt)`.
+    // `N=$(cmd | tee out.txt)` names `out.txt`, not `out.txt)`. A word with
+    // no marker keeps its literal trailing closers.
     for t in &mut targets {
-        t.truncate(t.trim_end_matches([')', '`']).len());
+        if t.contains('\u{0}') {
+            let n = t.trim_end_matches([')', '`', '\u{0}']).len();
+            t.truncate(n);
+        }
     }
     targets.retain(|t| !t.is_empty());
     targets
@@ -370,6 +380,7 @@ fn lex(command: &str) -> Option<Vec<String>> {
     // whitespace split (`$(pick x)` lexes as `$(pick` + `x)`), so a depth
     // counter, not the current word, decides whether `)` is literal.
     let mut subst = 0usize;
+    let mut bt = 0usize;
     // Set right after a `<<`/`<<-` token: (strip_tabs, reader_is_shell), for
     // the newline arm to act on once the delimiter word lands in `toks`.
     let mut heredoc: Option<(bool, bool)> = None;
@@ -463,12 +474,28 @@ fn lex(command: &str) -> Option<Vec<String>> {
                     subst += 1;
                 } else if c == ')' && subst > 0 {
                     cur.push(c);
+                    // NUL marks a lexer-glued closer; a quoted literal never
+                    // carries one, so a target trim can tell them apart.
+                    cur.push('\u{0}');
                     subst -= 1;
                 } else {
                     if !cur.is_empty() {
                         toks.push(std::mem::take(&mut cur));
                     }
                     toks.push(c.to_string());
+                }
+            }
+            '`' => {
+                // An unquoted backtick is a command-substitution delimiter,
+                // exactly like the `$( ` opener: open glues into the word,
+                // close glues with the marker.
+                if bt > 0 {
+                    cur.push(c);
+                    cur.push('\u{0}');
+                    bt -= 1;
+                } else {
+                    cur.push(c);
+                    bt += 1;
                 }
             }
             '<' | '>' => {
@@ -798,6 +825,11 @@ mod tests {
             targets("N=$(cmd | tee out.txt)"),
             vec!["out.txt"],
             "tee inside a substitution still binds"
+        );
+        assert_eq!(
+            targets("printf x > '1)'"),
+            vec!["1)"],
+            "a quoted literal closer is part of the path"
         );
         // Quoted "a > b" is one word, not an operator.
         assert!(targets("echo \"a > b\"").is_empty());

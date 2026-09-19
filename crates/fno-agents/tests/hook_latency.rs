@@ -1191,10 +1191,10 @@ fn hook_sources_stay_small() {
         nbnc(&format!("{root}/src/hook/stop.rs"), true) <= 950,
         "hook/stop.rs grew past its ceiling"
     );
-    // The ceiling follows the merged file: the substitution-closer strip
-    // landed king_guard.rs at 604 nbnc (main sat at the old 600 exactly).
+    // The ceiling follows the merged file: the substitution-closer handling
+    // (strip, then lexer-glued markers) landed king_guard.rs at 623 nbnc.
     assert!(
-        nbnc(&format!("{root}/src/hook/king_guard.rs"), true) <= 620,
+        nbnc(&format!("{root}/src/hook/king_guard.rs"), true) <= 630,
         "hook/king_guard.rs grew past its ceiling"
     );
     assert!(
