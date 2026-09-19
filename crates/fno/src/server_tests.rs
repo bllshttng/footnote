@@ -5111,33 +5111,6 @@ fn valid_session_uuid_accepts_only_lowercase_8_4_4_4_12_hex() {
     assert!(!valid_session_uuid("12345678-1234-1234-1234-1234567890a")); // short group
 }
 
-#[test]
-fn agent_rows_join_pr_from_holder_map() {
-    // A name-resolved row gets its pr without a claim; a holder-only row
-    // keeps the harness-native fallback. updated_at passes through.
-    let mut core = empty_core();
-    core.session_name = "main".into();
-    let mut worker = bg_row("t-xdae5-reviewflags-glm", "/w", None);
-    worker.updated_at = Some(42);
-    core.agents = vec![worker, bg_row("holder-only", "/x", None)];
-    core.backlog_holders = HashMap::from([("x-9c5f".to_string(), "holder-only".to_string())]);
-    core.backlog_pr = HashMap::from([("x-dae5".to_string(), 999), ("x-9c5f".to_string(), 385)]);
-    core.backlog_driver = HashMap::from([("x-dae5".to_string(), "09234474".to_string())]);
-    let rows = core.agent_rows();
-    let joined = rows
-        .iter()
-        .find(|r| r.name == "t-xdae5-reviewflags-glm")
-        .unwrap();
-    assert_eq!(joined.pr, Some(999));
-    assert_eq!(joined.updated_at, Some(42));
-    // The attach handle joins through the same node resolution as the pr:
-    // the row names the driving session even when its own session id differs.
-    assert_eq!(joined.pr_session_short.as_deref(), Some("09234474"));
-    let fallback = rows.iter().find(|r| r.name == "holder-only").unwrap();
-    assert_eq!(fallback.pr, Some(385));
-    // No driver map entry behind the fallback's pr: the row says so.
-    assert_eq!(fallback.pr_session_short, None);
-}
 
 #[test]
 fn an_active_mission_header_renders_but_never_groups_worker_rows() {
@@ -6788,7 +6761,7 @@ async fn remove_on_an_alive_row_is_not_refused_on_the_server() {
 
 /// A paneless registry row for the routing tests: `name`/`cwd`/`attach_id`
 /// are the join surfaces; everything else is the quiet default.
-fn bg_row(name: &str, cwd: &str, attach: Option<&str>) -> RegistryAgent {
+pub(super) fn bg_row(name: &str, cwd: &str, attach: Option<&str>) -> RegistryAgent {
     RegistryAgent {
         model: None,
         route: None,
@@ -6965,6 +6938,9 @@ fn agent_tails_push_updates_rows_without_a_row_change() {
 // shrink-only line, and test motion is the sanctioned shrink.
 #[path = "server/tests/external_lifecycle_and_backlog_tests.rs"]
 mod external_lifecycle_and_backlog_tests;
+
+#[path = "server/tests/row_set_tests.rs"]
+mod row_set_tests;
 
 #[path = "server/tests/agent_launcher_tests.rs"]
 mod agent_launcher_tests;
@@ -8886,7 +8862,7 @@ fn node_id_shape_check() {
 
 // -- Observer attach (x-6a14 web read-only bridge) --------------------------
 
-fn empty_core() -> Core {
+pub(super) fn empty_core() -> Core {
     let (out_tx, _out_rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
     let (exit_tx, _exit_rx) = mpsc::channel::<u64>(8);
     let (self_tx, _self_rx) = mpsc::channel::<CoreMsg>(8);
