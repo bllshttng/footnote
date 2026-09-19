@@ -818,27 +818,72 @@ def _read_index(path: "Path | None" = None, *, warn: bool = True) -> "tuple[list
 
 
 def _read_legacy_index(path: "Path", *, warn: bool = True) -> "tuple[list[dict], int]":
-    """Read the pre-wave-12 JSONL index for compatibility and migration."""
+    """Read the decision index: committed store rows first, legacy JSONL for
+    the rest.
+
+    The store commit is the write boundary, so a store beside the index holds
+    every recorded row; the raw scan then only contributes legacy-only rows
+    plus the DAMAGED count - a torn append must still cost its warning, and
+    the recovery verb that warning names is what recompacts the file.
+    """
+    from fno.events.store_client import native_rows
+
+    def _row(event_line: str) -> dict:
+        event = json.loads(event_line)
+        data = event["data"]
+        row = dict(data)
+        row["ts"] = event.get("ts")
+        row["_event_type"] = event.get("type")
+        return row
+
+    def _key(row: dict) -> "tuple[str, str]":
+        return (
+            str(row.get("_event_type") or DECISION_EVENT),
+            str(
+                row.get("decision_id")
+                or row.get("retraction_id")
+                or row.get("target_decision_id")
+                or ""
+            ),
+        )
+
+    seen: "set[tuple[str, str]]" = set()
+    rows: list[dict] = []
+    # The store read lands BEFORE the raw-existence dance: a store without a
+    # raw index is the normal post-cutover shape, not an empty one.
+    committed = native_rows(path, types=sorted(DECISION_EVENT_TYPES))
+    if committed is not None:
+        for line in committed:
+            try:
+                row = _row(line)
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+                continue
+            rows.append(row)
+            seen.add(_key(row))
+    damaged = 0
     try:
         path.stat()
     except FileNotFoundError:
         try:
             path.lstat()
         except OSError:
-            return [], 0
-        raise
-    rows: list[dict] = []
-    damaged = 0
+            # A dangling path with no store rows reads as empty; the raise
+            # below keeps an unreachable store from reading as "no records".
+            if not rows:
+                return [], 0
+        else:
+            raise
     for line in _read_lines(path):
         if not _is_index_line(line):
             damaged += 1
             continue
-        event = json.loads(line)
-        data = event["data"]
-        row = dict(data)
-        row["ts"] = event.get("ts")
-        row["_event_type"] = event.get("type")
+        row = _row(line)
+        key = _key(row)
+        if key[1] and key in seen:
+            continue
         rows.append(row)
+        if key[1]:
+            seen.add(key)
     if damaged and warn:
         print(
             f"decide: {damaged} damaged row(s) in {path} were skipped. "
@@ -1503,7 +1548,14 @@ def _default_journals() -> "list[Path]":
         try:
             stat = path.stat()
         except OSError:
-            continue
+            # The store commit is the write boundary: a journal whose only
+            # trace is its store is still a journal the fold must read.
+            from fno.events.store_client import store_db_path
+
+            try:
+                stat = store_db_path(path).stat()
+            except OSError:
+                continue
         key = (stat.st_dev, stat.st_ino)
         if key in seen:
             continue
@@ -1514,33 +1566,47 @@ def _default_journals() -> "list[Path]":
 
 def _journal_events(paths: "list[Path]") -> "list[dict]":
     events: "list[dict]" = []
+    from fno.events.store_client import native_rows
+
+    def _fold(lines) -> "list[dict]":
+        events: "list[dict]" = []
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(rec, dict) or rec.get("type") not in DECISION_EVENT_TYPES:
+                continue
+            data = rec.get("data")
+            if isinstance(data, dict) and (
+                data.get("decision_id")
+                or data.get("retraction_id")
+                or data.get("target_decision_id")
+            ):
+                events.append(rec)
+        return events
+
     for path in paths:
+        # The store commit is the write boundary: committed rows are the
+        # whole history; raw bytes are only the pre-store legacy fallback
+        # (errors="replace" there, so one torn append cannot block reindex -
+        # the very recovery the damaged-row warning sends the operator to).
+        committed = native_rows(path, types=sorted(DECISION_EVENT_TYPES))
+        if committed is not None:
+            events.extend(_fold(committed))
+            continue
         try:
-            # errors="replace" for the same reason the index reader uses it,
-            # and it matters MORE here: this folds every journal the graph
-            # names, so one torn multi-byte append in any of them would make
-            # reindex impossible - the very recovery the damaged-row warning
-            # sends the operator to.
             fh = path.open(encoding="utf-8", errors="replace")
         except OSError:
             continue
         with fh:
-            for line in fh:
-                if not any(event_type in line for event_type in DECISION_EVENT_TYPES):
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if not isinstance(rec, dict) or rec.get("type") not in DECISION_EVENT_TYPES:
-                    continue
-                data = rec.get("data")
-                if isinstance(data, dict) and (
-                    data.get("decision_id")
-                    or data.get("retraction_id")
-                    or data.get("target_decision_id")
-                ):
-                    events.append(rec)
+            events.extend(
+                _fold(
+                    line
+                    for line in fh
+                    if any(event_type in line for event_type in DECISION_EVENT_TYPES)
+                )
+            )
     return events
 
 
