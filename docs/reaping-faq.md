@@ -133,7 +133,7 @@ A kept open-PR row is a session that is not driving. The daemon's retire arm run
 3. **Wait.** The transcript is inside the grace window, or the last nudge is too young.
 4. **Pause.** A live merge order holds the session. The only allowed pause. A lead records it with `fno inbox decide "merge-order:<held-node>:after:<lead-node>" "<lead-node> merges first"`. The ladder waits while the lead node is not done.
 5. **Escalate.** After 3 nudges with no activity, one operator question is filed on the marker `pr-nudge:`. The ladder then waits for activity.
-6. **Mail.** A live session gets `fno agents mail send <full-session-id> "continue: ..."`, rendered from the status JSON: the verdict, the head, and each failing check with its step and first error.
+6. **Mail.** A live session gets `fno agents mail send <full-session-id> "continue: ..."`. The text renders the status JSON: verdict, head, and each failing check with its step and first error.
 7. **Resume.** A session with no live process gets `fno agents resume <full-session-id> --message "<text>"`, which relaunches the same conversation under its full session id.
 
 The message renders the status JSON of `fno do pr status <N>` as a verdict and head. It names each failing check with its step and first error. Events: `pr_nudge_sent`, `pr_nudge_escalated`, `pr_nudge_paused`. State is one file per session under `~/.fno/agents/pr-nudge/`. The ladder fires on the daemon arm only. `fno agents reap --dry-run` prints its plan as `would nudge <id> (<action>)` and takes no effect.
