@@ -651,23 +651,61 @@ pub fn mutate_single_row(
 /// changed plus the ids it removed. Changed rows replace by id (or append,
 /// in the order shipped, when the id is new); removed ids drop. Returns the
 /// post-write rows so the caller can render and answer in the same breath.
+/// The per-row digest the row commit's optimistic check compares: the same
+/// recipe main's keeper uses (canonical copy, sha256 over the python-json
+/// form, truncated to 16 hex chars), so a client that read through any of
+/// our readers gets a stable identity for the row it based on.
+fn canonical_row_digests(entries: &[Value]) -> std::collections::BTreeMap<String, String> {
+    use sha2::Digest as _;
+    let mut canonical = entries.to_vec();
+    crate::graph_store::ensure_slugs(&mut canonical);
+    crate::graph_store::recompute_statuses_with_plan_rungs(&mut canonical, None);
+    crate::graph_store::canonicalize_entries(&mut canonical);
+    canonical
+        .iter()
+        .filter_map(|row| {
+            let id = crate::graph_store::entry_id(row)?.to_string();
+            let digest = sha2::Sha256::digest(crate::graph_store::to_python_json(row).as_bytes());
+            Some((id, format!("{digest:x}")[..16].to_string()))
+        })
+        .collect()
+}
+
 pub fn apply_client_rows(
     graph: &Path,
     mutation: &str,
     mut changed: Vec<Value>,
     removed: Vec<String>,
-    expected_version: Option<&str>,
+    base_digests: std::collections::BTreeMap<String, String>,
 ) -> Result<Vec<Value>, String> {
     mutate_single_row(graph, mutation, move |rows: &mut Vec<Value>| {
-        // The optimistic-token check INSIDE the write transaction: a
+        // Per-row base digests, verified INSIDE the write transaction: a
         // pre-transaction `state_version` probe leaves a window where another
         // writer lands between check and commit, and the tx would silently
         // overwrite its rows (measured: 53 of 100 concurrent same-row notes
-        // survived). The tx's own authoritative rows are what the client's
-        // base_version must still name.
-        if let Some(expected) = expected_version {
-            if content_version(rows) != expected {
-                return Err("graph conflict: base version moved".into());
+        // survived). A changed row whose stored digest moved past the
+        // client's base conflicts; rows this commit never touched merge on.
+        let current = canonical_row_digests(rows);
+        for row in changed.iter() {
+            let Some(id) = crate::graph_store::entry_id(row) else {
+                continue;
+            };
+            let id = id.to_string();
+            let Some(base) = base_digests.get(&id) else {
+                continue;
+            };
+            if let Some(now) = current.get(&id) {
+                if now != base {
+                    return Err("graph conflict: base row moved".into());
+                }
+            }
+        }
+        for id in removed.iter() {
+            let (Some(base), Some(now)) = (base_digests.get(id), current.get(id)) else {
+                continue;
+            };
+            if base != now {
+                return Err("graph conflict: base row moved".into());
             }
         }
         rows.retain(|row| {
