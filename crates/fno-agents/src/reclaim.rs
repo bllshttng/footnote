@@ -535,10 +535,16 @@ pub(crate) mod tests {
     fn age(path: &Path, minutes: u64) {
         let old = SystemTime::now() - Duration::from_secs(minutes * 60);
         // A dir cannot be opened for writing; futimens through a read handle
-        // is allowed for the file's owner.
+        // is allowed for the file's owner. Both times: cargo_build_dirs'
+        // quiet_of now takes the newer of mtime and atime, so a fixture
+        // backdating only one would still read as fresh.
         let file = std::fs::File::options().read(true).open(path).unwrap();
-        file.set_times(std::fs::FileTimes::new().set_modified(old))
-            .unwrap();
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(old)
+                .set_accessed(old),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -662,8 +668,12 @@ pub(crate) mod tests {
                 orphan.join(entry)
             };
             let file = std::fs::File::options().read(true).open(&p).unwrap();
-            file.set_times(std::fs::FileTimes::new().set_modified(old))
-                .unwrap();
+            file.set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(old)
+                    .set_accessed(old),
+            )
+            .unwrap();
         }
         for name in [
             "debug/deps/payload",
@@ -674,8 +684,12 @@ pub(crate) mod tests {
                 .read(true)
                 .open(orphan.join(name))
                 .unwrap();
-            file.set_times(std::fs::FileTimes::new().set_modified(old))
-                .unwrap();
+            file.set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(old)
+                    .set_accessed(old),
+            )
+            .unwrap();
         }
 
         let state = temp_lane_root("cargo-lane-state");

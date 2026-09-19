@@ -8,9 +8,13 @@
 //! classifies each tagged hash dir through four lanes (fresh, orphan, age,
 //! cap), guarded by an exclusive `flock` on each profile's `.cargo-lock`
 //! before any delete. Over the cap the lane reaps owned rows least recently
-//! used first, fresh rows included; only a live cargo holding that lock keeps
-//! a row. Rows are matched by `CACHEDIR.TAG`, base, and member fingerprint -
-//! never by name.
+//! used first, fresh rows included, down to a short `CAP_MIN_QUIET_SECS`
+//! floor it never crosses; a live cargo holding that lock keeps a row, and
+//! so does a row whose tree a currently running cargo process's cwd falls
+//! under - the lock alone misses the gap between two test binaries in one
+//! `cargo test` run, where nothing is locked or open yet the run still needs
+//! the dir. Rows are matched by `CACHEDIR.TAG`, base, and member fingerprint
+//! - never by name.
 //!
 //! Surfaced as the `cargo_build_dirs` lane of `fno doctor reclaim`, the
 //! `fno-agents reclaim cargo-build-dirs` / `remove-for` subcommands, and the
@@ -27,6 +31,13 @@ use std::time::{Duration, SystemTime};
 const FRESH_SECS: u64 = 6 * 3600;
 /// An owned build quiet for 3 days is reaped by the age lane.
 const AGE_SECS: u64 = 3 * 24 * 3600;
+/// The cap lane's own floor, far short of `FRESH_SECS` so a busy fleet's rows
+/// still clear it: a row touched within this window never goes under cap
+/// pressure, live-cargo detection or not. A held `.cargo-lock` and a live
+/// process's cwd are the precise signals; this is the backstop for when
+/// neither fires - `lsof` absent, an odd process name - a lock gap must
+/// never read as idle.
+const CAP_MIN_QUIET_SECS: u64 = 15 * 60;
 /// The cap lane never defends more than this, and no more than half the free
 /// space (whichever is smaller) - the same shape as the bash sweep's
 /// `min(--cap-bytes, free-share-pct% of free)`.
@@ -318,9 +329,19 @@ fn quiet_of(dir: &Path, now: SystemTime) -> Duration {
         let Ok(meta) = std::fs::symlink_metadata(dir) else {
             return;
         };
+        // mtime alone misses a directory only ever read from, never written
+        // to again after the build that made it - a `cargo test` run reads
+        // `deps/` without touching its mtime. atime is the weaker of the two
+        // (many mounts throttle it via relatime) but costs nothing extra to
+        // check, so take whichever of the pair is newer.
         if let Ok(m) = meta.modified() {
             if m > *acc {
                 *acc = m;
+            }
+        }
+        if let Ok(a) = meta.accessed() {
+            if a > *acc {
+                *acc = a;
             }
         }
         if depth == 0 {
@@ -452,6 +473,58 @@ fn remove_empty_shard(dir: &Path) -> bool {
     false
 }
 
+/// Every currently running `cargo` process's cwd, via one `lsof` read (the
+/// same tool `pane_stop.rs` already relies on; works on both macOS and
+/// Linux). `lsof` missing or erroring reads as no live process - the flock
+/// still catches the pure-compile window either way.
+///
+/// `FNO_TEST_LIVE_CARGO_CWDS` (colon-separated paths) substitutes for the
+/// real read in tests: a process whose kernel-reported name is genuinely
+/// `cargo` can't be spawned to order (the name comes from the executed
+/// file's own path, not argv0 or a script's shebang target), so the seam is
+/// what lets a test drive the tree-to-shard mapping below deterministically.
+fn live_cargo_cwds() -> Vec<PathBuf> {
+    if let Ok(raw) = std::env::var("FNO_TEST_LIVE_CARGO_CWDS") {
+        return raw
+            .split(':')
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .collect();
+    }
+    let Ok(output) = Command::new("lsof")
+        .args(["-a", "-d", "cwd", "-c", "cargo", "-Fn"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix('n'))
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Every hash dir a live cargo command might still need. `cargo test` drops
+/// its `.cargo-lock` once compiling ends, so the flock reads free for the
+/// whole run phase - the gap between one test binary exiting and the next
+/// one starting has no lock and no open file under the dir the cap lane is
+/// about to judge. The live process's cwd is the only signal left: whichever
+/// registered tree it falls under has a cargo command in flight, so every
+/// dir that tree's manifests resolve to stays off the cap lane's table.
+fn live_shards(trees: &[PathBuf], fno_base: &Path) -> BTreeSet<PathBuf> {
+    let mut shards = BTreeSet::new();
+    for cwd in live_cargo_cwds() {
+        let cwd = phys(&cwd);
+        let Some(tree) = trees.iter().find(|t| cwd.starts_with(phys(t))) else {
+            continue;
+        };
+        if let Ok(answer) = answer_tree(tree, fno_base) {
+            shards.extend(answer.dirs.iter().map(|d| phys(d)));
+        }
+    }
+    shards
+}
+
 // --- free space --------------------------------------------------------------
 
 fn free_bytes(path: &Path) -> Option<u64> {
@@ -526,8 +599,8 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
 
     let mut names: BTreeSet<String> = BTreeSet::new();
     let mut resolved: BTreeSet<PathBuf> = BTreeSet::new();
-    for tree in trees {
-        match answer_tree(&tree, &fno_base) {
+    for tree in &trees {
+        match answer_tree(tree, &fno_base) {
             Ok(answer) => {
                 rep.trees_resolved += 1;
                 names.extend(answer.names);
@@ -538,6 +611,15 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
             }
         }
     }
+    // A live `cargo` (build or test) holds `.cargo-lock` only while it
+    // compiles; `cargo test` drops it before running the built binaries, so
+    // the gap between one test binary exiting and the next one starting has
+    // no lock and no open file under the dir the cap lane is about to judge.
+    // The live process itself is the only signal left standing: whichever
+    // tree its cwd falls under is a tree with a cargo command in flight, so
+    // every dir that tree's manifests resolve to is off the table this
+    // sweep, cap pressure or not.
+    let live = live_shards(&trees, &fno_base);
 
     let mut rows: Vec<Row> = Vec::new();
     for base in &bases {
@@ -571,7 +653,9 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
     let mut planned_bytes: u64 = 0;
     let mut refusal_of: BTreeMap<usize, &'static str> = BTreeMap::new();
     for (i, row) in rows.iter().enumerate() {
-        let decision = if row.quiet < Duration::from_secs(FRESH_SECS) {
+        let decision = if live.contains(&phys(&row.path)) {
+            Decision::Keep("cargo-live")
+        } else if row.quiet < Duration::from_secs(FRESH_SECS) {
             Decision::Keep("fresh")
         } else if rep.orphan_lane.is_none()
             && !resolved.contains(&phys(&row.path))
@@ -644,9 +728,10 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
     }
 
     // Cap: while the bytes actually left exceed the effective ceiling, reap
-    // owned rows least recently used first, fresh rows included. The flock
-    // is the only veto here (no quiet recheck), and a refused row never ends
-    // the loop - the next-oldest candidate still goes.
+    // owned rows least recently used first, rows past CAP_MIN_QUIET_SECS
+    // included. The flock, the live-cargo check, and that floor are the only
+    // vetoes here (no FRESH_SECS recheck), and a refused row never ends the
+    // loop - the next-oldest candidate still goes.
     let mut remaining = if apply {
         before_bytes.saturating_sub(rep.reclaimed_bytes)
     } else {
@@ -656,7 +741,12 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
         let mut candidates: Vec<usize> = rows
             .iter()
             .enumerate()
-            .filter(|(i, r)| (r.under_fno || r.membership) && !planned.contains(i))
+            .filter(|(i, r)| {
+                (r.under_fno || r.membership)
+                    && !planned.contains(i)
+                    && !live.contains(&phys(&r.path))
+                    && r.quiet >= Duration::from_secs(CAP_MIN_QUIET_SECS)
+            })
             .map(|(i, _)| i)
             .collect();
         candidates.sort_by(|a, b| rows[*b].quiet.cmp(&rows[*a].quiet));
@@ -846,7 +936,13 @@ mod tests {
         let old = SystemTime::now() - Duration::from_secs(secs);
         fn walk(path: &Path, old: SystemTime) {
             if let Ok(file) = std::fs::File::options().read(true).open(path) {
-                let _ = file.set_times(std::fs::FileTimes::new().set_modified(old));
+                // quiet_of now takes the newer of mtime and atime, so a
+                // fixture backdating only mtime would still read as fresh.
+                let _ = file.set_times(
+                    std::fs::FileTimes::new()
+                        .set_modified(old)
+                        .set_accessed(old),
+                );
             }
             if let Ok(entries) = std::fs::read_dir(path) {
                 for entry in entries.flatten() {
@@ -944,6 +1040,7 @@ mod tests {
             std::env::remove_var("CBD_FB_ANSWER");
             std::env::remove_var("FNO_CARGO_TARGETS_BASE");
             std::env::remove_var("FNO_CARGO_FREE_BYTES");
+            std::env::remove_var("FNO_TEST_LIVE_CARGO_CWDS");
             let _ = std::fs::remove_dir_all(&self.root);
             let _ = std::fs::remove_dir_all(&self.fb_parent);
         }
@@ -1225,6 +1322,72 @@ mod tests {
             "{summary}"
         );
         drop(lock);
+    }
+
+    /// The CI incident this guards against: `cargo test` drops `.cargo-lock`
+    /// once compiling ends, so the gap between one test binary exiting and
+    /// the next one starting holds no lock and no open file - the cap lane
+    /// reaped the build dir a live `cargo test` was still running out of.
+    /// The live process's own tree stays off the cap lane's table even when
+    /// it is the only row standing between the sweep and the cap.
+    #[test]
+    fn cap_keeps_a_row_a_live_cargo_process_owns() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("caplive", "never-broken");
+        // The fake cargo always answers CBD_FNO_ANSWER for this tree, so
+        // this is the exact dir a live cargo process running from
+        // `env.root` would own.
+        let live = plant(&env.fno_base, "00", "aaaa11", 0, false);
+        let other = plant(&env.fno_base, "00", "other01", 3600, false);
+        let unit = crate::reclaim::tree_bytes(&live);
+        std::env::set_var("FNO_CARGO_FREE_BYTES", unit.to_string());
+        std::env::set_var("FNO_TEST_LIVE_CARGO_CWDS", &env.root);
+
+        let rep = sweep(&env.root, true, SystemTime::now());
+
+        assert!(
+            live.exists(),
+            "a live cargo process's own build dir is never a cap candidate"
+        );
+        assert!(
+            !other.exists(),
+            "an unrelated row still goes under cap pressure"
+        );
+        assert_eq!(rep.reaped, 1, "{rep:?}");
+        assert!(rep.lines.iter().any(|l| l.contains("kept lane=cargo-live")));
+        assert!(rep.lines.iter().any(|l| l.contains("reaped lane=cap")));
+        let summary = rep.lines.last().unwrap();
+        assert!(summary.contains("cap_exceeded=true"), "{summary}");
+        assert!(summary.contains("cap_held=cargo-live:1"), "{summary}");
+    }
+
+    /// Defense in depth: with no live cargo process detected at all (`lsof`
+    /// absent, an odd process name, the test seam left empty), a row touched
+    /// two minutes ago is still never a cap candidate - `CAP_MIN_QUIET_SECS`
+    /// is the backstop for whatever the live-cargo check misses. A lock gap
+    /// must never read as idle.
+    #[test]
+    fn cap_never_crosses_its_own_min_quiet_floor() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("capfloor", "never-broken");
+        let recent = plant(&env.fno_base, "00", "recent1", 120, false);
+        let other = plant(&env.fno_base, "00", "other02", 3600, false);
+        let unit = crate::reclaim::tree_bytes(&recent);
+        std::env::set_var("FNO_CARGO_FREE_BYTES", unit.to_string());
+
+        let rep = sweep(&env.root, true, SystemTime::now());
+
+        assert!(
+            recent.exists(),
+            "a row inside the cap's own min-quiet floor is never a cap candidate"
+        );
+        assert!(
+            !other.exists(),
+            "an unrelated row past the floor still goes under cap pressure"
+        );
+        assert_eq!(rep.reaped, 1, "{rep:?}");
+        assert!(rep.lines.iter().any(|l| l.contains("kept lane=fresh")));
+        assert!(rep.lines.iter().any(|l| l.contains("reaped lane=cap")));
     }
 
     /// AC4-HP: a dry run that plans one age reap reports the bytes it WOULD
