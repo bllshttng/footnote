@@ -4147,15 +4147,6 @@ MemAvailable:    8000000 kB\n";
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("s0");
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("FNO_CONFIG", dir.join("config.toml"));
-        std::fs::write(
-            dir.join("config.toml"),
-            r#"[[work.workspaces.main.projects]]
-name = "other"
-path = "/repo/other"
-"#,
-        )
-        .unwrap();
         std::fs::write(
             dir.join("graph.json"),
             serde_json::json!({ "entries": [
@@ -4174,18 +4165,18 @@ path = "/repo/other"
             ),
         )
         .unwrap();
-        // Same config-pinned graph as the receipt test: no env writes to race.
+        // Same double pin as the receipt test, plus the workspace map the
+        // resolve_territories leg needs: one config file answers both
+        // lookups through the climb, so no FNO_CONFIG write can leak.
         std::fs::create_dir_all(dir.join(".fno")).unwrap();
         std::fs::write(
             dir.join(".fno/config.toml"),
             format!(
-                "schema_version = 1\n\n[paths]\ngraph_json = \"{}\"\n",
+                "schema_version = 1\n\n[paths]\ngraph_json = \"{}\"\n\n[[work.workspaces.main.projects]]\nname = \"other\"\npath = \"/repo/other\"\n",
                 dir.join("graph.json").display()
             ),
         )
         .unwrap();
-        // Same double pin as the receipt test: config first, FNO_HOME as the
-        // fall-through guard against a leaked FNO_CONFIG.
         std::env::set_var("FNO_HOME", &dir);
 
         let mut warnings = Vec::new();
