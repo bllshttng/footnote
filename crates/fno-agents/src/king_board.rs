@@ -43,6 +43,7 @@ mod classify;
 pub(crate) mod prs;
 mod queues;
 pub(crate) mod scope;
+mod stranded;
 
 pub(crate) use queues::not_read_status;
 
@@ -62,6 +63,7 @@ pub(crate) use scope::{
     autonomous_merge_enabled, blocked_child_grace_minutes, expand_home, graph_json_path,
     home_dot_fno, operator_lane_path, parse_manifest, project_map,
 };
+pub(crate) use stranded::{read_stranded_trees, stranded_candidates, STRANDED_GRACE_MINUTES};
 
 /// Priorities a king treats as its own work. Lower bands are the operator's.
 pub(crate) const KING_PRIORITIES: [&str; 2] = ["p0", "p1"];
@@ -1058,6 +1060,18 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         }
     };
 
+    // The stranded-tree read: which linked worktrees hold uncommitted or
+    // unpushed work under an open king-priority node. Candidates come from
+    // the one graph read; repos from the workspace map plus this repo's
+    // canonical root, so a board run anywhere lands the same tree set.
+    let candidates = entries
+        .as_deref()
+        .map(|e| stranded_candidates(e))
+        .unwrap_or_default();
+    let repos = scope::project_repo_paths(&cwd);
+    let stranded = read_stranded_trees(&repos, &candidates, &mut budget);
+    mark(&mut sources, "stranded", &stranded, false);
+
     let inputs = BoardInputs {
         ready,
         claims,
@@ -1074,6 +1088,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         lane,
         undispatched,
         blocked_child,
+        stranded,
         entries,
         held: held_map,
         warnings,
@@ -1386,6 +1401,7 @@ mod tests {
             blocked_child: ok_read(Value::Array(Vec::new())),
             lane: ok_read(Value::Array(Vec::new())),
             undispatched: ok_read(Value::Array(Vec::new())),
+            stranded: ok_read(Value::Array(Vec::new())),
             entries: None,
             held: Default::default(),
             warnings: Vec::new(),
@@ -1799,6 +1815,75 @@ mod tests {
         assert_eq!(rows.len(), 1, "{unheld}");
         assert_eq!(rows[0]["id"], "x-dddd");
         assert!(rows[0].get("claim_state").is_none(), "{:?}", rows[0]);
+    }
+
+    #[test]
+    fn stranded_tree_names_a_dirty_quiet_driverless_tree() {
+        // AC3-HP: a p1 ready node whose tree holds 1 modified file, no live
+        // claim or driver, and no write for 61 minutes is stranded, and the
+        // row carries the tree, the dirty count and the resume flag.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.entries = Some(vec![json!({
+            "id": "x-dddd", "priority": "p1", "status": "ready",
+            "title": "stranded tree",
+        })]);
+        inputs.stranded = ok_read(json!([
+            {"id": "x-dddd", "tree": "/base/footnote/x-dddd", "branch": "feature/x-dddd",
+             "dirty": 1, "unpushed": 0, "idle_minutes": 61, "resumable": true},
+        ]));
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        let stranded = queues
+            .iter()
+            .find(|q| q["name"] == "stranded_tree")
+            .unwrap();
+        let rows = stranded["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{stranded}");
+        assert_eq!(rows[0]["id"], "x-dddd");
+        assert_eq!(rows[0]["dirty"], 1);
+        assert_eq!(rows[0]["resumable"], true);
+    }
+
+    #[test]
+    fn stranded_tree_omits_fresh_work_a_live_claim_and_a_clean_tree() {
+        // AC3-LIVE: the same tree under a live claim, or last written 10
+        // minutes ago, or clean and fully pushed, is not stranded. A stranded
+        // row whose node left the graph also drops (the queue trusts the
+        // graph join, never names unattributable work).
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.claims = ok_read(json!([
+            {"key": "node:x-claimed", "state": "live", "holder": "session-1"},
+        ]));
+        inputs.entries = Some(vec![
+            json!({"id": "x-fresh", "priority": "p1", "status": "ready", "title": "wrote 10m ago"}),
+            json!({"id": "x-claimed", "priority": "p1", "status": "ready", "title": "live claim"}),
+            json!({"id": "x-clean", "priority": "p1", "status": "ready", "title": "clean tree"}),
+        ]);
+        inputs.stranded = ok_read(json!([
+            {"id": "x-fresh", "dirty": 1, "unpushed": 0, "idle_minutes": 10, "resumable": true},
+            {"id": "x-claimed", "dirty": 2, "unpushed": 1, "idle_minutes": 90, "resumable": true},
+            {"id": "x-clean", "dirty": 0, "unpushed": 0, "idle_minutes": 90, "resumable": true},
+            {"id": "x-ghost", "dirty": 3, "unpushed": 0, "idle_minutes": 90, "resumable": false},
+        ]));
+        let board = build_board(&inputs);
+        let queues = board.get("queues").and_then(Value::as_array).unwrap();
+        let stranded = queues
+            .iter()
+            .find(|q| q["name"] == "stranded_tree")
+            .unwrap();
+        let rows = stranded["rows"].as_array().unwrap();
+        assert!(
+            rows.iter().all(|r| r["id"] != "x-fresh"),
+            "a tree written 10 minutes ago is not stranded: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r["id"] != "x-claimed"),
+            "a tree under a live claim is not stranded: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r["id"] != "x-clean"),
+            "a clean, fully pushed tree is not stranded: {rows:?}"
+        );
     }
 
     #[test]
@@ -2702,7 +2787,7 @@ mod tests {
     #[test]
     fn the_board_answers_inside_a_tight_budget_with_every_queue_present() {
         // An isolated HOME + cwd: no graph, no claims, no lane - the degraded
-        // machine. The board must still answer with all thirteen queues
+        // machine. The board must still answer with all fourteen queues
         // (plus nothing else), the unreadable actionable ones counted, and
         // exit 1.
         // A declared hermetic root: blocked_child's collection resolves
@@ -2726,7 +2811,7 @@ mod tests {
         });
         std::env::remove_var("FNO_AGENTS_HOME");
         let queues = payload.get("queues").and_then(Value::as_array).unwrap();
-        assert_eq!(queues.len(), 14, "{payload}");
+        assert_eq!(queues.len(), 15, "{payload}");
         assert_eq!(payload["exit_code"], 1, "{payload}");
         assert!(payload["unreadable"].as_i64().unwrap() > 0);
         let names: Vec<&str> = queues
@@ -2743,6 +2828,7 @@ mod tests {
                 "unheld_progress",
                 "blocked_child",
                 "undriven_pr",
+                "stranded_tree",
                 "mergeable_pr",
                 "stale_claim",
                 "operator_question",
