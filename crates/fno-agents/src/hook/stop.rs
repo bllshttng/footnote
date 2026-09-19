@@ -132,9 +132,9 @@ enum GrokFire {
 /// only on grok's camelCase `hookEventName: "stop"`; claude and codex send no
 /// such key, so `None` leaves them on today's path. grok's own
 /// `transcript_path` copy names updates.jsonl, so the store path comes from
-/// the chat_history.jsonl lookup below instead. A subagent stop and the session-end fire (no `promptId`)
-/// answer `Skip`: neither is this session's turn gate, so `hook stop` exits 0
-/// with no output and no event.
+/// the chat_history.jsonl lookup below instead. A subagent stop and the
+/// session-end fire (no `promptId`) answer `Skip`: neither is this session's
+/// turn gate, so `hook stop` exits 0 with no output and no event.
 fn normalize_grok_envelope(parsed: &Value) -> Option<GrokFire> {
     if parsed.get("hookEventName").and_then(Value::as_str) != Some("stop") {
         return None;
