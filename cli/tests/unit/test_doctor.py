@@ -1493,6 +1493,43 @@ def test_fix_rust_stale_refused_pin_exits_one_without_refresh(
     assert "refused" in result.stderr
 
 
+def test_fix_rust_stale_pin_path_mismatch_refuses_without_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An allow verdict for a DIFFERENT path than the one the verdict
+    measured gates nothing: a concurrent --source repin between the verdict
+    read and the fix would validate one checkout and refresh another. The
+    refresh may only run on the exact tree the pin just allowed."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc",
+        marker="abc",
+        capture_present="present",
+        rust_binary="/cargo/bin/fno-agents",
+        rust_marker="aaa",
+        rust_source_rev="bbb",
+        cargo_bin_present=True,
+    )
+    from fno import update
+
+    monkeypatch.setattr(update, "_target_in_progress", lambda: False)
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda override=None: {"decision": "allow", "path": "/elsewhere/safe"},
+    )
+
+    def _no_refresh(source, *, force=False, dry_run=False):
+        raise AssertionError("_refresh_rust_bins must not run on a pin path mismatch")
+
+    monkeypatch.setattr(update, "_refresh_rust_bins", _no_refresh)
+
+    result = runner.invoke(app, ["doctor", "--fix"])
+    assert result.exit_code == 1
+    assert "/elsewhere/safe" in result.stderr
+
+
 def test_ac2_edge_python_and_rust_stale_fix_delegates_update_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

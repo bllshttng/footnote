@@ -4538,12 +4538,23 @@ def doctor_command(
             # Same gate as update_command: an unresolvable or refused pin
             # means the source is unproven or a worktree whose HEAD is not
             # an ancestor of origin/main, and refreshing from it installs
-            # unmerged code machine-wide. Name the path so the reader sees
-            # the worktree.
+            # unmerged code machine-wide. A pin resolved to a DIFFERENT
+            # path than src is the same hazard: a concurrent `--source`
+            # repin between the verdict read and here would gate one
+            # checkout and refresh another. Name the path so the reader
+            # sees the worktree.
             pin = update._resolve_source_pin(source)
-            if pin is None or pin.get("decision") == "refuse":
+            if (
+                pin is None
+                or pin.get("decision") == "refuse"
+                or not pin.get("path")
+                or src is None
+                or Path(pin["path"]) != src
+            ):
                 rpath = (pin or {}).get("path") or src
-                reason = (pin or {}).get("refusal") or "source checkout unproven or refused"
+                reason = (pin or {}).get("refusal") or (
+                    "resolved pin does not match the source the verdict measured"
+                )
                 typer.echo(
                     "fno doctor: --fix refused: source "
                     f"{rpath} failed the source-pin gate: {reason}.",
