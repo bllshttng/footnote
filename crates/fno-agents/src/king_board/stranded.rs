@@ -107,7 +107,7 @@ fn probe_tree(
     branch: &Option<String>,
     budget: &mut Budget,
 ) -> Result<Value, RunFailure> {
-    let mut git = |args: Vec<&str>, budget: &mut Budget| -> Result<String, RunFailure> {
+    let git = |args: Vec<&str>, budget: &mut Budget| -> Result<String, RunFailure> {
         let slice = match budget.start("stranded tree probe") {
             Some(s) => s,
             None => return Err(RunFailure::KilledAtSlice(BUDGET_EXHAUSTED.to_string())),
