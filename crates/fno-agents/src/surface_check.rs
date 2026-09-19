@@ -373,12 +373,18 @@ fn shape_check(plan_path: &str, out: &mut String) -> bool {
             .filter(|a| nonempty_str(a))
             .map(|a| a.as_str().unwrap().trim())
             .collect();
-        if ats.contains(&control) {
+        let heads: Vec<&str> = ats.iter().map(|a| at_head(a)).collect();
+        if heads.iter().any(|h| *h == at_head(control)) {
             out.push_str(&format!("O\tcontrol `{control}` returned by the sweep\n"));
         } else {
+            let listed = heads
+                .iter()
+                .map(|h| format!("`{h}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
             out.push_str(&format!(
-                "E\tsurface.control `{control}` names no listed answerer - a control that is \
-                 not an answerer is a typo or a lie\n"
+                "E\tsurface.control `{control}` names no listed answerer (listed: {listed}); \
+                 a control matches an answerer's path and symbol, and the note is ignored\n"
             ));
         }
     }
@@ -710,6 +716,11 @@ fn at_symbol(at_text: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// An `at:` or `control:` value without its trailing ` (note)`.
+fn at_head(at: &str) -> &str {
+    at.split_once(" (").map_or(at, |(head, _)| head).trim()
 }
 
 /// Every free `name(` in `reads:`. There is no space before the parenthesis
@@ -1169,6 +1180,42 @@ mod tests {
         let plan = write_plan(&dir, &fm, "ctrl.md");
         let out = run(&plan, None, None);
         assert!(out.contains("names no listed answerer"), "{out}");
+        assert!(out.contains("`src/reader.py:10`"), "{out}");
+    }
+
+    #[test]
+    fn control_matches_answerer_ignoring_at_note() {
+        let dir = tmp_dir("ctrl-head");
+        let fm = surface_block(
+            "Is this reachable?",
+            "  answerers:\n    - at: src/reader.py:10 row_ref_valid (the filter)\n      \
+             disposition: dual-logic\n      reads: \"x\"\n      emits: \"y\"\n  \
+             control: src/reader.py:10 row_ref_valid\n",
+            1,
+            1,
+        );
+        let plan = write_plan(&dir, &fm, "ctrl-head.md");
+        let out = run(&plan, None, None);
+        assert!(
+            out.contains("O\tcontrol `src/reader.py:10 row_ref_valid` returned by the sweep"),
+            "{out}"
+        );
+        assert!(!out.contains("names no listed answerer"), "{out}");
+    }
+
+    #[test]
+    fn quick_template_surface_example_passes() {
+        let tpl = include_str!("../../../skills/blueprint/references/quick-template.md");
+        let fm = tpl
+            .split("```markdown\n---\n")
+            .nth(1)
+            .and_then(|s| s.split("\n---\n").next())
+            .unwrap();
+        let dir = tmp_dir("tpl");
+        let plan = write_plan(&dir, fm, "tpl.md");
+        let out = run(&plan, None, None);
+        assert!(out.contains("O\tcontrol"), "{out}");
+        assert!(!out.contains("names no listed answerer"), "{out}");
     }
 
     // ── cross-language walk ──────────────────────────────────────────────

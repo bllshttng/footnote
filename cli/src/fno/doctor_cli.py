@@ -71,6 +71,26 @@ doctor_app.command("reclaim", hidden=True)(reclaim_command)
 doctor_app.command("footprint", hidden=True)(footprint_command)
 # Bash-call shape over this project's transcripts; hidden, `fno help doctor --all`.
 doctor_app.command("bash-census", hidden=True)(bash_census_command)
+
+
+# `doctor intel` shells to the Rust fold; hidden per the new-verb convention.
+@doctor_app.command("intel", hidden=True)
+def intel_command() -> None:
+    """Who typed: per-session provenance counters, tool calls, commits, relay facets.
+
+    Runs the fold at its defaults (14 days, this project). The flag surface
+    is the binary's, never Python's: `fno-agents intel --help`.
+    """
+    import subprocess
+    from fno._subprocess_util import propagate_returncode
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo("fno doctor intel: the fno-agents binary was not found; run `fno doctor update --rust`.", err=True)
+        raise typer.Exit(code=2)
+    result = subprocess.run([str(binary), "intel"], check=False)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
 # `doctor lanes` is the whole-machine lane advisor: one number and its
 # reasoning, or a refusal naming every dark sensor. Hidden per the new-verb
 # convention; `fno help doctor --all`.

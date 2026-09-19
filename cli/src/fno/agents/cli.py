@@ -3872,13 +3872,13 @@ def _batch_resolver():
 
 
 def _truth_line(result: dict, falsifier: str | None) -> str:
-    """The human truth line. A falsified row reads dead, never its last
-    transcript state."""
-    from fno.agents.session_truth import render_truth
+    """The human truth line: dead, or exited (resumable) when a resume could relaunch it."""
+    from fno.agents.session_truth import RESUMABLE_BASES, render_truth
 
     payload = _truth_payload(result, falsifier=falsifier)
     if payload["reachability"] == "unreachable":
-        result = {**result, "state": "dead"}
+        result = {**result, "state": (
+            "exited" if payload["basis"] in RESUMABLE_BASES and result.get("session_id") else "dead")}
     return f"{render_truth(result)} [{payload['reachability']}: {payload['basis']}]"
 
 

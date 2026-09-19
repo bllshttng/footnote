@@ -1,11 +1,11 @@
 //! The operator lane parser and the thirteen-queue board build (pure; no I/O).
 use super::classify::{claim_is_dead, holder_token, node_driver, node_has_pr};
-use super::prs::derived_status;
+use super::prs::{derived_status, node_pr_refs, nodes_binding_pr};
 use super::scope::operator_lane_path;
 use super::{
-    as_int, s_str, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES, LEGACY_DEFER_PREFIX, SRC_CLAIMS,
-    SRC_DISTRESS, SRC_DRIVERS, SRC_NEEDS, SRC_PRS, SRC_PR_GATE, SRC_PR_NODES, SRC_QUESTIONS,
-    SRC_READY, SRC_UNDISPATCHED, SRC_WORKED, TERMINAL_RUNGS,
+    as_int, is_terminal, s_str, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES,
+    LEGACY_DEFER_PREFIX, SRC_CLAIMS, SRC_DISTRESS, SRC_DRIVERS, SRC_NEEDS, SRC_PRS, SRC_PR_GATE,
+    SRC_PR_NODES, SRC_QUESTIONS, SRC_READY, SRC_UNDISPATCHED, SRC_WORKED, TERMINAL_RUNGS,
 };
 use serde_json::{json, Map, Value};
 use std::cell::RefCell;
@@ -1057,16 +1057,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             if s_str(node, "id").is_some_and(|id| contained_ids.contains(id)) {
                 continue;
             }
-            let terminal = s_str(node, "status")
-                .map(|s| TERMINAL_RUNGS.contains(&s))
-                .unwrap_or(false)
-                || node.get("superseded_by").is_some_and(|v| !v.is_null())
-                || node
-                    .get("completed_at")
-                    .and_then(Value::as_str)
-                    .map(|c| !c.is_empty() && !c.starts_with(LEGACY_DEFER_PREFIX))
-                    .unwrap_or(false);
-            if terminal {
+            if is_terminal(node) {
                 continue;
             }
             let status = derived_status(node);
@@ -1095,6 +1086,39 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             );
             if state != "none" {
                 continue;
+            }
+            // A driver on ANOTHER node that binds one of this node's PRs is
+            // still a driver: the crown dispatched the worker elsewhere and
+            // bound the PR there (`fno backlog update <node> --add-pr`). The
+            // resume gate reads the same binding.
+            let bound_entry = s_str(node, "id")
+                .and_then(|id| by_id.get(id))
+                .unwrap_or(node);
+            let shared_prs: Vec<i64> = node_pr_refs(bound_entry).iter().map(|(n, _)| *n).collect();
+            if !shared_prs.is_empty() {
+                let entries = inputs.entries.as_deref().unwrap_or(&[]);
+                let driven_elsewhere = shared_prs.iter().any(|pr| {
+                    nodes_binding_pr(entries, *pr).iter().any(|other| {
+                        if s_str(node, "id").is_some_and(|id| id == *other) {
+                            return false;
+                        }
+                        let Some(other_entry) = by_id.get(*other) else {
+                            return false;
+                        };
+                        let (other_state, _) = node_driver(
+                            other_entry,
+                            &claim_by_node,
+                            &inputs.holder_activity,
+                            inputs.scope_ids.as_ref(),
+                            Some(&inputs.worked),
+                            Some(&inputs.drivers),
+                        );
+                        other_state != "none"
+                    })
+                });
+                if driven_elsewhere {
+                    continue;
+                }
             }
             let pr_number = node.get("pr_number").and_then(Value::as_i64);
             if let Some(n) = pr_number {
@@ -1694,6 +1718,78 @@ mod tests {
         assert!(
             rows.iter().all(|r| r["id"] != "x-cccc"),
             "a driven PR was named undriven: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn undriven_pr_counts_a_driver_on_a_node_that_binds_the_pr() {
+        // AC7-HP first half: node A holds open PR P with no driver of its
+        // own; node B binds P through additional_prs and has a live driver.
+        // The PR has a driver, so A is not listed.
+        let mut inputs = pr_board_inputs(
+            json!([]),
+            json!([
+                {"id": "x-aaaa", "priority": "p1", "status": "in_progress",
+                 "title": "driven through a bound node", "pr_number": 2187},
+                {"id": "x-bbbb", "priority": "p2", "status": "in_progress",
+                 "title": "the bound driver's node",
+                 "additional_prs": [{"number": 2187, "url": "https://example.com/pr/2187"}]},
+            ]),
+        );
+        inputs.scope_ids = None;
+        inputs.crown_scope = None;
+        inputs.entries = Some(vec![
+            json!({
+                "id": "x-aaaa", "status": "in_progress", "pr_number": 2187,
+            }),
+            json!({
+                "id": "x-bbbb", "status": "in_progress",
+                "additional_prs": [{"number": 2187, "url": "https://example.com/pr/2187"}],
+            }),
+        ]);
+        inputs.drivers = SourceRead::ok(json!([
+            {"name": "t-x-bbbb-worker", "node": "x-bbbb", "token": "uuid-bbbb"},
+        ]));
+        let (token, probe) = active_probe("uuid-bbbb");
+        inputs.holder_activity.insert(token, probe);
+        let board = build_board(&inputs);
+        let rows = queue_rows(&board, "undriven_pr");
+        assert!(
+            rows.iter().all(|r| r["id"] != "x-aaaa"),
+            "a PR driven through a bound node was named undriven: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn undriven_pr_still_names_the_pr_when_the_bound_node_has_no_driver() {
+        // AC7-HP second half: the bound node has no driver either, so the PR
+        // stays undriven and x-aaaa is still listed.
+        let mut inputs = pr_board_inputs(
+            json!([]),
+            json!([
+                {"id": "x-aaaa", "priority": "p1", "status": "in_progress",
+                 "title": "undriven", "pr_number": 2188},
+                {"id": "x-bbbb", "priority": "p2", "status": "in_progress",
+                 "title": "bound but driverless",
+                 "additional_prs": [{"number": 2188, "url": "https://example.com/pr/2188"}]},
+            ]),
+        );
+        inputs.scope_ids = None;
+        inputs.crown_scope = None;
+        inputs.entries = Some(vec![
+            json!({
+                "id": "x-aaaa", "status": "in_progress", "pr_number": 2188,
+            }),
+            json!({
+                "id": "x-bbbb", "status": "in_progress",
+                "additional_prs": [{"number": 2188, "url": "https://example.com/pr/2188"}],
+            }),
+        ]);
+        let board = build_board(&inputs);
+        let rows = queue_rows(&board, "undriven_pr");
+        assert!(
+            rows.iter().any(|r| r["id"] == "x-aaaa"),
+            "a driverless PR lost its row: {rows:?}"
         );
     }
 

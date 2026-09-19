@@ -1296,10 +1296,9 @@ def _launch_harness_axis(launch: str, node_cwd: Optional[str] = None) -> Optiona
 def _territory_stamp(node_id: str) -> dict:
     """The territory stamp: three values, never two. ``kingless`` is False on
     a crowned territory, True on a kingless one, None when nothing could read
-    the attribution. Reads the territory-verdict door, whose unknown receipt
-    omits both fields, so ``.get`` is the whole fold: an absent field stamps
-    as null, never as a guessed boolean. Any read failure degrades to nulls
-    with one warning and the dispatch proceeds.
+    the attribution. Reads the territory-verdict door; its unknown receipt
+    omits both fields, so ``.get`` is the whole fold and an absence stamps
+    null. Any read failure degrades to nulls with one warning.
     """
     try:
         from fno.rust_binary import call_binary_json
@@ -1386,8 +1385,7 @@ def _spawn_worker(
         if reused:
             return reused
     # The stamp lands on the cold-spawn path only: a reuse dispatch runs no
-    # subprocess at all. The record, not the veto: a kingless territory
-    # still drains.
+    # subprocess at all. The record, not the veto: a kingless territory drains.
     row.update(_territory_stamp(node_id))
     from fno.harness_identity import (
         CODEX_SHORT_ADDRESS_RULE,

@@ -210,7 +210,7 @@ A target driver asks whether its one deliverable shipped. A king has no PR, so p
 | `unplanned` | `fno backlog ready --json -A` | yes, by blueprinting it |
 | `stalled_holder` | `fno agents claim list -J` + `fno backlog get <id>` + `fno agents peek <holder>` | yes, by one wake per node |
 | `unheld_progress` | graph entries + `fno agents claim list -J` | yes, by redispatching the node or closing it |
-| `undriven_pr` | `gh pr list --state open` + the graph | yes, by dispatching one target worker |
+| `undriven_pr` | `gh pr list --state open` + the graph | yes, by dispatching one target worker on the node, or, when the worker runs on another node, binding the PR there first (`fno backlog update <node> --add-pr <n>`); the resume gate reads that same binding and refuses a relaunch over the new holder |
 | `mergeable_pr` | `gh pr list` + `fno do pr status` (ready verdict; a not-ready row renders its `ready_blockers` and is not actionable) | only when gate-ready and under `config.king.autonomous_merge` |
 | `stale_claim` | `fno agents claim list -J --include-stale` | yes, by `fno agents claim reap` |
 | `operator_question` | `fno inbox outstanding --json` | no, a human answers it |

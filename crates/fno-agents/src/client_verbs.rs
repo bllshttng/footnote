@@ -2286,27 +2286,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     let session_id = resume_session_id(entry, harness);
 
     if cwd.is_empty() {
-        if !session_id.is_empty() {
-            eprintln!(
-                "fno agents resume: agent {} has no recorded cwd. \
-                 the row is the resume handle and still carries the session id: the harness \
-                 itself can reach the session directly (e.g. claude --resume <id>). To re-drive \
-                 it under fno, rm this row and `fno agents adopt <id>` rebinds a fresh one \
-                 with a live cwd - that pair spends the recorded route bindings. rm alone just \
-                 deletes the handle.",
-                py_repr_str(&name)
-            );
-        } else {
-            // Neither cwd nor session id: nothing to resume and nothing to
-            // rebind. Do not claim an id the row does not carry.
-            eprintln!(
-                "fno agents resume: agent {} has no recorded cwd and no session id. \
-                 The row holds nothing resumable; rm it and re-spawn is the honest cleanup, \
-                 and nothing is lost.",
-                py_repr_str(&name)
-            );
-        }
-        return 13;
+        return crate::resume_gate::missing_cwd_refusal(&name, session_id);
     }
 
     // claude gets the liveness-probed smart fork (US1/US2): a live
@@ -2488,16 +2468,20 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // means a gone cwd never acquires the session claim, and never burns a
     // wake attempt, on the failure path.
     if !Path::new(cwd).is_dir() {
-        eprintln!(
-            "fno agents resume: cwd {} for {} is no longer reachable. Check whether the path \
-             is recoverable first (renamed worktree base, unmounted volume): \
-             the row is the resume handle. To re-drive the session under fno from a live cwd, \
-             rm this row and `fno agents adopt <id>` rebinds a fresh one; rm alone deletes the \
-             handle and the session binding with it. rm is for a path that is gone for good.",
-            py_repr_str(cwd),
-            py_repr_str(&name)
-        );
-        return 13;
+        return crate::resume_gate::gone_cwd_refusal(cwd, &name);
+    }
+
+    // A resume brings the session back from down. If its node (or a PR it
+    // binds) took a different live or suspect holder while it was down,
+    // relaunching would put a second writer on that branch - refuse before
+    // any launch. The live-attach arm is skipped (a live session is not
+    // coming back from down, so there is no collision to guard);
+    // `--print-command` returned earlier and stays pure inspection.
+    if harness != "claude" || claim_uuid.is_some() {
+        let gate_id = claim_uuid.as_deref().unwrap_or(session_id);
+        if let Some(code) = crate::resume_gate::gate_and_reserve(home, session_id, &name, gate_id) {
+            return code;
+        }
     }
 
     // Live claude row (short_id, no mux ref): `claim_uuid` is None only on

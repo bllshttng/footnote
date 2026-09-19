@@ -118,9 +118,9 @@ pub fn decide(input: &NudgeInput) -> (NudgeAction, LadderState) {
         return (NudgeAction::Pause, state);
     }
     // 4. Escalate: the budget is spent and the operator has not heard yet.
-    // After this fires once, the ladder waits for activity - no more
-    // nudges, no repeat asks.
-    if input.state.attempts >= MAX_ATTEMPTS {
+    // After this fires once - or after a resume refused for a new holder -
+    // the ladder waits for activity - no more nudges, no repeat asks.
+    if input.state.attempts >= MAX_ATTEMPTS || input.state.escalated {
         if !input.state.escalated {
             return (NudgeAction::Escalate, state);
         }
@@ -289,6 +289,9 @@ pub fn apply(
                 "--message".to_string(),
                 text.clone(),
             ];
+            // The resume's exit code, when the resume actually ran: the
+            // Mail rung only falls back to it, the Resume rung is one.
+            let mut resumed_exit: Option<i32> = None;
             let (code, stdout, landed, fallback) = if action == NudgeAction::Mail {
                 let argv = vec![
                     "fno".to_string(),
@@ -312,16 +315,24 @@ pub fn apply(
                         state.mail_durable = true;
                     }
                     let (resume_code, _) = runner(&resume_argv, "");
+                    resumed_exit = Some(resume_code);
                     landed = resume_code == 0;
                     fallback = true;
                 }
                 (code, stdout, landed, fallback)
             } else {
                 let (code, stdout) = runner(&resume_argv, "");
+                resumed_exit = Some(code);
                 (code, stdout, code == 0, false)
             };
             state.attempts += 1;
-            if !landed {
+            if resumed_exit == Some(crate::resume_gate::RESUME_REASSIGNED_EXIT) {
+                // The resume refused for a new holder: nudging on would put
+                // a second writer on the branch. Wait for activity, and the
+                // refusal is not a delivery failure - no undelivered, no
+                // operator question.
+                state.escalated = true;
+            } else if !landed {
                 state.undelivered += 1;
             }
             state.last_nudge_at = Some(now);
@@ -680,6 +691,52 @@ mod tests {
         );
         assert!(saw_resume);
         let _ = std::fs::remove_dir_all(std::env::temp_dir().join("fno-pn-resume"));
+    }
+
+    #[test]
+    fn resume_refused_for_a_new_holder_stops_the_ladder() {
+        // AC6-HP: exit 17 from the resume is the gate refusing a second
+        // writer on the branch. The ladder waits for activity - escalated,
+        // no undelivered, no operator question.
+        let r = row(false);
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            if argv.contains(&"resume".to_string()) {
+                (17, String::new())
+            } else {
+                (0, String::new())
+            }
+        };
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-refused"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        apply(
+            &home,
+            &emitter,
+            &r,
+            &LadderState::default(),
+            false,
+            900,
+            1900,
+            &mut runner,
+        );
+        let state = load_state(&home, &r.session_id);
+        assert!(state.escalated, "refusal must stop the ladder");
+        assert_eq!(state.undelivered, 0);
+        assert_eq!(state.attempts, 1);
+        assert_eq!(
+            decide(&crate::pr_nudge::NudgeInput {
+                state,
+                transcript_age_s: Some(10_000),
+                last_activity_at: None,
+                merge_order_hold: false,
+                grace_secs: 900,
+                now: 1900,
+                live: false,
+            })
+            .0,
+            NudgeAction::Wait
+        );
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("fno-pn-refused"));
     }
 
     #[test]
