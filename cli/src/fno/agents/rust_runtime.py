@@ -238,6 +238,9 @@ RUST_CLIENT_VERBS = frozenset(
         # three dispatch directly in client.rs before build_request, never `fno agents`.
         "graph-get",
         "bash-census",
+        # The provenance fold: daemon-free read, Rust-side; `fno doctor intel`
+        # is a thin leaf over it.
+        "intel",
         "session-start-bytes",
         "judge",
         # backlog-note + backlog-notes (the bounded-state change): direct
@@ -533,6 +536,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "backlog-note": "The native note action: bounded-state write, revision check, history routing, nobody-bound refusal; invoked directly by `fno backlog note`'s bridge, not `fno agents` routing.",
     "backlog-notes": "Note-corpus inventory, digest migration (preview default, explicit apply), and paged history readback; the migration runbook drives it, not `fno agents` routing.",
     "bash-census": "Bash-call compound/cd/heredoc shares and top command/verb tables over recent transcripts; invoked directly by `fno doctor bash-census`.",
+    "intel": "The session-provenance fold: operator vs relay vs harness vs keepalive counters, node/PR join, and relay facets per session; invoked directly by `fno doctor intel`.",
     "session-start-bytes": "Session-start preamble byte total; invoked directly by `fno doctor`'s session-start byte report.",
     "judge": "Blueprint judge: grade a plan against the five product questions, or --labels/--split to calibrate against evals/blueprint-judge/labels.yaml; invoked by fno.observer.cli's judge_cmd/sweep through its own subprocess round-trip (_judge_via_rust), not `fno agents` routing.",
     "court-orphans": "Crowns whose registry row is gone but whose manifest holds them: --root <spaces-root> --held <scope> (repeatable, one flag per scope); invoked directly by `fno agents court`, not `fno agents` routing.",

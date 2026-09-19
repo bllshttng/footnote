@@ -396,14 +396,36 @@ pub(crate) struct BusIndex {
 }
 
 impl BusIndex {
+    /// A join-free index: fixtures and the queue's no-bus path.
+    #[cfg(test)]
     pub(crate) fn empty() -> Self {
         BusIndex { rows: Vec::new() }
     }
 
+    /// The live log plus every retained rotation segment
+    /// (`messages.jsonl.1`, `.2`, ...): a relay row still inside the fold's
+    /// window must not vanish because the bus rotated it out. Segments are
+    /// read until one is missing, ten names max.
     pub(crate) fn load(path: &Path) -> Self {
-        let Ok(raw) = std::fs::read_to_string(path) else {
-            return Self::empty();
-        };
+        let mut raw = String::new();
+        let mut missing = false;
+        for suffix in ["", ".1", ".2", ".3", ".4", ".5", ".6", ".7", ".8", ".9"] {
+            if missing {
+                break;
+            }
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("messages.jsonl");
+            let segment = path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(format!("{file_name}{suffix}"));
+            match std::fs::read_to_string(&segment) {
+                Ok(text) => raw.push_str(&text),
+                Err(_) => missing = true,
+            }
+        }
         let rows = raw
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -618,9 +640,12 @@ impl TranscriptSource for ClaudeSource {
 /// The codex transcript store: `$CODEX_HOME/sessions` rollout files through
 /// [`crate::codex_store`], the listing liveness already walks. `sessions_dir`
 /// is the injected root (None resolves the env home); tests pin a fixture
-/// directory instead of mutating process env.
+/// directory instead of mutating process env. `cwd` scopes the listing to
+/// the requested project when set (matching claude's default view); a
+/// rollout whose session metadata carries no cwd still reports.
 pub(crate) struct CodexSource {
     pub(crate) sessions_dir: Option<PathBuf>,
+    pub(crate) cwd: Option<PathBuf>,
 }
 
 /// The rollout uuid: the 36-char id after the last `-` in
@@ -636,19 +661,58 @@ pub(crate) fn rollout_session_id(stem: &str) -> String {
     stem.to_string()
 }
 
+/// One rollout's session metadata, from its first line: the authoritative
+/// session id and the cwd the session ran in. Codex treats the metadata row
+/// as the identity, so a filename uuid that disagrees with it loses.
+fn rollout_meta(path: &Path) -> (Option<String>, Option<String>) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return (None, None);
+    };
+    use std::io::BufRead;
+    let first = std::io::BufReader::new(file)
+        .lines()
+        .next()
+        .and_then(|l| l.ok());
+    let Some(first) = first else {
+        return (None, None);
+    };
+    let Ok(row) = serde_json::from_str::<Value>(&first) else {
+        return (None, None);
+    };
+    let meta = row.get("payload");
+    let id = meta
+        .and_then(|p| p.get("session_id").or_else(|| p.get("id")))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let cwd = meta
+        .and_then(|p| p.get("cwd"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    (id, cwd)
+}
+
 impl TranscriptSource for CodexSource {
     fn harness(&self) -> &'static str {
         "codex"
     }
 
     fn sessions(&self, days: u64) -> Vec<SessionFile> {
+        let want_slug = self.cwd.as_deref().map(crate::claude_ask::claude_cwd_slug);
         crate::codex_store::codex_sessions(self.sessions_dir.as_deref(), days)
             .into_iter()
-            .map(|s| SessionFile {
-                path: s.path,
-                session_id: s.session_id,
-                mtime: s.mtime_secs,
-                size: s.size,
+            .filter_map(|s| {
+                let (meta_id, meta_cwd) = rollout_meta(&s.path);
+                if let (Some(want), Some(actual)) = (&want_slug, &meta_cwd) {
+                    if crate::claude_ask::claude_cwd_slug(Path::new(actual)) != *want {
+                        return None;
+                    }
+                }
+                Some(SessionFile {
+                    session_id: meta_id.unwrap_or(s.session_id),
+                    path: s.path,
+                    mtime: s.mtime_secs,
+                    size: s.size,
+                })
             })
             .collect()
     }
@@ -758,7 +822,7 @@ mod tests {
         assert_eq!(classify_turn(&row, &bus, "eeee-ffff"), Provenance::Operator);
         // No bus at all: today's residual, counted as operator.
         assert_eq!(
-            classify_turn(&row, &BusIndex::empty(), "cccc-dddd"),
+            classify_turn(&row, &BusIndex { rows: Vec::new() }, "cccc-dddd"),
             Provenance::Operator
         );
     }
@@ -802,7 +866,10 @@ mod tests {
         ] {
             let row = json!({"type": "user", "isMeta": true,
                              "message": {"role": "user", "content": text}});
-            assert_eq!(classify_turn(&row, &BusIndex::empty(), "s").label(), label);
+            assert_eq!(
+                classify_turn(&row, &BusIndex { rows: Vec::new() }, "s").label(),
+                label
+            );
         }
     }
 

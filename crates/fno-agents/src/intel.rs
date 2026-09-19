@@ -37,6 +37,10 @@ struct SessionRow {
     /// HEAD-sha transitions in the entry's loop_check fingerprints, the
     /// derivation digest.rs uses (events never carry a commit event).
     commits: usize,
+    /// Transcript mtime + size: the facet-cache key the skill needs, so a
+    /// resumed session re-judges instead of stranding on a stale cache.
+    mtime: u64,
+    size: u64,
     node: Option<String>,
     pr_number: Option<u64>,
     relay: Vec<RelayFacet>,
@@ -352,6 +356,8 @@ fn fold_session(
         counters,
         tool_use: source.tool_uses(&raw),
         commits: ctx.commits_for(&group),
+        mtime: file.mtime,
+        size: file.size,
         node,
         pr_number: pr,
         relay,
@@ -633,7 +639,14 @@ fn fold_all(
         all_projects,
         projects_dir: crate::claude_drive::claude_projects_dir(),
     };
-    let codex = CodexSource { sessions_dir: None };
+    let codex = CodexSource {
+        sessions_dir: None,
+        cwd: if all_projects {
+            None
+        } else {
+            Some(cwd.to_path_buf())
+        },
+    };
     let sources: [&dyn TranscriptSource; 2] = [&claude, &codex];
     let mut rows: Vec<SessionRow> = Vec::new();
     for source in sources {
@@ -650,7 +663,7 @@ fn fold_all(
         "opencode".to_string(),
         "no transcript source registered yet".to_string(),
     );
-    let nodes = node_rows(&rows, &ctx.bus, now);
+    let nodes = node_rows(&rows, &ctx.bus, ctx.now);
     let totals = totals_of(&rows);
     Report {
         days,
@@ -837,6 +850,7 @@ mod tests {
         };
         let codex = CodexSource {
             sessions_dir: Some(fx.dir.join("codex").join("sessions")),
+            cwd: None,
         };
         let sources: [&dyn TranscriptSource; 2] = [&claude, &codex];
         let mut rows = Vec::new();

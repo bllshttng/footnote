@@ -25,7 +25,7 @@ use sha2::Sha256;
 // The classifier is the promoted `provenance` module: same functions, same
 // reason names, so the queue's skip counters and its 17 regression tests are
 // unchanged by the move.
-use crate::provenance::{classify, is_bare_command, is_user_turn, turn_text, turn_ts_epoch};
+use crate::provenance::{classify, is_user_turn, turn_text, turn_ts_epoch};
 
 /// A held turn in the scan cursor; the payload adds the rendered excerpt.
 #[derive(Debug, Clone, Serialize)]
@@ -433,6 +433,7 @@ pub fn run(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provenance::is_bare_command;
     use serde_json::json;
     use std::os::unix::fs::PermissionsExt;
 

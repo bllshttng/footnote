@@ -6,8 +6,6 @@ routing, while the group callback preserves the bare diagnostic command.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import typer
 import typer.core
 
@@ -75,13 +73,11 @@ doctor_app.command("footprint", hidden=True)(footprint_command)
 doctor_app.command("bash-census", hidden=True)(bash_census_command)
 
 
-# `doctor intel` is the session-provenance fold; the fold lives in Rust and
-# this leaf shells to it. Hidden per the new-verb convention; `fno help doctor --all`.
+# `doctor intel` shells to the Rust fold; hidden per the new-verb convention.
 @doctor_app.command("intel", hidden=True)
 def intel_command(
     days: int = typer.Option(14, "--days", help="Window size in days (0 = every transcript)."),
-    node: Optional[str] = typer.Option(None, "--node", help="One node's story."),
-    session: Optional[str] = typer.Option(None, "--session", help="One session's story."),
+    node: str | None = typer.Option(None, "--node", help="One node's story."),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit one JSON document."),
     all_projects: bool = typer.Option(False, "--all-projects", help="Fold every project slug, not just cwd."),
 ) -> None:
@@ -96,7 +92,6 @@ def intel_command(
         raise typer.Exit(code=2)
     argv = [str(binary), "intel", "--days", str(days)]
     argv += ["--node", node] if node else []
-    argv += ["--session", session] if session else []
     argv += ["--json"] if json_output else []
     argv += ["--all-projects"] if all_projects else []
     result = subprocess.run(argv, check=False)

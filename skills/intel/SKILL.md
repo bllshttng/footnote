@@ -1,6 +1,6 @@
 ---
 name: intel
-description: Session-provenance report for the operator - who typed, what was satisfied, what corrected the agents, what the relay graph says. Runs the fno-agents intel fold, judges operator turns only, writes one vault report, feeds the S2 corrections writer. Use when: 'session report', 'who typed', 'operator insights', 'intel report'.
+description: Session-provenance report for the operator - who typed, what was satisfied, what corrected the agents, what the relay graph says. Runs the fno-agents intel fold, judges operator turns only, writes one vault report, feeds the S2 corrections writer. Use when the operator says session report, who typed, operator insights, or intel report.
 ---
 
 # intel
@@ -19,7 +19,7 @@ The one rule the whole report stands on: **operator turns only**. Relay, harness
    fno-agents intel --json --node <id>
    ```
 
-   (`fno doctor intel` is the same fold with the same flags.) Exit 3 means no sessions in the window. Report that and stop.
+   (`fno doctor intel` is the same fold. The binary's full flag set, including `--session`, sits on `fno-agents intel`.) Exit 3 means no sessions in the window. Report that and stop.
 
 2. Judge the attended sessions and write one facet file each: `~/.fno/intel/facets/<session>.json`, mode 0600. Key the facet by session id + mtime + size (all three are on the fold's session row). A session whose key matches an existing facet is not re-judged. Skip it, so a resumed session re-enters the report instead of stranding on a stale cache:
 
