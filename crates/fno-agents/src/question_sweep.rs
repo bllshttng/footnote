@@ -50,7 +50,7 @@ fn read_closed_rung_facts(cwd: &Path, home: &AgentsHome) -> (Vec<(String, String
 
 fn statuses_of(store: &crate::backlog::api::Store) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    if let Ok(rows) = crate::backlog::api::rows(store) {
+    if let Ok(rows) = crate::backlog::api::rows(store, true) {
         for row in rows {
             if let (Some(id), Some(status)) = (
                 row.get("id").and_then(serde_json::Value::as_str),
