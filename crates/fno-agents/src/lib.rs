@@ -1238,12 +1238,6 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // fire row whose journal entries are the operator-notice rate bound.
     "evals_scheduled_run",
     "evals_stale",
-    // PR heal loop (daemon-emitted): the per-run verdict arms of
-    // `fno-agents heal` - a flake rerun and a real PR push - plus the
-    // fleet-scope readout the daemon prints on boot.
-    "pr_heal_flake",
-    "pr_heal_pr",
-    "daemon_fleet_scope",
     // Scratch-shape sweep (agents-emitted from the `scratch sweep`
     // stage of the daily eval-sweep ignition): one row per new (job, shape)
     // recurrence the jobs-dir walker found, and one row per node the sweep
