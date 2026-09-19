@@ -892,11 +892,9 @@ def test_auto_continue_tick_marks_a_kingless_dispatch(iso, monkeypatch):
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
     monkeypatch.setattr(adv, "_spawn_worker", kingless_spawn)
     adv.advance(project="fno", events_path=iso)
-    ticks = [
-        json.loads(line)
-        for line in iso.read_text().splitlines()
-        if line.strip() and json.loads(line)["type"] == "control_plane_tick"
-    ]
+    from tests._event_rows import event_rows
+
+    ticks = [t for t in event_rows(iso) if t["type"] == "control_plane_tick"]
     arms = [t for t in ticks
             if t["data"].get("arm") == "auto_continue" and t["data"].get("acted") == 1]
     assert len(arms) == 1
@@ -914,11 +912,9 @@ def test_auto_continue_tick_crowned_dispatch_is_byte_identical(iso, monkeypatch)
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
     monkeypatch.setattr(adv, "_spawn_worker", crowned_spawn)
     adv.advance(project="fno", events_path=iso)
-    ticks = [
-        json.loads(line)
-        for line in iso.read_text().splitlines()
-        if line.strip() and json.loads(line)["type"] == "control_plane_tick"
-    ]
+    from tests._event_rows import event_rows
+
+    ticks = [t for t in event_rows(iso) if t["type"] == "control_plane_tick"]
     arms = [t for t in ticks
             if t["data"].get("arm") == "auto_continue" and t["data"].get("acted") == 1]
     assert len(arms) == 1

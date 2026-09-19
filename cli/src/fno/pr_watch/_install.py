@@ -894,20 +894,20 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
         except Exception:
             return marks
 
-    if not events_path.exists():
+    from fno.events.store_client import store_db_path
+
+    if not events_path.exists() and not store_db_path(events_path).exists():
         return marks
 
     chunks_by_receipt: dict[str, list[dict]] = {}
     try:
-        for line in events_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-                if not isinstance(ev, dict):
-                    continue
-            except json.JSONDecodeError:
+        # Committed rows: the store commit is the write boundary, so a tick
+        # the emitter committed is only visible through the store. Absence of
+        # the raw journal is expected post-cutover.
+        from fno.events.store_client import query_rows
+
+        for ev in query_rows(events_path):
+            if not isinstance(ev, dict):
                 continue
             etype = ev.get("type")
             if etype == "pr_watch_sweep_chunk":
@@ -951,7 +951,7 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
                 recent = marks["recent_ends"]
                 recent.append(marks["last_end"])
                 del recent[:-_RECENT_ENDS_KEEP]
-    except OSError:
+    except Exception:
         pass
     return marks
 

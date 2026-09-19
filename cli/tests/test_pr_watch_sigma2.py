@@ -179,7 +179,7 @@ class TestEmitEventAnchoredPath:
         anchored_events = fake_home / ".fno" / "events.jsonl"
         lines = event_rows(anchored_events)
         assert len(lines) == 1
-        ev = json.loads(lines[0])
+        ev = lines[0]
         assert ev["type"] == "pr_watch_tick"
 
     def test_emit_event_same_path_as_the_liveness_watermark(self, tmp_path, monkeypatch):
@@ -361,8 +361,10 @@ class TestCliTickIntegration:
 
         # Assert a pr_watch_tick event landed in state_dir()/events.jsonl
         events_path = fno_dir / "events.jsonl"
-        assert events_path.exists(), (
-            f"No events.jsonl found at {events_path}. "
+        from fno.events.store_client import store_db_path
+
+        assert store_db_path(events_path).exists(), (
+            f"No event store found at {events_path}. "
             "The real _emit_event wrote to a cwd-relative path instead (bug #1 not fixed)."
         )
         from tests._event_rows import event_rows
