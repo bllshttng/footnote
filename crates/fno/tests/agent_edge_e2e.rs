@@ -70,10 +70,16 @@ fn pane_list_at(scratch: &Scratch, mux: &PathBuf) -> Vec<serde_json::Value> {
 }
 
 fn kill_server_at(scratch: &Scratch, mux: &PathBuf) {
+    // --end-unkept is load-bearing here: SHELL=/bin/sh is keeper-ineligible,
+    // so every plain shell this test spawns (the detach substitute shell, the
+    // bootstrap pane) is unkept, and an unkept-gated kill-server refuses -
+    // the server survives, the "restart" reattaches the old process, and the
+    // resume gesture reads the live-detached row. Ending those shells is the
+    // point of this teardown; only the keeper-hosted worker is contract.
     let _ = scratch
         .command()
         .env("FNO_MUX_DIR", mux)
-        .args(["mux", "kill-server"])
+        .args(["mux", "kill-server", "--end-unkept"])
         .output();
 }
 

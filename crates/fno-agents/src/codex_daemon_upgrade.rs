@@ -430,7 +430,10 @@ mod tests {
 
     /// AC23-EDGE: a second transaction behind the lock reads lock-busy and
     /// never touches the daemon. The lock file is the provider's own; the
-    /// test only holds and releases it.
+    /// test only holds and releases it. The transaction answers `Absent`
+    /// before it ever reaches the lock when the codex CLI is not on the
+    /// machine, so that box asserts the Absent gate instead - the lock-busy
+    /// arm runs wherever a CLI exists.
     #[tokio::test(flavor = "current_thread")]
     async fn the_second_concurrent_transaction_reads_lock_busy() {
         use crate::harness_daemon::HarnessDaemonAdapter;
@@ -439,6 +442,13 @@ mod tests {
             .expect("test acquires the provider lock first");
         let outcome = crate::codex_daemon_upgrade::codex_daemon_upgrade_transaction().await;
         drop(held);
+        if crate::codex_daemon_readiness::codex_cli_path().is_none() {
+            assert!(
+                matches!(outcome, crate::codex_daemon_upgrade::UpgradeOutcome::Absent),
+                "a CLI-less box answers Absent before the lock, got {outcome:?}"
+            );
+            return;
+        }
         match outcome {
             crate::codex_daemon_upgrade::UpgradeOutcome::Held {
                 kind: crate::codex_daemon_upgrade::HoldKind::LockBusy,
