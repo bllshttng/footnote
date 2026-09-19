@@ -1427,9 +1427,14 @@ mod tests {
     }
 
     fn journal_count(journal: &Path, needle: &str) -> usize {
-        std::fs::read_to_string(journal)
-            .map(|t| t.lines().filter(|l| l.contains(needle)).count())
-            .unwrap_or(0)
+        // Committed rows, not journal bytes: the store cutover commits
+        // sweep rows in the store beside the journal.
+        let _ = fno_event_store::import_all(journal);
+        fno_event_store::query_events(journal, &fno_event_store::EventQuery::default())
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.line.contains(needle))
+            .count()
     }
 
     fn now_ts() -> String {

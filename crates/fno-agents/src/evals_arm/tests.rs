@@ -83,14 +83,16 @@ fn thread_spawner() -> impl Fn(&[String]) -> Result<u32, String> {
 }
 
 fn wait_for_row(events: &Path, kind: &str, timeout: Duration) -> Option<Value> {
+    // Committed rows, not journal bytes: the store cutover commits ticks in
+    // the store beside the journal.
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if let Ok(text) = fs::read_to_string(events) {
-            for line in text.lines().rev() {
-                if let Ok(v) = serde_json::from_str::<Value>(line) {
-                    if v.get("type").and_then(Value::as_str) == Some(kind) {
-                        return Some(v);
-                    }
+        let rows = fno_event_store::query_events(events, &fno_event_store::EventQuery::default())
+            .unwrap_or_default();
+        for r in rows.iter().rev() {
+            if let Ok(v) = serde_json::from_str::<Value>(&r.line) {
+                if v.get("type").and_then(Value::as_str) == Some(kind) {
+                    return Some(v);
                 }
             }
         }
@@ -100,14 +102,15 @@ fn wait_for_row(events: &Path, kind: &str, timeout: Duration) -> Option<Value> {
 }
 
 fn count_kind(events: &Path, kind: &str) -> usize {
-    fs::read_to_string(events)
-        .map(|text| {
-            text.lines()
-                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-                .filter(|v| v.get("type").and_then(Value::as_str) == Some(kind))
-                .count()
+    fno_event_store::query_events(events, &fno_event_store::EventQuery::default())
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| {
+            serde_json::from_str::<Value>(&r.line)
+                .map(|v| v.get("type").and_then(Value::as_str) == Some(kind))
+                .unwrap_or(false)
         })
-        .unwrap_or(0)
+        .count()
 }
 
 fn claim_state(root: &Path) -> claims::ClaimState {

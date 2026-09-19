@@ -1142,7 +1142,7 @@ mod tests {
             !held,
             "no recorded merge_status passes the doneness re-read"
         );
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let events = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(
             events.contains("\"type\":\"merge_cleanup_completed\""),
             "the request must settle: {events}"
@@ -1185,7 +1185,7 @@ mod tests {
         );
         assert_eq!(acted, 0);
         assert!(held, "a recorded non-merged status holds the request");
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let events = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(
             events.contains("merge-status:open:x-1"),
             "the hold must name the recorded merge_status: {events}"
@@ -1229,7 +1229,7 @@ mod tests {
         );
         assert_eq!(acted, 0);
         assert!(held, "an open additional PR holds the request");
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let events = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(
             events.contains("additional-pr-open:x-1"),
             "the hold must name the open additional PR: {events}"
@@ -1278,7 +1278,7 @@ mod tests {
         std::fs::create_dir_all(home.root()).unwrap();
         std::fs::write(home.root().join("merge-reap.stamp"), "0").unwrap();
         consume_merge_cleanup_requests(&home, &["/repo".to_string()], &emitter, i64::MAX / 2);
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let events = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(
             events.contains("\"skip_reason\":\"all_in_grace\""),
             "the tick row must name the grace hold: {events}"
@@ -1393,8 +1393,7 @@ mod tests {
         assert_eq!(acted, 2, "one row + one tree");
         assert!(!held, "the settled request completed");
 
-        let kinds: Vec<String> = std::fs::read_to_string(home.events_jsonl())
-            .unwrap()
+        let kinds: Vec<String> = crate::events::committed_journal_text(&home.events_jsonl())
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(&l).ok())
             .filter_map(|v| v.get("type").and_then(Value::as_str).map(str::to_string))
@@ -1462,7 +1461,7 @@ mod tests {
             &seams,
             None,
         );
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let events = crate::events::committed_journal_text(&home.events_jsonl());
         let completed = events
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(&l).ok())
@@ -1513,7 +1512,7 @@ mod tests {
         );
         assert_eq!(acted, 0);
         assert!(held, "an open node holds the request");
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let events = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(
             events.contains("\"type\":\"merge_cleanup_held\"") && events.contains("node-open:x-1"),
             "the hold must name the open node: {events}"
@@ -1556,7 +1555,7 @@ mod tests {
             None,
         );
         assert_eq!(acted, 1, "the row is removed, the tree is not");
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let events = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(
             events.contains("tree-held:unreachable-from-origin-main"),
             "the hold must name the tree: {events}"
@@ -1683,7 +1682,7 @@ mod tests {
         assert!(held, "an unverified effect holds the request");
         let registry = state::load_registry(&home.registry_json()).unwrap();
         assert_eq!(registry.entries.len(), 1, "the row is kept for retry");
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let events = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(
             events.contains("target-x-1-worker:native_removal_unconfirmed"),
             "the kept row must name the effect that held it, not the stop: {events}"
@@ -1899,7 +1898,7 @@ mod tests {
             after.entries.iter().any(|e| e.name == "t-1-writing-glm"),
             "the writing worker's row stays"
         );
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let events = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(
             !events.contains("merge_cleanup_completed"),
             "no completion tombstones a held request: {events}"
@@ -1944,7 +1943,7 @@ mod tests {
         );
         assert_eq!(acted, 0);
         assert!(!held);
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let events = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(
             events.contains("\"rows\":\"none-present\""),
             "the completion names the zero honestly: {events}"

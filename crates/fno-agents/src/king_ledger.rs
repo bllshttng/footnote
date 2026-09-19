@@ -1492,7 +1492,7 @@ mod tests {
         let o = emit_one(&h, || Ok(()));
         assert_eq!(o.acted, 1);
         assert_eq!(o.skip_reason, None);
-        let log = std::fs::read_to_string(h.events_jsonl()).unwrap_or_default();
+        let log = crate::events::committed_journal_text(&h.events_jsonl());
         assert_eq!(
             log.matches("\"arm\":\"crown_ledger\"").count(),
             1,
@@ -1508,7 +1508,7 @@ mod tests {
         let o = emit_one(&h, || Err("exit 1: graph unreadable".to_string()));
         assert_eq!(o.acted, 0);
         assert_eq!(o.skip_reason.as_deref(), Some("error"));
-        let log = std::fs::read_to_string(h.events_jsonl()).unwrap_or_default();
+        let log = crate::events::committed_journal_text(&h.events_jsonl());
         assert!(log.contains("\"acted\":0"), "log: {log}");
         assert!(log.contains("\"skip_reason\":\"error\""), "log: {log}");
         assert!(log.contains("graph unreadable"), "log: {log}");
