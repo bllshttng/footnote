@@ -677,6 +677,19 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
         println!("{answer}");
         return 0;
     }
+    // A `pi_route` field asks the pi route owner which provider, model and
+    // effort tokens a launch carries (same field-on-a-verb shape).
+    if let Some(ask) = parsed.get("pi_route") {
+        let s = |k: &str| ask.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let route = crate::pi::pi_route(&s("model"), &s("effort"), &s("tools"), &s("deny_tools"));
+        let answer = serde_json::json!({
+            "tokens": route.tokens,
+            "route_source": route.route_source,
+            "note": route.note,
+        });
+        println!("{answer}");
+        return 0;
+    }
     println!("{}", decide(&parsed));
     0
 }

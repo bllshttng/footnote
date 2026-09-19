@@ -879,12 +879,12 @@ state = "native"
 # cursor-agent is a pane-only fno harness. Its --print stream-json mode is
 # output-only: it has no input-format, rpc, acp, serve, or stdio drive lane.
 
-# The keeper-lane spawn arm (docs/architecture/thread-lanes.md). The lane
-# driver appends pi's own provider/model pair, so every option that would ride
-# another lane's argv is refused by name and `carries` is empty.
+# The keeper-lane spawn arm (docs/architecture/thread-lanes.md). The route
+# owner (pi_route) carries the user's model, effort and tool axes onto the
+# thread lane the same way the pane arm does.
 [harness.pi.keeper]
 once_refusal = "--once is not supported on the pi thread lane (it is persistent); pi has no one-shot lane - its headless stance is unmeasured"
-carries = []
+carries = ["model", "effort", "tools", "deny_tools"]
 passthrough = ["*"]
 ready_marker = "(sub)"
 resume_refusal = "is not supported on the pi thread lane yet; the keeper row resumes by name (fno agents ask/resume <name>). Refusing rather than silently spawning a fresh session."
