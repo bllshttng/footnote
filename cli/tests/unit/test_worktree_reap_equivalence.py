@@ -324,7 +324,19 @@ def test_rust_token_scanner_matches_the_python_producer(tmp_path, branch, expect
 
     home = tmp_path / "graph-home" / "agents"
     home.mkdir(parents=True)
-    rows = [{"id": tok, "status": "done"} for tok in expected]
+    # The typed fold drops a row the model cannot represent, so each seed
+    # carries the fields the model requires.
+    rows = [
+        {
+            "id": tok,
+            "slug": tok,
+            "title": f"node {tok}",
+            "type": "feature",
+            "status": "done",
+            "priority": "p2",
+        }
+        for tok in expected
+    ]
     (home.parent / "graph-archive.json").write_text(json.dumps({"entries": rows}))
     env = dict(os.environ, FNO_AGENTS_HOME=str(home))
 
