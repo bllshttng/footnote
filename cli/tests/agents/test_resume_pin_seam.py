@@ -245,3 +245,20 @@ def test_live_owner_refuses_unserved_model_and_answers_default_served(
         None, opus_uuid, None, None, routed=False
     )
     assert model == "claude-opus-5"
+
+
+def test_stale_owner_answer_shape_refuses_not_degrades(tmp_path, monkeypatch):
+    """An older binary routes the resume_pin payload to the axes plan, whose
+    answer carries no decision keys; the seam must refuse, never launch
+    unpinned (the review's mixed-version case)."""
+    _home(tmp_path, monkeypatch)
+    from fno.agents import fork_lineage
+    from fno.agents.fork_lineage import ResumeUnpinned
+
+    def _axes_plan(payload):
+        return {"inject": [], "applied": [], "suppressed": [], "messages": []}
+
+    monkeypatch.setattr(fork_lineage, "spawn_axes_call", _axes_plan)
+    with pytest.raises(ResumeUnpinned) as excinfo:
+        fork_lineage.resume_axes(None, LINEAGE_UUID, None, None, routed=False)
+    assert "stale resume-pin owner" in str(excinfo.value)

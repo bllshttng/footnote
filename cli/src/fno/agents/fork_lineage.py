@@ -41,8 +41,8 @@ def resume_axes(src, session_id, effort, route_model, *, routed):
             "session_id": session_id, "routed": routed, "row": None if src is None else vars(src)}})
     except SpawnAxesUnavailable as exc:
         raise ResumeUnpinned(f"the resume-pin owner is unavailable: {exc}", exit_code=2) from exc
-    if "refusal" in answer:
-        raise ResumeUnpinned(answer["refusal"], exit_code=2)
+    if "refusal" in answer or "source" not in answer:
+        raise ResumeUnpinned(answer.get("refusal", "stale resume-pin owner"), exit_code=2)
     get = answer.get
     return get("model"), effort or get("effort"), route_model or get("route_model")
 
