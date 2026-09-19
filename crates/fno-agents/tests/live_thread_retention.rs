@@ -62,6 +62,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
