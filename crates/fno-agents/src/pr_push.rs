@@ -113,11 +113,13 @@ pub(crate) fn read_checks_rows(gh_bin: &str, cwd: &Path, head: &str) -> Result<V
         &format!("repos/{{owner}}/{{repo}}/commits/{head}/check-runs"),
     )?;
     let mut rows: Vec<Value> = Vec::new();
+    let mut raw: Vec<Value> = Vec::new();
     for page in pages {
         let Some(runs) = page.get("check_runs").and_then(|r| r.as_array()) else {
             continue;
         };
         for run in runs {
+            raw.push(run.clone());
             rows.push(json!({
                 "name": run.get("name").and_then(|v| v.as_str()).unwrap_or(""),
                 "bucket": rest_bucket(run),
@@ -131,11 +133,65 @@ pub(crate) fn read_checks_rows(gh_bin: &str, cwd: &Path, head: &str) -> Result<V
             }));
         }
     }
+    // A run that failed before minting a job owns no check run; the shared
+    // rule adds its row so the failure cannot read green (x-5cf9).
+    rows.extend(zero_job_rows(gh_bin, cwd, head, &raw)?);
     // The check-runs endpoint returns ONLY check-runs. A commit StatusContext
     // lives on a different endpoint, and reading one without the other is a
     // false green.
     rows.extend(read_statuses(gh_bin, cwd, head));
     Ok(rows)
+}
+
+
+/// The rows for the Actions runs that failed before minting a job (x-5cf9):
+/// the head_sha-scoped runs listing, the shared rule in
+/// `pr_status_facts::zero_job_failures`, and this module's row shape. A
+/// failed runs read is an `Err`, like a failed check-runs read.
+pub(crate) fn zero_job_rows(
+    gh_bin: &str,
+    cwd: &Path,
+    head: &str,
+    check_runs: &[Value],
+) -> Result<Vec<Value>, String> {
+    let pages = gh_api_pages(
+        gh_bin,
+        cwd,
+        &format!("repos/{{owner}}/{{repo}}/actions/runs?head_sha={head}&per_page=100"),
+    )?;
+    let mut runs: Vec<Value> = Vec::new();
+    for page in pages {
+        if let Some(list) = page.get("workflow_runs").and_then(|r| r.as_array()) {
+            runs.extend(list.iter().cloned());
+        }
+    }
+    let jobs_total = |id: u64| -> Result<u64, String> {
+        let raw = gh_api(
+            gh_bin,
+            cwd,
+            &format!("repos/{{owner}}/{{repo}}/actions/runs/{id}/jobs?per_page=1"),
+            &[],
+        )?;
+        serde_json::from_str::<Value>(&raw)
+            .map_err(|e| format!("the jobs read for run {id} was unparseable: {e}"))?
+            .get("total_count")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("the jobs read for run {id} carried no total_count"))
+    };
+    let found = crate::pr_status_facts::zero_job_failures(&runs, check_runs, &jobs_total)?;
+    Ok(found
+        .iter()
+        .map(|r| {
+            json!({
+                "name": r.path,
+                "bucket": "fail",
+                "link": r.url,
+                "workflow": r.path,
+                "startedAt": r.created_at,
+                "completedAt": "",
+            })
+        })
+        .collect())
 }
 
 /// The commit's StatusContexts, in the same row shape as the check-runs. A
@@ -792,5 +848,81 @@ pub fn run_push(argv: &[String]) -> i32 {
             eprintln!("pr-push: the push failed: {}", err.trim());
             4
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_exec(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    /// A fake gh: green rust-ci check runs, an empty status read, a failed
+    /// cli-ci run with no check-run link, and a jobs read answering zero.
+    /// A `fail-runs` flag file makes the runs listing exit non-zero.
+    fn stub_gh(dir: &std::path::Path) -> PathBuf {
+        write_exec(
+            dir,
+            "gh",
+            r#"#!/bin/sh
+D="$(dirname "$0")"
+for a in "$@"; do case "$a" in
+  */check-runs)
+    echo '{"check_runs":[{"name":"rust-ci","status":"completed","conclusion":"success","started_at":"2026-09-19T06:00:00Z","completed_at":"2026-09-19T06:05:00Z","html_url":"https://github.com/o/r/actions/runs/35344488345/job/99","check_suite":{"id":7}}]}'
+    exit 0 ;;
+  */status)
+    echo '{"statuses":[]}'
+    exit 0 ;;
+  *actions/runs?head_sha=*)
+    if [ -f "$D/fail-runs" ]; then
+      echo "gh: runs read failed" >&2
+      exit 1
+    fi
+    echo '{"total_count":1,"workflow_runs":[{"id":35366958901,"path":".github/workflows/cli-ci.yml","status":"completed","conclusion":"failure","created_at":"2026-09-19T07:00:00Z","html_url":"https://github.com/o/r/actions/runs/35366958901"}]}'
+    exit 0 ;;
+  *jobs?per_page=1)
+    echo '{"total_count":0}'
+    exit 0 ;;
+esac; done
+echo '{"check_runs":[]}'
+exit 1
+"#,
+        )
+    }
+
+    #[test]
+    fn ac2_hp_the_zero_job_failure_reads_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = stub_gh(dir.path());
+        let rows = read_checks_rows(gh.to_str().unwrap(), dir.path(), "abc123").unwrap();
+        let hit = rows
+            .iter()
+            .find(|r| r["name"] == ".github/workflows/cli-ci.yml")
+            .expect("the zero-job failure row");
+        assert_eq!(hit["bucket"], "fail");
+        assert_eq!(
+            hit["link"],
+            "https://github.com/o/r/actions/runs/35366958901"
+        );
+        assert_eq!(hit["workflow"], ".github/workflows/cli-ci.yml");
+    }
+
+    #[test]
+    fn ac2_err_a_failed_runs_read_is_err_never_green_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = stub_gh(dir.path());
+        std::fs::write(dir.path().join("fail-runs"), b"").unwrap();
+        let err = read_checks_rows(gh.to_str().unwrap(), dir.path(), "abc123")
+            .expect_err("the runs read failed");
+        assert!(err.contains("actions/runs"), "err names the runs read: {err}");
     }
 }
