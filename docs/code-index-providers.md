@@ -2,9 +2,9 @@
 
 ## Is this page for you?
 
-You want a blueprint (or any planner step) to ask a local code index before it designs, and you want to add or override a provider of your own. This page is the provider contract: one TOML file per index, what every key means, where the files live, and what happens when an index is missing, stale or broken.
+You want a blueprint to ask a local code index before it designs. You also want to add or override a provider of your own. This page is the provider contract. It defines one TOML file per index, every key, the file locations, and how the reader treats a missing, stale or broken index.
 
-Not for: installing or running an indexer. footnote ships no indexer; you bring codegraph, graphify or your own tool, and fno only asks it. Copying an index into a fresh worktree is `scripts/setup/setup-worktree.sh` (`provision_graphify`, `provision_codegraph`). Why an index answer never proves absence: [graph-search.md](graph-search.md).
+Not for: installing or running an indexer. footnote ships no indexer. You bring codegraph, graphify or your own tool, and fno only asks it. Copying an index into a fresh worktree is `scripts/setup/setup-worktree.sh` (`provision_graphify`, `provision_codegraph`). Why an index answer never proves absence: [graph-search.md](graph-search.md).
 
 ## The contract
 
@@ -23,7 +23,7 @@ fresh_match = "Index is up to date" # optional; stdout must contain it, else fre
 refresh = ["codegraph", "sync"]     # documented for users; fno never runs it
 ```
 
-`roles` declares the questions a provider answers. The planner asks by role and takes the first `ready` provider per role, so two symbol providers do not both get asked. `ask` is one argv; `{term}` is replaced with the question. `fresh` runs the optional probe and matches `fresh_match` in stdout: a match is `yes`, anything else is `no`, and no probe is `unknown`.
+`roles` declares the questions a provider answers. The planner asks by role and takes the first `ready` provider per role, so two symbol providers do not both get asked. `ask` is one argv. `{term}` is replaced with the question. `fresh` runs the optional probe and matches `fresh_match` in stdout. A match reads `yes`, anything else reads `no`, and no probe reads `unknown`.
 
 A provider that errors, times out or is missing never blocks a plan. The plan records `status: unavailable` or `status: error` and continues. Detection itself never runs `ask`, `fresh` or `refresh`.
 
@@ -35,6 +35,6 @@ Detection reads three directories in order, and a later file with the same `name
 2. `~/.fno/code-index/providers/`
 3. `<repo>/.fno/code-index/providers/`
 
-Drop a file in one of the last two to add or override a provider. No config key, no verb, no restart: the next detection reads it.
+Drop a file in one of the last two to add or override a provider. No config key, no verb, no restart. The next detection reads it.
 
-`refresh` is documentation for humans. fno never runs it. Keeping the index current is the provider's job and yours (`codegraph sync`, `graphify update .`, or graphify's git hook); a plan states the freshness it read, and a stale `absent` verdict is confirmed with a plain search before it is trusted.
+`refresh` is documentation for humans. fno never runs it. Keeping the index current is the provider's job and yours. Run `codegraph sync`, `graphify update .`, or install graphify's git hook. A plan states the freshness it read. A stale `absent` verdict is confirmed with a plain search before it is trusted.

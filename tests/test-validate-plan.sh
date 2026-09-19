@@ -825,9 +825,18 @@ surface:
       reason: "calls the Python verdict, never reads the row itself"
   count: 2
   count_after: 2
+code_index:
+  main_sha: abc1234
+  providers: []
 ---
 
 # Covered walk fixture
+
+## Existence audit
+
+| Claim | Kind | Verdict | Evidence |
+|---|---|---|---|
+| row_ref_valid exists | code | exists at src/reader.py:1 | `row_ref_valid(row)` |
 HEREDOC
 OUTPUT=$(cd "$WALK_DIR" && bash "$VALIDATE" "$PLAN_WALK_COVERED" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 if [[ $EXIT_CODE -eq 0 ]] && grep -q "readers by tree python 1, rust 1" <<< "$OUTPUT"; then

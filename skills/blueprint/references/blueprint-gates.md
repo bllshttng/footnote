@@ -149,14 +149,16 @@ Any other action, such as `Modify` or `Create`, plans new Python. Move that chan
 
 ## Code Index Audit (every plan - step 2-index)
 
-A plan built on node text can send a worker after work that already shipped. The gate checks that the planner ASKED the code indexes a repo holds; it never checks what an index answered. Detection is the validator's bundled sibling `lib/code-index-detect.sh`; a repo with no provider prints nothing, and a plan with `providers: []` plus the audit section is clean: no index is not a refusal.
+A plan built on node text can send a worker after work that already shipped. The gate checks that the planner asked the code indexes a repo holds. It never checks what an index answered. Detection is the validator's bundled sibling `lib/code-index-detect.sh`. A repo with no provider prints nothing, and a plan with `providers: []` plus the audit section is clean. No index is not a refusal.
 
 The plan must carry:
 
 - a `code_index:` frontmatter block with `main_sha:` (the 7-to-40-hex sha the plan read) and `providers:` (a list, or `[]`)
 - one `- name: <name>` entry per provider detection prints for the plan's repo, whatever its status
 - `status:` (`answered` | `unavailable` | `error`) and `fresh:` (`yes` | `no` | `unknown`) on every entry
-- `## Existence audit` as the plan's first `##` heading, with at least one table row; every row carries a verdict cell starting `exists`, `absent`, `partial` or `unanswered`, and an `absent` row's evidence cell states the confirming search (`after <exact command>`)
+- `## Existence audit` as the plan's first `##` heading, with at least one table row
+- a verdict cell starting `exists`, `absent`, `partial` or `unanswered` on every row
+- an `absent` row's evidence stating the confirming search (`after <exact command>`)
 
 The refusals, verbatim:
 
@@ -172,7 +174,7 @@ Existence audit row <n> has no verdict cell - start one cell with exists, absent
 Existence audit row <n> reads absent but its evidence names no confirming search - an index never makes a zero trustworthy, so the evidence cell states 'after <exact command>'
 ```
 
-Graduated like the No New Python gate: a plan created after 2026-09-17 errors; an older plan, or one with no readable date, warns. Quick plans are not exempt - the node asked for a gate, not advice. Why the confirmation rule exists: [graph-search.md](../../../docs/graph-search.md). The provider manifests a user can add: [code-index-providers.md](../../../docs/code-index-providers.md).
+Graduated like the No New Python gate. A plan created after 2026-09-17 errors. An older plan, or one with no readable date, warns. Quick plans are not exempt: the node asked for a gate, not advice. Why the confirmation rule exists: [graph-search.md](../../../docs/graph-search.md). The provider manifests a user can add: [code-index-providers.md](../../../docs/code-index-providers.md).
 
 ## Answerer Enumeration Gate (graduated, every plan that changes a read, write, or feed)
 
