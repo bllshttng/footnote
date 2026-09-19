@@ -4,11 +4,14 @@
 //! resolution cached a bare path: a linked worktree whose HEAD diverged from
 //! origin/main got installed machine-wide and every later update re-installed
 //! it (measured 2026-09-09 and 2026-09-13). This module owns the decision
-//! natively so Python keeps only transport. The gate covers ONLY proven linked
-//! worktrees picked implicitly. An explicit `--source` stays the escape hatch
-//! (accepted, but loud). Non-git packaged candidates keep existing behavior.
-//! Missing git evidence for a linked worktree refuses; it never reads as
-//! eligible. Ancestry is probed live; the cached companion never supplies it.
+//! natively so Python keeps only transport. The gate covers any git checkout
+//! picked implicitly: a proven non-ancestor of the remote-default ref refuses,
+//! whatever the kind, because a divergent main checkout is the canonical
+//! checkout after a pull merged a ref origin never merged. Ancestry that
+//! cannot be proven refuses a linked worktree and allows a main checkout. An
+//! explicit `--source` stays the escape hatch (accepted, but loud). Non-git
+//! packaged candidates keep existing behavior. Ancestry is probed live; the
+//! cached companion never supplies it.
 
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
@@ -250,7 +253,13 @@ fn classify(path: &str, origin: &str) -> ResolveAnswer {
         &["rev-parse", "--verify", &format!("{rref}^{{commit}}")],
     );
 
-    let (ancestor, detail): (Option<bool>, Option<String>) = if kind != WorktreeKind::LinkedWorktree
+    // Ancestry is probed for every git checkout, not only a linked worktree:
+    // a divergent main checkout is the same hazard on an implicit pick (the
+    // canonical checkout after a pull merged a ref origin never merged). A
+    // main checkout with no remote-default ref cannot prove divergence, so it
+    // keeps today's eligible answer with the instrument detail cleared.
+    let (ancestor, detail): (Option<bool>, Option<String>) = if kind == WorktreeKind::NonGit
+        || (kind == WorktreeKind::MainCheckout && remote_head.is_none())
     {
         (None, None)
     } else if remote_head.is_none() {
@@ -285,20 +294,25 @@ fn classify(path: &str, origin: &str) -> ResolveAnswer {
         }
     };
 
-    let eligibility = if kind != WorktreeKind::LinkedWorktree {
-        "eligible"
-    } else {
-        match ancestor {
-            Some(true) => "eligible",
-            Some(false) => "divergent",
-            None => "ancestry_unknown",
-        }
+    let eligibility = match (kind, ancestor) {
+        (WorktreeKind::LinkedWorktree, None) => "ancestry_unknown",
+        (_, Some(false)) => "divergent",
+        _ => "eligible",
     };
 
     let explicit = origin == "explicit";
     let state = branch_label(heads.branch.as_deref(), heads.detached);
     let (decision, mut warning, refusal) = match eligibility {
         "eligible" => (Decision::Allow, None, None),
+        "divergent" if explicit && kind == WorktreeKind::MainCheckout => (
+            Decision::Allow,
+            Some(format!(
+                "warning: --source {path} is a divergent main checkout ({state} HEAD {sh} vs {rref} HEAD {rh}); installing by explicit request",
+                sh = short(&heads.source_head),
+                rh = short(&remote_head),
+            )),
+            None,
+        ),
         "divergent" if explicit => (
             Decision::Allow,
             Some(format!(
@@ -307,6 +321,15 @@ fn classify(path: &str, origin: &str) -> ResolveAnswer {
                 rh = short(&remote_head),
             )),
             None,
+        ),
+        "divergent" if kind == WorktreeKind::MainCheckout => (
+            Decision::Refuse,
+            None,
+            Some(format!(
+                "refusing source {path}: main checkout {state} HEAD {sh} is not an ancestor of {rref} HEAD {rh}, so it holds commits {rref} never merged. A machine-wide install ships them to every fno process on the machine. Save those commits on a branch and reset the checkout to {rref}, or re-run with --source {path} to install it on purpose.",
+                sh = short(&heads.source_head),
+                rh = short(&remote_head),
+            )),
         ),
         "divergent" => (
             Decision::Refuse,
@@ -1176,5 +1199,99 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.contains("unknown flag"), "err was {err}");
+    }
+
+    /// A main checkout whose main merged a local branch origin never merged
+    /// (the 2026-09-19 incident shape): origin/main pinned at the base commit,
+    /// then a --no-ff merge of a side branch. cli/ stays untracked throughout.
+    fn divergent_main_checkout(root: &std::path::Path) -> String {
+        new_repo(root);
+        let cli = add_cli(root);
+        git_in(root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git_in(root, &["checkout", "-q", "-b", "side"]);
+        fs::write(root.join("side.txt"), "x\n").unwrap();
+        git_in(root, &["add", "side.txt"]);
+        git_in(root, &["commit", "-q", "-m", "side"]);
+        git_in(root, &["checkout", "-q", "main"]);
+        git_in(root, &["merge", "-q", "--no-ff", "-m", "merge", "side"]);
+        cli
+    }
+
+    #[test]
+    fn main_checkout_merged_unmerged_branch_refuses() {
+        let base = tempfile::tempdir().unwrap();
+        let cli = divergent_main_checkout(&base.path().join("m1"));
+        let a = resolve(&ResolveArgs {
+            override_path: None,
+            env_source: None,
+            cache: None,
+            candidate_paths: vec![cli.clone()],
+        });
+        assert_eq!(a.decision, Decision::Refuse);
+        assert_eq!(a.eligibility, "divergent");
+        assert_eq!(a.worktree_kind, Some(WorktreeKind::MainCheckout));
+        assert_eq!(a.ancestor, Some(false));
+        let refusal = a.refusal.unwrap();
+        assert!(refusal.contains(&cli), "refusal names the path: {refusal}");
+        assert!(
+            refusal.contains("main checkout"),
+            "names the kind: {refusal}"
+        );
+        assert!(
+            refusal.contains("not an ancestor"),
+            "names the divergence: {refusal}"
+        );
+        assert!(
+            refusal.contains("origin/main"),
+            "names the remote ref: {refusal}"
+        );
+        assert!(
+            refusal.contains("--source"),
+            "names the override: {refusal}"
+        );
+        let guidance = a.guidance.unwrap();
+        assert!(
+            guidance.starts_with("update blocked:"),
+            "guidance leads with the block: {guidance}"
+        );
+    }
+
+    #[test]
+    fn main_checkout_divergent_explicit_warns_and_allows() {
+        let base = tempfile::tempdir().unwrap();
+        let cli = divergent_main_checkout(&base.path().join("m2"));
+        let a = resolve(&ResolveArgs {
+            override_path: Some(cli),
+            env_source: None,
+            cache: None,
+            candidate_paths: vec![],
+        });
+        assert_eq!(a.decision, Decision::Allow);
+        assert_eq!(a.eligibility, "divergent");
+        let warning = a.warning.unwrap();
+        assert!(
+            warning.contains("divergent main checkout"),
+            "warning names a divergent main checkout: {warning}"
+        );
+    }
+
+    #[test]
+    fn main_checkout_without_remote_ref_keeps_allow() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("m3");
+        new_repo(&root);
+        let cli = add_cli(&root);
+        git_in(&root, &["commit", "-q", "--allow-empty", "-m", "extra"]);
+        let a = resolve(&ResolveArgs {
+            override_path: None,
+            env_source: None,
+            cache: None,
+            candidate_paths: vec![cli],
+        });
+        assert_eq!(a.decision, Decision::Allow);
+        assert_eq!(a.eligibility, "eligible");
+        assert_eq!(a.ancestor, None);
+        assert_eq!(a.refusal, None);
+        assert_eq!(a.detail, None);
     }
 }
