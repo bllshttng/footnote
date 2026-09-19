@@ -93,7 +93,14 @@ fn enrich_next(mut node: Value, fno_py: &OsStr) -> Result<Value, String> {
     {
         return Ok(node);
     }
-    let output = Command::new(fno_py).args(["backlog", "get", id]).output();
+    let output = crate::bounded_cmd::output_with_timeout_result(
+        {
+            let mut command = Command::new(fno_py);
+            command.args(["backlog", "get", id]);
+            command
+        },
+        30,
+    );
     let Ok(output) = output else {
         return Ok(node);
     };

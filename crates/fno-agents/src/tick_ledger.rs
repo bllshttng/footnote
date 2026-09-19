@@ -473,8 +473,9 @@ pub fn needs_attention(row: &ArmStatus) -> bool {
 /// to skip. Sources: the pr-watch tick's outcome tokens (disabled, lock_held,
 /// quota_skip pass through; timeout/error fail), the king-wake and notify
 /// emitters' failure tokens, merge_close's `failures` (a partial reconcile
-/// that left nodes unresolved), and auto_continue's `next-error` (a non-zero,
-/// malformed or timed-out `backlog next`), `spawn-failed` (the dispatch it
+/// that left nodes unresolved), and auto_continue's `next-error` (a non-zero
+/// or malformed `backlog next`) and `select-unmeasured` (a bounded read that
+/// did not answer or a transient store refusal), `spawn-failed` (the dispatch it
 /// fired exited non-zero), and active_backlog's `env_broken` (the resolver
 /// shelled out and failed: no usable `fno`, non-zero exit, unreadable
 /// receipt -): an arm that could not compute its input, or whose
