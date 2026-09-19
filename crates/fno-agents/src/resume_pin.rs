@@ -138,6 +138,18 @@ pub fn resolve(
             (model, "transcript", marketing)
         }
     };
+    // A routed resume never refuses: the route owns the argv, so a candidate
+    // that resolves is only recorded, and no candidate records nothing.
+    if routed {
+        return Ok(Pin {
+            argv_model: None,
+            route_model: candidate,
+            effort,
+            source,
+            marketing_name: marketing,
+        });
+    }
+
     let Some(candidate) = candidate else {
         let row_read = if row.is_some() {
             "the registry row records no model"
@@ -153,16 +165,6 @@ pub fn resolve(
              pass --model to resume it"
         ));
     };
-
-    if routed {
-        return Ok(Pin {
-            argv_model: None,
-            route_model: Some(candidate),
-            effort,
-            source,
-            marketing_name: marketing,
-        });
-    }
 
     match route_provider_of(Some(&candidate)) {
         Some(p) if p != "anthropic" => Err(format!(
