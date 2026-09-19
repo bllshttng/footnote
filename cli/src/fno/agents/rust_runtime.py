@@ -285,7 +285,6 @@ RUST_CLIENT_VERBS = frozenset(
         # Python calls it via fno.agents.spawn_axes_client. A `node_seed`
         # field routes the payload to the node-seed decision instead.
         "spawn-axes",
-        # The spawn door's launch-cwd resolution (node_dispatch.ensure_launch_workdir).
         "launch-workdir",
         # The failover chain walk: payload JSON in, the
         # {eligible} answer out; Python calls it via fno.rust_binary.verb_call.
