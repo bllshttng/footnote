@@ -441,7 +441,7 @@ fn guard_remove(dir: &Path, now: SystemTime, recheck_quiet: bool) -> Result<(), 
     if recheck_quiet && quiet_of(dir, now) < Duration::from_secs(FRESH_SECS) {
         return Err("build-in-progress");
     }
-    let locks = take_locks(dir)?;
+    let _locks = take_locks(dir)?;
     std::fs::remove_dir_all(dir).map_err(|_| "delete-failed")
 }
 
