@@ -501,11 +501,8 @@ def render_node_seed(node: str, *, harness: Optional[str]) -> Optional[NodeSeed]
 def ensure_launch_workdir(
     recorded_cwd: Optional[str], node_id: str, harness: str
 ) -> Optional[Path]:
-    """Resolve the launch workdir through the launch-workdir seam verb
-    (ported to Rust), printing the hold line on a refusal or a transport
-    failure. The verb keys the ensure on the NODE id, so a node-seeded spawn
-    resumes the node's existing worktree instead of minting a worker-named
-    tree beside it."""
+    """Resolve the launch workdir through the launch-workdir seam verb (Rust);
+    the hold line on any refusal, the node id keys the resumed tree."""
     from fno.rust_binary import VerbUnavailable, verb_call
 
     payload = {
