@@ -9577,49 +9577,6 @@ impl Core {
         subline_from(self.branch_by_cwd.get(cwd).map(String::as_str), cwd)
     }
 
-    /// Which portal shows `pane`, DERIVED from the open portals every
-    /// time the rows are built. Nothing is stored per row: the row-to-pane
-    /// relation is a pointer, so a row moving between portals stays ONE row
-    /// whose index changes, and no row can carry an index that has gone stale.
-    ///
-    /// `None` means this pane is not a portal seat - never "unknown". The
-    /// comparison is EQUALITY on the seat id, and the `Option` is matched
-    /// rather than tested: pane ids allocate from zero (`next_pane_id`), so
-    /// pane 0 is a valid seat and a truthiness test on it is the
-    /// defect that made six live workers invisible.
-    /// The lowest portal index nothing LIVE holds.
-    ///
-    /// Server-side on purpose. A client computing this from the rows it last
-    /// rendered races every other client: two of them pick the same number and
-    /// the second reach repoints the first one's brand-new portal. The server
-    /// handles reaches one at a time, so allocating here cannot collide.
-    ///
-    /// Liveness, not presence, the same read `close_pane` uses: an entry whose
-    /// pane closed elsewhere is stale, and its index is free to reuse. The
-    /// reach's own stale-slot path then reads the leftover entry for its
-    /// remembered tab, so reusing the index lands the new viewer where the old
-    /// one was.
-    ///
-    /// `None` means every index holds a portal whose seat is live.
-    /// The old saturation at `u8::MAX` was itself an occupied index, so a
-    /// full space silently REPOINTED portal 255; the caller refuses instead.
-    fn next_free_portal(&self) -> Option<u8> {
-        (0..=u8::MAX).find(|idx| {
-            !self
-                .portals
-                .get(idx)
-                .is_some_and(|portal| self.panes.contains_key(&portal.seat))
-        })
-    }
-
-    fn portal_of(&self, pane: Option<u64>) -> Option<u8> {
-        let pane = pane?;
-        self.portals
-            .iter()
-            .find(|(_, portal)| portal.seat == pane)
-            .map(|(idx, _)| *idx)
-    }
-
     /// A registry row's message tail from the off-loop transcript map.
     /// `None` for a row with no session uuid (a bare pane, a tombstone) or one
     /// whose transcript yielded no prose - the extended table then renders an
@@ -14078,6 +14035,7 @@ async fn serve(
             _ = pane_reap_tick.tick() => {
                 // Deferred repaint requests ride the same 1s pass.
                 core.fire_due_nudges();
+                core.follow_portal_viewer_titles();
                 // Snapshot first: reader completion guarantees all output for
                 // these panes was enqueued before this point. Drain it, then
                 // close exactly the snapshot even if another reader finishes

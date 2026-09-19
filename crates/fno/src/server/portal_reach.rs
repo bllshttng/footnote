@@ -29,6 +29,16 @@ pub(super) fn row_answers_key(a: &RegistryAgent, key: &str) -> bool {
     a.mux.is_none() && !a.exited && (a.attach_id.as_deref() == Some(key) || a.name == key)
 }
 
+/// The session a claude viewer's OSC title names: the title minus one
+/// leading status glyph token ("✳", "◐", a braille spinner frame).
+pub(super) fn title_session_name(title: &str) -> &str {
+    let t = title.trim();
+    match t.split_once(' ') {
+        Some((glyph, rest)) if !glyph.chars().any(char::is_alphanumeric) => rest.trim(),
+        _ => t,
+    }
+}
+
 /// Remember every restored portal slot's seat (index, row, pane,
 /// tab id) until the tab ids are final.
 pub(super) fn collect_portal_slot_seats(
@@ -1119,6 +1129,156 @@ impl Core {
             }
         }
         landing
+    }
+
+    /// Which portal shows `pane`, DERIVED from the open portals every
+    /// time the rows are built. Nothing is stored per row: the row-to-pane
+    /// relation is a pointer, so a row moving between portals stays ONE row
+    /// whose index changes, and no row can carry an index that has gone stale.
+    ///
+    /// `None` means this pane is not a portal seat - never "unknown". The
+    /// comparison is EQUALITY on the seat id, and the `Option` is matched
+    /// rather than tested: pane ids allocate from zero (`next_pane_id`), so
+    /// pane 0 is a valid seat and a truthiness test on it is the
+    /// defect that made six live workers invisible.
+    pub(super) fn portal_of(&self, pane: Option<u64>) -> Option<u8> {
+        let pane = pane?;
+        self.portals
+            .iter()
+            .find(|(_, portal)| portal.seat == pane)
+            .map(|(idx, _)| *idx)
+    }
+
+    /// The portal index a seat's row may wear: `None` unless the seat's key
+    /// answers exactly one live row. A held seat (its row is gone) or a
+    /// dropped one (the key names two, or the viewer title names no row)
+    /// wears no marker, so the sideline band and the portal picker tell the
+    /// truth instead of guessing.
+    pub(super) fn portal_marker(&self, pane: Option<u64>) -> Option<u8> {
+        let idx = self.portal_of(pane)?;
+        let key = self.portals.get(&idx)?.row_key.as_str();
+        let named = self
+            .agents
+            .iter()
+            .filter(|a| row_answers_key(a, key))
+            .count();
+        (named == 1).then_some(idx)
+    }
+
+    /// The lowest portal index nothing LIVE holds.
+    ///
+    /// Server-side on purpose. A client computing this from the rows it last
+    /// rendered races every other client: two of them pick the same number and
+    /// the second reach repoints the first one's brand-new portal. The server
+    /// handles reaches one at a time, so allocating here cannot collide.
+    ///
+    /// Liveness, not presence, the same read `close_pane` uses: an entry whose
+    /// pane closed elsewhere is stale, and its index is free to reuse. The
+    /// reach's own stale-slot path then reads the leftover entry for its
+    /// remembered tab, so reusing the index lands the new viewer where the old
+    /// one was.
+    ///
+    /// `None` means every index holds a portal whose seat is live.
+    /// The old saturation at `u8::MAX` was itself an occupied index, so a
+    /// full space silently REPOINTED portal 255; the caller refuses instead.
+    pub(super) fn next_free_portal(&self) -> Option<u8> {
+        (0..=u8::MAX).find(|idx| {
+            !self
+                .portals
+                .get(idx)
+                .is_some_and(|portal| self.panes.contains_key(&portal.seat))
+        })
+    }
+
+    /// A claude portal seat follows the session its viewer's OSC title names.
+    ///
+    /// A claude attach TUI can switch sessions inside its own TUI (the
+    /// agent-view arrow) without fno learning it, so the seat's stored row
+    /// goes stale. Every 1s tick: a title naming one free row repoints
+    /// `row_key`, `attached` and the pane name to it; a title naming no
+    /// single free row drops the claim, so no row wears a seat that shows
+    /// something else. Only claude viewer seats are followed (`entry.cmd`
+    /// gates on the attach program), and a title naming a row another
+    /// portal shows never steals it.
+    pub(super) fn follow_portal_viewer_titles(&mut self) {
+        let viewer_cmd = cmd_from_argv(&attach_base(""));
+        let candidates: Vec<(u8, u64, String)> = self
+            .portals
+            .iter()
+            .filter_map(|(idx, portal)| {
+                let entry = self.panes.get(&portal.seat)?;
+                if entry.cmd != viewer_cmd {
+                    return None;
+                }
+                let title = title_session_name(entry.vt.osc_title()?);
+                // A glyph-only frame ("◐", mid-spinner) names no session; a
+                // seat must not unclaim onto it.
+                (!title.is_empty() && title.chars().any(char::is_alphanumeric))
+                    .then(|| (*idx, portal.seat, title.to_string()))
+            })
+            .collect();
+        let mut changed = false;
+        for (idx, seat, title) in candidates {
+            let named: Vec<&RegistryAgent> = self
+                .agents
+                .iter()
+                .filter(|a| {
+                    a.mux.is_none()
+                        && !a.exited
+                        && (a.name == title || a.harness_title.as_deref() == Some(title.as_str()))
+                })
+                .collect();
+            let claim: Option<String> = match named.as_slice() {
+                [row] => row.attach_id.as_deref().and_then(|id| {
+                    let free = self.live_viewer_portal(row, id, idx).is_none()
+                        && match self.attached.get(id) {
+                            Some(p) => *p == seat || !self.panes.contains_key(p),
+                            None => true,
+                        };
+                    free.then(|| id.to_string())
+                }),
+                _ => None,
+            };
+            // Skip when the seat already agrees: the one row the title names
+            // is the seated row with the attach mapping in place, or an
+            // unclaimed seat whose key is already the title text (stable, so
+            // a title naming no row costs no layout push per tick).
+            let agrees = match named.as_slice() {
+                [row] => {
+                    row_answers_key(row, &self.portals[&idx].row_key)
+                        && row
+                            .attach_id
+                            .as_deref()
+                            .is_some_and(|id| self.attached.get(id) == Some(&seat))
+                }
+                _ => false,
+            } || (claim.is_none()
+                && self.portals[&idx].row_key == title
+                && !self.attached.values().any(|p| *p == seat));
+            if agrees {
+                continue;
+            }
+            self.attached.retain(|_, p| *p != seat);
+            match claim {
+                Some(id) => {
+                    self.attached.insert(id.clone(), seat);
+                    let (_, cd) = self.attach_account_ctx(&id);
+                    self.portals.get_mut(&idx).expect("candidate idx").row_key = id.clone();
+                    self.name_attached_pane(seat, &id, cd.as_deref());
+                }
+                None => {
+                    self.portals.get_mut(&idx).expect("candidate idx").row_key = title.clone();
+                    if let Some(entry) = self.panes.get_mut(&seat) {
+                        entry.name = Some(title.clone());
+                    }
+                }
+            }
+            self.notice_all(format!("portal {idx} now shows {title}"));
+            changed = true;
+        }
+        if changed {
+            self.push_layout(true);
+        }
     }
 
     /// One-row-one-viewer, shared by the reach and the landed check: the

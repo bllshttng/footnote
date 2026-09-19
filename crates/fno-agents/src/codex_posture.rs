@@ -413,19 +413,21 @@ pub fn permission_pane_tokens(provider: &str, mode: &str) -> Result<Vec<String>,
                 ))
             }
         }
-        "agy" => {
-            if mode == "skip" {
-                // The argv already carries --dangerously-skip-permissions
-                // unconditionally.
-                Ok(Vec::new())
-            } else {
-                Err(format!(
-                    "agy --permission-mode {mode:?} unmappable; only 'skip' maps \
-                     (--dangerously-skip-permissions). Finer control is config-only \
-                     (toolPermission)."
-                ))
-            }
-        }
+        "agy" => match mode {
+            "skip" => Ok(vec!["--dangerously-skip-permissions".into()]),
+            "accept-edits" | "plan" => Ok(vec!["--mode".into(), mode.to_string()]),
+            "sandbox" => Ok(vec!["--sandbox".into()]),
+            "accept-edits+sandbox" | "plan+sandbox" => Ok(vec![
+                "--mode".into(),
+                mode.trim_end_matches("+sandbox").to_string(),
+                "--sandbox".into(),
+            ]),
+            "default" => Ok(Vec::new()),
+            _ => Err(format!(
+                "agy --permission-mode {mode:?} unmappable; use skip, accept-edits, \
+                 plan, sandbox, accept-edits+sandbox, plan+sandbox, or default"
+            )),
+        },
         "pi" => Err(format!(
             "pi --permission-mode {mode:?} unmappable, and this is an absence in \
              pi rather than a gap in fno: pi ships NO permission popups (its own \
@@ -522,7 +524,7 @@ mod mappable_tests {
         );
         assert_eq!(
             permission_pane_tokens("agy", "skip").unwrap(),
-            Vec::<String>::new()
+            vec!["--dangerously-skip-permissions"]
         );
         assert_eq!(
             permission_pane_tokens("cursor-agent", "force").unwrap(),
@@ -531,6 +533,50 @@ mod mappable_tests {
         assert!(permission_pane_tokens("pi", "yolo").is_err());
         assert!(permission_pane_tokens("codex", "banana").is_err());
         assert!(permission_pane_tokens("nonexistent", "yolo").is_err());
+    }
+
+    /// AC5-HP (tokens) and AC7-ERR (refusal): the agy arm of the one
+    /// vocabulary maps every mode agy 1.1.27 --help lists, and refuses any
+    /// other value by naming the full vocabulary.
+    #[test]
+    fn agy_arm_maps_the_mode_vocabulary_and_refuses_the_rest() {
+        assert_eq!(
+            permission_pane_tokens("agy", "plan").unwrap(),
+            vec!["--mode", "plan"]
+        );
+        assert_eq!(
+            permission_pane_tokens("agy", "accept-edits").unwrap(),
+            vec!["--mode", "accept-edits"]
+        );
+        assert_eq!(
+            permission_pane_tokens("agy", "sandbox").unwrap(),
+            vec!["--sandbox"]
+        );
+        assert_eq!(
+            permission_pane_tokens("agy", "plan+sandbox").unwrap(),
+            vec!["--mode", "plan", "--sandbox"]
+        );
+        assert_eq!(
+            permission_pane_tokens("agy", "accept-edits+sandbox").unwrap(),
+            vec!["--mode", "accept-edits", "--sandbox"]
+        );
+        assert_eq!(
+            permission_pane_tokens("agy", "default").unwrap(),
+            Vec::<String>::new()
+        );
+        let err = permission_pane_tokens("agy", "yolo-please")
+            .expect_err("an unmappable agy mode must refuse");
+        for word in [
+            "skip",
+            "accept-edits",
+            "plan",
+            "sandbox",
+            "accept-edits+sandbox",
+            "plan+sandbox",
+            "default",
+        ] {
+            assert!(err.contains(word), "refusal lists {word}: {err}");
+        }
     }
 
     /// AC4-HP: the codex thread lane carries the axis, per the capability
