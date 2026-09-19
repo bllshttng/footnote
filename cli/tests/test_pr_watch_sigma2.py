@@ -174,11 +174,10 @@ class TestEmitEventAnchoredPath:
             pass
         monkeypatch.setenv("HOME", str(fake_home))
 
+        from tests._event_rows import event_rows
+
         anchored_events = fake_home / ".fno" / "events.jsonl"
-        assert anchored_events.exists(), (
-            f"event not found at state_dir path {anchored_events}"
-        )
-        lines = anchored_events.read_text().strip().splitlines()
+        lines = event_rows(anchored_events)
         assert len(lines) == 1
         ev = json.loads(lines[0])
         assert ev["type"] == "pr_watch_tick"
@@ -366,7 +365,9 @@ class TestCliTickIntegration:
             f"No events.jsonl found at {events_path}. "
             "The real _emit_event wrote to a cwd-relative path instead (bug #1 not fixed)."
         )
-        events = [json.loads(line) for line in events_path.read_text().strip().splitlines() if line.strip()]
+        from tests._event_rows import event_rows
+
+        events = event_rows(events_path)
         tick_events = [e for e in events if e.get("type") == "pr_watch_tick"]
         assert len(tick_events) >= 1, (
             f"No pr_watch_tick event in {events_path}. Events found: {events}"
@@ -692,10 +693,11 @@ class TestControlPlaneArmRows:
             from fno.pr_watch.cli import tick
             tick()
 
+        from tests._event_rows import event_rows as _event_rows
         rows = [
-            json.loads(line)
-            for line in (fno_dir / "events.jsonl").read_text().splitlines()
-            if line.strip() and json.loads(line).get("type") == "control_plane_tick"
+            r
+            for r in _event_rows(fno_dir / "events.jsonl")
+            if r.get("type") == "control_plane_tick"
         ]
         by_arm = {r["data"]["arm"]: r["data"] for r in rows}
         assert by_arm["watchdog"]["skip_reason"] == "watchdog_off"

@@ -423,9 +423,12 @@ def _events_file() -> Path:
 
 
 def _seed_events(records: list[dict]) -> None:
+    from fno.events.store_client import emit_envelope
+
     p = _events_file()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("".join(json.dumps(r) + "\n" for r in records))
+    for i, r in enumerate(records):
+        emit_envelope({"ts": f"2026-01-01T00:00:{i:02d}Z", "source": "test", **r}, p)
 
 
 def _ev_fail(nid: str) -> dict:
@@ -437,11 +440,15 @@ def _ev_parked(nid: str) -> dict:
 
 
 def _append_events(records: list[dict]) -> None:
+    from fno.events.store_client import emit_envelope
+
     p = _events_file()
     p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a", encoding="utf-8") as fh:
-        for r in records:
-            fh.write(json.dumps(r) + "\n")
+    n = 0
+    for r in records:
+        n += 1
+        emit_envelope({"ts": f"2026-01-0{min(n // 3600 + 1, 9)}T{n // 60 % 60:02d}:{n % 60:02d}:00Z",
+                       "source": "test", **r}, p)
 
 
 @pytest.fixture(autouse=True)
