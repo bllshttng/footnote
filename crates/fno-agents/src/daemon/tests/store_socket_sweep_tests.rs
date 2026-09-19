@@ -71,7 +71,11 @@ fn store_socket_sweep_unlinks_the_dead_and_leaves_the_live() {
     // provably-dead litter must be gone after bounded passes.
     let mut passes = 0;
     while passes < 10 {
-        let _ = store_socket_sweep_in(&home, temp_root.clone(), &emitter);
+        let _ = crate::daemon::store_socket_sweep::store_socket_sweep_in(
+            &home,
+            temp_root.clone(),
+            &emitter,
+        );
         passes += 1;
         assert!(
             shielded_sock.exists(),

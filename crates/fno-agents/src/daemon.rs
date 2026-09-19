@@ -41,8 +41,6 @@ use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 use self::roster_death::claude_row_provably_absent;
 pub(crate) use self::roster_death::{claude_row_id, pid_is_gone};
 pub(crate) use self::store_socket_sweep::store_socket_sweep;
-#[cfg(test)]
-pub(crate) use self::store_socket_sweep::store_socket_sweep_in;
 mod list_rows;
 use self::list_rows::{
     activity_basis_from_truth, apply_row_contradiction, attention_sort_key, basis_word_from_truth,
