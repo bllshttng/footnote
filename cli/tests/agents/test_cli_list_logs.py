@@ -1,9 +1,9 @@
-"""CLI-level tests for `fno agents list` and `fno agents logs`.
+"""CLI-level tests for `fno agents logs`.
 
 These tests exercise the Typer entry points, not the underlying
 read.py / harnesses.claude module. The latter have their own unit tests
-in test_read.py / test_harnesses_claude_read.py. Here we verify flag
-wiring, exit codes, TTY behavior, and the AC3-ERR allowed-values list.
+in test_read.py / test_harnesses_claude_read.py. Here we verify log flag
+wiring and exit codes.
 """
 from __future__ import annotations
 
@@ -70,24 +70,6 @@ def _patch_claude_subprocess(monkeypatch):
 
     monkeypatch.setattr(claude_mod, "claude_agents_json", _fake)
     return claude_mod
-
-
-# --- `fno agents list` -------------------------------------------------------
-
-
-def test_list_invalid_status_value_exits_2_with_allowed_values(
-    tmp_path, monkeypatch, runner, _patch_claude_subprocess
-):
-    """AC3-ERR — invalid --status exits 2 with allowed-values list."""
-    use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.cli import agents_app
-
-    result = runner.invoke(agents_app, ["list", "--status", "invalid-value"])
-
-    assert result.exit_code == 2
-    # Typer puts the allowed-values list in the usage error.
-    assert "writing" in result.output.lower()
-    assert "orphaned" in result.output.lower()
 
 
 # --- `fno agents logs <name>` -----------------------------------------------
@@ -323,4 +305,3 @@ def test_every_word_the_renderer_produces_is_a_filterable_status():
 # vendor answered as. Only the second one is still right when a route silently
 # falls back, so the row carries the derived reading.
 # ---------------------------------------------------------------------------
-

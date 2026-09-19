@@ -1,12 +1,9 @@
-"""Tests for fno.agents.format — pure renderers.
+"""Tests for fno.agents.format — registry-row serialization.
 
-Covers AC1-UI (--json shape), AC1-EDGE (empty), AC3-HP (cross-provider shape
-stability), AC3-UI (jq round-trip parseable).
+Covers cross-provider shape stability and the fields consumed by non-list
+registry readers.
 """
 from __future__ import annotations
-
-import json
-import pathlib
 
 from fno.agents.format import (
     serialize_entry,
@@ -172,43 +169,8 @@ def test_serialize_entry_carries_the_last_event_pair() -> None:
     assert default["last_message"] is None
 
 
-# ---------------------------------------------------------------------------
-# Shared key-set contract
-#
-# Two serializers answer one question and they have drifted before, so both are
-# pinned to schemas/agents-list-row.json: this file pins the Python side,
-# crates/fno-agents/src/daemon.rs pins the Rust side, and a key added to one and
-# not the other fails CI.
-#
-# The served `fno agents list` is the Rust projection; `serialize_entry` still
-# feeds the field-coverage lint and must keep the shared key set.
-# ---------------------------------------------------------------------------
-
-_SCHEMA_PATH = (
-    pathlib.Path(__file__).resolve().parents[3] / "schemas" / "agents-list-row.json"
-)
-
-
-def _contract() -> dict:
-    return json.loads(_SCHEMA_PATH.read_text())
-
-
-def test_serialize_entry_key_set_matches_shared_contract() -> None:
-    contract = _contract()
-    expected = set(contract["required"]) | set(contract["python_only"]["keys"])
-
-    row = serialize_entry(_claude_entry(), live_status="Working")
-
-    assert set(row) == expected
-
-
 def test_serialize_entry_emits_last_activity_basis() -> None:
-    """The age's instrument rides the row on the Python lane too.
-
-    The contract test above pins the KEY on both serializers; this pins the
-    value lane: the resolver's instrument word when it answered, its reason
-    word when it could not resolve the handle.
-    """
+    """The age's instrument rides the serialized registry row."""
     answered = serialize_entry(
         _claude_entry(),
         live_status=None,

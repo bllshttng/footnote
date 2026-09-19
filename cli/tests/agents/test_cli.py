@@ -1,8 +1,8 @@
-"""Tests for `fno agents` Typer subapp scaffold — TDD Red phase.
+"""Tests for the `fno agents` Typer subapp scaffold.
 
 AC5/AC6 from Task 1.2:
 - `fno agents` Typer subapp wired into main CLI; `fno agents --help` prints usage
-- Empty `ask` / `list` / `ping` stubs exit 0 and print "not implemented yet"
+- Hidden lifecycle commands remain invocable through the compatibility surface.
 """
 from __future__ import annotations
 
