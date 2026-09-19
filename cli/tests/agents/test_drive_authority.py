@@ -102,7 +102,10 @@ def test_emit_operator_initiated_envelope_and_data(tmp_path: Path) -> None:
         events_path=events,
         task_id="ab-12345678",
     )
-    rec = json.loads(events.read_text().strip())
+    from tests._event_rows import event_rows
+
+    rows = event_rows(events)
+    rec = rows[0]
     assert set(rec) == {"ts", "source", "type", "data"}
     assert rec["source"] == "backlog"
     assert rec["type"] == "operator_initiated"
