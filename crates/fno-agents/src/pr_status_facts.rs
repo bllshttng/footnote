@@ -305,10 +305,7 @@ pub(crate) fn zero_job_failures(
     let mut out = Vec::new();
     for (path, run) in newest {
         let status = run.get("status").and_then(Value::as_str).unwrap_or("");
-        let conclusion = run
-            .get("conclusion")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let conclusion = run.get("conclusion").and_then(Value::as_str).unwrap_or("");
         if status != "completed" || !matches!(conclusion, "failure" | "startup_failure") {
             continue;
         }
