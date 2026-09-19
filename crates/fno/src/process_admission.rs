@@ -85,8 +85,21 @@ impl MaxPanes {
 /// headroom.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Census {
-    Complete { count: ProcessCount },
-    Unavailable { reason: String },
+    Complete {
+        count: ProcessCount,
+    },
+    Unavailable {
+        reason: String,
+    },
+    /// No reading is owed, and none can be taken: this build carries no
+    /// snapshot arm, or this process holds no descriptor to read one with.
+    /// Both are facts about the world, so a retry cannot change either.
+    /// Admit and let the caller's own error speak: a process with no free
+    /// descriptor cannot spawn a child either, and the pty layer already
+    /// names that limit exactly.
+    NoSource {
+        reason: String,
+    },
 }
 
 impl Census {
@@ -98,6 +111,12 @@ impl Census {
 
     pub fn unavailable(reason: impl Into<String>) -> Self {
         Self::Unavailable {
+            reason: reason.into(),
+        }
+    }
+
+    pub fn no_source(reason: impl Into<String>) -> Self {
+        Self::NoSource {
             reason: reason.into(),
         }
     }
@@ -257,6 +276,11 @@ pub fn decide_processes(census: &Census, ceiling: MaxProcesses) -> AdmissionDeci
             scope: Scope::Fleet,
             reason: AdmissionReason::MeasurementUnavailable,
         },
+        // No source is not headroom and not a refusal: the facts behind it
+        // (no snapshot arm, no /proc, no descriptor) cannot change by
+        // re-reading, and a process in that state fails its own spawn one
+        // layer down with a message naming the real limit.
+        Census::NoSource { .. } => AdmissionDecision::Admit,
     }
 }
 
@@ -383,6 +407,13 @@ pub fn configured_pane_group_max(requested: Option<usize>) -> usize {
         .unwrap_or(DEFAULT_PANE_GROUP_MAX)
 }
 
+/// The one receipt the gate writes when it stops measuring. The reason is a
+/// fact about the world, the spawn below reports its own limit, and an
+/// operator reading a log can tell a descriptor famine from a full fleet.
+fn write_not_measuring_receipt(reason: &str) {
+    eprintln!("process admission is not measuring: {reason}; admitting, the spawn below reports its own limit");
+}
+
 /// Acquire the machine-global admission lock, measure the relevant process
 /// tree, and return a permit that must remain alive through the spawn syscall.
 pub fn admit_fleet() -> Result<AdmissionPermit, AdmissionFailure> {
@@ -416,26 +447,50 @@ pub fn admit_fleet() -> Result<AdmissionPermit, AdmissionFailure> {
     if std::env::var_os("FNO_MUX_NATIVE_TEST_ADMISSION").is_none() {
         return Ok(test_permit(Scope::Fleet, 0, ceiling.get()));
     }
-    let lock = acquire_lock().map_err(|detail| AdmissionFailure {
-        decision: AdmissionDecision::Refuse {
-            count: None,
-            ceiling: ceiling.get(),
-            scope: Scope::Fleet,
-            reason: AdmissionReason::LockUnavailable,
-        },
-        detail,
-    })?;
+    let lock = match acquire_lock() {
+        Ok(lock) => Some(lock),
+        // A fact, not a race: with no descriptor left, the census behind the
+        // lock would fail the same way. Admit, and let the spawn below name
+        // its own limit.
+        Err(AcquireFailure::NoSource(reason)) => {
+            write_not_measuring_receipt(&reason);
+            return Ok(AdmissionPermit {
+                _lock: None,
+                scope: Scope::Fleet,
+                count: 0,
+                ceiling: ceiling.get(),
+                #[cfg(test)]
+                track_children: true,
+            });
+        }
+        Err(AcquireFailure::Other(detail)) => {
+            return Err(AdmissionFailure {
+                decision: AdmissionDecision::Refuse {
+                    count: None,
+                    ceiling: ceiling.get(),
+                    scope: Scope::Fleet,
+                    reason: AdmissionReason::LockUnavailable,
+                },
+                detail,
+            });
+        }
+    };
     let census = process_census();
     let decision = decide_processes(&census, ceiling);
     match decision {
-        AdmissionDecision::Admit => Ok(AdmissionPermit {
-            _lock: Some(lock),
-            scope: Scope::Fleet,
-            count: census.count().expect("admitted census has a count"),
-            ceiling: ceiling.get(),
-            #[cfg(test)]
-            track_children: true,
-        }),
+        AdmissionDecision::Admit => {
+            if let Census::NoSource { reason } = &census {
+                write_not_measuring_receipt(reason);
+            }
+            Ok(AdmissionPermit {
+                _lock: lock,
+                scope: Scope::Fleet,
+                count: census.count().unwrap_or(0),
+                ceiling: ceiling.get(),
+                #[cfg(test)]
+                track_children: true,
+            })
+        }
         decision => Err(AdmissionFailure {
             decision,
             detail: census.reason().unwrap_or_default().to_string(),
@@ -460,19 +515,37 @@ pub fn admit_tab(
     if std::env::var_os("FNO_MUX_NATIVE_TEST_ADMISSION").is_none() {
         return Ok(test_permit(Scope::Tab, pane_count, ceiling.get()));
     }
-    let lock = acquire_lock().map_err(|detail| AdmissionFailure {
-        decision: AdmissionDecision::Refuse {
-            count: None,
-            ceiling: ceiling.get(),
-            scope: Scope::Tab,
-            reason: AdmissionReason::LockUnavailable,
-        },
-        detail,
-    })?;
+    let lock = match acquire_lock() {
+        Ok(lock) => Some(lock),
+        // Same famine door as admit_fleet: the pane count needs no snapshot,
+        // and the spawn below names its own limit.
+        Err(AcquireFailure::NoSource(reason)) => {
+            write_not_measuring_receipt(&reason);
+            return Ok(AdmissionPermit {
+                _lock: None,
+                scope: Scope::Tab,
+                count: pane_count,
+                ceiling: ceiling.get(),
+                #[cfg(test)]
+                track_children: true,
+            });
+        }
+        Err(AcquireFailure::Other(detail)) => {
+            return Err(AdmissionFailure {
+                decision: AdmissionDecision::Refuse {
+                    count: None,
+                    ceiling: ceiling.get(),
+                    scope: Scope::Tab,
+                    reason: AdmissionReason::LockUnavailable,
+                },
+                detail,
+            });
+        }
+    };
     let decision = decide_panes(PaneCount::new(pane_count), ceiling);
     match decision {
         AdmissionDecision::Admit => Ok(AdmissionPermit {
-            _lock: Some(lock),
+            _lock: lock,
             scope: Scope::Tab,
             count: pane_count,
             ceiling: ceiling.get(),
@@ -524,15 +597,33 @@ pub fn admit_pane(
     if std::env::var_os("FNO_MUX_NATIVE_TEST_ADMISSION").is_none() {
         return Ok(test_permit(Scope::Fleet, 0, fleet_ceiling.get()));
     }
-    let lock = acquire_lock().map_err(|detail| AdmissionFailure {
-        decision: AdmissionDecision::Refuse {
-            count: None,
-            ceiling: fleet_ceiling.get(),
-            scope: Scope::Fleet,
-            reason: AdmissionReason::LockUnavailable,
-        },
-        detail,
-    })?;
+    let lock = match acquire_lock() {
+        Ok(lock) => Some(lock),
+        // Same famine door as admit_fleet: with no descriptor left, the
+        // census behind the lock would fail the same way.
+        Err(AcquireFailure::NoSource(reason)) => {
+            write_not_measuring_receipt(&reason);
+            return Ok(AdmissionPermit {
+                _lock: None,
+                scope: Scope::Fleet,
+                count: 0,
+                ceiling: fleet_ceiling.get(),
+                #[cfg(test)]
+                track_children: true,
+            });
+        }
+        Err(AcquireFailure::Other(detail)) => {
+            return Err(AdmissionFailure {
+                decision: AdmissionDecision::Refuse {
+                    count: None,
+                    ceiling: fleet_ceiling.get(),
+                    scope: Scope::Fleet,
+                    reason: AdmissionReason::LockUnavailable,
+                },
+                detail,
+            });
+        }
+    };
     let fleet = process_census();
     let fleet_decision = decide_processes(&fleet, fleet_ceiling);
     if !matches!(fleet_decision, AdmissionDecision::Admit) {
@@ -540,6 +631,9 @@ pub fn admit_pane(
             decision: fleet_decision,
             detail: fleet.reason().unwrap_or_default().to_string(),
         });
+    }
+    if let Census::NoSource { reason } = &fleet {
+        write_not_measuring_receipt(reason);
     }
     let tab = decide_panes(PaneCount::new(pane_count), tab_ceiling);
     if !matches!(tab, AdmissionDecision::Admit) {
@@ -549,9 +643,9 @@ pub fn admit_pane(
         });
     }
     Ok(AdmissionPermit {
-        _lock: Some(lock),
+        _lock: lock,
         scope: Scope::Fleet,
-        count: fleet.count().expect("admitted census has a count"),
+        count: fleet.count().unwrap_or(0),
         ceiling: fleet_ceiling.get(),
         #[cfg(test)]
         track_children: true,
@@ -682,18 +776,48 @@ pub async fn tokio_status(
     child.wait().await
 }
 
-fn acquire_lock() -> Result<File, String> {
-    let path = admission_lock_path().map_err(|e| format!("cannot prepare admission state: {e}"))?;
+/// Why the admission lock could not be taken. `NoSource` is the descriptor
+/// famine door: with no descriptor left to open the lock with, the census
+/// behind the lock would fail the same way, so the caller admits instead of
+/// refusing. Everything else keeps the lock-unavailable refusal.
+enum AcquireFailure {
+    NoSource(String),
+    Other(String),
+}
+
+/// True when an open error means this process has no descriptor left to read
+/// the process table with. A fact about this process, not a race, so it
+/// never earns a retry.
+fn no_descriptor_left(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EMFILE) | Some(libc::ENFILE)
+    )
+}
+
+fn acquire_lock() -> Result<File, AcquireFailure> {
+    let path = admission_lock_path()
+        .map_err(|e| AcquireFailure::Other(format!("cannot prepare admission state: {e}")))?;
     let file = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
         .open(&path)
-        .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+        .map_err(|error| {
+            if no_descriptor_left(&error) {
+                AcquireFailure::NoSource(format!(
+                    "no descriptor left to open the admission lock (cannot open {}: {})",
+                    path.display(),
+                    error
+                ))
+            } else {
+                AcquireFailure::Other(format!("cannot open {}: {}", path.display(), error))
+            }
+        })?;
     #[cfg(unix)]
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| format!("cannot secure {}: {e}", path.display()))?;
+        .map_err(|e| AcquireFailure::Other(format!("cannot secure {}: {e}", path.display())))?;
     #[cfg(unix)]
     {
         let fd = std::os::unix::io::AsRawFd::as_raw_fd(&file);
@@ -706,7 +830,11 @@ fn acquire_lock() -> Result<File, String> {
             }
             let error = io::Error::last_os_error();
             if error.kind() != io::ErrorKind::Interrupted {
-                return Err(format!("cannot lock {}: {error}", path.display()));
+                return Err(AcquireFailure::Other(format!(
+                    "cannot lock {}: {}",
+                    path.display(),
+                    error
+                )));
             }
         }
     }
@@ -763,28 +891,80 @@ impl Census {
     fn count(&self) -> Option<usize> {
         match self {
             Self::Complete { count } => Some(count.get()),
-            Self::Unavailable { .. } => None,
+            Self::Unavailable { .. } | Self::NoSource { .. } => None,
         }
     }
 
     fn reason(&self) -> Option<&str> {
         match self {
             Self::Complete { .. } => None,
-            Self::Unavailable { reason } => Some(reason),
+            Self::Unavailable { reason } | Self::NoSource { reason } => Some(reason),
         }
     }
 }
 
-fn process_census() -> Census {
-    let result = snapshot_processes().and_then(|rows| {
-        let attributed = attributed_pids(&rows)?;
-        let markers = marker_count(&rows, &attributed)?;
-        Ok(attributed.len() + markers)
-    });
-    match result {
-        Ok(count) => Census::complete(count),
-        Err(reason) => Census::unavailable(reason),
+/// Why a reading did not produce a count. `NoSource` is the world; `Unread`
+/// is a read that failed and may yet succeed.
+enum CensusFailure {
+    NoSource(String),
+    Unread(String),
+}
+
+/// Classify one /proc-directory read error. `NotFound` names the mount, not
+/// a pid; EMFILE/ENFILE mean this process has no descriptor left to read
+/// with. Both are facts, so neither earns a retry. Every other error is a
+/// read failure and holds.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn classify_proc_dir_error(error: &io::Error) -> CensusFailure {
+    if no_descriptor_left(error) || error.kind() == io::ErrorKind::NotFound {
+        CensusFailure::NoSource(format!("cannot read /proc: {error}"))
+    } else {
+        CensusFailure::Unread(format!("/proc unavailable: {error}"))
     }
+}
+
+/// A short read of the process table is a race, not a state: the snapshot and
+/// the per-pid read are separate syscalls, so a pid can die between them. Read
+/// again before the whole machine is refused over one row.
+const CENSUS_ATTEMPTS: u32 = 4;
+const CENSUS_WAIT: std::time::Duration = std::time::Duration::from_millis(25);
+
+fn process_census() -> Census {
+    // ponytail: the machine-global admission lock is already held here, so the
+    // hold below serializes every other spawn for up to 75ms. Bounded on
+    // purpose. If that cost ever shows up, move the wait above acquire_lock.
+    census_with(read_process_count, CENSUS_ATTEMPTS, CENSUS_WAIT)
+}
+
+fn read_process_count() -> Result<usize, CensusFailure> {
+    let rows = snapshot_processes()?;
+    let attributed = attributed_pids(&rows).map_err(CensusFailure::Unread)?;
+    let markers = marker_count(&rows, &attributed).map_err(CensusFailure::Unread)?;
+    Ok(attributed.len() + markers)
+}
+
+fn census_with(
+    mut read: impl FnMut() -> Result<usize, CensusFailure>,
+    attempts: u32,
+    wait: std::time::Duration,
+) -> Census {
+    let started = std::time::Instant::now();
+    let mut last = String::new();
+    for attempt in 1..=attempts {
+        match read() {
+            Ok(count) => return Census::complete(count),
+            // A fact about the world. Re-reading cannot change it, so stop.
+            Err(CensusFailure::NoSource(reason)) => return Census::no_source(reason),
+            Err(CensusFailure::Unread(reason)) => last = reason,
+        }
+        if attempt < attempts {
+            std::thread::sleep(wait);
+        }
+    }
+    Census::unavailable(format!(
+        "census unread after {attempts} reads over {}ms: {last}",
+        started.elapsed().as_millis()
+    ))
 }
 
 /// Count the live children the ledger records, and rewrite the ledger to
@@ -899,8 +1079,10 @@ fn attributed_pids(rows: &[ProcessRow]) -> Result<HashSet<u32>, String> {
     let mut attributed = HashSet::new();
     for row in rows {
         // The mux/client/test executable is the admission observer, not a
-        // worker slot. Count its descendants, including zombies, so a fresh
-        // server can admit two children under a ceiling of two.
+        // worker slot. Count its descendants, so a fresh server can admit
+        // two children under a ceiling of two. A row the reader cannot name
+        // is not counted, and on macOS proc_name answers nothing for a
+        // defunct pid, so a zombie is not counted on that platform.
         let is_attributed =
             row.pid != current_pid && reaches_root(row, &by_pid, &roots, current_pid)?;
         if is_attributed {
@@ -950,7 +1132,7 @@ fn reaches_root(
     }
 }
 
-fn snapshot_processes() -> Result<Vec<ProcessRow>, String> {
+fn snapshot_processes() -> Result<Vec<ProcessRow>, CensusFailure> {
     #[cfg(target_os = "macos")]
     {
         return snapshot_macos();
@@ -960,30 +1142,34 @@ fn snapshot_processes() -> Result<Vec<ProcessRow>, String> {
         return snapshot_linux();
     }
     #[allow(unreachable_code)]
-    Err("native process snapshot unavailable on this platform".into())
+    Err(CensusFailure::NoSource(
+        "native process snapshot unavailable on this platform".into(),
+    ))
 }
 
 #[cfg(target_os = "macos")]
-fn snapshot_macos() -> Result<Vec<ProcessRow>, String> {
+fn snapshot_macos() -> Result<Vec<ProcessRow>, CensusFailure> {
     let needed = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     if needed <= 0 {
-        return Err(format!(
+        return Err(CensusFailure::Unread(format!(
             "proc_listallpids failed: {}",
             io::Error::last_os_error()
-        ));
+        )));
     }
     let mut pids = vec![0 as libc::pid_t; needed as usize];
     let bytes = i32::try_from(pids.len() * std::mem::size_of::<libc::pid_t>())
-        .map_err(|_| "process snapshot is too large".to_string())?;
+        .map_err(|_| CensusFailure::Unread("process snapshot is too large".into()))?;
     let found = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
     if found < 0 {
-        return Err(format!(
+        return Err(CensusFailure::Unread(format!(
             "proc_listallpids failed: {}",
             io::Error::last_os_error()
-        ));
+        )));
     }
     if found as usize > pids.len() {
-        return Err("process snapshot changed while being read".into());
+        return Err(CensusFailure::Unread(
+            "process snapshot changed while being read".into(),
+        ));
     }
     let mut rows = Vec::with_capacity(found as usize);
     for pid in pids.into_iter().take(found as usize).filter(|pid| *pid > 0) {
@@ -1010,13 +1196,24 @@ fn snapshot_macos() -> Result<Vec<ProcessRow>, String> {
                 i32::try_from(size).expect("proc_bsdinfo fits in c_int"),
             )
         };
-        if got == 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
-            // proc_listallpids is a point-in-time list. A process that exits
-            // between that list and proc_pidinfo is no longer live capacity,
-            // not an incomplete measurement.
-            continue;
-        }
         if got != i32::try_from(size).expect("proc_bsdinfo fits in c_int") {
+            // kill(2) inside the death probe below overwrites errno, so read
+            // it first.
+            let error = io::Error::last_os_error();
+            if got == 0 && error.raw_os_error() == Some(libc::ESRCH) {
+                // proc_listallpids is a point-in-time list. A process that
+                // exits between that list and proc_pidinfo is no longer live
+                // capacity, not an incomplete measurement.
+                continue;
+            }
+            // A pid that dies between proc_name and this read is gone
+            // capacity, not a failed measurement. On macOS a defunct pid
+            // answers neither ESRCH here nor ESRCH to kill(2), so positive
+            // death evidence decides, the same rule the child marker ledger
+            // already applies to its own unreadable entries.
+            if crate::proto::pid_confirmed_dead(pid) {
+                continue;
+            }
             // System services owned by another user can expose a name but
             // deny BSD-info reads. They cannot be attributed without a root
             // name, so omit them. A denied fno root remains unknown and fails
@@ -1032,7 +1229,9 @@ fn snapshot_macos() -> Result<Vec<ProcessRow>, String> {
             {
                 continue;
             }
-            return Err(format!("process snapshot row unavailable for pid={pid}"));
+            return Err(CensusFailure::Unread(format!(
+                "process snapshot row unavailable for pid={pid} name={name} got={got} errno={error}"
+            )));
         }
         let info = unsafe { info.assume_init() };
         rows.push(ProcessRow {
@@ -1055,7 +1254,9 @@ fn snapshot_macos() -> Result<Vec<ProcessRow>, String> {
             )
         };
         if got != i32::try_from(size).expect("proc_bsdinfo fits in c_int") {
-            return Err("current process missing from process snapshot".into());
+            return Err(CensusFailure::Unread(
+                "current process missing from process snapshot".into(),
+            ));
         }
         let info = unsafe { info.assume_init() };
         rows.push(ProcessRow {
@@ -1067,7 +1268,9 @@ fn snapshot_macos() -> Result<Vec<ProcessRow>, String> {
                     path.file_name()
                         .map(|name| name.to_string_lossy().into_owned())
                 })
-                .ok_or_else(|| "current executable name unavailable".to_string())?,
+                .ok_or_else(|| {
+                    CensusFailure::Unread("current executable name unavailable".into())
+                })?,
         });
     }
     Ok(rows)
@@ -1093,10 +1296,26 @@ fn pid_gone(error: &io::Error) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn snapshot_linux() -> Result<Vec<ProcessRow>, String> {
+fn snapshot_linux() -> Result<Vec<ProcessRow>, CensusFailure> {
     let mut rows = Vec::new();
-    for entry in std::fs::read_dir("/proc").map_err(|e| format!("/proc unavailable: {e}"))? {
-        let entry = entry.map_err(|e| format!("/proc entry unavailable: {e}"))?;
+    let dir = match std::fs::read_dir("/proc") {
+        Ok(dir) => dir,
+        Err(error) => return Err(classify_proc_dir_error(&error)),
+    };
+    for entry in dir {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if no_descriptor_left(&error) => {
+                return Err(CensusFailure::NoSource(format!(
+                    "no descriptor left to read the process table (cannot read /proc: {error})"
+                )));
+            }
+            Err(error) => {
+                return Err(CensusFailure::Unread(format!(
+                    "/proc entry unavailable: {error}"
+                )))
+            }
+        };
         let name = entry.file_name();
         let Some(pid_text) = name
             .to_str()
@@ -1106,20 +1325,27 @@ fn snapshot_linux() -> Result<Vec<ProcessRow>, String> {
         };
         let pid = pid_text
             .parse::<u32>()
-            .map_err(|e| format!("invalid /proc pid {pid_text}: {e}"))?;
+            .map_err(|e| CensusFailure::Unread(format!("invalid /proc pid {pid_text}: {e}")))?;
         let stat = match std::fs::read_to_string(entry.path().join("stat")) {
             Ok(stat) => stat,
             // A pid that exits between the listing and the read is gone
             // capacity, not a failed measurement (the macOS arm's rule).
             Err(error) if pid_gone(&error) => continue,
+            Err(error) if no_descriptor_left(&error) => {
+                return Err(CensusFailure::NoSource(format!(
+                    "no descriptor left to read the process table (cannot read pid={pid} stat: {error})"
+                )));
+            }
             Err(error) => {
-                return Err(format!(
+                return Err(CensusFailure::Unread(format!(
                     "process snapshot row unavailable for pid={pid}: {error}"
-                ))
+                )))
             }
         };
         let Some((comm, rest)) = stat.rsplit_once(") ") else {
-            return Err(format!("malformed process snapshot row for pid={pid}"));
+            return Err(CensusFailure::Unread(format!(
+                "malformed process snapshot row for pid={pid}"
+            )));
         };
         let name = comm
             .split_once(" (")
@@ -1128,15 +1354,17 @@ fn snapshot_linux() -> Result<Vec<ProcessRow>, String> {
             .to_string();
         let fields = rest.split_whitespace().collect::<Vec<_>>();
         let Some(ppid_text) = fields.get(1) else {
-            return Err(format!("malformed process snapshot row for pid={pid}"));
+            return Err(CensusFailure::Unread(format!(
+                "malformed process snapshot row for pid={pid}"
+            )));
         };
         let ppid = ppid_text
             .parse::<u32>()
-            .map_err(|e| format!("invalid parent pid for pid={pid}: {e}"))?;
+            .map_err(|e| CensusFailure::Unread(format!("invalid parent pid for pid={pid}: {e}")))?;
         rows.push(ProcessRow { pid, ppid, name });
     }
     if rows.is_empty() {
-        return Err("process snapshot is empty".into());
+        return Err(CensusFailure::Unread("process snapshot is empty".into()));
     }
     Ok(rows)
 }
@@ -1336,8 +1564,8 @@ mod tests {
     }
 
     /// The refusal an operator reads must list every spelling the parser
-    /// takes. A synonym added to an array and forgotten in the string would
-    /// otherwise leave the recovery vocabulary understated.
+    /// takes. A synonym added to an array and forgotten in the string the
+    /// operator reads would otherwise leave the recovery vocabulary understated.
     #[test]
     fn accepted_set_text_lists_every_spelling_the_parser_takes() {
         for accepted in ADMISSION_OFF.iter().chain(ADMISSION_ON.iter()) {
@@ -1346,6 +1574,163 @@ mod tests {
                     .split(|c: char| !c.is_ascii_alphanumeric())
                     .any(|word| word == *accepted),
                 "{accepted:?} is accepted but missing from {ADMISSION_ACCEPTED:?}"
+            );
+        }
+    }
+
+    /// A reading that arrives on a later attempt admits, and the attempt
+    /// count proves the retry loop actually looped.
+    #[test]
+    fn census_admits_a_reading_that_arrives_on_a_later_attempt() {
+        let mut calls = 0;
+        let census = census_with(
+            || {
+                calls += 1;
+                if calls < 3 {
+                    Err(CensusFailure::Unread("short read".into()))
+                } else {
+                    Ok(7)
+                }
+            },
+            4,
+            std::time::Duration::from_millis(1),
+        );
+        assert_eq!(census, Census::complete(7));
+    }
+
+    /// The refusal must carry the evidence an operator needs to diagnose:
+    /// how many reads, how long, and the last failure text.
+    #[test]
+    fn census_names_its_attempts_when_every_read_fails() {
+        let census = census_with(
+            || {
+                Err(CensusFailure::Unread(
+                    "process snapshot row unavailable for pid=1 name=fno got=0 errno=Operation not permitted"
+                        .into(),
+                ))
+            },
+            4,
+            std::time::Duration::from_millis(1),
+        );
+        let Census::Unavailable { reason } = census else {
+            panic!("expected unavailable, got {census:?}");
+        };
+        assert!(reason.contains("census unread after 4 reads"), "{reason}");
+        assert!(reason.contains("ms:"), "{reason}");
+        assert!(
+            reason.contains(
+                "process snapshot row unavailable for pid=1 name=fno got=0 errno=Operation not permitted"
+            ),
+            "{reason}"
+        );
+    }
+
+    /// A clean first reading costs one read and no wait.
+    #[test]
+    fn census_stops_at_the_first_reading() {
+        let mut calls = 0;
+        let census = census_with(
+            || {
+                calls += 1;
+                Ok(3)
+            },
+            4,
+            std::time::Duration::from_millis(1),
+        );
+        assert_eq!(census, Census::complete(3));
+        assert_eq!(calls, 1);
+    }
+
+    /// The in-crate guard for the fail-closed mapping the e2e suite pins:
+    /// an unread census refuses with no count and never a number.
+    #[test]
+    fn an_unread_census_never_reports_a_count() {
+        let decision =
+            decide_processes(&Census::unavailable("census unread"), MaxProcesses::new(2));
+        assert_eq!(
+            decision,
+            AdmissionDecision::Refuse {
+                count: None,
+                ceiling: 2,
+                scope: Scope::Fleet,
+                reason: AdmissionReason::MeasurementUnavailable,
+            }
+        );
+    }
+
+    /// The NoSource admit is the whole point of the third outcome.
+    #[test]
+    fn a_census_with_no_source_admits() {
+        let decision = decide_processes(
+            &Census::no_source("cannot read /proc"),
+            MaxProcesses::new(2),
+        );
+        assert_eq!(decision, AdmissionDecision::Admit);
+    }
+
+    /// The guard against retry-then-hold-forever: a NoSource answer stops
+    /// the loop on its first answer, with no wait spent.
+    #[test]
+    fn census_stops_at_the_first_no_source_answer() {
+        let mut calls = 0;
+        let census = census_with(
+            || {
+                calls += 1;
+                Err(CensusFailure::NoSource("no descriptor left".into()))
+            },
+            4,
+            std::time::Duration::from_millis(1),
+        );
+        assert_eq!(census, Census::no_source("no descriptor left"));
+        assert_eq!(calls, 1);
+    }
+
+    /// EMFILE/ENFILE are the famine; EACCES/EIO are read failures.
+    #[test]
+    fn an_exhausted_descriptor_budget_is_no_source() {
+        for errno in [libc::EMFILE, libc::ENFILE] {
+            assert!(
+                matches!(
+                    classify_proc_dir_error(&io::Error::from_raw_os_error(errno)),
+                    CensusFailure::NoSource(_)
+                ),
+                "{errno}"
+            );
+        }
+        for errno in [libc::EACCES, libc::EIO] {
+            assert!(
+                matches!(
+                    classify_proc_dir_error(&io::Error::from_raw_os_error(errno)),
+                    CensusFailure::Unread(_)
+                ),
+                "{errno}"
+            );
+        }
+    }
+
+    /// The /proc directory door and the per-pid door do not share a rule:
+    /// a missing /proc is a missing source, a missing row is gone capacity.
+    #[test]
+    fn a_missing_proc_directory_is_no_source() {
+        let not_found = io::Error::from(io::ErrorKind::NotFound);
+        assert!(matches!(
+            classify_proc_dir_error(&not_found),
+            CensusFailure::NoSource(_)
+        ));
+        assert!(pid_gone(&io::Error::from_raw_os_error(libc::ENOENT)));
+    }
+
+    /// NoSource is reachable only from the absent-source facts. Every plain
+    /// read failure errno must land in Unread, which retries and refuses.
+    #[test]
+    fn no_source_never_comes_from_a_read_failure() {
+        for errno in [libc::EACCES, libc::EIO, libc::EPERM, libc::ESRCH] {
+            assert!(
+                matches!(
+                    classify_proc_dir_error(&io::Error::from_raw_os_error(errno)),
+                    CensusFailure::Unread(_)
+                ),
+                "{errno}"
             );
         }
     }
