@@ -94,6 +94,25 @@ def test_uv_run_python_m_pytest_refused(footnote_repo):
     assert guard.decide("uv run python -m pytest -q", cwd=str(footnote_repo))
 
 
+def test_attached_dash_m_spelling_refused(footnote_repo):
+    assert guard.decide("python -mpytest -q", cwd=str(footnote_repo))
+
+
+def test_uvx_from_package_refused(footnote_repo):
+    assert guard.decide("uvx --from pytest-uv pytest -q", cwd=str(footnote_repo))
+
+
+def test_uvx_from_other_package_allows(footnote_repo):
+    assert (
+        guard.decide("uvx --from pytest-mock ruff check .", cwd=str(footnote_repo))
+        is None
+    )
+
+
+def test_cargo_toolchain_test_refused(footnote_repo):
+    assert guard.decide("cargo +nightly test", cwd=str(footnote_repo))
+
+
 def test_pipeline_stage_refused(footnote_repo):
     assert guard.decide("rg pattern sources/ | pytest -q", cwd=str(footnote_repo))
 

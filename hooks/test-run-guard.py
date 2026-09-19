@@ -90,7 +90,7 @@ _PY_NAME = re.compile(r"python(?:3(?:\.\d+)?)?")
 #: Anything unlisted is read as boolean, which fails open: `--someday x pytest`
 #: would read `x` as the command and allow.
 _UV_VALUE_FLAGS = {
-    "--with", "--without", "--python", "--env-file", "--config-file",
+    "--with", "--without", "--from", "--python", "--env-file", "--config-file",
     "--project", "--directory", "--default-index", "--index",
     "--exclude-newer", "--python-preference", "-p",
 }
@@ -152,9 +152,14 @@ def _is_python(name):
 
 
 def _has_dash_m_module(argv, target):
-    """True when argv carries `-m <target>`: `python -m pytest -q`."""
-    for i in range(len(argv) - 1):
-        if argv[i] == "-m" and _basename(argv[i + 1]) == target:
+    """True when argv carries `-m <target>` in either spelling: the split
+    `python -m pytest -q` and the attached `python -mpytest`, which CPython
+    accepts identically."""
+    for i, tok in enumerate(argv):
+        if tok == "-m":
+            if i + 1 < len(argv) and _basename(argv[i + 1]) == target:
+                return True
+        elif tok.startswith("-m") and tok[2:] and _basename(tok[2:]) == target:
             return True
     return False
 
@@ -205,7 +210,8 @@ def _uvx_target(argv):
 
 
 def _cargo_subcommand(argv):
-    """The first positional of a cargo invocation: `cargo -C wt test` -> test."""
+    """The first positional of a cargo invocation: `cargo -C wt test` -> test.
+    A `+toolchain` token is neither a flag nor the subcommand."""
     skip = False
     for tok in argv:
         if skip:
@@ -213,6 +219,8 @@ def _cargo_subcommand(argv):
             continue
         if tok == "--":
             return None
+        if tok.startswith("+"):
+            continue
         if tok.startswith("-") and len(tok) > 1:
             skip = tok in _CARGO_VALUE_FLAGS
             continue
