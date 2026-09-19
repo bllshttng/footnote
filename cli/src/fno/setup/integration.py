@@ -269,8 +269,6 @@ def _pi_extension_src() -> Path:
 
 
 def _pi_is_installed() -> bool:
-    # True only when the dest exists AND matches the shipped source, so a
-    # stale copy reports not-installed; the read is the Rust pi arm.
     from fno.rust_binary import call_binary_json
 
     _err, payload = call_binary_json(
@@ -283,20 +281,15 @@ def _pi_is_installed() -> bool:
 def _pi_install() -> IntegrationResult:
     from fno.rust_binary import call_binary_json
 
-    label = "pi"
     _err, payload = call_binary_json(
-        "plugin-install",
-        ["pi", "--extension-src", str(_pi_extension_src()), "--json"],
+        "plugin-install", ["pi", "--extension-src", str(_pi_extension_src()), "--json"]
     )
-    if payload and payload.get("installed"):
-        note = "extension -> {}, skills: {}".format(
-            payload.get("dest", "?"), payload.get("skills", "unresolved")
+    if payload and payload.get("status"):
+        return IntegrationResult(
+            payload["cli"], payload["label"], payload["status"], note=payload["note"]
         )
-        return IntegrationResult("pi", label, "installed", note=note)
-    detail = (payload.get("refused") if payload else _err) or (
-        "the fno-agents binary is missing or failed; run fno doctor update --rust"
-    )
-    return IntegrationResult("pi", label, "failed", note=str(detail))
+    note = _err or "the fno-agents binary is missing or failed; run fno doctor update --rust"
+    return IntegrationResult("pi", "pi", "failed", note=note)
 
 
 # --- agy (Antigravity CLI) --------------------------------------------------

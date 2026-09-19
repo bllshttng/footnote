@@ -45,7 +45,7 @@ _FINISH_ARGV: dict[str, Callable[[list[str], Path], list[str]]] = {
 
 
 def _pi_axes(model, effort, tools, deny_tools) -> dict:
-    """The pi_route ask: empty string means "unset" on the Rust side."""
+    """The pi_route ask; empty string means "unset" on the Rust side."""
     return {"model": model or "", "effort": effort or "",
             "tools": tools or "", "deny_tools": deny_tools or ""}
 
@@ -182,9 +182,7 @@ def complete_launch_argv(
 
     argv = [*argv, *keeper_posture(harness, "thread", permission_mode, yolo)]
     if harness == "pi":
-        # One route owner for keeper and pane; the generic adds below would
-        # name a bare --model without its provider. The answer's `note`
-        # (route source and pi's unsandboxed posture) rides the receipt.
+        # One route owner for keeper and pane; the generic adds would misname it.
         from fno.agents.spawn_axes_client import spawn_axes_call
 
         route = spawn_axes_call({"pi_route": _pi_axes(model, effort, tools, deny_tools)})

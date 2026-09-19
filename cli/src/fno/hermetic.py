@@ -198,8 +198,7 @@ _ENVIRONMENT: tuple[str, ...] = (
     # the sandbox itself, and it is read here only to widen the config ceiling
     # so a test's OWN config stays findable.
     "TMPDIR",
-    # pi's relocation knobs: a store test sets them so the Rust child reads
-    # the fixture store, never the developer's real tree.
+    # pi's relocation knobs: a store test sets them for the Rust child.
     "PI_CODING_AGENT_DIR",
     "PI_CODING_AGENT_SESSION_DIR",
 )
