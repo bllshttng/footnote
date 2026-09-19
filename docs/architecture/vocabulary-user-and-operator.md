@@ -29,7 +29,7 @@ Measured 2026-09-11: 5408 hits across 1012 files. Measured 2026-09-15 for the au
 | Authority | the phrase `operator authority` and `operator-authored`: renamed across strings, gates, docs, skills, hooks and test pins; the decide refusal now reads "cannot record under superuser authority" | Yes. Law d-cfc62071 renames it superuser. |
 | Retired trailer literals | the byte-exact trailer consts in `crates/fno-agents/src/mail_inject.rs` ("Retired form, still accepted for queued records"), the `{standing}` builder that renders them, the structural-refusal message that cites them, and that gate's test fixtures | No. They must match stored bodies byte for byte, and the forgery gate must keep matching the shapes attackers quote. |
 | Wire value | the origin string in ledgers and envelopes: 80 sites in `cli/src` and `crates/*/src`, plus the env pins `FNO_OPERATOR_SESSION_ID`, `FNO_OPERATOR_HARNESS`, `FNO_OPERATOR_TRANSCRIPT`, `FNO_OPERATOR_CAPTURE_DIR`, and the `--authority operator` value | No. A data migration with no gain the human can see. |
-| Persisted graph data | `source_kind: operator_request`: 12 source files plus live rows in `graph.json` | No. Stored values; the display layer can relabel without touching them. |
+| Persisted graph data | `source_kind: operator_request`: 12 source files plus live rows in the graph.db store | No. Stored values; the display layer can relabel without touching them. |
 | Shipped config keys | `routing.operator_access` and `routing.operator_view`, written in `crates/fno-agents/src/route_slot.rs` | No. They are already in users' config.toml files. |
 | Shell homonym | `hooks/king-delegation-guard.sh`, where operator means a redirect operator, not a person | No. Nothing to rename. |
 

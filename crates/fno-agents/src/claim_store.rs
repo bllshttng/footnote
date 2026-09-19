@@ -136,48 +136,6 @@ fn insert_record(connection: &Connection, record: &claims::ClaimRecord) -> Resul
     Ok(())
 }
 
-pub fn export_lockfiles(root: Option<&Path>) -> Result<Value, String> {
-    let connection = open(root)?;
-    let directory = claims_dir(root)?;
-    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let mut statement = connection
-        .prepare(
-            "SELECT key, holder, schema_version, acquired_at, expires_at, pid,
-                  pid_unavailable, host, machine_id, reason, harness, session_id,
-                  pid_provenance, metadata FROM claims ORDER BY key",
-        )
-        .map_err(|error| error.to_string())?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok(claims::ClaimRecord {
-                key: row.get(0)?,
-                holder: row.get(1)?,
-                schema_version: row.get(2)?,
-                acquired_at: row.get(3)?,
-                expires_at: row.get(4)?,
-                pid: row.get(5)?,
-                pid_unavailable: row.get(6)?,
-                host: row.get(7)?,
-                machine_id: row.get(8)?,
-                reason: row.get(9)?,
-                harness: row.get(10)?,
-                session_id: row.get(11)?,
-                pid_provenance: row.get(12)?,
-                metadata: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
-            })
-        })
-        .map_err(|error| error.to_string())?;
-    let mut exported = 0usize;
-    for row in rows {
-        let record = row.map_err(|error| error.to_string())?;
-        let path = claims::claim_path(&record.key, root)?;
-        let yaml = serde_yaml_ng::to_string(&record).map_err(|error| error.to_string())?;
-        std::fs::write(path, yaml).map_err(|error| error.to_string())?;
-        exported += 1;
-    }
-    Ok(json!({"exported": exported, "root": directory}))
-}
-
 fn record_for(connection: &Connection, key: &str) -> Result<Option<ClaimRecord>, String> {
     connection
         .query_row(
@@ -722,28 +680,6 @@ mod tests {
             .unwrap();
         assert_eq!(claims_count, 1);
         assert_eq!(node_claims_count, 1);
-    }
-
-    #[test]
-    fn claim_store_export_lockfiles_has_positive_receipt() {
-        let temp = TempDir::new().unwrap();
-        let outcome = claims::acquire(
-            "node:export-test",
-            "holder",
-            AcquireOpts {
-                root: Some(temp.path().to_path_buf()),
-                pid: Some(std::process::id()),
-                ..Default::default()
-            },
-        );
-        assert!(matches!(outcome, AcquireOutcome::Acquired(_)));
-
-        let receipt = export_lockfiles(Some(temp.path())).unwrap();
-
-        assert_eq!(receipt["exported"], 1);
-        assert!(claims::claim_path("node:export-test", Some(temp.path()))
-            .unwrap()
-            .exists());
     }
 
     #[test]

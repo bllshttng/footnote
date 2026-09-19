@@ -71,6 +71,11 @@ def state(tmp_path, monkeypatch):
     env["HOME"] = str(home)
     env["FNO_AGENTS_HOME"] = str(home / ".fno" / "agents")
     env.pop("FNO_STATE_DIR", None)
+    # The child timer must resolve THIS home's state dir: drop the autouse
+    # sandbox's settings pins, which would otherwise hide the hold clock.
+    env.pop("FNO_CONFIG", None)
+    env.pop("FNO_GLOBAL_SETTINGS_PATH", None)
+    env.pop("FNO_NO_CANONICAL_CONFIG", None)
     return env, home
 
 

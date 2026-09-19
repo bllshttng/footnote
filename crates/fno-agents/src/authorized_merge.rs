@@ -1058,7 +1058,7 @@ fn node_binding_probe(cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
     let root = canonical_repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
     let graph_path = crate::king_board::scope::graph_json_path(cwd);
     let store = GraphStore::new(&graph_path);
-    match backlog_api::rows(&store) {
+    match backlog_api::rows(&store, false) {
         Err(e) => ProbeOutcome::Inconclusive(format!(
             "graph unreadable ({}); refusing to assume bound",
             e.0

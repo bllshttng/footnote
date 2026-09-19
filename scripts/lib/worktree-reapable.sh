@@ -90,11 +90,12 @@ wt_reapable() {
     [[ "${WT_REAPABLE_ALLOW_UNBORN:-0}" == "1" ]] && flags="$flags --allow-unborn"
     [[ "${WT_REAPABLE_DONE_NODE:-0}" == "1" ]] && flags="$flags --done-node"
 
-    local out="" rc=0 verdict=2
+    local out="" rc=0 verdict=2 used=""
     if [[ -n "$bin" ]]; then
         # shellcheck disable=SC2086
         out="$("$bin" worktree-reapable $flags "$target" 2>/dev/null)" || rc=$?
         verdict=0; _wt_reapable_verdict "$rc" "$out" || verdict=$?
+        used="$bin"
     fi
 
     # FALL THROUGH, DO NOT STOP AT THE FIRST SILENCE. A checkout with no build
@@ -107,6 +108,7 @@ wt_reapable() {
         # shellcheck disable=SC2086
         out="$(fno agents workspace worktree reapable $flags "$target" 2>/dev/null)" || rc=$?
         verdict=0; _wt_reapable_verdict "$rc" "$out" || verdict=$?
+        used="fno (installed)"
     fi
 
     # 0 permission (positive marker AND clean exit), 1 a receipt that says no.
@@ -114,6 +116,8 @@ wt_reapable() {
         WT_REAPABLE_LINE="$out"
         return "$verdict"
     fi
-    WT_REAPABLE_LINE="reapable=no reason=probe-failed detail=verb-unavailable(rc=$rc)"
+    # Name the responder and what it said: an unparseable answer from a named
+    # binary is diagnosable, an anonymous one is a ghost hunt.
+    WT_REAPABLE_LINE="reapable=no reason=probe-failed detail=verb-unavailable(rc=$rc used=$used out=${out:0:80})"
     return 1
 }

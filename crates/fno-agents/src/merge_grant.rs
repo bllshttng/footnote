@@ -572,7 +572,7 @@ pub fn run_op(op: &str, payload: &Value) -> String {
 fn read_rows(payload: &Value) -> Result<Vec<Value>, String> {
     let cwd = payload.get("cwd").and_then(Value::as_str).unwrap_or(".");
     let graph_path = graph_json_path(Path::new(cwd));
-    backlog_api::rows(&GraphStore::new(&graph_path)).map_err(|e| e.0)
+    backlog_api::rows(&GraphStore::new(&graph_path), false).map_err(|e| e.0)
 }
 
 #[cfg(test)]

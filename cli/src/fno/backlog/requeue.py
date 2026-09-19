@@ -115,6 +115,16 @@ def _clear_locked_by(task_id: str, *, expect_locked_by: object = _UNSET) -> Opti
             raise typer.Exit(code=3)
         node["locked_by"] = None
         node["locked_at"] = None
+        # The store's recompute keeps a status it cannot derive, so the
+        # release writes the ladder's answer itself: with the claim gone and
+        # nothing else holding the row, a non-terminal node returns to the
+        # state it was claimed from - ready, or idea for a plan-less row
+        # that never reached a rung. Terminal words stay (reopen owns the
+        # un-done; done/superseded/deferred outrank every release).
+        if node.get("status") == "in_progress":
+            from fno.graph.ladder import Rung, plan_rung
+
+            node["status"] = "idea" if plan_rung(node) in (Rung.IDEA, Rung.NONE) else "ready"
         return entries
 
     commit_rows_via_store(_graph_path(), mutator)

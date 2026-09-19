@@ -11,8 +11,8 @@ When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly o
 `codex posture: blueprint plans natively in this thread; it writes the plan, closes the blueprint session row, and dispatches nothing.`
 
 <HARD-GATE>
-NEVER edit ~/.fno/graph.json directly via Edit/Write tools or `jq -i`/`sed -i`.
-ALWAYS use `fno backlog` commands or call `locked_mutate_graph()` from Python.
+NEVER edit ~/.fno/graph.db directly via Edit/Write tools or `jq -i`/`sed -i`.
+ALWAYS use `fno backlog` commands.
 Direct edits are blocked by `hooks/graph-write-protect.sh`.
 </HARD-GATE>
 

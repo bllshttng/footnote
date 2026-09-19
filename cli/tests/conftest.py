@@ -61,7 +61,7 @@ def _quiet_gh_budget(monkeypatch):
 def _sandbox_decision_index(tmp_path, monkeypatch):
     """Keep the machine-wide decision index out of the developer's ~/.fno.
 
-    ``record_decision`` writes to ``paths.decisions_jsonl()`` on every call, and
+    ``record_decision`` writes to ``fno.decide._decisions_index_path()`` on every call, and
     that path is deliberately machine-wide: ``FNO_REPO_ROOT`` does not move it,
     so without this every test that records a decision appends to the real
     index and reads back another test's rows. Autouse rather than opt-in
@@ -69,7 +69,7 @@ def _sandbox_decision_index(tmp_path, monkeypatch):
     ``fno outstanding clear --answer``, which is not where anyone looks for it.
     """
     sandbox = tmp_path / ".decision-index" / "decisions.jsonl"
-    monkeypatch.setattr("fno.paths.decisions_jsonl", lambda: sandbox)
+    monkeypatch.setattr("fno.decide._decisions_index_path", lambda: sandbox)
 
 
 @pytest.fixture(autouse=True)
@@ -695,7 +695,7 @@ def _hermetic_authorized_merge(monkeypatch):
 # ---------------------------------------------------------------------------
 # Applied at MODULE LOAD, not as a fixture. The fno.graph package freezes its
 # path constants at IMPORT time - store.py does ``from _constants import
-# GRAPH_JSON`` at module top and ``read_graph(path: Path = GRAPH_JSON)`` as a
+# GRAPH_JSON`` at module top and ``read_graph_strict(path: Path = GRAPH_JSON)`` as a
 # default arg - so the graph/ledger paths bind to ``~/.fno`` before any per-test
 # fixture can redirect them. Under cross-test contamination the graph store's
 # fail-open (``Path.home() / ".fno"``) then leaked test nodes into the
@@ -1022,3 +1022,67 @@ def checkout_fno_agents_binary():
         if p.exists():
             return p
     return None
+
+
+@pytest.fixture(autouse=True)
+def _door_binary_from_this_checkout(monkeypatch):
+    """Door-routed verbs shell out to a resolved ``fno-agents`` binary, and
+    on a dev checkout the installed one lags the worktree source: a store
+    verb then refuses against rows only the worktree build can see. Pin the
+    door to this checkout's build when one exists; an operator override
+    through $FNO_AGENTS_BIN always wins."""
+    import os
+
+    if (os.environ.get("FNO_AGENTS_BIN") or "").strip():
+        return
+    root = Path(__file__).resolve().parents[2]
+    for profile in ("debug", "release"):
+        candidate = root / "crates" / "fno-agents" / "target" / profile / "fno-agents"
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            monkeypatch.setenv("FNO_AGENTS_BIN", str(candidate))
+            return
+    # No local build: the door silently resolved the installed binary and
+    # store-door tests fail with refusals that look like product bugs.
+    # Measured 2026-09-18: a swept target dir cost a store suite an hour of
+    # false reds. Say so, once, at the point of the decision.
+    global _door_binary_pin_warned
+    if not _door_binary_pin_warned:
+        _door_binary_pin_warned = True
+        print(
+            "WARNING: no fno-agents binary under crates/fno-agents/target; "
+            "door-routed tests run the installed binary and may read stale "
+            "store rows. Build with: cargo build --bin fno-agents",
+            file=__import__("sys").stderr,
+        )
+
+
+_door_binary_pin_warned = False
+
+
+_FACADE_NAMES = (
+    "GRAPH_JSON",
+    "GRAPH_MD",
+    "GRAPH_HTML",
+    "GRAPH_ARCHIVE_JSON",
+    "LEDGER_JSON",
+    "BRIEFS_DIR",
+)
+
+
+@pytest.fixture(autouse=True)
+def _unbake_constants_facade():
+    """Undo the baked-facade trap fno.graph._constants documents.
+
+    ``monkeypatch.setattr(gc, "GRAPH_JSON", g)`` reads the current value
+    through the module ``__getattr__`` (which RESOLVES a real path) and
+    restores that resolved path as a concrete attribute on teardown, so
+    every later test in the process reads a dead tmp graph. The module doc
+    begs for ``setitem(vars(module), ...)``; dozens of sites use setattr
+    anyway. Cleanup runs at SETUP: the previous test's monkeypatch undo is
+    the last writer by then, so the delete cannot race it.
+    """
+    import fno.graph._constants as gc
+
+    for name in _FACADE_NAMES:
+        if name in vars(gc):
+            delattr(gc, name)

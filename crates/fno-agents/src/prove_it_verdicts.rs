@@ -512,8 +512,34 @@ mod tests {
     use std::fs::File;
 
     fn write_graph(dir: &Path, entries: &[Value]) -> PathBuf {
+        // The store import drops rows the model cannot represent; give the
+        // minimal fixture rows the required fields so the seeded store
+        // answers the verb.
+        let rows: Vec<Value> = entries
+            .iter()
+            .map(|row| {
+                let mut row = row.clone();
+                if let Some(obj) = row.as_object_mut() {
+                    let id = obj
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("x-node")
+                        .to_string();
+                    obj.entry("slug".to_string())
+                        .or_insert(Value::String(id.clone()));
+                    obj.entry("title".to_string()).or_insert(Value::String(id));
+                    obj.entry("type".to_string())
+                        .or_insert(Value::String("feature".into()));
+                    obj.entry("status".to_string())
+                        .or_insert(Value::String("ready".into()));
+                    obj.entry("priority".to_string())
+                        .or_insert(Value::String("p2".into()));
+                }
+                row
+            })
+            .collect();
         let path = dir.join("graph.json");
-        std::fs::write(&path, serde_json::json!({"entries": entries}).to_string())
+        std::fs::write(&path, serde_json::json!({"entries": rows}).to_string())
             .expect("write graph");
         path
     }
@@ -1075,15 +1101,15 @@ mod tests {
     }
 
     #[test]
-    fn read_defaulted_reads_the_written_graph_back() {
-        // Positive control for the fixture writer: the same read_defaulted the
-        // verb uses must see the entries the test wrote.
+    fn read_entries_reads_the_written_graph_back() {
+        // Positive control for the fixture writer: the same read the verb
+        // uses must see the entries the test wrote.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_graph(
             dir.path(),
             &[json!({"id": "x-aaa", "plan_path": "/p/a.md"})],
         );
-        let entries = graph_store::read_defaulted(&path, false).expect("read");
+        let entries = crate::backlog::read_entries(&path).expect("read");
         assert_eq!(entries.len(), 1);
         assert_eq!(entry_id(&entries[0]), Some("x-aaa"));
     }

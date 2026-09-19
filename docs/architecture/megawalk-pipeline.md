@@ -85,14 +85,14 @@ Central CRUD interface for the task backlog. All mutations use `locked_mutate()`
 
 ### Ledger vs Graph Separation
 
-`~/.fno/ledger.json` is the execution + planning history registry (owner: target). `~/.fno/graph.json` is the forward-looking graph of planned, ready, in-progress, and completed feature nodes - shared by `megawalk next` (which filters by `roadmap_id`) and any individual `/target <plan_path>` invocation (which just reads the plan). They are intentionally separate files: ledger records what happened, graph records what's planned or claimed.
+`~/.fno/ledger.json` is the execution + planning history registry (owner: target). `~/.fno/graph.db` is the forward-looking graph of planned, ready, in-progress, and completed feature nodes - shared by `megawalk next` (which filters by `roadmap_id`) and any individual `/target <plan_path>` invocation (which just reads the plan). They are intentionally separate files: ledger records what happened, graph records what's planned or claimed.
 
 `adopt` bridges them without duplicating data. It has two modes:
 
 - **Backlog mode** (no `--roadmap-id`): node created with `roadmap_id=null`. Visible to anyone scanning the graph but not routed by `megawalk next`. Intended for ad-hoc specs you want tracked but haven't committed to a specific roadmap.
 - **Roadmap mode** (`--roadmap-id <id>`): node tagged to that roadmap so `megawalk next --roadmap-id <id>` picks it up in ordering.
 
-In both modes the ad-hoc plan's row in `ledger.json` stays as planning-cost history, and `adopt` only appends a new node to `graph.json` linked by `plan_path`. Nodes carry a `source: "adopt"` tag to distinguish them from roadmap-generator output.
+In both modes the ad-hoc plan's row in `ledger.json` stays as planning-cost history, and `adopt` only appends a new node to `graph.db` linked by `plan_path`. Nodes carry a `source: "adopt"` tag to distinguish them from roadmap-generator output.
 
 ## Backlog Lifecycle (Adopt → Render → Triage → Pick)
 
@@ -103,7 +103,7 @@ sequenceDiagram
     participant U as User
     participant SP as /blueprint
     participant RT as roadmap-tasks.py
-    participant GJ as graph.json
+    participant GJ as graph.db
     participant GM as graph.md
     participant TR as /triage
     participant RL as /target
@@ -131,8 +131,8 @@ sequenceDiagram
 
 Key properties:
 
-- **One writer, many readers.** `roadmap-tasks.py` is the only writer of `graph.json`. `graph.md` and any other derived views are produced inside `locked_mutate_graph()` so they can never disagree with the JSON source of truth.
-- **`graph.md` is always current.** Every mutation triggers a re-render post-write. A render failure logs to stderr but does not raise - graph.json has already been durably written by the time the render runs.
+- **One writer, many readers.** `roadmap-tasks.py` is the only writer of `graph.db`. `graph.md` and any other derived views are produced inside `locked_mutate_graph()` so they can never disagree with the store's source of truth.
+- **`graph.md` is always current.** Every mutation triggers a re-render post-write. A render failure logs to stderr but does not raise - graph.db has already been durably written by the time the render runs.
 - **Triage is advisory, not automatic.** The LLM proposes; the human approves, cherry-picks, or rejects. Priority is a business decision, never auto-applied.
 - **Backlog and roadmaps coexist.** A node with `roadmap_id=null` is on the general backlog; a node with `roadmap_id=rm-X` is tagged to a roadmap. Both appear on the same kanban; `megawalk next` filters by roadmap_id, `/target` picks from either.
 - **No schema changes.** The kanban columns and triage proposals read existing graph fields; no migration needed.
@@ -233,7 +233,7 @@ The state is `LOOPING | PAUSED | COMPLETE | BLOCKED` (per `cli/src/fno/schemas/m
 ### Walker Loop (per iteration)
 
 ```
-read graph.json (through the store keeper's gated read)
+read graph.db (through the store keeper's gated read)
 select_ready_nodes(parallel_cap, deps_satisfied, priority p0..p3)
   |-> for each: WorktreeManager.create() -> ThreadPoolExecutor.submit(_drive_node)
 poll futures (FIRST_COMPLETED, POLL_INTERVAL_S)
@@ -250,7 +250,7 @@ Per-node driving is now owned by the Rust unified-loop runtime (`fno-agents loop
 
 | Primitive | Module | Role |
 |-----------|--------|------|
-| PreToolUse hook (`hooks/graph-write-protect.sh`) | hooks/ | Blocks Edit/Write on `~/.fno/graph.json` end-to-end (test fixtures bypassed) |
+| PreToolUse hook (`hooks/graph-write-protect.sh`) | hooks/ | Blocks Edit/Write on `~/.fno/graph.db` end-to-end (test fixtures bypassed) |
 | HARD-GATE blocks (megawalk SKILL.md) | skills/ | LLM-side guard against direct mutation |
 | PID lock (`_acquire_pid_lock`) | megawalk.py | Prevents concurrent walker processes; reclaims stale locks |
 | Stale-approval pinning | `_check_review_approval` | Approves only if PR head SHA matches the approved review SHA |

@@ -2567,8 +2567,11 @@ def test_law_authority_reads_the_real_index_three_ways(tmp_path):
     from fno import paths
 
     def _seed(*rows):
-        paths.decisions_jsonl().parent.mkdir(parents=True, exist_ok=True)
-        paths.decisions_jsonl().write_text(
+        import fno.decide
+
+        index = fno.decide._decisions_index_path()
+        index.parent.mkdir(parents=True, exist_ok=True)
+        index.write_text(
             "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8"
         )
 
@@ -2758,10 +2761,11 @@ def _seed_waiver_law_row(
     subject, decision_id, *, decision, authority_source, ts="2026-08-29T00:00:00Z"
 ):
     """One live law-lane row at an exact subject, in the sandboxed index."""
-    from fno import paths
+    import fno.decide
 
-    paths.decisions_jsonl().parent.mkdir(parents=True, exist_ok=True)
-    paths.decisions_jsonl().open("a", encoding="utf-8").write(
+    index = fno.decide._decisions_index_path()
+    index.parent.mkdir(parents=True, exist_ok=True)
+    index.open("a", encoding="utf-8").write(
         json.dumps(
             {
                 "type": "operator_decision",

@@ -1,9 +1,8 @@
-"""Unit tests for ``fno doctor graph backend``. The soak evidence read
-lives in Rust (``backlog::soak_gaps``, tested there); the negative control
-runs in-process and the tree checks (reader census, writer ratchet, table
-ownership) run in CI. Here the flip verbs run against a real keeper on a
-temp graph with the gate seam stubbed, so the operator's live graph and
-config are never touched."""
+"""Unit tests for ``fno doctor graph backend``. SQLite is the only store,
+so the flip verb stamps the backend meta and refuses every other name; the
+tree checks (reader census, writer ratchet, table ownership) run in CI.
+Here the verbs run against a real keeper on a temp graph, so the
+operator's live graph and config are never touched."""
 
 from __future__ import annotations
 
@@ -16,18 +15,14 @@ import typer
 
 from fno import doctor_graph
 
-FULL = {
-    "type": "feature",
-    "status": "idea",
-    "priority": "p2",
-    "domain": "code",
-    "created_at": "2026-09-11T00:00:00+00:00",
-}
-
 
 def _row(node_id: str, **overrides):
     return {
-        **FULL,
+        "type": "feature",
+        "status": "idea",
+        "priority": "p2",
+        "domain": "code",
+        "created_at": "2026-09-11T00:00:00+00:00",
         "id": node_id,
         "slug": node_id,
         "title": node_id,
@@ -50,8 +45,8 @@ def _meta(graph: Path, key: str):
 
 @pytest.fixture
 def world(tmp_path, monkeypatch):
-    """A temp machine: graph and state root, with the gate seam and the
-    config writer stubbed. Skips where no keeper binary can spawn."""
+    """A temp machine: graph and state root. Skips where no keeper binary
+    can spawn."""
     from fno.graph.store import _worker_binary
 
     if _worker_binary() is None:
@@ -61,46 +56,21 @@ def world(tmp_path, monkeypatch):
         json.dumps({"entries": [_row("x-1", title="one"), _row("x-2", title="two")]}),
         encoding="utf-8",
     )
-    config_sets: list[tuple[str, str]] = []
-    gaps: list[str] = []
-    illegal_keepers: list[tuple[int, int]] = []
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
-    monkeypatch.setattr(
-        "fno.config.writer.set_config_value",
-        lambda key, value, **k: config_sets.append((key, value)),
-    )
-    monkeypatch.setattr(
-        doctor_graph, "_gate_gaps", lambda client: list(gaps)
-    )
-    monkeypatch.setattr(
-        doctor_graph, "_keeper_gaps", lambda client: list(gaps)
-    )
-    monkeypatch.setattr(
-        doctor_graph, "_illegal_canonical_keepers", lambda *a: list(illegal_keepers)
-    )
-    return {
-        "graph": graph,
-        "tmp": tmp_path,
-        "config_sets": config_sets,
-        "gaps": gaps,
-        "illegal_keepers": illegal_keepers,
-    }
+    return {"graph": graph, "tmp": tmp_path}
 
 
-def test_happy_flip_to_sqlite_stamps_backend_and_config(world):
+def test_happy_flip_to_sqlite_stamps_backend(world):
     doctor_graph._flip("sqlite")
     assert _meta(world["graph"], "backend") == "sqlite"
     assert _meta(world["graph"], "backend_since_ms") is not None
-    assert ("graph.read_source", "sqlite") in world["config_sets"]
 
 
-def test_flip_refuses_naming_the_gap_and_changes_nothing(world):
-    world["gaps"].append("first sample 2026-09-07T12:00:00Z is 2 day(s) old; the soak needs 7 days")
+def test_flip_refuses_the_deleted_json_backend(world):
     with pytest.raises(typer.Exit):
-        doctor_graph._flip("sqlite")
+        doctor_graph._flip("json")
     assert _meta(world["graph"], "backend") is None
-    assert world["config_sets"] == []
 
 
 def test_flip_is_idempotent_and_keeps_the_since_stamp(world):
@@ -110,7 +80,7 @@ def test_flip_is_idempotent_and_keeps_the_since_stamp(world):
     assert _meta(world["graph"], "backend_since_ms") == since_first
 
 
-def test_rollback_exports_first_then_flips(world):
+def test_the_store_is_the_only_writer_and_the_export_stays_frozen(world):
     from fno.graph.store import _client_for
 
     doctor_graph._flip("sqlite")
@@ -126,12 +96,7 @@ def test_rollback_exports_first_then_flips(world):
         },
     )
     body = world["graph"].read_text(encoding="utf-8")
-    assert "flip probe" not in body, "no background export: graph.json is frozen"
-    doctor_graph._flip("json")
-    body = world["graph"].read_text(encoding="utf-8")
-    assert "flip probe" in body, "rollback exports current rows before the flip"
-    assert _meta(world["graph"], "backend") == "json"
-    assert ("graph.read_source", "json") in world["config_sets"]
+    assert "flip probe" not in body, "no write path touches graph.json; only export --now does"
 
 
 def test_status_prints_the_status_line(world, capsys):
@@ -140,60 +105,4 @@ def test_status_prints_the_status_line(world, capsys):
     doctor_graph.graph_backend("status")
     out = capsys.readouterr().out
     assert out.startswith("backend=sqlite since=")
-    assert " days=0" in out
-    assert "keepers=" not in out
-    assert "keepers: fno agents watchdog --only keeper" in out
-
-
-def test_status_prints_one_gate_line_per_gap(world, capsys):
-    # AC15-HP: the status read prints one gate line per keeper gap and
-    # changes nothing; with no gap it reads `gate: soak clean`.
-    doctor_graph._flip("sqlite")
-    capsys.readouterr()
-    world["gaps"].append("soak clean since 2026-09-15 is 1 day(s) old; the soak needs 7")
-    doctor_graph.graph_backend("status")
-    out = capsys.readouterr().out
-    assert (
-        "gate: soak clean since 2026-09-15 is 1 day(s) old; the soak needs 7\n" in out
-    ), out
-    world["gaps"].clear()
-    doctor_graph.graph_backend("status")
-    out = capsys.readouterr().out
-    assert "gate: soak clean\n" in out, out
-
-
-def test_status_refuses_an_illegal_canonical_keeper(world, capsys):
-    """A resident store keeper on the canonical graph while the store reads
-    sqlite must refuse with the pid, its RSS, and the collector named -
-    never print a clean status line and exit 0 over a live leaker."""
-    world["illegal_keepers"].append((96904, 1_310_720))
-    with pytest.raises(typer.Exit) as excinfo:
-        doctor_graph.graph_backend("status")
-    assert excinfo.value.exit_code == 1
-    captured = capsys.readouterr()
-    assert "pid 96904" in captured.err
-    assert "1.25 GB RSS" in captured.err
-    assert "fno agents watchdog --only keeper --apply-all" in captured.err
-
-
-def test_status_exits_zero_when_no_keeper_is_illegal(world, capsys):
-    doctor_graph._flip("sqlite")
-    capsys.readouterr()
-    doctor_graph.graph_backend("status")
-    out = capsys.readouterr().out
-    assert out.startswith("backend=sqlite since=")
-    assert "refused:" not in out
-
-
-def test_gate_gaps_unions_keeper_and_negative_control_gaps(monkeypatch):
-    """Keeper gap lines and a failed in-process negative control both land
-    in the refusal list."""
-
-    class FakeClient:
-        def request(self, method, params):
-            assert method == "backend_gate"
-            return {"gaps": ["keeper gap"]}
-
-    monkeypatch.setattr("fno.graph.parity.negative_control", lambda **k: 1)
-    gaps = doctor_graph._gate_gaps(FakeClient())
-    assert gaps == ["keeper gap", "negative control failed"]
+    assert " days=0 keepers=" in out

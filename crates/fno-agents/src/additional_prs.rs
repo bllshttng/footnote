@@ -275,7 +275,7 @@ pub(crate) fn stamp_pass(
 ) -> Vec<(String, String)> {
     let mut refusals = Vec::new();
     let store = crate::backlog::api::Store::new(&crate::gc_sweep::graph_path(home));
-    let Ok(entries) = crate::backlog::api::rows(&store) else {
+    let Ok(entries) = crate::backlog::api::rows(&store, true) else {
         return refusals;
     };
     for stamp in plan_stamps(&entries, read) {
@@ -319,7 +319,7 @@ pub(crate) fn plan_settle(
     read: &mut dyn FnMut(&str, &str) -> Option<PrState>,
 ) -> (Vec<crate::gc_sweep::StaleDoRow>, Vec<PrStamp>) {
     let store = crate::backlog::api::Store::new(&crate::gc_sweep::graph_path(home));
-    match crate::backlog::api::rows(&store) {
+    match crate::backlog::api::rows(&store, true) {
         Ok(mut entries) => {
             let stamps = plan_stamps(&entries, read);
             apply_stamps(&mut entries, &stamps);

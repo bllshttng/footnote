@@ -473,6 +473,16 @@ def warn_if_note_is_long(text: str, *, stream: Any = sys.stderr) -> None:
     )
 
 
+
+def _decisions_index_path() -> Path:
+    """The compatibility decision index beside the ledger: a journal-adjacent
+    file that never rotates, so a ruling the operator asked for stays readable
+    after the project journal has archived away."""
+    from fno import paths
+
+    return Path(paths.ledger_json()).parent / "decisions.jsonl"
+
+
 def record_decision(
     *,
     decision: str,
@@ -620,7 +630,7 @@ def record_decision(
     )
     append_event(event, events_path=events_path(events_root))
     try:
-        append_event(event, events_path=paths.decisions_jsonl())
+        append_event(event, events_path=_decisions_index_path())
     except Exception as exc:  # noqa: BLE001 - the event id names recovery
         raise IndexWriteError(decision_id, exc) from exc
     # Order is the contract: the project journal is durability, the index is
@@ -709,7 +719,7 @@ def retract_decision(
     events_root = resolve_carveout_root()
     append_event(event, events_path=events_path(events_root))
     try:
-        append_event(event, events_path=paths.decisions_jsonl())
+        append_event(event, events_path=_decisions_index_path())
     except Exception as exc:  # noqa: BLE001 - the event id names recovery
         raise IndexWriteError(str(target["decision_id"]), exc) from exc
     try:
@@ -788,7 +798,7 @@ def _project(event: dict[str, Any]) -> str | None:
             break
         return entries
 
-    graph_store.locked_mutate_graph(graph_store.GRAPH_JSON, mutator)
+    graph_store.commit_rows_via_store(graph_store.GRAPH_JSON, mutator)
     return matched[0] if matched else None
 
 
@@ -803,7 +813,7 @@ def _read_index(path: "Path | None" = None, *, warn: bool = True) -> "tuple[list
         db_rows = graph_api.decisions(path=paths.graph_json())
     except Exception:
         db_rows = []
-    legacy_rows, damaged = _read_legacy_index(paths.decisions_jsonl(), warn=warn)
+    legacy_rows, damaged = _read_legacy_index(_decisions_index_path(), warn=warn)
     if not db_rows:
         return legacy_rows, damaged
     def row_key(row: dict) -> tuple[str, str]:
@@ -870,23 +880,17 @@ def _graph_entries(*, required: bool = False) -> "list[dict]":
         entries = graph_store.read_graph_strict(graph_store.GRAPH_JSON)
         if not required:
             return graph_store.entries_with_archive(entries)
-        # entries_with_archive reads the ARCHIVE softly and degrades on any
-        # failure, so a torn graph-archive.json would drop every archived
-        # node's decisions from a backfill that still printed "+0" and exited
-        # 0. Both graph files, or neither: a guard on one is decorative.
-        from fno.paths import graph_archive_json
+        # The archive read is strict too (read_archive_entries raises on a
+        # store failure), so a torn store cannot drop every archived node's
+        # decisions from a backfill that still printed "+0" and exited 0.
+        # Both halves of the store, or neither: a guard on one is decorative.
+        from fno.paths import graph_json
 
-        archive_path = graph_archive_json()
-        if not archive_path.exists():
-            return entries
+        archived = graph_store.read_archive_entries(path=graph_json())
         live = {e.get("id") for e in entries if isinstance(e, dict)}
         return [
             *entries,
-            *(
-                a
-                for a in graph_store.read_graph_strict(archive_path)
-                if isinstance(a, dict) and a.get("id") not in live
-            ),
+            *(a for a in archived if isinstance(a, dict) and a.get("id") not in live),
         ]
     except Exception as exc:  # noqa: BLE001 - the graph is advisory to a string query
         if required:
@@ -1546,13 +1550,12 @@ def _journal_events(paths: "list[Path]") -> "list[dict]":
 
 def reindex(sources: "list[Path] | None" = None) -> dict[str, int]:
     """Backfill the compatibility JSONL index without minting new ids."""
-    from fno import paths
     from fno.events import append_event, validate
 
     if sources is None:
         _graph_entries(required=True)
 
-    index = Path(paths.decisions_jsonl())
+    index = _decisions_index_path()
     repaired = _compact_index(index)
     existing, _ = _read_legacy_index(index, warn=False)
     prior_keys = {

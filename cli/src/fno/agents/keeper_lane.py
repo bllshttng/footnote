@@ -115,15 +115,10 @@ def store_backend_of(graph: Optional[Path]) -> str:
 
 
 def graph_read_source() -> str:
-    """The configured authoritative backend; failure reads json. The
-    legality arm reads BOTH sides, so a json rollback never reads as a
-    leak."""
-    try:
-        from fno.config import load_settings
-
-        return str(load_settings().graph.read_source)
-    except Exception:  # noqa: BLE001 - config failure reads json (rollback)
-        return "json"
+    """The authoritative backend: sqlite is the only store, so the name is
+    a constant. Kept as a function because the legality arm reads it as a
+    verdict, not a value."""
+    return "sqlite"
 
 
 @dataclass(frozen=True)
@@ -243,7 +238,7 @@ def keeper_verdict(obs: KeeperObs, *, grace_s: Optional[float] = None) -> tuple[
         and graph_read_source() == "sqlite"
     ):
         return REAP, (
-            f"{obs.graph} reads backend=sqlite while graph.read_source=sqlite - "
+            f"{obs.graph} reads backend=sqlite and the store reads sqlite - "
             "a resident keeper must not exist there (clients serve by exec)"
         )
     if obs.sock_state not in REAPABLE_SOCK_STATES:

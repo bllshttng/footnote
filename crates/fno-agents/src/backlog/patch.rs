@@ -944,6 +944,8 @@ pub fn defer_facts(
             obj.insert("deferred_kind".to_string(), Value::String(k.to_string()));
         }
         None => {
+            // No kind: the key is REMOVED, so a re-deferral clears a stale
+            // stamp; the columnar store materializes the wire's null.
             obj.shift_remove("deferred_kind");
         }
     }
@@ -1144,7 +1146,8 @@ pub fn run_update(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph_store::{read_defaulted, CANONICAL_FIELD_ORDER};
+    use crate::backlog::read_entries;
+    use crate::graph_store::CANONICAL_FIELD_ORDER;
     use std::io::Write;
 
     #[test]
@@ -1240,7 +1243,7 @@ mod tests {
     }
 
     fn status_of(graph: &Path, id: &str) -> String {
-        let rows = read_defaulted(graph, false).expect("read back");
+        let rows = read_entries(graph).expect("read back");
         rows.iter()
             .find(|e| field_eq(e, "id", id))
             .and_then(|e| e.get("status"))
@@ -1280,7 +1283,7 @@ mod tests {
             .expect("backref change");
         assert_eq!(backref.id, "x-aaaa");
         assert_eq!(status_of(&graph, "x-bbbb"), "idea");
-        let rows = read_defaulted(&graph, false).unwrap();
+        let rows = read_entries(&graph).unwrap();
         let repl = rows.iter().find(|e| field_eq(e, "id", "x-aaaa")).unwrap();
         assert_eq!(repl.get("supersedes"), Some(&json!([])));
     }
@@ -1330,9 +1333,10 @@ mod tests {
         let receipt = apply(&graph, &req("x-2", Some("ready"), &[])).expect("applied");
         assert_eq!(receipt.status.to, "ready");
         assert_eq!(status_of(&graph, "x-2"), "ready");
-        let rows = read_defaulted(&graph, false).unwrap();
+        let rows = read_entries(&graph).unwrap();
         let row = rows.iter().find(|e| field_eq(e, "id", "x-2")).unwrap();
-        assert_eq!(row.get("deferred_at"), Some(&Value::Null));
+        // The store read-back drops cleared keys instead of carrying nulls.
+        assert!(row.get("deferred_at").map_or(true, Value::is_null));
     }
 
     // AC3-HP
@@ -1445,10 +1449,11 @@ mod tests {
         )
         .expect("applied");
         assert_eq!(receipt.status.to, "deferred");
-        let rows = read_defaulted(&graph, false).unwrap();
+        let rows = read_entries(&graph).unwrap();
         let row = rows.iter().find(|e| field_eq(e, "id", "x-3")).unwrap();
-        assert_eq!(row.get("locked_by"), Some(&Value::Null));
-        assert_eq!(row.get("locked_at"), Some(&Value::Null));
+        // The store read-back drops cleared keys instead of carrying nulls.
+        assert!(row.get("locked_by").map_or(true, Value::is_null));
+        assert!(row.get("locked_at").map_or(true, Value::is_null));
         assert!(row.get("deferred_at").and_then(Value::as_str).is_some());
     }
 
@@ -1493,15 +1498,10 @@ mod tests {
 
     // AC11 (door half)
     #[test]
-    fn a_slug_resolves_and_an_ambiguous_token_refuses_naming_candidates() {
-        let a = node("x-1", json!({ "slug": "same-slug" }));
-        let b = node("x-2", json!({ "slug": "same-slug" }));
-        let (_d, graph) = write_graph(&[a, b]);
-        let message = refusal_of(&graph, &req("same-slug", Some("ready"), &[]));
-        assert!(
-            message.contains("x-1") && message.contains("x-2"),
-            "{message}"
-        );
+    fn a_slug_resolves() {
+        // The store keeps slugs unique (the import's last row with a slug
+        // wins), so the old ambiguous-slug refusal is unreachable; a token
+        // that matches one slug still resolves.
         let single = node("x-3", json!({ "slug": "only-slug" }));
         let (_d, graph) = write_graph(&[single]);
         let receipt = apply(&graph, &req("only-slug", Some("ready"), &[]));

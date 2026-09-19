@@ -11,7 +11,6 @@ reflex. The keeper's version conflict is what serializes writers now.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from fno.graph._constants import GRAPH_JSON
@@ -31,13 +30,31 @@ def load_graph(path: Path | None = None, *, keep_malformed: bool = False) -> lis
     if path is None:
         path = GRAPH_JSON
 
-    if not path.exists():
-        return []
+    # The store, not any seed file, is what holds the rows now: a store
+    # born from a write never materializes graph.json, so an absent seed
+    # file means "read the store", not "nothing exists". The typed read
+    # carries a row it cannot represent verbatim, which is what
+    # ``keep_malformed`` callers count; corruption raises rather than
+    # answering empty.
+    from fno.graph.store import (
+        GraphCorruptError,
+        GraphMalformedRootError,
+        GraphUnreadableError,
+        StoreUnavailable,
+        read_graph_strict,
+    )
 
-    from fno.graph.store import read_file_bytes
-
-    raw_bytes = read_file_bytes(Path(path))
-    return _entries(json.loads(raw_bytes), keep_malformed=keep_malformed)
+    try:
+        return read_graph_strict(Path(path))
+    except (
+        GraphCorruptError,
+        GraphMalformedRootError,
+        GraphUnreadableError,
+        StoreUnavailable,
+    ) as exc:
+        # Unreadable is NOT empty: every load_graph caller treats ValueError
+        # as "the store could not be read" (absence cannot be proven).
+        raise ValueError(f"graph store unreadable: {path}") from exc
 
 
 def _entries(data: object, *, keep_malformed: bool = False) -> list[dict]:
@@ -68,9 +85,9 @@ def query_by_source_inbox_msg(msg_id: str, path: Path | None = None) -> list[dic
     hermetic-test redirect) is still honored by reading that file directly.
     """
     if path is not None:
-        from fno.graph.store import read_graph
+        from fno.graph.store import read_graph_strict
 
-        return [e for e in read_graph(path) if e.get("source_inbox_msg") == msg_id]
+        return [e for e in read_graph_strict(path) if e.get("source_inbox_msg") == msg_id]
     from fno.tracker import sidecar as sidecar_store
 
     return [

@@ -77,7 +77,11 @@ def _seed(g: Path, entries: list[dict]) -> None:
 
 
 def _read(g: Path) -> list[dict]:
-    return json.loads(g.read_text()).get("entries", [])
+    # The store owns state; graph.json is a frozen export, so read-backs
+    # come from store rows.
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(g)
 
 
 def _seed_ledger(ledger: Path, entries: list[dict]) -> None:
@@ -258,7 +262,7 @@ def test_done_named_repo_overrides_a_disagreeing_recorded_url(
 ):
     """A named --repo is an assertion: it stamps the url for THAT repo even
     when the node's recorded pr_url names a different one (the repair flow
-    that previously required locked_mutate_graph)."""
+    that previously required commit_rows_via_store)."""
     _seed(tmp_graph, [{
         "id": "ab-repo0001",
         "title": "cross-repo repair",

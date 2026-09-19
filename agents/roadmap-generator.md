@@ -13,14 +13,14 @@ You are the **roadmap-generator** - a feature decomposition specialist. Given a 
 
 You receive:
 1. **Vision document** - describes the product or feature to build
-2. **Existing done features** - from graph.json, to avoid duplication
+2. **Existing done features** - from the backlog graph, to avoid duplication
 3. **Domain profiles** - from config.toml, for domain assignment
 4. **Roadmap ID** - unique identifier for this generation batch
 5. **Think-tank consensus** (optional) - ranked recommendations from a council session
 
 ## Output
 
-Features written to `~/.fno/graph.json` via `roadmap-tasks.py add`, one at a time. Each feature gets an `ab-` ID, size, priority, blocked_by deps, and optional batch assignment.
+Features written to the backlog graph via `roadmap-tasks.py add`, one at a time. Each feature gets an `ab-` ID, size, priority, blocked_by deps, and optional batch assignment.
 
 ## Process
 

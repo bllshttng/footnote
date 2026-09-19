@@ -8,6 +8,8 @@ envelope event whose `type` is `graph_tx_conflict`.
 """
 from __future__ import annotations
 
+import base64
+import json
 from pathlib import Path
 from typing import Any
 
@@ -24,11 +26,16 @@ class _FakeClient:
         self.conflicts = conflicts
         self.entries = entries
         self.commits = 0
+        self.version = 0
 
     def request(self, verb: str, payload: dict[str, Any]) -> dict[str, Any]:
-        if verb == "begin":
-            return {"version": "v1", "entries": self.entries}
-        if verb == "commit":
+        if verb == "read_file":
+            self.version += 1
+            body = json.dumps({"entries": self.entries}).encode()
+            return {"bytes_b64": base64.b64encode(body).decode(), "sha256": f"v{self.version}"}
+        if verb == "row_digests":
+            return {"digests": {e["id"]: f"d{self.version}" for e in self.entries}}
+        if verb == "commit_rows":
             self.commits += 1
             if self.commits <= self.conflicts:
                 raise store._Conflict()
@@ -36,7 +43,7 @@ class _FakeClient:
                 "dropped": 0,
                 "backup": None,
                 "closure_releases": [],
-                "entries": payload["entries"],
+                "entries": payload["changed"],
             }
         raise AssertionError(f"unexpected verb {verb}")
 
@@ -93,14 +100,14 @@ def test_two_conflicts_emit_two_events_then_commit(
     g = _graph(tmp_path)
     install(_FakeClient(conflicts=2, entries=[]), g)
 
-    committed = store.locked_mutate_graph(g, lambda entries: entries)
+    committed = store.commit_rows_via_store(g, lambda entries: entries)
 
     assert committed == []
     rows = _conflicts(journal)
     assert len(rows) == 2, rows
     assert [r["data"]["attempt"] for r in rows] == [1, 2]
     assert all(r["data"]["exhausted"] is False for r in rows)
-    assert [r["data"]["attempts_max"] for r in rows] == [5, 5]
+    assert [r["data"]["attempts_max"] for r in rows] == [store._TX_ATTEMPTS] * 2
     assert all(r["data"]["graph_path"] == str(g) for r in rows)
     assert all(r["source"] == "python" for r in rows)
     assert len(sleeps) == 2
@@ -111,18 +118,22 @@ def test_exhaustion_emits_exhausted_then_raises(
 ) -> None:
     sleeps, install = tx
     g = _graph(tmp_path)
-    install(_FakeClient(conflicts=5, entries=[]), g)
+    install(_FakeClient(conflicts=store._TX_ATTEMPTS, entries=[]), g)
 
-    with pytest.raises(RuntimeError, match="graph mutated under us 5 times"):
-        store.locked_mutate_graph(g, lambda entries: entries)
+    with pytest.raises(
+        RuntimeError, match=rf"graph mutated under us {store._TX_ATTEMPTS} times"
+    ):
+        store.commit_rows_via_store(g, lambda entries: entries)
 
     rows = _conflicts(journal)
-    assert len(rows) == 5, rows
+    assert len(rows) == store._TX_ATTEMPTS, rows
     assert rows[-1]["data"]["exhausted"] is True
-    assert [r["data"]["attempt"] for r in rows] == [1, 2, 3, 4, 5]
-    # Backoff ran before every retry: four sleeps, each within its
-    # full-jitter bound, so wall time is at least their sum.
-    assert len(sleeps) == 4
+    assert [r["data"]["attempt"] for r in rows] == list(
+        range(1, store._TX_ATTEMPTS + 1)
+    )
+    # Backoff ran before every retry: one fewer sleep than attempts, each
+    # within its full-jitter bound, so wall time is at least their sum.
+    assert len(sleeps) == store._TX_ATTEMPTS - 1
     for i, slept in enumerate(sleeps):
         bound = min(store._TX_BACKOFF_CAP_S, store._TX_BACKOFF_BASE_S * 2**i)
         assert 0 <= slept <= bound, (i, slept, bound)
@@ -146,4 +157,4 @@ def test_an_unwritable_journal_never_changes_the_outcome(
         store, "_finish_mutation", lambda path, outcome: outcome["entries"]
     )
 
-    assert store.locked_mutate_graph(g, lambda entries: entries) == []
+    assert store.commit_rows_via_store(g, lambda entries: entries) == []

@@ -626,7 +626,7 @@ def reindex_compat_cmd() -> None:
         counts = reindex()
     except Exception as exc:  # noqa: BLE001 - recovery must name its refusal
         typer.echo(
-            f"backlog decide-reindex: failed on the index at {paths.decisions_jsonl()}: {exc}",
+            f"backlog decide-reindex: failed on the index at {Path(paths.ledger_json()).parent / 'decisions.jsonl'}: {exc}",
             err=True,
         )
         raise typer.Exit(1)
@@ -964,7 +964,7 @@ def _list_decisions(
 
         hint = (
             ""
-            if Path(paths.decisions_jsonl()).exists()
+            if Path(paths.ledger_json()).parent.joinpath("decisions.jsonl").exists()
             else " (no index yet on this machine - run `fno backlog "
             "decide-reindex` to backfill what is already on disk)"
         )

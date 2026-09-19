@@ -2635,6 +2635,13 @@ mod tests {
     fn a_hung_advance_child_is_killed_at_the_wall_clock() {
         let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
+        // Pin the agents home: the fleet-incident gate re-reads the stop file
+        // every tick, and an unpinned verdict answers the machine's LIVE
+        // incident instead of this sandbox's absent one.
+        let agents = tmp.path().join("agents-home");
+        std::fs::create_dir_all(&agents).unwrap();
+        let saved_agents = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("FNO_AGENTS_HOME", &agents);
         let p = tmp.path().join("bin").join("fno");
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         // exec: the kill hits the sleeper itself, not a shell wrapper.
@@ -2659,6 +2666,10 @@ mod tests {
                 .any(|l| l.contains("advance-timeout") && l.contains("killed after 1s wall clock")),
             "lines: {lines:?}"
         );
+        match saved_agents {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
     }
 
     fn test_journal(tmp: &std::path::Path) -> (Journal, PathBuf) {

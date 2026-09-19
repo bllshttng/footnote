@@ -118,13 +118,13 @@ Day-to-day usage (create/edit/columns/lifecycle/roadmap) is in [docs/backlog-usa
 ### State files & forbidden surfaces
 
 NEVER edit these directly (a `PreToolUse` hook detects it). Use `fno backlog` / `fno do state`:
-- `~/.fno/graph.json` - the backlog graph; mutate via `fno backlog` only.
+- `~/.fno/graph.db` - the backlog graph; mutate via `fno backlog` only.
 - `<space>/worktrees/<name>/target-state.md` - immutable manifest. Only post-init write is first-fill of `plan_path` via `fno do state set`.
 - Generated copies named in `generated-artifacts.tsv` or `skill-bundles.yaml`, and the installed plugin copy. Edit and Write are refused. The refusal names the source and regen command.
 
 | File | Default | Purpose | Owner |
 |------|---------|---------|-------|
-| `paths.graph_json()` | `~/.fno/graph.json` (+ `.md` Kanban) | Feature dependency graph | backlog |
+| `paths.graph_db()` | `~/.fno/graph.db` (+ `.md` Kanban) | Feature dependency graph | backlog |
 | `paths.ledger_json()` | `~/.fno/ledger.json` | Execution history + cost | target |
 | `paths.briefs_dir()` | `~/.fno/briefs/{id}.md` | Sidecar discovery briefs | backlog |
 | `<space>/worktrees/<name>/target-state.md` | repo space | Immutable session manifest | target |
@@ -164,7 +164,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 - **`fno agents claim`** - the one work-claim primitive with atomic lockfiles. `target init` already claims the node - never `claim acquire` manually. [coordination](docs/architecture/coordination.md).
 - **`fno agents mail` - native review.** The native review runs via Skill. Raw mail is the fallback. The stop gate and `fno do pr merge` enforce code review. `review.self_review_required = false` needs a live claim, expires after `review.optout_ttl_minutes`, disarms unattended auto-merge. [review lanes](docs/architecture/review-lanes.md).
 - **`fno inbox decide`** - records a ruling per subject. `fno inbox decisions X` recovers it, newest first. [decision-record](docs/architecture/decision-record.md).
-- **`fno agents feed`** - one ordered projection of questions.jsonl + graph.json. Rows carry the node id + session id the mux `prefix+e` overlay deep-links through. [activity-feed](docs/architecture/activity-feed.md).
+- **`fno agents feed`** - one ordered projection of questions.jsonl + the graph store. Rows carry the node id + session id the mux `prefix+e` overlay deep-links through. [activity-feed](docs/architecture/activity-feed.md).
 - **`fno whoami` / `fno whoami status`** - read-only self-introspection; run when confused after compaction.
 - **`fno do target start <node>`** - one-verb worktree cold-start (ensure off `origin/main` -> `target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
 - **Spawn substrate** - `fno agents spawn --substrate <pane|thread|headless>`. Both attachable. `thread` is the default where the harness seats one (pane placement flags or a `--` fence imply pane). Persistent, hosts no pane until a **portal** opens a view, 0-indexed, several at once ([portals](docs/architecture/portals.md)). `pane` is the mux-hosted fallback, `headless` the one-shot non-interactive substrate, `bg` a one-release alias for `thread`.
@@ -189,7 +189,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 
 ## graphify
 
-Query `graphify-out/graph.json` before source reads. `/graphify` loads the skill first. Prefer `query`/`path`/`explain`, wiki for navigation, report as fallback. Dirty output expected. Skip on explicit opt-out or graph debugging. After edits run `graphify update .`.
+Query the `graphify-out/` knowledge graph before source reads. `/graphify` loads the skill first. Prefer `query`/`path`/`explain`, wiki for navigation, report as fallback. Dirty output expected. Skip on explicit opt-out or graph debugging. After edits run `graphify update .`.
 
 ## Deep-dive docs
 

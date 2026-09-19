@@ -278,8 +278,8 @@ def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
         if not isinstance(node, ast.Call):
             return False
         f = node.func
-        return (isinstance(f, ast.Name) and f.id == "read_graph") or (
-            isinstance(f, ast.Attribute) and f.attr == "read_graph"
+        return (isinstance(f, ast.Name) and f.id == "read_graph_strict") or (
+            isinstance(f, ast.Attribute) and f.attr == "read_graph_strict"
         )
 
     py_root = REPO_ROOT / "cli" / "src"
@@ -320,6 +320,19 @@ def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
             if not _is_read_graph(site) and not _raw_parse_is_graph_read(site, top):
                 # A raw parse with no graph_json() in the enclosing body is
                 # another file's parse, not a graph-store read.
+                continue
+            if _is_read_graph(site):
+                # The strict store read: since the cutover the graph store is
+                # footnote-owned regardless of the tracker backend, so every
+                # read_graph_strict site is legal by definition. The raw-parse
+                # modality below still guards hand-rolled file access.
+                total += 1
+                if verbose:
+                    print(
+                        f"  {'store-read':<18} "
+                        f"{Path(rel).relative_to(REPO_ROOT)}:{site.lineno} in "
+                        f"{top.name if top else '<module>'}()"
+                    )
                 continue
             klass, problem = _classify_site(
                 site,
@@ -458,8 +471,8 @@ def self_test() -> int:
         failures.append(f"injected unmarked verb not detected (marker={marker!r})")
 
     # Reads modality: an injected forbidden consumer must be detected.
-    bad = "# read_graph()\nx = read_graph(path)"
-    pattern = re.compile(r"\bread_graph\b")
+    bad = "# read_graph()\nx = read_graph_strict(path)"
+    pattern = re.compile(r"\bread_graph(_strict)?\b")
     hits = [
         (i + 1, bad_line.strip())
         for i, bad_line in enumerate(bad.splitlines())

@@ -1341,7 +1341,7 @@ mod tests {
                 || crate::reap_render::MuxSweep::Skipped,
                 noop_roster_sweep,
             );
-            wait_for_retire_row(&home.events_jsonl());
+            wait_for_retire_row_within(&home.events_jsonl(), 30);
             let row = std::fs::read_to_string(home.events_jsonl())
                 .unwrap()
                 .lines()
@@ -1767,7 +1767,11 @@ mod tests {
             serde_json::to_vec(&serde_json::json!({
                 "entries": [{
                     "id": "x-h1",
+                    "slug": "x-h1",
+                    "title": "x-h1",
+                    "type": "feature",
                     "status": "idea",
+                    "priority": "p2",
                     "project": "p",
                     "sessions": [{
                         "phase": "blueprint",

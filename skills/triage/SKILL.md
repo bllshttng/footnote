@@ -10,7 +10,7 @@ metadata:
 
 # Triage
 
-Propose an optimal ordering for pending specs on `~/.fno/graph.json`
+Propose an optimal ordering for pending specs on the backlog graph
 based on dependencies, sequencing, priority versus project goals, and
 duplicate detection.
 

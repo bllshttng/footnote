@@ -55,9 +55,10 @@ fn fixture_nodes() -> Vec<Node> {
     vec![one, two, three, four]
 }
 
-/// One arm of the both-backends run: JSON (no db named) or SQLite (the
-/// store names its own backend after the one-shot import).
-fn arm(dir: &TempDir, backend: crate::backlog::Backend) -> Store {
+/// One store over a graph.json fixture: the seed imports on the store's
+/// first open (never here, so tests that rewrite the file first still work).
+fn one_store() -> (TempDir, Store) {
+    let dir = TempDir::new().unwrap();
     let graph = dir.path().join("graph.json");
     let entries: Vec<Value> = fixture_nodes().iter().map(Node::to_json).collect();
     std::fs::write(
@@ -65,63 +66,15 @@ fn arm(dir: &TempDir, backend: crate::backlog::Backend) -> Store {
         serde_json::to_string(&json!({ "entries": entries })).unwrap(),
     )
     .unwrap();
-    let store = Store::new(&graph);
-    if backend == crate::backlog::Backend::Sqlite {
-        crate::backlog::read_entries(&graph).unwrap();
-        crate::backlog::set_backend(&graph, backend).unwrap();
-    }
-    store
-}
-
-fn both_stores() -> (TempDir, TempDir, Store, Store) {
-    let json_dir = TempDir::new().unwrap();
-    let sqlite_dir = TempDir::new().unwrap();
-    let json_store = arm(&json_dir, crate::backlog::Backend::Json);
-    let sqlite_store = arm(&sqlite_dir, crate::backlog::Backend::Sqlite);
-    (json_dir, sqlite_dir, json_store, sqlite_store)
-}
-
-fn scrub(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            for key in [
-                "created_at",
-                "touched_at",
-                "archived_at",
-                "ts",
-                "ended_at",
-                "locked_at",
-            ] {
-                map.remove(key);
-            }
-            for (_, child) in map.iter_mut() {
-                scrub(child);
-            }
-        }
-        Value::Array(items) => items.iter_mut().for_each(scrub),
-        _ => {}
-    }
-}
-
-fn transcript(store: &Store) -> String {
-    let mut out = String::new();
-    out.push_str(&format!(
-        "{:?}\n",
-        node(store, "ab-one").unwrap().map(|n| n.to_json())
-    ));
-    let conn = nodes(store, &NodeFilter::default(), &Page::default()).unwrap();
-    for row in &conn.nodes {
-        out.push_str(&format!("row {}\n", row.to_json()));
-    }
-    out
+    (dir, Store::new(&graph))
 }
 
 // -- queries ----------------------------------------------------------------
 
 #[test]
 fn api_node_finds_one_row() {
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         let one = node(store, "ab-one").unwrap().unwrap();
         assert_eq!(one.id, "ab-one");
         assert_eq!(one.title, "One");
@@ -134,8 +87,8 @@ fn api_node_finds_one_row() {
 fn api_nodes_pages_two_then_cursor_third() {
     // AC14-HP: first:2 over 3 matching rows returns 2 with a next page; the
     // end cursor resumes at the third.
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         let filter = NodeFilter {
             project: Some("fno".into()),
             ..Default::default()
@@ -172,8 +125,8 @@ fn api_nodes_pages_two_then_cursor_third() {
 
 #[test]
 fn api_nodes_first_none_returns_every_row() {
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         let conn = nodes(store, &NodeFilter::default(), &Page::default()).unwrap();
         assert_eq!(conn.nodes.len(), 3, "archived hidden by default");
         assert!(!conn.page_info.has_next_page);
@@ -182,8 +135,8 @@ fn api_nodes_first_none_returns_every_row() {
 
 #[test]
 fn api_nodes_hides_archived_unless_included() {
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         let page = Page {
             include_archived: true,
             ..Default::default()
@@ -196,8 +149,8 @@ fn api_nodes_hides_archived_unless_included() {
 
 #[test]
 fn api_nodes_filters_by_state_and_status_words() {
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         let filter = NodeFilter {
             state_type: Some("unstarted".into()),
             ..Default::default()
@@ -225,8 +178,8 @@ fn api_nodes_filters_by_state_and_status_words() {
 
 #[test]
 fn api_nodes_filters_by_parent_label_claim_and_session() {
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         let cases: Vec<NodeFilter> = vec![
             NodeFilter {
                 label: Some("infra".into()),
@@ -268,8 +221,8 @@ fn api_nodes_filters_by_parent_label_claim_and_session() {
 
 #[test]
 fn api_nodes_orders_by_created_at() {
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         let page = Page {
             order_by: OrderBy::CreatedAt,
             ..Default::default()
@@ -282,8 +235,8 @@ fn api_nodes_orders_by_created_at() {
 
 #[test]
 fn api_version_reads_zero_then_counter() {
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         let before = version(store).unwrap();
         assert!(before >= 0);
     }
@@ -294,8 +247,8 @@ fn api_version_reads_zero_then_counter() {
 #[test]
 fn api_node_update_bumps_version_once() {
     // AC15-EDGE: one successful mutation, version grows by exactly one.
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         let before = version(store).unwrap();
         let payload = node_update(
             store,
@@ -322,8 +275,8 @@ fn api_node_update_bumps_version_once() {
 fn api_failed_mutation_keeps_version() {
     // AC15-EDGE: a failed mutation answers success:false and the store's
     // counter does not move.
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         let before = version(store).unwrap();
         let payload = node_update(
             store,
@@ -357,7 +310,7 @@ fn api_node_update_status_moves_through_the_patch_door() {
     // leaves the row and version untouched. Leaving a terminal row rewrites
     // the replacer's chain, a second-row edit the single-row API must not
     // do silently, so it refuses naming the owning door.
-    let (_d1, _d2, json_store, _sqlite_store) = both_stores();
+    let (_d1, json_store) = one_store();
     let graph = _d1.path().join("graph.json");
     let mut entries: Vec<Value> = fixture_nodes().iter().map(Node::to_json).collect();
     entries.push(json!({
@@ -392,8 +345,8 @@ fn api_node_update_status_moves_through_the_patch_door() {
 
 #[test]
 fn api_node_create_appends_and_queries() {
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         let before = version(store).unwrap();
         let payload = node_create(
             store,
@@ -430,8 +383,8 @@ fn api_node_create_appends_and_queries() {
 
 #[test]
 fn api_node_batch_update_moves_every_named_row() {
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         let payload = node_batch_update(
             store,
             &["ab-one".into(), "ab-two".into()],
@@ -463,8 +416,8 @@ fn api_node_batch_update_moves_every_named_row() {
 
 #[test]
 fn api_archive_unarchive_delete_roundtrip() {
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         let payload = node_archive(store, "ab-two").unwrap();
         assert!(payload.success);
         let conn = nodes(store, &NodeFilter::default(), &Page::default()).unwrap();
@@ -486,8 +439,8 @@ fn api_archive_unarchive_delete_roundtrip() {
 
 #[test]
 fn api_edge_label_and_note_mutations_agree() {
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         let payload = relation_create(store, "ab-one", "ab-two", RelationType::Blocks).unwrap();
         assert!(payload.success);
         assert_eq!(
@@ -531,8 +484,8 @@ fn api_edge_label_and_note_mutations_agree() {
 
 #[test]
 fn api_pr_session_dispatch_and_encounter_mutations_agree() {
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         let payload = pull_request_attach(
             store,
             "ab-one",
@@ -645,119 +598,6 @@ fn api_pr_session_dispatch_and_encounter_mutations_agree() {
     }
 }
 
-// -- the cross-arm contract ---------------------------------------------------
-
-#[test]
-fn api_both_backends_agree_on_to_json() {
-    // AC14-HP: the same scripted queries and mutations under each backend,
-    // equal typed output (clock stamps scrubbed, everything else exact).
-    fn script(store: &Store) -> Vec<Value> {
-        let mut out: Vec<Value> = Vec::new();
-        out.push(json!(node(store, "ab-one").unwrap().map(|n| n.to_json())));
-        out.push(json!(nodes(
-            store,
-            &NodeFilter::default(),
-            &Page::default()
-        )
-        .unwrap()
-        .nodes
-        .iter()
-        .map(Node::to_json)
-        .collect::<Vec<_>>()));
-        node_update(
-            store,
-            "ab-one",
-            NodeUpdateInput {
-                title: Some("One scripted".into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        node_create(
-            store,
-            NodeCreateInput {
-                id: "ab-scripted".into(),
-                title: "Scripted".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        relation_create(store, "ab-two", "ab-three", RelationType::Related).unwrap();
-        label_add(store, "ab-three", "scripted").unwrap();
-        comment_create(
-            store,
-            "ab-two",
-            CommentCreateInput {
-                body: "scripted note".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        node_archive(store, "ab-three").unwrap();
-        out.push(json!(node(store, "ab-one").unwrap().map(|n| n.to_json())));
-        out.push(json!(node(store, "ab-scripted")
-            .unwrap()
-            .map(|n| n.to_json())));
-        out.push(json!(version(store).unwrap()));
-        out.iter_mut().for_each(scrub);
-        out
-    }
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    assert_eq!(
-        serde_json::to_string(&script(&json_store)).unwrap(),
-        serde_json::to_string(&script(&sqlite_store)).unwrap(),
-    );
-}
-
-#[test]
-fn api_transcript_helper_agrees_before_mutations() {
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    let (a, b) = (transcript(&json_store), transcript(&sqlite_store));
-    assert_eq!(a, b);
-}
-
-/// The keeper feeds the pure read halves from the cache; the store-reading
-/// functions delegate to the same halves. This pins the seam: on both
-/// backends the pure halves over the store's rows answer byte-equal to the
-/// store reads (the AC8 pre-change-equality contract).
-#[test]
-fn api_pure_read_halves_equal_the_store_reads_on_both_backends() {
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
-        let store_rows = read_rows(store).unwrap();
-        // rows: the round-tripped list.
-        assert_eq!(rows_in(&store_rows), rows(store).unwrap());
-        // node: one present id, one absent.
-        assert_eq!(
-            node_in(&store_rows, "ab-two").map(|n| n.to_json()),
-            node(store, "ab-two").unwrap().map(|n| n.to_json())
-        );
-        assert_eq!(node_in(&store_rows, "ab-nope").map(|n| n.to_json()), None);
-        // nodes: the default page and an id_in filter, compared as the wire
-        // projection (page info plus node rows).
-        let as_rows = |c: &Connection<Node>| {
-            (
-                serde_json::to_value(&c.page_info).unwrap(),
-                c.nodes.iter().map(|n| n.to_json()).collect::<Vec<_>>(),
-            )
-        };
-        let filter = NodeFilter::default();
-        let page = Page::default();
-        assert_eq!(
-            as_rows(&nodes(store, &filter, &page).unwrap()),
-            as_rows(&nodes_in(&store_rows, &filter, &page))
-        );
-        let id_filter = NodeFilter {
-            id_in: Some(vec!["ab-one".into(), "ab-three".into()]),
-            ..Default::default()
-        };
-        assert_eq!(
-            as_rows(&nodes(store, &id_filter, &page).unwrap()),
-            as_rows(&nodes_in(&store_rows, &id_filter, &page))
-        );
-    }
-}
-
 #[test]
 fn api_cursor_decodes_roundtrip() {
     let mut one = base_row("ab-one", "One", "idea");
@@ -771,8 +611,8 @@ fn api_cursor_decodes_roundtrip() {
 fn api_created_at_order_resumes_after_cursor() {
     // Regression: the resume scan assumed ordinal-ascending rows, which
     // breaks under OrderBy::CreatedAt; resume by row identity instead.
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         run_created_at_page(store);
     }
 }
@@ -809,8 +649,8 @@ fn run_created_at_page(store: &Store) {
 fn api_comments_cursor_resumes_without_restart() {
     // Regression: the note cursor lacked its ':' separator, so every
     // resume decoded as None and restarted at the first row.
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         note_note(store, "note one");
         note_note(store, "note two");
         page_two_asserts(store);
@@ -857,13 +697,13 @@ fn page_two_asserts(store: &Store) {
 // -- wave-8 reader seam -----------------------------------------------------
 
 /// The rows seam the wave-8 board readers share: every defaulted row comes
-/// back in ordinal order (archived included), and a mutation through the api
-/// is visible to the next read (AC7).
+/// back in ordinal order, a mutation through the api is visible to the next
+/// read (AC7), and archived rows answer only when asked for.
 #[test]
 fn readers_follow_store_rows_reflect_mutations() {
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
-        let all = rows(store).unwrap();
+    let (_d1, ref store) = one_store();
+    {
+        let all = rows(store, true).unwrap();
         assert_eq!(all.len(), 4);
         assert_eq!(all[0]["id"], "ab-one");
         assert_eq!(all[3]["id"], "ab-four"); // archived rows ride along
@@ -878,7 +718,7 @@ fn readers_follow_store_rows_reflect_mutations() {
             },
         )
         .unwrap();
-        let after = rows(store).unwrap();
+        let after = rows(store, true).unwrap();
         assert_eq!(after[1]["id"], "ab-two");
         assert_eq!(after[1]["title"], "Two renamed");
     }
@@ -886,8 +726,7 @@ fn readers_follow_store_rows_reflect_mutations() {
 
 #[test]
 fn api_session_end_writes_an_explicit_instant_on_both_fill_branches() {
-    let (_d1, _d2, json_store, _sqlite_store) = both_stores();
-    let store = &json_store;
+    let (_d1, ref store) = one_store();
     session_append(store, "ab-one", session_row("s-explicit")).unwrap();
     let payload = session_end(
         store,
@@ -935,7 +774,7 @@ fn api_session_end_writes_an_explicit_instant_on_both_fill_branches() {
     )
     .unwrap();
     assert!(payload.success);
-    let entries = rows(store).unwrap();
+    let entries = rows(store, true).unwrap();
     let raw = entries
         .iter()
         .find(|e| crate::graph_store::entry_id(e) == Some("ab-raw1"))
@@ -946,8 +785,8 @@ fn api_session_end_writes_an_explicit_instant_on_both_fill_branches() {
 
 #[test]
 fn pull_request_stamp_matches_one_entry_and_never_double_stamps() {
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         pull_request_attach(
             store,
             "ab-one",

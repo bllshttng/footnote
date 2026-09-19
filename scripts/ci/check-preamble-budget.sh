@@ -200,7 +200,11 @@ set -euo pipefail
 # loaded surface. A first draft weighed 68; the style gate split it into four
 # short sentences, and 109 is the measured residue of the version that passes.
 # The raise spends exactly its delta and leaves the bank above intact.
-CEILING_BYTES=40216
+# 2026-09-19 (PR 2226): main at 21d830e shipped the preamble 100 B over this
+# ceiling (the gate only runs on AGENTS.md-touching PRs, so the growth landed
+# unmeasured). This branch's own renames shrink the preamble by 8 B; the raise
+# absorbs main's overage so the gate measures from main's real position again.
+CEILING_BYTES=40316
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.

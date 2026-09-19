@@ -71,7 +71,7 @@ Top-level positionals are now either verbs (`roadmap`, `adopt`, `status`, `defer
 
 ## Added: `/megawalk ab-xxxxxxxx`
 
-Any graph node ID is now a valid argument - it resolves to the node's `plan_path` via `~/.fno/graph.json` and runs just that node, instead of picking the top-ranked ready task. Same form works in `/target`.
+Any graph node ID is now a valid argument - it resolves to the node's `plan_path` via the backlog graph store and runs just that node, instead of picking the top-ranked ready task. Same form works in `/target`.
 
 ```bash
 /megawalk ab-1234abcd           # run this specific node

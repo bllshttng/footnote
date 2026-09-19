@@ -21,9 +21,6 @@ pub use crate::backlog::model::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-const MUTATE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct ApiError(pub String);
@@ -36,6 +33,14 @@ impl From<crate::graph_store::StoreError> for ApiError {
 
 impl From<ApiError> for crate::graph_store::StoreError {
     fn from(error: ApiError) -> Self {
+        // The store-open family crosses as a stringified StoreError::Sqlite
+        // ("sqlite: ..."): an unreadable or corrupt store must keep the
+        // unreadable kind, because callers branch GraphUnreadableError to
+        // tell "node absent" from "graph unreadable". Only the prefix is
+        // recoverable after the round trip through the string.
+        if error.0.starts_with("sqlite:") {
+            return Self::Unreadable(String::new(), error.0);
+        }
         Self::Invalid(error.0)
     }
 }
@@ -62,6 +67,7 @@ impl Store {
 }
 
 pub use crate::backlog::model::state_type;
+pub use crate::backlog::search::search;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -434,9 +440,13 @@ pub fn nodes(
 /// represent rides through VERBATIM, so the reader seam stays total and a
 /// legacy-shaped row can never silently vanish from a board fold (the typed
 /// queries drop it, the import's rule; a reader must not). Archived rows
-/// come back; the caller filters.
-pub fn rows(store: &Store) -> Result<Vec<Value>, ApiError> {
-    Ok(rows_in(&read_rows(store)?))
+/// come back only when `include_archived` is set; the default answers the
+/// working graph alone.
+pub fn rows(store: &Store, include_archived: bool) -> Result<Vec<Value>, ApiError> {
+    Ok(rows_in(&read_rows(store)?)
+        .into_iter()
+        .filter(|row| include_archived || row.get("archived_at").map_or(true, Value::is_null))
+        .collect())
 }
 
 /// Every row, round-tripped through the model where it fits, verbatim
@@ -493,10 +503,8 @@ pub fn version(store: &Store) -> Result<i64, ApiError> {
 
 // -- writes ----------------------------------------------------------------
 
-/// Read, apply the typed mutation to the named rows, publish through
-/// `graph_store::mutate_rows` (the one optimistic cycle every whole-graph
-/// writer shares). `Ok(false)` from `apply` is a domain refusal: nothing is
-/// written and the counter stays put, which is AC15's failed-mutation arm.
+/// The decision ledger read: every recorded decision, or one node's, or a
+/// single decision by id.
 pub fn decisions(
     store: &Store,
     node: Option<&str>,
@@ -545,20 +553,10 @@ fn mutate(
     mutation: &str,
     mut apply: impl FnMut(&mut Vec<Value>) -> Result<bool, String>,
 ) -> Result<bool, ApiError> {
-    if crate::backlog::backend(&store.graph) == crate::backlog::Backend::Sqlite {
-        // Single-row path: the immediate transaction reads
-        // the current authoritative rows, writes only the changed node's
-        // aggregates, and the gate event names this mutation (AC24).
-        return crate::backlog::mutate_single_row(&store.graph, mutation, |rows| apply(rows))
-            .map_err(ApiError);
-    }
-    // The json leg keeps the whole-graph cycle: it serves the rollback arm
-    // until the JSON retirement wave.
-    let landed =
-        crate::graph_store::mutate_rows(&store.graph, MUTATE_TIMEOUT, None, None, |rows| {
-            apply(rows).map_err(crate::graph_store::StoreError::Invalid)
-        })?;
-    Ok(landed.is_some())
+    // The immediate transaction reads the current authoritative rows,
+    // writes only the changed node's aggregates, and the gate event names
+    // this mutation (AC24).
+    crate::backlog::mutate_single_row(&store.graph, mutation, |rows| apply(rows)).map_err(ApiError)
 }
 
 fn fresh_version(store: &Store) -> i64 {

@@ -10,7 +10,7 @@ The load-bearing invariant is a partition enforced in CI by `scripts/ci/check-tr
 
 ## The partition rule
 
-Today's `~/.fno/graph.json` is two things merged into one record.
+Today's `~/.fno/graph.db` backlog store is two things merged into one record.
 It is a tracker of the fields any backlog stores.
 It is also a sidecar of the fields only footnote knows.
 Adoption is a partition along that existing line, not a rewrite.
@@ -49,7 +49,7 @@ footnote keeps deriving the rest from the plan and the PR exactly as it does tod
 
 The sidecar lives at `~/.fno/sidecar/<url-encoded-id>.json`.
 It resolves through `fno.paths`, one file per work item, keyed by the opaque id.
-Placement is beside `graph.json` and `ledger.json`.
+Placement is beside `graph.db` and `ledger.json`.
 It inherits the existing `config.paths` and `state_dir` override with no new machinery.
 
 One file per item means concurrent workers on different items never contend.
@@ -74,10 +74,10 @@ They are `title`, `state`, `priority`, `parent`, `blocked_by`, `size`, `domain`,
 
 ## Backends
 
-The first backend is `graph.json`, the default, unchanged.
+The first backend is the built-in graph.db store, the default, unchanged.
 A user who wants no tracker gets today's behaviour with no config.
 A stock install with no account works offline.
-`graph.json` is the default forever, never a migration target.
+The built-in store is the default forever, never a migration target.
 
 The second backend is GitHub Issues, the first external one.
 Linear is third and has the cleanest data model of the three.

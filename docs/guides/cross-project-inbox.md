@@ -125,7 +125,7 @@ with persist_to_memory, answer/complete -> fyi with replies_to), and
 renames the original file to `inbox-pre-migration.md` as a safety net.
 Idempotent: re-running on already-migrated projects is a no-op.
 
-The `com.fno.backlog-sync` launchd job mirrors `~/.fno/graph.json` to obsidian; the inbox files already live in the obsidian vault, so no separate sync is needed.
+The `com.fno.backlog-sync` launchd job mirrors the backlog graph to obsidian; the inbox files already live in the obsidian vault, so no separate sync is needed.
 
 ## Draining
 

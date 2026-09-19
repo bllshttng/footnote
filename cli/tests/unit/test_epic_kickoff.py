@@ -37,7 +37,13 @@ def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def _events(p: Path) -> list[dict]:
     if not p.exists():
         return []
-    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+    # The agents-telemetry dialect (kind-keyed) shares this journal under
+    # the sandbox; only schema rows (type-keyed) are decisions.
+    return [
+        json.loads(line)
+        for line in p.read_text().splitlines()
+        if line.strip() and "type" in json.loads(line)
+    ]
 
 
 def _write_graph(tmp_path: Path, entries: list[dict], monkeypatch) -> Path:
@@ -88,10 +94,10 @@ def _patch_headroom(monkeypatch, n: int):
 def _read_epic(epic_id="x-EPIC"):
     """Read the epic node via the (test-patched) graph_json, resolved at call time."""
     import fno.paths as _p
-    from fno.graph.store import read_graph
+    from fno.graph.store import read_graph_strict
     from fno.graph._intake import _find_node
 
-    return _find_node(read_graph(_p.graph_json()), epic_id)
+    return _find_node(read_graph_strict(_p.graph_json()), epic_id)
 
 
 def _patch_spawn(monkeypatch, *, claim_node=True, fail_on=None):

@@ -10,7 +10,7 @@ Before this work, agent-to-agent messages and the cross-project inbox were two s
 
 ## The substrate
 
-One global append-only log is the system of record. The per-recipient markdown thread file is demoted to a render of that log (the `graph.json -> graph.md` pattern): regenerated on every mutation, carrying zero authority. Read-state is a per-consumer cursor, not a per-thread flag.
+One global append-only log is the system of record. The per-recipient markdown thread file is demoted to a render of that log (the `graph.db -> graph.md` pattern): regenerated on every mutation, carrying zero authority. Read-state is a per-consumer cursor, not a per-thread flag.
 
 | Layer | Lives | Role |
 | :--- | :--- | :--- |

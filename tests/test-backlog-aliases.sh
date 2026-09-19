@@ -167,11 +167,13 @@ else
 fi
 
 # --- Scenario 5: backlog done marks node complete ---------------------------
-# Extract the last adopted ID from graph.json (one of the two we just added)
-node_id=$(python3 -c "
-import json, sys
-data = json.load(open('$GRAPH_JSON'))
-entries = data.get('entries', [])
+# Reads go through the store client: graph.json is a fold-on-open seed, so
+# a written node lives in graph.db, never in the file.
+GRAPH_PY="$REPO_ROOT/cli/.venv/bin/python"
+[[ -x "$GRAPH_PY" ]] || GRAPH_PY=python3
+node_id=$("$GRAPH_PY" -c "
+from fno.graph.store import read_graph_strict
+entries = read_graph_strict('$GRAPH_JSON')
 print(entries[-1]['id'] if entries else '')
 ")
 
@@ -185,11 +187,10 @@ else
         fail "done did not report completion: $done_out"
     fi
 
-    # Verify completed_at is set in the json
-    has_completed=$(python3 -c "
-import json
-data = json.load(open('$GRAPH_JSON'))
-for e in data.get('entries', []):
+    # Verify completed_at is set in the store
+    has_completed=$("$GRAPH_PY" -c "
+from fno.graph.store import read_graph_strict
+for e in read_graph_strict('$GRAPH_JSON'):
     if e.get('id') == '$node_id':
         print('yes' if e.get('completed_at') else 'no')
         break

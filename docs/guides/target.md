@@ -172,7 +172,7 @@ Most of the time you'll use target (S/M/L). Megawalk is removed; for a vision do
 
 For multi-feature work, `fno backlog` is the PM layer and target is the tech lead for each feature.
 
-The backlog graph (`~/.fno/graph.json`) stores features with `blocked_by` dependencies and derived status. Key commands:
+The backlog graph (`~/.fno/graph.db`) stores features with `blocked_by` dependencies and derived status. Key commands:
 
 | Command | What it does |
 |---------|-------------|

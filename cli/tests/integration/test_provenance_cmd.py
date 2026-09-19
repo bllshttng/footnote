@@ -303,7 +303,12 @@ def test_ac3_ui_lifecycle_rows_json(tmp_graph, tmp_path, monkeypatch):
     r = _invoke("backlog", "provenance", "ab-life0002", "--json")
     assert r.exit_code == 0, r.output
     data = json.loads(r.output)
-    assert data["sessions"] == _SESSIONS
+    # Store rows normalize sessions to the typed shape (started_at/ended_at
+    # fields, nulls materialized), so compare the lifecycle identity, not
+    # the raw seeded dicts.
+    assert [
+        (s["phase"], s["harness"], s["session_id"]) for s in data["sessions"]
+    ] == [(s["phase"], s["harness"], s["session_id"]) for s in _SESSIONS]
     assert "edges" in data  # existing edges preserved
 
 

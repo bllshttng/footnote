@@ -210,7 +210,11 @@ def test_archive_script_agrees(tmp_path: Path, name: str, mutate, expected: bool
     # pins those). `unborn` is the one corpus row where that diverges.
     expected_archive = True if name == "unborn" else expected
 
-    assert _archive_script_verdict(repo) == expected_archive
+    actual = _archive_script_verdict(repo)
+    assert actual == expected_archive, (
+        f"{name}: archive verdict {actual} != corpus {expected_archive}; "
+        f"FNO_AGENTS_BIN={os.environ.get('FNO_AGENTS_BIN', '<unset>')}"
+    )
 
 
 def test_deletions_only_worktree_is_actually_removed(tmp_path: Path) -> None:
@@ -232,7 +236,10 @@ def test_deletions_only_worktree_is_actually_removed(tmp_path: Path) -> None:
         capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=60,
     )
 
-    assert r.returncode == 0, f"archive failed: {r.stderr}"
+    assert r.returncode == 0, (
+        "archive failed: "
+        f"{r.stderr}\nFNO_AGENTS_BIN={os.environ.get('FNO_AGENTS_BIN', '<unset>')}"
+    )
     assert not repo.exists(), "predicate passed but the worktree is still on disk"
 
 
@@ -324,7 +331,19 @@ def test_rust_token_scanner_matches_the_python_producer(tmp_path, branch, expect
 
     home = tmp_path / "graph-home" / "agents"
     home.mkdir(parents=True)
-    rows = [{"id": tok, "status": "done"} for tok in expected]
+    # The typed fold drops a row the model cannot represent, so each seed
+    # carries the fields the model requires.
+    rows = [
+        {
+            "id": tok,
+            "slug": tok,
+            "title": f"node {tok}",
+            "type": "feature",
+            "status": "done",
+            "priority": "p2",
+        }
+        for tok in expected
+    ]
     (home.parent / "graph-archive.json").write_text(json.dumps({"entries": rows}))
     env = dict(os.environ, FNO_AGENTS_HOME=str(home))
 

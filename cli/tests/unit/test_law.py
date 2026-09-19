@@ -58,7 +58,9 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     index = tmp_path / "state" / "decisions.jsonl"
     index.parent.mkdir()
     index.touch()
-    monkeypatch.setattr(paths, "decisions_jsonl", lambda: index)
+    import fno.decide
+
+    monkeypatch.setattr(fno.decide, "_decisions_index_path", lambda: index)
     return index
 
 

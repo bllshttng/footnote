@@ -1,7 +1,7 @@
 """Campaign commit: the only writing path, plus the approval boundary.
 
 ``commit`` writes one epic and its child work orders through
-``locked_mutate_graph`` (the sole graph mutator), which validates every
+``commit_rows_via_store`` (the sole graph mutator), which validates every
 ``company_work`` projection before graph bytes change. Cycle and epic-depth
 safety reuse the existing guards; this module adds no second checker.
 
@@ -190,7 +190,7 @@ def commit(
 ) -> CommitResult | CoordinatorRefusal:
     """Commit a proposal as one epic and N child work orders in the graph.
 
-    Writes only through ``locked_mutate_graph`` (the sole graph mutator), which
+    Writes only through ``commit_rows_via_store`` (the sole graph mutator), which
     validates every ``company_work`` projection before bytes change. Cycle and
     epic-depth safety reuse the existing guards; this adds no second checker.
     Dependency edges between children are ordinary ``blocked_by`` edges, so the
