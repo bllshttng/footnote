@@ -610,6 +610,7 @@ pub fn snapshot_with(
         let reset_epoch = reset_raw.filter(|r| *r as f64 > now_f);
         let reset_passed_epoch = reset_raw.filter(|r| *r as f64 <= now_f);
         let capped_n = capped.len();
+        let measured_n = members.iter().filter(|m| m.cap_unknown.is_none()).count();
         // A capped member whose 429 is newer than the passed reset is a NEW
         // strand, not a returning one; `newest_assistant` is RFC3339.
         let new_strand_since = |r: i64| {
@@ -621,7 +622,9 @@ pub fn snapshot_with(
                     == Some(true)
             })
         };
-        let state = if reset_epoch.is_none()
+        let state = if measured_n == 0 && reset_raw.is_none() {
+            "unmeasured"
+        } else if reset_epoch.is_none()
             && reset_passed_epoch.is_some()
             && capped_n >= 1
             && !new_strand_since(reset_passed_epoch.unwrap())
@@ -705,6 +708,38 @@ pub fn read_persisted_snapshot(home: &AgentsHome) -> Option<CapSnapshot> {
         measured_at: v.get("measured_at")?.as_str()?.to_string(),
         measured_at_epoch: v.get("measured_at_epoch")?.as_i64()?,
     })
+}
+
+pub fn provider_quota_states(
+    home: &AgentsHome,
+    now_epoch: i64,
+    max_age_s: i64,
+) -> Option<BTreeMap<String, String>> {
+    let snapshot = read_persisted_snapshot(home)?;
+    let age = now_epoch.saturating_sub(snapshot.measured_at_epoch);
+    if max_age_s < 0 || age > max_age_s {
+        return None;
+    }
+    fn rank(state: &str) -> u8 {
+        match state {
+            "open" => 4,
+            "returning" => 3,
+            "unmeasured" => 2,
+            "closed" => 1,
+            _ => 0,
+        }
+    }
+    let mut states = BTreeMap::new();
+    for lane in snapshot.lanes {
+        let replace = states
+            .get(&lane.provider)
+            .map(|state: &String| rank(&lane.state) > rank(state))
+            .unwrap_or(true);
+        if replace {
+            states.insert(lane.provider, lane.state);
+        }
+    }
+    Some(states)
 }
 
 /// Append one line to `questions.jsonl` (the feed's question store).
@@ -1903,6 +1938,72 @@ mod tests {
             lane.members[0].cap_unknown.as_deref(),
             Some("transcript-not-found")
         );
+        assert_eq!(lane.state, "unmeasured");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn provider_quota_states_folds_account_lanes_and_rejects_stale_snapshots() {
+        let root = std::env::temp_dir().join(format!("pc-quota-states-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = AgentsHome::at(root.join("agents"));
+        let lane = |account: &str, state: &str| CapLane {
+            lane: format!("openai:{account}"),
+            provider: "openai".into(),
+            account: account.into(),
+            reset_epoch: None,
+            reset_passed_epoch: None,
+            missing_reset_timezone: vec![],
+            state: state.into(),
+            members: vec![],
+        };
+        persist_snapshot(
+            &home,
+            &CapSnapshot {
+                lanes: vec![lane("main", "closed"), lane("backup", "unmeasured")],
+                measured_at: epoch_to_rfc3339(100),
+                measured_at_epoch: 100,
+            },
+        );
+
+        let states = provider_quota_states(&home, 200, 1_800).expect("fresh snapshot");
+        assert_eq!(states.get("openai").map(String::as_str), Some("unmeasured"));
+        assert!(provider_quota_states(&home, 2_000, 1_800).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ac1_edge_health_lock_keeps_unmeasured_lane_closed() {
+        let root = std::env::temp_dir().join(format!("pc-ac1-edge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let claude_home = root.join("home");
+        let projects = root.join("projects").join("-repo");
+        let state_path = root.join("runtime-state.json");
+        write(
+            &claude_home.join("registry.json"),
+            r#"{"schema_version":25,"agents":[{"name":"w-unread","harness":"claude","provider":"openai","launch_account":"default","state":"working"}]}"#,
+        );
+        write(
+            &state_path,
+            r#"{"provider_health":{"default":{"rate_limited_until":2000000000.0}}}"#,
+        );
+
+        let snap = snapshot_with(
+            &scan(
+                claude_home.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                state_path,
+                claude_home,
+            ),
+            1_000_000_000,
+            &cfg(2),
+        )
+        .unwrap();
+        let lane = snap
+            .lanes
+            .iter()
+            .find(|l| l.lane == "openai:default")
+            .expect("openai:default lane");
         assert_eq!(lane.state, "closed");
         let _ = std::fs::remove_dir_all(&root);
     }
