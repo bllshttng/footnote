@@ -456,11 +456,9 @@ def test_legacy_underscore_status_key_migrates_on_import(tmp_path):
     )
     entry = read_graph_strict(path)[0]
     assert "_status" not in entry
-    # The store's own contract (graph_store.rs
-    # defaults_apply_and_reorder_nothing): the legacy key is dropped and its
-    # value lands in `status`, where the rename folds claimed -> in_progress.
-    # A row left with NO status word defaults idea instead (the AC7 edge).
-    assert entry["status"] == "in_progress"
+    # The KEY spelling is not a modeled field: dropped, and the row takes
+    # the default. Only a literal `status: "claimed"` renames.
+    assert entry["status"] == "idea"
 
 
 def _ready_plan_entry(tmp_path: Path, node_id: str = "ab-open0001") -> tuple[Path, dict]:

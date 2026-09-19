@@ -851,10 +851,9 @@ fn derive_store_defaults(row: &mut Value) {
     // KEY is the pre-rename spelling of the status VALUE, and a couple of
     // status/priority words predate a rename. Folding them here keeps a
     // legacy seed reading identically on the import and commit paths.
-    if let Some(old) = obj.get("_status").cloned() {
-        obj.entry("status".to_string()).or_insert(old);
-        obj.shift_remove("_status");
-    }
+    // The pre-rename KEY spelling is not a modeled field: drop it, and let
+    // the status default. Only a literal `status` value ever renames.
+    obj.shift_remove("_status");
     if let Some(old) = obj.get("priority").and_then(Value::as_str) {
         if let Some((_, to)) = crate::graph_store::PRIORITY_MIGRATION
             .iter()
