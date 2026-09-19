@@ -167,6 +167,7 @@ frontmatter carries no code_index: block - run the planner's step 2-index, then 
 code_index.main_sha is missing or not a 7-to-40-hex sha - write the origin/main sha the plan read
 code_index.providers is missing - list one entry per index asked (with status and fresh), or providers: [] when no index is present
 code index <name> is present (<manifest path>) and the plan does not record asking it. Ask it by role and record it under code_index.providers, with status unavailable or error if the ask failed
+provider <name> in code_index.providers is not a valid provider name - write the name exactly as the manifest declares it, lowercase letters, digits and dashes
 provider <name> has no readable status: - set status: answered, unavailable or error
 provider <name> has no readable fresh: - set fresh: yes, no or unknown (unknown when the manifest has no fresh probe)
 the first ## heading is '<heading>' - the audit is the plan's first section: ## Existence audit, one row per claim, each with a verdict cell

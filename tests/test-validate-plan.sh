@@ -1503,6 +1503,18 @@ else
     fail "AC13g: expected a warn-only section: $CIA_OUT"
 fi
 
+# AC13h: a recorded name with regex metachars errors even when a well-formed
+# entry precedes it - the metachar must not reuse that entry's slice.
+PLAN_CIA_H="$CIA_REPO/cia_h.md"
+sed -e 's/^    - name: codegraph$/    - name: x*\n    - name: codegraph/' "$PLAN_CIA_A" > "$PLAN_CIA_H"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_CIA_H" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "provider x\* in code_index.providers is not a valid provider name" <<< "$CIA_OUT"; then
+    pass "AC13h: a metachar provider name errors naming the name"
+else
+    fail "AC13h: expected the bad-name ERROR: $CIA_OUT"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Test Results ==="

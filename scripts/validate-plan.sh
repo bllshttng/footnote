@@ -1665,6 +1665,13 @@ check_code_index_file() {
         rname=""
         while IFS= read -r rname; do
             [[ -z "$rname" ]] && continue
+            # The name feeds a dynamic awk regex below, and a metachar would
+            # match another entry's line and steal its status/fresh. The
+            # schema is the manifest name's own, so enforce it here.
+            if [[ ! "$rname" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+                findings+=("provider $rname in code_index.providers is not a valid provider name - write the name exactly as the manifest declares it, lowercase letters, digits and dashes")
+                continue
+            fi
             entry=$(awk -v n="$rname" '
                 $0 ~ ("^[[:space:]]*-[[:space:]]*name:[[:space:]]*" n "[[:space:]]*$") { f = 1; print; next }
                 f && /^[[:space:]]*-[[:space:]]/ { exit }
