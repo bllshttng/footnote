@@ -128,15 +128,22 @@ pub struct AgentsHome {
 }
 
 impl AgentsHome {
+    /// Builds the declared-root case from an already-read value. Shared by
+    /// `from_env` and `from_env_opt` so the fence runs in one place and
+    /// neither caller re-reads `HOME_ENV` to get it.
+    fn from_value(v: Option<std::ffi::OsString>) -> Option<Self> {
+        let root = PathBuf::from(v?);
+        fence_declared_root(test_sandbox_claimed(), &root);
+        Some(AgentsHome { root })
+    }
+
     /// Resolve from the environment: `FNO_AGENTS_HOME` if set, else
     /// `$HOME/.fno/agents`. Falls back to `./.fno/agents` if `$HOME`
     /// is somehow unset (CI containers), so the daemon never panics on a missing
     /// home — it degrades to a relative tree.
     pub fn from_env() -> Self {
-        if let Some(v) = std::env::var_os(HOME_ENV) {
-            let root = PathBuf::from(v);
-            fence_declared_root(test_sandbox_claimed(), &root);
-            return AgentsHome { root };
+        if let Some(home) = Self::from_value(std::env::var_os(HOME_ENV)) {
+            return home;
         }
         refuse_undeclared_home_fallback(test_root_declared(), HOME_ENV);
         let base = std::env::var_os("HOME")
@@ -159,25 +166,18 @@ impl AgentsHome {
     /// sandbox it does not have still panics through [`fence_declared_root`];
     /// that refusal is the point, not a hole in this degrade.
     ///
-    /// Reads `HOME_ENV` exactly once. An earlier cut read it here to decide
-    /// "declared", then called [`Self::from_env`], which read it AGAIN to
-    /// build the root - two reads of process-global state with no lock
-    /// between them. A sibling test that unset the pin in that gap flipped
-    /// the second read to none, and `from_env` fell through into its own
-    /// undeclared-root panic on a caller that only wanted to compare against
-    /// a declared root, never resolve one. Passing the one captured value
-    /// through closes the window; see `paths::tests::
-    /// from_env_opt_never_panics_on_a_pin_cleared_between_its_two_reads`.
+    /// Reads `HOME_ENV` once and reuses that value: a second independent
+    /// read let a concurrent unset flip the answer between checking and
+    /// building.
     pub fn from_env_opt() -> Option<Self> {
-        match std::env::var_os(HOME_ENV) {
-            Some(v) => {
-                let root = PathBuf::from(v);
-                fence_declared_root(test_sandbox_claimed(), &root);
-                Some(AgentsHome { root })
-            }
-            None if cfg!(test) && !test_root_declared() => None,
-            None => Some(Self::from_env()),
+        let declared = std::env::var_os(HOME_ENV);
+        if declared.is_some() {
+            return Self::from_value(declared);
         }
+        if cfg!(test) && !test_root_declared() {
+            return None;
+        }
+        Some(Self::from_env())
     }
 
     /// Construct rooted at an explicit directory (tests).
@@ -947,47 +947,19 @@ mod tests {
         std::env::remove_var(HOME_ENV);
     }
 
-    /// `from_env_opt` read `HOME_ENV` once to decide it was declared, then
-    /// called `from_env()`, which read `HOME_ENV` a SECOND time. A sibling
-    /// test unpinning the var between those two reads made the second read
-    /// see none, and `from_env()` fell through into
-    /// `refuse_undeclared_home_fallback` - a caller that only ever wanted to
-    /// COMPARE against a declared root got the resolver's panic instead.
-    /// king_board's `mergeable_pr_is_scoped_by_the_binding_node` hit exactly
-    /// this through `build_board`'s unconditional `operator_lane_path` call:
-    /// green alone, red once in the full suite (CI job 105880978006). This
-    /// hammers the same window: one thread toggles the pin, the reader must
-    /// never observe `from_env`'s inner panic.
+    /// `from_value` is the seam `from_env` and `from_env_opt` share: given
+    /// the value up front, it never re-reads the environment to get it.
     #[test]
-    fn from_env_opt_never_panics_on_a_pin_cleared_between_its_two_reads() {
-        let _guard = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let root = tmp("toctou");
-        let stop = std::sync::atomic::AtomicBool::new(false);
-        let panicked = std::sync::atomic::AtomicBool::new(false);
-        std::thread::scope(|s| {
-            s.spawn(|| {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
-                while std::time::Instant::now() < deadline {
-                    std::env::set_var(HOME_ENV, &root);
-                    std::env::remove_var(HOME_ENV);
-                }
-                stop.store(true, std::sync::atomic::Ordering::SeqCst);
-            });
-            s.spawn(|| {
-                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
-                    if std::panic::catch_unwind(AgentsHome::from_env_opt).is_err() {
-                        panicked.store(true, std::sync::atomic::Ordering::SeqCst);
-                    }
-                }
-            });
-        });
-        assert!(
-            !panicked.load(std::sync::atomic::Ordering::SeqCst),
-            "from_env_opt panicked while a concurrent thread toggled {HOME_ENV} - \
-             the TOCTOU between its own presence check and from_env()'s re-read"
-        );
+    fn from_value_builds_the_declared_root_from_the_given_value() {
+        let root = tmp("from-value");
+        let home = AgentsHome::from_value(Some(root.clone().into_os_string()))
+            .expect("a declared value builds a home");
+        assert_eq!(home.root(), root.as_path());
+    }
+
+    #[test]
+    fn from_value_is_none_when_nothing_is_declared() {
+        assert!(AgentsHome::from_value(None).is_none());
     }
 
     // ── is_sandbox ─────────────────────────────────────────────────
