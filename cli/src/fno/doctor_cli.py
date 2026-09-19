@@ -75,13 +75,12 @@ doctor_app.command("bash-census", hidden=True)(bash_census_command)
 
 # `doctor intel` shells to the Rust fold; hidden per the new-verb convention.
 @doctor_app.command("intel", hidden=True)
-def intel_command(
-    days: int = typer.Option(14, "--days", help="Window size in days (0 = every transcript)."),
-    node: str | None = typer.Option(None, "--node", help="One node's story."),
-    json_output: bool = typer.Option(False, "--json", "-J", help="Emit one JSON document."),
-    all_projects: bool = typer.Option(False, "--all-projects", help="Fold every project slug, not just cwd."),
-) -> None:
-    """Who typed: per-session provenance counters, tool calls, commits, relay facets."""
+def intel_command() -> None:
+    """Who typed: per-session provenance counters, tool calls, commits, relay facets.
+
+    Runs the fold at its defaults (14 days, this project). The flag surface
+    is the binary's, never Python's: `fno-agents intel --help`.
+    """
     import subprocess
     from fno._subprocess_util import propagate_returncode
     from fno.rust_binary import resolve_binary
@@ -90,11 +89,7 @@ def intel_command(
     if binary is None:
         typer.echo("fno doctor intel: the fno-agents binary was not found; run `fno doctor update --rust`.", err=True)
         raise typer.Exit(code=2)
-    argv = [str(binary), "intel", "--days", str(days)]
-    argv += ["--node", node] if node else []
-    argv += ["--json"] if json_output else []
-    argv += ["--all-projects"] if all_projects else []
-    result = subprocess.run(argv, check=False)
+    result = subprocess.run([str(binary), "intel"], check=False)
     raise typer.Exit(code=propagate_returncode(result.returncode))
 # `doctor lanes` is the whole-machine lane advisor: one number and its
 # reasoning, or a refusal naming every dark sensor. Hidden per the new-verb
