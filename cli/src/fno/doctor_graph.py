@@ -80,7 +80,7 @@ def graph_backend(
         since_text = since.strftime("%Y-%m-%d") if since else "never"
         days = (datetime.now(timezone.utc) - since).days if since else 0
         typer.echo(
-            f"backend={state.get('backend')} since={since_text} days={days}"
+            f"backend={state.get('backend')} since={since_text} days={days} keepers={_keepers()}"
         )
         return
     if target not in ("sqlite", "json"):
