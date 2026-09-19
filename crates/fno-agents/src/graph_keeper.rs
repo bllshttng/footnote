@@ -1142,6 +1142,14 @@ pub(crate) fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         // order instead of last-write-wins on whole files.
         "commit_rows" => handle_commit_rows(state, &params),
         "read_file" => handle_read_file(state),
+        "row_digests" => {
+            let entries: Vec<Value> = params
+                .get("entries")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            Ok(json!({ "digests": canonical_row_digests(&entries) }))
+        }
         "defaults" => handle_pure(&params, |mut entries, p| {
             graph_store::apply_defaults(
                 &mut entries,
@@ -2503,7 +2511,7 @@ fn set_related(entries: &mut [Value], node_id: &str, desired: &[String]) -> Resu
 /// write ledger records the request by id like any other write, so a
 /// crashed client can ask `write_status` what landed.
 fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
-    let base = params.get("base_version").and_then(Value::as_str);
+    let _base = params.get("base_version").and_then(Value::as_str);
     let changed: Vec<Value> = params
         .get("changed")
         .and_then(Value::as_array)
@@ -2519,15 +2527,29 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Store
         })
         .unwrap_or_default();
     let _gate = state.gate.write().unwrap_or_else(|e| e.into_inner());
-    let entries =
-        crate::backlog::apply_client_rows(&state.graph, "commit_rows", changed, removed, base)
-            .map_err(|error| {
-                if error == "graph conflict: base version moved" {
-                    StoreError::Conflict
-                } else {
-                    StoreError::Invalid(error)
-                }
-            })?;
+    let base_digests: std::collections::BTreeMap<String, String> = params
+        .get("base_digests")
+        .and_then(Value::as_object)
+        .map(|map| {
+            map.iter()
+                .filter_map(|(id, v)| v.as_str().map(|d| (id.clone(), d.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let entries = crate::backlog::apply_client_rows(
+        &state.graph,
+        "commit_rows",
+        changed,
+        removed,
+        base_digests,
+    )
+    .map_err(|error| {
+        if error == "graph conflict: base row moved" {
+            StoreError::Conflict
+        } else {
+            StoreError::Invalid(error)
+        }
+    })?;
     Ok(json!({
         "dropped": 0,
         "backup": Value::Null,

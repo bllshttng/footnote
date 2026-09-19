@@ -734,8 +734,14 @@ def _commit_rows(client, base_version: str, base_entries: list[dict],
             "read the graph before retrying",
         )
     changed, removed = diff
+    # Per-row base digests: the keeper verifies them INSIDE its write
+    # transaction, so a concurrent writer that touched the same rows
+    # conflicts instead of being silently overwritten.
+    touched = [row["id"] for row in changed] + removed
+    base_digests = client.request("row_digests", {"entries": base_entries})["digests"]
     return client.request("commit_rows", {
         "base_version": base_version,
+        "base_digests": {rid: base_digests[rid] for rid in touched if rid in base_digests},
         "changed": changed,
         "removed": removed,
     })
