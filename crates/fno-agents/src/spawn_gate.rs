@@ -4065,6 +4065,32 @@ MemAvailable:    8000000 kB\n";
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Snapshot-and-restore scope for the env vars a fixture pins: the
+    /// original value (or its absence) is put back on drop, panic included,
+    /// so a fixture cannot permanently discard an ambient pin.
+    struct EnvPin(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvPin {
+        fn take(vars: &[&'static str]) -> Self {
+            Self(
+                vars.iter()
+                    .map(|var| (*var, std::env::var_os(var)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for EnvPin {
+        fn drop(&mut self) {
+            for (var, saved) in &self.0 {
+                match saved {
+                    Some(v) => std::env::set_var(var, v),
+                    None => std::env::remove_var(var),
+                }
+            }
+        }
+    }
+
     /// AC9: `kingless` rides every readable verdict receipt. A node inside a
     /// live crown's compiled scope reads false, a node in a project no crown
     /// rules reads true, and an unreadable attribution stays the existing
@@ -4113,7 +4139,8 @@ MemAvailable:    8000000 kB\n";
         .unwrap();
         // Defense in depth against an FNO_CONFIG another test leaked toward a
         // deleted tempdir: the config pin answers first, FNO_HOME catches the
-        // fall-through, and the removal below stops this test leaking too.
+        // fall-through, and the pin restores the ambient value on drop.
+        let _env = EnvPin::take(&["FNO_HOME"]);
         std::env::set_var("FNO_HOME", &dir);
 
         let crowned = territory_verdict_receipt(&dir, &reg, "x-1", 4);
@@ -4128,7 +4155,6 @@ MemAvailable:    8000000 kB\n";
             unknown.get("kingless").is_none(),
             "an unreadable attribution must not guess a boolean: {unknown}"
         );
-        std::env::remove_var("FNO_HOME");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -4177,6 +4203,7 @@ MemAvailable:    8000000 kB\n";
             ),
         )
         .unwrap();
+        let _env = EnvPin::take(&["FNO_HOME"]);
         std::env::set_var("FNO_HOME", &dir);
 
         let mut warnings = Vec::new();
