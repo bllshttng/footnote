@@ -80,14 +80,6 @@ fn missing_diff_keys(prev_data: Option<&Value>) -> Vec<&'static str> {
 /// payload stays whole, only the rendered rows are cut, as the board does).
 const MAX_COURT_ROWS: usize = 25;
 
-const RED_CONCLUSIONS: [&str; 5] = [
-    "failure",
-    "timed_out",
-    "cancelled",
-    "action_required",
-    "startup_failure",
-];
-
 fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|x| x.as_str())
 }
@@ -770,77 +762,37 @@ fn r_held() -> Result<Value, String> {
     Ok(json!({"open": rows.len(), "rows": rows}))
 }
 
-fn owner_repo(url: &str) -> Result<String, String> {
-    let url = url.trim().trim_end_matches('/');
-    let tail = url.rsplit_once(':').map(|(_, t)| t).unwrap_or(url);
-    let tail = tail.rsplit('/').take(2).collect::<Vec<_>>();
-    if tail.len() == 2 && !tail[1].is_empty() {
-        let repo = tail[0].trim_end_matches(".git");
-        if !repo.is_empty() {
-            return Ok(format!("{}/{repo}", tail[1]));
-        }
-    }
-    Err(format!("cannot read owner/repo from origin url {url:?}"))
+/// One verdict token for the check-in line, from the shared reader's rows:
+/// every check-run page, legacy statuses, and runs that failed before
+/// minting a job. GitHub's combined status is gone from the reduce: it reads
+/// `pending` for a commit with zero legacy statuses, which no green on this
+/// repo survives.
+fn main_ci_token(rows: Vec<Value>) -> Result<Value, String> {
+    let (conclusion, _, _) = crate::loopcheck::classify_checks_payload(&Value::Array(rows))?;
+    let token = match conclusion {
+        crate::loopcheck::CiConclusion::Failure(_) => "red",
+        crate::loopcheck::CiConclusion::Success => "green",
+        _ => "pending",
+    };
+    Ok(Value::String(token.into()))
 }
 
 fn r_main_ci() -> Result<Value, String> {
-    let git = |args: &[&str]| -> Result<String, String> {
-        let argv: Vec<std::ffi::OsString> = std::iter::once("git".into())
-            .chain(args.iter().map(std::ffi::OsString::from))
-            .collect();
+    let sha = {
+        let argv: Vec<std::ffi::OsString> =
+            vec!["git".into(), "rev-parse".into(), "origin/main".into()];
         let (code, out, err) = run_capture(&argv).map_err(|e| e.to_string())?;
         if code != 0 {
             return Err(format!(
-                "git {} failed: {}",
-                args[0],
+                "git rev-parse failed: {}",
                 err.trim().chars().take(120).collect::<String>()
             ));
         }
-        Ok(out.trim().to_string())
+        out.trim().to_string()
     };
-    let sha = git(&["rev-parse", "origin/main"])?;
-    let owner_repo = owner_repo(&git(&["remote", "get-url", "origin"])?)?;
-    let gh_json = |args: &[&str]| -> Result<Value, String> {
-        let argv: Vec<std::ffi::OsString> = std::iter::once("gh".into())
-            .chain(args.iter().map(std::ffi::OsString::from))
-            .collect();
-        let (code, out, err) = run_capture(&argv).map_err(|e| e.to_string())?;
-        if code != 0 {
-            return Err(format!(
-                "gh api failed: {}",
-                err.trim().chars().take(120).collect::<String>()
-            ));
-        }
-        serde_json::from_str(out.trim()).map_err(|e| format!("gh api payload did not parse: {e}"))
-    };
-    let runs = gh_json(&[
-        "api",
-        &format!("repos/{owner_repo}/commits/{sha}/check-runs"),
-    ])?;
-    let status = gh_json(&["api", &format!("repos/{owner_repo}/commits/{sha}/status")])?;
-    let check_runs = runs.get("check_runs").and_then(|c| c.as_array());
-    let combined = s_str(&status, "state").unwrap_or("").to_lowercase();
-    let red = check_runs
-        .map(|runs| {
-            runs.iter().any(|r| {
-                let conclusion = s_str(r, "conclusion").unwrap_or("");
-                RED_CONCLUSIONS.contains(&conclusion)
-            })
-        })
-        .unwrap_or(false)
-        || combined == "failure"
-        || combined == "error";
-    if red {
-        return Ok(Value::String("red".into()));
-    }
-    let all_completed = check_runs
-        .map(|runs| runs.iter().all(|r| s_str(r, "status") == Some("completed")))
-        .unwrap_or(false);
-    if check_runs.map(|r| !r.is_empty()).unwrap_or(false) && all_completed && combined == "success"
-    {
-        return Ok(Value::String("green".into()));
-    }
-    Ok(Value::String("pending".into()))
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let rows = crate::pr_push::read_checks_rows("gh", &cwd, &sha)?;
+    main_ci_token(rows)
 }
 
 /// The control plane's own verdict: every arm failing past the notify
@@ -2173,16 +2125,31 @@ mod tests {
     }
 
     #[test]
-    fn owner_repo_reads_ssh_and_https_urls() {
+    fn main_ci_token_reads_green_on_pass_and_skip_rows_only() {
+        // The 9da9a1de2a shape: every check passed and the combined status
+        // read pending (0 legacy statuses). The shared reduce reads green.
+        let rows = vec![
+            serde_json::json!({"name": "rust-ci", "bucket": "pass"}),
+            serde_json::json!({"name": "guards", "bucket": "skipping"}),
+        ];
+        assert_eq!(main_ci_token(rows).unwrap(), Value::String("green".into()));
+    }
+
+    #[test]
+    fn main_ci_token_reads_red_on_a_zero_job_fail_row() {
+        let rows = vec![
+            serde_json::json!({"name": "rust-ci", "bucket": "pass"}),
+            serde_json::json!({"name": ".github/workflows/cli-ci.yml", "bucket": "fail"}),
+        ];
+        assert_eq!(main_ci_token(rows).unwrap(), Value::String("red".into()));
+    }
+
+    #[test]
+    fn main_ci_token_reads_pending_on_no_rows() {
         assert_eq!(
-            owner_repo("git@github.com:own/repo.git").unwrap(),
-            "own/repo"
+            main_ci_token(Vec::new()).unwrap(),
+            Value::String("pending".into())
         );
-        assert_eq!(
-            owner_repo("https://github.com/own/repo.git").unwrap(),
-            "own/repo"
-        );
-        assert!(owner_repo("not a url").is_err());
     }
 
     fn board_payload() -> Value {
