@@ -825,7 +825,7 @@ pub fn court_orphans(
             continue;
         }
         let key = territory_key(&scope);
-        if held_keys.contains(&key) || !seen.insert(key) {
+        if held_keys.contains(&key) || seen.contains(&key) {
             continue;
         }
         if let Some(session) = crate::claude_adopt::manifest_field(content, "harness_session_id") {
@@ -842,6 +842,9 @@ pub fn court_orphans(
                 }
             }
         }
+        // Only a LISTED candidate claims the territory key: one the verdict
+        // dropped must not hide a second spelling held by a live session.
+        seen.insert(key);
         let level = crate::claude_adopt::manifest_field(content, "crown_level")
             .and_then(|v| v.parse().ok());
         out.push(OrphanCrown {
@@ -1357,6 +1360,29 @@ mod tests {
         };
         let out = court_orphans(&root, &[], &roster);
         assert_eq!(out.len(), 1, "codex manifests never drop: {out:?}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_dropped_holder_frees_the_territory_key() {
+        // Two spellings of ONE territory: a.md sorts first and names a
+        // finished session, b.md names a live one. The drop must not burn
+        // the dedup key, or the live spelling never lists.
+        let root = tmp("verdict-key");
+        let finished = "eeee5555-0000-4000-8000-000000000005";
+        let live = "ffff6666-0000-4000-8000-000000000006";
+        let a = write_court_manifest(&root, "beta,gamma", finished, "2026-09-18T20:00:00Z");
+        let b = write_court_manifest(&root, "gamma, beta", live, "2026-09-18T21:00:00Z");
+        let roster = || {
+            crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                crate::claude_roster::ClaudeAgentRow::new(&finished[..8], Some("stopped")),
+                crate::claude_roster::ClaudeAgentRow::new(&live[..8], Some("working")),
+            ])
+        };
+        let out = court_orphans(&root, &[], &roster);
+        assert_eq!(out.len(), 1, "only the live spelling lists: {out:?}");
+        assert_eq!(out[0].manifest_path, b.display().to_string());
+        assert_ne!(out[0].manifest_path, a.display().to_string());
         fs::remove_dir_all(&root).ok();
     }
 
