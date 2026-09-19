@@ -10,11 +10,14 @@ use crate::server::CoreMsg;
 use crate::store_client;
 
 /// The off-loop work-queue reader: the same 1s change-gated shape as the
-/// registry reader, over the graph store. The gate is the keeper's mutation
-/// counter (`store_client::version`), which bumps on every backlog mutation
-/// (claim/close) and keeps moving after the SQLite flip, where a file mtime
-/// would freeze (Risk 5). The 4M document read is skipped whenever the stamp
-/// is unchanged.
+/// registry reader, over the graph store. The gate is the store files'
+/// mtime+len stamp (`store_client::store_stamp`): every committed write
+/// appends to the write-ahead log, so the stamp moves on every backlog
+/// mutation (claim/close) and keeps moving after the SQLite flip, where the
+/// frozen graph.json's mtime would never change (Risk 5). Two stats per
+/// tick keep the idle cost at the file leg's level - a keeper exec per tick
+/// measured 1.5s of CPU over the 20s idle budget (budget 1s). The document
+/// read is skipped whenever the stamp is unchanged.
 ///
 /// External tracker backend: the graph store is not the authoritative
 /// backend there, so there is no counter to gate on. The reader instead
@@ -134,13 +137,12 @@ pub(crate) fn spawn(
                 };
                 (stamp, raw)
             } else {
-                let version_path = path.clone();
-                let stamp = tokio::task::spawn_blocking(move || {
-                    store_client::version(&version_path).ok().map(|v| (v, 0))
-                })
-                .await
-                .ok()
-                .flatten();
+                let stamp_path = path.clone();
+                let stamp =
+                    tokio::task::spawn_blocking(move || store_client::store_stamp(&stamp_path))
+                        .await
+                        .ok()
+                        .flatten();
                 let read_path = path.clone();
                 let changed = stamp != state.cached_stamp();
                 let raw = if changed {
