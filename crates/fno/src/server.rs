@@ -2794,6 +2794,12 @@ impl Core {
         cols: u16,
         cwd: &str,
     ) -> Result<u64, String> {
+        // Before admission: the ceiling probe must own the wall. At one free
+        // descriptor the admission census EMFILEs first and the operator
+        // would read a measurement failure where the truth is the ceiling.
+        if let Some(err) = crate::pty::fd_ceiling_refusal() {
+            return Err(err.to_string());
+        }
         let permit = crate::process_admission::admit_fleet().map_err(|e| e.to_string())?;
         self.spawn_pane_cmd_with_permit(argv, rows, cols, cwd, permit)
     }
@@ -2963,6 +2969,22 @@ impl Core {
                     let id = self.next_pane_id;
                     self.next_pane_id = id.saturating_add(1);
                     Ok(id)
+                }
+                Err(e)
+                    if e.raw_os_error() == Some(libc::EMFILE)
+                        || e.raw_os_error() == Some(libc::ENFILE) =>
+                {
+                    // The reservation died to the open-file ceiling, not to a
+                    // persistence fault: the same wall the pty spawn names,
+                    // named here because the reservation runs first.
+                    let limit = crate::pty::nofile_limit();
+                    let open = usize::try_from(limit).unwrap_or(0);
+                    return Err(crate::pty::PtyError::SpawnFdLimit {
+                        open,
+                        limit,
+                        detail: "the pane id reservation hit EMFILE".into(),
+                    }
+                    .to_string());
                 }
                 Err(e) => Err(format!("pane id reservation failed: {e}")),
             }

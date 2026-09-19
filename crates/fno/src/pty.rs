@@ -13,6 +13,7 @@ use crate::mux_cli::{BASH_SHELL_INIT, ZSH_SHELL_INIT};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -178,6 +179,56 @@ thread_local! {
 
 fn fork_guard() -> std::sync::MutexGuard<'static, ()> {
     FORK_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Detect a full descriptor table and return its typed diagnostic, or `None`
+/// while spawn headroom remains. Duplicating an owned fd allocates a slot
+/// without opening anything, so the probe reads the table's true state; two
+/// probes refuse typed when only one slot remains, before a mid-spawn EMFILE
+/// can surface as some other subsystem's failure.
+pub(crate) fn fd_ceiling_refusal() -> Option<PtyError> {
+    let dup_probe = || i32::from(unsafe { libc::dup(2) });
+    let first = dup_probe();
+    if first < 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EMFILE) {
+            let limit = nofile_limit();
+            return Some(PtyError::SpawnFdLimit {
+                open: usize::try_from(limit).unwrap_or(0),
+                limit,
+                detail: "dup probe hit EMFILE at the descriptor table's ceiling".into(),
+            });
+        }
+        return None;
+    }
+    let second = dup_probe();
+    unsafe { libc::close(first) };
+    if second < 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EMFILE) {
+            let limit = nofile_limit();
+            return Some(PtyError::SpawnFdLimit {
+                open: usize::try_from(limit.saturating_sub(1)).unwrap_or(0),
+                limit,
+                detail: "dup probe hit EMFILE one slot short of the ceiling".into(),
+            });
+        }
+        return None;
+    }
+    unsafe { libc::close(second) };
+    None
+}
+
+/// The soft `RLIMIT_NOFILE` for this process. A read failure answers 0, which
+/// the caller's formatting tolerates (the diagnostic still names the remedy).
+pub(crate) fn nofile_limit() -> libc::rlim_t {
+    let mut rl = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: plain rlimit read, no pointers beyond the caller-owned struct.
+    unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) };
+    rl.rlim_cur
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -633,6 +684,14 @@ impl PtyShell {
     ) -> Result<(PtyShell, Vec<u8>), PtyError> {
         if argv.is_empty() {
             return Err(PtyError::Spawn("empty argv".into()));
+        }
+        // The keeper road needs only one descriptor (the socket), so unlike
+        // the openpty road it would otherwise walk one slot from the wall,
+        // where every later measurement EMFILEs first and the operator sees
+        // the wrong diagnostic. Refuse typed while there is still headroom
+        // to say so.
+        if let Some(err) = fd_ceiling_refusal() {
+            return Err(err);
         }
         let dir = keeper_dir();
         std::fs::create_dir_all(&dir)
