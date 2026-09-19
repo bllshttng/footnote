@@ -52,3 +52,11 @@ The one rule the whole report stands on: **operator turns only**. Relay, harness
 6. Relay section: computed from the fold's `relay` facets and `nodes` rows. No model judgment: delivery, answers, contract breaches, and silences are facts.
 
 Judgment runs on this session's own model. No profile, no spawned reviewer, no Python shim. The fold is Rust (`fno-agents intel`), the narrative is you, and the S2 writer is the script that already existed.
+
+## Known Limitations and Deferred Work
+
+- Operator is a residual classification, not a witnessed one: claude records no positive typed-turn marker, so a turn counts as operator after every injected shape fails to match. The mux `operator_submit` event is the designed close for this; until it lands, a session driven from a bare terminal can still misattribute injected text that matches no known envelope shape.
+- The relay delivered-check is a substring read: a bus body that appears verbatim in the transcript through some other channel reads as delivered even if the mail never landed in this session's turn flow.
+- Opencode sessions report under the fold's `skipped.opencode` until a `TranscriptSource` impl ships for that store; they are never guessed into the report.
+
+- Full list: [LIMITATIONS.md](LIMITATIONS.md).
