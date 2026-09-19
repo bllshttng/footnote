@@ -1209,15 +1209,14 @@ def build_pane_argv(
         # file). Opening a NOT-yet-existing id is a CREATE, the unserialised
         # half - the spawn lane serialises via
         # `fno.agents.harnesses.pi.create_decision`; this builder only composes
-        # argv. `--provider` AND `--model` both, always (provider alone falls
-        # through to Bedrock and dies naming an expired AWS SSO session). pi
-        # ships no permission popups, so `yolo` maps to nothing; `--approve`
-        # trusts files, a different axis, and stays an operator choice.
-        from fno.agents.harnesses.pi import pi_model, pi_provider
+        # argv. The route is the ONE pi route owner: a `provider/id` model
+        # stays `--model` only, a bare model carries `--provider`, no model
+        # defers to pi's own settings. pi ships no permission popups, so
+        # `yolo` maps to nothing; `--approve` trusts files, a different axis,
+        # and stays an operator choice.
+        from fno.agents.spawn_axes_client import pi_route
 
-        argv = [*identity, "--provider", pi_provider(), "--model", model or pi_model()]
-        if effort:
-            argv += effort_tokens("pi", effort)
+        argv = [*identity, *pi_route(model, effort)]
         if permission_mode:
             argv += permission_pane_tokens("pi", permission_mode)
         argv += tier3

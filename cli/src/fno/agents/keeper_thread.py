@@ -36,10 +36,10 @@ def _agy_finish(argv: list[str], cwd: Path) -> list[str]:
     return argv
 
 
-#: The one completion per harness the contract cannot express. Bare ``pi``
-#: defaults to provider google, so the pair is always appended.
+#: The one completion per harness the contract cannot express. pi's route is
+#: not here: it carries the user's axes, so it runs in complete_launch_argv
+#: before the generic model/effort adds.
 _FINISH_ARGV: dict[str, Callable[[list[str], Path], list[str]]] = {
-    "pi": lambda argv, cwd: [*argv, *_pi_provider_model()],
     "agy": _agy_finish,
 }
 
@@ -49,12 +49,6 @@ def keeper_arm(harness: str) -> Optional[dict]:
     from fno.agents.harness_map import _HARNESS_CAPS
 
     return (_HARNESS_CAPS.get(harness) or {}).get("keeper")
-
-
-def _pi_provider_model() -> list[str]:
-    from fno.agents.harnesses.pi import pi_model, pi_provider
-
-    return ["--provider", pi_provider(), "--model", pi_model()]
 
 
 def _trust_agy_folder(cwd: Path) -> bool:
@@ -179,6 +173,14 @@ def complete_launch_argv(
     from fno.agents.spawn_axes_client import keeper_posture
 
     argv = [*argv, *keeper_posture(harness, "thread", permission_mode, yolo)]
+    if harness == "pi":
+        # pi's route is one owner for keeper and pane: a `provider/id` model
+        # stays `--model` only, a bare model carries the provider, and no
+        # model defers to pi's own settings. The generic adds below would
+        # name a bare --model without its provider.
+        from fno.agents.spawn_axes_client import pi_route
+
+        return [*argv, *pi_route(model, effort)]
     if arm.get("takes_model") and model:
         argv = [*argv, "--model", model]
     if arm.get("takes_effort") and effort:
