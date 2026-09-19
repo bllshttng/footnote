@@ -209,3 +209,37 @@ fn agent_row_unmeasured_renders_a_distinct_dim_glyph_from_exited() {
         LatticeState::Unmeasured
     );
 }
+
+#[test]
+fn wide_glyph_name_keeps_the_pr_column_aligned() {
+    // x-19bb (absorbed into x-177c): the sideline's glyph_cols returned
+    // width 1 for CJK, so every column after a wide glyph shifted and the PR
+    // column never lined up between rows. The Table's Buffer measures with
+    // unicode-width, so a wide name and an ASCII name paint `#pr` at the
+    // SAME cell.
+    let mut view = two_pane_view();
+    let mut wide = tab_agent(None, None, false);
+    wide.name = "王者".into();
+    wide.tail = Some("the message".into());
+    wide.pr = Some(1);
+    let mut ascii = tab_agent(None, None, false);
+    ascii.name = "king".into();
+    ascii.tail = Some("the message".into());
+    ascii.pr = Some(1);
+    ascii.pane_id = Some(2);
+    view.sideline_width = 60;
+    view.layout.agents = vec![wide, ascii];
+    let frame = view.compose();
+    let cols = frame.cols as usize;
+    let text_w = view.panel_w() as usize - 1;
+    let pr = sideline_column_rects(text_w as u16)[3];
+    // The two agent rows paint at outer rows 1 and 2 (row 0: squad header).
+    let wide_pr = &frame.cells[1 * cols + pr.x as usize..1 * cols + (pr.x + pr.width) as usize];
+    let ascii_pr = &frame.cells[2 * cols + pr.x as usize..2 * cols + (pr.x + pr.width) as usize];
+    let wide_hash = wide_pr.iter().position(|c| c.c == '#').expect("pr cell");
+    let ascii_hash = ascii_pr.iter().position(|c| c.c == '#').expect("pr cell");
+    assert_eq!(
+        wide_hash, ascii_hash,
+        "the PR column lands at the same cell on a wide and an ASCII name"
+    );
+}
