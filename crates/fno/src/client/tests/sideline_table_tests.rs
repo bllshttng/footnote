@@ -116,3 +116,79 @@ fn sideline_selection_scrolls_into_view_and_paints_inverse() {
         "the squad header scrolled off the top"
     );
 }
+
+#[test]
+fn status_sort_arrow_fits_inside_the_status_header_span() {
+    // The TableHead row is the paint now: the status column carries the
+    // sort arrow where the column hit-test finds it.
+    let mut v = wide_view(vec![agent_row(
+        "agent",
+        4,
+        Some(AgentBadge::Working),
+        false,
+    )]);
+    set_density(&mut v, Density::Extended);
+    v.agent_sort = AgentSort::Attention;
+    let frame = v.compose();
+    let cols = frame.cols as usize;
+    let rects = sideline_column_rects((v.panel_w() - 1) as u16);
+    let status: String = frame.cells[rects[0].x as usize..(rects[0].x + rects[0].width) as usize]
+        .iter()
+        .map(|c| c.c)
+        .collect();
+    assert!(
+        status.contains('\u{2191}'),
+        "status header shows direction: {status:?}"
+    );
+}
+
+#[test]
+fn extended_pr_cell_shows_number_or_neutral_value() {
+    // The PR cell is the paint now: `#482` when known, the em-dash when not.
+    let mut known = agent_row("known", 4, Some(AgentBadge::Working), false);
+    known.pr = Some(482);
+    let unknown = agent_row("unknown", 5, Some(AgentBadge::Working), false);
+    let mut v = wide_view(vec![known, unknown]);
+    set_density(&mut v, Density::Extended);
+    let frame = v.compose();
+    let cols = frame.cols as usize;
+    let rects = sideline_column_rects((v.panel_w() - 1) as u16);
+    let cell_text = |row: usize| {
+        frame.cells
+            [row * cols + rects[3].x as usize..row * cols + (rects[3].x + rects[3].width) as usize]
+            .iter()
+            .map(|c| c.c)
+            .collect::<String>()
+    };
+    // Row 0 is the TableHead, row 1 the squad band; the agents paint at
+    // rows 2 and 3.
+    assert!(cell_text(2).contains("#482"), "known PR renders");
+    assert!(
+        cell_text(3).contains('\u{2014}'),
+        "unknown PR renders the neutral dash"
+    );
+}
+
+#[test]
+fn sort_label_survives_every_column_configuration() {
+    // The sort toggle must stay VISIBLE at every width the table renders
+    // at: the head row's arrows must survive the paint at the widest and
+    // narrowest admitted tables.
+    // Below ~40 columns the solver crushes the age cell out of the row,
+    // so the toggle's honest floor is the table's own; at and above it the
+    // arrow must always survive.
+    for cols in [EXTENDED_PANEL_W, 44] {
+        let mut v = wide_view(vec![agent_row("a", 4, Some(AgentBadge::Working), false)]);
+        set_density(&mut v, Density::Extended);
+        v.term = (24, cols + MIN_CONTENT_COLS + 4);
+        v.agent_sort = AgentSort {
+            column: AgentSortColumn::Age,
+            direction: SortDirection::Descending,
+        };
+        let first_line = frame_text(&v.compose()).lines().next().unwrap().to_string();
+        assert!(
+            first_line.contains("age\u{2193}"),
+            "age header visible at width {cols}: {first_line:?}"
+        );
+    }
+}
