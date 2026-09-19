@@ -1477,12 +1477,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         queue(
             "stranded_tree",
             "git worktree list --porcelain + git status --porcelain + git rev-list --count HEAD --not --remotes".to_string(),
-            &if inputs.stranded.is_ok()
-                && inputs.entries.is_some()
-                && inputs.claims.is_ok()
-                && inputs.drivers.is_ok()
-                && inputs.holder_activity_error.is_none()
-            {
+            &if stranded_ok {
                 SourceRead::ok(Value::Null)
             } else {
                 SourceRead::err(

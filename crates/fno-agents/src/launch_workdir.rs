@@ -165,7 +165,7 @@ mod tests {
         };
         let payload = json!({
             "recorded_cwd": cwd.to_string_lossy(),
-            "node": "x-58e3",
+            "node": "x-eeee",
             "harness": "claude",
         });
         // `plain` stays bound until decide returns, so the non-git cwd the
@@ -176,11 +176,11 @@ mod tests {
     #[test]
     fn a_missing_recorded_cwd_passes_through_verbatim() {
         let (answer, receipt) = decide(&json!({
-            "recorded_cwd": "/nonexistent/x-5d17-scratch",
+            "recorded_cwd": "/nonexistent/x-3333-scratch",
             "node": "x-1",
             "harness": "claude",
         }));
-        assert_eq!(answer, json!({ "workdir": "/nonexistent/x-5d17-scratch" }));
+        assert_eq!(answer, json!({ "workdir": "/nonexistent/x-3333-scratch" }));
         assert!(receipt.is_none());
     }
 
@@ -205,11 +205,11 @@ mod tests {
 
     #[test]
     fn an_ensure_success_answers_the_path_and_names_the_resume() {
-        let (answer, receipt) = decide_with(0, false, "/wt/x-58e3");
-        assert_eq!(answer, json!({ "workdir": "/wt/x-58e3" }));
+        let (answer, receipt) = decide_with(0, false, "/wt/x-eeee");
+        assert_eq!(answer, json!({ "workdir": "/wt/x-eeee" }));
         assert_eq!(
             receipt.as_deref(),
-            Some("fno agents spawn: resuming x-58e3 in its existing worktree /wt/x-58e3")
+            Some("fno agents spawn: resuming x-eeee in its existing worktree /wt/x-eeee")
         );
     }
 }
