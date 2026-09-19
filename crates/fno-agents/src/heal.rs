@@ -691,6 +691,23 @@ pub(crate) const EXIT_NO_GH: i32 = 127;
 /// A remedy. `cargo fmt` over a large crate is the long pole.
 const REMEDY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// The whole drive loop's budget: under the pr-watch `StartInterval` of 600s,
+/// so a loop cannot span ticks and pile one live store reader on the last.
+const DRIVE_BUDGET: std::time::Duration = std::time::Duration::from_secs(480);
+
+/// The cap for one remedy: [`REMEDY_TIMEOUT`], capped at what the root's
+/// slice of [`DRIVE_BUDGET`] still has, floored at 1s. A remedy started near
+/// the deadline must not run past it.
+fn remedy_timeout(a: &Args) -> std::time::Duration {
+    match a.deadline {
+        None => REMEDY_TIMEOUT,
+        Some(d) => d
+            .saturating_duration_since(std::time::Instant::now())
+            .min(REMEDY_TIMEOUT)
+            .max(std::time::Duration::from_secs(1)),
+    }
+}
+
 /// Parsed `pr-heal` arguments. `gh_bin` / `git_bin` / `cwd` are the same test
 /// seams `loop-check` carries, so push discipline is provable against stub
 /// executables instead of a real remote. `claims_root` and `events_file`
@@ -719,6 +736,13 @@ struct Args {
     gh_bin: String,
     git_bin: String,
     cwd: std::path::PathBuf,
+    /// Every `--cwd` root, deduplicated; `cwd` is the first. One process
+    /// heals every root, so the tick pays one spawn and one pid file.
+    roots: Vec<std::path::PathBuf>,
+    /// When the root's slice of [`DRIVE_BUDGET`] is spent. Set by the
+    /// `--all --apply` entry, never parsed; past it the loop skips and
+    /// receipts each PR it did not reach.
+    deadline: Option<std::time::Instant>,
     /// Prepended when resolving a remedy's binary (`cargo`, `uv`). Empty
     /// means resolve off PATH. It exists so a test can inject a stub WITHOUT
     /// mutating the process PATH: PATH is global, and a stub `git` placed
@@ -747,6 +771,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         gh_bin: "gh".to_string(),
         git_bin: "git".to_string(),
         cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        roots: Vec::new(),
+        deadline: None,
         bin_dir: String::new(),
         claims_root: String::new(),
         events_file: String::new(),
@@ -776,7 +802,13 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                 i += 1;
             }
             "--cwd" => {
-                a.cwd = std::path::PathBuf::from(take("--cwd")?);
+                let p = std::path::PathBuf::from(take("--cwd")?);
+                if a.roots.is_empty() {
+                    a.cwd = p.clone();
+                }
+                if !a.roots.contains(&p) {
+                    a.roots.push(p);
+                }
                 i += 1;
             }
             "--bin-dir" => {
@@ -955,7 +987,7 @@ fn apply_auto(a: &Args, findings: &mut [Finding]) -> Vec<String> {
             let dir = a.cwd.join(&cmd.cwd);
             let argv: Vec<&str> = cmd.argv.iter().map(|s| s.as_str()).collect();
             let bin = seam_bin(a, argv[0]);
-            let ok = run(&bin, &argv[1..], &dir, REMEDY_TIMEOUT)
+            let ok = run(&bin, &argv[1..], &dir, remedy_timeout(a))
                 .map(|(ok, _, _)| ok)
                 .unwrap_or(false);
             if !ok {
@@ -1197,6 +1229,13 @@ pub fn run_heal(argv: &[String]) -> i32 {
         );
     }
     if a.all && a.apply {
+        // The loop is bounded to the tick: DRIVE_BUDGET, split evenly across
+        // the roots, so no drive loop outlives the tick that spawned it.
+        let mut a = a;
+        a.deadline = Some(std::time::Instant::now() + DRIVE_BUDGET);
+        if a.roots.len() > 1 {
+            return run_roots_apply(&a, a.dry_run);
+        }
         return run_all_apply(&a, a.dry_run);
     }
     if a.dry_run {
@@ -1527,7 +1566,7 @@ fn emit_arm_row(a: &Args, acted: u8, skip_reason: Option<&str>, detail: &str) {
     }
 }
 
-/// The dir holding the journal; also where the per-root pid files live.
+/// The dir holding the journal; also where the drive loop's pid file lives.
 fn events_dir(a: &Args) -> std::path::PathBuf {
     journal_path(a)
         .parent()
@@ -1535,25 +1574,15 @@ fn events_dir(a: &Args) -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
-/// The pid file for the drive loop running against this `--cwd` root. The
-/// root path (not a hash) tags the file, so a `--status` read is legible and
-/// an orphan from a removed root is still attributable.
+/// The pid file for THE drive loop. One process heals every root, so one
+/// pid file: the in-flight guard sees the loop whatever root asked, and
+/// `live_heal_pids`' `pr-heal.` / `.pid` match still reads the name.
 fn heal_pid_file(a: &Args) -> std::path::PathBuf {
-    let tag: String = a
-        .cwd
-        .to_string_lossy()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    events_dir(a).join(format!("pr-heal.{tag}.pid"))
+    events_dir(a).join("pr-heal.pid")
 }
 
+// Test-only reader since the guard switched to live_heal_pids.
+#[cfg_attr(not(test), allow(dead_code))]
 fn read_pid_file(path: &std::path::Path) -> Option<u32> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
@@ -1603,16 +1632,17 @@ fn run_detached(
         return EXIT_CLEAN;
     }
     let pid_file = heal_pid_file(a);
-    if let Some(pid) = read_pid_file(&pid_file) {
-        if crate::evals_arm::pid_alive(pid) {
-            emit_arm_row(
-                a,
-                0,
-                Some("in_flight"),
-                &format!("pid {pid} is still running the drive loop"),
-            );
-            return EXIT_CLEAN;
-        }
+    // One live loop holds the tick, whatever file names it: the single
+    // pr-heal.pid, or a stale per-root file a pre-upgrade loop still runs
+    // in (the sweep filters dead pids).
+    if let Some(pid) = live_heal_pids(&events_dir(a)).first() {
+        emit_arm_row(
+            a,
+            0,
+            Some("in_flight"),
+            &format!("pid {pid} is still running the drive loop"),
+        );
+        return EXIT_CLEAN;
     }
     let mut child: Vec<String> = Vec::with_capacity(argv.len() + 2);
     child.push(crate::evals_arm::self_exe());
@@ -1673,9 +1703,32 @@ fn age_phrase(ts: &str) -> String {
     }
 }
 
+/// True when the pid names a healer process. A stale pid file outlives its
+/// loop, and pid numbers are recycled: without an identity check a recycled
+/// pid holds the tick (every root) for as long as the unrelated owner lives.
+/// `ps -o command=` answers on macOS and Linux alike; an unreadable answer
+/// counts as NOT the healer (fail open to a spawn, never stuck in_flight).
+/// The current process is exempt: production never writes its own pid to a
+/// file, and the test harness does exactly that.
+fn pid_names_a_healer(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    let Ok((true, out, _)) = run(
+        "ps",
+        &["-p", &pid.to_string(), "-o", "command="],
+        &std::env::temp_dir(),
+        READ_TIMEOUT,
+    ) else {
+        return false;
+    };
+    out.contains("pr-heal") || out.contains("fno-agents")
+}
+
 /// Live pids across every `pr-heal.*.pid` file in `dir`. The pid lives in the
-/// file CONTENT (the name only tags the root, and root paths contain dots),
-/// read as an integer; EPERM counts alive.
+/// file CONTENT, read as an integer; EPERM counts alive. The glob also sweeps
+/// the old per-root `pr-heal.<tag>.pid` files; they hold dead pids and skip,
+/// and a recycled pid that belongs to an unrelated process skips too.
 fn live_heal_pids(dir: &std::path::Path) -> Vec<u32> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1695,7 +1748,7 @@ fn live_heal_pids(dir: &std::path::Path) -> Vec<u32> {
         let Ok(pid) = text.trim().parse::<u32>() else {
             continue;
         };
-        if crate::evals_arm::pid_alive(pid) {
+        if crate::evals_arm::pid_alive(pid) && pid_names_a_healer(pid) {
             out.push(pid);
         }
     }
@@ -1740,8 +1793,14 @@ fn status_line(a: &Args) -> String {
             .collect::<Vec<_>>()
             .join(",")
     };
+    // One row names one root's run: a multi-root tick writes one row per
+    // root, so the line labels whose counts these are.
+    let root = data
+        .get("root")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
     format!(
-        "Heal: armed; last run {ts} ({}); healed {healed}, rebased {rebased}, reran {reran}, escalated {escalated}; {acted_clause}; in-flight {in_flight}",
+        "Heal: armed; last run {ts} ({}, root {root}); healed {healed}, rebased {rebased}, reran {reran}, escalated {escalated}; {acted_clause}; in-flight {in_flight}",
         age_phrase(&ts)
     )
 }
@@ -2015,7 +2074,7 @@ fn apply_rerun(a: &Args, findings: &mut [Finding], head: &str) -> Vec<String> {
             };
             continue;
         }
-        match run(&a.gh_bin, &rerun_args, &a.cwd, REMEDY_TIMEOUT) {
+        match run(&a.gh_bin, &rerun_args, &a.cwd, remedy_timeout(a)) {
             Ok((true, _, _)) => {
                 issued.push(key);
                 // The report names the rerun as the action taken, and the
@@ -2059,6 +2118,11 @@ fn emit_tick_event(
 ) {
     let path = journal_path(a);
     let mut fields = serde_json::Map::new();
+    // One process writes one pr_heal_tick row per root; `root` names whose.
+    fields.insert(
+        "root".to_string(),
+        serde_json::json!(a.cwd.to_string_lossy()),
+    );
     for (k, v) in counts {
         fields.insert((*k).to_string(), serde_json::json!(v));
     }
@@ -2093,6 +2157,38 @@ fn emit_tick_event(
     {
         eprintln!("pr-heal: the pr_heal_tick row did not land: {e}");
     }
+}
+
+/// The multi-root drive loop: one process heals every `--cwd` root, so the
+/// tick pays one spawn and one pid file. Each root runs with an even share
+/// of what is left of [`DRIVE_BUDGET`]; a root that spends less passes its
+/// unspent time on. Each root's `run_all_apply` writes its own `pr_heal_tick`
+/// row, and `root` on the row names whose.
+fn run_roots_apply(a: &Args, dry_run: bool) -> i32 {
+    let deadline = a
+        .deadline
+        .unwrap_or_else(|| std::time::Instant::now() + DRIVE_BUDGET);
+    let mut worst = EXIT_CLEAN;
+    let mut roots_left = a.roots.len();
+    for root in &a.roots {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            // Out of budget: the root's PRs wait for the next tick. Its
+            // pre-loop reads (listing, worktree scan, main HEAD) would each
+            // pay up to 60s past the deadline for zero work.
+            roots_left -= 1;
+            continue;
+        }
+        let slice = remaining / roots_left as u32;
+        let root_args = Args {
+            cwd: root.clone(),
+            deadline: Some(std::time::Instant::now() + slice),
+            ..a.clone()
+        };
+        worst = worse_of(worst, run_all_apply(&root_args, dry_run));
+        roots_left -= 1;
+    }
+    worst
 }
 
 /// The drive loop: one heal per red open PR, from that PR's own worktree,
@@ -2157,8 +2253,22 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
     let rerun_keys_ever = journal_rerun_keys(&journal_path(a));
     let flake_guards = journal_flake_guards(&journal_path(a));
     let mut worst = EXIT_CLEAN;
+    // The root's slice of the drive budget: past it, every PR not yet
+    // reached gets one receipt and waits for the next tick.
+    let deadline = a
+        .deadline
+        .unwrap_or_else(|| std::time::Instant::now() + DRIVE_BUDGET);
     for pr in open_pr_numbers(&pages) {
         bump(&mut counts, "seen");
+        if std::time::Instant::now() >= deadline {
+            bump(&mut counts, "skip_deadline");
+            receipt(
+                &pr,
+                "skip_deadline",
+                "the drive budget for this root is spent",
+            );
+            continue;
+        }
         println!("── PR {pr}");
         let state = match read_pr(a, &pr) {
             Ok(v) => v,
@@ -2224,7 +2334,7 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
             }
             rebased_this_run += 1;
             let bin = seam_bin(a, "fno");
-            let push = run(&bin, &["do", "pr", "push"], wt, REMEDY_TIMEOUT);
+            let push = run(&bin, &["do", "pr", "push"], wt, remedy_timeout(a));
             match push {
                 Ok((true, out, _)) => {
                     let (before, after) = behind_numbers(&out);
@@ -4401,7 +4511,197 @@ echo '[]'
         );
     }
 
-    // ── the Heal: readout line ────────────────────────────────────────────
+    #[test]
+    fn a_two_root_detach_spawns_one_child_carrying_every_root() {
+        // The per-root Python loop is gone: one spawn whose child argv
+        // carries every --cwd, one pid file. The second root rides
+        // drive_args' own --cwd plus one more.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let other = tempfile::tempdir().unwrap();
+        let other_s = other.path().to_str().unwrap();
+        let argv = drive_args(d, &["--detach", "--cwd", other_s]);
+        let a = parse_args(&argv).unwrap();
+        assert_eq!(
+            a.roots,
+            vec![d.to_path_buf(), other.path().to_path_buf()],
+            "both roots parsed, deduplicated"
+        );
+        let spawned = std::cell::RefCell::new(Vec::<Vec<String>>::new());
+        let spawn = |argv: &[String]| -> std::io::Result<u32> {
+            spawned.borrow_mut().push(argv.to_vec());
+            Ok(std::process::id())
+        };
+        let code = run_detached(&a, &argv, &clear_pause, &spawn);
+        assert_eq!(code, EXIT_CLEAN);
+        let calls = spawned.borrow();
+        assert_eq!(calls.len(), 1, "one spawn: {calls:?}");
+        let child = &calls[0];
+        for root in [d, other.path()] {
+            assert!(
+                child
+                    .windows(2)
+                    .any(|w| w[0] == "--cwd" && Path::new(&w[1]) == root),
+                "the child carries --cwd {root:?}: {child:?}"
+            );
+        }
+        drop(calls);
+        assert_eq!(
+            heal_pid_file(&a),
+            events_dir(&a).join("pr-heal.pid"),
+            "one root-free pid file"
+        );
+        assert_eq!(
+            read_pid_file(&heal_pid_file(&a)),
+            Some(std::process::id()),
+            "one pid file written"
+        );
+    }
+
+    #[test]
+    fn a_two_root_detach_with_a_live_pid_skips_in_flight() {
+        // The in-flight guard reads the ONE pid file whatever root asked:
+        // the per-root files never let it see a loop started for a root
+        // other than its own.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let other = tempfile::tempdir().unwrap();
+        let other_s = other.path().to_str().unwrap();
+        let argv = drive_args(d, &["--detach", "--cwd", other_s]);
+        let a = parse_args(&argv).unwrap();
+        std::fs::write(heal_pid_file(&a), format!("{}\n", std::process::id())).unwrap();
+        let spawned = std::cell::RefCell::new(0);
+        let spawn = |_: &[String]| -> std::io::Result<u32> {
+            *spawned.borrow_mut() += 1;
+            Ok(std::process::id())
+        };
+        let code = run_detached(&a, &argv, &clear_pause, &spawn);
+        assert_eq!(code, EXIT_CLEAN);
+        assert_eq!(*spawned.borrow(), 0, "never double-spawned");
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("\"acted\":0"), "{events}");
+        assert!(events.contains("in_flight"), "{events}");
+    }
+
+    #[test]
+    fn a_spent_deadline_skips_every_pr_with_a_receipt() {
+        // Deadline already spent: no PR is read, every PR gets one
+        // skip_deadline receipt, and the tick row carries the count.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let listing = format!(
+            "[{},{},{}]",
+            r#"{"number":1,"head":{"sha":"aaa1","ref":"feature/x-1111"},"base":{"ref":"main"},"mergeable":null}"#,
+            r#"{"number":2,"head":{"sha":"bbb2","ref":"feature/x-2222"},"base":{"ref":"main"},"mergeable":null}"#,
+            r#"{"number":3,"head":{"sha":"ccc3","ref":"feature/x-3333"},"base":{"ref":"main"},"mergeable":null}"#,
+        );
+        let body = r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "gh $*" >> "$D/gh.log"
+for a in "$@"; do case "$a" in
+  *'pulls?state=open'*) echo 'LISTING'; exit 0 ;;
+esac; done
+echo '[]'
+"#
+        .replace("LISTING", &listing);
+        write_exec(d, "gh", &body);
+        stub_git_drive(d);
+        stub_cargo(d);
+        let mut a = parse_args(&drive_args(d, &[])).unwrap();
+        a.deadline = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        run_all_apply(&a, false);
+        let gh = log_of(d, "gh.log");
+        assert!(
+            !gh.contains("pulls/"),
+            "no PR is read past a spent deadline: {gh}"
+        );
+        let events = log_of(d, "events.jsonl");
+        assert_eq!(
+            events.matches("\"action\":\"skip_deadline\"").count(),
+            3,
+            "one receipt per unreached PR: {events}"
+        );
+        assert!(events.contains("\"skip_deadline\":3"), "{events}");
+    }
+
+    #[test]
+    fn run_roots_apply_visits_every_root_and_writes_its_row() {
+        // One process, one pr_heal_tick row per root, folded to the worst
+        // verdict. Instant stubs and a generous budget: no timing dependence
+        // (the skip itself is covered by the spent-deadline tests).
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let roots: Vec<std::path::PathBuf> = (0..3)
+            .map(|i| {
+                let p = d.join(format!("root-{i}"));
+                std::fs::create_dir_all(&p).unwrap();
+                p
+            })
+            .collect();
+        let body = r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "gh $*" >> "$D/gh.log"
+for a in "$@"; do case "$a" in
+  *'pulls?state=open'*) echo '[]'; exit 0 ;;
+esac; done
+echo '[]'
+"#;
+        write_exec(d, "gh", body);
+        stub_git_drive(d);
+        stub_cargo(d);
+        let mut a = parse_args(&drive_args(d, &[])).unwrap();
+        a.roots = roots.clone();
+        a.deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        let code = run_roots_apply(&a, false);
+        assert_eq!(code, EXIT_CLEAN);
+        let events = log_of(d, "events.jsonl");
+        for root in &roots {
+            let row = events
+                .lines()
+                .find(|l| l.contains("pr_heal_tick") && l.contains(root.to_str().unwrap()))
+                .unwrap_or_else(|| panic!("no tick row for {root:?}: {events}"));
+            assert!(row.contains("\"dry_run\":false"), "{row}");
+        }
+    }
+
+    #[test]
+    fn remedy_timeout_never_outruns_the_deadline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = parse_args(&args_for(tmp.path(), &[])).unwrap();
+        assert_eq!(remedy_timeout(&a), REMEDY_TIMEOUT, "no deadline: unchanged");
+        let mut short = a.clone();
+        short.deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        assert!(
+            remedy_timeout(&short) <= std::time::Duration::from_secs(10),
+            "10s left: never 300s"
+        );
+        let mut spent = a.clone();
+        spent.deadline = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        assert_eq!(
+            remedy_timeout(&spent),
+            std::time::Duration::from_secs(1),
+            "spent deadline: the 1s floor"
+        );
+    }
+
+    #[test]
+    fn a_single_root_tick_row_carries_the_root() {
+        // One --cwd behaves as today, except the pr_heal_tick row now names
+        // its root: the field the two-probe done-check reads.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive_rebase(d, "null");
+        stub_git_drive(d);
+        stub_cargo(d);
+        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
+        stub_fno_push(d, "", 0, "");
+        run_heal(&drive_args(d, &[]));
+        let events = log_of(d, "events.jsonl");
+        assert!(
+            events.contains(&format!("\"root\":\"{}\"", d.to_str().unwrap())),
+            "{events}"
+        );
+    }
 
     #[test]
     fn status_line_unarmed_names_the_arm_command() {
@@ -4451,7 +4751,7 @@ echo '[]'
         .unwrap();
         let line = status_line(&a);
         assert!(line.starts_with("Heal: armed; last run "), "{line}");
-        assert!(line.contains("(12m ago)"), "{line}");
+        assert!(line.contains("(12m ago, root unknown)"), "{line}");
         assert!(
             line.contains("healed 1, rebased 0, reran 0, escalated 3"),
             "{line}"
@@ -4503,7 +4803,11 @@ echo '[]'
             events.to_string_lossy().into_owned(),
         ])
         .unwrap();
-        assert!(status_line(&a).contains("(1d ago)"), "{}", status_line(&a));
+        assert!(
+            status_line(&a).contains("(1d ago, root unknown)"),
+            "{}",
+            status_line(&a)
+        );
     }
 
     #[test]
@@ -4528,6 +4832,131 @@ echo '[]'
             status_line(&a).contains(&format!("in-flight {}", std::process::id())),
             "{}",
             status_line(&a)
+        );
+    }
+
+    #[test]
+    fn the_status_line_labels_the_root_its_row_names() {
+        // One row names one root's run: the line labels whose counts these
+        // are instead of letting the last root's row read as the whole tick.
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let ts = chrono::Utc::now().to_rfc3339();
+        std::fs::write(
+            &events,
+            format!(
+                "{{\"ts\":\"{ts}\",\"type\":\"pr_heal_tick\",\"data\":{{\"root\":\"/srv/repo\",\"healed\":2}}}}\n"
+            ),
+        )
+        .unwrap();
+        let a = parse_args(&[
+            "--status".to_string(),
+            "--armed".to_string(),
+            "--events-file".to_string(),
+            events.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let line = status_line(&a);
+        assert!(line.contains("root /srv/repo"), "{line}");
+        assert!(line.contains("healed 2"), "{line}");
+    }
+
+    #[test]
+    fn a_stale_per_root_pid_file_with_a_live_pid_holds_the_tick() {
+        // Migration guard: a pre-upgrade loop still alive in an old
+        // pr-heal.<root>.pid file holds the tick, so a binary swap cannot
+        // double-spawn the healer while the old loop lives.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let a = parse_args(&detach_args(d)).unwrap();
+        std::fs::write(
+            events_dir(&a).join("pr-heal.some-root.pid"),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+        let spawned = std::cell::RefCell::new(0);
+        let spawn = |_: &[String]| -> std::io::Result<u32> {
+            *spawned.borrow_mut() += 1;
+            Ok(std::process::id())
+        };
+        let code = run_detached(&a, &detach_args(d), &clear_pause, &spawn);
+        assert_eq!(code, EXIT_CLEAN);
+        assert_eq!(
+            *spawned.borrow(),
+            0,
+            "a live stale-file loop holds the tick"
+        );
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("in_flight"), "{events}");
+    }
+
+    #[test]
+    fn a_recycled_pid_that_names_no_healer_does_not_hold_the_tick() {
+        // A stale pid file outlives its loop and pids are recycled: the pid
+        // in an old file may belong to any unrelated process. `ps` names the
+        // owner; a non-healer owner never holds the tick (the P1 codex
+        // finding: otherwise one stale file disables healing forever).
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let a = parse_args(&detach_args(d)).unwrap();
+        let sleeper = {
+            let c = std::process::Command::new("/bin/sleep")
+                .arg("15")
+                .spawn()
+                .unwrap();
+            let pid = c.id();
+            // Leave it running under its own pid for the ps read.
+            std::mem::forget(c);
+            pid
+        };
+        std::fs::write(
+            events_dir(&a).join("pr-heal.old-root.pid"),
+            format!("{sleeper}\n"),
+        )
+        .unwrap();
+        let spawned = std::cell::RefCell::new(0);
+        let spawn = |_: &[String]| -> std::io::Result<u32> {
+            *spawned.borrow_mut() += 1;
+            Ok(std::process::id())
+        };
+        let code = run_detached(&a, &detach_args(d), &clear_pause, &spawn);
+        assert_eq!(code, EXIT_CLEAN);
+        assert_eq!(
+            *spawned.borrow(),
+            1,
+            "a recycled pid naming no healer never holds the tick"
+        );
+    }
+
+    #[test]
+    fn a_spent_budget_skips_every_root_without_paying_the_pre_loop_reads() {
+        // Zero slice, zero work: an exhausted budget runs no listing, no
+        // worktree scan, no main-HEAD read for any root, and writes no tick
+        // row (AC2 corner codex raised: the reads cost up to 60s each).
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let ra = d.join("root-a");
+        let rb = d.join("root-b");
+        std::fs::create_dir_all(&ra).unwrap();
+        std::fs::create_dir_all(&rb).unwrap();
+        let body = r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "gh $*" >> "$D/gh.log"
+exit 0
+"#;
+        write_exec(d, "gh", body);
+        stub_git_drive(d);
+        stub_cargo(d);
+        let mut a = parse_args(&drive_args(d, &[])).unwrap();
+        a.roots = vec![ra, rb];
+        a.deadline = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        let code = run_roots_apply(&a, false);
+        assert_eq!(code, EXIT_CLEAN);
+        assert_eq!(log_of(d, "gh.log"), "", "no pre-loop read past the budget");
+        let events = log_of(d, "events.jsonl");
+        assert!(
+            !events.contains("pr_heal_tick"),
+            "no tick row for a root that never ran: {events}"
         );
     }
 
