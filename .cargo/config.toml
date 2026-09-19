@@ -6,8 +6,14 @@ incremental = false
 # overrides this value.
 build-dir = "{cargo-cache-home}/build/{workspace-path-hash}"
 
-# Every test binary and doctest asks for a cargo run slot before it runs,
-# so a fresh-build cargo test counts against the same cap as a compile.
+# Every test binary and doctest on a macOS host asks for a cargo run slot
+# before it runs, so a fresh-build cargo test counts against the same cap as
+# a compile. Keyed by target triple, not cfg(all()): a triple runner takes
+# precedence over any cfg runner, so a user's own cfg runner still fires on
+# every other repo, and two cfg runners is what makes cargo refuse to start.
 # Cargo resolves a config path with a slash from the checkout root.
-[target.'cfg(all())']
+[target.aarch64-apple-darwin]
+runner = ["scripts/lib/cargo-rustc-wrapper.sh", "--run"]
+
+[target.x86_64-apple-darwin]
 runner = ["scripts/lib/cargo-rustc-wrapper.sh", "--run"]
