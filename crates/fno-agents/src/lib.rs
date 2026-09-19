@@ -190,6 +190,7 @@ mod mint_guard_tests;
 pub mod model_env_scrub;
 pub mod naming;
 pub mod needs;
+pub mod launch_workdir;
 pub mod node_origin;
 pub mod node_reading;
 pub mod node_route;
