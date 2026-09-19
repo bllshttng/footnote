@@ -117,9 +117,10 @@ pub struct PanePlacement {
     /// No portal at n opens one (a portal is never persisted as a squad
     /// member; an open portal is persisted as a slot of its tab and
     /// restored held), a portal at n on another row repoints it in place,
-    /// a portal at n on this row focuses it. Mutually exclusive with `here`, `at`, `split`
-    /// and a non-default `target` (a portal owns its geometry); the server
-    /// refuses a conflicting combination. Additive and `#[serde(default)]`,
+    /// a portal at n on this row focuses it. `here` is refused; `split`,
+    /// `tab` and `target` are honored on a fresh open and ignored with a
+    /// notice when the portal already has a live seat (a portal owns its
+    /// geometry). Additive and `#[serde(default)]`,
     /// so every existing placement stays wire-identical and the
     /// compatibility floor does not move (see `MIN_COMPAT_PROTO` above).
     #[serde(default)]
