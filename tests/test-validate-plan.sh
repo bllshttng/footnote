@@ -1353,6 +1353,147 @@ else
     fail "AC12j: expected the malformed-id warnings: $OUTPUT"
 fi
 
+# --- AC13: Code Index Audit ---
+echo ""
+echo "--- AC13: Code Index Audit ---"
+
+# Section-scoped assertions, same as AC11: other gates may also fire on the
+# sparse fixtures, so only this section's lines prove this check.
+cia() {
+    sed -n '/^--- Code Index Audit ---/,/^--- /p' <<< "$1" | sed '1d' | grep -v '^--- ' || true
+}
+
+# A fixture repo holding .codegraph so detection prints codegraph. Not a git
+# repo: the gate falls back to the plan's own directory as the repo root.
+CIA_REPO="$TMPDIR_BASE/cia-repo"
+mkdir -p "$CIA_REPO/.codegraph"
+printf 'stub\n' > "$CIA_REPO/.codegraph/db"
+
+# AC13a (AC3-HP): a post-gate plan that records codegraph answered and opens
+# with the audit table -> clean section.
+PLAN_CIA_A="$CIA_REPO/cia_a.md"
+cat > "$PLAN_CIA_A" <<'EOF'
+---
+claims: x-ciaa
+created: 2099-01-01
+code_index:
+  main_sha: abc1234
+  providers:
+    - name: codegraph
+      role: symbol
+      status: answered
+      fresh: yes
+---
+
+## Existence audit
+
+| Claim | Kind | Verdict | Evidence |
+|---|---|---|---|
+| the send verb exists | code | exists at src/m.rs:1 | `fno send` answers |
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `src/m.rs` | Modify |
+EOF
+OUTPUT=$(bash "$VALIDATE" "$PLAN_CIA_A" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if [[ -z "$CIA_OUT" ]]; then
+    pass "AC13a: a recorded provider and an audit table leave the section clean"
+else
+    fail "AC13a: expected a clean section: $CIA_OUT"
+fi
+
+# AC13b (AC3-ERR): the same repo, providers: [] -> ERROR naming the present
+# index; exit 1.
+PLAN_CIA_B="$CIA_REPO/cia_b.md"
+sed -e 's/^  main_sha: abc1234$/  main_sha: abc1234/' -e '/^    - name: codegraph$/,/^      fresh: yes$/d' \
+    -e 's/^  providers:$/  providers: []/' "$PLAN_CIA_A" > "$PLAN_CIA_B"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_CIA_B" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "code index codegraph is present" <<< "$CIA_OUT"; then
+    pass "AC13b: an unrecorded present index errors and the plan exits 1"
+else
+    fail "AC13b: expected the present-index ERROR (exit $EXIT_CODE): $CIA_OUT"
+fi
+
+# AC13c (AC4-ERR): no code_index block at all -> ERROR on a post-gate plan,
+# WARN and no error on a pre-gate one.
+sed -e '/^code_index:$/,/^      fresh: yes$/d' "$PLAN_CIA_A" > "$CIA_REPO/cia_c.md"
+OUTPUT=$(bash "$VALIDATE" "$CIA_REPO/cia_c.md" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "frontmatter carries no code_index: block" <<< "$CIA_OUT" \
+    && grep -q "ERROR" <<< "$CIA_OUT"; then
+    pass "AC13c: a missing block errors on a post-gate plan"
+else
+    fail "AC13c: expected the missing-block ERROR: $CIA_OUT"
+fi
+sed -e 's/^created: 2099-01-01$/created: 2026-09-10/' "$CIA_REPO/cia_c.md" > "$CIA_REPO/cia_c2.md"
+OUTPUT=$(bash "$VALIDATE" "$CIA_REPO/cia_c2.md" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "WARN" <<< "$CIA_OUT" && ! grep -q "ERROR" <<< "$CIA_OUT"; then
+    pass "AC13c2: the same gap warns on a pre-gate plan and adds no error"
+else
+    fail "AC13c2: expected a warn-only section: $CIA_OUT"
+fi
+
+# AC13d (AC4-ERR): the first ## heading is not the audit -> ERROR post-gate.
+sed 's/^## Existence audit$/## Context/' "$PLAN_CIA_A" > "$CIA_REPO/cia_d.md"
+OUTPUT=$(bash "$VALIDATE" "$CIA_REPO/cia_d.md" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "the first ## heading is '## Context'" <<< "$CIA_OUT"; then
+    pass "AC13d: a missing audit heading errors on a post-gate plan"
+else
+    fail "AC13d: expected the heading ERROR: $CIA_OUT"
+fi
+
+# AC13e (AC4-ERR): an absent row whose evidence lacks 'after' -> ERROR
+# post-gate, warn pre-gate.
+sed -e 's/| exists at src\/m.rs:1 | `fno send` answers |/| absent | nothing found |/' \
+    "$PLAN_CIA_A" > "$CIA_REPO/cia_e.md"
+OUTPUT=$(bash "$VALIDATE" "$CIA_REPO/cia_e.md" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "reads absent but its evidence names no confirming search" <<< "$CIA_OUT"; then
+    pass "AC13e: an absent row without a confirming search errors"
+else
+    fail "AC13e: expected the absent-row ERROR: $CIA_OUT"
+fi
+sed -e 's/^created: 2099-01-01$/created: 2026-09-10/' "$CIA_REPO/cia_e.md" > "$CIA_REPO/cia_e2.md"
+OUTPUT=$(bash "$VALIDATE" "$CIA_REPO/cia_e2.md" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "reads absent but its evidence names no confirming search" <<< "$CIA_OUT" \
+    && ! grep -q "ERROR" <<< "$CIA_OUT"; then
+    pass "AC13e2: the same absent row warns pre-gate and adds no error"
+else
+    fail "AC13e2: expected a warn-only section: $CIA_OUT"
+fi
+
+# AC13f (AC4-EDGE): a repo where detection prints nothing and a plan with
+# providers: [] and a one-row audit -> clean section.
+CIA_EMPTY="$TMPDIR_BASE/cia-repo-empty"
+mkdir -p "$CIA_EMPTY"
+PLAN_CIA_F="$CIA_EMPTY/cia_f.md"
+sed -e 's/^  main_sha: abc1234$/  main_sha: abc1234/' -e 's/^  providers:$/  providers: []/' "$PLAN_CIA_A" > "$PLAN_CIA_F"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_CIA_F" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if [[ -z "$CIA_OUT" ]]; then
+    pass "AC13f: no index detected with providers: [] and an audit table is clean"
+else
+    fail "AC13f: expected a clean section: $CIA_OUT"
+fi
+
+# AC13g: an undated fixture warns instead of erroring.
+sed -e '/^created: 2099-01-01$/d' -e '/^code_index:$/,/^      fresh: yes$/d' "$PLAN_CIA_A" > "$CIA_REPO/cia_g.md"
+OUTPUT=$(bash "$VALIDATE" "$CIA_REPO/cia_g.md" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "frontmatter carries no code_index: block" <<< "$CIA_OUT" \
+    && ! grep -q "ERROR" <<< "$CIA_OUT"; then
+    pass "AC13g: an undated fixture warns and adds no error"
+else
+    fail "AC13g: expected a warn-only section: $CIA_OUT"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Test Results ==="

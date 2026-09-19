@@ -1609,6 +1609,140 @@ elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
 fi
 
 # -------------------------------------------------------------------
+# Check 6c-ter: Code Index Audit
+# -------------------------------------------------------------------
+# A blueprint that skipped a present code index plans against a premise an
+# index could have falsified in seconds. The gate checks that the planner
+# ASKED: a code_index: block naming the sha read, a provider entry per index
+# detection finds, and an Existence audit table as the plan's first section.
+# It never checks what an index answered. The detection reader is the
+# bundled sibling lib/code-index-detect.sh; a repo with no provider prints
+# nothing and a plan with `providers: []` and the audit section is clean.
+code_index_gate_date="2026-09-17"
+check_code_index_file() {
+    local file="$1" label="$2"
+    local detect_script repo_root detection created block
+    detect_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/code-index-detect.sh"
+    if [[ ! -f "$detect_script" ]]; then
+        warn "$label: code-index-detect.sh not found beside the validator - the Code Index Audit runs NOT CHECKED"
+        return 0
+    fi
+    # The plan audits its own repo, not wherever the validator was invoked:
+    # resolve the root from the plan's directory, falling back to that
+    # directory for a plan that lives outside any checkout.
+    repo_root="$(git -C "$(dirname "$file")" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$repo_root" ]] || repo_root="$(cd "$(dirname "$file")" && pwd)"
+    detection=$(bash "$detect_script" "$repo_root" 2>/dev/null)
+
+    block=$(awk '
+        /^---/ { c++; next }
+        c == 1 { print }
+    ' "$file" | awk '
+        /^code_index:/ { inblk = 1; print; next }
+        inblk && /^[^[:space:]#-]/ { inblk = 0 }
+        inblk { print }
+    ')
+
+    local findings=()
+    if [[ -z "$block" ]]; then
+        findings+=("frontmatter carries no code_index: block - run the planner's step 2-index, then record main_sha (the origin/main sha you read) and providers (one entry per index, or [])")
+    else
+        if ! grep -Eq '^[[:space:]]*main_sha:[[:space:]]*[0-9a-f]{7,40}[[:space:]]*$' <<< "$block"; then
+            findings+=("code_index.main_sha is missing or not a 7-to-40-hex sha - write the origin/main sha the plan read, e.g. main_sha: $(git -C "$repo_root" rev-parse HEAD 2>/dev/null | cut -c1-12 || echo <sha>)")
+        fi
+        if ! grep -Eq '^[[:space:]]*providers:' <<< "$block"; then
+            findings+=("code_index.providers is missing - list one entry per index asked (with status and fresh), or providers: [] when no index is present")
+        fi
+        local dname dpath
+        while IFS=$'\t' read -r dname _ _ dpath; do
+            [[ -z "$dname" ]] && continue
+            if ! grep -Eq "^[[:space:]]*-[[:space:]]*name:[[:space:]]*$dname[[:space:]]*$" <<< "$block"; then
+                findings+=("code index $dname is present ($dpath) and the plan does not record asking it. Ask it by role and record it under code_index.providers, with status unavailable or error if the ask failed")
+            fi
+        done <<< "$detection"
+
+        local rname entry status fresh
+        rname=""
+        while IFS= read -r rname; do
+            [[ -z "$rname" ]] && continue
+            entry=$(awk -v n="$rname" '
+                $0 ~ ("^[[:space:]]*-[[:space:]]*name:[[:space:]]*" n "[[:space:]]*$") { f = 1; print; next }
+                f && /^[[:space:]]*-[[:space:]]/ { exit }
+                f { print }
+            ' <<< "$block")
+            status=$(sed -n 's/^[[:space:]]*status:[[:space:]]*//p' <<< "$entry" | head -1)
+            fresh=$(sed -n 's/^[[:space:]]*fresh:[[:space:]]*//p' <<< "$entry" | head -1)
+            if [[ ! "$status" =~ ^(answered|unavailable|error)$ ]]; then
+                findings+=("provider $rname has no readable status: - set status: answered, unavailable or error")
+            fi
+            if [[ ! "$fresh" =~ ^(yes|no|unknown)$ ]]; then
+                findings+=("provider $rname has no readable fresh: - set fresh: yes, no or unknown (unknown when the manifest has no fresh probe)")
+            fi
+        done < <(sed -n 's/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' <<< "$block")
+    fi
+
+    local first_h2 rows row verdict evid
+    first_h2=$(awk '/^##[[:space:]]/ { print; exit }' "$file")
+    if [[ "$first_h2" != "## Existence audit" ]]; then
+        findings+=("the first ## heading is '${first_h2:-none}' - the audit is the plan's first section: ## Existence audit, one row per claim, each with a verdict cell")
+    else
+        rows=$(awk '
+            /^##[[:space:]]+Existence[[:space:]]+audit/ { t = 1; next }
+            /^##/ { t = 0 }
+            t && /^\|/ { print }
+        ' "$file" | grep -Ev '^[[:space:]]*\|[-: |]*\|[[:space:]]*$')
+        rows=$(printf '%s\n' "$rows" | tail -n +2)
+        if [[ -z "${rows//[[:space:]]/}" ]]; then
+            findings+=("the Existence audit table has no rows - one row per claim the plan rests on, each with a verdict cell starting exists, absent, partial or unanswered")
+        else
+            local rn=0
+            while IFS= read -r row; do
+                [[ -z "$row" ]] && continue
+                rn=$((rn+1))
+                verdict=$(printf '%s\n' "$row" | awk -F'|' '
+                    {
+                        for (i = 2; i < NF; i++) {
+                            c = $i; gsub(/^[[:space:]]+|[[:space:]]+$/, "", c)
+                            s = c; sub(/^[^A-Za-z]*/, "", s)
+                            if (s ~ /^(exists|absent|partial|unanswered)/) {
+                                e = $(i+1); gsub(/^[[:space:]]+|[[:space:]]+$/, "", e)
+                                print s "\t" e
+                                exit
+                            }
+                        }
+                        print "\t"
+                    }
+                ')
+                if [[ -z "${verdict%%$'\t'*}" ]]; then
+                    findings+=("Existence audit row $rn has no verdict cell - start one cell with exists, absent, partial or unanswered")
+                elif [[ "${verdict%%$'\t'*}" == "absent" && "${verdict#*$'\t'}" != *after* ]]; then
+                    findings+=("Existence audit row $rn reads absent but its evidence names no confirming search - an index never makes a zero trustworthy, so the evidence cell states 'after <exact command>'")
+                fi
+            done <<< "$rows"
+        fi
+    fi
+
+    created=$(_plan_created_date "$file")
+    local f
+    for f in ${findings[@]+"${findings[@]}"}; do
+        if [[ "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && [[ "$created" > "$code_index_gate_date" ]]; then
+            error "$label: $f"
+        else
+            warn "$label: $f (created ${created:-unknown}, not after the $code_index_gate_date gate)"
+        fi
+    done
+}
+
+echo ""
+echo "--- Code Index Audit ---"
+
+if [[ -f "$PLAN_DIR" ]]; then
+    check_code_index_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"
+elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
+    check_code_index_file "$PLAN_DIR/00-INDEX.md" "$(basename "$PLAN_DIR")/00-INDEX.md"
+fi
+
+# -------------------------------------------------------------------
 # Check 6c: Wave section headers (parity with Execution Strategy YAML)
 # -------------------------------------------------------------------
 echo ""
