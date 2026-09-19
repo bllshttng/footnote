@@ -10,7 +10,7 @@ The card label leads with the id, then the slug: `<id> <slug>`. The id is the ha
 
 A claim flips a card to in-flight without a graph write. The sideline folds the live claim store every tick (`fno-agents claim sweep`). The claim lockfile outranks the graph's status field.
 
-A PR row names the session driving it. An agents-section row carrying a PR shows `attach <short id>` beside its name (its own session id, live or exited alike). A PR row with no session id says `no session`.
+A PR row names the session driving it. An agents-section row carrying a PR shows `attach <short id>` beside its name, joined server-side from the graph: the live claim holder's session, else the node's last do or ship session from `sessions[]`. A PR row whose node records no session says `no session`.
 
 ## The scope
 

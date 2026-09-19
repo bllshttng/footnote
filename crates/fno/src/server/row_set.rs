@@ -28,6 +28,19 @@ impl Core {
             let node_id = agents_view::resolve_node_id(name, &self.backlog_pr)?;
             self.backlog_pr.get(&node_id).copied()
         };
+        // The attach handle joins through the SAME node resolution the pr
+        // join uses: a row only shows an attach handle when it shows a pr.
+        let session_from_name = |name: &str| -> Option<String> {
+            let node_id = agents_view::resolve_node_id(name, &self.backlog_pr)?;
+            self.backlog_driver.get(&node_id).cloned()
+        };
+        let session_by_holder: HashMap<&str, String> = self
+            .backlog_holders
+            .iter()
+            .filter_map(|(node, holder)| {
+                self.backlog_driver.get(node).map(|d| (holder.as_str(), d.clone()))
+            })
+            .collect();
         // 1. Pane rows: one per live tab leaf, deterministic (squad -> tab ->
         //    pane order). Iterating the tree (not `self.agents`) is what makes a
         //    bare shell pane a first-class row.
@@ -107,6 +120,8 @@ impl Core {
                                 updated_at: a.updated_at,
                                 pr: pr_from_name(&a.name)
                                     .or_else(|| pr_by_holder.get(a.name.as_str()).copied()),
+                                pr_session_short: session_from_name(&a.name)
+                                    .or_else(|| session_by_holder.get(a.name.as_str()).cloned()),
                                 tail: self.compose_tail(a),
                                 crown_level: a.crown_level,
                                 crown_scope: a.crown_scope.clone(),
@@ -181,6 +196,7 @@ impl Core {
                                 last_activity_age_s: e.map(|e| e.last_output.elapsed().as_secs()),
                                 updated_at: None,
                                 pr: None,
+                                pr_session_short: None,
                                 tail: None,
                                 // A bare shell pane has no registry entry, so
                                 // no crown and no reachability probe either.
@@ -271,6 +287,8 @@ impl Core {
                         updated_at: a.updated_at,
                         pr: pr_from_name(&a.name)
                             .or_else(|| pr_by_holder.get(a.name.as_str()).copied()),
+                        pr_session_short: session_from_name(&a.name)
+                            .or_else(|| session_by_holder.get(a.name.as_str()).cloned()),
                         tail: self.compose_tail(a),
                         crown_level: a.crown_level,
                         crown_scope: a.crown_scope.clone(),
@@ -338,6 +356,8 @@ impl Core {
                         updated_at: a.updated_at,
                         pr: pr_from_name(&a.name)
                             .or_else(|| pr_by_holder.get(a.name.as_str()).copied()),
+                        pr_session_short: session_from_name(&a.name)
+                            .or_else(|| session_by_holder.get(a.name.as_str()).cloned()),
                         tail: self.compose_tail(a),
                         crown_level: a.crown_level,
                         crown_scope: a.crown_scope.clone(),
@@ -486,6 +506,7 @@ impl Core {
                 // those cells stay EMPTY rather than inferred (AC4-ERR).
                 updated_at: None,
                 pr: None,
+                pr_session_short: None,
                 tail: None,
                 // An external-daemon row is not an fno-registry worker: no
                 // crown, and its liveness lives in its own daemon, so no

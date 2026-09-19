@@ -7807,13 +7807,12 @@ impl View {
                     if let Some(idx) = a.portal {
                         text.push_str(&format!(" ◫{idx}"));
                     }
-                    // A PR row names the session driving it: the attach
-                    // handle with its short id (live or exited alike).
+                    // A PR row names the session driving it (the server's
+                    // graph join: the live claim holder's session, else the
+                    // node's last do/ship session); no session id says so.
                     if a.pr.is_some() {
-                        match a.harness_session_id.as_deref() {
-                            Some(sid) => {
-                                text.push_str(&format!(" attach {}", sid.get(..8).unwrap_or(sid)))
-                            }
+                        match a.pr_session_short.as_deref() {
+                            Some(sid) => text.push_str(&format!(" attach {sid}")),
                             None => text.push_str(" no session"),
                         }
                     }

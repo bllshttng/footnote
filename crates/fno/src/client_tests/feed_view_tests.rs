@@ -95,7 +95,7 @@ fn joined_row(name: &str, cwd_base: Option<&str>, pane: Option<u64>) -> AgentRow
         tab: None,
         account: None,
         updated_at: None,
-        pr: None,
+        pr: None,        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,

@@ -5122,6 +5122,7 @@ fn agent_rows_join_pr_from_holder_map() {
     core.agents = vec![worker, bg_row("holder-only", "/x", None)];
     core.backlog_holders = HashMap::from([("x-9c5f".to_string(), "holder-only".to_string())]);
     core.backlog_pr = HashMap::from([("x-dae5".to_string(), 999), ("x-9c5f".to_string(), 385)]);
+    core.backlog_driver = HashMap::from([("x-dae5".to_string(), "09234474".to_string())]);
     let rows = core.agent_rows();
     let joined = rows
         .iter()
@@ -5129,8 +5130,13 @@ fn agent_rows_join_pr_from_holder_map() {
         .unwrap();
     assert_eq!(joined.pr, Some(999));
     assert_eq!(joined.updated_at, Some(42));
+    // The attach handle joins through the same node resolution as the pr:
+    // the row names the driving session even when its own session id differs.
+    assert_eq!(joined.pr_session_short.as_deref(), Some("09234474"));
     let fallback = rows.iter().find(|r| r.name == "holder-only").unwrap();
     assert_eq!(fallback.pr, Some(385));
+    // No driver map entry behind the fallback's pr: the row says so.
+    assert_eq!(fallback.pr_session_short, None);
 }
 
 #[test]
@@ -8913,6 +8919,7 @@ fn empty_core() -> Core {
         backlog_stale: false,
         backlog_holders: HashMap::new(),
         backlog_pr: HashMap::new(),
+        backlog_driver: HashMap::new(),
         missions: backlog_view::MissionMap::default(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),

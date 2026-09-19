@@ -326,7 +326,9 @@ fn default_true() -> bool {
 /// v85: `Command::DispatchPlan`, the card menu's Plan entry - the dispatch
 /// door pinned to the architect agent and the blueprint message; floor
 /// stays 58.
-pub const PROTO_VERSION: u32 = 85;
+/// v86: `AgentRow.pr_session_short` (serde default), the server-joined
+/// driving-session short id behind a PR row's attach handle; floor stays 58.
+pub const PROTO_VERSION: u32 = 86;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1299,6 +1301,13 @@ pub struct AgentRow {
     /// v48 reader wire-tolerant (defaults false = today's behavior).
     #[serde(default)]
     pub resumable: bool,
+    /// (v86) The driving session's SHORT id for a PR row, resolved
+    /// server-side from the graph (the live claim holder's session, else
+    /// the node's last do/ship session). The PR row's attach handle; `None`
+    /// = no session known, and the row says so. `#[serde(default)]` keeps a
+    /// v85 reader wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_session_short: Option<String>,
     /// (v54) Why the row reaches the final paneless notice branch. This is
     /// derived from the registry's authoritative harness/session fields on
     /// the server; `None` means the row is pane-hosted, attachable, synthetic,
@@ -4097,7 +4106,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 84);
+        assert_eq!(PROTO_VERSION, 86);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
@@ -4442,6 +4451,7 @@ mod tests {
                         resumable: false,
                         no_pane_reason: None,
                         pane_activity: None,
+                        pr_session_short: None,
                     },
                     AgentRow {
                         spawned_by_name: None,
@@ -4483,6 +4493,7 @@ mod tests {
                         resumable: false,
                         no_pane_reason: None,
                         pane_activity: None,
+                        pr_session_short: None,
                     },
                 ],
                 focus_node: Some("x-cccc".into()),

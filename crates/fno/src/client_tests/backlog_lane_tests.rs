@@ -14,7 +14,9 @@ fn a_pr_row_names_the_session_driving_it() {
     // id of its driving session; no session id reads "no session".
     let mut a = blocked_row("w1", 3, None);
     a.pr = Some(9);
-    a.harness_session_id = Some("09234474-8893-44d5-9f65-10dd0e2e353a".into());
+    // The server joins the driving session's short id from the graph: the
+    // live claim holder's session, else the node's last do/ship session.
+    a.pr_session_short = Some("09234474".into());
     let view = view_with_agents(vec![a]);
     let frame = view.compose();
     let text = frame_text(&frame);
@@ -25,7 +27,7 @@ fn a_pr_row_names_the_session_driving_it() {
 
     let mut b = blocked_row("w2", 4, None);
     b.pr = Some(10);
-    b.harness_session_id = None;
+    b.pr_session_short = None;
     let view = view_with_agents(vec![b]);
     let text = frame_text(&view.compose());
     assert!(

@@ -1008,6 +1008,8 @@ pub(crate) enum CoreMsg {
         holders: HashMap<String, String>,
         /// node id -> pr_number, from the same graph read as `cards`.
         prs: HashMap<String, u64>,
+        /// node id -> driving session short id, from the same graph read.
+        drivers: HashMap<String, String>,
         /// Active missions, from the same graph read as `cards`.
         missions: backlog_view::MissionMap,
     },
@@ -2017,6 +2019,9 @@ pub(crate) struct Core {
     /// layout time (holder name -> node -> pr) into `AgentRow.pr` for the peek
     /// header's `PR #N` label.
     backlog_pr: HashMap<String, u64>,
+    /// node id -> driving session short id; joined at layout time into
+    /// `AgentRow.pr_session_short` (the PR row's attach handle).
+    backlog_driver: HashMap<String, String>,
     /// Active missions, from the off-loop graph reader; grouped into
     /// synthetic "mission squad" headers at layout time.
     missions: backlog_view::MissionMap,
@@ -13251,6 +13256,7 @@ impl Core {
                 stale,
                 holders,
                 prs,
+                drivers,
                 missions,
             } => {
                 // Same as AgentRows: only sideline data moved, so push the
@@ -13260,6 +13266,7 @@ impl Core {
                 self.backlog_stale = stale;
                 self.backlog_holders = holders;
                 self.backlog_pr = prs;
+                self.backlog_driver = drivers;
                 self.missions = missions;
                 self.push_layout(false);
                 Flow::Continue
@@ -13566,6 +13573,7 @@ async fn serve(
         backlog_stale: false,
         backlog_holders: HashMap::new(),
         backlog_pr: HashMap::new(),
+        backlog_driver: HashMap::new(),
         missions: backlog_view::MissionMap::default(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
