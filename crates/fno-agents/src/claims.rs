@@ -4617,9 +4617,9 @@ mod tests {
     }
 
     #[test]
-    fn events_lock_corpse_is_stolen_within_the_daemon_budget() {
-        // AC5-ERR: the 2s hot-path budget still holds -- a corpse is stolen on
-        // the first spin rather than burning the whole deadline.
+    fn events_write_lands_beside_a_corpse_lock() {
+        // The store commit is the write boundary: a stale lock dir beside the
+        // journal neither blocks nor gets touched by an append.
         let td = TempDir::new().unwrap();
         let events = td.path().join(".fno/events.jsonl");
         std::fs::create_dir_all(events.parent().unwrap()).unwrap();
@@ -4630,13 +4630,12 @@ mod tests {
         let started = Instant::now();
         let res = append_event_line(
             &events,
-            &json!({"ts": "2026-01-01T00:00:00Z", "source": "test", "type": "x"}),
+            &json!({"ts": "2026-01-01T00:00:00Z", "source": "test", "type": "x", "data": {}}),
             Duration::from_secs(2),
         );
 
         assert!(res.is_ok(), "{res:?}");
         assert!(started.elapsed() < Duration::from_secs(2));
-        assert!(!lock.exists());
         assert_eq!(committed_row_count(&events), 1);
     }
 
@@ -4669,8 +4668,9 @@ mod tests {
     }
 
     #[test]
-    fn events_lock_fresh_contention_still_times_out() {
-        // AC2-EDGE: honest contention keeps today's log-and-skip behavior.
+    fn events_write_lands_despite_a_fresh_foreign_lock() {
+        // The store serializes writers in SQL: a live-looking lock dir beside
+        // the journal is foreign state an append neither waits on nor drops.
         let td = TempDir::new().unwrap();
         let events = td.path().join(".fno/events.jsonl");
         std::fs::create_dir_all(events.parent().unwrap()).unwrap();
@@ -4678,11 +4678,12 @@ mod tests {
 
         let res = append_event_line(
             &events,
-            &json!({"ts": "t", "type": "x"}),
+            &json!({"ts": "2026-01-01T00:00:00Z", "source": "test", "type": "x", "data": {}}),
             Duration::from_secs(2),
         );
 
-        assert!(res.is_err(), "fresh lock was stolen");
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(committed_row_count(&events), 1);
     }
 
     #[test]
@@ -4701,7 +4702,7 @@ mod tests {
         let writer = std::thread::spawn(move || {
             append_event_line(
                 &writer_path,
-                &json!({"ts": "2026-01-01T00:00:00Z", "source": "test", "type": "handoff"}),
+                &json!({"ts": "2026-01-01T00:00:00Z", "source": "test", "type": "handoff", "data": {}}),
                 Duration::from_secs(5),
             )
         });
@@ -4710,15 +4711,10 @@ mod tests {
         std::os::unix::fs::symlink(&canonical, &local).unwrap();
         std::fs::remove_dir_all(&local_lock).unwrap();
 
-        std::thread::sleep(Duration::from_millis(200));
-        assert_eq!(
-            std::fs::metadata(&canonical).unwrap().len(),
-            0,
-            "writer bypassed the canonical mutex after the symlink handoff"
-        );
-
         std::fs::remove_dir_all(&canonical_lock).unwrap();
         writer.join().unwrap().unwrap();
+        // The store resolves the symlinked leaf: the row commits behind the
+        // canonical path, not beside the symlink.
         assert_eq!(committed_row_count(&canonical), 1);
     }
 
@@ -4784,7 +4780,7 @@ mod tests {
                 std::thread::spawn(move || {
                     append_event_line(
                         &events,
-                        &json!({"ts": "2026-01-01T00:00:00Z", "source": "test", "type": "x", "i": i}),
+                        &json!({"ts": "2026-01-01T00:00:00Z", "source": "test", "type": "x", "data": {"i": i}}),
                         // The assertion is that all four lines land whole with
                         // one rename winner, never that they land fast, so the
                         // budget is generous. But it must EXCEED STALE_MUTEX_STEAL,

@@ -12596,7 +12596,7 @@ mod tests {
         let p = dir.path().join("events.jsonl");
         std::fs::write(
             &p,
-            attestation_line_on_branch("code-review", "oldhead", "pass", "feature/x"),
+            attestation_line_on_branch("code-review", "oldhead", "pass", "feature/x") + "\n",
         )
         .unwrap();
         let reviewers = vec!["code-review".to_string()];
@@ -14493,7 +14493,7 @@ git_bounded();";
                 line("BBB", "pass"),
                 line("BBB", "fail"),
             ]
-            .join("\n"),
+            .join("\n") + "\n",
         )
         .unwrap();
         let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC", "feature/x");
@@ -14524,7 +14524,7 @@ git_bounded();";
                 line("BBB", "fail"),
                 line("AAA", "fail"),
             ]
-            .join("\n"),
+            .join("\n") + "\n",
         )
         .unwrap();
         let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC", "feature/x");
@@ -14545,6 +14545,7 @@ git_bounded();";
                 r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
                 "\n",
                 r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail","branch":"feature/x"}}"#,
+                "\n",
             ),
         )
         .unwrap();
@@ -14568,7 +14569,12 @@ git_bounded();";
             ),
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW", "feature/x");
+        let out = unattested_reviewers(
+            &tmp.path().join("e2.jsonl"),
+            &["sigma".to_string()],
+            "NEW",
+            "feature/x",
+        );
         assert_eq!(out[0].superseded_head.as_deref(), Some("OLD"));
     }
 
