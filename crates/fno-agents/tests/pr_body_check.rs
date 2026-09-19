@@ -70,7 +70,8 @@ fn run_verb(cwd: &Path, extra: &[&str]) -> (i32, String, String) {
 
 fn run_verb_with_stdin(cwd: &Path, extra: &[&str], stdin: Option<&str>) -> (i32, String, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_fno-agents"));
-    cmd.args(["pr-body-check"])
+    cmd.envs(fno_agents::test_run::self_owner_env())
+        .args(["pr-body-check"])
         .arg("--cwd")
         .arg(cwd)
         .args(extra)
