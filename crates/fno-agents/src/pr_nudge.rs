@@ -280,7 +280,10 @@ pub fn apply(
             );
         }
         NudgeAction::Mail | NudgeAction::Resume => {
-            let text = nudge_text(row, runner);
+            // One read serves the text; the red-head rung (task 1.2) reads
+            // it once in build_input instead.
+            let status = read_status(row, runner);
+            let text = nudge_text(row, &status);
             let resume_argv = vec![
                 "fno".to_string(),
                 "agents".to_string(),
@@ -376,9 +379,11 @@ fn escalation_text(marker: &str, sid: &str, undelivered: u32) -> String {
     )
 }
 
-/// The nudge body: the order to drive, plus the PR's own verdict line so
-/// the session sees the state without a round trip.
-fn nudge_text(row: &OpenPrRow, runner: Runner) -> String {
+/// The PR-status read: exit-blind. The verb writes its JSON payload to
+/// stdout whatever the exit (exit 1 IS the red verdict), so the reader
+/// keeps the last non-empty stdout line that parses as a JSON object and
+/// reports the exit code only when no line parses.
+fn read_status(row: &OpenPrRow, runner: Runner) -> Result<Value, i32> {
     let argv = vec![
         "fno".to_string(),
         "do".to_string(),
@@ -387,22 +392,154 @@ fn nudge_text(row: &OpenPrRow, runner: Runner) -> String {
         row.pr.to_string(),
     ];
     let (code, stdout) = runner(&argv, &row.cwd);
-    let line = if code == 0 {
-        stdout
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty())
-            .unwrap_or_default()
-            .to_string()
-    } else {
-        format!("pr status unread (exit {code})")
+    // Reverse scan: the payload is the last JSON object line on stdout.
+    let mut parsed = None;
+    for line in stdout.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+            if v.is_object() {
+                parsed = Some(v);
+                break;
+            }
+        }
+    }
+    parsed.ok_or(code)
+}
+
+/// The head whose settled red this payload names, when it names one: an
+/// OPEN, settled, red payload with a non-empty head. Every other payload
+/// buys no red wake.
+fn settled_red_head(payload: &Value) -> Option<String> {
+    let head = payload.get("head").and_then(Value::as_str)?;
+    if head.is_empty() {
+        return None;
+    }
+    match (
+        payload.get("verdict").and_then(Value::as_str),
+        payload.get("settled").and_then(Value::as_bool),
+        payload.get("pr_state").and_then(Value::as_str),
+    ) {
+        (Some("red"), Some(true), Some("OPEN")) => Some(head.to_string()),
+        _ => None,
+    }
+}
+
+/// The nudge body: the order to drive, plus the PR's own verdict, head and
+/// failing checks so the session starts the fix round without a round
+/// trip.
+fn nudge_text(row: &OpenPrRow, status: &Result<Value, i32>) -> String {
+    let pr = row.pr;
+    let node = &row.node;
+    match status {
+        Err(code) => format!(
+            "continue: PR #{pr} on node {node} is open and not merged. Drive it to merge. \
+             fno do pr status {pr}: pr status unread (exit {code})"
+        ),
+        Ok(payload) => {
+            let verdict = payload
+                .get("verdict")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let settled = payload
+                .get("settled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let head = payload
+                .get("head")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let head12: String = head.chars().take(12).collect();
+            let failures = render_failures(payload, pr);
+            if settled && verdict == "red" && settled_red_head(payload).is_some() {
+                format!(
+                    "continue: PR #{pr} on node {node} settled red at {head12}. \
+                     Fix the failing checks, push, and drive it to merge. Failing: {failures}"
+                )
+            } else {
+                let mut text = format!(
+                    "continue: PR #{pr} on node {node} is open and not merged. Drive it to merge. \
+                     fno do pr status {pr}: {verdict} {} @ {head12}",
+                    if settled { "settled" } else { "unsettled" }
+                );
+                if !failures.is_empty() {
+                    text.push_str(". Failing: ");
+                    text.push_str(&failures);
+                }
+                text
+            }
+        }
+    }
+}
+
+/// The failing checks as one ` | `-joined string. A settled red with no
+/// failure detail points at the verb; any other shape renders empty so the
+/// caller skips the suffix.
+fn render_failures(payload: &Value, pr: u64) -> String {
+    let Some(items) = payload.get("failures").and_then(Value::as_array) else {
+        if settled_red_head(payload).is_some() {
+            return format!("see `fno do pr status {pr}`");
+        }
+        return String::new();
     };
-    format!(
-        "continue: PR #{pr} on node {node} is open and not merged. Drive it to merge. \
-         fno do pr status {pr}: {line}",
-        pr = row.pr,
-        node = row.node,
-    )
+    let rendered: Vec<String> = items.iter().map(failure_item).collect();
+    if rendered.is_empty() {
+        if settled_red_head(payload).is_some() {
+            return format!("see `fno do pr status {pr}`");
+        }
+        return String::new();
+    }
+    rendered.join(" | ")
+}
+
+/// One failing check as one backticked span, at most 160 characters:
+/// `<check> [<step>]: <first_error>`, with `...` marking a cut error.
+fn failure_item(entry: &Value) -> String {
+    const MAX: usize = 160;
+    let check = entry.get("check").and_then(Value::as_str).unwrap_or("?");
+    let step = entry
+        .get("step")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut body = String::from(check);
+    if !step.is_empty() {
+        body.push_str(" [");
+        body.push_str(step);
+        body.push(']');
+    }
+    if let Some(err) = entry
+        .get("first_error")
+        .and_then(Value::as_str)
+        .and_then(clean_first_error)
+    {
+        // item = backtick + body + ": " + err + backtick <= 160.
+        let budget = MAX.saturating_sub(4 + body.chars().count());
+        if err.chars().count() <= budget {
+            body.push_str(": ");
+            body.push_str(&err);
+        } else if budget >= 8 {
+            let cut: String = err.chars().take(budget - 3).collect();
+            body.push_str(": ");
+            body.push_str(&cut);
+            body.push_str("...");
+        }
+    }
+    if body.chars().count() > MAX - 2 {
+        let cut: String = body.chars().take(MAX - 5).collect();
+        body = format!("{cut}...");
+    }
+    format!("`{body}`")
+}
+
+/// The error line for one item: ANSI stripped, first non-empty line,
+/// backticks removed.
+fn clean_first_error(err: &str) -> Option<String> {
+    crate::claude_ask::strip_ansi_csi(err)
+        .lines()
+        .map(|l| l.trim().replace('`', ""))
+        .find(|l| !l.is_empty())
 }
 
 /// Does an already-open operator question carry this marker? Same read the
@@ -611,6 +748,22 @@ mod tests {
         }
     }
 
+    /// The status payload the real verb writes to stdout whatever the exit
+    /// (`_status.py` writes the human line to stderr, the JSON to stdout).
+    fn status_payload(verdict: &str, settled: bool, head: &str) -> String {
+        format!(
+            "{{\"pr\":\"1943\",\"pr_state\":\"OPEN\",\"verdict\":\"{verdict}\",\
+             \"settled\":{settled},\"head\":\"{head}\"}}"
+        )
+    }
+
+    fn status_with_failures(verdict: &str, settled: bool, head: &str, failures: &str) -> String {
+        format!(
+            "{{\"pr\":\"1943\",\"pr_state\":\"OPEN\",\"verdict\":\"{verdict}\",\
+             \"settled\":{settled},\"head\":\"{head}\",\"failures\":{failures}}}"
+        )
+    }
+
     /// The last event of `kind` on this home's log, framed `{ts, type,
     /// source, data}` by the unified envelope.
     fn last_event(home: &AgentsHome, kind: &str) -> Value {
@@ -629,7 +782,7 @@ mod tests {
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
             text_runner_calls.push(argv.to_vec());
             if argv.contains(&"do".to_string()) {
-                (0, "1943 OPEN pending\n".into())
+                (0, status_payload("pending", false, "0123456789abcdef"))
             } else if argv.contains(&"send".to_string()) {
                 (0, "msg-1 delivered (hosted)\n".into())
             } else {
@@ -655,7 +808,7 @@ mod tests {
         assert_eq!(mail[1], "agents");
         assert_eq!(mail[3], "send");
         assert!(mail[5].contains("PR #1943"));
-        assert!(mail[5].contains("1943 OPEN pending"));
+        assert!(mail[5].contains("pending unsettled @ 0123456789ab"));
         let saved = load_state(&home, &row(true).session_id);
         assert_eq!(saved.attempts, 1);
         assert_eq!(saved.undelivered, 0);
@@ -749,7 +902,7 @@ mod tests {
         let mut saw_resume = false;
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
             if argv.contains(&"do".to_string()) {
-                return (0, "1943 OPEN pending\n".into());
+                return (0, status_payload("pending", false, "0123456789abcdef"));
             }
             if argv.contains(&"send".to_string()) {
                 mail_text = Some(argv[5].clone());
@@ -796,7 +949,7 @@ mod tests {
         let mut saw_resume = false;
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
             if argv.contains(&"do".to_string()) {
-                return (0, "1943 OPEN pending\n".into());
+                return (0, status_payload("pending", false, "0123456789abcdef"));
             }
             if argv.contains(&"send".to_string()) {
                 return (0, String::new());
@@ -832,7 +985,7 @@ mod tests {
         let mut saw_resume = false;
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
             if argv.contains(&"do".to_string()) {
-                return (0, "1943 OPEN pending\n".into());
+                return (0, status_payload("pending", false, "0123456789abcdef"));
             }
             if argv.contains(&"send".to_string()) {
                 return (7, "boom\n".into());
@@ -868,7 +1021,7 @@ mod tests {
         // not land, and the escalation must be able to say so.
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
             if argv.contains(&"do".to_string()) {
-                return (0, "1943 OPEN pending\n".into());
+                return (0, status_payload("pending", false, "0123456789abcdef"));
             }
             if argv.contains(&"send".to_string()) {
                 return (0, "msg-1 queued (durable) [live-miss]\n".into());
@@ -904,7 +1057,7 @@ mod tests {
         // confirm the landing, so both take the sticky rung.
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
             if argv.contains(&"do".to_string()) {
-                return (0, "1943 OPEN pending\n".into());
+                return (0, status_payload("pending", false, "0123456789abcdef"));
             }
             if argv.contains(&"send".to_string()) {
                 return (0, "msg-1 appended (durable) to thread-t1\n".into());
@@ -1094,5 +1247,113 @@ mod tests {
         save_state(&home, "../evil", &st);
         assert_eq!(load_state(&home, "../evil"), LadderState::default());
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn settled_red_names_the_verdict_and_the_failing_checks() {
+        // AC4-ERR, AC6-EDGE: exit 1 IS the red verdict - the payload on
+        // stdout carries it. Each failing item renders as one clean
+        // backticked span: no ANSI, no inner backtick, second line dropped.
+        let r = row(true);
+        let out = status_with_failures(
+            "red",
+            true,
+            "abcdef1234567890",
+            r#"[{"check":"ci / test","step":"Run tests","first_error":"\u001b[31mexpected 200, got 401\nshould retry `now`"}]"#,
+        );
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            if argv.contains(&"do".to_string()) {
+                (1, out.clone())
+            } else {
+                (0, String::new())
+            }
+        };
+        let status = read_status(&r, &mut runner);
+        let text = nudge_text(&r, &status);
+        assert!(text.contains("settled red at abcdef123456"), "{text}");
+        assert!(
+            text.contains("Failing: `ci / test [Run tests]: expected 200, got 401`"),
+            "{text}"
+        );
+        assert!(!text.contains("pr status unread"), "{text}");
+        assert!(!text.contains('\u{1b}'), "{text}");
+        assert!(!text.contains("should retry"), "{text}");
+    }
+
+    #[test]
+    fn a_long_first_error_is_cut_inside_one_span() {
+        // AC6-EDGE: every failing item stays one span of at most 160
+        // characters, with `...` at the cut.
+        let r = row(true);
+        let err = "x".repeat(400);
+        let out = status_with_failures(
+            "red",
+            true,
+            "abcdef1234567890",
+            &format!(r#"[{{"check":"ci","first_error":"{err}"}}]"#),
+        );
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            if argv.contains(&"do".to_string()) {
+                (1, out.clone())
+            } else {
+                (0, String::new())
+            }
+        };
+        let status = read_status(&r, &mut runner);
+        let text = nudge_text(&r, &status);
+        let items = text.split("Failing: ").nth(1).unwrap();
+        for item in items.split(" | ") {
+            assert!(item.chars().count() <= 160, "{item}");
+            assert!(item.ends_with("...`"), "{item}");
+            assert!(item.starts_with('`'), "{item}");
+        }
+    }
+
+    #[test]
+    fn an_unparseable_status_read_keeps_the_unread_line() {
+        // AC4-ERR: empty stdout with exit 1. The old line stands, and no
+        // red head is read.
+        let r = row(true);
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            if argv.contains(&"do".to_string()) {
+                (1, String::new())
+            } else {
+                (0, String::new())
+            }
+        };
+        let status = read_status(&r, &mut runner);
+        assert!(matches!(status, Err(1)));
+        let text = nudge_text(&r, &status);
+        assert!(text.contains("pr status unread (exit 1)"), "{text}");
+    }
+
+    #[test]
+    fn other_payloads_render_the_verdict_shape() {
+        // AC4-ERR: a pending (exit 2) payload names the verdict and head.
+        // A red payload that is not settled-OPEN keeps the generic shape
+        // and still appends its failures.
+        let r = row(true);
+        let pending = status_payload("pending", false, "0123456789abcdef");
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            if argv.contains(&"do".to_string()) {
+                (2, pending.clone())
+            } else {
+                (0, String::new())
+            }
+        };
+        let text = nudge_text(&r, &read_status(&r, &mut runner));
+        assert!(text.contains("pending unsettled @ 0123456789ab"), "{text}");
+        let unsettled_red =
+            status_with_failures("red", false, "abcdef1234567890", r#"[{"check":"ci"}]"#);
+        let mut runner2 = |argv: &[String], _cwd: &str| -> (i32, String) {
+            if argv.contains(&"do".to_string()) {
+                (1, unsettled_red.clone())
+            } else {
+                (0, String::new())
+            }
+        };
+        let text2 = nudge_text(&r, &read_status(&r, &mut runner2));
+        assert!(text2.contains("red unsettled @ abcdef123456"), "{text2}");
+        assert!(text2.contains(". Failing: `ci`"), "{text2}");
     }
 }
