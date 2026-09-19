@@ -141,11 +141,17 @@ case "$(uname -s)" in
 esac
 VIEWER_PID=$!
 sleep 3
-pgrep -f "session $S1" >/dev/null 2>&1 || log "note: viewer attach not visible to pgrep (continuing)"
+# Match the viewer client's own argv ($FNO immediately followed by
+# --session), never the pane's own session flag: every pane keeper is
+# ALSO launched with "--session $S1" in its argv (fno-agents-worker --pane
+# --sock ... --session $S1 --pane-key ...), so a bare "session $S1" pattern
+# reaps the keepers this very check exists to prove survive.
+VIEWER_PATTERN="$FNO --session $S1"
+pgrep -f "$VIEWER_PATTERN" >/dev/null 2>&1 || log "note: viewer attach not visible to pgrep (continuing)"
 kill -9 "$VIEWER_PID" 2>/dev/null
 sleep 2
-if pgrep -f "session $S1" >/dev/null 2>&1; then
-  pkill -9 -f "session $S1" 2>/dev/null
+if pgrep -f "$VIEWER_PATTERN" >/dev/null 2>&1; then
+  pkill -9 -f "$VIEWER_PATTERN" 2>/dev/null
   log "note: the attach child outlived its pty wrapper and was killed"
 fi
 sleep 1
