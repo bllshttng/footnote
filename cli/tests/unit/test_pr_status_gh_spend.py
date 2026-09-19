@@ -9,7 +9,10 @@ logs with no smoke-runner lines, and the review, coverage, hold and lane
 probes stubbed):
 
 - a cache miss spends at most 15 spawns (2 PR reads, 1 check-runs page, 1
-  runs listing, 1 combined status, 5 logs, 5 job objects);
+  runs listing, 1 combined status, 5 logs, 5 job objects), plus 5
+  fno-agents cause reads that are counted as their own class (the binary is
+  a subprocess spawn, never a gh one, and its internal gh reads ride the
+  op's own bounds);
 - a second read inside the TTL spends exactly 1, the head read;
 - a same-head refresh past the TTL spends at most 5 with 0 log and 0
   job-object reads - failure detail reused by job id;
@@ -46,6 +49,11 @@ class _FakeGh:
     def __call__(self, cmd, **kwargs):
         argv = [str(a) for a in cmd]
         self.argvs.append(argv)
+        # The fno-agents binary is a subprocess spawn but not a gh spawn:
+        # answer its op receipts so the read behaves as it would against the
+        # real binary, and let the classifier count the class separately.
+        if argv[0].endswith("fno-agents"):
+            return self._agents_answer(argv, kwargs)
         path = next((a for a in argv[2:] if not a.startswith("-")), "")
         if re.search(r"/pulls/\d+$", path):
             return self._json(self.world["pr"])
@@ -74,6 +82,24 @@ class _FakeGh:
     def _json(self, payload) -> SimpleNamespace:
         return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
 
+    def _agents_answer(self, argv, kwargs) -> SimpleNamespace:
+        if argv[-1] != "authorized-merge":
+            return SimpleNamespace(returncode=1, stdout="", stderr=f"unexpected verb: {argv}")
+        try:
+            payload = json.loads(kwargs.get("input") or "{}")
+        except json.JSONDecodeError:
+            return SimpleNamespace(returncode=2, stdout="", stderr="bad payload")
+        op = payload.get("op")
+        if op == "status-failure-cause":
+            if "items" in payload:
+                return self._json({"items": [{"cause": None}] * len(payload["items"])})
+            return self._json({"cause": None, "source": "tail", "truncated": False})
+        if op == "status-merge-blocker":
+            return self._json(
+                {"state": None, "blockers": [], "missing_required_checks": None, "source": "fake"}
+            )
+        return SimpleNamespace(returncode=2, stdout="", stderr=f"unexpected op: {op}")
+
     def since(self, index: int) -> list[list[str]]:
         return self.argvs[index:]
 
@@ -88,9 +114,17 @@ def _classes(argvs: list[list[str]]) -> dict:
         "jobs": [],
         "attempts": 0,
         "attempt_jobs": 0,
+        "agents": [],
         "other": [],
     }
     for cmd in argvs:
+        # The fno-agents binary: a subprocess spawn, never a gh one. Its
+        # internal gh reads ride the op's own bounds and are invisible here -
+        # the class exists so a binary spawn can never masquerade as
+        # unclassified gh spend.
+        if cmd[0].endswith("fno-agents"):
+            c["agents"].append(cmd[-1] if cmd[1:] else "")
+            continue
         path = next((a for a in cmd[2:] if not a.startswith("-")), "")
         if re.search(r"/pulls/\d+$", path):
             c["pulls"] += 1
@@ -345,6 +379,9 @@ def test_f6_miss_sends_at_most_15_spawns(gh, capsys):
     assert c["pulls"] == 2 and c["checks"] == 1 and c["runs"] == 1 and c["status"] == 1
     assert len(c["logs"]) == 5 and len(c["jobs"]) == 5
     assert not c["other"]
+    # One fno-agents cause read per detailed failure (MAX_DETAILED_FAILURES),
+    # not a gh spawn: the class is bounded, never unclassified.
+    assert len(c["agents"]) == 5
     assert json.loads(capsys.readouterr().out)["verdict"] == "red"
 
 
