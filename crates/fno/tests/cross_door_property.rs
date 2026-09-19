@@ -118,11 +118,12 @@ impl Fleet {
             self.dir.join("graph.json"),
             format!(
                 r#"{{"entries": [
-                {{"id": "{NODE}", "type": "feature", "status": "done",
+                {{"id": "{NODE}", "slug": "{NODE}", "title": "{NODE}",
+                  "type": "feature", "status": "done", "priority": "p2",
                   "merge_status": "merged",
                   "sessions": [
-                    {{"session_id": "{U1}", "phase": "review"}},
-                    {{"session_id": "{U3}", "phase": "review"}}
+                    {{"session_id": "{U1}", "phase": "review", "harness": "claude"}},
+                    {{"session_id": "{U3}", "phase": "review", "harness": "claude"}}
                   ]}}
             ]}}"#
             ),

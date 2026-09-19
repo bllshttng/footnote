@@ -662,13 +662,19 @@ EOF
 chmod +x "$REAL_BIN/fno"
 payload="$(jq -cn --arg cwd "$REAL_REPO" '{cwd:$cwd,session_id:"owner-session",tool_name:"Bash",tool_input:{command:"gh pr create --fill"},tool_response:{stdout:"https://github.com/acme/widgets/pull/42"}}')"
 err="$(printf '%s' "$payload" | PATH="$REAL_BIN:$PATH" FNO_CONFIG="$REAL_CONFIG" CODEX_THREAD_ID= CLAUDE_PLUGIN_ROOT="$REPO_ROOT" bash "$HOOK" 2>&1 >/dev/null)"; rc=$?
-real_status="$(jq -r '.entries[0].status' "$REAL_GRAPH")"
+# The bind writes through the store (graph.json is only the fold-on-open
+# seed), so the reread goes through the store client, not the file.
+readback="$(uv run --project "$REPO_ROOT/cli" python -c "
+from fno.graph.store import read_graph_strict
+e = read_graph_strict('$REAL_GRAPH')[0]
+print(e['status'], e.get('pr_number'), e.get('locked_by'))
+")"
+real_status="${readback%% *}"
 if [[ "$rc" -eq 0 && "$real_status" == in_review \
-      && "$(jq -r '.entries[0].pr_number' "$REAL_GRAPH")" == 42 \
-      && "$(jq -r '.entries[0].locked_by' "$REAL_GRAPH")" == owner-session ]]; then
+      && "$readback" == *"42 owner-session"* ]]; then
   pass "T33 real PostToolUse binds the graph and removes the node from ready"
 else
-  fail "T33 rc=$rc status=$real_status graph=$(cat "$REAL_GRAPH") stderr=[$err]"
+  fail "T33 rc=$rc status=$real_status readback=[$readback] stderr=[$err]"
 fi
 rm -rf "$REAL_TMP"
 
