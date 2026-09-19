@@ -501,17 +501,19 @@ fn within_window(mtime: u64, days: u64, now: u64) -> bool {
 }
 
 /// The claude transcript store: `<projects>/<cwd-slug>/*.jsonl`, or every
-/// slug with `all_projects`. Paths ride
-/// [`crate::claude_drive::claude_projects_dir`] - the store `resume`/`adopt`
-/// already resolve, not a second guess.
+/// slug with `all_projects`. The projects root is resolved once by the
+/// caller (via [`crate::claude_drive::claude_projects_dir`]) and injected,
+/// so the fold reads the store `resume`/`adopt` already resolve and tests
+/// never mutate process env.
 pub(crate) struct ClaudeSource {
     pub(crate) cwd: PathBuf,
     pub(crate) all_projects: bool,
+    pub(crate) projects_dir: PathBuf,
 }
 
 impl ClaudeSource {
     fn session_dirs(&self) -> Vec<PathBuf> {
-        let base = crate::claude_drive::claude_projects_dir();
+        let base = self.projects_dir.clone();
         if self.all_projects {
             let mut dirs: Vec<PathBuf> = std::fs::read_dir(&base)
                 .into_iter()
@@ -618,8 +620,12 @@ impl TranscriptSource for ClaudeSource {
 }
 
 /// The codex transcript store: `$CODEX_HOME/sessions` rollout files through
-/// [`crate::codex_store`], the listing liveness already walks.
-pub(crate) struct CodexSource;
+/// [`crate::codex_store`], the listing liveness already walks. `sessions_dir`
+/// is the injected root (None resolves the env home); tests pin a fixture
+/// directory instead of mutating process env.
+pub(crate) struct CodexSource {
+    pub(crate) sessions_dir: Option<PathBuf>,
+}
 
 /// The rollout uuid: the 36-char id after the last `-` in
 /// `rollout-<ts>-<uuid>.jsonl`. A name that does not end in one falls back to
@@ -640,7 +646,15 @@ impl TranscriptSource for CodexSource {
     }
 
     fn sessions(&self, days: u64) -> Vec<SessionFile> {
-        crate::codex_store::codex_sessions(None, days)
+        crate::codex_store::codex_sessions(self.sessions_dir.as_deref(), days)
+            .into_iter()
+            .map(|s| SessionFile {
+                path: s.path,
+                session_id: s.session_id,
+                mtime: s.mtime_secs,
+                size: s.size,
+            })
+            .collect()
     }
 
     fn turns(&self, path: &Path) -> Vec<Turn> {
@@ -765,8 +779,9 @@ mod tests {
             user_row("and keep the worktree clean"),
             user_row("ship it when green"),
             user_row("<fno_mail from=\"p\" to=\"s\">run the sweep</fno_mail>"),
-            json!({"type": "user", "isMeta": true, "message": {"role": "user",
-                   "content": "Another Claude session sent a message:\n<teammate-message>hi</teammate-message>"}}),
+            user_row(
+                "Another Claude session sent a message:\n<teammate-message>hi</teammate-message>",
+            ),
             user_row("[cache-keepalive] Ping 2/4"),
         ];
         let mut counters: std::collections::BTreeMap<String, u64> =

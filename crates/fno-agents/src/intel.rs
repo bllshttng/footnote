@@ -207,8 +207,8 @@ fn session_join(fno_dir: &Path) -> HashMap<String, (Vec<String>, Option<String>,
                 }
             }
             if let (Some(sid), Some(node)) = (session, input) {
-                join.entry(sid)
-                    .or_insert_with(|| (vec![sid.clone()], Some(node), None));
+                let group = vec![sid.clone()];
+                join.entry(sid).or_insert_with(|| (group, Some(node), None));
             }
         }
     }
@@ -615,8 +615,9 @@ fn fold_all(
     let claude = ClaudeSource {
         cwd: cwd.to_path_buf(),
         all_projects,
+        projects_dir: crate::claude_drive::claude_projects_dir(),
     };
-    let codex = CodexSource;
+    let codex = CodexSource { sessions_dir: None };
     let sources: [&dyn TranscriptSource; 2] = [&claude, &codex];
     let mut rows: Vec<SessionRow> = Vec::new();
     for source in sources {
@@ -633,12 +634,14 @@ fn fold_all(
         "opencode".to_string(),
         "no transcript source registered yet".to_string(),
     );
+    let nodes = node_rows(&rows, &ctx.bus, now);
+    let totals = totals_of(&rows);
     Report {
         days,
         sessions: rows,
-        nodes: node_rows(&rows, &ctx.bus, now),
+        nodes,
         skipped,
-        totals: totals_of(&rows),
+        totals,
     }
 }
 
@@ -675,9 +678,6 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    /// Serializes env-var-mutating tests (see bash_census tests).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     const CLAUDE_SID: &str = "ccccdddd-1111-2222-3333-444455556666";
     const CODEX_SID: &str = "0f0e1d2c-3b4a-4958-8675-3092f4c1b2a3";
     const QUIET_SID: &str = "eeee1111-2222-4333-8444-555566667777";
@@ -707,8 +707,8 @@ mod tests {
         cwd: PathBuf,
     }
 
-    fn build_fixture() -> Fixture {
-        let dir = std::env::temp_dir().join(format!("fno-intel-test-{}", std::process::id()));
+    fn build_fixture(tag: &str) -> Fixture {
+        let dir = std::env::temp_dir().join(format!("fno-intel-test-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let cwd = PathBuf::from("/fixture/project");
@@ -797,16 +797,16 @@ mod tests {
         ];
         write_lines(&dir.join("events.jsonl"), &events);
 
-        std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, dir.join("claude"));
-        std::env::set_var("CODEX_HOME", dir.join("codex"));
-        std::env::set_var("FNO_BUS_DIR", dir.join("bus"));
         Fixture { dir, cwd }
     }
 
-    /// The fold over the fixture, claude + codex sources.
+    /// The fold over the fixture, claude + codex sources. The roots are
+    /// injected, never env: a full-suite run shares one process, and a
+    /// set_var here would leak into unrelated tests (the heal suite's
+    /// hermetic fence panics on a foreign CODEX_HOME).
     fn fold_fixture() -> (Fixture, Vec<SessionRow>) {
-        let fx = build_fixture();
-        let bus = BusIndex::load(&bus_log_path(&fx.dir));
+        let fx = build_fixture("folded");
+        let bus = BusIndex::load(&fx.dir.join("bus").join("messages.jsonl"));
         let ctx = FoldCtx {
             bus,
             join: session_join(&fx.dir),
@@ -817,8 +817,11 @@ mod tests {
         let claude = ClaudeSource {
             cwd: fx.cwd.clone(),
             all_projects: false,
+            projects_dir: fx.dir.join("claude"),
         };
-        let codex = CodexSource;
+        let codex = CodexSource {
+            sessions_dir: Some(fx.dir.join("codex").join("sessions")),
+        };
         let sources: [&dyn TranscriptSource; 2] = [&claude, &codex];
         let mut rows = Vec::new();
         for source in sources {
@@ -829,7 +832,6 @@ mod tests {
 
     #[test]
     fn the_fixture_folds_two_sessions_one_per_harness_with_every_counter() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let (_fx, rows) = fold_fixture();
         assert_eq!(rows.len(), 2, "one claude + one codex row");
         let claude = rows.iter().find(|r| r.harness == "claude").unwrap();
@@ -856,7 +858,6 @@ mod tests {
 
     #[test]
     fn a_bus_row_absent_from_the_transcript_reports_undelivered() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let (_fx, rows) = fold_fixture();
         let codex = rows.iter().find(|r| r.harness == "codex").unwrap();
         let undelivered = codex.relay.iter().find(|f| f.id == "msg-11").unwrap();
@@ -868,8 +869,7 @@ mod tests {
 
     #[test]
     fn a_session_with_zero_operator_and_relay_turns_is_unattended() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let fx = build_fixture();
+        let fx = build_fixture("quiet");
         // A transcript with only a keepalive ping: no operator, no relay.
         let slug = crate::claude_ask::claude_cwd_slug(&fx.cwd);
         write_lines(
@@ -889,6 +889,7 @@ mod tests {
         let claude = ClaudeSource {
             cwd: fx.cwd.clone(),
             all_projects: false,
+            projects_dir: fx.dir.join("claude"),
         };
         let rows = fold_source(&claude, &ctx);
         let quiet = rows.iter().find(|r| r.session == QUIET_SID).unwrap();
