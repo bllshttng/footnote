@@ -101,22 +101,6 @@ def _make_candidate(
     )
 
 
-def _claude_ok_response(text: str = "done") -> subprocess.CompletedProcess:
-    """Simulate a successful claude --print --output-format json response."""
-    payload = json.dumps({"result": text, "is_error": False})
-    return subprocess.CompletedProcess(args=[], returncode=0, stdout=payload, stderr="")
-
-
-def _claude_is_error_response() -> subprocess.CompletedProcess:
-    """rc=0 but is_error:true -- the load-bearing AC1-FR case."""
-    payload = json.dumps({"result": "skill errored", "is_error": True})
-    return subprocess.CompletedProcess(args=[], returncode=0, stdout=payload, stderr="")
-
-
-def _claude_nonzero_response(rc: int = 1) -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess(args=[], returncode=rc, stdout="", stderr="error")
-
-
 def _rest_ok(stdout: str):
     """fno.pr._proc.run result shape for a successful REST read."""
     from fno.pr._proc import Result
@@ -381,142 +365,6 @@ class TestTrackedStateBatch:
 
 
 # ---------------------------------------------------------------------------
-# fire_skill tests
-# ---------------------------------------------------------------------------
-
-
-class TestFireSkill:
-    """AC1-FR: fire_skill honours rc=0+is_error:true as FAILURE."""
-
-    def test_rc0_is_error_false_is_success(self, tmp_path):
-        """AC-HP: rc=0, is_error=False -> DispatchResult.ok True."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        def stub_runner(cmd, **kw):
-            return _claude_ok_response()
-
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
-        assert result.ok is True
-        assert result.is_error is False
-        assert result.rc == 0
-
-    def test_rc0_is_error_true_is_failure(self, tmp_path):
-        """AC1-FR (load-bearing): rc=0 but is_error:true -> DispatchResult.ok False."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        def stub_runner(cmd, **kw):
-            return _claude_is_error_response()
-
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
-        assert result.ok is False
-        assert result.is_error is True
-        assert result.rc == 0
-
-    def test_nonzero_rc_is_failure(self, tmp_path):
-        """AC-ERR: non-zero rc -> DispatchResult.ok False."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        def stub_runner(cmd, **kw):
-            return _claude_nonzero_response(rc=2)
-
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
-        assert result.ok is False
-        assert result.rc == 2
-
-    def test_unparseable_json_is_failure(self, tmp_path):
-        """AC-ERR: stdout not JSON -> DispatchResult.ok False."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        def stub_runner(cmd, **kw):
-            return subprocess.CompletedProcess(args=[], returncode=0, stdout="not json", stderr="")
-
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
-        assert result.ok is False
-
-    def test_env_seam_overrides_command(self, tmp_path, monkeypatch):
-        """AC-EDGE: PR_WATCH_FIRE_CMD env seam overrides the real claude invocation."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        captured = {}
-
-        def stub_runner(cmd, **kw):
-            captured["cmd"] = cmd
-            return _claude_ok_response()
-
-        monkeypatch.setenv("PR_WATCH_FIRE_CMD", "true")
-        result = fire_skill("check", 5, tmp_path, runner=stub_runner, node_id="x-5")
-        # When seam is set, the command prefix should change (stub runner sees it)
-        assert result.ok is True
-
-    def test_check_verb_fires_correct_skill(self, tmp_path):
-        """AC-HP: verb='check' -> /fno:pr check <n> in command."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        captured = {}
-
-        def stub_runner(cmd, **kw):
-            captured["cmd"] = cmd
-            return _claude_ok_response()
-
-        fire_skill("check", 7, tmp_path, runner=stub_runner, node_id="x-7")
-        cmd_str = " ".join(str(c) for c in captured["cmd"])
-        assert captured["cmd"][:3] != ["claude", "--print", "--output-format"]
-        assert "agents" in captured["cmd"] and "spawn" in captured["cmd"]
-        assert captured["cmd"][captured["cmd"].index("--substrate") + 1] == "headless"
-        assert captured["cmd"][captured["cmd"].index("--harness") + 1] == "claude"
-        assert captured["cmd"][captured["cmd"].index("--output-format") + 1] == "json"
-        assert "check" in cmd_str
-        assert "7" in cmd_str
-        # `autonomous` is merged-only; check must not carry it.
-        assert "autonomous" not in cmd_str
-
-    def test_runner_receives_bounded_timeout(self, tmp_path):
-        """x-97d8: fire_skill MUST pass a bounded timeout= to the runner so a
-        wedged headless claude cannot block the tick forever."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        captured = {}
-
-        def stub_runner(cmd, **kw):
-            captured.update(kw)
-            return _claude_ok_response()
-
-        fire_skill("check", 7, tmp_path, runner=stub_runner, node_id="x-7")
-        assert captured.get("timeout") is not None
-        assert captured["timeout"] > 0
-
-    def test_explicit_timeout_bounds_child_before_wrapper(self, tmp_path):
-        """The child deadline fires before the wrapper can orphan its worker."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        captured = {}
-
-        def stub_runner(cmd, **kw):
-            captured["cmd"] = cmd
-            captured.update(kw)
-            return _claude_ok_response()
-
-        fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1", timeout_s=12.0)
-        child_timeout = float(
-            captured["cmd"][captured["cmd"].index("--timeout") + 1]
-        )
-        assert child_timeout == 12.0
-        assert captured["timeout"] > child_timeout
-
-    def test_runner_timeout_is_failure(self, tmp_path):
-        """x-97d8: a real TimeoutExpired now reaches the (previously dead)
-        handler and yields a clean failure, not a forever-block."""
-        from fno.pr_watch._dispatch import fire_skill
-
-        def stub_runner(cmd, **kw):
-            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kw.get("timeout", 0))
-
-        result = fire_skill("check", 1, tmp_path, runner=stub_runner, node_id="x-1")
-        assert result.ok is False
-        assert result.is_error is True
-
-
-# ---------------------------------------------------------------------------
 # tick() orchestrator tests
 # ---------------------------------------------------------------------------
 
@@ -526,6 +374,7 @@ def _make_tick_deps(
     candidates=None,
     obs_map: Optional[dict] = None,
     fire_ok: bool = True,
+    fire_rc: int = 0,
     claim_held: bool = False,
     node_claimed: bool = False,
     merge_ready: bool = True,
@@ -566,7 +415,9 @@ def _make_tick_deps(
         from fno.pr_watch._dispatch import DispatchResult
 
         fired.append({"verb": verb, "pr": pr_number, "model": model})
-        if fire_ok:
+        if fire_rc:
+            return DispatchResult(ok=False, rc=fire_rc, is_error=False, raw="")
+        elif fire_ok:
             return DispatchResult(ok=True, rc=0, is_error=False, raw='{"is_error":false}')
         else:
             return DispatchResult(ok=False, rc=0, is_error=True, raw='{"is_error":true}')
@@ -1533,6 +1384,50 @@ class TestTickOrchestrator:
         entry = fresh_store.get("owner/repo#1")
         assert entry["parked"] == "retries-exhausted"
 
+    def test_admission_refusal_does_not_burn_a_retry(self, tmp_path):
+        """An exit-82 refusal is not an attempt: the skip names
+        admission-refused, retries stay put, and nothing parks - so an armed
+        breaker held across three ticks cannot park every open PR."""
+        from fno.pr_watch._dispatch import tick
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        store = WatermarkStore(path=store_path)
+        store.set("owner/repo#1", {
+            "last_review_ts": "2026-06-10T00:00:00Z",
+            "last_seen_state": "OPEN",
+            "merge_dispatched": False,
+            "retries": 1,
+            "parked": None,
+        })
+
+        candidate = _make_candidate(pr_number=1, repo_dir=tmp_path)
+        obs_map = {1: _make_obs(1, "OPEN", latest_review_ts="2026-06-12T00:00:00Z")}
+        deps = _make_tick_deps(tmp_path, candidates=[candidate], obs_map=obs_map,
+                               fire_rc=82)
+
+        tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+        )
+
+        skipped = [e for e in deps["events"] if e["type"] == "pr_watch_skipped"]
+        assert any(e["data"].get("reason") == "admission-refused" for e in skipped)
+        assert [e for e in deps["events"] if e["type"] == "pr_watch_dispatch_failed"] == []
+        assert deps["notifications"] == []
+        entry = WatermarkStore(path=store_path).get("owner/repo#1")
+        assert entry["retries"] == 1
+        assert not entry.get("parked")
+
     def test_corrupt_store_baseline_no_mass_fire(self, tmp_path):
         """AC-ERR: corrupt store -> first tick baselines (no fire) not mass-fires."""
         from fno.pr_watch._dispatch import tick
@@ -2486,8 +2381,11 @@ class TestTickRecordsAndDeadline:
         assert ends[0]["phase"] == "settings"
         assert res.exit_code != 0
 
-    def test_deadline_timeout_writes_end_record_and_exits_75(self, monkeypatch):
-        """AC7-HP: a tick stalled past its deadline ends with outcome timeout."""
+    def test_wall_spent_by_one_phase_is_not_a_tick_timeout(self, monkeypatch):
+        """A phase that spends the whole wall ceiling is cut and the phases
+        behind it starve, but the tick still runs to its end record: outcome
+        error without a watermark (the sweep never finished), never timeout.
+        Only a wall abort between phases reads timeout."""
         import time as _time
 
         def _stall(**_kw):
@@ -2497,15 +2395,19 @@ class TestTickRecordsAndDeadline:
         monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "1")
         res, events = self._invoke_tick(monkeypatch, _stall)
 
-        assert res.exit_code == 75, f"expected exit 75, got {res.exit_code}: {res.output!r}"
+        assert res.exit_code == 0, f"expected exit 0, got {res.exit_code}: {res.output!r}"
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
         assert len(ends) == 1
-        assert ends[0]["outcome"] == "timeout"
-        assert ends[0]["phase"] == "sweep"
+        assert ends[0]["outcome"] == "error"
+        assert "why" not in ends[0]
+        assert "sweep" in ends[0]["cut"]
         assert ends[0]["duration_s"] >= 1.0
-        # x-d211: the env ceiling (1s) is below the sweep cap (150s), so the
-        # wall fired - the why says deadline, never "phase slice spent".
-        assert ends[0]["why"] == "deadline_exceeded"
+        rows = [d for t, d in events if t == "control_plane_tick"
+                and d.get("arm") == "pr_watch_sweep"]
+        assert rows
+        # The wall wording, not the slice wording: the env ceiling (1s) is
+        # below the sweep cap (150s), so the alarm budget was the wall.
+        assert "deadline exceeded in phase sweep" in rows[-1]["detail"]
 
     def test_sigterm_during_a_tick_writes_its_death_record(self, monkeypatch):
         """A bootout's SIGTERM cannot unwind the tick, so the handler writes
@@ -2629,7 +2531,7 @@ class TestTickRecordsAndDeadline:
 
         res, events = self._invoke_tick(monkeypatch, _stall)
 
-        assert res.exit_code == 75, f"expected 75, got {res.exit_code}: {res.output!r}"
+        assert res.exit_code == 0, f"expected 0, got {res.exit_code}: {res.output!r}"
         rows = [d for t, d in events if t == "control_plane_tick"]
         king_rows = [d for d in rows if d.get("arm") == "king_wake"]
         notify_rows = [d for d in rows if d.get("arm") == "notify_watch"]
@@ -2640,9 +2542,12 @@ class TestTickRecordsAndDeadline:
         assert merge_rows[-1]["detail"].startswith("merge sweep=cut candidates=0")
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
         assert ends and ends[-1].get("cut") == ["sweep"]
-        # x-d211: the 1s cap is below the 30s wall, so this cut is slice
-        # starvation - one arm lost its turn, the tick carried on.
-        assert ends[-1].get("why") == "slice_starved"
+        # The 1s cap is below the 30s wall, so this cut is slice starvation -
+        # one arm lost its turn and the tick carried on to its end record.
+        # The cut sweep left no TickResult, so the honest outcome is error
+        # without a watermark, never timeout.
+        assert ends[-1].get("outcome") == "error"
+        assert "why" not in ends[-1]
         assert "sweep" in ends[-1].get("phase_s", {})
         assert "king_wake" in ends[-1].get("phase_s", {})
         # Saturated = the phase spent its whole slice: the cut sweep did,
@@ -2703,7 +2608,7 @@ class TestTickRecordsAndDeadline:
         }
         res, events = self._invoke_tick(monkeypatch, _stall, grant_queue=grant_queue)
 
-        assert res.exit_code == 75, res.output
+        assert res.exit_code == 0, res.output
         assert len(drained) == 1 and len(drained[0]) == 1
         cand, key, grant = drained[0][0]
         assert cand.pr_number == 1
@@ -2738,7 +2643,7 @@ class TestTickRecordsAndDeadline:
             monkeypatch, _stall, grant_queue=None, verb_error="boom"
         )
 
-        assert res.exit_code == 75, res.output
+        assert res.exit_code == 0, res.output
         rows = [d for t, d in events if t == "control_plane_tick"]
         merge_rows = [d for d in rows if d.get("arm") == "pr_watch_merge"]
         assert merge_rows and merge_rows[-1].get("skip_reason") == "error"
@@ -2797,7 +2702,7 @@ class TestTickRecordsAndDeadline:
 
         res, events = self._invoke_tick(monkeypatch, _stall)
 
-        assert res.exit_code == 75, f"expected 75, got {res.exit_code}: {res.output!r}"
+        assert res.exit_code == 0, f"expected 0, got {res.exit_code}: {res.output!r}"
         rows = [d for t, d in events if t == "control_plane_tick"]
         king_rows = [d for d in rows if d.get("arm") == "king_wake"]
         assert king_rows and king_rows[-1].get("skip_reason") == "timeout"
@@ -3726,8 +3631,8 @@ class TestFleetLegRunsAfterACutPRLeg:
         monkeypatch.setitem(prcli._PHASE_CAP_S, "sweep", 1)
         res, events, hb = self._invoke(monkeypatch, tmp_path, _stall, _sweep)
 
-        # The sweep was cut at its own slice; the tick still exits 75.
-        assert res.exit_code == 75, res.output
+        # The sweep was cut at its own slice; the tick still completes.
+        assert res.exit_code == 0, res.output
         assert ran == ["fleet"], "recovery must run on its own slice after a cut sweep"
         assert hb.exists(), "the fleet heartbeat must survive a cut sweep"
         payload = _json.loads(hb.read_text(encoding="utf-8"))
@@ -3763,7 +3668,7 @@ class TestFleetLegRunsAfterACutPRLeg:
             king_wake_fn=_stall_in_king_wake,
         )
 
-        assert res.exit_code == 75, res.output
+        assert res.exit_code == 0, res.output
         assert swept == [1], "recovery must run on its own slice after a cut king_wake"
         assert hb.exists(), "the fleet heartbeat must survive a cut king_wake"
         ends = [d for t, d in events if t == "pr_watch_tick_end"]

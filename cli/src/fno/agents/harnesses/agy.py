@@ -2,7 +2,9 @@
 
 ``--conversation`` resumes and nothing creates, so the id comes from the only
 surface that returns one: a print-mode turn whose JSON envelope carries
-``conversation_id``. Lane notes: docs/architecture/thread-lanes.md."""
+``conversation_id``. The turn's argv is the Rust owner's answer
+(crates/fno-agents/src/agy_launch.rs) and carries the spawn's selected axes.
+Lane notes: docs/architecture/thread-lanes.md."""
 from __future__ import annotations
 
 import json
@@ -13,9 +15,6 @@ from pathlib import Path
 from fno.agents.dispatch import DispatchAskError
 
 AGY_BINARY = "agy"
-# The mint is a real turn, so it needs a real prompt. A no-op one keeps the
-# conversation's first message harmless.
-MINT_PROMPT = "Reply with exactly: OK"
 # A ceiling, not a budget: the measured mint is 1.5s. Inside the row's declared
 # binding window (timeout_ms = 60000), so a wedged `agy` raises the refusal
 # below instead of dying to a caller with a shorter fuse.
@@ -46,13 +45,21 @@ def require_conversation_id(conversation_id: str) -> str:
     return text
 
 
-def create_conversation(cwd: Path | str, *, timeout_s: float = MINT_TIMEOUT_S) -> str:
-    """Mint an agy conversation id by running one print-mode turn."""
-    argv = [
-        AGY_BINARY, "-p", MINT_PROMPT,
-        "--output-format", "json",
-        "--dangerously-skip-permissions",
-    ]
+def create_conversation(
+    cwd: Path | str,
+    *,
+    model: str | None = None,
+    effort: str | None = None,
+    permission_mode: str | None = None,
+    yolo: bool = False,
+    timeout_s: float = MINT_TIMEOUT_S,
+) -> str:
+    """Mint an agy conversation id by running one print-mode turn. The argv
+    is the Rust owner's answer, so the mint carries the same model, effort
+    and permission posture the spawn selected."""
+    from fno.agents.spawn_axes_client import agy_mint_argv
+
+    argv = agy_mint_argv(model, effort, permission_mode, yolo)
     try:
         completed = subprocess.run(  # noqa: S603
             argv, cwd=str(cwd), capture_output=True, text=True, timeout=timeout_s

@@ -411,6 +411,18 @@ with open(sys.argv[3], "w") as fh:
 time.sleep(120)
 """
 
+# Same shape, but the var names a STRANGER (an ancestor's ancestor): the merge
+# verb sets it to its own pid and every descendant inherits it, so a grandchild
+# holds a pid that was never its parent.
+_STRANGER_PARENT = """
+import os, subprocess, sys, time
+env = dict(os.environ, FNO_DIE_WITH_PARENT=str(sys.argv[1]))
+proc = subprocess.Popen([sys.executable, "-c", sys.argv[2], sys.argv[3]], env=env)
+with open(sys.argv[4], "w") as fh:
+    fh.write(str(proc.pid))
+time.sleep(120)
+"""
+
 
 def _child_env(iso: Path, extra: dict) -> dict:
     env = dict(
@@ -529,6 +541,78 @@ def test_die_with_parent_unset_keeps_the_orphan_running(iso):
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+def _stranger_env_child(iso: Path, sock: Path, extra: dict):
+    """A grandchild whose FNO_DIE_WITH_PARENT names a live stranger pid."""
+    pidfile = iso / "child.pid"
+    intermediate = subprocess.Popen(
+        [sys.executable, "-c", _STRANGER_PARENT, str(os.getpid()),
+         _CHILD_BLOCK_ON_SOCKET, str(sock), str(pidfile)],
+        env=_child_env(iso, extra),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    return intermediate, pidfile
+
+
+def test_an_inherited_stranger_pid_does_not_read_as_a_dead_parent(iso):
+    """The merge verb sets the var to its own pid; a reconcile grandchild that
+    inherits it must not exit 124 at zero seconds. This is the fleet-wide
+    reconcile no-op."""
+    key = reconcile_flight_key(node=None, pr_number=None)
+    sock = _short_sock_dir() / "s.sock"
+    intermediate, pidfile = _stranger_env_child(iso, sock, {})
+    child_pid = None
+    try:
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and not pidfile.exists():
+            time.sleep(0.1)
+        if pidfile.exists():
+            child_pid = int(pidfile.read_text())
+        _wait_for_flight_held(key, iso)
+        time.sleep(2.5)
+        assert child_pid is not None and not _pid_gone(child_pid), (
+            "an inherited stranger pid must not read as a dead parent"
+        )
+    finally:
+        if intermediate.poll() is None:
+            intermediate.kill()
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_the_stranger_disarm_keeps_the_budget_watch_armed(iso):
+    """Positive control: the same grandchild still self-trips on its budget,
+    so the survival above is the parent check disarming, not a dead watchdog."""
+    key = reconcile_flight_key(node=None, pr_number=None)
+    sock = _short_sock_dir() / "s.sock"
+    intermediate, pidfile = _stranger_env_child(iso, sock, {"FNO_FLIGHT_BUDGET_S": "2"})
+    child_pid = None
+    try:
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and not pidfile.exists():
+            time.sleep(0.1)
+        if pidfile.exists():
+            child_pid = int(pidfile.read_text())
+        _wait_for_flight_held(key, iso)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and not _pid_gone(child_pid):
+            time.sleep(0.2)
+        assert child_pid is not None and _pid_gone(child_pid), (
+            "the budget watch must still trip for the disarmed grandchild"
+        )
+        assert claim_status(key, root=claims_root_for(key))["state"] == "free"
+    finally:
+        if intermediate.poll() is None:
+            intermediate.kill()
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 def test_budget_takes_the_subtree_when_session_leader(iso):

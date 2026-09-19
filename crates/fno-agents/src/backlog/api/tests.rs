@@ -943,3 +943,65 @@ fn api_session_end_writes_an_explicit_instant_on_both_fill_branches() {
     assert_eq!(raw["sessions"][0]["ended_at"], "2026-08-02T08:30:00Z");
     assert_eq!(raw["sessions"][0]["ended_by"], "reap-sweep");
 }
+
+#[test]
+fn pull_request_stamp_matches_one_entry_and_never_double_stamps() {
+    let (_d1, _d2, json_store, sqlite_store) = both_stores();
+    for store in [&json_store, &sqlite_store] {
+        pull_request_attach(
+            store,
+            "ab-one",
+            PullRequestInput {
+                number: 1522,
+                url: None,
+                note: None,
+            },
+        )
+        .unwrap();
+        pull_request_attach(
+            store,
+            "ab-one",
+            PullRequestInput {
+                number: 1523,
+                url: Some("https://github.com/o/r/pull/1523".into()),
+                note: None,
+            },
+        )
+        .unwrap();
+
+        // Stamps 1523 only; 1522 stays unstamped.
+        let payload = pull_request_stamp(
+            store,
+            "ab-one",
+            1523,
+            Some("https://github.com/o/r/pull/1523"),
+            "merged",
+        )
+        .unwrap();
+        assert!(payload.success);
+        let one = node(store, "ab-one").unwrap().unwrap();
+        // 1522 landed as the primary (primary_pr was empty); 1523 is the
+        // one additional_prs entry, and only it carries the stamp.
+        assert_eq!(one.primary_pr.unwrap().merge_status, None);
+        let extras = one.additional_prs.unwrap();
+        assert_eq!(extras.len(), 1);
+        assert_eq!(extras[0].merge_status.as_deref(), Some("merged"));
+
+        // A second call is refused: the entry already reads merged.
+        let again = pull_request_stamp(
+            store,
+            "ab-one",
+            1523,
+            Some("https://github.com/o/r/pull/1523"),
+            "closed",
+        )
+        .unwrap();
+        assert!(!again.success);
+
+        // An absent number is refused and writes nothing.
+        let absent = pull_request_stamp(store, "ab-one", 999, None, "merged").unwrap();
+        assert!(!absent.success);
+        let one = node(store, "ab-one").unwrap().unwrap();
+        assert_eq!(one.additional_prs.unwrap().len(), 1);
+    }
+}

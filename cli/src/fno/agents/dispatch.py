@@ -67,7 +67,7 @@ from fno.config._dispatch_verbs import is_verb_seed
 from fno.agents.lane_heal import lane_heal as _lane_heal
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
-from fno.agents.keeper_thread import complete_launch_argv, mint_session_id
+from fno.agents.keeper_thread import _mint_thread_session_id, complete_launch_argv
 from fno.harness_names import unknown_thread_harness_message
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.reachability import mux_ref_names_a_pane
@@ -958,19 +958,6 @@ def _keeper_identify(sock: Path, timeout_sec: float = 10.0) -> dict:
     raise TimeoutError(f"no keeper answered Identify on {sock}: {last_err}")
 
 
-def _mint_thread_session_id(
-    harness: str, cwd: Path, requested: Optional[str] = None
-) -> str:
-    """The harness session id a keeper thread launches on, fixed BEFORE launch.
-
-    The per-harness shapes live in :func:`fno.agents.keeper_thread.
-    mint_session_id`; the caller-assigned default is here because a UUIDv4 is
-    not a harness fact.
-    """
-    minted = mint_session_id(harness, cwd, requested)
-    return minted if minted is not None else str(uuid.uuid4())
-
-
 def _keeper_pid_start_time(pid: int) -> Optional[int]:
     """The keeper's process-start token, read while the spawner owns it.
 
@@ -1063,7 +1050,13 @@ def _lane_b_thread_spawn(
             )
 
         session_id = _mint_thread_session_id(
-            harness, cwd, requested=resume_session_id
+            harness,
+            cwd,
+            requested=resume_session_id,
+            model=model,
+            effort=effort,
+            permission_mode=permission_mode,
+            yolo=yolo,
         )
         try:
             argv = render_session_argv(harness, "interactive_create", session_id)

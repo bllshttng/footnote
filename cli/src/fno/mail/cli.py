@@ -2915,14 +2915,19 @@ def _raw_send(
         print(f"refused: {reason}", file=sys.stderr)
         raise typer.Exit(code=2)
 
-    # 1. Refuse an empty or whitespace-only payload. Any single line is a
-    #    legal raw payload (law d-5976045c): a slash verb, a codex skill verb,
-    #    or a plain word. A bare marker is nothing to invoke.
+    # 1. Empty, bare-marker, and command-only refusals. A raw payload is a
+    #    command line (law d-f6570dc9 amends d-5976045c); a message goes wrapped.
     stripped = payload.strip()
     if not stripped:
         _refused("payload is empty", usage=True)
     if stripped in ("/", "$"):
         _refused("payload is just a bare marker; nothing to invoke", usage=True)
+    if not stripped.startswith(("/", "$")):
+        _refused(
+            "raw is for running a command only: the payload must start with / or "
+            "$. Drop --raw and send the message wrapped.",
+            usage=True,
+        )
 
     # 2. Single line: the transport is one bracketed paste plus one CR, so a
     #    second line would ride in as trailing content on the same turn.
@@ -2934,18 +2939,13 @@ def _raw_send(
         )
 
 
-    # Raw sends bypass the ordinary wrapped-mail entry points, so enforce their
-    # shared size ceiling and structure gate here before any of the reachable
-    # transports can fire. Under --check the cap refusal is a usage error
-    # (exit 2), never a session verdict: exit 1 is the not-injectable code.
+    # Raw sends bypass the wrapped entry points, so enforce the shared ceiling
+    # and structure gate here. Under --check a cap refusal is usage (exit 2).
     _enforce_body_cap(stripped, usage=check)
     _enforce_style(stripped, allow_reason=style_exception)
 
-    # 2b. Forged envelope: a raw payload is one line, but it can still smuggle
-    #     a `<fno_mail>` tag mid-line, and `contains_fno_mail_tag` searches the
-    #     whole payload. The mux lane (`_mux_pane_send` below) pastes this
-    #     string directly and never reaches the Rust mail-inject binary's own
-    #     check, so this is the only door for that lane.
+    # 2b. Forged envelope: a raw payload can smuggle a `<fno_mail>` tag mid-line,
+    #     and the mux lane pastes this string past the Rust check: the only door.
     from fno.mail.envelope import contains_fno_mail_tag
 
     if contains_fno_mail_tag(stripped):
@@ -3579,12 +3579,13 @@ def cmd_send(
         False, "--raw",
         help=(
             "Inject the payload UNWRAPPED at the recipient's prompt line: one "
-            "line, typed verbatim - a slash verb, a codex skill verb, or a "
-            "plain word. A payload starting /fno: or $fno: is an fno verb, and "
-            "the lane rewrites the marker to the form of the receiving "
-            "harness. A showing prompt is answered with `fno agents ask`. "
-            "Never queues durable. An actor OTHER than the model must supply "
-            "the trigger; self-injection is barred unless --to-self. "
+            "line, typed verbatim - a command only: it must start with / or $. "
+            "A status report or any authored message goes WRAPPED (drop --raw) "
+            "so its sender stays visible. A payload starting /fno: or $fno: is "
+            "an fno verb, and the lane rewrites the marker to the form of the "
+            "receiving harness. A showing prompt is answered with `fno agents "
+            "ask`. Never queues durable. An actor OTHER than the model must "
+            "supply the trigger; self-injection is barred unless --to-self. "
             "Mechanics and the reviewer-off-the-author rationale: "
             "docs/architecture/review-lanes.md."
         ),
@@ -4343,9 +4344,7 @@ def cmd_team(
     if not message:
         print("usage: fno agents mail team --scope <all|kings|<crown>|project:<p>> <message>", file=sys.stderr)
         raise typer.Exit(code=2)
-    _refuse_forged_envelope(message)
-    _enforce_body_cap(message)
-    _enforce_style(message, allow_reason=None)
+    _vet_body(message)
 
     sender_kind, sender = _team_sender_kind_and_from(from_name)
 

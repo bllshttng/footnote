@@ -191,6 +191,9 @@ def _envelope(node: dict, tag: str, details_block: str, tail_block: str) -> str:
     title = node.get("title")
     if isinstance(title, str) and title.strip():
         body.append(f"title: {title.strip()}")
+    reading = node.get("_reading")
+    if isinstance(reading, str) and reading:
+        body.append(reading)
     if details_block:
         body.append("details:")
         body.append(details_block)

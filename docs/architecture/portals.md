@@ -58,6 +58,12 @@ Liveness is counted from `panes`, not from `portals.len()`. An entry left stale-
 
 **The `>=1-pane` invariant needs nothing added.** Its only statement lives in `sweep_dead_sideline` and compiles to `panes.len() <= 1`, a whole-session pane count. Portals are panes, so N portals move away from that floor rather than toward it. A portal-specific invariant is a second, weaker rule competing with a guard that already holds.
 
+## A portal follows the session its viewer shows
+
+A claude viewer can switch sessions inside its own TUI, and fno is never told. The server reads the seat's OSC title once a second. A title that names one free row moves the row key, the attach mapping and the pane name to that row. A title that names no single free row drops the claim, so no row wears a seat that shows something else. A seat whose key names no single row also wears no `◫` marker, so the picker does not list it.
+
+Only claude viewer seats are followed, gated on the attach program in the seat's `cmd`. Plain attach panes and other harnesses are not, and a title naming a row another portal shows never steals it.
+
 ## Wire
 
 `PanePlacement.portal: Option<u8>`, `PanePlacement.portal_new: bool` and `AgentRow.portal: Option<u8>` arrived in proto v64. All three are additive and `#[serde(default)]`, so the compatibility floor did not move. A v63 client still attaches.

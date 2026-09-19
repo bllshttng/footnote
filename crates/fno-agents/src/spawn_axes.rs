@@ -591,6 +591,42 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
         println!("{}", crate::node_seed::decide(seed));
         return 0;
     }
+    // A `keeper_posture` field asks the agy_launch owner which permission
+    // tokens a launch carries (same field-on-a-verb shape as node_seed).
+    if let Some(ask) = parsed.get("keeper_posture") {
+        let s = |k: &str| ask.get(k).and_then(Value::as_str).map(|v| v.to_string());
+        let answer = match crate::agy_launch::keeper_posture(
+            ask.get("harness").and_then(Value::as_str).unwrap_or(""),
+            ask.get("lane").and_then(Value::as_str).unwrap_or("pane"),
+            s("permission_mode").as_deref(),
+            ask.get("yolo").and_then(Value::as_bool).unwrap_or(false),
+        ) {
+            Ok(p) => serde_json::json!({
+                "tokens": p.tokens,
+                "effective": p.effective,
+                "source": p.source,
+                "note": p.note,
+            }),
+            Err(reason) => serde_json::json!({"refused": reason}),
+        };
+        println!("{answer}");
+        return 0;
+    }
+    // An `agy_mint` field asks for the conversation-mint argv.
+    if let Some(ask) = parsed.get("agy_mint") {
+        let s = |k: &str| ask.get(k).and_then(Value::as_str).map(|v| v.to_string());
+        let answer = match crate::agy_launch::agy_mint_argv(
+            s("model").as_deref(),
+            s("effort").as_deref(),
+            s("permission_mode").as_deref(),
+            ask.get("yolo").and_then(Value::as_bool).unwrap_or(false),
+        ) {
+            Ok(argv) => serde_json::json!({"argv": argv}),
+            Err(reason) => serde_json::json!({"refused": reason}),
+        };
+        println!("{answer}");
+        return 0;
+    }
     println!("{}", decide(&parsed));
     0
 }

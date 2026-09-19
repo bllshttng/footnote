@@ -296,7 +296,12 @@ fn run_argv(o: &Opts, started_rfc3339: &str) -> Vec<String> {
 }
 
 /// Tick mode: the pr-watch evals leg.
-fn run_tick_mode(o: &Opts, gate: &dyn Fn() -> GateReading, spawner: Spawner<'_>) -> i32 {
+fn run_tick_mode(
+    o: &Opts,
+    gate: &dyn Fn() -> GateReading,
+    pause: &dyn Fn() -> crate::loops_pause::DispatchPause,
+    spawner: Spawner<'_>,
+) -> i32 {
     let claims_root = o.claims_root.clone().or_else(claims::global_claims_root);
     let summary = parse_summary(o.summary_json.as_deref());
 
@@ -356,9 +361,13 @@ fn run_tick_mode(o: &Opts, gate: &dyn Fn() -> GateReading, spawner: Spawner<'_>)
     }
     let escalates = summary.never_ran || age_days.map_or(false, |a| a > 2.0 * o.stale_days as f64);
 
-    // 3. The gate, read-only: the same counters a spawn would be refused on.
+    // 3. The gate, read-only: a durable stop outranks the capacity counters
+    // a spawn would be refused on, so the incident is the first case.
     let g = gate();
-    let gate_refusal = if g.slots >= g.max_live as usize {
+    let hold = pause();
+    let gate_refusal = if hold.is_paused() {
+        Some((hold.skip_reason(), hold.detail()))
+    } else if g.slots >= g.max_live as usize {
         Some(("fleet_full", "spawn gate refused: fleet_full".to_string()))
     } else {
         g.ram_gb.and_then(|ram| {
@@ -651,7 +660,12 @@ pub fn run_evals_arm(args: &[String]) -> i32 {
     if o.run {
         run_run_mode(&o)
     } else {
-        run_tick_mode(&o, &read_gate, &spawn_detached)
+        run_tick_mode(
+            &o,
+            &read_gate,
+            &crate::loops_pause::dispatch_pause,
+            &spawn_detached,
+        )
     }
 }
 

@@ -1010,6 +1010,71 @@ pub fn pull_request_attach(
     }
 }
 
+/// Stamp one `additional_prs` entry's outcome. Matches one entry by
+/// `number`, and by `url` when the caller passes one. An entry that is
+/// already settled (`merged` or `closed`), or no match at all, writes
+/// nothing and returns `success: false`.
+pub fn pull_request_stamp(
+    store: &Store,
+    id: &str,
+    number: i64,
+    url: Option<&str>,
+    merge_status: &str,
+) -> Result<Payload<Node>, ApiError> {
+    let mut updated: Option<Node> = None;
+    let ok = mutate(store, "pull_request_stamp", |rows| {
+        for row in rows.iter_mut() {
+            if crate::graph_store::entry_id(row) != Some(id) {
+                continue;
+            }
+            let Ok(mut parsed) = Node::from_json(row) else {
+                return Ok(false);
+            };
+            let Some(extras) = parsed.additional_prs.as_mut() else {
+                return Ok(false);
+            };
+            let matched = extras.iter_mut().find(|extra| {
+                if extra.number != Some(number) {
+                    return false;
+                }
+                match url {
+                    Some(want) => {
+                        extra
+                            .url
+                            .as_deref()
+                            .map(crate::additional_prs::normalize_url)
+                            == Some(crate::additional_prs::normalize_url(want))
+                    }
+                    None => true,
+                }
+            });
+            let Some(extra) = matched else {
+                return Ok(false);
+            };
+            if matches!(
+                extra.merge_status.as_deref(),
+                Some("merged") | Some("closed")
+            ) {
+                return Ok(false);
+            }
+            extra.merge_status = Some(merge_status.to_string());
+            *row = parsed.to_json();
+            updated = Some(parsed);
+            return Ok(true);
+        }
+        Ok(false)
+    })?;
+    if ok {
+        Ok(Payload {
+            success: true,
+            node: updated,
+            version: fresh_version(store),
+        })
+    } else {
+        refusal(store)
+    }
+}
+
 pub fn session_append(
     store: &Store,
     id: &str,

@@ -1116,7 +1116,12 @@ pub fn run_heal(argv: &[String]) -> i32 {
             eprintln!("pr-heal: --detach rehearses nothing and reports nothing on its own; it belongs to --all --apply");
             return EXIT_READ_ERROR;
         }
-        return run_detached(&a, argv, &spawn_detached);
+        return run_detached(
+            &a,
+            argv,
+            &crate::loops_pause::dispatch_pause,
+            &spawn_detached,
+        );
     }
     if a.all && a.apply {
         return run_all_apply(&a, a.dry_run);
@@ -1510,8 +1515,20 @@ fn spawn_detached(argv: &[String]) -> std::io::Result<u32> {
 fn run_detached(
     a: &Args,
     argv: &[String],
+    pause: &dyn Fn() -> crate::loops_pause::DispatchPause,
     spawn: &dyn Fn(&[String]) -> std::io::Result<u32>,
 ) -> i32 {
+    // An armed load breaker holds this drive loop: heal dispatches workers,
+    // so it obeys the pause the spawn gate already enforces at admission,
+    // and it answers on its own arm row instead of feeding the gate a spawn
+    // to refuse. Exit 0 is a drive-loop verdict: the Python phase reads
+    // "ran" and writes no second row, so the journal holds exactly one heal
+    // row for this tick.
+    let hold = pause();
+    if hold.is_paused() {
+        emit_arm_row(a, 0, Some(hold.skip_reason()), &hold.detail());
+        return EXIT_CLEAN;
+    }
     let pid_file = heal_pid_file(a);
     if let Some(pid) = read_pid_file(&pid_file) {
         if crate::evals_arm::pid_alive(pid) {
@@ -4117,6 +4134,12 @@ echo '[]'
         drive_args(dir, &["--detach"])
     }
 
+    /// The clear verdict, as a closure the detach runner reads; the armed
+    /// test passes its own.
+    fn clear_pause() -> crate::loops_pause::DispatchPause {
+        crate::loops_pause::DispatchPause::Clear
+    }
+
     #[test]
     fn detach_spawns_a_child_names_it_in_a_pid_file_and_journals_the_spawn() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4128,7 +4151,7 @@ echo '[]'
             spawned.borrow_mut().push(argv.to_vec());
             Ok(std::process::id())
         };
-        let code = run_detached(&a, &argv_sent, &spawn);
+        let code = run_detached(&a, &argv_sent, &clear_pause, &spawn);
         assert_eq!(code, EXIT_CLEAN);
         let pid_file = heal_pid_file(&a);
         assert_eq!(
@@ -4170,12 +4193,43 @@ echo '[]'
             *spawned.borrow_mut() += 1;
             Ok(std::process::id())
         };
-        let code = run_detached(&a, &detach_args(d), &spawn);
+        let code = run_detached(&a, &detach_args(d), &clear_pause, &spawn);
         assert_eq!(code, EXIT_CLEAN);
         assert_eq!(*spawned.borrow(), 0, "never double-spawned");
         let events = log_of(d, "events.jsonl");
         assert!(events.contains("\"acted\":0"), "{events}");
         assert!(events.contains("in_flight"), "{events}");
+    }
+
+    #[test]
+    fn detach_under_an_armed_incident_spawns_nothing_and_journals_fleet_stop() {
+        // The breaker exists to stop spawns: the drive loop obeys it on its
+        // own arm row instead of feeding the admission gate a spawn to
+        // refuse, and the tick still completes its other legs.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let a = parse_args(&detach_args(d)).unwrap();
+        let spawned = std::cell::RefCell::new(0);
+        let spawn = |_: &[String]| -> std::io::Result<u32> {
+            *spawned.borrow_mut() += 1;
+            Ok(std::process::id())
+        };
+        let armed = || crate::loops_pause::DispatchPause::FleetIncident {
+            generation: 9,
+            reason: "rustc storm".to_string(),
+        };
+        let code = run_detached(&a, &detach_args(d), &armed, &spawn);
+        assert_eq!(code, EXIT_CLEAN);
+        assert_eq!(*spawned.borrow(), 0, "nothing spawned under the breaker");
+        assert!(
+            read_pid_file(&heal_pid_file(&a)).is_none(),
+            "no pid file under an armed breaker"
+        );
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("\"arm\":\"heal\""), "{events}");
+        assert!(events.contains("\"acted\":0"), "{events}");
+        assert!(events.contains("fleet_stop"), "{events}");
+        assert!(events.contains("generation 9"), "{events}");
     }
 
     #[test]
@@ -4196,7 +4250,7 @@ echo '[]'
             *spawned.borrow_mut() += 1;
             Ok(std::process::id())
         };
-        let code = run_detached(&a, &detach_args(d), &spawn);
+        let code = run_detached(&a, &detach_args(d), &clear_pause, &spawn);
         assert_eq!(code, EXIT_CLEAN);
         assert_eq!(
             *spawned.borrow(),

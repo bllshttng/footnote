@@ -212,6 +212,19 @@ pub(crate) fn s_i64(v: &Value, key: &str) -> Option<i64> {
     v.get(key).and_then(Value::as_i64)
 }
 
+/// node -> the node claim's acquired_at (epoch ms) for the distress
+/// staleness compare. A row without a `node:`-prefixed key, or whose
+/// acquired_at is absent or non-numeric, contributes nothing.
+pub(crate) fn claim_acquired_at_by_node(claim_rows: &[Value]) -> HashMap<String, i64> {
+    claim_rows
+        .iter()
+        .filter_map(|row| {
+            let node = s_str(row, "key")?.strip_prefix("node:")?;
+            Some((node.to_string(), s_i64(row, "acquired_at")?))
+        })
+        .collect()
+}
+
 /// Python `bool()` over a JSON value: null/false/empty-string/zero/empty
 /// container are false. The classify port decides `completed`/`has_pr`/
 /// `batch_owner` the way the Python `bool(entry.get(...))` did, so a legacy
@@ -953,6 +966,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                         let candidates = queues::resolve_blocked_child_candidates(
                             rows,
                             &claim_state_by_node,
+                            &claim_acquired_at_by_node(&claim_rows),
                             &status_by_node,
                             blocked_child_grace_minutes(&cwd),
                             now_secs_board() as i64,
@@ -2827,5 +2841,23 @@ mod tests {
             parsed.unreadable_sources,
             "the killed source must read as unreadable"
         );
+    }
+
+    #[test]
+    fn claim_acquired_at_map_skips_non_node_keys_and_bad_values() {
+        // The staleness compare reads this map; a role-prefixed key or an
+        // absent/non-numeric acquired_at contributes nothing, never an
+        // error.
+        let rows = vec![
+            serde_json::json!({"key": "node:x-1", "acquired_at": 1_760_000_000_000i64}),
+            serde_json::json!({"key": "node:x-2"}),
+            serde_json::json!({"key": "node:x-3", "acquired_at": "oops"}),
+            serde_json::json!({"key": "pane:x-9", "acquired_at": 7}),
+        ];
+        let m = claim_acquired_at_by_node(&rows);
+        assert_eq!(m.get("x-1"), Some(&1_760_000_000_000));
+        assert!(!m.contains_key("x-2"), "absent acquired_at: skip");
+        assert!(!m.contains_key("x-3"), "non-numeric acquired_at: skip");
+        assert_eq!(m.len(), 1, "a role-prefixed key is not a node");
     }
 }

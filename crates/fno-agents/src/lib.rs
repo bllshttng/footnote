@@ -46,9 +46,12 @@
 
 pub mod acceptance_evidence;
 pub mod active_backlog;
+pub mod additional_prs;
 mod agent_lock;
 pub mod agents_config;
 pub mod agy_ask;
+pub mod agy_hooks;
+pub mod agy_launch;
 pub mod announce;
 pub mod arm_repair;
 pub mod arm_watch;
@@ -102,6 +105,7 @@ pub mod component_update;
 pub mod context_run;
 pub mod court_fold;
 pub mod crown_settle;
+pub mod crown_split;
 pub mod cursor_agent;
 pub mod daemon;
 pub mod decision_index;
@@ -186,6 +190,7 @@ pub mod model_env_scrub;
 pub mod naming;
 pub mod needs;
 pub mod node_origin;
+pub mod node_reading;
 pub mod node_route;
 pub mod node_seed;
 pub mod nudge;

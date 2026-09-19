@@ -159,3 +159,33 @@ peer-review.diff
 # blocks the verified deploy.
 graphify-out/
 .codegraph
+
+# Per-project skill rosters, written into this checkout by multi-harness skill
+# installers: skillteam links them at ~/.agents/skill-store, and `npx skills
+# add` copies real files. Nothing here is tracked. Left untracked they cost
+# twice. The flush nudge in hooks/context-nudge.sh counts them as this
+# session's unsaved work and urges a commit of files the session never wrote,
+# and every copy is one more tree a recursive search walks. Root-anchored:
+# both installers write to the checkout root. No trailing slash: a roster can
+# be a symlink, which git treats as a file and a `foo/` rule would miss.
+/.agent
+/.codebuddy
+/.continue
+/.cursor
+/.github/prompts
+/.hermes
+/.kiro
+/.openclaw
+/.pi
+/.qoder
+/.roo
+/.trae
+/.windsurf
+# Named, not shaped: .opencode/skills holds this repo's own tracked skills, so
+# only the foreign install can be ignored here.
+/.opencode/skills/ui-ux-pro-max
+
+# Session transcripts dumped at the repo root, named by the harness as
+# YYYY-MM-DD-HHMMSS-<slug>.txt. The repo tracks no root-level .txt, so the
+# dated glob is narrow enough that it cannot hide an intentional one.
+/20??-??-??-*.txt
