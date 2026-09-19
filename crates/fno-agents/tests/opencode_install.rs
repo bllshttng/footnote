@@ -283,3 +283,35 @@ fn stale_install_is_named_when_the_source_version_moves() {
     install(Path::new("/nonexistent-repo")).unwrap();
     assert_eq!(installed_status()["status"], "installed");
 }
+
+#[test]
+fn agent_restrictions_follow_the_translator_contract() {
+    let s = scratch("restriction-parity");
+    write_file(
+        &s.root.join("agents/reviewer.md"),
+        "---\ndescription: reviews code\ndisallowedTools: [\"Write\", \"Edit\", \"Bash\"]\n---\nReviewer body\n",
+    );
+    write_file(
+        &s.root.join("agents/allowlisted.md"),
+        "---\ndescription: allowlist only\ntools: [\"Read\", \"Grep\"]\n---\nAllowlisted body\n",
+    );
+    install(Path::new("/nonexistent-repo")).unwrap();
+
+    // The denylist carries into OpenCode's disable-only tools record.
+    let reviewer = read(&s.conf.join("agent/fno:reviewer.md"));
+    assert!(reviewer.contains("mode: subagent"));
+    assert!(reviewer.contains("write: false"));
+    assert!(reviewer.contains("edit: false"));
+    assert!(reviewer.contains("bash: false"));
+
+    // The allowlist cannot be expressed: the agent is skipped, never
+    // installed unrestricted.
+    assert!(
+        !s.conf.join("agent/fno:allowlisted.md").exists(),
+        "an allowlist-carrying agent must not install unrestricted"
+    );
+    let manifest: serde_json::Value = serde_json::from_str(&read(&manifest_path(&s.conf))).unwrap();
+    let files = manifest["files"].as_object().unwrap();
+    assert!(files.contains_key("agent/fno:reviewer.md"));
+    assert!(!files.contains_key("agent/fno:allowlisted.md"));
+}

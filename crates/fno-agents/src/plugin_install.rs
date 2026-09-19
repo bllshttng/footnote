@@ -384,6 +384,283 @@ fn check_stage_report(stage: &Path, source_dir: &Path) -> StageCheck {
     }
 }
 
+/// One fno plugin root on disk: a tree that looks like (or is recorded as) an
+/// installed copy of this plugin.
+#[derive(Debug, Clone, Serialize)]
+struct PluginRoot {
+    path: PathBuf,
+    origin: &'static str,
+    live: bool,
+}
+
+/// Canonical-equality path compare; falls back to raw equality when either
+/// side cannot be canonicalized (a not-yet-created path).
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
+}
+
+fn push_root(
+    roots: &mut Vec<PluginRoot>,
+    seen: &mut Vec<PathBuf>,
+    path: PathBuf,
+    origin: &'static str,
+    live: bool,
+) {
+    if !path.exists() {
+        return;
+    }
+    let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    if seen.contains(&key) {
+        return;
+    }
+    seen.push(key);
+    roots.push(PluginRoot { path, origin, live });
+}
+
+/// The footnote marketplace's `source.source` kind ("directory", "file",
+/// "github", ...). None when the registry is unreadable or names no footnote
+/// marketplace.
+fn marketplace_source_kind(home: &Path) -> Option<String> {
+    let text =
+        std::fs::read_to_string(home.join(".claude/plugins/known_marketplaces.json")).ok()?;
+    let v = serde_json::from_str::<Value>(&text).ok()?;
+    v.get("footnote")?
+        .get("source")?
+        .get("source")?
+        .as_str()
+        .map(String::from)
+}
+
+/// Every fno plugin root this machine could load or mistake for the loaded
+/// one, plus one detail line per registry file that could not be read. A
+/// path that does not exist on disk is never reported, and an unreadable
+/// registry never contributes a root reported as fresh.
+///
+/// Live means "the harness loads this tree in place": Claude records a local
+/// (directory or file) marketplace's own path as its install location and
+/// execs from there, so the marketplace root is live exactly when the
+/// marketplace shape is local. `installPath` in installed_plugins.json is a
+/// recorded string contradicted by that behaviour, never live; nor are the
+/// orphan copies.
+fn plugin_roots_for(home: &Path) -> (Vec<PluginRoot>, Vec<String>) {
+    let mut roots: Vec<PluginRoot> = Vec::new();
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut detail: Vec<String> = Vec::new();
+
+    let marketplaces = home.join(".claude/plugins/known_marketplaces.json");
+    match std::fs::read_to_string(&marketplaces)
+        .map_err(|e| e.to_string())
+        .and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string()))
+    {
+        Err(e) => detail.push(format!("{} unreadable: {e}", marketplaces.display())),
+        Ok(v) => match (
+            v.get("footnote"),
+            v.get("footnote").and_then(|f| f.get("source")),
+        ) {
+            (Some(rec), Some(source)) => {
+                let local = matches!(
+                    source.get("source").and_then(Value::as_str),
+                    Some("directory" | "file")
+                );
+                let path = rec
+                    .get("installLocation")
+                    .and_then(Value::as_str)
+                    .or_else(|| source.get("path").and_then(Value::as_str));
+                if let Some(p) = path {
+                    push_root(
+                        &mut roots,
+                        &mut seen,
+                        PathBuf::from(p),
+                        "marketplace",
+                        local,
+                    );
+                }
+            }
+            _ => detail.push(format!(
+                "{} names no footnote marketplace",
+                marketplaces.display()
+            )),
+        },
+    }
+
+    let registry = home.join(".claude/plugins/installed_plugins.json");
+    match std::fs::read_to_string(&registry)
+        .map_err(|e| e.to_string())
+        .and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string()))
+    {
+        Err(e) => detail.push(format!("{} unreadable: {e}", registry.display())),
+        Ok(v) => {
+            let entries = v
+                .get("plugins")
+                .and_then(|p| p.get("fno@footnote"))
+                .and_then(Value::as_array);
+            match entries {
+                None => detail.push(format!(
+                    "{} names no fno@footnote entry",
+                    registry.display()
+                )),
+                Some(list) => {
+                    for entry in list {
+                        if let Some(p) = entry.get("installPath").and_then(Value::as_str) {
+                            push_root(&mut roots, &mut seen, PathBuf::from(p), "registry", false);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for path in [
+        home.join(".gemini/config/plugins/footnote"),
+        home.join(".codex/plugins/cache/footnote-local"),
+        home.join(".claude/plugins/cache/footnote"),
+    ] {
+        push_root(&mut roots, &mut seen, path, "orphan", false);
+    }
+
+    (roots, detail)
+}
+
+fn plugin_roots() -> (Vec<PluginRoot>, Vec<String>) {
+    plugin_roots_for(&dirs_home())
+}
+
+/// A single root's verdict carrying the role it played in the enumeration,
+/// plus the rendered one-line note and blocker text the doctor printer and
+/// blocker list print verbatim (the Python side is transport only).
+#[derive(Serialize)]
+struct RootVerdict {
+    #[serde(flatten)]
+    check: StageCheck,
+    path: String,
+    origin: &'static str,
+    live: bool,
+    kind: &'static str,
+    note: String,
+    blocker: Option<String>,
+}
+
+/// The doctor-shaped fold: flat keys pointed at the live root, status the
+/// worst across roots, and the per-root detail under `roots`.
+#[derive(Serialize)]
+struct RootsReport {
+    status: String,
+    sha: Option<String>,
+    installed_at: Option<String>,
+    kind: Option<&'static str>,
+    stage: Option<String>,
+    remedy: Option<String>,
+    detail: Option<String>,
+    roots: Vec<RootVerdict>,
+    enumeration_detail: Vec<String>,
+}
+
+fn root_note(live: bool, drift: usize, remedy: &str) -> String {
+    let mut note = format!(" ({drift} file(s) differ from source HEAD)");
+    if drift == 0 {
+        note.clear();
+    }
+    if !live && drift > 0 {
+        let remedy = if remedy.is_empty() {
+            "fno config plugin install claude"
+        } else {
+            remedy
+        };
+        note.push_str(&format!(". Fix: {remedy} removes the stale second copy"));
+    }
+    note
+}
+
+/// Byte verdict for EVERY enumerated root against source HEAD. The exit code
+/// is the worst status across roots, so one stale root exits 3 even when the
+/// live root is fresh.
+fn check_roots_report(
+    scan: &[PluginRoot],
+    detail: Vec<String>,
+    source_dir: &Path,
+) -> (RootsReport, i32) {
+    // Worst status reads stale above unknown: stale carries a remedy and the
+    // doctor exit gate keys on it, while unknown only names its gap.
+    fn rank(status: &str) -> u8 {
+        match status {
+            "stale" => 2,
+            "unknown" => 1,
+            _ => 0,
+        }
+    }
+    let mut roots = Vec::new();
+    let mut worst: Option<(u8, &'static str)> = None;
+    for root in scan {
+        let check = check_stage_report(&root.path, source_dir);
+        let drift = check.differing_count + check.missing_count;
+        let blocker = if check.status == "stale" {
+            let role = if root.live { "live" } else { "second copy" };
+            Some(format!(
+                "plugin root {} ({}) differs from source HEAD in {} file(s) (e.g. {}). Fix: {}",
+                root.path.display(),
+                role,
+                drift,
+                check.sample.first().map(String::as_str).unwrap_or("?"),
+                check.remedy
+            ))
+        } else {
+            None
+        };
+        let note = root_note(root.live, drift, &check.remedy);
+        let last_status = check.status;
+        roots.push(RootVerdict {
+            path: root.path.display().to_string(),
+            origin: root.origin,
+            live: root.live,
+            kind: "stage",
+            note,
+            blocker,
+            check,
+        });
+        let rank_cur = rank(last_status);
+        if worst.map_or(true, |w| rank_cur > w.0) {
+            worst = Some((rank_cur, last_status));
+        }
+    }
+    let live = roots.iter().find(|r| r.live);
+    let joined = if detail.is_empty() {
+        None
+    } else {
+        Some(detail.join("; "))
+    };
+    let report = RootsReport {
+        status: worst.map(|w| w.1).unwrap_or("unknown").to_string(),
+        sha: live.map(|r| r.check.source_head.clone()),
+        installed_at: None,
+        kind: if live.is_some() || roots.is_empty() {
+            Some("stage")
+        } else {
+            None
+        },
+        stage: live.map(|r| r.path.clone()),
+        remedy: live.map(|r| r.check.remedy.clone()),
+        detail: joined,
+        enumeration_detail: detail,
+        roots,
+    };
+    let exit = worst.map(|w| check_exit_code(w.1)).unwrap_or(4);
+    (report, exit)
+}
+
+fn print_roots_report(report: &RootsReport) {
+    for line in &report.enumeration_detail {
+        println!("plugin root: {line}");
+    }
+    for root in &report.roots {
+        let role = if root.live { "live" } else { "second copy" };
+        println!("plugin root ({}, {role}): {}", root.origin, root.path);
+        print_check(&root.check, false);
+    }
+}
+
 #[derive(Debug)]
 enum RestageOutcome {
     Absent,
@@ -587,9 +864,15 @@ fn export_rc_env() -> Option<PathBuf> {
     Some(rc)
 }
 
-fn remove_stale_copies() -> Vec<PathBuf> {
-    let home = dirs_home();
+/// Remove the second copies a successful install leaves behind. The gemini
+/// and codex-dev-channel copies are unconditional. The Claude cache copy is
+/// guarded: removed only when the marketplace loads in place (directory or
+/// file shape) and a live root was proven and that live root is not the
+/// cache itself. `home` and `roots` come from the caller's scan, so the
+/// removal and any report can never disagree about which root is live.
+fn remove_stale_copies(home: &Path, roots: &[PluginRoot]) -> (Vec<PathBuf>, Vec<String>) {
     let mut removed = Vec::new();
+    let mut refused = Vec::new();
     for path in [
         home.join(".gemini/config/plugins/footnote"),
         home.join(".codex/plugins/cache/footnote-local"),
@@ -599,7 +882,35 @@ fn remove_stale_copies() -> Vec<PathBuf> {
             removed.push(path);
         }
     }
-    removed
+    let cache = home.join(".claude/plugins/cache/footnote");
+    if !cache.exists() {
+        return (removed, refused);
+    }
+    let live_roots: Vec<&PluginRoot> = roots.iter().filter(|r| r.live).collect();
+    let cache_is_live = live_roots.iter().any(|r| paths_equal(&r.path, &cache));
+    match marketplace_source_kind(home) {
+        None => refused.push(format!(
+            "claude cache {} kept: footnote marketplace shape unreadable",
+            cache.display()
+        )),
+        Some(kind) if kind != "directory" && kind != "file" => refused.push(format!(
+            "claude cache {} kept: marketplace source is '{kind}', not a local directory",
+            cache.display()
+        )),
+        _ if cache_is_live => refused.push(format!(
+            "claude cache {} kept: it is the live root",
+            cache.display()
+        )),
+        _ if live_roots.is_empty() => refused.push(format!(
+            "claude cache {} kept: no live root proven on this machine",
+            cache.display()
+        )),
+        _ => {
+            let _ = std::fs::remove_dir_all(&cache);
+            removed.push(cache);
+        }
+    }
+    (removed, refused)
 }
 
 /// `--source` default: the source checkout `fno doctor update` pinned at its
@@ -777,14 +1088,30 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
     }
     match mode.as_deref() {
         // Byte verdict for the stage; doctor's plugin_cache leg calls this.
+        // With no --stage, EVERY enumerated root is checked and the exit code
+        // is the worst status across roots.
         Some("--check") => {
-            let stage_path = stage
-                .map(PathBuf::from)
-                .unwrap_or_else(|| state_root().join("plugin-stage").join("fno"));
             let source_dir = source.map(PathBuf::from).unwrap_or_else(default_source_dir);
-            let report = check_stage_report(&stage_path, &source_dir);
-            print_check(&report, json);
-            check_exit_code(report.status)
+            if let Some(dir) = stage {
+                let stage_path = PathBuf::from(dir);
+                let report = check_stage_report(&stage_path, &source_dir);
+                print_check(&report, json);
+                check_exit_code(report.status)
+            } else {
+                let (roots, detail) = plugin_roots();
+                let (report, worst) = check_roots_report(&roots, detail, &source_dir);
+                if json {
+                    match serde_json::to_string(&report) {
+                        Ok(s) => println!("{s}"),
+                        Err(e) => {
+                            eprintln!("plugin-install --check: serialization error: {e}")
+                        }
+                    }
+                } else {
+                    print_roots_report(&report);
+                }
+                worst
+            }
         }
         // Deploy-only rebuild of an existing stage; fno doctor update calls
         // this after a successful install.
@@ -861,7 +1188,11 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
                 Ok(detail) => {
                     println!("plugin install {harness}: {detail}");
                     env_exports_receipt();
-                    let stale = remove_stale_copies();
+                    let (roots, _) = plugin_roots();
+                    let (stale, refused) = remove_stale_copies(&dirs_home(), &roots);
+                    for line in refused {
+                        println!("{line}");
+                    }
                     if !stale.is_empty() {
                         let joined: Vec<String> =
                             stale.iter().map(|p| p.display().to_string()).collect();
@@ -882,6 +1213,7 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
                 "usage: fno-agents plugin-install <claude|codex|opencode|agy|grok> [--force]"
             );
             eprintln!("       fno-agents plugin-install --check [--stage <dir>] [--source <dir>] [--json|-J]");
+            eprintln!("         (no --stage checks every plugin root; exit is the worst status across roots)");
             eprintln!("       fno-agents plugin-install --restage [--source <dir>]");
             2
         }
@@ -967,7 +1299,11 @@ fn run_opencode_arm(_harness: &str, json: bool, uninstall: bool, status: bool, q
                     say(line);
                 }
             }
-            let stale = remove_stale_copies();
+            let (roots, _) = plugin_roots();
+            let (stale, refused) = remove_stale_copies(&dirs_home(), &roots);
+            for line in refused {
+                say(line);
+            }
             if !stale.is_empty() {
                 let joined: Vec<String> = stale.iter().map(|p| p.display().to_string()).collect();
                 say(format!("removed stale copies: {}", joined.join(", ")));
@@ -1541,6 +1877,35 @@ mod tests {
         assert!(!parsed.uninstall && !parsed.status && !parsed.quick);
     }
 
+    /// A throwaway HOME for the root-enumeration fixtures. The marketplace
+    /// carries both a path-bearing source and an installLocation; the
+    /// installLocation must win (Claude records the in-place load path there).
+    fn fixture_home(base: &Path) -> PathBuf {
+        let home = base.join("home");
+        fs::create_dir_all(home.join(".claude/plugins")).unwrap();
+        home
+    }
+
+    fn write_marketplace(home: &Path, shape: &str, install_location: &Path, source_path: &Path) {
+        let v = json!({"footnote": {"source": {"source": shape, "path": source_path.display().to_string()},
+            "installLocation": install_location.display().to_string()}});
+        fs::write(
+            home.join(".claude/plugins/known_marketplaces.json"),
+            serde_json::to_string(&v).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_registry(home: &Path, install_path: &Path) {
+        let v = json!({"version": 2, "plugins": {"fno@footnote": [
+            {"scope": "user", "installPath": install_path.display().to_string()}]}});
+        fs::write(
+            home.join(".claude/plugins/installed_plugins.json"),
+            serde_json::to_string(&v).unwrap(),
+        )
+        .unwrap();
+    }
+
     /// Recorded `grok inspect --json` text (grok 1.0.34, machine 2026-09-18):
     /// the fno plugin entry, an unrelated plugin, and a hooks-bearing plugin.
     fn grok_inspect_sample() -> String {
@@ -1594,5 +1959,206 @@ mod tests {
             parse_grok_inspect(no_array),
             GrokReachability::Unknown { .. }
         ));
+    }
+
+    /// AC1-HP: with no --stage, the check runs once per enumerated root. A
+    /// byte-identical marketplace stage reads live and fresh; a differing
+    /// registry installPath reads not live, stale with a named sample, and
+    /// the worst status drives the exit code.
+    #[test]
+    fn check_without_stage_reports_every_root_and_worst_exit() {
+        let base = std::env::temp_dir().join(format!("pi-roots-ac1-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (source, stage) = fresh_stage(&base);
+        let home = fixture_home(&base);
+        write_marketplace(&home, "directory", &stage, &base.join("elsewhere"));
+        // A registry installPath whose bytes differ from source HEAD in
+        // exactly one file.
+        let cache = base.join("registry-tree");
+        fs::create_dir_all(cache.join("hooks")).unwrap();
+        fs::write(
+            cache.join("hooks/hooks.json"),
+            "{\"hooks\":[{\"command\":\"${CLAUDE_PLUGIN_ROOT}/hooks/live.sh\"}]}",
+        )
+        .unwrap();
+        fs::write(cache.join("hooks/live.sh"), "tampered\n").unwrap();
+        write_registry(&home, &cache);
+
+        let (roots, detail) = plugin_roots_for(&home);
+        assert_eq!(roots.len(), 2, "roots: {roots:?} detail: {detail:?}");
+        let (report, exit) = check_roots_report(&roots, detail, &source);
+        assert_eq!(exit, 3);
+        assert_eq!(report.roots.len(), 2);
+        let live = &report.roots[0];
+        assert!(live.live, "the marketplace root must read live");
+        assert_eq!(live.check.status, "fresh");
+        assert_eq!(live.path, stage.display().to_string());
+        let second = &report.roots[1];
+        assert!(!second.live);
+        assert_eq!(second.check.status, "stale");
+        assert_eq!(second.check.sample, vec!["hooks/live.sh".to_string()]);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The installLocation (where Claude actually loads a local marketplace)
+    /// wins over source.path, and origins dedupe by canonical path with the
+    /// earlier origin kept.
+    #[test]
+    fn roots_prefer_install_location_and_dedupe_by_canonical_path() {
+        let base = std::env::temp_dir().join(format!("pi-roots-dedupe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let source = base.join("source");
+        new_repo(&source);
+        let stage_parent = base.join("stage-parent");
+        fs::create_dir_all(&stage_parent).unwrap();
+        let (stage, _) = build_stage(&source, &stage_parent).unwrap();
+        let home = fixture_home(&base);
+        // installLocation names the stage; source.path names a DIFFERENT
+        // existing tree, so a wrong preference shows up in the enumeration.
+        write_marketplace(&home, "directory", &stage, &source);
+        // The registry names the cache path, which is also a hardcoded
+        // orphan path: dedupe must keep the earlier origin (registry).
+        let cache = home.join(".claude/plugins/cache/world");
+        fs::create_dir_all(&cache).unwrap();
+        write_registry(&home, &cache);
+
+        let (roots, _) = plugin_roots_for(&home);
+        assert_eq!(roots.len(), 2, "roots: {roots:?}");
+        assert_eq!(roots[0].path, stage);
+        assert!(roots[0].live);
+        assert_eq!(
+            roots[1].origin, "registry",
+            "earlier origin wins: {roots:?}"
+        );
+        assert_eq!(roots[1].path, cache);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// AC2-HP: a missing registry contributes no roots and one detail line,
+    /// and no root the enumerator could not read is ever reported fresh.
+    #[test]
+    fn roots_missing_or_malformed_registry_never_reads_fresh() {
+        let base = std::env::temp_dir().join(format!("pi-roots-ac2-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (source, stage) = fresh_stage(&base);
+        let home = fixture_home(&base);
+        write_marketplace(&home, "directory", &stage, &stage);
+
+        let (roots, detail) = plugin_roots_for(&home);
+        assert_eq!(roots.len(), 1, "roots: {roots:?}");
+        assert!(roots[0].live);
+        assert!(
+            detail.iter().any(|d| d.contains("installed_plugins.json")),
+            "detail: {detail:?}"
+        );
+        let (report, exit) = check_roots_report(&roots, detail, &source);
+        assert_eq!(exit, 0);
+        assert!(report.roots.iter().all(|r| r.check.status == "fresh"));
+
+        // Malformed JSON: same never-assert rule, one detail line, no roots
+        // contributed by the registry.
+        fs::write(
+            home.join(".claude/plugins/installed_plugins.json"),
+            "not json {",
+        )
+        .unwrap();
+        let (roots, detail) = plugin_roots_for(&home);
+        assert!(roots.iter().all(|r| r.origin != "registry"));
+        assert!(detail.iter().any(|d| d.contains("installed_plugins.json")));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A NON-local marketplace (github and friends) yields no live root, and
+    /// the registry installPath copy is still enumerated and byte-checked
+    /// whatever the marketplace shape - the enumeration is shape-independent.
+    #[test]
+    fn roots_without_a_local_marketplace_still_report_registry_copies() {
+        let base = std::env::temp_dir().join(format!("pi-roots-github-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (source, _stage) = fresh_stage(&base);
+        let home = fixture_home(&base);
+        write_marketplace(
+            &home,
+            "github",
+            &base.join("not-on-disk"),
+            &base.join("not-on-disk"),
+        );
+        // A registry copy that differs from source HEAD in one file.
+        let cache = home.join(".claude/plugins/cache/footnote");
+        fs::create_dir_all(cache.join("hooks")).unwrap();
+        fs::write(
+            cache.join("hooks/hooks.json"),
+            "{\"hooks\":[{\"command\":\"${CLAUDE_PLUGIN_ROOT}/hooks/live.sh\"}]}",
+        )
+        .unwrap();
+        fs::write(cache.join("hooks/live.sh"), "tampered\n").unwrap();
+        write_registry(&home, &cache);
+
+        let (roots, _) = plugin_roots_for(&home);
+        assert_eq!(roots.len(), 1, "only the registry copy exists: {roots:?}");
+        assert!(!roots[0].live, "a github marketplace yields no live root");
+        let (report, exit) = check_roots_report(&roots, Vec::new(), &source);
+        assert_eq!(exit, 3);
+        assert_eq!(report.roots[0].check.status, "stale");
+        assert_eq!(
+            report.roots[0].check.sample,
+            vec!["hooks/live.sh".to_string()]
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// AC2.1-HP + AC2.1-ERR: the Claude cache copy is removed only under the
+    /// guard. A local marketplace with a proven live root removes it and
+    /// receipts the path; a non-local marketplace and a cache that IS the
+    /// live root both keep it, naming the condition that refused.
+    #[test]
+    fn claude_cache_removal_is_guarded() {
+        let base = std::env::temp_dir().join(format!("pi-rm-ac3-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let home = fixture_home(&base);
+        let stage = base.join("stage");
+        fs::create_dir_all(&stage).unwrap();
+        let cache = home.join(".claude/plugins/cache/footnote");
+        fs::create_dir_all(&cache).unwrap();
+        let live_stage = vec![PluginRoot {
+            path: stage.clone(),
+            live: true,
+            origin: "marketplace",
+        }];
+
+        // HP: directory marketplace + live stage + existing cache -> removed.
+        write_marketplace(&home, "directory", &stage, &stage);
+        let (removed, refused) = remove_stale_copies(&home, &live_stage);
+        assert_eq!(removed, vec![cache.clone()], "removed: {removed:?}");
+        assert!(refused.is_empty());
+        assert!(!cache.exists());
+        fs::create_dir_all(&cache).unwrap();
+
+        // ERR: a non-local marketplace refuses, naming the shape.
+        write_marketplace(&home, "github", &stage, &stage);
+        let (removed, refused) = remove_stale_copies(&home, &live_stage);
+        assert!(removed.is_empty());
+        assert!(
+            refused.iter().any(|l| l.contains("'github'")),
+            "{refused:?}"
+        );
+        assert!(cache.exists());
+        fs::create_dir_all(&cache).unwrap();
+
+        // ERR: the cache itself is the live root -> kept, naming why.
+        write_marketplace(&home, "directory", &cache, &cache);
+        let live_cache = vec![PluginRoot {
+            path: cache.clone(),
+            live: true,
+            origin: "marketplace",
+        }];
+        let (removed, refused) = remove_stale_copies(&home, &live_cache);
+        assert!(removed.is_empty());
+        assert!(
+            refused.iter().any(|l| l.contains("live root")),
+            "{refused:?}"
+        );
+        assert!(cache.exists());
+        let _ = fs::remove_dir_all(&base);
     }
 }

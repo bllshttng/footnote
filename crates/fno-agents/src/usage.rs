@@ -83,7 +83,7 @@ usage: fno-agents loop-check --state <manifest> --transcript <transcript.jsonl> 
        [--driver target|king] [--events <p>] [--global-events <p>] [--settings <p>]
        [--global-settings <p>] [--ledger <p>] [--gh-budget-ledger <p>] [--now <rfc3339>]
        [--author-harness <h>] [--hook-input-stdin] [--gh-bin <p>] [--git-bin <p>]
-       [--fno-bin <p>] [--read-timeout-ms <n>]
+       [--fno-bin <p>] [--read-timeout-ms <n>] [--harness <h>] [--harness-session <id>]
 
 The stop-hook decision verb: it decides whether a driven session may stop,
 and every verdict comes from external truth read fresh on each fire - PR
@@ -95,6 +95,11 @@ session's own claim of done is not an input.
 its one deliverable shipped. king reads a king manifest (frontmatter
 scope) and asks whether the crown scope drained. The arm is chosen by the
 flag, never by sniffing the file, and any other value is refused.
+
+--harness and --harness-session name the harness and harness session id
+of the caller that asked this target to stop. With both set, the
+registry answers who may drive this target before any progress logic
+runs. With either absent, the engine answers exactly as it always has.
 
 Required: --state, --transcript, --cwd. Unknown flags are tolerated for
 shim forward-compat. stdout is one JSON decision; exit 0 = a decision

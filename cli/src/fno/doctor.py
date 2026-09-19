@@ -687,16 +687,6 @@ def _component_convergence(
     ]
 
 
-def _plugin_registry_path() -> Path:
-    """The claude plugin install registry (module-level so tests can stub it)."""
-    return Path.home() / ".claude" / "plugins" / "installed_plugins.json"
-
-
-def _known_marketplaces_path() -> Path:
-    """Claude's marketplace registry (module-level so tests can stub it)."""
-    return Path.home() / ".claude" / "plugins" / "known_marketplaces.json"
-
-
 def _run_stage_check(argv: list[str]) -> tuple[int, str, str]:
     """One ``plugin-install --check`` probe (module-level so tests stub it).
     Transport failures come back as exit -1 with the reason, never raise."""
@@ -707,157 +697,31 @@ def _run_stage_check(argv: list[str]) -> tuple[int, str, str]:
         return -1, "", str(exc)
 
 
-def _stage_check_report(install_location: str = "") -> Optional[dict[str, Any]]:
-    """Stage-drift verdict when Claude runs the plugin from the fno stage.
-
-    A directory marketplace never mints a ``gitCommitSha``, so for that
-    install shape freshness is a byte comparison of the stage against source
-    HEAD. Returns None when this install is not a directory marketplace; any
-    transport failure maps to ``unknown`` in ``detail``, never ``fresh``.
-    ``install_location`` (where Claude actually execs) wins over the
-    marketplace path when both exist.
-    """
-    try:
-        data = json.loads(_known_marketplaces_path().read_text(encoding="utf-8"))
-        source = data["footnote"]["source"]
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-    if not isinstance(source, dict) or source.get("source") != "directory":
-        return None
-    stage_path = install_location or str(source.get("path") or "")
-    if not stage_path:
-        return None
-
+def _plugin_cache_report() -> dict[str, Any]:
+    """Root freshness, folded natively by the Rust verb; transport only."""
     def unknown(detail: str) -> dict[str, Any]:
-        return {"status": "unknown", "sha": None, "installed_at": None, "detail": detail, "kind": "stage", "stage": stage_path}
+        return {"status": "unknown", "sha": None, "installed_at": None, "detail": detail, "kind": "stage", "stage": None, "roots": []}
 
     binary = _cargo_bin_path()
     src = _resolve_source(None)
-    if not binary:
-        return unknown("no cargo fno-agents binary to run the stage check")
-    if src is None:
-        return unknown("no source checkout to compare against")
+    if not binary or src is None:
+        return unknown(
+            "no cargo fno-agents binary to run the stage check"
+            if not binary
+            else "no source checkout to compare against"
+        )
     code, out, err = _run_stage_check(
-        [binary, "plugin-install", "--check", "--json",
-         "--stage", stage_path, "--source", str(src)]
+        [binary, "plugin-install", "--check", "--json", "--source", str(src)]
     )
-    if code not in (0, 3):
+    if code not in (0, 3, 4):
         return unknown(f"plugin-install --check exited {code}: {(err or out).strip()}")
     try:
         verdict = json.loads(out)
     except ValueError:
-        return unknown("plugin-install --check printed no JSON")
-    if not isinstance(verdict, dict):
-        return unknown("plugin-install --check printed a non-object")
-    verdict["kind"] = "stage"
-    verdict.setdefault("stage", stage_path)
-    verdict["sha"] = verdict.pop("source_head", None)
-    verdict.setdefault("remedy", f"cd {verdict.get('source') or src} && fno config plugin install claude")
+        verdict = None
+    if not isinstance(verdict, dict) or not isinstance(verdict.get("roots"), list) or not verdict["roots"]:
+        return unknown("plugin-install --check named no readable plugin root")
     return verdict
-
-
-def _plugin_cache_report() -> dict[str, Any]:
-    """Freshness of the deployed CLAUDE plugin cache the hooks run from.
-
-    ``fno doctor`` already owns source-vs-installed staleness for the wheel and
-    the cargo bins, but not for ``~/.claude/plugins/cache/footnote``: the copy
-    ``hooks/helpers/init-target-state.sh`` (resolved via CLAUDE_PLUGIN_ROOT)
-    actually executes in every Claude session. A cache pinned to a pre-feature
-    sha ships hooks that predate provenance writers while every Python-side
-    check reads green - the exact gap that left armed manifests reporting
-    ``auto_merge_source: unknown`` after.
-
-    Uses the module's staleness vocabulary: ``fresh`` when the pinned sha IS
-    the source HEAD, ``stale`` when the sha is a proven ancestor of HEAD (and
-    not HEAD), ``unknown`` when the installed-plugins file is missing, the sha
-    is unknown to this clone, or git is unavailable. Never asserts staleness on
-    absent evidence (same rule as the exit-code contract at module top).
-
-    When stale, the report also carries ``deleted_hook_scripts`` iff the
-    pinned..HEAD range deleted a script the pinned revision's hook config
-    referenced - the case that bricks live sessions rather than merely
-    lagging, and the only stale worth interrupting an operator for.
-    """
-    # Any, not Optional[str]: the stale branch adds deleted_hook_scripts,
-    # a list, beside the string fields.
-    report: dict[str, Any] = {
-        "status": "unknown",
-        "sha": None,
-        "installed_at": None,
-        "detail": None,
-    }
-    try:
-        registry = _plugin_registry_path()
-        data = json.loads(registry.read_text(encoding="utf-8"))
-        plugins = data.get("plugins") if isinstance(data, dict) else None
-        entries = (
-            plugins.get("fno@footnote") if isinstance(plugins, dict) else None
-        ) or []
-        entry = entries[0] if isinstance(entries, list) and entries else {}
-    except (OSError, ValueError, IndexError, AttributeError, TypeError, KeyError):
-        # A hand-edited, corrupted, or future-version registry is exactly the
-        # broken install this advisory leg exists to describe: any malformed
-        # shape degrades to unknown, never a traceback through doctor_command's
-        # unwrapped call sites.
-        report["detail"] = "no installed_plugins.json entry for fno@footnote"
-        return report
-    sha = entry.get("gitCommitSha")
-    if not sha:
-        # The stage is the artifact; Claude execs from the registry path.
-        return _stage_check_report(str(entry.get("installLocation") or "")) or report | {
-            "detail": "installed_plugins.json carries no gitCommitSha"
-        }
-    report["sha"] = sha
-    report["installed_at"] = entry.get("installedAt")
-
-    src = _resolve_source(None)
-    if src is None:
-        report["detail"] = "no source checkout to compare against"
-        return report
-    try:
-        head = subprocess.run(
-            ["git", "-C", str(src), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if head.returncode != 0:
-            report["detail"] = "git rev-parse failed in the source checkout"
-            return report
-        if head.stdout.strip() == sha:
-            report["status"] = "fresh"
-            return report
-        ancestor = subprocess.run(
-            ["git", "-C", str(src), "merge-base", "--is-ancestor", sha, "HEAD"],
-            capture_output=True,
-            timeout=15,
-        )
-        if ancestor.returncode == 0:
-            report["status"] = "stale"
-        else:
-            # Not HEAD and not an ancestor: a foreign sha. Unknown, never
-            # stale-on-absent-evidence.
-            report["detail"] = "pinned sha is not known as an ancestor of HEAD"
-    except (OSError, subprocess.SubprocessError):
-        report["detail"] = "git unavailable"
-        return report
-
-    # Stale fires after EVERY merge, so it cannot by itself separate benign
-    # lag from brick risk. The separator: did this range delete a hook script
-    # the pinned revision's config referenced? Only that case takes every
-    # pre-merge session's Bash away. Same never-assert-on-absent-evidence
-    # rule: a git failure adds no key rather than claiming the all-clear.
-    from fno.hook_config import stubless_deletions
-
-    head_sha = head.stdout.strip()
-    deleted = (
-        stubless_deletions(src, sha, head_sha)
-        if report["status"] == "stale"
-        else None
-    )
-    if deleted:
-        report["deleted_hook_scripts"] = deleted
-    return report
 
 
 # ---------------------------------------------------------------------------
@@ -1598,8 +1462,10 @@ def _silent_switch_report(
         if armed.get("unknown"):
             cache = plugin_cache if plugin_cache is not None else _plugin_cache_report()
             # A stale STAGE is a different artifact with its own fix; this
-            # cause line is about the git-cached claude plugin only.
-            if cache.get("status") == "stale" and cache.get("kind") != "stage":
+            # cause line is about the legacy sha-pinned cache shape only (a
+            # report with roots names each stale root in its own line, and a
+            # byte-stale installPath tree has no sha pin to refresh).
+            if cache.get("status") == "stale" and not cache.get("roots"):
                 sha = str(cache.get("sha") or "")[:12]
                 when = str(cache.get("installed_at") or "")[:10] or "?"
                 finding["cause"] = (
@@ -2038,6 +1904,9 @@ def _blockers(result: dict[str, Any]) -> list[str]:
         blockers.append(f"{plugin_hooks['failed']} plugin hook(s) cannot launch.")
 
     plugin_cache = result.get("plugin_cache") or {}
+    blockers.extend(r["blocker"] for r in plugin_cache.get("roots") or [] if r.get("blocker"))
+    if plugin_cache.get("roots"):
+        return blockers
     if plugin_cache.get("kind") == "stage" and plugin_cache.get("status") == "stale":
         sample = plugin_cache.get("sample") or []
         drift = plugin_cache.get("differing_count", 0) + plugin_cache.get("missing_count", 0)
@@ -2736,10 +2605,14 @@ def _emit_human(
             f"run `{finding['command']}` or let the reaper restore it."
         )
 
-    # Deployed claude plugin cache: the hooks actually executed by
-    # Claude sessions. Advisory, same vocabulary as the wheel/rust legs.
+    # Deployed fno plugin roots: one line per root, rendered by the Rust fold.
     pc = result.get("plugin_cache") or {}
-    if pc.get("kind") == "stage" and pc.get("status") == "stale":
+    for root in pc.get("roots") or []:
+        role = "live" if root.get("live") else "second copy"
+        out(f"fno doctor: plugin root ({root.get('origin')}, {role}): {root.get('path')}: {root.get('status')}{root.get('note') or ''}")
+    if pc.get("roots"):
+        pass
+    elif pc.get("kind") == "stage" and pc.get("status") == "stale":
         sample = pc.get("sample") or []
         out(
             f"fno doctor: plugin stage STALE ({pc.get('differing_count', 0)} differing, "
@@ -4612,7 +4485,7 @@ def doctor_command(
         # in silence. Advisory, like the two around it - the exit code is settled
         # by the blocker list, and the defect this closes is the silence.
         pc = result.get("plugin_cache") or {}
-        if pc.get("status") == "stale" and not json_out:
+        if pc.get("status") == "stale" and not pc.get("roots") and not json_out:
             typer.echo(
                 "fno doctor: --fix cannot refresh the claude plugin cache; that "
                 "registry belongs to claude. Run: `claude plugin update "

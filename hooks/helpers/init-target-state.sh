@@ -225,6 +225,8 @@ detect_provider() {
     echo "codex"
   elif [[ "${GEMINI_SESSION_ID:-}" == *[![:space:]]* ]]; then
     echo "gemini"
+  elif [[ "${OPENCODE_SESSION_ID:-}" == *[![:space:]]* ]]; then
+    echo "opencode"
   elif [[ -n "${CODEX_PLUGIN_ROOT:-}" ]]; then
     echo "codex"
   elif [[ -n "${GEMINI_PROJECT_DIR:-}" ]]; then

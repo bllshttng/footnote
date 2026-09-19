@@ -299,7 +299,7 @@ free, no row resolved to this node (N scanned, M unresolved); ... Confirm with: 
 free, roster not consulted (<reason>)
 ```
 
-The scanned count is the point. A scan of forty rows finding nobody is a different answer from a read that failed. Printing `free` for both is how the defect survives its own fix. Assert one of these strings. Never grep for the absence of the word `free`.
+The scanned count is the point. A scan of forty rows finding nobody is a different answer from a read that failed. Printing `free` for both is how the defect survives its own fix. Assert one of these strings. Never grep for the absence of the word `free`. The finished-session clause is a rider: it is appended to any of these outcomes it can coexist with, not only the clean-roster one.
 
 `roster_rows_unresolved` is the count of scanned rows whose worktree manifest or ledger did not resolve a node. If a worktree basename matches, the reader reports a candidate with `fno agents peek <name>`. It never acquires or infers a claim. `state: free` remains the claim answer.
 
