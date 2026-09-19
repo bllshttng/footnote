@@ -1572,7 +1572,7 @@ def cmd_spawn(
         node_seed_env = seed.env
         node_seed_receipt = seed.receipt
         if cwd is None and not here:
-            ensured = seed.ensure_launch_workdir(name, harness)
+            ensured = seed.ensure_launch_workdir(harness)
             if ensured is None:
                 raise typer.Exit(code=2)
             workdir = ensured.resolve()

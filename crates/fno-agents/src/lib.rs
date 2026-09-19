@@ -163,6 +163,7 @@ pub mod king_term;
 pub mod king_termination;
 pub mod king_verdict_inputs;
 pub mod lane_heal;
+pub mod launch_workdir;
 pub mod law_match;
 mod lifecycle_child;
 pub mod liveness_sweep;

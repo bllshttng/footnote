@@ -1,11 +1,12 @@
-//! The operator lane parser and the thirteen-queue board build (pure; no I/O).
+//! The operator lane parser and the fourteen-queue board build (pure; no I/O).
 use super::classify::{claim_is_dead, holder_token, node_driver, node_has_pr};
 use super::prs::{derived_status, node_pr_refs, nodes_binding_pr};
 use super::scope::operator_lane_path;
 use super::{
     as_int, is_terminal, s_str, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES,
     LEGACY_DEFER_PREFIX, SRC_CLAIMS, SRC_DISTRESS, SRC_DRIVERS, SRC_NEEDS, SRC_PRS, SRC_PR_GATE,
-    SRC_PR_NODES, SRC_QUESTIONS, SRC_READY, SRC_UNDISPATCHED, SRC_WORKED, TERMINAL_RUNGS,
+    SRC_PR_NODES, SRC_QUESTIONS, SRC_READY, SRC_UNDISPATCHED, SRC_WORKED, STRANDED_GRACE_MINUTES,
+    TERMINAL_RUNGS,
 };
 use serde_json::{json, Map, Value};
 use std::cell::RefCell;
@@ -330,7 +331,7 @@ fn verdict_rows_from(outstanding: &Value) -> Vec<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// Board construction: the thirteen queues
+// Board construction: the fourteen queues
 // ---------------------------------------------------------------------------
 
 pub(crate) struct Queue {
@@ -442,6 +443,10 @@ pub(crate) struct BoardInputs {
     /// needs already live; this queue only scope-filters and renders, the
     /// same split `undispatched` uses for its Python-computed selection.
     pub(crate) blocked_child: SourceRead,
+    /// The stranded-tree read: per-repo worktree scans joined to the graph's
+    /// king-priority candidates. Rows carry
+    /// `{id, tree, branch, dirty, unpushed, idle_minutes, resumable}`.
+    pub(crate) stranded: SourceRead,
     /// The graph entries (None = unreadable); one read shared with scope
     /// compile, undispatched classify, and claimed-node lookups.
     pub(crate) entries: Option<Vec<Value>>,
@@ -1247,6 +1252,69 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
 
     let lane_source = format!("cat {}", operator_lane_path(Path::new(".")).display());
 
+    // Stranded trees: local work at risk. A row survives only when the tree
+    // holds work (dirty or unpushed), the tree has gone quiet past the grace
+    // window, and nobody drives the node - the same `node_driver` verdict
+    // `unheld_progress` trusts. Report-only: the remedy is dispatch, which
+    // `undispatched`/`unheld_progress` already drive and which now resumes
+    // in the tree, so the queue never keeps a king working by itself.
+    let stranded_ok = inputs.stranded.is_ok()
+        && inputs.entries.is_some()
+        && inputs.claims.is_ok()
+        && inputs.drivers.is_ok()
+        && inputs.holder_activity_error.is_none();
+    let stranded_rows: Vec<Value> = if stranded_ok {
+        let entry_by_id: HashMap<String, &Value> = inputs
+            .entries
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|e| s_str(e, "id").map(|id| (id.to_string(), e)))
+            .collect();
+        inputs
+            .stranded
+            .rows()
+            .into_iter()
+            .filter(|row| {
+                let dirty = row.get("dirty").and_then(Value::as_i64).unwrap_or(0);
+                let unpushed = row.get("unpushed").and_then(Value::as_i64).unwrap_or(0);
+                if dirty <= 0 && unpushed <= 0 {
+                    return false;
+                }
+                let idle = row.get("idle_minutes").and_then(Value::as_i64).unwrap_or(0);
+                if idle < STRANDED_GRACE_MINUTES {
+                    return false;
+                }
+                let Some(id) = s_str(row, "id") else {
+                    return false;
+                };
+                let Some(node) = entry_by_id.get(id) else {
+                    return false;
+                };
+                let (state, _claim) = node_driver(
+                    node,
+                    &claim_by_node,
+                    &inputs.holder_activity,
+                    inputs.scope_ids.as_ref(),
+                    Some(&inputs.worked),
+                    Some(&inputs.drivers),
+                );
+                if state != "none" {
+                    return false;
+                }
+                in_scope(
+                    "stranded_tree",
+                    false,
+                    node.get("id").unwrap_or(&Value::Null),
+                    row,
+                    &mut out_of_scope,
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let mut queues = vec![
         queue(
             "operator_lane",
@@ -1403,6 +1471,36 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             undriven_rows,
             true,
             "an open PR with nobody driving it; report only, never close or defer one - that judgment is the operator's".to_string(),
+            "/fno:target",
+            None,
+        ),
+        queue(
+            "stranded_tree",
+            "git worktree list --porcelain + git status --porcelain + git rev-list --count HEAD --not --remotes".to_string(),
+            &if stranded_ok {
+                SourceRead::ok(Value::Null)
+            } else {
+                SourceRead::err(
+                    inputs
+                        .stranded
+                        .error
+                        .clone()
+                        .or_else(|| {
+                            if inputs.entries.is_none() {
+                                Some("graph unreadable".to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .or_else(|| inputs.claims.error.clone())
+                        .or_else(|| inputs.drivers.error.clone())
+                        .or_else(|| inputs.holder_activity_error.clone())
+                        .unwrap_or_default(),
+                )
+            },
+            stranded_rows,
+            false,
+            "a tree holding uncommitted or unpushed work that no live session drives; dispatch the node and every node-keyed door resumes in it (resumable=false: run fno do target start <id> from inside the tree); never remove it".to_string(),
             "/fno:target",
             None,
         ),
@@ -1574,6 +1672,7 @@ mod tests {
             lane: empty.clone(),
             undispatched: SourceRead::ok(json!([])),
             blocked_child: empty.clone(),
+            stranded: SourceRead::ok(json!([])),
             worked: empty,
             entries: None,
             held: Default::default(),
