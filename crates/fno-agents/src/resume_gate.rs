@@ -524,7 +524,7 @@ mod tests {
     // the resuming session's own holder.
     #[test]
     fn reserve_refuses_when_a_dispatch_wins_the_race() {
-        let (home, dir) = registry_home("reserve");
+        let (_, dir) = registry_home("reserve");
         let entries = vec![do_entry("x-aaaa", "8c58eaf1-old")];
         let claims_root = dir.join("claims-root");
         std::fs::create_dir_all(&claims_root).unwrap();
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn reserve_acquires_the_seat_and_a_second_pass_reenters() {
-        let (home, dir) = registry_home("reserve-ok");
+        let (_, dir) = registry_home("reserve-ok");
         let entries = vec![do_entry("x-aaaa", "8c58eaf1-old")];
         let claims_root = dir.join("claims-root");
         std::fs::create_dir_all(&claims_root).unwrap();
