@@ -11866,8 +11866,7 @@ mod tests {
 
     fn attestation_line(reviewer: &str, head: &str, verdict: &str) -> String {
         serde_json::json!({
-            "ts": "2026-01-01T00:00:00Z",
-            "source": "test",
+            "ts": "2026-01-01T00:00:00Z", "source": "test",
             "type": "review_attestation",
             "data": {"reviewer": reviewer, "head_sha": head, "verdict": verdict,
                      "attester_session_id": "sess-author"}
@@ -11886,8 +11885,7 @@ mod tests {
         branch: &str,
     ) -> String {
         serde_json::json!({
-            "ts": "2026-01-01T00:00:00Z",
-            "source": "test",
+            "ts": "2026-01-01T00:00:00Z", "source": "test",
             "type": "review_attestation",
             "data": {"reviewer": reviewer, "head_sha": head, "verdict": verdict,
                      "attester_session_id": "sess-author", "branch": branch}
@@ -12099,8 +12097,7 @@ mod tests {
         // ABSENT (the pre-landed backlog) still counts - absence must never
         // be read as zero.
         let zero = serde_json::json!({
-            "ts": "2026-01-01T00:00:00Z",
-            "source": "test",
+            "ts": "2026-01-01T00:00:00Z", "source": "test",
             "type": "review_attestation",
             "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
                      "attester_session_id": "sess-author", "reviewed_line_count": 0}
@@ -12144,8 +12141,7 @@ mod tests {
         // lines AND 0 files is the empty-diff shape the producer refuses, so
         // the gate must refuse it too, whatever else the line claims.
         let zero = serde_json::json!({
-            "ts": "2026-01-01T00:00:00Z",
-            "source": "test",
+            "ts": "2026-01-01T00:00:00Z", "source": "test",
             "type": "review_attestation",
             "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
                      "attester_session_id": "sess-author",
@@ -12177,8 +12173,7 @@ mod tests {
         // it would strand exactly those PRs (images, fonts, renames) with no
         // satisfiable producer path.
         let binary = serde_json::json!({
-            "ts": "2026-01-01T00:00:00Z",
-            "source": "test",
+            "ts": "2026-01-01T00:00:00Z", "source": "test",
             "type": "review_attestation",
             "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
                      "attester_session_id": "sess-author",
@@ -12205,8 +12200,7 @@ mod tests {
         // reads a separate scan; a review of nothing must not satisfy it
         // there either, only on the coverage axis.
         let zero = serde_json::json!({
-            "ts": "2026-01-01T00:00:00Z",
-            "source": "test",
+            "ts": "2026-01-01T00:00:00Z", "source": "test",
             "type": "review_attestation",
             "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
                      "attester_session_id": "sess-author",
@@ -12385,8 +12379,7 @@ mod tests {
         // the retracting session's own entry stays untouched - undoing an
         // impersonation must not require performing it a second time.
         let pass = serde_json::json!({
-            "ts": "2026-01-01T00:00:00Z",
-            "source": "test",
+            "ts": "2026-01-01T00:00:00Z", "source": "test",
             "type": "review_attestation",
             "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
                      "attester_session_id": "sess-A", "branch": "feature/x"}
@@ -12406,8 +12399,7 @@ mod tests {
         assert_eq!(control.coverage, Coverage::Covered(1));
 
         let retraction = serde_json::json!({
-            "ts": "2026-01-01T00:00:00Z",
-            "source": "test",
+            "ts": "2026-01-01T00:00:00Z", "source": "test",
             "type": "review_attestation",
             "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "fail",
                      "attester_session_id": "sess-operator",
