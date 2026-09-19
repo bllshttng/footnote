@@ -2904,7 +2904,10 @@ mod tests {
             data.as_object().unwrap()
         ));
         assert!(
-            !path.exists() || crate::events::committed_journal_text(&path).trim().is_empty(),
+            !path.exists()
+                || crate::events::committed_journal_text(&path)
+                    .trim()
+                    .is_empty(),
             "the corrupted-scope row must not reach the journal"
         );
     }
@@ -3012,7 +3015,10 @@ mod tests {
             &history,
             at(479)
         ));
-        assert_eq!(crate::events::committed_journal_text(&path).lines().count(), 1);
+        assert_eq!(
+            crate::events::committed_journal_text(&path).lines().count(),
+            1
+        );
         // 481 minutes old: the beat is due, one hook row.
         assert!(hook_beat(
             &path,
@@ -3037,7 +3043,10 @@ mod tests {
             &history,
             at(482)
         ));
-        assert_eq!(crate::events::committed_journal_text(&path).lines().count(), 2);
+        assert_eq!(
+            crate::events::committed_journal_text(&path).lines().count(),
+            2
+        );
     }
 
     #[test]

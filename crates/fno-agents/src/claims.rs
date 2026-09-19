@@ -4629,7 +4629,7 @@ mod tests {
         assert_eq!(committed_row_count(&events), 1);
     }
 
-   #[test]
+    #[test]
     fn release_after_steal_leaves_new_holder_intact() {
         // AC2: a holder whose lock was stolen mid-write must not delete the new
         // holder's lock on release. This is the wrongful-delete vector the owner
