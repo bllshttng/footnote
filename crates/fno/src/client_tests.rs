@@ -438,6 +438,7 @@ fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> Age
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -902,6 +903,7 @@ pub(super) fn focus_agent(pane: u64) -> AgentRow {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -2550,9 +2552,9 @@ fn chrome_hit_card_opens_confirm_with_node() {
     });
     view.expand_pull_sections(); // (x-c5ee) ~ backlog now defaults Collapsed
                                  // display_rows (x-0090, no tab rows): [footnote squad, + new workspace,
-                                 // Header, Card] -> the card is index 3, at outer row 3 (x-cd67 US1: the
+                                 // Header, scope subline, Card] -> the card is index 4 (x-cd67 US1: the
                                  // sideline owns row 0, so outer row == display index).
-    match view.chrome_hit(3, 5) {
+    match view.chrome_hit(4, 5) {
         Some(ChromeHit::Confirm(a)) => {
             assert!(
                 matches!(&a.action, ConfirmKind::Dispatch { node } if node == "x-a496"),
@@ -2609,13 +2611,14 @@ fn chrome_hit_non_ready_card_is_notice_not_confirm() {
     });
     view.expand_pull_sections(); // (x-c5ee) ~ backlog now defaults Collapsed
                                  // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
-                                 // blocked, in-flight] -> the cards paint at outer rows 3, 4 (x-cd67 US1).
+                                 // scope subline, blocked, in-flight] -> the cards paint at outer rows 4, 5
+                                 // (x-cd67 US1).
     assert!(
-        matches!(view.chrome_hit(3, 5), Some(ChromeHit::Notice(_))),
+        matches!(view.chrome_hit(4, 5), Some(ChromeHit::Notice(_))),
         "blocked card -> notice, not confirm"
     );
     assert!(
-        matches!(view.chrome_hit(4, 5), Some(ChromeHit::Notice(_))),
+        matches!(view.chrome_hit(5, 5), Some(ChromeHit::Notice(_))),
         "in-flight card -> notice, not confirm"
     );
 }
@@ -2672,17 +2675,17 @@ fn chrome_hit_inflight_card_routes_pane_then_attach_then_hint() {
     });
     view.expand_pull_sections(); // (x-c5ee) ~ backlog now defaults Collapsed
                                  // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
-                                 // 4 cards] -> rows 3-6 (x-cd67 US1: outer row == display index).
-    assert_eq!(cmds(view.chrome_hit(3, 5)), vec![Command::FocusPane(11)]);
+                                 // scope subline, 4 cards] -> rows 4-7 (x-cd67 US1: outer row == index).
+    assert_eq!(cmds(view.chrome_hit(4, 5)), vec![Command::FocusPane(11)]);
     assert_eq!(
-        cmds(view.chrome_hit(4, 5)),
+        cmds(view.chrome_hit(5, 5)),
         vec![Command::attach_agent("deadbee2")]
     );
-    match view.chrome_hit(5, 5) {
+    match view.chrome_hit(6, 5) {
         Some(ChromeHit::Notice(msg)) => assert_eq!(msg, "in flight - worked by t:abc"),
         other => panic!("expected hint notice, got {}", chrome_hit_label(&other)),
     }
-    match view.chrome_hit(6, 5) {
+    match view.chrome_hit(7, 5) {
         Some(ChromeHit::Notice(msg)) => {
             assert_eq!(msg, "card in flight - no session visible here")
         }
@@ -2894,6 +2897,7 @@ fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> 
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -3573,6 +3577,7 @@ fn view_with_dead_interleaved() -> View {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -3774,6 +3779,7 @@ fn section_header_is_clickable_but_never_selector_selectable() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -4049,6 +4055,7 @@ fn elsewhere_section_live_only_hides_exited_orphans() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -4117,6 +4124,7 @@ fn section_header_caret_tracks_all_three_states() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -4244,6 +4252,7 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -4288,6 +4297,7 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -4331,6 +4341,7 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -4418,6 +4429,7 @@ fn chrome_hit_bottom_chrome_row_is_swallowed() {
             account: None,
             updated_at: None,
             pr: None,
+            pr_session_short: None,
             tail: None,
             crown_level: None,
             crown_scope: None,
@@ -4981,6 +4993,7 @@ fn row_menu_entries_gate_by_agent_state() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -5985,6 +5998,7 @@ async fn row_menu_disambiguates_same_named_agents() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -7841,6 +7855,7 @@ fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -8904,6 +8919,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 account: None,
                 updated_at: None,
                 pr: None,
+                pr_session_short: None,
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
@@ -8945,6 +8961,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 account: None,
                 updated_at: None,
                 pr: None,
+                pr_session_short: None,
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
@@ -8986,6 +9003,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 account: None,
                 updated_at: None,
                 pr: None,
+                pr_session_short: None,
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
@@ -9104,6 +9122,7 @@ fn squad_header_rollup_counts_in_every_view_state() {
             account: None,
             updated_at: None,
             pr: None,
+            pr_session_short: None,
             tail: None,
             crown_level: None,
             crown_scope: None,
@@ -9549,6 +9568,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 account: None,
                 updated_at: None,
                 pr: None,
+                pr_session_short: None,
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
@@ -9590,6 +9610,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 account: None,
                 updated_at: None,
                 pr: None,
+                pr_session_short: None,
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
@@ -9631,6 +9652,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 account: None,
                 updated_at: None,
                 pr: None,
+                pr_session_short: None,
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
@@ -9675,6 +9697,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 account: None,
                 updated_at: None,
                 pr: None,
+                pr_session_short: None,
                 tail: None,
                 crown_level: None,
                 crown_scope: None,
@@ -10191,6 +10214,7 @@ fn unified_rows_view() -> View {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -10258,7 +10282,7 @@ fn backlog_layout(cards: Vec<BacklogCard>, total: usize) -> LayoutView {
     layout
 }
 
-fn bcard(id: &str, state: CardState) -> BacklogCard {
+pub(super) fn bcard(id: &str, state: CardState) -> BacklogCard {
     BacklogCard {
         id: id.into(),
         slug: format!("{id}-slug"),
@@ -10502,69 +10526,6 @@ fn float_hint_only_on_ready_cards() {
 }
 
 #[test]
-fn card_menu_open_plan_follows_ld7_grey_versus_absent() {
-    let mut card = bcard("x-a", CardState::Ready);
-    let off = crate::digest_overlay::ObsidianCfg::default();
-    let on = crate::digest_overlay::ObsidianCfg {
-        enabled: true,
-        // Absolute, so resolution never depends on the test host's HOME.
-        vault: Some("/tmp/vault".into()),
-    };
-
-    // Obsidian disabled: the item cannot apply no matter what the operator
-    // does in this menu, so LD7 says absent, never greyed.
-    card.plan_path = Some("/tmp/vault/plans/x-a.md".into());
-    let m = build_card_menu(&card, &off, Anchor::Center);
-    assert_eq!(
-        m.popup.rows.len(),
-        4,
-        "no open-plan row when obsidian is off"
-    );
-    assert_eq!(
-        m.actions.len(),
-        2,
-        "no OpenPlan action when obsidian is off"
-    );
-
-    // No plan_path: state can change (a plan can be added later), so LD7
-    // says greyed with the reason, not absent.
-    card.plan_path = None;
-    let m = build_card_menu(&card, &on, Anchor::Center);
-    match &m.popup.rows[4] {
-        PopupRow::Entry {
-            label,
-            hint,
-            enabled,
-            ..
-        } => {
-            assert_eq!(label, "Open plan");
-            assert_eq!(hint, "no plan");
-            assert!(!enabled);
-        }
-        other => panic!("expected the open-plan entry, got {other:?}"),
-    }
-    assert_eq!(
-        m.actions.len(),
-        2,
-        "a disabled entry contributes no action slot"
-    );
-
-    // Plan present and obsidian on: enabled, and the third action lines up
-    // with the third selectable target.
-    card.plan_path = Some("/tmp/vault/plans/x-a.md".into());
-    let m = build_card_menu(&card, &on, Anchor::Center);
-    match &m.popup.rows[4] {
-        PopupRow::Entry { label, enabled, .. } => {
-            assert_eq!(label, "Open plan");
-            assert!(enabled);
-        }
-        other => panic!("expected the open-plan entry, got {other:?}"),
-    }
-    assert_eq!(m.actions.len(), 3);
-    assert_eq!(m.actions[2], MenuAction::OpenPlan);
-}
-
-#[test]
 fn stale_feed_keeps_its_cards_and_says_so() {
     // AC7-FR: a failing graph read must never blank the section - it keeps
     // the last-known cards under a header that admits they are memory.
@@ -10676,17 +10637,25 @@ fn selector_nav_skips_headers_and_clamps() {
     // AC2-UI + Boundaries: j/k stop on every actionable row, skip the two
     // section headers, and clamp (no wrap) at both ends.
     // Blank spacers sit at 2, 4, 6, 10 (the 4 = footer spacer); footer at 5,
-    // headers at 7 and 11.
+    // headers at 7 and 11; the backlog scope subline is inert at 12.
     let v = unified_rows_view();
     assert_eq!(
         v.selector_down(5),
         8,
         "j from the footer skips the spacer + '~ elsewhere'"
     );
-    assert_eq!(v.selector_down(9), 12, "j skips the spacer + '~ backlog'");
-    assert_eq!(v.selector_down(14), 14, "clamp at the last row");
+    assert_eq!(
+        v.selector_down(9),
+        13,
+        "j skips the spacer + '~ backlog' + its inert scope subline"
+    );
+    assert_eq!(v.selector_down(15), 15, "clamp at the last row");
     assert_eq!(v.selector_up(8), 5, "k skips '~ elsewhere' + spacer upward");
-    assert_eq!(v.selector_up(12), 9, "k skips '~ backlog' + spacer upward");
+    assert_eq!(
+        v.selector_up(13),
+        9,
+        "k skips the scope subline + '~ backlog' + spacer upward"
+    );
     assert_eq!(v.selector_up(0), 0, "clamp at the top");
 }
 
@@ -10694,11 +10663,12 @@ fn selector_nav_skips_headers_and_clamps() {
 fn selector_anchor_steps_off_headers() {
     // AC1-FR / AC2-EDGE: a re-anchored cursor never rests on a Header -
     // forward first, and an out-of-range index clamps to the last row.
-    // Headers sit at 7 and 11 (Blank spacers at 2, 4, 6, 10).
+    // Headers sit at 7 and 11 (Blank spacers at 2, 4, 6, 10; the scope
+    // subline is inert at 12).
     let v = unified_rows_view();
     assert_eq!(v.selector_anchor(7), Some(8), "header steps forward");
-    assert_eq!(v.selector_anchor(11), Some(12), "header steps forward");
-    assert_eq!(v.selector_anchor(50), Some(14), "stale index clamps");
+    assert_eq!(v.selector_anchor(11), Some(13), "header steps forward");
+    assert_eq!(v.selector_anchor(50), Some(15), "stale index clamps");
     assert_eq!(v.selector_anchor(0), Some(0), "actionable row stays put");
 }
 
@@ -10933,6 +10903,7 @@ fn peek_overlay_renders_loading_transcript_and_answerable() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -11387,6 +11358,7 @@ async fn selector_x_on_a_tombstone_sends_dismiss() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -11449,6 +11421,7 @@ pub(super) fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRo
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -12303,8 +12276,10 @@ async fn selector_enter_refusal_keeps_selector_open() {
         .find(|a| a.name == "bg-other")
         .unwrap()
         .exited = true; // the dead paneless row
-                        // bg-other (9), blocked card (13), in-flight card (14).
-    for row in [9usize, 13, 14] {
+                        // bg-other (9). The card rows left this contract: Enter on a
+                        // card now opens the node detail, whose dim reasons carry the
+                        // refusal (node_detail_tests covers that).
+    for row in [9usize] {
         v.selector = Some(row);
         v.notice = None;
         let mut buf: Vec<u8> = Vec::new();
@@ -12316,21 +12291,23 @@ async fn selector_enter_refusal_keeps_selector_open() {
 }
 
 #[tokio::test]
-async fn selector_enter_ready_card_opens_confirm() {
-    // AC2-HP: Enter on a Ready card closes the selector and arms the
-    // one-keypress dispatch confirm - nothing on the wire yet; the second
-    // Enter (confirm_keys) sends the DispatchNode (AC2-FR: the confirm
-    // takes the action, so one dispatch at most).
+async fn selector_enter_ready_card_opens_node_detail() {
+    // Enter on a card opens the node detail overlay and keeps the selector
+    // underneath (Esc unwinds one layer). Nothing reaches the wire; the
+    // dispatch confirm stays on the click path (chrome_hit_card_opens_*).
     let mut v = unified_rows_view();
-    v.selector = Some(12); // ready card
+    v.selector = Some(13); // ready card, past the scope subline
     let mut buf: Vec<u8> = Vec::new();
     selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
-    assert!(buf.is_empty(), "confirm first, dispatch on the next Enter");
-    assert_eq!(v.selector, None);
-    assert!(
-        matches!(&v.confirm.as_ref().unwrap().action, ConfirmKind::Dispatch { node } if node == "x-rdy"),
-        "the Ready card's node is armed for dispatch"
-    );
+    assert!(buf.is_empty(), "the open sends nothing");
+    let nd = v
+        .node_detail
+        .as_ref()
+        .expect("Enter on a card opened the node detail");
+    assert_eq!(nd.node_id, "x-rdy");
+    assert!(nd.want, "the open arms a fold");
+    assert_eq!(v.selector, Some(13), "the selector survives underneath");
+    assert!(v.confirm.is_none(), "no dispatch is armed by an open");
 }
 
 #[tokio::test]
@@ -12387,11 +12364,11 @@ fn short_terminal_degrades_prompts_to_notices() {
     // prompt cannot render, so a Ready card and the footer refuse with a
     // notice instead of arming an invisible modal (which could dispatch
     // blind on the next Enter).
-    // ready card at 12, footer at 5.
+    // ready card at 13 (after the scope subline), footer at 5.
     let mut v = unified_rows_view();
     v.term.0 = MIN_ROWS_FOR_STATUS - 1;
     assert!(
-        matches!(v.row_action(12), Some(ChromeHit::Notice(_))),
+        matches!(v.row_action(13), Some(ChromeHit::Notice(_))),
         "ready card refuses on a too-short terminal"
     );
     assert!(
@@ -12400,7 +12377,7 @@ fn short_terminal_degrades_prompts_to_notices() {
     );
     // At the minimum height both act normally again.
     v.term.0 = MIN_ROWS_FOR_STATUS;
-    assert!(matches!(v.row_action(12), Some(ChromeHit::Confirm(_))));
+    assert!(matches!(v.row_action(13), Some(ChromeHit::Confirm(_))));
     assert!(matches!(v.row_action(5), Some(ChromeHit::OpenCreate)));
 }
 
@@ -12503,6 +12480,7 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             account: None,
             updated_at: None,
             pr: None,
+            pr_session_short: None,
             tail: None,
             crown_level: None,
             crown_scope: None,
@@ -12544,6 +12522,7 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             account: None,
             updated_at: None,
             pr: None,
+            pr_session_short: None,
             tail: None,
             crown_level: None,
             crown_scope: None,
@@ -12624,6 +12603,7 @@ fn squad_rollup_bare_pane_folds_to_idle() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -12809,6 +12789,7 @@ async fn nav_goto_teleports_cross_squad_then_focuses() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -13282,6 +13263,7 @@ fn nav_rows_lists_plain_panes_and_dedups_agent_panes() {
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,
@@ -13428,7 +13410,7 @@ fn answerable(idx_labels: &[(&str, &str)], fp: u8) -> AnswerablePrompt {
     }
 }
 
-fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) -> AgentRow {
+pub(super) fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) -> AgentRow {
     AgentRow {
         spawned_by_name: None,
         lineage_reason: None,
@@ -13461,6 +13443,7 @@ fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) -> AgentRow
         account: None,
         updated_at: None,
         pr: None,
+        pr_session_short: None,
         tail: None,
         crown_level: None,
         crown_scope: None,

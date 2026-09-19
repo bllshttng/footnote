@@ -321,7 +321,7 @@ impl AttachForm {
 /// Single-quote each token for `sh -c`. Every token here comes from the
 /// capability contract or a session id, but quoting is the property that keeps
 /// that true of a contract someone edits later.
-fn shell_join(tokens: &[String]) -> String {
+pub(crate) fn shell_join(tokens: &[String]) -> String {
     tokens
         .iter()
         .map(|token| format!("'{}'", token.replace('\'', r"'\''")))
@@ -333,8 +333,8 @@ fn shell_join(tokens: &[String]) -> String {
 /// the bundled form it reads, the config key that may override it, and how
 /// strict the parse is: a resume lane fills exactly `{session_id}` (the
 /// contract validator refuses any other placeholder in a resume lane), so a
-/// `{short_id}` form or one promising a `pre_exec` the resume builder does
-/// not run is not a resume form.
+/// `{short_id}` form is not a resume form. A `pre_exec` rides either lane;
+/// the resume builder composes it the way the attach renderer does.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FormLane {
     Attach,
@@ -721,9 +721,6 @@ fn parse_form(lane: FormLane, block: &toml::Value) -> Option<AttachForm> {
                 .collect()
         })
         .unwrap_or_default();
-    if lane == FormLane::Resume && !pre_exec.is_empty() {
-        return None;
-    }
     Some(AttachForm {
         tokens,
         id_kind,
@@ -3160,11 +3157,13 @@ tokens = []"#,
     /// daemon-starting form each refuse rather than render an argv the
     /// resume builder cannot honor.
     #[test]
-    fn the_resume_lane_refuses_short_id_and_pre_exec_forms() {
+    fn the_resume_lane_refuses_short_id_and_carries_pre_exec() {
         let short_id: toml::Value =
             toml::from_str(r#"tokens = ["opencode", "--session", "{short_id}"]"#).unwrap();
         assert!(parse_form(FormLane::Attach, &short_id).is_some());
         assert!(parse_form(FormLane::Resume, &short_id).is_none());
+        // The shared-daemon ownership assertion rides the resume lane too:
+        // the pre_exec is carried, and the resume builder composes it.
         let daemon_start: toml::Value = toml::from_str(
             r#"
             tokens   = ["codex", "resume", "{session_id}"]
@@ -3172,8 +3171,12 @@ tokens = []"#,
         "#,
         )
         .unwrap();
-        assert!(parse_form(FormLane::Attach, &daemon_start).is_some());
-        assert!(parse_form(FormLane::Resume, &daemon_start).is_none());
+        let carried = parse_form(FormLane::Resume, &daemon_start).expect("pre_exec rides resume");
+        assert_eq!(
+            carried.pre_exec,
+            ["codex", "app-server", "daemon", "start"],
+            "the ownership assertion survives the parse"
+        );
         let plain: toml::Value =
             toml::from_str(r#"tokens = ["codex", "resume", "{session_id}"]"#).unwrap();
         assert!(parse_form(FormLane::Resume, &plain).is_some());

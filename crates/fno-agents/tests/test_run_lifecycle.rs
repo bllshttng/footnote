@@ -5,6 +5,7 @@
 //! assertion is a positive marker on a real pid (born from an actual short
 //! command), never an absence read off a log line.
 
+use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -240,5 +241,377 @@ fn a_cargo_under_the_holding_cargo_is_admitted_at_once() {
     assert_eq!(build_holder(&root), Some(holder));
     let _ = nested_cargo.kill();
     let _ = nested_cargo.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A fake cargo holder: an `sh` whose only child execs a symlink to
+/// `/bin/sleep`, so the census sees one child with a chosen argv0. Its own
+/// process group lets the test killpg the whole holder at the end.
+fn spawn_holder(root: &std::path::Path, dir: &str, name: &str) -> std::process::Child {
+    let link_dir = root.join(dir);
+    std::fs::create_dir_all(&link_dir).unwrap();
+    let link = link_dir.join(name);
+    std::os::unix::fs::symlink("/bin/sleep", &link).expect("symlink the chosen argv0");
+    Command::new("/bin/sh")
+        .arg("-c")
+        .arg("\"$0\" 60; true")
+        .arg(&link)
+        .process_group(0)
+        .spawn()
+        .expect("spawn the holder sh")
+}
+
+fn kill_group(child: &mut std::process::Child) {
+    unsafe { libc::killpg(child.id() as libc::c_int, libc::SIGTERM) };
+    child.wait().unwrap();
+}
+
+/// A holder cargo whose only child is a test binary yields `build:cargo` to
+/// a waiter after the idle window, while the holder still lives. The
+/// takeover names the idle holder in the new claim's reason, the waiter's
+/// stderr, and the waiter worktree's `claim_released` event.
+#[test]
+fn a_holder_in_its_test_phase_yields_the_slot_after_the_idle_window() {
+    let root = std::fs::canonicalize(tmp_claims_root("idle-takeover")).unwrap();
+    let (tree_a, tree_b) = (root.join("a"), root.join("b"));
+    std::fs::create_dir_all(&tree_a).unwrap();
+    std::fs::create_dir_all(&tree_b).unwrap();
+    let mut holder = spawn_holder(&root, "target/debug/deps", "fno_agents-0123abcd");
+
+    let first = build_admit(&root, holder.id(), &tree_a).status().unwrap();
+    assert!(first.success(), "the holder must be admitted at once");
+    let old_holder = build_holder(&root).expect("the holder cargo holds build:cargo");
+
+    let mut cargo_b = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut waiter = build_admit(&root, cargo_b.id(), &tree_b)
+        .env("FNO_TEST_BUILD_IDLE_SECS", "1")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let started = Instant::now();
+    let status = loop {
+        match waiter.try_wait().unwrap() {
+            Some(status) => break status,
+            None => {
+                assert!(
+                    started.elapsed() < Duration::from_secs(12),
+                    "the waiter must take over within the idle window plus one scan"
+                );
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    };
+    assert!(
+        status.success(),
+        "the takeover must read as success, got {status}"
+    );
+    assert!(
+        pid_alive(holder.id()),
+        "the idle holder must still be alive at takeover"
+    );
+
+    let new_holder = build_holder(&root).expect("the waiter holds build:cargo after takeover");
+    assert!(
+        new_holder.contains(tree_b.to_str().unwrap()),
+        "the claim must name the waiter's tree: {new_holder}"
+    );
+    let (_, rec) = fno_agents::claims::status("build:cargo", Some(&root));
+    let rec = rec.expect("a claim record after takeover");
+    assert!(
+        rec.reason
+            .as_deref()
+            .is_some_and(|r| r.contains("took over from") && r.contains(&old_holder)),
+        "the reason must name the idle holder: {:?}",
+        rec.reason
+    );
+
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut waiter.stderr.take().unwrap(), &mut stderr).unwrap();
+    assert!(
+        stderr.contains("cargo admission: taking over") && stderr.contains(&old_holder),
+        "stderr must name the takeover and the idle holder: {stderr}"
+    );
+
+    // The claims lifecycle is an ephemeral event class: it lands in the
+    // sibling journal beside .fno/events.jsonl.
+    let events = std::fs::read_to_string(tree_b.join(".fno/events.jsonl.ephemeral"))
+        .or_else(|_| std::fs::read_to_string(tree_b.join(".fno/events.jsonl")))
+        .expect("the waiter worktree records the release");
+    assert!(
+        events.contains("claim_released") && events.contains(&old_holder),
+        "the events journal must name the released idle holder"
+    );
+
+    kill_group(&mut holder);
+    let _ = cargo_b.kill();
+    let _ = cargo_b.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The control that separates takeover from a TTL: a holder with a live
+/// compile process under it keeps the slot past the same window, and the
+/// waiter is admitted within 2s of the holder's death.
+
+#[test]
+fn a_compiling_holder_keeps_the_slot_past_the_idle_window() {
+    let root = std::fs::canonicalize(tmp_claims_root("compile-keeps")).unwrap();
+    let (tree_a, tree_b) = (root.join("a"), root.join("b"));
+    std::fs::create_dir_all(&tree_a).unwrap();
+    std::fs::create_dir_all(&tree_b).unwrap();
+    let mut holder = spawn_holder(&root, "bin", "rustc");
+    // Let the compile-process child appear before the first idle scan.
+    std::thread::sleep(Duration::from_millis(300));
+
+    let first = build_admit(&root, holder.id(), &tree_a).status().unwrap();
+    assert!(first.success(), "the holder must be admitted at once");
+    let old_holder = build_holder(&root).expect("the holder cargo holds build:cargo");
+
+    let mut cargo_b = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut waiter = build_admit(&root, cargo_b.id(), &tree_b)
+        .env("FNO_TEST_BUILD_IDLE_SECS", "1")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    std::thread::sleep(Duration::from_secs(8));
+    assert!(
+        waiter.try_wait().unwrap().is_none(),
+        "a compiling holder keeps the slot past the idle window"
+    );
+
+    kill_group(&mut holder);
+    let released = Instant::now();
+    let status = waiter.wait().unwrap();
+    assert!(
+        status.success(),
+        "the waiter must follow the holder, got {status}"
+    );
+    assert!(
+        released.elapsed() < Duration::from_secs(2),
+        "admission must follow the holder's death within 2s, took {:?}",
+        released.elapsed()
+    );
+    assert_ne!(
+        build_holder(&root),
+        Some(old_holder),
+        "the waiter now holds"
+    );
+    let _ = cargo_b.kill();
+    let _ = cargo_b.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn slot_pool_setup(root: &std::path::Path) {
+    std::fs::write(root.join("config.toml"), "[test]\nmax_cargo_runs = 2\n")
+        .expect("write the slot-pool config");
+}
+
+fn run_admit(root: &std::path::Path, cargo_pid: u32, worktree: &std::path::Path) -> Command {
+    let mut cmd = Command::new(bin());
+    cmd.args(["test-run", "run-admit", "--cargo-pid"])
+        .arg(cargo_pid.to_string())
+        .arg("--worktree")
+        .arg(worktree)
+        .env("FNO_CLAIMS_ROOT", root)
+        .env("TMPDIR", root)
+        .env("FNO_CONFIG", root.join("config.toml"));
+    cmd
+}
+
+/// AC1-HP: two cargos hold both run slots; a third waits, names both
+/// holders and the count, and takes the freed slot within 2s.
+#[test]
+fn a_third_cargo_run_waits_until_a_slot_frees() {
+    let root = std::fs::canonicalize(tmp_claims_root("run-pool")).unwrap();
+    let (tree_1, tree_2, tree_3) = (root.join("w1"), root.join("w2"), root.join("w3"));
+    for tree in [&tree_1, &tree_2, &tree_3] {
+        std::fs::create_dir_all(tree).unwrap();
+    }
+    slot_pool_setup(&root);
+
+    let mut holder_1 = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut holder_2 = Command::new("sleep").arg("60").spawn().unwrap();
+    let first = run_admit(&root, holder_1.id(), &tree_1).status().unwrap();
+    assert!(first.success(), "slot 0 must be taken at once");
+    let second = run_admit(&root, holder_2.id(), &tree_2).status().unwrap();
+    assert!(second.success(), "slot 1 must be taken at once");
+
+    let mut waiter = run_admit(&root, std::process::id(), &tree_3)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        waiter.try_wait().unwrap().is_none(),
+        "the third cargo must wait while both slots are held"
+    );
+
+    let _ = holder_1.kill();
+    let _ = holder_1.wait();
+    let released = Instant::now();
+    let status = waiter.wait().unwrap();
+    assert!(
+        status.success(),
+        "the waiter must be admitted, got {status}"
+    );
+    assert!(
+        released.elapsed() < Duration::from_secs(2),
+        "admission must follow the freed slot within 2s, took {:?}",
+        released.elapsed()
+    );
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut waiter.stderr.take().unwrap(), &mut stderr).unwrap();
+    assert!(
+        stderr.contains("cargo admission: holding")
+            && stderr.contains("2 of 2 cargo run slots held by"),
+        "stderr must name the pool count: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("cargo:{}:{}", tree_1.display(), holder_1.id()))
+            && stderr.contains(&format!("cargo:{}:{}", tree_2.display(), holder_2.id())),
+        "stderr must name both holders: {stderr}"
+    );
+    let _ = holder_2.kill();
+    let _ = holder_2.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC3-EDGE: a process under a slot holder (a nested cargo, a doctest's
+/// rustdoc) is admitted through the status pass with no second claim.
+#[test]
+fn a_process_under_a_slot_holder_is_admitted_without_a_second_slot() {
+    let root = std::fs::canonicalize(tmp_claims_root("run-nested")).unwrap();
+    let tree_1 = root.join("w1");
+    std::fs::create_dir_all(&tree_1).unwrap();
+    slot_pool_setup(&root);
+
+    let first = run_admit(&root, std::process::id(), &tree_1)
+        .status()
+        .unwrap();
+    assert!(first.success(), "the test process must take slot 0 at once");
+
+    let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+    let start = Instant::now();
+    let status = run_admit(&root, child.id(), &root.join("w2"))
+        .status()
+        .unwrap();
+    assert!(status.success(), "the child must be admitted, got {status}");
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+    let (_, rec) = fno_agents::claims::status("test:cargo-run:1", Some(&root));
+    assert!(
+        !matches!(rec, Some(_)),
+        "slot 1 must stay free: a nested ask writes no second claim"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC4-HP: with every slot held, a waiting build-admit leaves build:cargo
+/// without a holder; it takes the slot first, then the build claim.
+#[test]
+fn build_admit_takes_a_run_slot_before_build_cargo() {
+    let root = std::fs::canonicalize(tmp_claims_root("run-order")).unwrap();
+    let (tree_1, tree_b) = (root.join("w1"), root.join("wb"));
+    std::fs::create_dir_all(&tree_1).unwrap();
+    std::fs::create_dir_all(&tree_b).unwrap();
+    slot_pool_setup(&root);
+
+    let mut holder_1 = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut holder_2 = Command::new("sleep").arg("60").spawn().unwrap();
+    assert!(run_admit(&root, holder_1.id(), &tree_1)
+        .status()
+        .unwrap()
+        .success());
+    assert!(run_admit(&root, holder_2.id(), &root.join("w2"))
+        .status()
+        .unwrap()
+        .success());
+
+    let mut cargo_b = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut waiter = build_admit(&root, cargo_b.id(), &tree_b)
+        .env("FNO_CONFIG", root.join("config.toml"))
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        waiter.try_wait().unwrap().is_none(),
+        "the build waiter must wait"
+    );
+    assert!(
+        build_holder(&root).is_none(),
+        "build:cargo must stay unheld while every slot is held"
+    );
+
+    let _ = holder_1.kill();
+    let _ = holder_1.wait();
+    let status = waiter.wait().unwrap();
+    assert!(
+        status.success(),
+        "the build waiter must be admitted, got {status}"
+    );
+    let new_holder = build_holder(&root).expect("the build waiter now holds build:cargo");
+    assert!(
+        new_holder.contains(&cargo_b.id().to_string()),
+        "build:cargo must name the waiter's cargo: {new_holder}"
+    );
+    let _ = cargo_b.kill();
+    let _ = cargo_b.wait();
+    let _ = holder_2.kill();
+    let _ = holder_2.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC8-HP: a cargo waiting on a run slot writes the same stop-hook marker
+/// as a build waiter; the stop hook's read names a holder.
+#[test]
+fn a_run_slot_waiter_writes_the_stop_hook_marker() {
+    let root = std::fs::canonicalize(tmp_claims_root("run-marker")).unwrap();
+    let tree_w = root.join("ww");
+    std::fs::create_dir_all(&tree_w).unwrap();
+    slot_pool_setup(&root);
+
+    let mut holder_1 = Command::new("sleep").arg("60").spawn().unwrap();
+    let mut holder_2 = Command::new("sleep").arg("60").spawn().unwrap();
+    assert!(run_admit(&root, holder_1.id(), &root.join("w1"))
+        .status()
+        .unwrap()
+        .success());
+    assert!(run_admit(&root, holder_2.id(), &root.join("w2"))
+        .status()
+        .unwrap()
+        .success());
+
+    let mut waiter = run_admit(&root, std::process::id(), &tree_w)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    // The stop hook reads the global waiters dir; pin this test process to
+    // the same claims root the waiter subprocesses used.
+    std::env::set_var("FNO_CLAIMS_ROOT", &root);
+    let message = fno_agents::test_run::build_hold_message(&tree_w)
+        .expect("the waiting run slot writes the stop-hook marker");
+    std::env::remove_var("FNO_CLAIMS_ROOT");
+    assert!(
+        message.contains("held for"),
+        "the hold message names a holder: {message}"
+    );
+
+    let _ = holder_1.kill();
+    let _ = holder_2.kill();
+    let _ = holder_1.wait();
+    let _ = holder_2.wait();
+    let status = waiter.wait().unwrap();
+    assert!(
+        status.success(),
+        "the waiter must be admitted, got {status}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -40,16 +40,22 @@ pub(super) fn title_session_name(title: &str) -> &str {
 }
 
 /// Remember every restored portal slot's seat (index, row, pane,
-/// tab id) until the tab ids are final.
+/// tab id, recorded session guard) until the tab ids are final.
 pub(super) fn collect_portal_slot_seats(
     kept_slots: &[&crate::proto::LayoutSlot],
     slot_pane: &HashMap<&str, u64>,
     tid: TabId,
-    into: &mut Vec<(u8, String, u64, TabId)>,
+    into: &mut Vec<(u8, String, u64, TabId, Option<String>)>,
 ) {
     for slot in kept_slots {
         if let (Some(p), Some(portal)) = (slot_pane.get(slot.name.as_str()), slot.portal.as_ref()) {
-            into.push((portal.index, portal.row.clone(), *p, tid));
+            into.push((
+                portal.index,
+                portal.row.clone(),
+                *p,
+                tid,
+                portal.session_id.clone(),
+            ));
         }
     }
 }
@@ -57,28 +63,42 @@ pub(super) fn collect_portal_slot_seats(
 /// One restore receipt for both held kinds. A zero count is not
 /// silent when the other is non-zero, so "no portal came back" and "the
 /// counter never ran" stay distinguishable.
-pub(super) fn notify_held_receipt(core: &mut Core, workers_total: usize, portals_total: usize) {
+pub(super) fn notify_held_receipt(
+    core: &mut Core,
+    workers_total: usize,
+    portals_total: usize,
+    portals_live: usize,
+) {
     let portals_note = if portals_total > 0 {
         format!(" and {portals_total} portal(s)")
     } else {
         String::new()
     };
+    let live_note = if portals_live > 0 {
+        format!(" ({portals_live} re-armed live on their re-adopted viewer(s))")
+    } else {
+        String::new()
+    };
     core.notice_all(format!(
-        "restore: held {workers_total} worker pane(s){portals_note}; focus one to resume it"
+        "restore: held {workers_total} worker pane(s){portals_note}; focus one to resume it{live_note}"
     ));
 }
 
 /// Re-arm every held portal seat after restore: the entry goes back
 /// in the map, the seat pane gets its name and its held message, and the
 /// reach or a focus fills it on first demand. A held portal is NOT a squad
-/// member - the slot in its tab is the whole record. Returns the count of
-/// seats re-armed, for the restore receipt.
+/// member - the slot in its tab is the whole record. When the seat pane
+/// ALREADY runs the re-adopted viewer (a keeper-hosted viewer joined its
+/// stored slot by pane id), the portal re-arms LIVE: no held message, and
+/// the reach fills nothing, so no second viewer is born. Returns the count
+/// of seats re-armed, for the restore receipt.
 pub(super) fn rearm_held_portal_seats(
     core: &mut Core,
-    seats: Vec<(u8, String, u64, TabId)>,
-) -> usize {
+    seats: Vec<(u8, String, u64, TabId, Option<String>)>,
+) -> (usize, usize) {
     let mut held = 0;
-    for (index, row, seat, tid) in seats {
+    let mut live = 0;
+    for (index, row, seat, tid, recorded_sid) in seats {
         let index = if core.portals.contains_key(&index) {
             match core.next_free_portal() {
                 Some(free) => {
@@ -108,13 +128,25 @@ pub(super) fn rearm_held_portal_seats(
         if let Some(entry) = core.panes.get_mut(&seat) {
             entry.name = Some(format!("portal{index}"));
         }
+        // A live re-arm leaves no fill door armed: the seat runs the real
+        // viewer, so `fill_held_portal_at`'s stand-in check already refuses.
+        if core.panes.get(&seat).is_some_and(|e| e.cmd.is_some()) {
+            core.notice_all(format!(
+                "restore: portal {index} ({row}) re-armed live on its re-adopted viewer"
+            ));
+            live += 1;
+            continue;
+        }
+        if let Some(sid) = recorded_sid {
+            core.portal_session_guards.insert(index, sid);
+        }
         core.write_restore_message(
             seat,
             &format!("portal {index} ({row}, held across restart) - reach the row, or focus this pane, to resume"),
         );
         held += 1;
     }
-    held
+    (held, live)
 }
 
 /// A focused portal seat that is still the held shell fills in
@@ -153,7 +185,22 @@ pub(super) fn fill_held_portal_at(
     }
     let row_key = core.portals.get(&idx)?.row_key.clone();
     let mut hits = core.agents.iter().filter(|a| row_answers_key(a, &row_key));
-    if let (Some(_), None) = (hits.next(), hits.next()) {
+    if let (Some(row), None) = (hits.next(), hits.next()) {
+        // A recorded session id binds the seat to the row's incarnation at
+        // capture. A different full id under the same key is a DIFFERENT
+        // thread wearing a familiar label: refuse, keep the seat held, and
+        // name both ids - no pane ever renders B under A's label.
+        if let Some(recorded) = core.portal_session_guards.get(&idx) {
+            if row.harness_session_id.as_deref() != Some(recorded.as_str()) {
+                core.notice_all(format!(
+                    "portal {idx} fill refused: stored session {} resolved to {} under the same key; seat stays held",
+                    recorded,
+                    row.harness_session_id.as_deref().unwrap_or("(unreadable)")
+                ));
+                return Some(Flow::Continue);
+            }
+        }
+        core.portal_session_guards.remove(&idx);
         return Some(core.reach_portal(
             client_id,
             view,

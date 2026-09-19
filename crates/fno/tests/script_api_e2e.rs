@@ -765,10 +765,13 @@ fn sigterm_shutdown_kills_pane_children() {
     // x-48a5: the SIGTERM arm must tear panes down the way CoreMsg::Kill
     // does. The pane holds a child that ignores SIGHUP, so the closing pty
     // master cannot be what kills it - only the server's explicit teardown
-    // can. Pre-fix, the child outlives the server.
+    // can. Pre-fix, the child outlives the server. The child must be a PLAIN
+    // one: a keeper-hosted pane survives the shutdown for re-adoption by
+    // design, so the broken FNO_AGENTS_WORKER_BIN routes the spawn down the
+    // unkept inline fallback this test is about.
     let scratch = Scratch::new("sigterm_panes");
     let dir = scratch.0.to_str().unwrap();
-    let run = pane(
+    let run = pane_with_env(
         &scratch,
         &[
             "run",
@@ -779,6 +782,8 @@ fn sigterm_shutdown_kills_pane_children() {
             "-c",
             "trap '' HUP; exec sleep 300",
         ],
+        "FNO_AGENTS_WORKER_BIN",
+        "/nonexistent/fno-agents-worker",
     );
     assert!(
         run.status.success(),
@@ -822,20 +827,24 @@ fn wedged_sigterm_reaps_plain_pane_children() {
     // healthy-loop teardown cannot satisfy the assertion by accident.
     let scratch = Scratch::new("wedged_sigterm_reaper");
     let dir = scratch.0.to_str().unwrap();
-    let run = pane_with_env(
-        &scratch,
-        &[
-            "run",
-            "--cwd",
-            dir,
-            "--",
+    // The pane must be PLAIN: the emergency SIGTERM path kills plain children
+    // and preserves keeper-hosted ones for re-adoption, so a broken
+    // FNO_AGENTS_WORKER_BIN routes the spawn down the unkept inline fallback.
+    // FNO_E2E_CORE_WEDGE parks the core loop so only that emergency path can
+    // answer the SIGTERM.
+    let run = scratch
+        .command()
+        .args(["mux", "pane", "run", "--cwd", dir, "--"])
+        .args([
             "/bin/sh",
             "-c",
             "echo $$ > child.pid; trap '' HUP; exec sleep 300",
-        ],
-        "FNO_E2E_CORE_WEDGE",
-        "1",
-    );
+        ])
+        .env("SHELL", "/bin/sh")
+        .env("FNO_E2E_CORE_WEDGE", "1")
+        .env("FNO_AGENTS_WORKER_BIN", "/nonexistent/fno-agents-worker")
+        .output()
+        .expect("fno binary runs");
     assert!(
         run.status.success(),
         "wedged pane run: stdout={:?} stderr={:?}",
