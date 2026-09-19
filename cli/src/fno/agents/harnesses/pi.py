@@ -68,6 +68,7 @@ from pathlib import Path
 from typing import Any, Iterator, Optional, Sequence
 
 from fno.agents.dispatch import DispatchAskError
+from fno.agents.spawn_axes_client import SpawnAxesUnavailable, pi_session_lookup
 
 # pi's provider and model for this fleet. Both are always passed: see trap 3 in
 # the module docstring. Env overrides so a different subscription needs no
@@ -127,14 +128,6 @@ def pi_model() -> str:
     return os.environ.get("FNO_PI_MODEL") or PI_DEFAULT_MODEL
 
 
-def pi_sessions_root() -> Path:
-    """pi's session store root, honouring a relocated ``PI_HOME``."""
-    home = os.environ.get("PI_HOME") or os.path.join(
-        os.environ.get("HOME", ""), ".pi"
-    )
-    return Path(home) / "agent" / "sessions"
-
-
 def encode_cwd(cwd: Path | str) -> str:
     """pi's on-disk encoding of a working directory.
 
@@ -154,11 +147,6 @@ def encode_cwd(cwd: Path | str) -> str:
     """
     raw = str(cwd)
     return "--" + raw.lstrip("/").replace("/", "-") + "--"
-
-
-def session_dir(cwd: Path | str) -> Path:
-    """The cwd-scoped directory pi keeps ``cwd``'s sessions in."""
-    return pi_sessions_root() / encode_cwd(cwd)
 
 
 @dataclass(frozen=True)
@@ -191,30 +179,33 @@ class SessionLookup:
 def lookup_sessions(cwd: Path | str, session_id: str) -> SessionLookup:
     """Read the session files for one ``(cwd, session_id)`` pair, oldest first.
 
+    The read lives in the Rust owner (``crates/fno-agents/src/pi.rs``, reached
+    through the ``pi_session_lookup`` field of ``spawn-axes``): one store
+    reader, honoring ``PI_CODING_AGENT_DIR`` and the session-dir settings the
+    way pi itself does.
+
     Ordering is by FILENAME, which carries an ISO-8601 timestamp prefix
     (``<ISO>_<session-id>.jsonl``), so a lexicographic sort is chronological
-    and needs no stat call and no parse.
-
-    Ranking by CONTENT is forbidden, and this function deliberately gives a
-    caller no means to do it. An empty assistant ``content`` array marks a turn
-    that was ATTEMPTED AND FAILED, not an idle or empty session, so preferring
-    the fuller file discards the one that errored, which is usually the one a
-    human needs to read.
+    and needs no stat call and no parse. Ranking by CONTENT is forbidden; an
+    empty assistant ``content`` array marks a turn that was attempted and
+    failed, which is usually the one a human needs to read.
     """
-    directory = session_dir(cwd)
-    suffix = f"_{session_id}.jsonl"
     try:
-        names = sorted(
-            entry for entry in os.listdir(directory) if entry.endswith(suffix)
+        answer = pi_session_lookup(str(cwd), session_id)
+    except SpawnAxesUnavailable:
+        return SessionLookup(
+            state="unknown",
+            directory=Path(""),
+            reason="fno-agents is missing or failed; run fno doctor update --rust",
         )
-    except OSError as exc:
-        return SessionLookup(state="unknown", directory=directory, reason=str(exc))
-    files = tuple(directory / name for name in names)
-    if not files:
-        return SessionLookup(state="none", directory=directory)
-    if len(files) == 1:
-        return SessionLookup(state="one", directory=directory, files=files)
-    return SessionLookup(state="duplicate", directory=directory, files=files)
+    files = tuple(Path(f) for f in answer.get("files", []))
+    return SessionLookup(
+        state=str(answer.get("state", "unknown")),
+        directory=Path(str(answer.get("directory", "") or "")),
+        files=files,
+        reason=str(answer.get("reason", "")),
+    )
+
 
 
 def duplicate_resume_refusal(
