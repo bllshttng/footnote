@@ -5104,6 +5104,9 @@ event_types:
     data:
       required: [seen, unknown, dry_run]
       properties:
+        root:
+          type: string
+          description: "The project root this row's cycle ran over; one process writes one row per root."
         seen:
           type: integer
           description: "Open PRs the loop examined this cycle."
@@ -5134,6 +5137,9 @@ event_types:
         skip_read_error:
           type: integer
           description: "PRs the world would not answer (read failures)."
+        skip_deadline:
+          type: integer
+          description: "PRs past the root's slice of the 480s drive budget; they wait for the next tick."
         still_red:
           type: integer
           description: "PRs acted on that remain red (escalations or read errors after apply)."
