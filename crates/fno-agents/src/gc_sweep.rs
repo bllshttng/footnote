@@ -4867,14 +4867,16 @@ mod tests {
     }
 
     /// `read_graph_rows` answers live rows and archived residents from one
-    /// store read. The old advisory graph-archive.json is inert: the store
-    /// is the only source. An unreadable store is `None` (consumers keep
-    /// their rows).
+    /// store read. The advisory graph-archive.json folds exactly once (the
+    /// v2 marker), and is inert afterwards: the store is the only source
+    /// for every read after the fold. An unreadable store is `None`
+    /// (consumers keep their rows).
     #[test]
     fn readers_follow_store_rows_read_the_store_and_advisory_archive() {
         let (base, home) = stale_state_home("rows-archive");
         seed_store(&home, vec![one_stale_do_entry("x-live")]);
-        // A leftover archive file contributes nothing: no reader merges it.
+        // The leftover archive file folds on the first open and stamps the
+        // v2 marker; from then on the file is inert, however it changes.
         std::fs::write(
             base.join("graph-archive.json"),
             serde_json::to_string(&serde_json::json!({"entries": [
@@ -4891,12 +4893,26 @@ mod tests {
                 .filter_map(|row| graph_store::entry_id(row).map(str::to_string))
                 .collect()
         };
-        assert_eq!(ids(&home), vec!["x-live".to_string()]);
+        assert_eq!(ids(&home), vec!["x-live".to_string(), "x-gone".to_string()]);
 
-        // A row folded into the archive keeps answering the sweep read.
+        // After the v2 stamp the file is inert: rewriting it adds nothing.
+        std::fs::write(
+            base.join("graph-archive.json"),
+            serde_json::to_string(&serde_json::json!({"entries": [
+                {"id": "x-later", "title": "Later", "slug": "x-later", "type": "feature",
+                 "status": "done", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ids(&home), vec!["x-live".to_string(), "x-gone".to_string()]);
+
+        // Archived rows keep answering the sweep read: node_archive moves
+        // x-live into the archive, and the include-archived read still
+        // answers it beside the folded x-gone.
         let store = crate::backlog::api::Store::new(&graph_path(&home));
         crate::backlog::api::node_archive(&store, "x-live").unwrap();
-        assert_eq!(ids(&home), vec!["x-live".to_string()]);
+        assert_eq!(ids(&home), vec!["x-live".to_string(), "x-gone".to_string()]);
 
         // An unreadable store reads None: every consumer keeps its rows.
         std::fs::write(
