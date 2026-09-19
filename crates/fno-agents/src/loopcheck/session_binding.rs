@@ -235,12 +235,23 @@ fn manifest_owner(parsed: &LoopCheckArgs, harness: &str, asked: &str) -> Option<
     let content = std::fs::read_to_string(&parsed.state_path).ok()?;
     let m_harness = scan_manifest_field(&content, "harness")?;
     let m_session = scan_manifest_field(&content, "harness_session_id")?;
-    let Some(checkout) = parsed.state_path.parent() else {
+    // The checkout the manifest records is authoritative: a space-resolved
+    // manifest lives under the state root, never inside the checkout it
+    // binds. A legacy manifest that names no owner_cwd falls back to its own
+    // directory (the in-repo layout, where the manifest sat in the checkout).
+    let checkout = scan_manifest_field(&content, "owner_cwd")
+        .or_else(|| {
+            parsed
+                .state_path
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+        });
+    let Some(checkout) = checkout else {
         return None;
     };
     if m_harness != harness
         || !crate::claims::same_session_id(&m_session, asked)
-        || !cwd_matches(&checkout.to_string_lossy(), &parsed.cwd)
+        || !cwd_matches(&checkout, &parsed.cwd)
     {
         let reason = format!(
             "wrong session: manifest bound to {m_harness}/{m_session}, asked {harness}/{asked}"

@@ -620,6 +620,20 @@ def test_codex_normalization_accepts_plugin_qualified_slash_and_native_skill():
     assert normalize_command("$fno:target x-81ad", "codex") == "$fno:target x-81ad"
 
 
+def test_pi_namespaced_seed_renders_the_skill_command_form():
+    """The namespaced canonical seed `/fno:target` reaches pi as its own
+    skill command, on the Python render path too - never the literal
+    `/fno:target` (no such pi command) and never `/skill:fno:target`."""
+    from fno.agents.harness_map import normalize_command
+
+    assert normalize_command("/fno:target resume", "pi") == "/skill:target resume"
+    assert normalize_command("/target resume", "pi") == "/skill:target resume"
+    # Already-native spelling is idempotent; claude's namespaced form is
+    # unchanged.
+    assert normalize_command("/skill:target resume", "pi") == "/skill:target resume"
+    assert normalize_command("/fno:target resume", "claude") == "/fno:target resume"
+
+
 def test_opencode_default_dispatch_renders_fno_slash():
     """AC1-HP: a default opencode dispatch renders the plugin-namespaced palette
     invocation `/fno:target ...` - no prose brief. The spawn claim reads
