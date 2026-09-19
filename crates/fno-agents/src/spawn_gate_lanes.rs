@@ -795,6 +795,20 @@ pub(crate) fn check_lane_quota_lock(
     let Some(snapshot) = crate::provider_cap::read_persisted_snapshot(&home) else {
         return Ok(());
     };
+    let provider_lanes: Vec<_> = snapshot
+        .lanes
+        .iter()
+        .filter(|lane| lane.provider == provider)
+        .collect();
+    if provider_lanes.is_empty() {
+        warnings.push(format!(
+            "spawn-gate note: provider lane {provider} quota unmeasured (no lane in snapshot); not refusing on it"
+        ));
+    } else if provider_lanes.iter().all(|lane| lane.state == "unmeasured") {
+        warnings.push(format!(
+            "spawn-gate note: provider lane {provider} quota unmeasured (no member measured); not refusing on it"
+        ));
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -1516,6 +1530,39 @@ mod tests {
 
         warnings.clear();
         assert!(check_lane_quota_lock(&dir.join("absent"), "zai", &mut warnings).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lane_quota_lock_warns_when_provider_lane_is_unmeasured() {
+        let dir = std::env::temp_dir().join(format!("fno-lanes-unmeasured-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("provider-cap")).unwrap();
+        std::fs::write(
+            dir.join("provider-cap").join("snapshot.json"),
+            serde_json::json!({
+                "lanes": [{
+                    "lane": "openai:default",
+                    "provider": "openai",
+                    "account": "default",
+                    "reset_epoch": null,
+                    "reset_passed_epoch": null,
+                    "missing_reset_timezone": [],
+                    "state": "unmeasured",
+                    "members": []
+                }],
+                "measured_at": "probe",
+                "measured_at_epoch": 1_000_000_000
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        assert!(check_lane_quota_lock(&dir, "openai", &mut warnings).is_ok());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].starts_with("spawn-gate note:"));
+        assert!(warnings[0].contains("provider lane openai quota unmeasured"));
+        assert!(warnings[0].contains("no member measured"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
