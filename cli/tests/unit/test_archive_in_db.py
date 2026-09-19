@@ -141,20 +141,69 @@ def test_import_skips_an_id_reuse_and_the_live_row_wins(tmp_path, monkeypatch):
 
 
 def test_import_without_a_file_stamps_nothing_and_folds_later(tmp_path, monkeypatch):
-    from fno.graph.store import _client_for, _worker_binary
+    from fno.graph.api import wire_rows
+    from fno.graph import store as store_mod
 
-    if _worker_binary() is None:
+    if store_mod._worker_binary() is None:
         pytest.skip("no fno-agents-worker binary; build with `cargo build -p fno-agents`")
     graph = tmp_path / "graph.json"
     _seed(graph, _row("x-live", title="here"))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
     monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
-    _client_for(graph).request("api", {"op": "decisions"})
+    store_mod._client_for(graph).request("api", {"op": "decisions"})
     with sqlite3.connect(graph.with_suffix(".db")) as connection:
         stamped = connection.execute(
             "SELECT value FROM graph_meta WHERE key = 'archive_imported_v2'"
         ).fetchone()
     assert stamped is None, "no archive file, no stamp: a restored file must still fold"
+
+    # The restored file arrives AFTER the first spawn: a fresh keeper (the
+    # fold probes once per process) must fold it and stamp v2.
+    (tmp_path / "graph-archive.json").write_text(
+        json.dumps({"entries": [_row("x-late", archived_at="2026-08-01T00:00:00Z")]}),
+        encoding="utf-8",
+    )
+    store_mod.reap_spawned_keepers(timeout=15.0)
+    store_mod._client_for(graph).request("api", {"op": "decisions"})
+    rows = {r["id"] for r in wire_rows(path=graph, include_archived=True)}
+    assert "x-late" in rows, "the later-restored archive folded on the next spawn"
+    with sqlite3.connect(graph.with_suffix(".db")) as connection:
+        stamped = connection.execute(
+            "SELECT value FROM graph_meta WHERE key = 'archive_imported_v2'"
+        ).fetchone()
+    assert stamped == ("1",), "the fold stamps v2"
+
+
+def test_a_v1_poisoned_stamp_voids_and_the_file_folds(tmp_path, monkeypatch):
+    from fno.graph.api import wire_rows
+    from fno.graph import store as store_mod
+
+    if store_mod._worker_binary() is None:
+        pytest.skip("no fno-agents-worker binary; build with `cargo build -p fno-agents`")
+    graph = tmp_path / "graph.json"
+    _seed(graph, _row("x-live", title="here"))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
+    store_mod._client_for(graph).request("api", {"op": "decisions"})
+    # A store poisoned by the old behavior: v1 stamped, no v2 key, and the
+    # archive file only restored afterwards.
+    with sqlite3.connect(graph.with_suffix(".db")) as connection:
+        connection.execute(
+            "INSERT INTO graph_meta(key, value) VALUES('archive_imported', '1')"
+        )
+    (tmp_path / "graph-archive.json").write_text(
+        json.dumps({"entries": [_row("x-v1", archived_at="2026-08-01T00:00:00Z")]}),
+        encoding="utf-8",
+    )
+    store_mod.reap_spawned_keepers(timeout=15.0)
+    store_mod._client_for(graph).request("api", {"op": "decisions"})
+    rows = {r["id"] for r in wire_rows(path=graph, include_archived=True)}
+    assert "x-v1" in rows, "the v1 stamp did not block the fold"
+    with sqlite3.connect(graph.with_suffix(".db")) as connection:
+        stamped = connection.execute(
+            "SELECT value FROM graph_meta WHERE key = 'archive_imported_v2'"
+        ).fetchone()
+    assert stamped == ("1",), "the re-fold stamps v2"
 
 
 def test_unarchive_clears_the_stamp(world):
