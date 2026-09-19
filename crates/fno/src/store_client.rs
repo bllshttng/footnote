@@ -445,6 +445,35 @@ pub fn rows(graph: &Path) -> Result<Vec<Value>, String> {
         .unwrap_or_default())
 }
 
+/// The board reader's change stamp: mtime+len over the store files (the db
+/// plus its write-ahead log). Every committed write appends to the log, so
+/// the stamp moves on every backlog mutation - two stats per tick, never a
+/// keeper exec, or the idle server pays a process spawn a second for a
+/// number it can stat for free.
+pub fn store_stamp(graph: &Path) -> Option<(i64, u64)> {
+    let db = graph.with_extension("db");
+    let wal = db.with_extension("db-wal");
+    let md = std::fs::metadata(&db).ok()?;
+    let modified = md.modified().ok()?;
+    let mut secs = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    let mut len = md.len();
+    if let Ok(w) = std::fs::metadata(&wal) {
+        if let Ok(t) = w.modified() {
+            if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+                let wall_secs = d.as_secs() as i64;
+                if wall_secs > secs {
+                    secs = wall_secs;
+                }
+            }
+        }
+        len = len.wrapping_add(w.len());
+    }
+    Some((secs, len))
+}
+
 /// The store's mutation counter: one bump per write, legacy writers
 /// included.
 pub fn version(graph: &Path) -> Result<i64, String> {
