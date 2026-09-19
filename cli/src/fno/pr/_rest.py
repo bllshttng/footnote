@@ -535,6 +535,23 @@ def resolve_current_pr_number_rest(
     return number, ""
 
 
+def _zero_job_rows(
+    slug: str, cwd: Optional[str], runs: list, check_runs: list
+) -> "tuple[list, str]":
+    """Rows for runs that failed before minting a job; the rule is Rust's."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    payload = {"op": "status-zero-job-runs", "slug": slug, "cwd": cwd,
+               "runs": runs, "check_runs": check_runs}
+    try:
+        out = verb_call("authorized-merge", payload, timeout=20)
+    except VerbUnavailable as exc:
+        return [], f"zero-job run read failed: {exc}"
+    if out.get("error") or not isinstance(out.get("rows"), list):
+        return [], f"zero-job run read failed: {out.get('error') or 'no rows'}"
+    return out["rows"], ""
+
+
 def fetch_pr_rest(
     pr: str,
     cwd: Optional[str] = None,
@@ -638,6 +655,12 @@ def fetch_pr_rest(
                 "workflow": run_names.get(run_id.group(1), "") if run_id else "",
             }
         )
+
+    if run_rows:
+        zero_rows, zero_reason = _zero_job_rows(slug, cwd, run_rows, check_runs)
+        if zero_reason:
+            return None, zero_reason
+        rollup.extend(zero_rows)
 
     # Legacy StatusContexts ride the combined-status endpoint. This read is a
     # separate check class, so failure is always loud: green CheckRuns do not
