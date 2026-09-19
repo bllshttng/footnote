@@ -1108,6 +1108,7 @@ def tick() -> None:
         def _phase_sweep(slice_s: float) -> None:
             nonlocal result, tick_failed
             assert settings is not None and cfg is not None
+            interval = int(getattr(cfg, "interval_seconds", 600))
             set_tick_phase("sweep")
             # A dead tick must not kill the legs below. The receipt contract makes
             # _tick raise on a failed emission even though state is already persisted,
@@ -1134,12 +1135,15 @@ def tick() -> None:
                 tick_failed = str(exc)
                 log.warning("pr-watch: tick failed: %s", exc)
                 typer.echo(f"pr-watch tick: failed: {exc}", err=True)
+                _emit_tick_row("pr_watch_sweep", interval_s=interval, skip_reason="error", detail=tick_failed)
                 result = None
 
             if result is not None:
                 if result.disabled:
                     reason = "config.autonomy.enabled" if not settings.autonomy.enabled else "config.pr_watch.enabled"
                     typer.echo(f"pr-watch tick: {reason} is false - skipped")
+                    _emit_tick_row("pr_watch_sweep", interval_s=interval, skip_reason="disabled", detail=reason)
+                    return
                 elif result.lock_held:
                     typer.echo(f"pr-watch tick: {result.lock_holder} - skipped")
                 elif result.quota_skip:
@@ -1164,6 +1168,9 @@ def tick() -> None:
                     typer.echo(
                         f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
                     )
+                # Stamp the row the merge arm mints every run: only cuts wrote here.
+                _emit_tick_row("pr_watch_sweep", interval_s=interval, acted=result.acted,
+                               detail=f"open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}")
 
         def _phase_merge(slice_s: float) -> None:
             assert cfg is not None
