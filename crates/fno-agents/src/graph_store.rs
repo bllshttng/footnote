@@ -857,7 +857,6 @@ pub(crate) fn index_by_id(entries: &[Value]) -> std::collections::HashMap<&str, 
         .collect()
 }
 
-
 /// Overlay read-time dependency readiness onto `status`/`blocked_reason`
 /// (store._apply_readiness_overlay).
 pub fn apply_readiness_overlay(entries: &mut [Value]) {
@@ -2771,8 +2770,9 @@ mod tests {
         })];
         apply_defaults(&mut entries, false);
         let e = &entries[0];
-        // The KEY spelling is not a modeled field: dropped, no promotion.
-        assert_eq!(s_str(e, "status"), None);
+        // The KEY spelling is not a modeled field: dropped, and the row
+        // takes the shared default, like any unmodeled key.
+        assert_eq!(s_str(e, "status"), Some("ready"));
         assert_eq!(s_str(e, "priority"), Some("p1"));
         assert_eq!(s_str(e, "parent"), None);
         assert!(e.get("children").unwrap().is_array());
