@@ -1053,9 +1053,6 @@ pub fn apply_defaults(entries: &mut Vec<Value>, keep_malformed: bool) {
             };
             obj.insert("locked_at".to_string(), stamped);
         }
-        // The legacy stamp is consumed wherever the rename lands it; keeping
-        // it as an extra would re-present a retired key on every read.
-        obj.shift_remove("claimed_at");
         for (k, v) in [
             ("completed_at", Value::Null),
             ("status", Value::String("ready".into())),

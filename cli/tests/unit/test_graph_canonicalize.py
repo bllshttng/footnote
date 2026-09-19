@@ -118,11 +118,12 @@ def test_legacy_graph_lock_timestamp_migrates_once_without_nested_rename(tmp_pat
 
     commit_rows_via_store(path, _noop)
 
-    # The stored row through the store read: the migration renamed the
-    # top-level stamp and left the nested sessions one alone.
+    # The stored row through the store read: the migration derives the
+    # modeled locked_at stamp and leaves the nested sessions one alone. The
+    # legacy key itself rides verbatim as an extra, like every unknown key.
     raw = read_graph_strict(path)[0]
     assert raw["locked_at"] == timestamp
-    assert "claimed_at" not in raw
+    assert raw.get("claimed_at") == timestamp
     assert raw["sessions"][0]["claimed_at"] == timestamp
 
 
