@@ -329,3 +329,148 @@ fn flags_absent_gate_never_runs_and_engine_is_unchanged() {
     assert_eq!(v["decision"], "allow");
     let _ = &home;
 }
+
+// ---------------------------------------------------------------------------
+// The manifest-owner arm and the per-harness continuation (pi)
+// ---------------------------------------------------------------------------
+
+/// A manifest that binds its own session the way init writes one: harness
+/// and harness_session_id named, the manifest living inside its checkout.
+fn manifest_bound(harness: &str, sid: &str, input_node: &str) -> String {
+    format!(
+        "---\nsession_id: fno-own\ncreated_at: 2026-09-18T00:00:00Z\nattended: true\nharness: {harness}\nharness_session_id: {sid}\ninput: \"{input_node}\"\n---\n"
+    )
+}
+
+fn with_binding_harness(args: Vec<String>, harness: &str, sid: &str) -> Vec<String> {
+    let mut args = args;
+    args.push("--harness".into());
+    args.push(harness.into());
+    args.push("--harness-session".into());
+    args.push(sid.into());
+    args
+}
+
+#[test]
+fn manifest_bound_pi_session_is_owner_and_gates_unchanged() {
+    let home = HomeGuard::new();
+    let cwd_dir = TempDir::new().unwrap();
+    let cwd = cwd_dir.path();
+    // Empty registry: no row is ever keyed by a pi session id.
+    home.seed_registry(&[]);
+
+    let manifest_path = cwd.join("target-state.md");
+    fs::write(&manifest_path, manifest_bound("pi", "pi-sess-1", "x-715e")).unwrap();
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(&transcript_path, transcript("no promise yet")).unwrap();
+
+    let args = with_binding_harness(
+        base_args(&manifest_path, &transcript_path, cwd),
+        "pi",
+        "pi-sess-1",
+    );
+    let (code, out) = run_loop_check_capture(&args);
+    let v: Value = serde_json::from_str(&out).unwrap();
+    // The manifest IS the binding: the engine decides exactly as it would
+    // without the flags (same manifest, same transcript, same cwd).
+    assert_ne!(v["decision"], "refuse", "{out}");
+    let (bare_code, bare_out) =
+        run_loop_check_capture(&base_args(&manifest_path, &transcript_path, cwd));
+    let bare: Value = serde_json::from_str(&bare_out).unwrap();
+    assert_eq!(v["decision"], bare["decision"], "{out} vs {bare_out}");
+    assert_eq!(code, bare_code);
+    let _ = &home;
+}
+
+#[test]
+fn foreign_pi_session_is_refused_and_names_both_sides() {
+    let home = HomeGuard::new();
+    let cwd_dir = TempDir::new().unwrap();
+    let cwd = cwd_dir.path();
+    home.seed_registry(&[]);
+
+    let manifest_path = cwd.join("target-state.md");
+    fs::write(&manifest_path, manifest_bound("pi", "pi-sess-1", "x-715e")).unwrap();
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(&transcript_path, transcript("x")).unwrap();
+
+    // A /new, a fork or a foreign session: any id the manifest does not name.
+    let (code, out) = run_loop_check_capture(&with_binding_harness(
+        base_args(&manifest_path, &transcript_path, cwd),
+        "pi",
+        "pi-sess-2",
+    ));
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(v["decision"], "refuse");
+    let msg = v["message"].as_str().unwrap();
+    assert!(
+        msg.contains("pi-sess-1"),
+        "must name the bound session: {out}"
+    );
+    assert!(
+        msg.contains("pi-sess-2"),
+        "must name the asking session: {out}"
+    );
+    // A refusal prints no continuation.
+    assert!(v.get("continuation").is_none(), "{out}");
+    let _ = &home;
+}
+
+#[test]
+fn a_manifest_row_for_another_harness_stays_refused() {
+    let home = HomeGuard::new();
+    let cwd_dir = TempDir::new().unwrap();
+    let cwd = cwd_dir.path();
+    home.seed_registry(&[]);
+
+    // The manifest binds a pi session; a claude ask cannot borrow it.
+    let manifest_path = cwd.join("target-state.md");
+    fs::write(&manifest_path, manifest_bound("pi", "pi-sess-1", "x-715e")).unwrap();
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(&transcript_path, transcript("x")).unwrap();
+
+    let (code, out) = run_loop_check_capture(&with_binding_harness(
+        base_args(&manifest_path, &transcript_path, cwd),
+        "claude",
+        "pi-sess-1",
+    ));
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(v["decision"], "refuse", "{out}");
+    let _ = &home;
+}
+
+#[test]
+fn the_pi_continuation_renders_the_skill_command_form() {
+    let home = HomeGuard::new();
+    let cwd_dir = TempDir::new().unwrap();
+    let cwd = cwd_dir.path();
+    home.seed_registry(&[]);
+
+    let manifest_path = cwd.join("target-state.md");
+    fs::write(&manifest_path, manifest_bound("pi", "pi-sess-1", "x-715e")).unwrap();
+    // A non-terminal message: the engine reads a block decision with a
+    // continuation.
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(&transcript_path, transcript("still working, no promise")).unwrap();
+
+    let args = with_binding_harness(
+        base_args(&manifest_path, &transcript_path, cwd),
+        "pi",
+        "pi-sess-1",
+    );
+    let (_code, out) = run_loop_check_capture(&args);
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["decision"], "block", "{out}");
+    assert_eq!(v["continuation"], "/skill:target resume", "{out}");
+
+    // The same ask without pi's flags keeps the legacy literal byte-for-byte
+    // (the engine's unbound output, which the shim and the loop driver pin).
+    let (_bare_code, bare_out) =
+        run_loop_check_capture(&base_args(&manifest_path, &transcript_path, cwd));
+    let bare: Value = serde_json::from_str(&bare_out).unwrap();
+    assert_eq!(bare["decision"], "block", "{bare_out}");
+    assert_eq!(bare["continuation"], "/target --resume", "{bare_out}");
+    let _ = &home;
+}
