@@ -373,7 +373,7 @@ fn write_targets(command: &str) -> Vec<String> {
 /// which case the body is lexed again and its tokens spliced in, so `bash
 /// <<EOF` still judges a real write in its body, but a heredoc mailed as a
 /// file body never donates a phantom write target.
-fn lex(command: &str) -> Option<Vec<String>> {
+pub(super) fn lex(command: &str) -> Option<Vec<String>> {
     let mut toks: Vec<String> = Vec::new();
     let mut cur = String::new();
     // Glued `(`/`)` inside a word: an open command substitution survives a

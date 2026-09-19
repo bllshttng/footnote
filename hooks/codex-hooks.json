@@ -67,7 +67,7 @@
           },
           {
             "type": "command",
-            "command": "python3 ${PLUGIN_ROOT}/hooks/test-run-guard.py",
+            "command": "bash ${PLUGIN_ROOT}/hooks/test-run-guard.sh",
             "statusMessage": "checking for an unadmitted raw test run"
           }
         ]

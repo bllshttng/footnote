@@ -518,13 +518,13 @@ def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> Non
     refusal it already owns is never re-decided here.
     """
     guards = [
-        "hooks/git-protection.py",
-        "hooks/bg-process-guard.py",
-        "hooks/truncation-guard.py",
-        "hooks/recursive-grep-guard.py",
-        "hooks/test-run-guard.py",
+        ("hooks/git-protection.py", "python3"),
+        ("hooks/bg-process-guard.py", "python3"),
+        ("hooks/truncation-guard.py", "python3"),
+        ("hooks/recursive-grep-guard.py", "python3"),
+        ("hooks/test-run-guard.sh", "bash"),
     ]
-    for guard in guards:
+    for guard, _interp in guards:
         assert (REPO_ROOT / guard).is_file(), f"guard missing at {guard}"
 
     for path, root_var, matcher in (
@@ -545,7 +545,7 @@ def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> Non
         commands = [
             hook.get("command") for hook in registrations[0].get("hooks", [])
         ]
-        expected = [f"python3 ${{{root_var}}}/{guard}" for guard in guards]
+        expected = [f"{interp} ${{{root_var}}}/{guard}" for guard, interp in guards]
         assert commands == expected, (
             f"{path.name} PreToolUse {matcher!r} chain drifted: {commands}"
         )

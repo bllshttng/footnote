@@ -77,7 +77,7 @@
           },
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/test-run-guard.py"
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/test-run-guard.sh"
           }
         ]
       },

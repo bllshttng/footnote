@@ -177,9 +177,12 @@ fn main() {
     if args.first().map(String::as_str) == Some("hook") {
         let code = match args.get(1).map(String::as_str) {
             Some("king-guard") => fno_agents::hook::king_guard::run(&args[2..]),
+            Some("test-run-guard") => fno_agents::hook::test_run_guard::run(&args[2..]),
             Some("stop") => fno_agents::hook::stop::run(&args[2..]),
             other => {
-                eprintln!("fno-agents hook: unknown entry {other:?}; expected king-guard or stop");
+                eprintln!(
+                    "fno-agents hook: unknown entry {other:?}; expected king-guard, test-run-guard or stop"
+                );
                 2
             }
         };
