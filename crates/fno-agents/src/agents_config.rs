@@ -1123,14 +1123,25 @@ pub fn notify_min_interval_s(cwd: &Path) -> u64 {
 /// for the bounded backlog selection read. Zero, negative, or malformed values
 /// fall back to the hang-safe default.
 pub fn auto_continue_select_timeout_s(cwd: &Path) -> u64 {
-    resolve(cwd, |t| {
-        t.get("auto_continue")?
-            .as_table()?
-            .get("select_timeout_s")
-            .and_then(|v| v.as_integer())
+    for path in config_candidates(cwd) {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Some(table) = parse_config(&content) else {
+            continue;
+        };
+        let Some(auto_continue) = table.get("auto_continue").and_then(Value::as_table) else {
+            continue;
+        };
+        let Some(value) = auto_continue.get("select_timeout_s") else {
+            continue;
+        };
+        return value
+            .as_integer()
             .and_then(|v| (v > 0).then_some(v as u64))
-    })
-    .unwrap_or(120)
+            .unwrap_or(120);
+    }
+    120
 }
 
 /// `[notify] arm_failing_after_s` (default 1800): how long an arm stays failing, or stale from a dead scheduler, before the arm_watch daemon arm tells the operator. Also the rate floor between arm notices. `0` or a value that does not parse falls back to 1800.
@@ -1428,6 +1439,30 @@ mod tests {
             "[auto_continue]\nselect_timeout_s = \"90\"\n",
         );
         assert_eq!(auto_continue_select_timeout_s(&cwd), 120);
+        clear_config_env();
+    }
+
+    #[test]
+    fn auto_continue_select_timeout_invalid_project_value_does_not_inherit_global() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        std::env::set_var("FNO_NO_CANONICAL_CONFIG", "1");
+        let global = tempfile::tempdir().unwrap();
+        std::fs::write(
+            global.path().join("config.toml"),
+            "[auto_continue]\nselect_timeout_s = 45\n",
+        )
+        .unwrap();
+        std::env::set_var(
+            "FNO_GLOBAL_SETTINGS_PATH",
+            global.path().join("settings.json"),
+        );
+        let cwd = write_project_settings(
+            "select-timeout-invalid-project",
+            "[auto_continue]\nselect_timeout_s = \"bad\"\n",
+        );
+        assert_eq!(auto_continue_select_timeout_s(&cwd), 120);
+        std::env::remove_var("FNO_NO_CANONICAL_CONFIG");
         clear_config_env();
     }
 

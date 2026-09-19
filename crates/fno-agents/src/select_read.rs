@@ -147,19 +147,34 @@ pub fn select_read(kind: Kind, args: &[String], fno_py: &OsStr, bound_s: u64) ->
     };
     let elapsed_ms = started.elapsed().as_millis();
     if output.status.code().is_none() {
+        if elapsed_ms >= u128::from(bound_s) * 1_000 {
+            return receipt(
+                "unmeasured",
+                None,
+                bound_s,
+                elapsed_ms,
+                Some("select-unmeasured"),
+                Some(unmeasured_detail(kind, args, bound_s, None)),
+            );
+        }
         return receipt(
-            "unmeasured",
+            "error",
             None,
             bound_s,
             elapsed_ms,
-            Some("select-unmeasured"),
-            Some(unmeasured_detail(kind, args, bound_s, None)),
+            Some("next-error"),
+            Some(format!(
+                "fno backlog {} terminated before its {}s budget",
+                kind_name(kind),
+                bound_s
+            )),
         );
     }
     if !output.status.success() {
+        let stderr_full = String::from_utf8_lossy(&output.stderr);
         let stderr = head(&output.stderr, 160);
-        let transient = stderr.contains("store keeper unavailable")
-            || stderr.contains("claim state is unavailable");
+        let transient = stderr_full.contains("store keeper unavailable")
+            || stderr_full.contains("claim state is unavailable");
         return if transient {
             receipt(
                 "unmeasured",
@@ -329,9 +344,19 @@ mod tests {
     }
 
     #[test]
+    fn signal_termination_before_the_bound_is_an_error() {
+        let dir = stub("#!/bin/sh\nkill -TERM $$\n");
+        let args = vec!["--project".to_string(), "fno".to_string()];
+        let fno_py = dir.path().join("fno-py");
+        let receipt = select_read(Kind::Next, &args, fno_py.as_os_str(), 5);
+        assert_eq!(receipt.status, "error");
+        assert_eq!(receipt.reason.as_deref(), Some("next-error"));
+    }
+
+    #[test]
     fn transient_store_failure_is_unmeasured_but_other_failure_is_error() {
         let transient = stub(
-            "#!/bin/sh\nprintf '%s' 'Error: store keeper unavailable; selection refused: stalled' >&2\nexit 1\n",
+            "#!/bin/sh\nprintf '%*s' 200 '' | tr ' ' x >&2\nprintf '%s' ' store keeper unavailable; selection refused: stalled' >&2\nexit 1\n",
         );
         let args = vec!["--project".to_string(), "fno".to_string()];
         let fno_py = transient.path().join("fno-py");
