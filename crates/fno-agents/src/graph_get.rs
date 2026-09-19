@@ -94,6 +94,14 @@ fn get_rows(entries: &[Value], ids: &[String]) -> (Vec<Value>, bool) {
     (out, any_missing)
 }
 
+/// The run's row assembly, split from `run_graph_get` for the same reason
+/// `get_rows` is: the marker-first contract is testable against the same
+/// function the binary runs, not against captured stdout.
+fn serve(entries: &mut [Value], ids: &[String]) -> (Vec<Value>, bool) {
+    crate::node_reading::attach_reading(entries);
+    get_rows(entries, ids)
+}
+
 pub fn run_graph_get(args: &[String]) -> i32 {
     let mut ids: Vec<String> = Vec::new();
     let mut graph_path = default_graph_path();
@@ -151,7 +159,7 @@ pub fn run_graph_get(args: &[String]) -> i32 {
     };
     graph_store::apply_readiness_overlay(&mut entries);
 
-    let (out, any_missing) = get_rows(&entries, &ids);
+    let (out, any_missing) = serve(&mut entries, &ids);
     println!(
         "{}",
         serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_string())
@@ -211,6 +219,46 @@ mod tests {
     fn no_ids_is_a_usage_error() {
         let args = vec!["--json".to_string()];
         assert_eq!(run_graph_get(&args), 2);
+    }
+
+    #[test]
+    fn a_row_with_a_plan_serves_the_reading_marker_first() {
+        let mut entries = vec![serde_json::json!({
+            "id": "x-aaaa",
+            "slug": "fewer-gated",
+            "status": "ready",
+            "details": "stale fix path",
+            "plan_path": "plans/one.md",
+        })];
+        let (out, missing) = serve(&mut entries, &["x-aaaa".to_string()]);
+        assert!(!missing);
+        assert_eq!(
+            out[0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .map(String::as_str),
+            Some("_reading")
+        );
+        assert_eq!(
+            out[0]["_reading"],
+            "plan_path is authoritative for the file list; \
+             details is the original filing and may be stale"
+        );
+    }
+
+    #[test]
+    fn a_bare_row_is_served_byte_for_byte() {
+        let mut entries = vec![node("x-aaaa", "fewer-gated")];
+        let before = entries.clone();
+        let (out, missing) = serve(&mut entries, &["x-aaaa".to_string()]);
+        assert!(!missing);
+        assert!(
+            out[0].get("_reading").is_none(),
+            "no plan, no state: the served row is unchanged"
+        );
+        assert_eq!(out[0], before[0]);
     }
 
     #[test]
