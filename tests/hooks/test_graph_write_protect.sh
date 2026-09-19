@@ -186,6 +186,18 @@ expect "P1 quoted redirect \$HOME blocked" block \
   '{"tool_name":"Bash","tool_input":{"command":"echo x > \"$HOME/.fno/graph.json\""}}'
 expect "P1 quoted tee ./ blocked" block \
   '{"tool_name":"Bash","tool_input":{"command":"tee \"./.fno/target-state.md\""}}'
+# A substitution closer (`)` or a backtick) after the path is a right bound
+# too, or the write slips the adjacency match inside $( ) and `( )`.
+expect "subst redirect graph.json blocked" block \
+  '{"tool_name":"Bash","tool_input":{"command":"N=$(echo x > ~/.fno/graph.json)"}}'
+expect "backtick redirect graph.json blocked" block \
+  '{"tool_name":"Bash","tool_input":{"command":"N=`echo x > ~/.fno/graph.json`"}}'
+expect "subst tee graph.json blocked" block \
+  '{"tool_name":"Bash","tool_input":{"command":"N=$(echo x | tee ~/.fno/graph.json)"}}'
+expect "subshell redirect graph.json blocked" block \
+  '{"tool_name":"Bash","tool_input":{"command":"(echo x > ~/.fno/graph.json)"}}'
+expect "subst read graph.json approved" approve \
+  '{"tool_name":"Bash","tool_input":{"command":"N=$(cat ~/.fno/graph.json)"}}'
 # P1: separator-equivalent paths (// and /./) resolve to the same protected file.
 expect "P1 double-slash redirect blocked" block \
   '{"tool_name":"Bash","tool_input":{"command":"echo x > ~/.fno//graph.json"}}'

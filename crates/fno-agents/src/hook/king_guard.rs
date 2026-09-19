@@ -292,8 +292,17 @@ fn write_targets(command: &str) -> Vec<String> {
             at_command = true;
         } else if nxt {
             nxt = false;
-            if !bound(tok) && !tok.contains('>') && !is_fd(tok) {
-                targets.push(tok.clone());
+            // Only a lexer-glued closer (NUL-marked) is substitution syntax;
+            // a quoted or escaped literal closer is part of the path. Closers
+            // and markers interleave when substitutions nest, so a marked
+            // word trims the combined set from the end.
+            let w = if tok.contains('\u{0}') {
+                tok.trim_end_matches([')', '`', '\u{0}'])
+            } else {
+                tok.as_str()
+            };
+            if !w.contains('>') && !is_fd(w) {
+                targets.push(w.to_string());
             }
         } else if is_redirect(tok) {
             // `lex` emits redirects as their own tokens (`2>`, `>`, `>>`,
@@ -341,6 +350,15 @@ fn write_targets(command: &str) -> Vec<String> {
         }
     }
     flush(&verb, &pool, &mut targets);
+    // The verb-operand flush saw the glued closers too; strip them here so
+    // `N=$(cmd | tee out.txt)` names `out.txt`, not `out.txt)`. A word with
+    // no marker keeps its literal trailing closers.
+    for t in &mut targets {
+        if t.contains('\u{0}') {
+            let n = t.trim_end_matches([')', '`', '\u{0}']).len();
+            t.truncate(n);
+        }
+    }
     targets.retain(|t| !t.is_empty());
     targets
 }
@@ -362,6 +380,7 @@ fn lex(command: &str) -> Option<Vec<String>> {
     // whitespace split (`$(pick x)` lexes as `$(pick` + `x)`), so a depth
     // counter, not the current word, decides whether `)` is literal.
     let mut subst = 0usize;
+    let mut bt = 0usize;
     // Set right after a `<<`/`<<-` token: (strip_tabs, reader_is_shell), for
     // the newline arm to act on once the delimiter word lands in `toks`.
     let mut heredoc: Option<(bool, bool)> = None;
@@ -455,12 +474,28 @@ fn lex(command: &str) -> Option<Vec<String>> {
                     subst += 1;
                 } else if c == ')' && subst > 0 {
                     cur.push(c);
+                    // NUL marks a lexer-glued closer; a quoted literal never
+                    // carries one, so a target trim can tell them apart.
+                    cur.push('\u{0}');
                     subst -= 1;
                 } else {
                     if !cur.is_empty() {
                         toks.push(std::mem::take(&mut cur));
                     }
                     toks.push(c.to_string());
+                }
+            }
+            '`' => {
+                // An unquoted backtick is a command-substitution delimiter,
+                // exactly like the `$( ` opener: open glues into the word,
+                // close glues with the marker.
+                if bt > 0 {
+                    cur.push(c);
+                    cur.push('\u{0}');
+                    bt -= 1;
+                } else {
+                    cur.push(c);
+                    bt += 1;
                 }
             }
             '<' | '>' => {
@@ -762,6 +797,39 @@ mod tests {
         assert!(
             targets("cmd 2>&1 | tee").is_empty(),
             "fd dup is not a write"
+        );
+        // A dup inside a command substitution: `lex` glues the closers
+        // into the word while `$( ` is open, so `1)` must still read as fd.
+        assert!(
+            targets("N=$(cmd 2>&1)").is_empty(),
+            "subst dup is not a write"
+        );
+        assert!(
+            targets("N=`cmd 2>&1`").is_empty(),
+            "backtick dup is not a write"
+        );
+        assert!(
+            targets("N=$(a $(b 2>&1))").is_empty(),
+            "nested subst dup is not a write"
+        );
+        assert!(
+            targets("N=$(cmd >&2)").is_empty(),
+            "reversed dup is not a write"
+        );
+        assert_eq!(
+            targets("X=$(cmd > out.txt)"),
+            vec!["out.txt"],
+            "a real write inside a substitution still binds"
+        );
+        assert_eq!(
+            targets("N=$(cmd | tee out.txt)"),
+            vec!["out.txt"],
+            "tee inside a substitution still binds"
+        );
+        assert_eq!(
+            targets("printf x > '1)'"),
+            vec!["1)"],
+            "a quoted literal closer is part of the path"
         );
         // Quoted "a > b" is one word, not an operator.
         assert!(targets("echo \"a > b\"").is_empty());
