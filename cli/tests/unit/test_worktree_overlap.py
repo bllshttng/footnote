@@ -394,13 +394,17 @@ def test_overlap_record_cli_accepts_carrier_invocation(tmp_path: Path, monkeypat
     assert parsed["recorded"] is True
     assert parsed["fold"]["distinct_observations"] == 1
     # The store beside the journal now holds one durable row; the raw file
-    # may stay absent (the commit is the write boundary).
+    # may stay absent (the commit is the write boundary). The shared sandbox
+    # journal also carries rows from other tests, so filter by type.
     from tests._event_rows import event_rows
     from fno.paths import global_events_json
 
     journal = global_events_json()
-    rows = event_rows(journal)
-    assert rows and rows[0]["type"] == "worktree_overlap_observed"
+    rows = [
+        r for r in event_rows(journal)
+        if r.get("type") == "worktree_overlap_observed"
+    ]
+    assert rows, f"no worktree_overlap_observed row in {journal}"
 
 
 def test_overlaps_cli_reports_and_exits_clean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

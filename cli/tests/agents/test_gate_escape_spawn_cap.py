@@ -67,12 +67,12 @@ def test_distinct_dedup_keys_count_separately(tmp_path):
 def test_fail_open_on_unwritable_log(tmp_path, monkeypatch):
     """AC1-FR: an append failure never raises; a durable failure line is logged."""
     ev = tmp_path / "events.jsonl"
-    import fno.events as events_mod
+    import fno.events.store_client as store_client_mod
 
     def _boom(*a, **k):
         raise OSError("disk full")
 
-    monkeypatch.setattr(events_mod, "append_event", _boom)
+    monkeypatch.setattr(store_client_mod, "emit_envelope", _boom)
     out = ge.emit_gate_escape("spawn-cap", dedup_key="k", events_path=ev)
     assert out is None
     assert _escapes(ev) == []

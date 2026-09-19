@@ -894,19 +894,40 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
         except Exception:
             return marks
 
-    from fno.events.store_client import store_db_path
+    store_exists = False
+    try:
+        from fno.events.store_client import store_db_path
 
-    if not events_path.exists() and not store_db_path(events_path).exists():
+        store_exists = store_db_path(events_path).exists()
+    except Exception:
+        store_exists = False
+
+    if not events_path.exists() and not store_exists:
         return marks
 
     chunks_by_receipt: dict[str, list[dict]] = {}
     try:
-        # Committed rows: the store commit is the write boundary, so a tick
-        # the emitter committed is only visible through the store. Absence of
-        # the raw journal is expected post-cutover.
-        from fno.events.store_client import query_rows
+        # The store commit is the write boundary: committed rows are the
+        # history. A journal with no store beside it (pre-store daemon, a
+        # seeded fixture) is still read from its raw bytes.
+        if store_exists:
+            from fno.events.store_client import query_rows
 
-        for ev in query_rows(events_path):
+            rows: "list[dict]" = query_rows(events_path)
+        else:
+            rows = []
+            for line in events_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                    if isinstance(ev, dict):
+                        rows.append(ev)
+                except json.JSONDecodeError:
+                    continue
+
+        for ev in rows:
             if not isinstance(ev, dict):
                 continue
             etype = ev.get("type")
