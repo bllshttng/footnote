@@ -339,19 +339,71 @@ pub(crate) fn zero_job_failures(
 /// The `status-zero-job-runs` op: `slug` + the raw runs/check-runs arrays
 /// in, the Python rollup rows out. `jobs_total` rides the gh probe seam.
 fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
-    let slug = payload
+    let Some(slug) = payload
         .get("slug")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty());
-    let cwd = PathBuf::from(payload.get("cwd").and_then(Value::as_str).unwrap_or("."));
-    let Some(runs) = payload.get("runs").and_then(Value::as_array) else {
-        return json!({"error": "status-zero-job-runs needs a runs array"});
+        .filter(|s| !s.is_empty())
+    else {
+        return json!({"error": "status-zero-job-runs needs a non-empty slug"});
     };
+    let cwd = PathBuf::from(payload.get("cwd").and_then(Value::as_str).unwrap_or("."));
     let Some(check_runs) = payload.get("check_runs").and_then(Value::as_array) else {
         return json!({"error": "status-zero-job-runs needs a check_runs array"});
     };
-    let Some(slug) = slug else {
-        return json!({"error": "status-zero-job-runs needs a non-empty slug"});
+    // The paginated listing when the payload names the head sha: a busy head
+    // carries more runs than one page, and a zero-job failure past page 1
+    // must still read red. Payload `runs` is the fallback for a caller that
+    // pre-read the listing.
+    let runs_result: Result<Vec<Value>, String> = match payload
+        .get("sha")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        Some(sha) => {
+            let path = format!("repos/{slug}/actions/runs?head_sha={sha}&per_page=100");
+            probes
+                .run_gh(
+                    &cwd,
+                    &[
+                        "api".to_string(),
+                        path,
+                        "--paginate".to_string(),
+                        "--slurp".to_string(),
+                    ],
+                )
+                .and_then(|(ok, stdout, _stderr)| {
+                    if ok {
+                        Ok(stdout)
+                    } else {
+                        Err("the runs listing read failed".to_string())
+                    }
+                })
+                .and_then(|stdout| {
+                    serde_json::from_str::<Value>(&stdout)
+                        .map_err(|e| format!("the runs listing was unparseable: {e}"))
+                })
+                .map(|parsed| match parsed {
+                    Value::Array(pages) => pages,
+                    other => vec![other],
+                })
+                .map(|pages| {
+                    let mut runs: Vec<Value> = Vec::new();
+                    for page in pages {
+                        if let Some(list) = page.get("workflow_runs").and_then(|r| r.as_array()) {
+                            runs.extend(list.iter().cloned());
+                        }
+                    }
+                    runs
+                })
+        }
+        None => match payload.get("runs").and_then(Value::as_array) {
+            Some(runs) => Ok(runs.clone()),
+            None => Err("status-zero-job-runs needs a runs array".to_string()),
+        },
+    };
+    let runs = match runs_result {
+        Ok(runs) => runs,
+        Err(err) => return json!({ "error": err }),
     };
     let jobs_total = |id: u64| -> Result<u64, String> {
         let args = vec![
@@ -368,7 +420,7 @@ fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
             .and_then(Value::as_u64)
             .ok_or_else(|| format!("the jobs read for run {id} carried no total_count"))
     };
-    match zero_job_failures(runs, check_runs, &jobs_total) {
+    match zero_job_failures(&runs, check_runs, &jobs_total) {
         Err(err) => json!({"error": err}),
         Ok(rows) => json!({"rows": rows
             .iter()

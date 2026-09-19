@@ -536,12 +536,14 @@ def resolve_current_pr_number_rest(
 
 
 def _zero_job_rows(
-    slug: str, cwd: Optional[str], runs: list, check_runs: list
+    slug: str, cwd: Optional[str], sha: str, runs: list, check_runs: list
 ) -> "tuple[list, str]":
     """Rows for runs that failed before minting a job; the rule is Rust's."""
     from fno.rust_binary import VerbUnavailable, verb_call
 
-    payload = {"op": "status-zero-job-runs", "slug": slug, "cwd": cwd,
+    # sha lets the op paginate the runs listing itself; `runs` is page 1,
+    # the read the workflow-name mapping already made.
+    payload = {"op": "status-zero-job-runs", "slug": slug, "cwd": cwd, "sha": sha,
                "runs": runs, "check_runs": check_runs}
     try:
         out = verb_call("authorized-merge", payload, timeout=20)
@@ -657,7 +659,7 @@ def fetch_pr_rest(
         )
 
     if run_rows:
-        zero_rows, zero_reason = _zero_job_rows(slug, cwd, run_rows, check_runs)
+        zero_rows, zero_reason = _zero_job_rows(slug, cwd, sha, run_rows, check_runs)
         if zero_reason:
             return None, zero_reason
         rollup.extend(zero_rows)

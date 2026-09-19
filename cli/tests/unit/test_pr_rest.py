@@ -1052,6 +1052,7 @@ def test_zero_job_failure_rows_read_red(monkeypatch):
     assert payload["op"] == "status-zero-job-runs"
     # _slug_or_reason lowercases the remote's owner/repo.
     assert payload["slug"] == "owner/repo"
+    assert payload["sha"] == "abc123def"
     assert payload["runs"] and payload["check_runs"]
 
 

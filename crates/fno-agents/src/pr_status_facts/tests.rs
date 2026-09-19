@@ -19,6 +19,9 @@ impl GhProbe for FakeGh {
         if args.contains(&"reviewDecision".to_string()) {
             return Ok((self.ok, self.review_decision.clone(), String::new()));
         }
+        if args.iter().any(|a| a.contains("jobs?per_page=1")) {
+            return Ok((self.ok, r#"{"total_count":0}"#.to_string(), String::new()));
+        }
         Ok((self.ok, self.output.clone(), String::new()))
     }
 }
@@ -514,6 +517,30 @@ fn ac1_edge_a_failed_run_with_jobs_is_not_reported() {
     .clone();
     let found = zero_job_failures(&runs, &[], &|_| Ok(3)).unwrap();
     assert!(found.is_empty());
+}
+
+#[test]
+fn the_op_paginates_the_runs_listing_when_the_payload_names_a_sha() {
+    let probes = FakeGh {
+        ok: true,
+        // `--paginate --slurp` output: a JSON array of pages. The zero-job
+        // failure lives on page 2.
+        output: r#"[{"workflow_runs":[{"id":1,"path":"w.yml","status":"completed","conclusion":"success","html_url":"https://github.com/o/r/actions/runs/1"}]},{"workflow_runs":[{"id":2,"path":"w.yml","status":"completed","conclusion":"failure","created_at":"2026-09-19T07:00:00Z","html_url":"https://github.com/o/r/actions/runs/2"}]}]"#
+            .to_string(),
+        review_decision: String::new(),
+        calls: RefCell::new(Vec::new()),
+    };
+    let payload = json!({"slug": "o/r", "cwd": "/repo", "sha": "abc123", "check_runs": []});
+    let out: Value = serde_json::from_str(&zero_job_runs_op(&probes, &payload).to_string())
+        .unwrap_or(Value::Null);
+    let rows = out["rows"].as_array().expect("rows array");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["name"], "w.yml");
+    let calls = probes.calls.borrow();
+    assert!(calls[0]
+        .iter()
+        .any(|a| a.contains("actions/runs?head_sha=abc123")));
+    assert!(calls[0].iter().any(|a| a == "--paginate"));
 }
 
 #[test]
