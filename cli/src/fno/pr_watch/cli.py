@@ -1142,8 +1142,6 @@ def tick() -> None:
                 if result.disabled:
                     reason = "config.autonomy.enabled" if not settings.autonomy.enabled else "config.pr_watch.enabled"
                     typer.echo(f"pr-watch tick: {reason} is false - skipped")
-                    _emit_tick_row("pr_watch_sweep", interval_s=interval, skip_reason="disabled", detail=reason)
-                    return
                 elif result.lock_held:
                     typer.echo(f"pr-watch tick: {result.lock_holder} - skipped")
                 elif result.quota_skip:
@@ -1168,8 +1166,10 @@ def tick() -> None:
                     typer.echo(
                         f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
                     )
-                # Stamp the row the merge arm mints every run: only cuts wrote here.
+                # One row per run like the merge arm: the skip word names a no-work tick.
+                skip = ("disabled" if result.disabled else "lock_held" if result.lock_held else "quota_skip" if result.quota_skip else None)
                 _emit_tick_row("pr_watch_sweep", interval_s=interval, acted=result.acted,
+                               skip_reason=skip,
                                detail=f"open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}")
 
         def _phase_merge(slice_s: float) -> None:

@@ -50,7 +50,7 @@ class FakeRunner:
         # test_pr_ritual_merge_guard.py for the refusal cases.
         self._state = state
 
-    def __call__(self, argv, *, cwd=None, timeout=None):
+    def __call__(self, argv, *, cwd=None, timeout=None, **kw):
         self.calls.append(list(argv))
         if argv and argv[0] == "env":
             # env(1) prefix (x-626f): KEY=VAL pairs, then the real tool. The
@@ -246,7 +246,7 @@ def test_advance_stream_emits_progress(tmp_path, capsys, monkeypatch):
 def test_failing_leg_records_failure_and_exit(tmp_path, capsys):
     # AC3-ERR: a non-zero exit surfaces as status=failed and run() exits 1.
     class _FailSync(FakeRunner):
-        def __call__(self, argv, *, cwd=None, timeout=None):
+        def __call__(self, argv, *, cwd=None, timeout=None, **kw):
             super().__call__(argv, cwd=cwd, timeout=timeout)
             if argv[1:4] == ["do", "pr", "sync-canonical"]:
                 return Result(3, "sync failed: boom", "")
@@ -261,7 +261,7 @@ def test_failing_leg_records_failure_and_exit(tmp_path, capsys):
         def __init__(self, inner):
             self._inner = inner
 
-        def __call__(self, argv, *, cwd=None, timeout=None):
+        def __call__(self, argv, *, cwd=None, timeout=None, **kw):
             self._inner.calls.append(list(argv))
             if argv[1:4] == ["do", "pr", "sync-canonical"]:
                 return Result(3, "sync failed: boom", "")
@@ -279,7 +279,7 @@ def test_failing_leg_records_failure_and_exit(tmp_path, capsys):
 def test_run_exits_nonzero_when_a_leg_fails(tmp_path, capsys, monkeypatch):
     # AC3 end-to-end: reconcile failure -> exit 1, every later leg still runs.
     class _FailReconcile(FakeRunner):
-        def __call__(self, argv, *, cwd=None, timeout=None):
+        def __call__(self, argv, *, cwd=None, timeout=None, **kw):
             self.calls.append(list(argv))
             t = _tool_argv(argv)
             sub = t[1] if len(t) > 1 and t[0] != "gh" else ""
@@ -711,7 +711,7 @@ def test_recover_falls_through_to_gh(tmp_path, monkeypatch):
     # AC9: a non-GitHub git origin (a mirror) falls through to the gh fallback.
 
     class _GhFallback(FakeRunner):
-        def __call__(self, argv, *, cwd=None, timeout=None):
+        def __call__(self, argv, *, cwd=None, timeout=None, **kw):
             self.calls.append(list(argv))
             if argv[:1] == ["git"] and "get-url" in argv:
                 return Result(0, "git@gitlab.com:mirror/x.git\n", "")
@@ -736,7 +736,7 @@ def test_reap_calls_rm_alone_when_self_reap_on(tmp_path, capsys):
             super().__init__(agent_rows=[{"name": "target-x-1234-slug", "status": "orphaned"}])
             self.order = []
 
-        def __call__(self, argv, *, cwd=None, timeout=None):
+        def __call__(self, argv, *, cwd=None, timeout=None, **kw):
             self.calls.append(list(argv))
             if len(argv) > 1 and argv[1] == "agents" and "stop" in argv:
                 self.order.append(("stop", argv[-1]))
@@ -888,7 +888,7 @@ def test_archive_refusal_leaves_a_standing_request(tmp_path, capsys, monkeypatch
     class _RefusingRunner:
         calls = inner.calls
 
-        def __call__(self, argv, *, cwd=None, timeout=None):
+        def __call__(self, argv, *, cwd=None, timeout=None, **kw):
             if argv and "archive-worktree.sh" in " ".join(argv):
                 return Result(2, "", "strict check failed")
             return inner(argv, cwd=cwd, timeout=timeout)
@@ -967,7 +967,7 @@ def test_archive_removes_the_row_only_after_the_worktree_is_gone(tmp_path, monke
     )
 
     class ArchiveRunner(FakeRunner):
-        def __call__(self, argv, *, cwd=None, timeout=None):
+        def __call__(self, argv, *, cwd=None, timeout=None, **kw):
             self.calls.append(list(argv))
             if argv[0] == "gh":
                 return Result(0, '{"state":"MERGED","headRefName":"feature/x"}', "")
@@ -1125,7 +1125,7 @@ def test_reconcile_leg_takes_the_probe_safe_bound(tmp_path):
     seen = {}
 
     class _ProbeRunner(FakeRunner):
-        def __call__(self, argv, *, cwd=None, timeout=None):
+        def __call__(self, argv, *, cwd=None, timeout=None, **kw):
             if "reconcile" in argv:
                 seen["timeout"] = timeout
             return FakeRunner.__call__(self, argv, cwd=cwd, timeout=timeout)
