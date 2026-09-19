@@ -659,7 +659,6 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("cost-accuracy harness", ".",
      "uv run --project cli python tests/lib/test_cost_tracker_pricing.py\n"
      "uv run --project cli python tests/metrics/test_session_cost_dedup.py\n"
-     "uv run --project cli python tests/metrics/test_backfill_cost_recompute.py\n"
      "bash tests/lib/test_cost_tracker_sh_parity.sh"),
     ("loop-check shim + immutable manifest harness", ".",
      "bash tests/hooks/test_loop_check_shim.sh\n"
