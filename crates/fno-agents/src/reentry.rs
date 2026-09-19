@@ -1675,4 +1675,150 @@ mod tests {
         .unwrap();
         assert_eq!(plan.node.as_deref(), Some("x-aaaa"));
     }
+
+    /// An empty route dir, under the env lock: the resume-pin lookup misses,
+    /// which is the unrouted shape these tests isolate from the machine.
+    fn empty_route_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let routes = tempfile::tempdir().unwrap();
+        std::env::set_var("FNO_ROUTE_SETTINGS_DIR", routes.path());
+        let path = routes.path().to_path_buf();
+        (routes, path)
+    }
+
+    fn has_flag(argv: &[String], flag: &str, value: &str) -> bool {
+        argv.windows(2).any(|w| w[0] == flag && w[1] == value)
+    }
+
+    #[test]
+    fn ac3_hp_unrouted_row_pins_the_requested_model_on_bg_resume() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_routes, _path) = empty_route_dir();
+        let mut e = row("opus");
+        e.harness_session_id = Some("cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "cccccccc".into();
+        e.requested_model = Some("claude-opus-5".into());
+        e.cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+        // No job dir staged: the bg-resume arm is the plan.
+        let (_tmp, home) = staged_home(&[]);
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "opus",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.mechanism, "bg-resume");
+        assert!(has_flag(&plan.argv, "--model", "claude-opus-5"));
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+    }
+
+    #[test]
+    fn ac3_edge_routed_row_pins_nothing() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join("reentry-test-route-pin.json");
+        write_route(&dir, false);
+        let (_routes, _path) = empty_route_dir();
+        let mut e = row("glm");
+        e.harness_session_id = Some("dddddddd-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "dddddddd".into();
+        e.provider = Some("zai".into());
+        e.launch_account = Some("makers".into());
+        e.requested_model = Some("glm-5.2".into());
+        e.route_settings_path = Some(dir.to_string_lossy().to_string());
+        e.cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+        // No job dir: the bg-resume arm carries the route as --settings and
+        // no --model, because the route owns the argv model.
+        let (_tmp, home) = staged_home(&[]);
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "glm",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.mechanism, "bg-resume");
+        assert!(!plan.argv.iter().any(|t| t == "--model"));
+        assert!(plan.argv.iter().any(|t| t == "--settings"));
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+    }
+
+    #[test]
+    fn ac3_edge_job_dir_respawn_argv_stays_bare() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_routes, _path) = empty_route_dir();
+        let mut e = row("opus");
+        e.harness_session_id = Some("eeeeeeee-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "eeeeeeee".into();
+        e.requested_model = Some("claude-opus-5".into());
+        e.cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+        // The staged job dir routes the plan to respawn, which restarts the
+        // saved launch; the pin never touches it.
+        let (_tmp, home) = staged_home(&["eeeeeeee"]);
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "opus",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.mechanism, "respawn");
+        assert!(!plan.argv.iter().any(|t| t == "--model"));
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+    }
+
+    #[test]
+    fn ac3_edge_unresolvable_row_keeps_todays_argv() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_routes, _path) = empty_route_dir();
+        let mut e = row("unpinned");
+        e.harness_session_id = Some("ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "ffffffff".into();
+        e.cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+        // No model axis and no transcript the resolver can find: the pin
+        // cannot resolve, and the argv is exactly today's.
+        let (_tmp, home) = staged_home(&[]);
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "unpinned",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.mechanism, "bg-resume");
+        assert!(!plan.argv.iter().any(|t| t == "--model"));
+        assert_eq!(
+            plan.argv,
+            vec![
+                "claude".to_string(),
+                "--bg".to_string(),
+                "--resume".to_string(),
+                "ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee".to_string()
+            ]
+        );
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+    }
 }
