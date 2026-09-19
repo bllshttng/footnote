@@ -143,8 +143,16 @@ expect "unrelated Edit approved" approve \
 # canonical operator audit event rather than the legacy event shape.
 _DRIVE_STUB=$(mktemp -d)
 _DRIVE_EVENTS="$_DRIVE_STUB/events.jsonl"
+export _DRIVE_EVENTS
+# The store commit is the acknowledgement, so the audited envelope never
+# lands in journal bytes: the stub captures the payload the guard hands the
+# native binary, and the assert below reads exactly that line back.
 cat > "$_DRIVE_STUB/fno" <<'SH'
 #!/usr/bin/env bash
+if [[ "$1:$2" == "doctor:event" && "$3" == "emit-envelope" ]]; then
+  cat >> "$_DRIVE_EVENTS"
+  exit 0
+fi
 printf '%s\n' '{"sessions":[{"short_id":"drive-test"}]}'
 SH
 chmod +x "$_DRIVE_STUB/fno"
