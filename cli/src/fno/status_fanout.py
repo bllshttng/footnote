@@ -179,9 +179,11 @@ def _stream_pass(active: Path, since_ts: Optional[str]) -> "tuple[list[dict[str,
     index counts correctly), every retained generation included, so the
     rotated-generation drain below is a store-less fallback only."""
     try:
-        from fno.events.store_client import query_rows
+        from fno.events.store_client import query_rows, store_db_path
 
-        rows = query_rows(active)
+        # A store-less journal (fixture or pre-cutover bytes) reads raw below;
+        # an absent store is not an empty history.
+        rows = query_rows(active) if store_db_path(active).exists() else None
     except Exception:
         rows = None
     if rows is not None:

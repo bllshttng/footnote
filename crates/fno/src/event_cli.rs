@@ -141,10 +141,7 @@ fn run_rows(args: &[OsString]) -> i32 {
         return 0;
     }
     if journal.exists() && !journal.is_file() {
-        eprintln!(
-            "error: {} is not a regular file",
-            journal.display()
-        );
+        eprintln!("error: {} is not a regular file", journal.display());
         return 1;
     }
     let _ = fno_event_store::import_all(&journal);
@@ -156,7 +153,10 @@ fn run_rows(args: &[OsString]) -> i32 {
     match fno_event_store::query_events(&journal, &query) {
         Ok(rows) => {
             let lines: Vec<&str> = rows.iter().map(|r| r.line.as_str()).collect();
-            println!("{}", serde_json::to_string(&lines).unwrap_or_else(|_| "[]".into()));
+            println!(
+                "{}",
+                serde_json::to_string(&lines).unwrap_or_else(|_| "[]".into())
+            );
             0
         }
         Err(e) => {
