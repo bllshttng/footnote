@@ -833,10 +833,12 @@ resolve_command_surface() {
 
 # The plugin-namespace prefix a slash-surface provider prepends to `/verb`
 # (mirrors harness_map's slash_prefix): opencode -> `fno:` (`/fno:target`);
-# claude/agy inject natively, so it is empty. Keep in sync with harness_map.
+# pi -> `skill:` (`/skill:target`); claude/agy inject natively, so it is
+# empty. Keep in sync with harness_map.
 slash_prefix() {
   case "$1" in
     opencode) printf 'fno:' ;;
+    pi)       printf 'skill:' ;;
     *)        printf '' ;;
   esac
 }
