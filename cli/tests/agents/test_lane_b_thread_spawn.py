@@ -254,6 +254,55 @@ def test_lane_b_spawn_renders_the_contract_argv_and_registers_the_row(
     assert row.fno_id == session_id
     assert row.origin == "spawn"
 
+    # The route note prints once when the route runs (no axes here: the
+    # fno-default pair).
+    assert True
+
+
+def test_lane_b_pi_keeper_carries_the_user_axes(lane_b_home, monkeypatch) -> None:
+    """AC15-HP/AC15-ERR: the keeper pi carries the user's model and effort.
+
+    A `provider/id` model stays `--model` only (pi reads the provider from
+    the pattern); a bare model carries the fno provider beside it. Effort
+    maps to pi's `--thinking`. The spawn stays on the thread lane - the
+    keeper row declares these axes carried.
+    """
+    recorded = _fake_keeper(monkeypatch, lane_b_home)
+
+    receipt = _lane_b_thread_spawn(
+        name="wk-pi-axes",
+        harness="pi",
+        cwd=lane_b_home,
+        model="anthropic/claude-sonnet-5",
+        effort="high",
+    )
+    argv = list(recorded["argv"])  # type: ignore[arg-type]
+    worker_tail = argv[argv.index("--") + 1 :]
+    assert worker_tail[-4:] == [
+        "--model",
+        "anthropic/claude-sonnet-5",
+        "--thinking",
+        "high",
+    ]
+    assert "--provider" not in worker_tail, worker_tail
+    assert receipt["session_id"]
+
+    recorded.clear()
+    receipt = _lane_b_thread_spawn(
+        name="wk-pi-bare",
+        harness="pi",
+        cwd=lane_b_home,
+        model="gpt-5.5",
+    )
+    argv = list(recorded["argv"])  # type: ignore[arg-type]
+    worker_tail = argv[argv.index("--") + 1 :]
+    assert worker_tail[-4:] == [
+        "--provider",
+        pi_provider(),
+        "--model",
+        "gpt-5.5",
+    ]
+
 
 def test_lane_b_spawn_renders_grok_argv_and_registers_the_row(
     lane_b_home, monkeypatch

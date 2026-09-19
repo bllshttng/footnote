@@ -35,6 +35,101 @@ pub const PI_DEFAULT_PROVIDER: &str = "openai-codex";
 /// omitted.
 pub const PI_DEFAULT_MODEL: &str = "gpt-5.5";
 
+/// The route a pi launch carries: the argv tokens, which input decided them,
+/// and the posture note every receipt names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PiRoute {
+    pub tokens: Vec<String>,
+    pub route_source: &'static str,
+    pub note: String,
+}
+
+/// The ONE pi route for keeper and pane. An explicit model carrying `/` is a
+/// `provider/id` pattern pi reads the provider from, so `--model` alone; a
+/// bare explicit model carries both flags (the Bedrock trap); no model
+/// defers to pi's own settings when they name BOTH a provider and a model,
+/// else fno's default pair. Effort, tools and deny-tools map to pi's own
+/// first-class flags.
+pub fn pi_route(model: &str, effort: &str, tools: &str, deny_tools: &str) -> PiRoute {
+    pi_route_in(model, effort, tools, deny_tools, &pi_agent_dir())
+}
+
+/// [`pi_route`] against an explicit agent dir, so a test drives the
+/// settings branch on a scratch tree.
+pub fn pi_route_in(
+    model: &str,
+    effort: &str,
+    tools: &str,
+    deny_tools: &str,
+    agent_dir: &Path,
+) -> PiRoute {
+    const POSTURE: &str = "pi runs unsandboxed and shows no approval prompts";
+    let mut tokens: Vec<String> = Vec::new();
+    let route_source;
+    let model = model.trim();
+    if model.is_empty() {
+        let settings = read_route_settings(agent_dir);
+        if settings.0.is_some() && settings.1.is_some() {
+            // pi resolves provider and model from its own settings: naming
+            // either would only override the user's configured default.
+            route_source = "pi-settings";
+        } else {
+            tokens = vec![
+                "--provider".to_string(),
+                pi_provider(),
+                "--model".to_string(),
+                pi_model(),
+            ];
+            route_source = "fno-default";
+        }
+    } else if model.contains('/') {
+        tokens = vec!["--model".to_string(), model.to_string()];
+        route_source = "explicit";
+    } else {
+        tokens = vec![
+            "--provider".to_string(),
+            pi_provider(),
+            "--model".to_string(),
+            model.to_string(),
+        ];
+        route_source = "explicit";
+    }
+    for (flag, value) in [
+        ("--thinking", effort.trim()),
+        ("--tools", tools.trim()),
+        ("--exclude-tools", deny_tools.trim()),
+    ] {
+        if !value.is_empty() {
+            tokens.push(flag.to_string());
+            tokens.push(value.to_string());
+        }
+    }
+    PiRoute {
+        tokens,
+        route_source,
+        note: POSTURE.to_string(),
+    }
+}
+
+/// `(defaultProvider, defaultModel)` from the agent dir's settings.json,
+/// `(None, None)` when the file is absent, unreadable, or names neither.
+fn read_route_settings(agent_dir: &Path) -> (Option<String>, Option<String>) {
+    let Ok(text) = std::fs::read_to_string(agent_dir.join("settings.json")) else {
+        return (None, None);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return (None, None);
+    };
+    let get = |key: &str| {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    (get("defaultProvider"), get("defaultModel"))
+}
+
 /// The provider fno passes to pi, `FNO_PI_PROVIDER` winning over the default.
 pub fn pi_provider() -> String {
     env_or("FNO_PI_PROVIDER", PI_DEFAULT_PROVIDER)
@@ -54,8 +149,8 @@ fn env_or(key: &str, fallback: &str) -> String {
 
 /// pi's agent dir: `PI_CODING_AGENT_DIR` when set, a leading `~` expanded,
 /// else `$HOME/.pi/agent`. That env var is the one pi itself reads; the
-/// `PI_HOME` this module's readers honored before is read by no pi code at
-/// all, so a relocated install read the wrong tree on every store question.
+/// store-root var this module's readers honored before is read by no pi
+/// code at all, so a relocated install read the wrong tree on every store question.
 pub fn pi_agent_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("PI_CODING_AGENT_DIR") {
         let dir = dir.trim();
@@ -582,5 +677,80 @@ mod tests {
         // A damaged claim file is evidence of nothing, and refusing an
         // operator's attach over one would fail closed on the wrong fact.
         assert!(!attach_blocked_by_create(ClaimState::Corrupted));
+    }
+
+    /// AC15-HP: a `provider/id` model stays `--model` only, effort maps to
+    /// `--thinking`; AC15-ERR: a bare model carries the fno provider beside
+    /// it.
+    #[test]
+    fn pi_route_maps_explicit_axes() {
+        let route = pi_route("anthropic/claude-sonnet-5", "high", "", "");
+        assert_eq!(
+            route.tokens,
+            vec![
+                "--model".to_string(),
+                "anthropic/claude-sonnet-5".to_string(),
+                "--thinking".to_string(),
+                "high".to_string(),
+            ]
+        );
+        let route = pi_route("gpt-5.5", "", "", "");
+        assert_eq!(
+            route.tokens,
+            vec![
+                "--provider".to_string(),
+                pi_provider(),
+                "--model".to_string(),
+                "gpt-5.5".to_string(),
+            ]
+        );
+        // Tool axes map to pi's own flags when carried.
+        let route = pi_route("", "", "read,edit", "bash");
+        assert_eq!(
+            route.tokens,
+            vec![
+                "--provider".to_string(),
+                pi_provider(),
+                "--model".to_string(),
+                pi_model(),
+                "--tools".to_string(),
+                "read,edit".to_string(),
+                "--exclude-tools".to_string(),
+                "bash".to_string(),
+            ]
+        );
+    }
+
+    /// AC16-HP/AC16-EDGE: settings naming BOTH a provider and a model win
+    /// outright; settings naming only one fall back to the fno default pair.
+    #[test]
+    fn pi_route_defers_to_pis_own_settings() {
+        let tmp = std::env::temp_dir().join(format!("pi-route-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        std::fs::write(
+            tmp.join("settings.json"),
+            r#"{"defaultProvider": "openai-codex", "defaultModel": "gpt-5.5"}"#,
+        )
+        .unwrap();
+        let route = pi_route_in("", "", "", "", &tmp);
+        assert_eq!(route.tokens, Vec::<String>::new());
+        assert_eq!(route.route_source, "pi-settings");
+        assert!(route.note.contains("unsandboxed"), "{}", route.note);
+
+        std::fs::write(
+            tmp.join("settings.json"),
+            r#"{"defaultProvider": "openai-codex"}"#,
+        )
+        .unwrap();
+        let route = pi_route_in("", "", "", "", &tmp);
+        assert_eq!(route.route_source, "fno-default");
+        assert!(route
+            .tokens
+            .windows(2)
+            .any(|w| w[0] == "--provider" && w[1] == pi_provider()));
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

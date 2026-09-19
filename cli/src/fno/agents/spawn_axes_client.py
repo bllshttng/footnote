@@ -83,3 +83,31 @@ def pi_session_lookup(cwd: str, session_id: str) -> dict[str, Any]:
     with ``files``, ``directory`` and ``reason`` as they carry."""
     ask = {"cwd": str(cwd), "session_id": session_id}
     return spawn_axes_call({"pi_session_lookup": ask})
+
+
+def pi_route(
+    model: str | None,
+    effort: str | None,
+    tools: str | None = None,
+    deny_tools: str | None = None,
+) -> list[str]:
+    """The provider/model/effort tokens a pi launch carries, from the Rust
+    owner; the route note prints once to stderr as
+    ``pi route: <route_source> - <note>``."""
+    ask = {
+        "model": model or "",
+        "effort": effort or "",
+        "tools": tools or "",
+        "deny_tools": deny_tools or "",
+    }
+    answer = spawn_axes_call({"pi_route": ask})
+    tokens = _answer_or_raise(answer, "tokens")
+    note = answer.get("note") or ""
+    if note:
+        import sys
+
+        print(
+            f"pi route: {answer.get('route_source')} - {note}",
+            file=sys.stderr,
+        )
+    return [str(t) for t in tokens]
