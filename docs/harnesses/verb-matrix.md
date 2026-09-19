@@ -27,6 +27,7 @@ The needs vocabulary is `loop`, every feature key the table declares a probe for
 | fno-me | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
 | groom | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
 | growth-launch | subagent_dispatch | `native` | `native` | `absent` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` | `unmeasured` |
+| intel | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
 | king-for-a-day | loop, spawn | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `capable` | `capable` |
 | law | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |
 | mail | - | `native` | `native` | `absent` | `native` | `native` | `native` | `unmeasured` | `unmeasured` | `native` | `native` |

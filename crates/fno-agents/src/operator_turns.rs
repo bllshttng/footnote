@@ -22,8 +22,10 @@ use serde_json::Value;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 
-use crate::mail_inject::contains_fno_mail_tag_anywhere;
-use crate::provider::parse_verb_token;
+// The classifier is the promoted `provenance` module: same functions, same
+// reason names, so the queue's skip counters and its 17 regression tests are
+// unchanged by the move.
+use crate::provenance::{classify, is_user_turn, turn_text, turn_ts_epoch};
 
 /// A held turn in the scan cursor; the payload adds the rendered excerpt.
 #[derive(Debug, Clone, Serialize)]
@@ -69,25 +71,7 @@ struct ScanState {
     skipped: BTreeMap<String, u64>,
 }
 
-/// `(prefix, reason)` matched against the reminder-stripped turn text, in
-/// order. Every prefix is a harness-injected envelope a person cannot type.
-const SKIP_RULES: &[(&str, &str)] = &[
-    ("<command-name>", "command_invocation"),
-    ("<command-message>", "command_invocation"),
-    ("<local-command", "command_invocation"),
-    ("<user_instructions>", "synthetic"),
-    ("<environment_context>", "synthetic"),
-    ("<task-notification>", "task_notification"),
-    ("<bash-input>", "bash_echo"),
-    ("<bash-stdout>", "bash_echo"),
-    ("[Request interrupted by user", "interrupt_marker"),
-    (
-        "This session is being continued from a previous conversation",
-        "compaction_preamble",
-    ),
-    ("Another Claude session sent a message:", "teammate_message"),
-];
-
+/// The excerpt width. Retained beside the cursor machinery the queue owns.
 const EXCERPT_CHARS: usize = 160;
 const HEAD_SAMPLE_BYTES: u64 = 4096;
 
@@ -97,13 +81,6 @@ fn scan_path(capture_dir: &Path, session: &str) -> PathBuf {
 
 fn ledger_path(capture_dir: &Path, session: &str) -> PathBuf {
     capture_dir.join(format!("{session}.jsonl"))
-}
-
-fn system_reminder_re() -> &'static regex::Regex {
-    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| {
-        regex::Regex::new(r"(?s)<system-reminder>.*?</system-reminder>").expect("valid pattern")
-    })
 }
 
 fn stand_down_re() -> &'static regex::Regex {
@@ -130,56 +107,6 @@ fn head_digest(prefix: &[u8], offset: u64) -> String {
     to_hex(&h.finalize())
 }
 
-/// True for a row the transcript writes when a user (or mail) speaks: a claude
-/// `type:"user"` row without a truthy `isMeta`, or a codex payload message.
-fn is_user_turn(obj: &Value) -> bool {
-    if obj.get("type").and_then(|v| v.as_str()) == Some("user") {
-        return !json_truthy(obj.get("isMeta"));
-    }
-    match obj.get("payload") {
-        Some(p) if p.is_object() => {
-            p.get("type").and_then(|v| v.as_str()) == Some("message")
-                && p.get("role").and_then(|v| v.as_str()) == Some("user")
-        }
-        _ => false,
-    }
-}
-
-fn json_truthy(v: Option<&Value>) -> bool {
-    match v {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(b)) => *b,
-        Some(Value::Number(n)) => n.as_f64().is_none_or(|f| f != 0.0),
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(Value::Array(a)) => !a.is_empty(),
-        Some(Value::Object(o)) => !o.is_empty(),
-    }
-}
-
-/// The user-visible text of a row, `""` when it has none. Both content shapes
-/// (string, block list) across the claude and codex row formats; a codex
-/// payload wins when present.
-fn turn_text(obj: &Value) -> String {
-    let mut content = match obj.get("message") {
-        Some(m) if m.is_object() => m.get("content"),
-        _ => obj.get("content"),
-    };
-    if let Some(p) = obj.get("payload") {
-        if p.is_object() {
-            content = p.get("content");
-        }
-    }
-    match content {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(blocks)) => blocks
-            .iter()
-            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join(" "),
-        _ => String::new(),
-    }
-}
-
 /// A stable ledger id: the row's own uuid/id, else a digest. The digest folds
 /// the row's line number in, so byte-identical duplicate rows still get
 /// distinct ids and one ack can never dispose two turns. sha1 (not sha256)
@@ -202,94 +129,6 @@ fn turn_id(obj: &Value, text: &str, line_no: usize) -> String {
     h.update(format!("{line_no}:{ts}:{text}").as_bytes());
     let hex = to_hex(&h.finalize());
     format!("derived-{}", &hex[..12])
-}
-
-/// RFC 3339 (Z or offset), else a naive stamp read as UTC: transcripts are
-/// UTC by convention and a naive stamp must not skew by the local offset.
-fn turn_ts_epoch(obj: &Value) -> Option<f64> {
-    let raw = match obj.get("timestamp") {
-        Some(Value::String(s)) if !s.trim().is_empty() => s,
-        _ => match obj.get("ts") {
-            Some(Value::String(s)) if !s.trim().is_empty() => s,
-            _ => return None,
-        },
-    };
-    let t = raw.trim();
-    let secs = |ts: i64, micros: u32| ts as f64 + micros as f64 / 1_000_000.0;
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(t) {
-        return Some(secs(dt.timestamp(), dt.timestamp_subsec_micros()));
-    }
-    if let Ok(nd) = chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S%.f") {
-        return Some(secs(
-            nd.and_utc().timestamp(),
-            nd.and_utc().timestamp_subsec_micros(),
-        ));
-    }
-    // A date-only stamp reads as midnight UTC, as Python's fromisoformat did.
-    let date_only = chrono::NaiveDate::parse_from_str(t, "%Y-%m-%d")
-        .ok()
-        .and_then(|d| d.and_hms_opt(0, 0, 0))?;
-    Some(secs(date_only.and_utc().timestamp(), 0))
-}
-
-/// A single-line slash command or `$fno:` verb with flag-shaped args only.
-/// A token ending in sentence punctuation means the turn carries prose, and
-/// prose may carry a ruling. A filename dot is fine (over-counting is the
-/// safe direction); `x-1.` is not.
-fn is_bare_command(text: &str) -> bool {
-    if text.contains('\n') {
-        return false;
-    }
-    let mut parts = text.split_whitespace();
-    let Some(first) = parts.next() else {
-        return false;
-    };
-    if parse_verb_token(first).is_none() {
-        return false;
-    }
-    parts.all(is_arg_token)
-}
-
-fn is_arg_token(tok: &str) -> bool {
-    if tok.is_empty() {
-        return false;
-    }
-    let shaped = tok.chars().all(|c| {
-        c.is_ascii_alphanumeric()
-            || matches!(c, '.' | '_' | '/' | ':' | '@' | '%' | '+' | '=' | '~' | '-')
-    });
-    shaped
-        && !matches!(
-            tok.chars().last(),
-            Some('.') | Some('?') | Some('!') | Some(';') | Some(',')
-        )
-}
-
-/// The operator-shaped text of a turn, or its named skip reason when it is
-/// not one. In order, failing toward the queue: injected mail never queues;
-/// a bare command invocation carries no ruling; a turn with no user text
-/// outside system-reminder/hook content is not a turn; a machine envelope is
-/// refused with its reason; everything else queues.
-fn classify(text: &str) -> Result<String, &'static str> {
-    if contains_fno_mail_tag_anywhere(text) {
-        return Err("fno_mail");
-    }
-    let cleaned = system_reminder_re()
-        .replace_all(text.trim(), "")
-        .trim()
-        .to_string();
-    if cleaned.is_empty() {
-        return Err("no_user_text");
-    }
-    for (prefix, reason) in SKIP_RULES {
-        if cleaned.starts_with(prefix) {
-            return Err(reason);
-        }
-    }
-    if is_bare_command(&cleaned) {
-        return Err("bare_command");
-    }
-    Ok(cleaned)
 }
 
 /// One-line excerpt; whitespace runs collapse so a row stays one row.
@@ -594,6 +433,7 @@ pub fn run(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provenance::is_bare_command;
     use serde_json::json;
     use std::os::unix::fs::PermissionsExt;
 

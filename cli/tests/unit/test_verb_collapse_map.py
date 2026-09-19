@@ -245,8 +245,10 @@ def test_map_covers_current_surface_once():
     # declares those paths natively and the verb-ratchet reads the generated
     # inventory, so no collapse-map row is consumed: 635 -> 606.
     # The spawn seam's permission-posture and sandbox-verdict owners each
-    # take one row: 608 -> 610.
-    assert len(mapped) == 610, (
+    # take one row: 608 -> 610. This branch allocates `doctor intel`, the
+    # doctor leaf over the binary's provenance fold (the binary-side action
+    # stays unregistered under d-fe66560a and takes no row): 610 -> 611.
+    assert len(mapped) == 611, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

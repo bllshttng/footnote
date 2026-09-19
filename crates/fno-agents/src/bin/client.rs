@@ -786,6 +786,13 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "bash-census" {
         return fno_agents::bash_census::run_bash_census(&args[1..]);
     }
+    // `intel`: the session-provenance fold, daemon-free read, == dispatch
+    // like board/reclaim: never registered in ALL_CLIENT_ACTIONS (the action
+    // list is shrink-only, d-fe66560a) and never routed by `fno agents`;
+    // `fno doctor intel` shells HERE through resolve_binary.
+    if verb == "intel" {
+        return fno_agents::intel::run_intel(&args[1..]);
+    }
     // `reclaim`: the machine janitor, daemon-free. Not a routable
     // `fno agents` verb; the Python surface is `fno doctor reclaim`, a thin
     // wrapper that shells HERE, and the daemon's daily sweep calls the gate
