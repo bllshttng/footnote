@@ -384,7 +384,14 @@ mod tests {
     #[test]
     fn open_blocking_question_holds_the_node_once() {
         let raw = [qrow("q-1", "sess-a", &["x-n"]), brow("q-1", "sess-a")].join("\n");
-        let path = std::env::temp_dir().join("fno-holds-test-1.jsonl");
+        let path = std::env::temp_dir().join(format!(
+            "fno-holds-test-1-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::write(&path, &raw).unwrap();
         let journals = vec![path.clone()];
         let holds = scan_open_holds(&journals, "sess-a", "x-n");
@@ -397,7 +404,14 @@ mod tests {
     #[test]
     fn second_fire_without_a_prior_block_is_a_first_fire() {
         let raw = qrow("q-2", "sess-b", &["x-n"]);
-        let path = std::env::temp_dir().join("fno-holds-test-2.jsonl");
+        let path = std::env::temp_dir().join(format!(
+            "fno-holds-test-2-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::write(&path, &raw).unwrap();
         let journals = vec![path.clone()];
         let holds = scan_open_holds(&journals, "sess-b", "x-n");
@@ -414,7 +428,14 @@ mod tests {
             qrow("q-4", "sess-c", &["x-n"]),
         ]
         .join("\n");
-        let path = std::env::temp_dir().join("fno-holds-test-3.jsonl");
+        let path = std::env::temp_dir().join(format!(
+            "fno-holds-test-3-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::write(&path, &raw).unwrap();
         let journals = vec![path.clone()];
         let mine = scan_open_holds(&journals, "sess-c", "x-n");

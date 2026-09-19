@@ -89,9 +89,18 @@ def test_blocked_pushes_to_parent(runner, tmp_path, monkeypatch) -> None:
 def test_run_summary_emit_does_not_push(runner, tmp_path, monkeypatch) -> None:
     calls: list = []
 
+    # Route like _emit_blocked: the store client shares this subprocess.run
+    # module attribute, so a blanket fake would swallow the native commit's
+    # receipt and fail the emit itself. Only the mail leg is faked.
+    import subprocess as _subprocess
+
+    original_run = _subprocess.run
+
     def fake_run(argv, **kw):
         calls.append(argv)
-        return _R(0)
+        if argv[:3] == ["fno", "agents", "mail"]:
+            return _R(0)
+        return original_run(argv, **kw)
 
     events = tmp_path / ".fno" / "events.jsonl"
     state = tmp_path / ".fno" / "target-state.md"
@@ -108,7 +117,10 @@ def test_run_summary_emit_does_not_push(runner, tmp_path, monkeypatch) -> None:
          })],
     )
     assert result.exit_code == 0, result.output
-    assert events.exists()
+    # The store is the record; the cutover stopped journal appends.
+    from fno.events.store_client import store_db_path
+
+    assert store_db_path(events).exists()
     assert not any(a[:4] == ["fno", "agents", "mail", "send"] for a in calls)
 
 

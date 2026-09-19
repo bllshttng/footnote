@@ -1236,7 +1236,7 @@ mod tests {
             300,
         );
 
-        let text = std::fs::read_to_string(&project).unwrap();
+        let text = crate::events::committed_journal_text(&project);
         let lines: Vec<Value> = text
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())

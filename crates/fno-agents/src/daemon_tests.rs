@@ -131,10 +131,14 @@ fn socket_inode_matches_detects_unlink_and_rebind() {
 }
 
 fn read_events(home: &AgentsHome) -> Vec<Value> {
-    std::fs::read_to_string(home.events_jsonl())
+    // Committed rows, not journal bytes: the store cutover stopped journal
+    // appends, so emitted events live only in the store beside the journal.
+    let journal = home.events_jsonl();
+    let _ = fno_event_store::import_all(&journal);
+    fno_event_store::query_events(&journal, &fno_event_store::EventQuery::default())
         .unwrap_or_default()
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .iter()
+        .filter_map(|r| serde_json::from_str::<Value>(&r.line).ok())
         .collect()
 }
 
@@ -1554,10 +1558,9 @@ fn emit_inside_leg_completion_publishes_only_for_report_bearing_rows() {
     emit_inside_leg_completion(&emitter, &with_report);
     emit_inside_leg_completion(&emitter, &rentry("plain", AgentStatus::Live, None));
 
-    let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    let log = read_events(&home);
     let events: Vec<serde_json::Value> = log
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
+        .into_iter()
         .filter(|v: &serde_json::Value| v["type"] == "inside_leg_completed")
         .collect();
     assert_eq!(
@@ -2802,9 +2805,12 @@ pub(super) fn probe_with_age(
 }
 
 pub(super) fn test_ctx(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
+    // The emitter commits to the store beside the home journal: `/dev/null`
+    // was a sink under the journal regime, but the store needs a real path.
+    let events_path = home.events_jsonl();
     Ctx {
+        emitter: EventEmitter::new(events_path, "daemon"),
         home,
-        emitter: EventEmitter::new(std::path::PathBuf::from("/dev/null"), "daemon"),
         opts: DaemonOptions {
             idle_exit: Duration::from_secs(1800),
             worker_bin,
@@ -4387,7 +4393,7 @@ async fn switchboard_failed_drive_does_not_orphan_restamped_recipient() {
     let restamp_done = home.root().join("restamp-done");
     let script = format!(
         r#"
-printf '%s\n' '{{"type":"system","subtype":"init","session_id":"s1"}}'
+printf '%s\n' '{{"ts":"2026-01-01T00:00:00Z","source":"test","type":"system","subtype":"init","session_id":"s1"}}'
 while IFS= read -r line; do
   touch '{}'
   while [ ! -f '{}' ]; do sleep 0.01; done

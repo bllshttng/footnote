@@ -2092,7 +2092,7 @@ fn gc_sweep_turns_unterminated_node_reap_into_durable_failure() {
     assert_eq!(done_reap["data"]["node_id"], "x-b44e");
     assert_eq!(done_reap["data"]["termination_event"], true);
 
-    let global = std::fs::read_to_string(&global_events).unwrap();
+    let global = crate::events::committed_journal_text(&global_events);
     let failures: Vec<Value> = global
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
@@ -2180,7 +2180,15 @@ fn gc_sweep_restores_row_when_dead_dispatch_receipt_cannot_persist() {
         registry.entries.push(row);
     })
     .unwrap();
+    // The write this test breaks is the STORE commit now: a directory at the
+    // store path refuses to open as SQLite, so the receipt persist fails the
+    // same way a journal append to a directory did pre-cutover.
     std::fs::create_dir_all(global_events_path(&home)).unwrap();
+    std::fs::create_dir_all(std::path::PathBuf::from(format!(
+        "{}.db",
+        global_events_path(&home).display()
+    )))
+    .unwrap();
 
     let summary = retire_sweep(
         &home,

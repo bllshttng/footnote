@@ -38,6 +38,20 @@ use std::path::{Path, PathBuf};
 /// `fno-event-store` crate; re-exported here for the write boundary.
 pub use fno_event_store::{is_ephemeral_event, EPHEMERAL_EVENT_TYPES, EPHEMERAL_SUFFIX};
 
+/// Test-only journal text: the committed rows as one line-joined string.
+/// The store cutover stopped journal appends, so tests asserting on emitted
+/// content read here instead of the raw file.
+#[cfg(test)]
+pub(crate) fn committed_journal_text(journal: &std::path::Path) -> String {
+    let _ = fno_event_store::import_all(journal);
+    fno_event_store::query_events(journal, &fno_event_store::EventQuery::default())
+        .unwrap_or_default()
+        .iter()
+        .map(|r| r.line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Errors the emitter surfaces to its caller. Emission failures are logged by
 /// the daemon rather than aborting the operation that triggered them: a missing
 /// audit line must not take down a live agent.

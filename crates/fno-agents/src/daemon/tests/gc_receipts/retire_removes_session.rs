@@ -622,7 +622,7 @@ fn the_planner_routes_retire_and_rm_the_harness_session() {
 /// The `agent_row_reaped` event this sweep emitted for one row, read off
 /// the events journal.
 fn reaped_event(home: &AgentsHome, short_id: &str) -> Option<serde_json::Value> {
-    let events = std::fs::read_to_string(home.events_jsonl()).ok()?;
+    let events = crate::events::committed_journal_text(&home.events_jsonl());
     events
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())

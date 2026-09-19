@@ -2669,10 +2669,13 @@ mod tests {
     }
 
     fn journal_lines(p: &std::path::Path) -> Vec<String> {
-        std::fs::read_to_string(p)
+        // Committed rows, not journal bytes: the store cutover stopped journal
+        // appends, so emitted events live only in the store beside the journal.
+        let _ = fno_event_store::import_all(p);
+        fno_event_store::query_events(p, &fno_event_store::EventQuery::default())
             .unwrap_or_default()
-            .lines()
-            .map(str::to_string)
+            .iter()
+            .map(|r| r.line.clone())
             .collect()
     }
 
@@ -4545,7 +4548,10 @@ mod tests {
         let mut running = 0usize;
         let mut peak = 0usize;
         let mut total = 0usize;
-        for line in journal_lines(log) {
+        // Raw marker log, not committed events: the stub's S/E lines are not
+        // envelopes and never enter the store.
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        for line in text.lines() {
             match line.trim() {
                 "S" => {
                     running += 1;

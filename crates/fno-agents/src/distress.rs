@@ -481,8 +481,7 @@ mod tests {
             Some("codex"),
             &d,
         );
-        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&project)
-            .unwrap()
+        let rows: Vec<serde_json::Value> = crate::events::committed_journal_text(&project)
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
@@ -511,7 +510,7 @@ mod tests {
             &d
         ));
         assert_eq!(
-            std::fs::read_to_string(&project).unwrap().lines().count(),
+            crate::events::committed_journal_text(&project).lines().count(),
             1,
             "identical distress must not append a second row"
         );
@@ -524,8 +523,7 @@ mod tests {
         assert!(append_blocked_event(
             &project, &global, "run-a", None, None, &d2
         ));
-        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&project)
-            .unwrap()
+        let rows: Vec<serde_json::Value> = crate::events::committed_journal_text(&project)
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
@@ -550,8 +548,7 @@ mod tests {
             &project, &global, "run-a", None, None, &d
         ));
         let row: serde_json::Value = serde_json::from_str(
-            std::fs::read_to_string(&project)
-                .unwrap()
+            crate::events::committed_journal_text(&project)
                 .lines()
                 .next()
                 .unwrap(),
@@ -566,7 +563,7 @@ mod tests {
             &project, &global, "run-a", None, None, &d
         ));
         assert_eq!(
-            std::fs::read_to_string(&project).unwrap().lines().count(),
+            crate::events::committed_journal_text(&project).lines().count(),
             1
         );
     }
@@ -609,7 +606,7 @@ mod tests {
             &distress.unwrap()
         ));
         let row: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+            serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
         assert_eq!(row["type"], serde_json::json!("blocked"));
         assert_eq!(
             row["data"]["reason"],
@@ -688,7 +685,7 @@ mod tests {
 
         assert!(wrote);
         let row: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+            serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
         assert_eq!(row["data"]["reason"], "worktree-init-blocked");
         assert_eq!(row["data"]["evidence"], "Operation not permitted");
         assert_eq!(row["node"], "x-bbbb");
@@ -788,8 +785,7 @@ print(rec["payload"]["content"][0]["text"], end="")
 
         assert_eq!(code, 0);
         assert_eq!(code2, 0);
-        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&project)
-            .unwrap()
+        let rows: Vec<serde_json::Value> = crate::events::committed_journal_text(&project)
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();

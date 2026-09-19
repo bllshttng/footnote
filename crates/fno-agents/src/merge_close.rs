@@ -482,7 +482,7 @@ mod tests {
         assert_eq!(o.acted, 0);
         assert_eq!(o.skip_reason.as_deref(), Some("loops_paused"));
         assert_eq!(o.detail, "loops paused by test");
-        let log = std::fs::read_to_string(h.events_jsonl()).unwrap_or_default();
+        let log = crate::events::committed_journal_text(&h.events_jsonl());
         assert!(log.contains("\"arm\":\"merge_close\""), "log: {log}");
         assert!(
             log.contains("\"skip_reason\":\"loops_paused\""),
@@ -499,7 +499,7 @@ mod tests {
         });
         assert_eq!(o.acted, 0);
         assert_eq!(o.skip_reason.as_deref(), Some("none_to_close"));
-        let log = std::fs::read_to_string(h.events_jsonl()).unwrap_or_default();
+        let log = crate::events::committed_journal_text(&h.events_jsonl());
         assert_eq!(
             log.matches("\"arm\":\"merge_close\"").count(),
             1,

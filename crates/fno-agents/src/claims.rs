@@ -2855,6 +2855,14 @@ mod tests {
 
     use support::*;
 
+    /// Committed rows in the store beside this journal.
+    fn committed_row_count(events: &std::path::Path) -> usize {
+        let _ = fno_event_store::import_all(events);
+        fno_event_store::query_events(events, &fno_event_store::EventQuery::default())
+            .unwrap_or_default()
+            .len()
+    }
+
     fn opts_in(root: &TempDir) -> AcquireOpts {
         AcquireOpts {
             root: Some(root.path().to_path_buf()),
@@ -2917,7 +2925,7 @@ mod tests {
         // .ephemeral sibling since retention routing. Read both files
         // so the assertions below keep describing the full audit trail.
         let mut text =
-            std::fs::read_to_string(root.path().join(".fno/events.jsonl")).unwrap_or_default();
+            crate::events::committed_journal_text(&root.path().join(".fno/events.jsonl"));
         text.push_str(
             &std::fs::read_to_string(root.path().join(".fno/events.jsonl.ephemeral"))
                 .unwrap_or_default(),
@@ -4565,14 +4573,14 @@ mod tests {
         let started = Instant::now();
         let res = append_event_line(
             &events,
-            &json!({"ts": "t", "type": "x"}),
+            &json!({"ts": "2026-01-01T00:00:00Z", "source": "test", "type": "x"}),
             Duration::from_secs(2),
         );
 
         assert!(res.is_ok(), "{res:?}");
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(!lock.exists());
-        assert_eq!(std::fs::read_to_string(&events).unwrap().lines().count(), 1);
+        assert_eq!(committed_row_count(&events), 1);
     }
 
     #[test]
@@ -4636,7 +4644,7 @@ mod tests {
         let writer = std::thread::spawn(move || {
             append_event_line(
                 &writer_path,
-                &json!({"ts": "t", "type": "handoff"}),
+                &json!({"ts": "2026-01-01T00:00:00Z", "source": "test", "type": "handoff"}),
                 Duration::from_secs(5),
             )
         });
@@ -4654,10 +4662,7 @@ mod tests {
 
         std::fs::remove_dir_all(&canonical_lock).unwrap();
         writer.join().unwrap().unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&canonical).unwrap().lines().count(),
-            1
-        );
+        assert_eq!(committed_row_count(&canonical), 1);
     }
 
     #[test]
@@ -4722,7 +4727,7 @@ mod tests {
                 std::thread::spawn(move || {
                     append_event_line(
                         &events,
-                        &json!({"ts": "t", "type": "x", "i": i}),
+                        &json!({"ts": "2026-01-01T00:00:00Z", "source": "test", "type": "x", "i": i}),
                         // The assertion is that all four lines land whole with
                         // one rename winner, never that they land fast, so the
                         // budget is generous. But it must EXCEED STALE_MUTEX_STEAL,
@@ -4744,7 +4749,7 @@ mod tests {
             h.join().unwrap().unwrap();
         }
 
-        assert_eq!(std::fs::read_to_string(&events).unwrap().lines().count(), 4);
+        assert_eq!(committed_row_count(&events), 4);
     }
 
     #[test]
