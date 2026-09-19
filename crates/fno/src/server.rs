@@ -44,7 +44,7 @@ use crate::proto::{
     RestoreRow, ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo,
     TabLayout, TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
-use crate::pty::{shell_candidates, PtyShell};
+use crate::pty::{shell_candidates, PaneChunk, PtyShell};
 use crate::restore_liveness::{
     classify_member, no_resume_form_reason, restore_worker_refusal_reason, worker_registry_match,
     MemberVerdict,
@@ -1145,6 +1145,16 @@ struct PaneEntry {
     /// signal burst the resize itself raised and coalesces into it, so a
     /// renderer that repaints exactly once on the burst never sees it.
     nudge_due: Option<Instant>,
+    /// The most recently REQUESTED pane size, set by the geometry pass
+    /// whether or not `vt` has caught up yet. A keeper-hosted pane's resize
+    /// is a round trip (`PtyShell::resize` queues a frame; `entry.vt.resize`
+    /// applies only once the keeper's ack arrives via `PaneChunk::Resized`
+    /// on the pane's own ordered output channel) - so this, not `vt.size()`,
+    /// is the one source of "what size did we last ask for", used by the
+    /// geometry pass itself (to dedupe a repeat request) and the repaint
+    /// nudge (to never nudge back to a stale pre-resize size while the ack
+    /// is still in flight).
+    requested_size: (u16, u16),
 }
 
 mod argv_facts;
@@ -1566,7 +1576,7 @@ pub(crate) struct Core {
     /// answer, and `FNO_SESSION` in every pane it spawns.
     session_name: String,
     shells: Vec<OsString>,
-    out_tx: mpsc::Sender<(u64, Vec<u8>)>,
+    out_tx: mpsc::Sender<(u64, PaneChunk)>,
     exit_tx: mpsc::Sender<u64>,
     /// A clone of the core channel so an off-loop task (the prefix+g dispatch
     /// shell-out) can route its outcome back as a `CoreMsg::DispatchResult`
@@ -3001,6 +3011,7 @@ impl Core {
                 last_output: Instant::now(),
                 stats: Arc::clone(&stats),
                 nudge_due: None,
+                requested_size: (rows, cols),
             },
         );
         self.pane_stats.write().unwrap().insert(id, stats);
@@ -6647,8 +6658,11 @@ impl Core {
     const NUDGE_DELAY: Duration = Duration::from_millis(300);
 
     /// Fire every due deferred repaint request (the 1s core tick's pass).
-    /// Re-reads each pane's CURRENT size, so a nudge armed by an older
-    /// geometry never re-introduces a stale winsize.
+    /// Re-reads each pane's CURRENT requested size (not `vt.size()`: a
+    /// keeper-hosted pane's `vt` only catches up once its resize ack lands,
+    /// so reading `vt.size()` here could still see the OLD size and nudge
+    /// the pty right back to it), so a nudge armed by an older geometry
+    /// never re-introduces a stale winsize.
     fn fire_due_nudges(&mut self) {
         let due: Vec<u64> = self
             .panes
@@ -6660,7 +6674,7 @@ impl Core {
         for pid in due {
             if let Some(entry) = self.panes.get_mut(&pid) {
                 entry.nudge_due = None;
-                let (rows, cols) = entry.vt.size();
+                let (rows, cols) = entry.requested_size;
                 entry.pty.nudge_winch(rows, cols);
                 e2e_log(format_args!(
                     "resize repaint nudge fired for pane {pid} at {rows}x{cols}"
@@ -8947,12 +8961,26 @@ impl Core {
             // bounded-update half; the storm's head coalesces at the channel).
             for (pid, r) in &rects {
                 if let Some(entry) = self.panes.get_mut(pid) {
-                    if entry.vt.size() != (r.rows, r.cols) {
+                    if entry.requested_size != (r.rows, r.cols) {
+                        entry.requested_size = (r.rows, r.cols);
                         if let Err(e) = entry.pty.resize(r.rows, r.cols, 0, 0) {
                             // Grid and kernel winsize would disagree: log it.
                             eprintln!("fno mux: pty resize failed: {e}");
                         }
-                        entry.vt.resize(r.rows, r.cols);
+                        if entry.pty.is_keeper_hosted() {
+                            // Applied later, in `drain_pty_output`, once the
+                            // keeper's ack for THIS resize round-trips
+                            // through the pane's own ordered output channel
+                            // (`PaneChunk::Resized`). Flipping `vt` here,
+                            // before the round trip lands, would let output
+                            // the child already produced under the OLD size
+                            // - still ahead of this resize on the wire -
+                            // arrive after the flip and get fed into the
+                            // wrong-size grid (the byte-exact reattach
+                            // race this branch's keeper hop introduced).
+                        } else {
+                            entry.vt.resize(r.rows, r.cols);
+                        }
                         // Ask the child to repaint once the resize dust
                         // settles: arm a deferred nudge the 1s core tick fires.
                         // An immediate re-signal would coalesce into the burst
@@ -13198,42 +13226,59 @@ async fn run_wait(
 
 fn drain_pty_output(
     core: &mut Core,
-    out_rx: &mut mpsc::Receiver<(u64, Vec<u8>)>,
-    first: Option<(u64, Vec<u8>)>,
+    out_rx: &mut mpsc::Receiver<(u64, PaneChunk)>,
+    first: Option<(u64, PaneChunk)>,
     e2e_first_out: &mut HashSet<u64>,
 ) -> bool {
     let mut drained = false;
     let mut touched = HashSet::new();
     {
-        let mut feed = |pid: u64, bytes: Vec<u8>| {
+        let mut feed = |pid: u64, chunk: PaneChunk| {
             drained = true;
-            if e2e_first_out.insert(pid) {
-                e2e_log(format_args!(
-                    "core loop: first output from pane {pid} ({} bytes)",
-                    bytes.len()
-                ));
-            }
-            if let Some(entry) = core.panes.get_mut(&pid) {
-                let t0 = Instant::now();
-                entry.vt.feed(&bytes);
-                entry.last_output = t0;
-                entry
-                    .stats
-                    .bytes_in
-                    .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                entry.stats.grid_updates.fetch_add(1, Ordering::Relaxed);
-                entry
-                    .stats
-                    .cpu_ns
-                    .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                touched.insert(pid);
+            match chunk {
+                PaneChunk::Output(bytes) => {
+                    if e2e_first_out.insert(pid) {
+                        e2e_log(format_args!(
+                            "core loop: first output from pane {pid} ({} bytes)",
+                            bytes.len()
+                        ));
+                    }
+                    if let Some(entry) = core.panes.get_mut(&pid) {
+                        let t0 = Instant::now();
+                        entry.vt.feed(&bytes);
+                        entry.last_output = t0;
+                        entry
+                            .stats
+                            .bytes_in
+                            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                        entry.stats.grid_updates.fetch_add(1, Ordering::Relaxed);
+                        entry
+                            .stats
+                            .cpu_ns
+                            .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        touched.insert(pid);
+                    }
+                }
+                PaneChunk::Resized(rows, cols) => {
+                    // The keeper's resize round trip landed: apply the VT
+                    // dimension change here, at its exact point in this
+                    // pane's own ordered channel, never eagerly when the
+                    // resize was issued (server.rs's push_layout). Any
+                    // trailing pre-resize output is necessarily ahead of
+                    // this marker in the same channel, so it is always fed
+                    // before the resize lands.
+                    if let Some(entry) = core.panes.get_mut(&pid) {
+                        entry.vt.resize(rows, cols);
+                        touched.insert(pid);
+                    }
+                }
             }
         };
-        if let Some((pid, bytes)) = first {
-            feed(pid, bytes);
+        if let Some((pid, chunk)) = first {
+            feed(pid, chunk);
         }
-        while let Ok((pid, bytes)) = out_rx.try_recv() {
-            feed(pid, bytes);
+        while let Ok((pid, chunk)) = out_rx.try_recv() {
+            feed(pid, chunk);
         }
     }
     for pid in touched {
@@ -13269,7 +13314,7 @@ async fn serve(
     // One shared pane-tagged output channel + one exit channel for all PTY
     // reader threads. Squads (and their first panes) are born from attaches;
     // nothing is spawned upfront.
-    let (out_tx, mut out_rx) = mpsc::channel::<(u64, Vec<u8>)>(256);
+    let (out_tx, mut out_rx) = mpsc::channel::<(u64, PaneChunk)>(256);
     let (exit_tx, mut exit_rx) = mpsc::channel::<u64>(64);
     let (core_tx, mut core_rx) = mpsc::channel::<CoreMsg>(256);
     // Attached-client count for the periodic readers: Core owns the
@@ -13718,11 +13763,11 @@ async fn serve(
         tokio::select! {
             chunk = out_rx.recv() => {
                 // out_tx lives in Core, so recv never yields None.
-                let Some((pid, bytes)) = chunk else { break Flow::Shutdown };
+                let Some((pid, item)) = chunk else { break Flow::Shutdown };
                 drain_pty_output(
                     &mut core,
                     &mut out_rx,
-                    Some((pid, bytes)),
+                    Some((pid, item)),
                     &mut e2e_first_out,
                 );
                 // Pane output is a liveness signal: re-arm the idle

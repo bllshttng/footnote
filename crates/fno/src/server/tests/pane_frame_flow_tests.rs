@@ -16,8 +16,9 @@ fn counter_core(bytes: &[u8]) -> (Core, u64) {
     core.panes.get_mut(&pid).unwrap().node = Some("x-deadbeef".into());
     core.panes.get_mut(&pid).unwrap().name = Some("peer".into());
     core.panes.get_mut(&pid).unwrap().cmd = Some("claude".into());
-    let (tx, mut rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
-    tx.try_send((pid, bytes.to_vec())).unwrap();
+    let (tx, mut rx) = mpsc::channel::<(u64, PaneChunk)>(8);
+    tx.try_send((pid, PaneChunk::Output(bytes.to_vec())))
+        .unwrap();
     drop(tx);
     let mut first_out = HashSet::new();
     drain_pty_output(&mut core, &mut rx, None, &mut first_out);
@@ -48,9 +49,10 @@ fn watcherless_pane_stamps_last_output_on_every_burst() {
     core.shells = vec!["/bin/cat".into()];
     let pid = core.spawn_pane(2, 4, "/tmp").expect("pane");
     let registered = core.panes[&pid].last_output;
-    let (tx, mut rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
+    let (tx, mut rx) = mpsc::channel::<(u64, PaneChunk)>(8);
     let mut first_out = HashSet::new();
-    tx.try_send((pid, b"burst".to_vec())).unwrap();
+    tx.try_send((pid, PaneChunk::Output(b"burst".to_vec())))
+        .unwrap();
     drop(tx);
     let before = Instant::now();
     drain_pty_output(&mut core, &mut rx, None, &mut first_out);

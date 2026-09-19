@@ -884,9 +884,12 @@ fn bare_pane_row_carries_its_own_activity_and_age() {
     );
     core.agents = vec![];
     // Feed an open command block (OSC 133 A then C, no D): Running.
-    let (tx, mut rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
-    tx.try_send((pid, b"\x1b]133;A\x07\x1b]133;C\x07workload".to_vec()))
-        .unwrap();
+    let (tx, mut rx) = mpsc::channel::<(u64, PaneChunk)>(8);
+    tx.try_send((
+        pid,
+        PaneChunk::Output(b"\x1b]133;A\x07\x1b]133;C\x07workload".to_vec()),
+    ))
+    .unwrap();
     drop(tx);
     let mut first_out = HashSet::new();
     drain_pty_output(&mut core, &mut rx, None, &mut first_out);
@@ -8829,7 +8832,7 @@ fn node_id_shape_check() {
 // -- Observer attach (x-6a14 web read-only bridge) --------------------------
 
 pub(super) fn empty_core() -> Core {
-    let (out_tx, _out_rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
+    let (out_tx, _out_rx) = mpsc::channel::<(u64, PaneChunk)>(8);
     let (exit_tx, _exit_rx) = mpsc::channel::<u64>(8);
     let (self_tx, _self_rx) = mpsc::channel::<CoreMsg>(8);
     Core {
