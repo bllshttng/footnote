@@ -19,4 +19,4 @@ def _no_zero_job_reads(monkeypatch):
     real wrapper (captured at import in test_pr_rest.py)."""
     from fno.pr import _rest
 
-    monkeypatch.setattr(_rest, "_zero_job_rows", lambda *a, **k: ([], ""))
+    monkeypatch.setattr(_rest, "_zero_job_rows", lambda *a, **k: ([], [], ""))

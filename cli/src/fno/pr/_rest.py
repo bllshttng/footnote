@@ -536,22 +536,21 @@ def resolve_current_pr_number_rest(
 
 
 def _zero_job_rows(
-    slug: str, cwd: Optional[str], sha: str, runs: list, check_runs: list
-) -> "tuple[list, str]":
-    """Rows for runs that failed before minting a job; the rule is Rust's."""
+    slug: str, cwd: Optional[str], sha: str, check_runs: list
+) -> "tuple[list, list, str]":
+    """Zero-job failure rows plus the runs listing; the rule is Rust's."""
     from fno.rust_binary import VerbUnavailable, verb_call
 
-    # sha lets the op paginate the runs listing itself; `runs` is page 1,
-    # the read the workflow-name mapping already made.
     payload = {"op": "status-zero-job-runs", "slug": slug, "cwd": cwd, "sha": sha,
-               "runs": runs, "check_runs": check_runs}
+               "check_runs": check_runs}
     try:
         out = verb_call("authorized-merge", payload, timeout=20)
     except VerbUnavailable as exc:
-        return [], f"zero-job run read failed: {exc}"
-    if out.get("error") or not isinstance(out.get("rows"), list):
-        return [], f"zero-job run read failed: {out.get('error') or 'no rows'}"
-    return out["rows"], ""
+        return [], [], f"zero-job run read failed: {exc}"
+    rows, listing = out.get("rows"), out.get("listing")
+    if out.get("error") or not isinstance(rows, list) or not isinstance(listing, list):
+        return [], [], f"zero-job run read failed: {out.get('error') or 'no rows'}"
+    return rows, listing, ""
 
 
 def fetch_pr_rest(
@@ -604,33 +603,11 @@ def fetch_pr_rest(
         if not isinstance(total, int) or len(check_runs) >= total or not page < 10:
             break
         page += 1
-    # The workflow name is the generated selector's dedup dimension for
-    # same-named jobs (several workflows here define `self-test`), but the
-    # REST check-run object carries no workflow field. One head_sha-scoped
-    # workflow-run listing supplies it: an Actions row's details_url embeds
-    # the run id, and a run entry's `name` is its workflow's name. A check
-    # run whose URL matches no run (an external app) keeps "", which keys
-    # exactly like the pre-workflow selector did; the GraphQL rollup blob
-    # (pr_json.statusCheckRollup) has no selectable workflow field either,
-    # so its rows degrade the same way. Failure is loud: a name the read
-    # could not fetch cannot prove the slot collapse it would hide.
-    runs = runner(
-        ["gh", "api", f"repos/{slug}/actions/runs?head_sha={sha}&per_page=100"],
-        cwd=cwd,
-    )
-    if not runs.ok:
-        return None, _rest_reason(runs, runner=runner, cwd=cwd)
-    try:
-        runs_payload = json.loads(runs.stdout)
-        if not isinstance(runs_payload, dict):
-            return None, "gh api actions runs returned a JSON value that is not an object"
-        run_rows = runs_payload.get("workflow_runs")
-        if not isinstance(run_rows, list) or not all(
-            isinstance(row, dict) for row in run_rows
-        ):
-            return None, "gh api actions runs carried malformed workflow_runs"
-    except json.JSONDecodeError:
-        return None, "gh api actions runs returned output that is not JSON"
+    # One listing read serves everything: the op's zero-job scan and the
+    # workflow-name mapping below (a check run matching no run keeps "").
+    zero_rows, run_rows, zero_reason = _zero_job_rows(slug, cwd, sha, check_runs)
+    if zero_reason:
+        return None, zero_reason
     run_names: dict[str, str] = {}
     for run_row in run_rows:
         run_id = run_row.get("id")
@@ -658,11 +635,7 @@ def fetch_pr_rest(
             }
         )
 
-    if run_rows:
-        zero_rows, zero_reason = _zero_job_rows(slug, cwd, sha, run_rows, check_runs)
-        if zero_reason:
-            return None, zero_reason
-        rollup.extend(zero_rows)
+    rollup.extend(zero_rows)
 
     # Legacy StatusContexts ride the combined-status endpoint. This read is a
     # separate check class, so failure is always loud: green CheckRuns do not

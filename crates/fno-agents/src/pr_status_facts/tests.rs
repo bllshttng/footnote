@@ -536,6 +536,8 @@ fn the_op_paginates_the_runs_listing_when_the_payload_names_a_sha() {
     let rows = out["rows"].as_array().expect("rows array");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["name"], "w.yml");
+    // The listing rides the answer for the caller's workflow-name mapping.
+    assert_eq!(out["listing"].as_array().map(|a| a.len()), Some(2));
     let calls = probes.calls.borrow();
     assert!(calls[0]
         .iter()
@@ -547,14 +549,18 @@ fn the_op_paginates_the_runs_listing_when_the_payload_names_a_sha() {
 fn the_op_answers_rows_in_the_python_rollup_shape() {
     let probes = FakeGh {
         ok: true,
-        output: r#"{"total_count": 0}"#.to_string(),
+        // `--paginate --slurp` output: one page holding the specimen runs.
+        output: format!(
+            r#"[{{"workflow_runs":{}}}] "#,
+            serde_json::to_string(&specimen_runs()).unwrap()
+        ),
         review_decision: String::new(),
         calls: RefCell::new(Vec::new()),
     };
     let payload = json!({
         "slug": "o/r",
         "cwd": "/repo",
-        "runs": specimen_runs(),
+        "sha": "abc123",
         "check_runs": specimen_check_runs(),
     });
     let out: Value = serde_json::from_str(&zero_job_runs_op(&probes, &payload).to_string())
@@ -570,7 +576,7 @@ fn the_op_answers_rows_in_the_python_rollup_shape() {
         "https://github.com/o/r/actions/runs/35366958901"
     );
     let calls = probes.calls.borrow();
-    assert!(calls[0]
+    assert!(calls.iter().any(|argv| argv
         .iter()
-        .any(|a| a.contains("repos/o/r/actions/runs/35366958901/jobs")));
+        .any(|a| a.contains("repos/o/r/actions/runs/35366958901/jobs"))));
 }

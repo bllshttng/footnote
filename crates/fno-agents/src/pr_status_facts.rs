@@ -350,58 +350,51 @@ fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
     let Some(check_runs) = payload.get("check_runs").and_then(Value::as_array) else {
         return json!({"error": "status-zero-job-runs needs a check_runs array"});
     };
-    // The paginated listing when the payload names the head sha: a busy head
-    // carries more runs than one page, and a zero-job failure past page 1
-    // must still read red. Payload `runs` is the fallback for a caller that
-    // pre-read the listing.
-    let runs_result: Result<Vec<Value>, String> = match payload
+    // The op owns the runs listing: paginated, because a busy head carries
+    // more runs than one page and a zero-job failure past page 1 must still
+    // read red. No caller passes a pre-read page - one listing, one reader.
+    let Some(sha) = payload
         .get("sha")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-    {
-        Some(sha) => {
-            let path = format!("repos/{slug}/actions/runs?head_sha={sha}&per_page=100");
-            probes
-                .run_gh(
-                    &cwd,
-                    &[
-                        "api".to_string(),
-                        path,
-                        "--paginate".to_string(),
-                        "--slurp".to_string(),
-                    ],
-                )
-                .and_then(|(ok, stdout, _stderr)| {
-                    if ok {
-                        Ok(stdout)
-                    } else {
-                        Err("the runs listing read failed".to_string())
-                    }
-                })
-                .and_then(|stdout| {
-                    serde_json::from_str::<Value>(&stdout)
-                        .map_err(|e| format!("the runs listing was unparseable: {e}"))
-                })
-                .map(|parsed| match parsed {
-                    Value::Array(pages) => pages,
-                    other => vec![other],
-                })
-                .map(|pages| {
-                    let mut runs: Vec<Value> = Vec::new();
-                    for page in pages {
-                        if let Some(list) = page.get("workflow_runs").and_then(|r| r.as_array()) {
-                            runs.extend(list.iter().cloned());
-                        }
-                    }
-                    runs
-                })
-        }
-        None => match payload.get("runs").and_then(Value::as_array) {
-            Some(runs) => Ok(runs.clone()),
-            None => Err("status-zero-job-runs needs a runs array".to_string()),
-        },
+    else {
+        return json!({"error": "status-zero-job-runs needs a non-empty sha"});
     };
-    let runs = match runs_result {
+    let path = format!("repos/{slug}/actions/runs?head_sha={sha}&per_page=100");
+    let runs: Vec<Value> = match probes
+        .run_gh(
+            &cwd,
+            &[
+                "api".to_string(),
+                path,
+                "--paginate".to_string(),
+                "--slurp".to_string(),
+            ],
+        )
+        .and_then(|(ok, stdout, _stderr)| {
+            if ok {
+                Ok(stdout)
+            } else {
+                Err("the runs listing read failed".to_string())
+            }
+        })
+        .and_then(|stdout| {
+            serde_json::from_str::<Value>(&stdout)
+                .map_err(|e| format!("the runs listing was unparseable: {e}"))
+        })
+        .map(|parsed| match parsed {
+            Value::Array(pages) => pages,
+            other => vec![other],
+        })
+        .map(|pages| {
+            let mut runs: Vec<Value> = Vec::new();
+            for page in pages {
+                if let Some(list) = page.get("workflow_runs").and_then(|r| r.as_array()) {
+                    runs.extend(list.iter().cloned());
+                }
+            }
+            runs
+        }) {
         Ok(runs) => runs,
         Err(err) => return json!({ "error": err }),
     };
@@ -422,19 +415,23 @@ fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
     };
     match zero_job_failures(&runs, check_runs, &jobs_total) {
         Err(err) => json!({"error": err}),
-        Ok(rows) => json!({"rows": rows
-            .iter()
-            .map(|r| {
-                json!({
-                    "name": r.path,
-                    "status": "completed",
-                    "conclusion": r.conclusion,
-                    "startedAt": r.created_at,
-                    "detailsUrl": r.url,
-                    "workflow": r.path,
+        Ok(rows) => json!({
+            "rows": rows
+                .iter()
+                .map(|r| {
+                    json!({
+                        "name": r.path,
+                        "status": "completed",
+                        "conclusion": r.conclusion,
+                        "startedAt": r.created_at,
+                        "detailsUrl": r.url,
+                        "workflow": r.path,
+                    })
                 })
-            })
-            .collect::<Vec<_>>()}),
+                .collect::<Vec<_>>(),
+            // The same listing, for the caller's workflow-name mapping.
+            "listing": runs,
+        }),
     }
 }
 

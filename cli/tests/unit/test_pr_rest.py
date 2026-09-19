@@ -78,10 +78,10 @@ def test_settledness_reader_issues_no_graphql_call():
         if c[:3] == ["gh", "pr", "view"] or (len(c) > 2 and c[2] == "graphql")
     ]
     assert graphql == [], f"settledness read spent GraphQL: {graphql}"
-    # The reads that DID fire are the four REST endpoints + the local slug.
+    # The reads that DID fire are the REST endpoints + the local slug; the
+    # runs listing is the op's own read, no Python argv for it anymore.
     assert any("/pulls/42" in c[-1] for c in calls)
     assert any("check-runs" in c[-1] for c in calls)
-    assert any("actions/runs?head_sha=" in c[-1] for c in calls)
     assert any(c[-1].endswith("/status") for c in calls)
     assert any(c[:2] == ["git", "remote"] for c in calls)
 
@@ -938,7 +938,7 @@ def _workflow_run(run_id, name):
     return {"id": run_id, "name": name, "head_sha": "abc123def"}
 
 
-def test_same_named_jobs_from_different_workflows_both_survive():
+def test_same_named_jobs_from_different_workflows_both_survive(monkeypatch):
     """The selector's workflow dimension must be live on the REST path: two
     workflows both defining `self-test` key distinct slots, so a CANCELLED red
     from one is not superseded by a pass from the other. The join key is the
@@ -955,6 +955,13 @@ def test_same_named_jobs_from_different_workflows_both_survive():
             "details_url": "https://github.com/Owner/Repo/actions/runs/222/job/2a",
         },
     ]
+    _serve_listing(
+        monkeypatch,
+        [
+            {"id": 111, "name": "alpha"},
+            {"id": 222, "name": "beta"},
+        ],
+    )
     pr_json, reason = _rest.fetch_pr_rest(
         "42",
         runner=_runner(check_runs=crs, workflow_runs=[_workflow_run(111, "alpha"), _workflow_run(222, "beta")]),
@@ -969,7 +976,7 @@ def test_same_named_jobs_from_different_workflows_both_survive():
     assert counts["fail"] == 1 and counts["total"] == 2
 
 
-def test_check_run_whose_url_names_no_listed_run_keeps_empty_workflow():
+def test_check_run_whose_url_names_no_listed_run_keeps_empty_workflow(monkeypatch):
     """An external app's check run carries no Actions URL; "" keys it exactly
     like the pre-workflow selector did instead of crashing the join."""
     crs = [
@@ -979,6 +986,7 @@ def test_check_run_whose_url_names_no_listed_run_keeps_empty_workflow():
             "details_url": "https://ci.example.net/builds/9",
         },
     ]
+    _serve_listing(monkeypatch, [{"id": 111, "name": "alpha"}])
     pr_json, reason = _rest.fetch_pr_rest(
         "42",
         runner=_runner(check_runs=crs, workflow_runs=[_workflow_run(111, "alpha")]),
@@ -987,21 +995,37 @@ def test_check_run_whose_url_names_no_listed_run_keeps_empty_workflow():
     assert pr_json["statusCheckRollup"][0]["workflow"] == ""
 
 
-def test_failed_workflow_run_listing_is_loud_not_a_silent_degrade():
-    """A workflow name the read could not fetch cannot prove the slot
-    collapse it would hide: (None, reason), the module's loud-failure
-    contract, never rows that quietly key name-only."""
+def test_failed_workflow_run_listing_is_loud_not_a_silent_degrade(monkeypatch):
+    """A listing the op could not read cannot prove the slot collapse it
+    would hide: (None, reason), the module's loud-failure contract, never
+    rows that quietly key name-only."""
+    import fno.rust_binary as rust_binary
+
+    monkeypatch.setattr(_rest, "_zero_job_rows", _REAL_ZERO_JOB_ROWS)
+
+    def boom(verb, payload, **kw):
+        raise rust_binary.VerbUnavailable("secondary rate limit")
+
+    monkeypatch.setattr(rust_binary, "verb_call", boom)
     pr_json, reason = _rest.fetch_pr_rest(
         "42",
-        runner=_runner(
-            check_runs=[_cr("ci", "completed", "success")],
-            fail=lambda cmd: (
-                "secondary rate limit" if "actions/runs" in cmd[-1] else None
-            ),
-        ),
+        runner=_runner(check_runs=[_cr("ci", "completed", "success")]),
     )
     assert pr_json is None
     assert "secondary rate limit" in reason
+
+
+def _serve_listing(monkeypatch, listing):
+    """Restore the real zero-job wrapper and fake only the binary call, so a
+    test drives the op transport with its own listing."""
+    import fno.rust_binary as rust_binary
+
+    monkeypatch.setattr(_rest, "_zero_job_rows", _REAL_ZERO_JOB_ROWS)
+
+    def fake_verb(verb, payload, **kw):
+        return {"rows": [], "listing": list(listing)}
+
+    monkeypatch.setattr(rust_binary, "verb_call", fake_verb)
 
 
 _ZERO_JOB_ROW = {
@@ -1024,7 +1048,18 @@ def test_zero_job_failure_rows_read_red(monkeypatch):
     def fake_verb(verb, payload, **kw):
         payloads.append(payload)
         assert verb == "authorized-merge"
-        return {"rows": [dict(_ZERO_JOB_ROW)]}
+        return {
+            "rows": [dict(_ZERO_JOB_ROW)],
+            "listing": [
+                {
+                    "id": 35337460787,
+                    "name": "cli-ci",
+                    "path": ".github/workflows/cli-ci.yml",
+                    "status": "completed",
+                    "conclusion": "failure",
+                }
+            ],
+        }
 
     monkeypatch.setattr(rust_binary, "verb_call", fake_verb)
     pr_json, reason = _rest.fetch_pr_rest(
@@ -1053,7 +1088,9 @@ def test_zero_job_failure_rows_read_red(monkeypatch):
     # _slug_or_reason lowercases the remote's owner/repo.
     assert payload["slug"] == "owner/repo"
     assert payload["sha"] == "abc123def"
-    assert payload["runs"] and payload["check_runs"]
+    assert payload["check_runs"]
+    # The op owns the listing read; the transport sends no pre-read page.
+    assert "runs" not in payload
 
 
 def test_zero_job_read_failure_is_loud_never_green(monkeypatch):
