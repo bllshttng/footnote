@@ -505,8 +505,8 @@ fn live_cargo_cwds() -> Result<Vec<PathBuf>, ()> {
 /// is the only signal left: whichever registered tree it falls under has a
 /// cargo command in flight, so every dir that tree's manifests resolve to
 /// stays off the cap lane's table. A cwd can sit under more than one
-/// registered tree - a nested `.claude/worktrees/<name>` inside its own
-/// checkout - so the LONGEST matching tree owns it, never the first one
+/// registered tree - a worktree nested inside its own checkout - so the
+/// LONGEST matching tree owns it, never the first one
 /// `git worktree list` happens to print (that would always be the main
 /// checkout). `Err` when `lsof` failed to run or a live cwd's own tree
 /// cannot answer its manifests: either way the returned set may be missing
@@ -1477,9 +1477,9 @@ mod tests {
     }
 
     /// The bug this guards: `live_shards` matched a live cwd against the
-    /// FIRST registered tree whose path prefixes it, which for a nested
-    /// worktree (`<repo>/.claude/worktrees/<name>`) is always the outer,
-    /// main checkout - `git worktree list` prints that one first. A cargo
+    /// FIRST registered tree whose path prefixes it, which for a worktree
+    /// nested inside its own checkout is always the outer, main checkout -
+    /// `git worktree list` prints that one first. A cargo
     /// process running inside the NESTED tree then had its build dir
     /// credited to the OUTER tree, so the outer tree's row was the one kept
     /// live and the nested tree's own build dir - the one actually in use -
@@ -1499,7 +1499,7 @@ mod tests {
         git(&env.root, &["config", "user.email", "t@t"]);
         git(&env.root, &["config", "user.name", "t"]);
         git(&env.root, &["commit", "-q", "--allow-empty", "-m", "init"]);
-        let nested = env.root.join(".claude/worktrees/nested");
+        let nested = env.root.join("wt/nested");
         git(
             &env.root,
             &[
