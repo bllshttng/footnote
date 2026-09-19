@@ -32,14 +32,18 @@ from fno.backlog import advance as adv
 
 @pytest.fixture(autouse=True)
 def _no_native_claim_verdicts(monkeypatch):
-    """The lane-fill door sweeps native claim verdicts through the binary,
-    which the changed-smoke runner has none of; these tests study the spawn
-    argv. The stub answers what the real sweep answers for an isolated
-    empty root: every requested key free."""
-    monkeypatch.setattr(
-        "fno.claims.verdict.claim_verdicts",
-        lambda keys=None, **_kw: {k: {"key": k, "state": "free"} for k in (keys or ())},
-    )
+    """The lane-fill door sweeps native claim verdicts, admits through the
+    spawn gate, and releases slots through claims.core - all through the
+    binary, which the changed-smoke runner has none of; these tests study
+    the spawn argv. The stub answers what the real sweep answers for an
+    isolated empty root (every requested key free) and the gate rides its
+    documented env off-switch."""
+    def _free(keys=None, **_kw):
+        return {k: {"key": k, "state": "free"} for k in (keys or ())}
+
+    monkeypatch.setattr("fno.claims.verdict.claim_verdicts", _free)
+    monkeypatch.setattr("fno.claims.core.claim_verdicts", _free)
+    monkeypatch.setenv("FNO_SPAWN_GATE", "0")
 
 BRIEF_SENTINEL = "brief-sentinel-7f31 blueprint-not-target"
 
