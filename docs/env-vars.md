@@ -174,6 +174,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_TASK_CONTEXT_FILE` | py | Absolute path to the executing attempt's bound task-context binding; a declared value gates `fno do target init`, embeds into written handoff receipts, and rides spawn payloads (rendered natively). |
 | `FNO_TEST_FOOTPRINT_PAYLOAD` | rs | Test seam: when set, the spawn gate's footprint probe returns this payload verbatim, so gate tests pin the CPU axis instead of reading the live machine. |
 | `FNO_TEST_HERMETIC` | py+rs | unclear: cli/src/fno/hermetic.py:557 |
+| `FNO_TEST_LIVE_CARGO_CWDS` | rs | Test seam: colon-separated cwd paths that stand in for a live `lsof` scan of running cargo processes, so cargo_build_dirs tests can drive the tree-to-shard mapping without a real cargo process. |
 | `FNO_TEST_MARKER_HOLD_MS` | rs | unclear: crates/fno/src/proto/startup_guard.rs:97 |
 | `FNO_TEST_MODE` | py | unclear: cli/src/fno/setup/doctor.py:229 |
 | `FNO_TEST_OWNED_HOLD_MS` | rs | unclear: crates/fno/src/proto/startup_guard.rs:109 |
