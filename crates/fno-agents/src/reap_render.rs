@@ -660,45 +660,87 @@ mod tests {
         }
     }
 
+    /// The doc's key list: every backticked snake_case token in the first
+    /// cell of a row under `## Every JSON key` in docs/reaping-faq.md. The
+    /// doc is the one list; this parser is how the tests read it.
+    fn doc_json_keys(doc: &str) -> Vec<String> {
+        let mut in_table = false;
+        let mut keys = Vec::new();
+        for line in doc.lines() {
+            if let Some(heading) = line.strip_prefix("## ") {
+                in_table = heading.trim() == "Every JSON key";
+                continue;
+            }
+            if !in_table {
+                continue;
+            }
+            let Some(cell) = line.strip_prefix("| ").and_then(|r| r.split('|').next()) else {
+                continue;
+            };
+            for (i, segment) in cell.split('`').enumerate() {
+                if i % 2 == 0 {
+                    continue;
+                }
+                let snake = segment.starts_with(|c: char| c.is_ascii_lowercase())
+                    && segment
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+                if snake {
+                    keys.push(segment.to_string());
+                }
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn the_doc_names_every_reap_json_key_and_only_those_keys() {
+        // The gate, both directions: a key the renderer emits with no doc
+        // row is an undocumented bucket; a doc row naming no rendered key is
+        // a stale one. One failure names every offender.
+        let out = render_reap_with_inventory(
+            &summary(&[]),
+            Some(&crate::gc_inventory::Inventory::default()),
+            Some(&MuxSweep::Skipped),
+            true,
+            true,
+        );
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        let rendered: Vec<String> = v
+            .as_object()
+            .expect("json object")
+            .keys()
+            .cloned()
+            .collect();
+        let doc_keys = doc_json_keys(include_str!("../../../docs/reaping-faq.md"));
+        let undocumented: Vec<&String> =
+            rendered.iter().filter(|k| !doc_keys.contains(k)).collect();
+        let stale: Vec<&String> = doc_keys.iter().filter(|k| !rendered.contains(k)).collect();
+        assert!(
+            undocumented.is_empty() && stale.is_empty(),
+            "docs/reaping-faq.md `## Every JSON key` disagrees with \
+             render_reap_with_inventory:\nkeys with no doc row: {undocumented:?}\n\
+             doc rows naming no rendered key: {stale:?}"
+        );
+    }
+
     #[test]
     fn reap_reports_every_bucket_even_when_all_are_zero() {
         // A key that vanishes at zero makes every consumer write a default,
         // and one of them will default to "no retirements ever happened".
-        let out = render_reap(&summary(&[]), true, false);
+        // The doc table is the one list of keys; this test carries no
+        // second copy of it.
+        let out = render_reap_with_inventory(
+            &summary(&[]),
+            Some(&crate::gc_inventory::Inventory::default()),
+            Some(&MuxSweep::Skipped),
+            true,
+            false,
+        );
         let v: Value = serde_json::from_str(out.trim()).expect("valid json");
-        for key in [
-            "retired",
-            "pruned",
-            "prune_failed",
-            "settled_do_rows",
-            "settle_refused",
-            "kept_operator",
-            "kept_crowned",
-            "kept_not_spawn",
-            "kept_no_provenance",
-            "kept_node_conflict",
-            "kept_pr_contradicts",
-            "kept_open_work",
-            "kept_open_work_stale",
-            "kept_open_do_row",
-            "kept_active",
-            "kept_probe_unread",
-            "kept_transcript_unresolved",
-            "kept_graph_unreadable",
-            "kept_dirty",
-            "kept_unmerged",
-            "kept_unprobed",
-            "kept_shared_tree",
-            "kept_live_descendants",
-            "stop_refused",
-            "needs_live_stop",
-            "dry_run_unverified",
-            "kept_no_receipt",
-            "expired_receipts",
-            "kept_receipts",
-        ] {
+        for key in doc_json_keys(include_str!("../../../docs/reaping-faq.md")) {
             assert!(
-                v.get(key).is_some(),
+                v.get(&key).is_some(),
                 "bucket {key} missing from json: {out}"
             );
         }

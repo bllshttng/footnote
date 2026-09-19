@@ -203,14 +203,29 @@ fn an_unstamped_expired_lease_still_heals_through_its_session() {
 }
 
 #[test]
-fn an_unexpired_holder_process_lease_with_a_dead_pid_stays_suspect() {
-    // Only the expired arm reads the pid; inside the TTL the lease stays
-    // protected, matching the dispatch: precedent.
+fn an_unexpired_holder_process_lease_with_a_dead_pid_is_reclaimable() {
+    // The holder is ONE SHORT-LIVED PROCESS, so its recorded pid is
+    // the lease's whole life. A provably dead pid frees the lease inside the
+    // TTL window instead of refusing every acquirer until expiry - a killed
+    // sync used to hold post-merge-sync for its full 30-minute TTL.
     let now = now_ms();
     let (state, _cause) = classify_with_basis(
         &lease_record(-1, now, Some(now + 60_000), "holder-process"),
         Some(now),
         &probe_pid,
+    );
+    assert_eq!(state, ClaimState::Stale);
+}
+
+#[test]
+fn an_unexpired_holder_process_lease_with_an_unreadable_pid_stays_suspect() {
+    // A refused probe is not proof of death: the process exists and refuses
+    // inspection, so the TTL window keeps protecting the lease.
+    let now = now_ms();
+    let (state, _cause) = classify_with_basis(
+        &lease_record(-1, now, Some(now + 60_000), "holder-process"),
+        Some(now),
+        &|_pid| PidProbe::Refused,
     );
     assert_eq!(state, ClaimState::Suspect);
 }

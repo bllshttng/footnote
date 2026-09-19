@@ -1108,6 +1108,7 @@ def tick() -> None:
         def _phase_sweep(slice_s: float) -> None:
             nonlocal result, tick_failed
             assert settings is not None and cfg is not None
+            interval = int(getattr(cfg, "interval_seconds", 600))
             set_tick_phase("sweep")
             # A dead tick must not kill the legs below. The receipt contract makes
             # _tick raise on a failed emission even though state is already persisted,
@@ -1134,6 +1135,7 @@ def tick() -> None:
                 tick_failed = str(exc)
                 log.warning("pr-watch: tick failed: %s", exc)
                 typer.echo(f"pr-watch tick: failed: {exc}", err=True)
+                _emit_tick_row("pr_watch_sweep", interval_s=interval, skip_reason="error", detail=tick_failed)
                 result = None
 
             if result is not None:
@@ -1164,6 +1166,11 @@ def tick() -> None:
                     typer.echo(
                         f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
                     )
+                # One row per run like the merge arm: the skip word names a no-work tick.
+                skip = ("disabled" if result.disabled else "lock_held" if result.lock_held else "quota_skip" if result.quota_skip else None)
+                _emit_tick_row("pr_watch_sweep", interval_s=interval, acted=result.acted,
+                               skip_reason=skip,
+                               detail=f"open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}")
 
         def _phase_merge(slice_s: float) -> None:
             assert cfg is not None

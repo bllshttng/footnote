@@ -1087,6 +1087,39 @@ def test_slice_saturated_tick_mints_its_watermark(monkeypatch, _no_global_tick_e
     assert any(t == "pr_watch_tick" for t, _d in _no_global_tick_events)
 
 
+def test_completed_sweep_stamps_its_arm_row(monkeypatch, _no_global_tick_events):
+    """A successful sweep minted no control_plane_tick row, so the arm's
+    newest row stayed its last cut and a healthy sweep read stale for hours.
+    Stamp the completion the way the merge arm already does."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch._dispatch import TickResult
+
+    settings = _cadence_settings()
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+    monkeypatch.setattr("time.time", lambda: 1.0)  # stranded's slot; others skip
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_kw: (
+            _kw["emit"]("pr_watch_tick", {"open_prs": 3, "acted": 1}),
+            TickResult(open_prs=3, acted=1, skipped=0),
+        )[1],
+    )
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    result = CliRunner().invoke(app, [])
+
+    assert result.exit_code == 0, result.output
+    rows = [d for t, d in _no_global_tick_events
+            if t == "control_plane_tick" and d.get("arm") == "pr_watch_sweep"]
+    assert rows, "a completed sweep must mint its arm row"
+    assert "skip_reason" not in rows[0]
+    assert rows[0]["acted"] == 1
+
+
 def test_notify_timeout_falls_back_to_the_phase_deadline(monkeypatch):
     """No explicit bound and an armed phase: the notify subprocess expires
     off the phase deadline (minus its 2s reserve), never off a literal."""

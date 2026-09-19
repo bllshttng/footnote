@@ -374,7 +374,9 @@ def test_f6_miss_sends_at_most_15_spawns(gh, capsys):
     gh.world = _f6_world("c" * 40)
     assert _cache.cached_status("42") == 1
     c = _classes(gh.argvs)
-    assert c["pulls"] == 2 and c["checks"] == 1 and c["runs"] == 1 and c["status"] == 1
+    # runs == 0: the listing is the zero-job op's own read (an fno-agents
+    # spawn, invisible to this gh-spend ledger), never a gh spawn here.
+    assert c["pulls"] == 2 and c["checks"] == 1 and c["runs"] == 0 and c["status"] == 1
     assert len(c["logs"]) == 5 and len(c["jobs"]) == 5
     assert not c["other"]
     # One fno-agents cause read per detailed failure (MAX_DETAILED_FAILURES),
@@ -447,18 +449,35 @@ def test_f6_pushed_head_reuses_nothing(gh, capsys):
 # --- green head (change 3) ---------------------------------------------------
 
 
-def test_green_miss_reads_the_runs_listing_once(gh, capsys):
-    gh.world = _green_world("e" * 40)
+def test_green_miss_reads_the_runs_listing_once(gh, capsys, monkeypatch):
+    world = _green_world("e" * 40)
+    gh.world = world
+    # The listing is the zero-job op's answer now; serve it at the seam.
+    from fno.pr import _rest
+
+    monkeypatch.setattr(
+        _rest,
+        "_zero_job_rows",
+        lambda slug, cwd, sha, check_runs: ([], world["runs"], ""),
+    )
     assert _cache.cached_status("42") == 0
     calls = _classes(gh.argvs)
-    assert calls["runs"] == 1, "rerun_recovery reuses the listing fetch_pr_rest read"
+    assert calls["runs"] == 0, "rerun_recovery reuses the listing the op returned"
     payload = json.loads(capsys.readouterr().out)
     assert payload["verdict"] == "green"
     assert payload["rerun_recovered"] is True
 
 
-def test_green_refresh_reuses_the_rerun_facts(gh, capsys):
-    gh.world = _green_world("e" * 40)
+def test_green_refresh_reuses_the_rerun_facts(gh, capsys, monkeypatch):
+    world = _green_world("e" * 40)
+    gh.world = world
+    from fno.pr import _rest
+
+    monkeypatch.setattr(
+        _rest,
+        "_zero_job_rows",
+        lambda slug, cwd, sha, check_runs: ([], world["runs"], ""),
+    )
     assert _cache.cached_status("42") == 0
     first = json.loads(capsys.readouterr().out)
     _age_row("e" * 40)

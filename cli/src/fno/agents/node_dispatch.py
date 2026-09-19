@@ -391,73 +391,6 @@ def node_spawn_argv(
     return cmd
 
 
-def _worktree_ensure_for_launch(
-    recorded_cwd: Path, agent_name: str, harness: str
-) -> Optional[str]:
-    """Resolve the launch cwd through the worktree verb (W5, change 5).
-
-    The node's recorded cwd is the canonical checkout for every organically
-    filed node, and launching there puts a code worker on the protected branch
-    that sibling terminals share. ``fno agents workspace worktree ensure`` owns the
-    policy resolution (per-project policy > global > harness-native); it
-    prints the resolved root and exits 0, or prints nothing and exits non-zero
-    on a refusal/misconfig - the caller HOLDS on that answer rather than
-    falling back to canonical main. Returns the path to launch in (the repo
-    root itself is the legal ``policy = never`` in-place answer), or None.
-    """
-    import subprocess
-
-    from fno.agents.mux_spawn import _fno_bin
-
-    try:
-        repo = subprocess.run(
-            ["git", "-C", str(recorded_cwd), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if not recorded_cwd.is_dir():
-        # A missing recorded cwd is the spawn's own error to surface (the old
-        # behavior passed it through verbatim); it is not a worktree-policy
-        # refusal, and holding here would break every scratch-cwd fixture.
-        return str(recorded_cwd)
-    if repo.returncode != 0:
-        # ONLY a genuine "not a repository" answer means launch-in-place (a
-        # vault project, worktree.policy=never by design). Any other git
-        # failure - dubious ownership, a corrupted .git, a missing cwd - must
-        # HOLD, not silently fall back to the canonical checkout this change
-        # exists to keep workers off (review finding).
-        if "not a git repository" in (repo.stderr or ""):
-            return str(recorded_cwd)
-        return None
-    canonical = repo.stdout.strip()
-    try:
-        ensured = subprocess.run(
-            [
-                _fno_bin(),
-                "workspace",
-                "worktree",
-                "ensure",
-                "--repo",
-                canonical,
-                "--name",
-                agent_name,
-                "--harness",
-                harness,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if ensured.returncode != 0:
-        return None
-    return ensured.stdout.strip() or None
-
-
 @dataclasses.dataclass
 class NodeSeed:
     """The rendered seed for a node-driven spawn (change 1), plus the
@@ -471,13 +404,13 @@ class NodeSeed:
     receipt: dict
     recorded_cwd: Optional[str]
 
-    def ensure_launch_workdir(self, agent_name: str, harness: str) -> Optional[Path]:
+    def ensure_launch_workdir(self, harness: str) -> Optional[Path]:
         """The launch workdir for a node-seeded spawn with no explicit cwd
         source: the worktree ensure's answer, never the node's recorded cwd
         (the canonical checkout for every organically filed node). A ``None``
         answer already printed its hold line - the caller exits 2 and the node
         stays claimable rather than launching on canonical main."""
-        return ensure_launch_workdir(self.recorded_cwd, self.node_id, agent_name, harness)
+        return ensure_launch_workdir(self.recorded_cwd, self.node_id, harness)
 
 
 def find_node_row(node: str) -> Optional[dict]:
@@ -566,14 +499,28 @@ def render_node_seed(node: str, *, harness: Optional[str]) -> Optional[NodeSeed]
 
 
 def ensure_launch_workdir(
-    recorded_cwd: Optional[str], node_id: str, agent_name: str, harness: str
+    recorded_cwd: Optional[str], node_id: str, harness: str
 ) -> Optional[Path]:
-    """Resolve the launch workdir through the worktree ensure verb, printing
-    the hold line on a refusal (change 1)."""
-    ensured = _worktree_ensure_for_launch(
-        Path(recorded_cwd) if recorded_cwd else Path.cwd(), agent_name, harness
-    )
-    if ensured is None:
+    """Resolve the launch workdir through the launch-workdir seam verb (Rust);
+    the hold line on any refusal, the node id keys the resumed tree."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    payload = {
+        "recorded_cwd": str(Path(recorded_cwd) if recorded_cwd else Path.cwd()),
+        "node": node_id,
+        "harness": harness,
+    }
+    try:
+        answer = verb_call(
+            "launch-workdir",
+            payload,
+            VerbUnavailable,
+            timeout=150,
+            passthrough_stderr=True,
+        )
+    except VerbUnavailable:
+        answer = None
+    if answer is None or "hold" in answer:
         print(
             f"fno agents spawn: worktree ensure refused or misconfigured for "
             f"{node_id}; holding the node rather than launching on canonical "
@@ -581,4 +528,4 @@ def ensure_launch_workdir(
             file=sys.stderr,
         )
         return None
-    return Path(ensured)
+    return Path(answer["workdir"])

@@ -292,9 +292,11 @@ class Ritual:
     # -- seams -------------------------------------------------------------
 
     def _sh(self, argv: list[str], *, cwd: Optional[Path] = None,
-            timeout: float = _LEG_TIMEOUT_S) -> Result:
+            timeout: float = _LEG_TIMEOUT_S, detached: bool = False) -> Result:
         """Shell an fno verb via the PATH-robust fno-py prefix."""
-        return self.runner([*fno_py_cmd(), *argv], cwd=str(cwd or self.canon), timeout=timeout)
+        kw = {"start_new_session": True} if detached else {}
+        return self.runner([*fno_py_cmd(), *argv], cwd=str(cwd or self.canon),
+                           timeout=timeout, **kw)
 
     def _gh(self, argv: list[str], *, timeout: float = 30.0) -> Result:
         return self.runner(["gh", *argv], cwd=str(self.canon or self.cwd), timeout=timeout)
@@ -323,7 +325,8 @@ class Ritual:
             )
 
     def _leg(self, step: str, argv: list[str], *, cwd: Optional[Path] = None,
-             timeout: float = _LEG_TIMEOUT_S) -> Result:
+             timeout: float = _LEG_TIMEOUT_S,
+             detached: bool = False) -> Result:
         """Run one best-effort leg; map exit code to ok/failed, never raise.
 
         A non-zero exit is the load-bearing signal : the receipt names
@@ -331,7 +334,7 @@ class Ritual:
         as a no-op.
         """
         try:
-            r = self._sh(argv, cwd=cwd, timeout=timeout)
+            r = self._sh(argv, cwd=cwd, timeout=timeout, detached=detached)
         except subprocess.TimeoutExpired:
             self._emit(step, _FAILED, "timeout")
             return Result(124, "", "timeout")
@@ -530,8 +533,9 @@ class Ritual:
         if not getattr(self.ctx.pm, "sync_command", None):
             self._emit("sync-canonical", _SKIPPED, "not configured")
             return
+        # detached: a sync in its own session survives the slice kill upstream.
         self._leg("sync-canonical", ["do", "pr", "sync-canonical", "--pr-number", str(self.ctx.pr)],
-                  timeout=900.0)
+                  timeout=900.0, detached=True)
 
     def _merged_state(self) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """(state, headRefName, mergedAt) from ONE gh call, or Nones if unreadable.

@@ -3249,6 +3249,7 @@ for a in "$@"; do case "$a" in
      fi
      exit 0 ;;
   */logs) echo "Diff in /w/w/crates/fno-agents/src/x.rs:1:"; exit 0 ;;
+  */status) echo '{{"statuses":[]}}'; exit 0 ;;
 esac; done
 echo '[]'
 "#
@@ -4284,6 +4285,7 @@ for a in "$@"; do case "$a" in
   *pulls/2*) echo '{"head":{"sha":"bbb2","ref":"feature/x-2222"},"base":{"ref":"main"},"mergeable":null,"body":"b"}'; exit 0 ;;
   *check-runs) echo '{"check_runs":[{"name":"ci","status":"completed","conclusion":"success","html_url":"https://github.com/o/r/actions/runs/777/job/9"}]}'; exit 0 ;;
   */logs) echo "all steps passed"; exit 0 ;;
+  */status) echo '{"statuses":[]}'; exit 0 ;;
 esac; done
 echo '[]'
 "#;

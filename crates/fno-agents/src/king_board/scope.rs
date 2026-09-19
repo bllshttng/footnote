@@ -126,6 +126,45 @@ pub(crate) fn project_map(cwd: &Path) -> Result<HashMap<String, String>, String>
 // the board shares with it.
 // ---------------------------------------------------------------------------
 
+/// The canonical repo roots the board's stranded-tree read should scan: every
+/// `work.workspaces.*.projects[].path` that exists on disk, plus this cwd's
+/// own canonical root, deduplicated. `project_map`'s values are project
+/// NAMES, not paths, so the stranded read needs its own path collector.
+pub(crate) fn project_repo_paths(cwd: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Some(work) = crate::agents_config::config_lookup(cwd, &["work", "workspaces"]) {
+        if let Some(table) = work.as_table() {
+            for (_ws, ws_data) in table {
+                let Some(projects) = ws_data.get("projects").and_then(|p| p.as_array()) else {
+                    continue;
+                };
+                for project in projects {
+                    let Some(raw) = project.get("path").and_then(|p| p.as_str()) else {
+                        continue;
+                    };
+                    let path = expand_home(raw);
+                    // A non-git project (a vault, worktree.policy = never)
+                    // would make every `git worktree list` there fail and
+                    // read the whole source unreadable; the stranded read
+                    // only means anything at a repository root.
+                    if path.is_dir()
+                        && crate::paths::canonical_repo_root(&path).is_some()
+                        && !out.contains(&path)
+                    {
+                        out.push(path);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(root) = crate::paths::canonical_repo_root(cwd) {
+        if !out.contains(&root) {
+            out.push(root);
+        }
+    }
+    out
+}
+
 /// King manifest frontmatter fields (king/state.parse_manifest): an unreadable
 /// manifest reads as absent.
 pub(crate) fn parse_manifest(path: &Path) -> HashMap<String, String> {
