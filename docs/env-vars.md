@@ -206,7 +206,8 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `OPENCODE_CONFIG_DIR` | py+rs | Moves OpenCode's config dir; the installer, the doctor leg and the scratch-install tests read it. |
 | `OUT_DIR` | rs | unclear: crates/fno-agents/build.rs:51 |
 | `PATH` | py+rs | Executable search path. |
-| `PI_HOME` | py+rs | unclear: cli/src/fno/agents/harnesses/pi.py:132 |
+| `PI_CODING_AGENT_DIR` | rs | pi's agent dir; fno installs the extension under it and resolves the session store from it. |
+| `PI_CODING_AGENT_SESSION_DIR` | rs | pi's flat session store override; fno matches a session by the file header's cwd. |
 | `POSTMORTEMS_DIR` | rs | unclear: crates/fno-agents/src/finalize.rs:4044 |
 | `POSTMORTEM_CORRECTIONS_LOG` | rs | unclear: crates/fno-agents/src/finalize.rs:2890 |
 | `POST_MERGE_NONINTERACTIVE` | py | unclear: cli/src/fno/pr/cli.py:918 |

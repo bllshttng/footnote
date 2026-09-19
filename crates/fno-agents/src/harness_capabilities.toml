@@ -730,12 +730,16 @@ route_on_pane = false
 # right semantics and a positive marker rather than an absence. So pi's answer is
 # "extension", the same member opencode carries. The extension shipped (
 # a port of opencode's plugin: loop-check stays the sole completion authority
-# and the extension never fabricates a termination), so `loop_extension` names
+# and the extension never fabricates a termination), and it binds the
+# manifest's own session and renders verbs in pi's skill-command form, so a
+# foreign session is refused instead of re-driven. `loop_extension` names
 # the shipped artifact and a looping dispatch at pi resolves.
 loop_participation = "extension"
 loop_extension = "cli/src/fno/setup/assets/pi/footnote.ts"
 command_surface = "slash"
-slash_prefix = ""
+# pi registers every skill as /skill:<name> and has no plugin
+# namespace, so the skill-command form is its only verb surface.
+slash_prefix = "skill:"
 # pi's in-TUI slash surface is composed at runtime from extensions, prompt
 # templates and skills; the vendor docs name /name as the built-in that
 # names a session. Measured 2026-09-04 from the vendor docs.
@@ -877,12 +881,12 @@ state = "native"
 # cursor-agent is a pane-only fno harness. Its --print stream-json mode is
 # output-only: it has no input-format, rpc, acp, serve, or stdio drive lane.
 
-# The keeper-lane spawn arm (docs/architecture/thread-lanes.md). The lane
-# driver appends pi's own provider/model pair, so every option that would ride
-# another lane's argv is refused by name and `carries` is empty.
+# The keeper-lane spawn arm (docs/architecture/thread-lanes.md). The route
+# owner (pi_route) carries the user's model, effort and tool axes onto the
+# thread lane the same way the pane arm does.
 [harness.pi.keeper]
 once_refusal = "--once is not supported on the pi thread lane (it is persistent); pi has no one-shot lane - its headless stance is unmeasured"
-carries = []
+carries = ["model", "effort", "tools", "deny_tools"]
 passthrough = ["*"]
 ready_marker = "(sub)"
 resume_refusal = "is not supported on the pi thread lane yet; the keeper row resumes by name (fno agents ask/resume <name>). Refusing rather than silently spawning a fresh session."

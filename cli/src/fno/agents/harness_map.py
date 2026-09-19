@@ -681,6 +681,9 @@ def normalize_command(command: str, harness: str) -> str:
         # already-namespaced `/fno:verb`, so re-applying would double it.
         if namespaced and prefix and first_word.startswith("/" + prefix):
             return cmd
+        # The Rust renderer's order: the row's prefix first, then agy, `fno:`.
+        if namespaced and prefix:
+            return "/" + prefix + verb + tail
         if namespaced and harness == "agy":
             return "/" + verb + tail
         if namespaced:
