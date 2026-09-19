@@ -7052,12 +7052,8 @@ fn append_loop_event(path: &Path, event_type: &str, data: serde_json::Value) {
     }
 }
 
-/// Append to both project and global event logs.
-///
-/// pub(crate): the `finalize` verb (step 6, ) emits its
-/// `session_finalized` / `session_finalize_failed` events through the same
-/// writer so they land in both logs with the identical `{ts,type,source,data}`
-/// envelope loop-check uses.
+/// Append to both project and global event logs; `finalize` ships its
+/// session events through the same writer, so all envelopes stay identical.
 pub(crate) fn emit_to_both(
     project_events: &Path,
     global_events: &Path,
@@ -14465,8 +14461,7 @@ git_bounded();";
         // guidance this whole node exists to delete, reappearing in exactly the
         // multi-round review/fix cycle that produces this sequence.
         let tmp = tempfile::tempdir().unwrap();
-        // One journal per scenario: the store keeps history, so a rewrite on
-        // the same path would leak the previous scenario's rows into this one.
+        // One journal per scenario: a rewrite would leak rows across them.
         let p = tmp.path().join("e1.jsonl");
         let line = |head: &str, verdict: &str| {
             format!(
@@ -14554,9 +14549,7 @@ git_bounded();";
                 "\n",
                 r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail","branch":"feature/x"}}"#,
                 "\n",
-                // A distinct ts: the re-run pass is a NEW row, and the
-                // store's byte-dedupe would otherwise drop it as a repeat
-                // of the first, leaving the fail as the latest verdict.
+                // Distinct ts: byte-dedupe would drop an identical row.
                 r#"{"ts":"2026-01-01T00:00:01Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
                 "\n",
             ),
