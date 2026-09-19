@@ -10605,10 +10605,37 @@ fn observe_decision(args: &[String], output: &str) {
 
 pub fn decide(args: &[String]) -> (i32, String) {
     let result = decide_inner(args);
+    let result = render_continuation_for_harness(args, result);
     if result.0 == 0 {
         observe_decision(args, &result.1);
     }
     result
+}
+
+/// A bound ask gets the continuation in the asking harness's own command
+/// form. pi registers skills as `/skill:<name>` and has no `/target` of its
+/// own, and the word the target skill resumes with is `resume`, never
+/// `--resume`, so pi's continuation renders through the capability row from
+/// the skill-correct base. Every other harness keeps the legacy literal
+/// byte-for-byte: the opencode bridge sends the gate's string verbatim and
+/// its contract is pinned.
+fn render_continuation_for_harness(args: &[String], result: (i32, String)) -> (i32, String) {
+    let Ok(parsed) = parse_args(args) else {
+        return result;
+    };
+    if parsed.harness.as_deref() != Some("pi") {
+        return result;
+    }
+    let (code, out) = result;
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&out) else {
+        return (code, out);
+    };
+    if value.get("continuation").and_then(Value::as_str) == Some("/target --resume") {
+        value["continuation"] =
+            serde_json::Value::String(crate::provider::render_verb_seed("/target resume", "pi"));
+        return (code, value.to_string());
+    }
+    (code, out)
 }
 
 /// Entry point called from `bin/client.rs` direct dispatch.
