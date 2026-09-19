@@ -7873,15 +7873,6 @@ impl View {
                 if let Some(idx) = a.portal {
                     name.push_str(&format!(" \u{25ab}{idx}"));
                 }
-                // A PR row names the session driving it (the server's graph
-                // join: the live claim holder's session, else the node's last
-                // do/ship session); no session id says so.
-                if a.pr.is_some() {
-                    match a.pr_session_short.as_deref() {
-                        Some(sid) => name.push_str(&format!(" attach {sid}")),
-                        None => name.push_str(" no session"),
-                    }
-                }
                 match self.agent_tab_context(a.squad, a.tab) {
                     Some(_)
                         if a.squad == Some(self.layout.active_squad)
@@ -7905,13 +7896,19 @@ impl View {
                     name.push_str(&format!(" [L{level} {scope}]"));
                 }
                 // The message column reads the sentence, not the markup, and
-                // leads with the separator.
-                let tail = a
-                    .tail
-                    .as_deref()
-                    .filter(|t| !t.is_empty())
-                    .map(|t| format!("\u{b7} {}", strip_md(t)))
-                    .unwrap_or_default();
+                // leads with the separator. A PR row with no output names the
+                // session driving it (the server's graph join: the live claim
+                // holder's session, else the node's last do/ship session); no
+                // session id says so. The widest column keeps the handle
+                // visible where the old inline suffix clipped.
+                let tail = match a.tail.as_deref().filter(|t| !t.is_empty()) {
+                    Some(t) => format!("\u{b7} {}", strip_md(t)),
+                    None => match (a.pr, a.pr_session_short.as_deref()) {
+                        (Some(_), Some(sid)) => format!("\u{b7} attach {sid}"),
+                        (Some(_), None) => "\u{b7} no session".to_string(),
+                        (None, _) => String::new(),
+                    },
+                };
                 let pr =
                     a.pr.map(|n| format!("#{n}"))
                         .unwrap_or_else(|| "\u{2014}".into());
