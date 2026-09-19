@@ -548,9 +548,18 @@ pub fn admit_tab(
     let lock = match acquire_lock() {
         Ok(lock) => Some(lock),
         // Same famine door as admit_fleet: the pane count needs no snapshot,
-        // and the spawn below names its own limit.
+        // and the spawn below names its own limit. The cap itself still
+        // applies: deciding it reads server state and needs no descriptor,
+        // so a famine never buys panes past it.
         Err(AcquireFailure::DescriptorsExhausted(reason)) => {
             write_not_measuring_receipt(&reason);
+            let tab = decide_panes(PaneCount::new(pane_count), ceiling);
+            if !matches!(tab, AdmissionDecision::Admit) {
+                return Err(AdmissionFailure {
+                    decision: tab,
+                    detail: String::new(),
+                });
+            }
             return Ok(AdmissionPermit {
                 _lock: None,
                 scope: Scope::Tab,
@@ -630,9 +639,17 @@ pub fn admit_pane(
     let lock = match acquire_lock() {
         Ok(lock) => Some(lock),
         // Same famine door as admit_fleet: with no descriptor left, the
-        // census behind the lock would fail the same way.
+        // census behind the lock would fail the same way. The tab cap still
+        // applies, for the same reason as admit_tab's famine door.
         Err(AcquireFailure::DescriptorsExhausted(reason)) => {
             write_not_measuring_receipt(&reason);
+            let tab = decide_panes(PaneCount::new(pane_count), tab_ceiling);
+            if !matches!(tab, AdmissionDecision::Admit) {
+                return Err(AdmissionFailure {
+                    decision: tab,
+                    detail: String::new(),
+                });
+            }
             return Ok(AdmissionPermit {
                 _lock: None,
                 scope: Scope::Fleet,
@@ -940,6 +957,7 @@ impl Census {
 /// Why a reading did not produce a count. `NoSource` and
 /// `DescriptorsExhausted` are facts about the world; `Unread` is a read that
 /// failed and may yet succeed.
+#[derive(Debug)]
 enum CensusFailure {
     NoSource(String),
     DescriptorsExhausted(String),
@@ -972,8 +990,8 @@ const CENSUS_ATTEMPTS: u32 = 4;
 const CENSUS_WAIT: std::time::Duration = std::time::Duration::from_millis(25);
 
 fn process_census() -> Census {
-    // ponytail: the machine-global admission lock is already held here, so the
-    // hold below serializes every other spawn for up to 75ms. Bounded on
+    // The machine-global admission lock is already held here, so the hold
+    // below serializes every other spawn for up to 75ms. Bounded on
     // purpose. If that cost ever shows up, move the wait above acquire_lock.
     census_with(read_process_count, CENSUS_ATTEMPTS, CENSUS_WAIT)
 }
@@ -981,7 +999,7 @@ fn process_census() -> Census {
 fn read_process_count() -> Result<usize, CensusFailure> {
     let rows = snapshot_processes()?;
     let attributed = attributed_pids(&rows).map_err(CensusFailure::Unread)?;
-    let markers = marker_count(&rows, &attributed).map_err(CensusFailure::Unread)?;
+    let markers = marker_count(&rows, &attributed)?;
     Ok(attributed.len() + markers)
 }
 
@@ -1018,8 +1036,22 @@ fn census_with(
 /// reserved for a failure to read state AT ALL: no marker path, an
 /// unreadable ledger file, no process root names. A single entry that is
 /// dead, unreadable or unparseable counts as nothing and is pruned.
-fn marker_count(rows: &[ProcessRow], attributed: &HashSet<u32>) -> Result<usize, String> {
+fn marker_count(rows: &[ProcessRow], attributed: &HashSet<u32>) -> Result<usize, CensusFailure> {
     marker_count_with(rows, attributed, crate::proto::pid_start_time)
+}
+
+/// Classify one child-marker-ledger error. The ledger read and rewrite open
+/// descriptors like any other census door, so EMFILE/ENFILE there is the
+/// same famine the census doors admit on. Every other error is a read
+/// failure and holds.
+fn classify_ledger_error(error: &io::Error) -> CensusFailure {
+    if no_descriptor_left(error) {
+        CensusFailure::DescriptorsExhausted(format!(
+            "descriptors-exhausted (child marker ledger: {error})"
+        ))
+    } else {
+        CensusFailure::Unread(format!("child marker ledger unavailable: {error}"))
+    }
 }
 
 /// The bounded start-time read both the ledger census and `record_child`
@@ -1051,15 +1083,15 @@ fn marker_count_with(
     rows: &[ProcessRow],
     attributed: &HashSet<u32>,
     read_start: fn(u32) -> Option<u64>,
-) -> Result<usize, String> {
-    let path =
-        admission_marker_path().map_err(|e| format!("child marker state unavailable: {e}"))?;
+) -> Result<usize, CensusFailure> {
+    let path = admission_marker_path()
+        .map_err(|e| CensusFailure::Unread(format!("child marker state unavailable: {e}")))?;
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(format!("child marker ledger unavailable: {error}")),
+        Err(error) => return Err(classify_ledger_error(&error)),
     };
-    let roots = process_root_names()?;
+    let roots = process_root_names().map_err(CensusFailure::Unread)?;
     let names: HashMap<u32, &str> = rows
         .iter()
         .map(|row| (row.pid, row.name.as_str()))
@@ -1112,7 +1144,7 @@ fn marker_count_with(
         let _ = std::fs::remove_file(&path);
     } else if body != raw.trim_end() {
         std::fs::write(&path, format!("{body}\n"))
-            .map_err(|error| format!("child marker ledger update failed: {error}"))?;
+            .map_err(|error| classify_ledger_error(&error))?;
     }
     Ok(unattributed_live)
 }
@@ -1845,5 +1877,19 @@ mod tests {
             line.contains("; admitting, the spawn below reports its own limit"),
             "{line}"
         );
+    }
+
+    /// The marker ledger opens descriptors too, so its errors sit behind the
+    /// same famine rule as every other census door.
+    #[test]
+    fn a_famined_marker_ledger_is_descriptors_exhausted() {
+        assert!(matches!(
+            classify_ledger_error(&io::Error::from_raw_os_error(libc::EMFILE)),
+            CensusFailure::DescriptorsExhausted(_)
+        ));
+        assert!(matches!(
+            classify_ledger_error(&io::Error::from_raw_os_error(libc::EACCES)),
+            CensusFailure::Unread(_)
+        ));
     }
 }
