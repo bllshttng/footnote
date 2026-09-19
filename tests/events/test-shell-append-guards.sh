@@ -34,8 +34,12 @@ assert_eq() {
 # top of grep's own output and the count comes back as two lines. Read grep's
 # stdout and substitute 0 only when the file is missing entirely.
 count_marker() {
-    local n
-    n=$(grep -c context_nudge "$1" 2>/dev/null)
+    # Committed rows, not journal bytes: the append commits through the store.
+    local bin n
+    bin="$REPO_ROOT/crates/fno/target/debug/fno"
+    [[ -x "$bin" ]] || bin="$REPO_ROOT/crates/fno/target/release/fno"
+    n=$("$bin" doctor event rows --events "$1" 2>/dev/null \
+        | grep -o context_nudge | wc -l | tr -d "[:space:]")
     [[ -n "$n" ]] || n=0
     printf '%s' "$n"
 }
