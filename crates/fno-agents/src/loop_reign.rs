@@ -733,12 +733,57 @@ fn territory_key(scope: &str) -> String {
     members.join(",")
 }
 
+/// A session holds one crown and a re-scope arms the new manifest before it
+/// clears the old one, so an older manifest naming the same session is a
+/// leftover. Group the manifests by `harness_session_id`; in a group every
+/// path but the greatest `created_at` is superseded (a missing stamp reads as
+/// the empty string, the oldest value). A tie at the greatest stamp supersedes
+/// neither.
+fn superseded_manifests(manifests: &[(PathBuf, String)]) -> std::collections::BTreeSet<PathBuf> {
+    let mut newest: std::collections::BTreeMap<String, (String, Vec<PathBuf>)> = Default::default();
+    let mut grouped: std::collections::BTreeSet<PathBuf> = Default::default();
+    for (path, content) in manifests {
+        let Some(session) = crate::claude_adopt::manifest_field(content, "harness_session_id")
+        else {
+            continue;
+        };
+        grouped.insert(path.clone());
+        let created =
+            crate::claude_adopt::manifest_field(content, "created_at").unwrap_or_default();
+        match newest.get_mut(&session) {
+            Some((best, paths)) => {
+                if created > *best {
+                    *best = created;
+                    paths.clear();
+                    paths.push(path.clone());
+                } else if created == *best {
+                    paths.push(path.clone());
+                }
+            }
+            None => {
+                newest.insert(session, (created, vec![path.clone()]));
+            }
+        }
+    }
+    let kept: std::collections::BTreeSet<PathBuf> =
+        newest.into_values().flat_map(|(_, paths)| paths).collect();
+    grouped.difference(&kept).cloned().collect()
+}
+
 /// Crowns whose registry row is gone but whose manifest still holds them
 /// scan every project space's `kings/` under `root`, keep manifests
 /// carrying `crown_scope` not among `held`. The sweep walks the spaces ROOT,
 /// not the rows' own projects - a vanished row names no cwd, and the
-/// vanished-row scope is exactly the case this read exists to surface.
-pub fn court_orphans(root: &Path, held: &[String]) -> Vec<OrphanCrown> {
+/// vanished-row scope is exactly the case this read exists to surface. The
+/// holder verdict keys on `harness_session_id`, never on `owner_pid`, which
+/// records the crowning CLI's pid: a candidate whose holder the claude
+/// roster lists as finished is skipped, and the roster read is lazy - it
+/// fires at most once, and only when a candidate survives every file filter.
+pub fn court_orphans(
+    root: &Path,
+    held: &[String],
+    roster: &dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot,
+) -> Vec<OrphanCrown> {
     let held_keys: std::collections::BTreeSet<String> =
         held.iter().map(|h| territory_key(h)).collect();
     let mut seen: std::collections::BTreeSet<String> = Default::default();
@@ -751,6 +796,7 @@ pub fn court_orphans(root: &Path, held: &[String]) -> Vec<OrphanCrown> {
         Err(_) => return out,
     };
     spaces.sort_by_key(|e| e.path());
+    let mut manifests: Vec<(PathBuf, String)> = Vec::new();
     for space in spaces {
         let kings = space.path().join("kings");
         let mut files: Vec<_> = match fs::read_dir(&kings) {
@@ -766,27 +812,46 @@ pub fn court_orphans(root: &Path, held: &[String]) -> Vec<OrphanCrown> {
             let Ok(content) = fs::read_to_string(&path) else {
                 continue;
             };
-            let Some(scope) = crate::claude_adopt::manifest_field(&content, "crown_scope") else {
-                continue;
-            };
-            let key = territory_key(&scope);
-            if held_keys.contains(&key) || !seen.insert(key) {
-                continue;
-            }
-            let level = crate::claude_adopt::manifest_field(&content, "crown_level")
-                .and_then(|v| v.parse().ok());
-            out.push(OrphanCrown {
-                scope,
-                level,
-                grantor: crate::claude_adopt::manifest_field(&content, "crown_grantor"),
-                manifest_session: crate::claude_adopt::manifest_field(
-                    &content,
-                    "harness_session_id",
-                )
-                .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned())),
-                manifest_path: path.display().to_string(),
-            });
+            manifests.push((path, content));
         }
+    }
+    let superseded = superseded_manifests(&manifests);
+    let mut roster_read: Option<crate::claude_roster::ClaudeAgentsSnapshot> = None;
+    for (path, content) in &manifests {
+        let Some(scope) = crate::claude_adopt::manifest_field(content, "crown_scope") else {
+            continue;
+        };
+        if superseded.contains(path) {
+            continue;
+        }
+        let key = territory_key(&scope);
+        if held_keys.contains(&key) || !seen.insert(key) {
+            continue;
+        }
+        if let Some(session) = crate::claude_adopt::manifest_field(content, "harness_session_id") {
+            let harness = crate::claude_adopt::manifest_field(content, "harness");
+            if harness.as_deref().map(|h| h == "claude").unwrap_or(true) {
+                let snapshot = roster_read.get_or_insert_with(roster);
+                let holder = crate::state::RegistryEntry {
+                    harness: Some("claude".into()),
+                    harness_session_id: Some(session),
+                    ..Default::default()
+                };
+                if crate::gc_sweep::claude_death_reason(&holder, snapshot).is_some() {
+                    continue;
+                }
+            }
+        }
+        let level = crate::claude_adopt::manifest_field(content, "crown_level")
+            .and_then(|v| v.parse().ok());
+        out.push(OrphanCrown {
+            scope,
+            level,
+            grantor: crate::claude_adopt::manifest_field(content, "crown_grantor"),
+            manifest_session: crate::claude_adopt::manifest_field(content, "harness_session_id")
+                .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned())),
+            manifest_path: path.display().to_string(),
+        });
     }
     out
 }
@@ -820,7 +885,11 @@ pub fn run_court_orphans(args: &[String]) -> i32 {
         eprintln!("fno-agents court-orphans: --root is required");
         return 2;
     };
-    match serde_json::to_string(&court_orphans(&root, &held)) {
+    match serde_json::to_string(&court_orphans(
+        &root,
+        &held,
+        &crate::claude_roster::read_all_agents_union,
+    )) {
         Ok(json) => {
             println!("{json}");
             0
@@ -1039,11 +1108,14 @@ mod tests {
         // Held as a differently-spelled member list: no orphan, and the two
         // spellings of one territory do not double-report.
         let held = vec!["alpha".to_string(), "beta, gamma".to_string()];
-        assert!(court_orphans(&root, &held).is_empty());
+        // Nothing survives the held filter, so the roster read stays lazy.
+        assert!(
+            court_orphans(&root, &held, &|| { panic!("roster read must stay lazy") }).is_empty()
+        );
 
         // Not held: the first spelling in sorted order surfaces, parsed, with
         // its session; dup.md sorts before multi.md.
-        let out = court_orphans(&root, &["alpha".to_string()]);
+        let out = court_orphans(&root, &["alpha".to_string()], &no_verdict_roster);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].scope, "gamma, beta");
         assert_eq!(out[0].level, Some(1));
@@ -1056,9 +1128,235 @@ mod tests {
             "---\ncrown_scope: delta\ncrown_level: 0\n---\n",
         )
         .unwrap();
-        let out = court_orphans(&root, &[]);
+        let out = court_orphans(&root, &[], &no_verdict_roster);
         let delta = out.iter().find(|o| o.scope == "delta").unwrap();
         assert_eq!(delta.manifest_session.as_deref(), Some("stem"));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Write a kings manifest with full field control for the court tests:
+    /// scope, session, and the recency stamp the superseded read compares.
+    fn write_court_manifest(root: &Path, scope: &str, session: &str, created_at: &str) -> PathBuf {
+        let kings = root.join("space-a").join("kings");
+        let path = kings.join(format!("{scope}.md"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let body = format!(
+            "---\nscope: {scope}\nshape: pass\nharness: claude\n\
+             harness_session_id: {session}\nowner_pid: 1\ncreated_at: {created_at}\n\
+             crown_scope: {scope}\ncrown_level: 2\ncrown_grantor: operator\n---\n"
+        );
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// A roster snapshot that decides nothing: every candidate stays listed.
+    /// Unknown answers for a read that failed or carries no rows, and
+    /// absence from a roster never proves death.
+    fn no_verdict_roster() -> crate::claude_roster::ClaudeAgentsSnapshot {
+        crate::claude_roster::ClaudeAgentsSnapshot::unknown("no roster in this test")
+    }
+
+    #[test]
+    fn a_rescope_leftover_stops_reading_as_a_crown() {
+        // AC1-HP: a session holds one crown. The re-scope armed the newer
+        // manifest before it cleared the older one, so the older file is a
+        // leftover: the court lists the live one (held), never the leftover.
+        let root = tmp("rescope-leftover");
+        let sess = "aaaa1111-0000-4000-8000-000000000001";
+        let old = write_court_manifest(&root, "x-old", sess, "2026-09-17T16:53:16Z");
+        let _new = write_court_manifest(&root, "x-new", sess, "2026-09-18T21:22:20Z");
+        let held = vec!["x-new".to_string()];
+        let out = court_orphans(&root, &held, &no_verdict_roster);
+        assert!(
+            !out.iter()
+                .any(|o| o.manifest_path == old.display().to_string()),
+            "the leftover must not list: {out:?}"
+        );
+        assert!(
+            out.is_empty(),
+            "held live crown must not list either: {out:?}"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unheld_manifests_from_distinct_sessions_all_list() {
+        // AC1-EDGE (first half): leftovers are per-SESSION, never per-scope.
+        // Two different sessions each naming one unheld manifest: both list.
+        let root = tmp("two-sessions");
+        let s1 = "aaaa1111-0000-4000-8000-000000000001";
+        let s2 = "bbbb2222-0000-4000-8000-000000000002";
+        let m1 = write_court_manifest(&root, "x-aaaa", s1, "2026-09-18T20:00:00Z");
+        let m2 = write_court_manifest(&root, "x-bbbb", s2, "2026-09-18T21:00:00Z");
+        let out = court_orphans(&root, &[], &no_verdict_roster);
+        let listed: Vec<&str> = out.iter().map(|o| o.manifest_path.as_str()).collect();
+        assert!(listed.contains(&m1.display().to_string().as_str()));
+        assert!(listed.contains(&m2.display().to_string().as_str()));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn equal_created_at_supersedes_neither() {
+        // AC1-EDGE (second half): a tie at the greatest created_at is genuine
+        // ambiguity, so neither file is a leftover and both list.
+        let root = tmp("tie");
+        let sess = "cccc3333-0000-4000-8000-000000000003";
+        let a = write_court_manifest(&root, "x-tie-a", sess, "2026-09-18T21:22:20Z");
+        let b = write_court_manifest(&root, "x-tie-b", sess, "2026-09-18T21:22:20Z");
+        let out = court_orphans(&root, &[], &no_verdict_roster);
+        let listed: Vec<&str> = out.iter().map(|o| o.manifest_path.as_str()).collect();
+        assert!(listed.contains(&a.display().to_string().as_str()));
+        assert!(listed.contains(&b.display().to_string().as_str()));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn missing_created_at_reads_oldest() {
+        // AC2-HP: zzz-scope carries no created_at; aaa does. The newest per
+        // session is the crown record, so zzz is the leftover and aaa lists.
+        let root = tmp("missing-created");
+        let sess = "dddd4444-0000-4000-8000-000000000004";
+        let _zzz = write_court_manifest(&root, "zzz-scope", sess, "");
+        let aaa = write_court_manifest(&root, "aaa-scope", sess, "2026-09-18T21:00:00Z");
+        let out = court_orphans(&root, &[], &no_verdict_roster);
+        assert_eq!(out.len(), 1, "zzz is superseded, aaa lists: {out:?}");
+        assert_eq!(out[0].manifest_path, aaa.display().to_string());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn sessionless_manifests_never_supersede_and_fall_back_to_the_stem() {
+        // AC2-EDGE: two unheld manifests with different scopes and no
+        // harness_session_id line. No group, no supersession: both list, each
+        // with its file stem as manifest_session.
+        let root = tmp("sessionless");
+        let kings = root.join("space-a").join("kings");
+        fs::create_dir_all(&kings).unwrap();
+        for scope in ["zzz-scope", "aaa-scope"] {
+            fs::write(
+                kings.join(format!("{scope}.md")),
+                format!("---\ncrown_scope: {scope}\ncrown_level: 0\n---\n"),
+            )
+            .unwrap();
+        }
+        let out = court_orphans(&root, &[], &no_verdict_roster);
+        assert_eq!(out.len(), 2, "no session, no supersession: {out:?}");
+        let sessions: Vec<&str> = out
+            .iter()
+            .map(|o| o.manifest_session.as_deref().unwrap())
+            .collect();
+        assert!(sessions.contains(&"zzz-scope"));
+        assert!(sessions.contains(&"aaa-scope"));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_live_owner_pid_cannot_keep_a_roster_finished_holder_listed() {
+        // AC3-HP: owner_pid records a live stranger's process, yet the
+        // roster lists the holder session stopped. The verdict keys on the
+        // session, so the candidate drops out.
+        let root = tmp("verdict-finished");
+        let sess = "eeee5555-0000-4000-8000-000000000005";
+        write_court_manifest(&root, "x-done", sess, "2026-09-18T21:00:00Z");
+        let short = &sess[..8];
+        let roster = || {
+            crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                crate::claude_roster::ClaudeAgentRow::new(short, Some("stopped")),
+            ])
+        };
+        let out = court_orphans(&root, &[], &roster);
+        assert!(
+            out.is_empty(),
+            "a roster-finished holder never lists: {out:?}"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_dead_owner_pid_cannot_drop_a_live_holder() {
+        // AC4-HP: owner_pid is a reaped pid (ESRCH), yet the roster lists
+        // the holder working under a live pid. The manifest lists.
+        let root = tmp("verdict-live");
+        let sess = "ffff6666-0000-4000-8000-000000000006";
+        let mut child = std::process::Command::new("true")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        let m = write_court_manifest(&root, "x-live", sess, "2026-09-18T21:00:00Z");
+        // write_court_manifest stamps owner_pid: 1; re-stamp with the reaped
+        // pid so the test pins the exact false-dead shape the node reports.
+        let body = fs::read_to_string(&m).unwrap().replacen(
+            "owner_pid: 1",
+            &format!("owner_pid: {dead_pid}"),
+            1,
+        );
+        fs::write(&m, body).unwrap();
+        let short = &sess[..8];
+        let roster = || {
+            crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                crate::claude_roster::ClaudeAgentRow::new(short, Some("working"))
+                    .with_pid(Some(std::process::id())),
+            ])
+        };
+        let out = court_orphans(&root, &[], &roster);
+        assert_eq!(out.len(), 1, "the live holder stays listed: {out:?}");
+        assert_eq!(out[0].manifest_session.as_deref(), Some(sess));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_unknown_roster_decides_nothing() {
+        // AC3-ERR: a failed roster read must never read as death. Every
+        // unheld, non-superseded manifest stays listed.
+        let root = tmp("verdict-unknown");
+        let sess = "aaaa7777-0000-4000-8000-000000000007";
+        write_court_manifest(&root, "x-unk", sess, "2026-09-18T21:00:00Z");
+        let out = court_orphans(&root, &[], &no_verdict_roster);
+        assert_eq!(out.len(), 1, "unknown roster, candidate stays: {out:?}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_roster_that_lacks_the_holder_proves_nothing() {
+        // AC3-EDGE (first half): absence from a known roster is not a death
+        // proof; the candidate stays.
+        let root = tmp("verdict-absent");
+        let sess = "bbbb8888-0000-4000-8000-000000000008";
+        write_court_manifest(&root, "x-absent", sess, "2026-09-18T21:00:00Z");
+        let roster = || {
+            crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                crate::claude_roster::ClaudeAgentRow::new("zzzz9999", Some("working")),
+            ])
+        };
+        let out = court_orphans(&root, &[], &roster);
+        assert_eq!(out.len(), 1, "absence never drops a candidate: {out:?}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_non_claude_manifest_stays_listed() {
+        // AC3-EDGE (second half): the verdict is claude-only. A codex
+        // manifest whose short id the roster lists stopped still lists.
+        let root = tmp("verdict-codex");
+        let path = root.join("space-a").join("kings").join("x-codex.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "---\nscope: x-codex\nshape: pass\nharness: codex\n\
+             harness_session_id: cccc9999-0000-4000-8000-000000000009\n\
+             owner_pid: 1\ncreated_at: 2026-09-18T21:00:00Z\n\
+             crown_scope: x-codex\ncrown_level: 2\n---\n",
+        )
+        .unwrap();
+        let roster = || {
+            crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                crate::claude_roster::ClaudeAgentRow::new("cccc9999", Some("stopped")),
+            ])
+        };
+        let out = court_orphans(&root, &[], &roster);
+        assert_eq!(out.len(), 1, "codex manifests never drop: {out:?}");
         fs::remove_dir_all(&root).ok();
     }
 
