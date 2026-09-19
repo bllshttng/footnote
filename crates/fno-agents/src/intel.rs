@@ -252,7 +252,10 @@ fn fold_session(
     source: &dyn TranscriptSource,
     ctx: &FoldCtx,
 ) -> SessionRow {
-    let turns = source.turns(&file.path);
+    // One read serves every parser: turns, tool calls, and the relay
+    // delivery check all work from this text.
+    let raw = std::fs::read_to_string(&file.path).unwrap_or_default();
+    let turns = source.turns(&raw);
     let mut counters: BTreeMap<&'static str, u64> = Provenance::all_labels()
         .into_iter()
         .map(|l| (l, 0u64))
@@ -271,8 +274,7 @@ fn fold_session(
         *counters.entry(p.label()).or_insert(0) += 1;
     }
 
-    // Relay facets: bus rows addressed to this session, oldest first. The
-    // transcript is read raw only when such rows exist.
+    // Relay facets: bus rows addressed to this session, oldest first.
     let mut relay: Vec<RelayFacet> = Vec::new();
     let mut addressed: Vec<&crate::provenance::BusRow> = ctx
         .bus
@@ -281,7 +283,6 @@ fn fold_session(
         .filter(|r| r.to_session.as_deref() == Some(file.session_id.as_str()))
         .collect();
     if !addressed.is_empty() {
-        let raw = std::fs::read_to_string(&file.path).unwrap_or_default();
         addressed.sort_by(|a, b| a.ts.cmp(&b.ts));
         let mut seen: HashSet<(String, String)> = HashSet::new();
         for row in addressed {
@@ -289,13 +290,18 @@ fn fold_session(
                 || raw.contains(row.body.trim());
             let row_ts = ts_secs(&row.ts);
             let mut answered = false;
-            for other in ctx.bus.rows() {
-                let reply = other.from_session.as_deref() == row.to_session.as_deref()
-                    && other.to_session.as_deref() == row.from_session.as_deref()
-                    && ts_secs(&other.ts).is_some_and(|t2| row_ts.is_none_or(|t1| t2 > t1));
-                if reply {
-                    answered = true;
-                    break;
+            // The reply goes to the sender, so a row whose sender is
+            // unknown can never be answered; and only a row addressed to a
+            // session (to_session present) can be that reply.
+            if row.from_session.is_some() {
+                for other in ctx.bus.rows() {
+                    let reply = other.from_session.as_deref() == row.to_session.as_deref()
+                        && other.to_session.as_deref() == row.from_session.as_deref()
+                        && ts_secs(&other.ts).is_some_and(|t2| row_ts.is_none_or(|t1| t2 > t1));
+                    if reply {
+                        answered = true;
+                        break;
+                    }
                 }
             }
             let key = (
@@ -344,7 +350,7 @@ fn fold_session(
             "unattended".to_string()
         },
         counters,
-        tool_use: source.tool_uses(&file.path),
+        tool_use: source.tool_uses(&raw),
         commits: ctx.commits_for(&group),
         node,
         pr_number: pr,

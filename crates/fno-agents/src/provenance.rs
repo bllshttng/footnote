@@ -489,11 +489,13 @@ pub(crate) trait TranscriptSource {
     /// Sessions whose transcript mtime falls inside the last `days` days;
     /// `days == 0` means no window.
     fn sessions(&self, days: u64) -> Vec<SessionFile>;
-    /// The user-shaped turns (typed, meta, or relayed) of one transcript.
-    fn turns(&self, path: &Path) -> Vec<Turn>;
-    /// Tool calls the assistant made in one transcript, in the harness's own
-    /// row shape.
-    fn tool_uses(&self, path: &Path) -> usize;
+    /// The user-shaped turns (typed, meta, or relayed) of one transcript's
+    /// raw text. Takes the raw bytes, not a path: the fold reads each file
+    /// once and every parser works from that single read.
+    fn turns(&self, raw: &str) -> Vec<Turn>;
+    /// Tool calls the assistant made, in the harness's own row shape, from
+    /// the same raw text.
+    fn tool_uses(&self, raw: &str) -> usize;
 }
 
 fn within_window(mtime: u64, days: u64, now: u64) -> bool {
@@ -577,10 +579,7 @@ impl TranscriptSource for ClaudeSource {
         out
     }
 
-    fn turns(&self, path: &Path) -> Vec<Turn> {
-        let Ok(raw) = std::fs::read_to_string(path) else {
-            return Vec::new();
-        };
+    fn turns(&self, raw: &str) -> Vec<Turn> {
         raw.lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .filter(|obj| is_user_turn(obj) || is_meta_row(obj))
@@ -596,10 +595,7 @@ impl TranscriptSource for ClaudeSource {
             .collect()
     }
 
-    fn tool_uses(&self, path: &Path) -> usize {
-        let Ok(raw) = std::fs::read_to_string(path) else {
-            return 0;
-        };
+    fn tool_uses(&self, raw: &str) -> usize {
         raw.lines()
             .filter(|line| line.contains("\"tool_use\""))
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -657,10 +653,7 @@ impl TranscriptSource for CodexSource {
             .collect()
     }
 
-    fn turns(&self, path: &Path) -> Vec<Turn> {
-        let Ok(raw) = std::fs::read_to_string(path) else {
-            return Vec::new();
-        };
+    fn turns(&self, raw: &str) -> Vec<Turn> {
         raw.lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .filter(is_user_turn)
@@ -676,10 +669,7 @@ impl TranscriptSource for CodexSource {
             .collect()
     }
 
-    fn tool_uses(&self, path: &Path) -> usize {
-        let Ok(raw) = std::fs::read_to_string(path) else {
-            return 0;
-        };
+    fn tool_uses(&self, raw: &str) -> usize {
         raw.lines()
             .filter(|line| line.contains("\"function_call\""))
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -705,8 +695,13 @@ mod tests {
     }
 
     fn bus_index(rows: Value) -> BusIndex {
+        // Unique per call: cargo test runs this module's tests on parallel
+        // threads of one process, and a shared path lets one fixture read
+        // another's rows.
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "fno-provenance-test-{}-bus.jsonl",
+            "fno-provenance-test-{}-{n}-bus.jsonl",
             std::process::id()
         ));
         let body = match rows {
