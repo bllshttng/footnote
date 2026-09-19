@@ -91,13 +91,19 @@ pub enum Census {
     Unavailable {
         reason: String,
     },
-    /// No reading is owed, and none can be taken: this build carries no
-    /// snapshot arm, or this process holds no descriptor to read one with.
-    /// Both are facts about the world, so a retry cannot change either.
-    /// Admit and let the caller's own error speak: a process with no free
-    /// descriptor cannot spawn a child either, and the pty layer already
-    /// names that limit exactly.
+    /// No reading is owed because no source exists: this build carries no
+    /// snapshot arm, or this host has no /proc directory. A fact about the
+    /// world, so a retry cannot change it. Admit and let the caller's own
+    /// error speak: the spawn below names the real limit.
     NoSource {
+        reason: String,
+    },
+    /// This process holds no descriptor left to read the table with
+    /// (EMFILE, ENFILE). Also a fact, but distinct from an absent source:
+    /// the host has a census, this process just cannot open one more file.
+    /// A process in that state cannot spawn a child either, so admit and
+    /// let the spawn below name the limit it actually hit.
+    DescriptorsExhausted {
         reason: String,
     },
 }
@@ -117,6 +123,12 @@ impl Census {
 
     pub fn no_source(reason: impl Into<String>) -> Self {
         Self::NoSource {
+            reason: reason.into(),
+        }
+    }
+
+    pub fn descriptors_exhausted(reason: impl Into<String>) -> Self {
+        Self::DescriptorsExhausted {
             reason: reason.into(),
         }
     }
@@ -276,11 +288,12 @@ pub fn decide_processes(census: &Census, ceiling: MaxProcesses) -> AdmissionDeci
             scope: Scope::Fleet,
             reason: AdmissionReason::MeasurementUnavailable,
         },
-        // No source is not headroom and not a refusal: the facts behind it
-        // (no snapshot arm, no /proc, no descriptor) cannot change by
-        // re-reading, and a process in that state fails its own spawn one
-        // layer down with a message naming the real limit.
-        Census::NoSource { .. } => AdmissionDecision::Admit,
+        // No source and descriptors-exhausted are not headroom and not a
+        // refusal: the facts behind them (no snapshot arm, no /proc, no
+        // descriptor) cannot change by re-reading, and a process in either
+        // state fails its own spawn one layer down with a message naming
+        // the real limit.
+        Census::NoSource { .. } | Census::DescriptorsExhausted { .. } => AdmissionDecision::Admit,
     }
 }
 
@@ -452,7 +465,7 @@ pub fn admit_fleet() -> Result<AdmissionPermit, AdmissionFailure> {
         // A fact, not a race: with no descriptor left, the census behind the
         // lock would fail the same way. Admit, and let the spawn below name
         // its own limit.
-        Err(AcquireFailure::NoSource(reason)) => {
+        Err(AcquireFailure::DescriptorsExhausted(reason)) => {
             write_not_measuring_receipt(&reason);
             return Ok(AdmissionPermit {
                 _lock: None,
@@ -519,7 +532,7 @@ pub fn admit_tab(
         Ok(lock) => Some(lock),
         // Same famine door as admit_fleet: the pane count needs no snapshot,
         // and the spawn below names its own limit.
-        Err(AcquireFailure::NoSource(reason)) => {
+        Err(AcquireFailure::DescriptorsExhausted(reason)) => {
             write_not_measuring_receipt(&reason);
             return Ok(AdmissionPermit {
                 _lock: None,
@@ -601,7 +614,7 @@ pub fn admit_pane(
         Ok(lock) => Some(lock),
         // Same famine door as admit_fleet: with no descriptor left, the
         // census behind the lock would fail the same way.
-        Err(AcquireFailure::NoSource(reason)) => {
+        Err(AcquireFailure::DescriptorsExhausted(reason)) => {
             write_not_measuring_receipt(&reason);
             return Ok(AdmissionPermit {
                 _lock: None,
@@ -776,12 +789,12 @@ pub async fn tokio_status(
     child.wait().await
 }
 
-/// Why the admission lock could not be taken. `NoSource` is the descriptor
+/// Why the admission lock could not be taken. `DescriptorsExhausted` is the
 /// famine door: with no descriptor left to open the lock with, the census
 /// behind the lock would fail the same way, so the caller admits instead of
 /// refusing. Everything else keeps the lock-unavailable refusal.
 enum AcquireFailure {
-    NoSource(String),
+    DescriptorsExhausted(String),
     Other(String),
 }
 
@@ -806,8 +819,8 @@ fn acquire_lock() -> Result<File, AcquireFailure> {
         .open(&path)
         .map_err(|error| {
             if no_descriptor_left(&error) {
-                AcquireFailure::NoSource(format!(
-                    "no descriptor left to open the admission lock (cannot open {}: {})",
+                AcquireFailure::DescriptorsExhausted(format!(
+                    "descriptors-exhausted (cannot open {}: {})",
                     path.display(),
                     error
                 ))
@@ -891,22 +904,28 @@ impl Census {
     fn count(&self) -> Option<usize> {
         match self {
             Self::Complete { count } => Some(count.get()),
-            Self::Unavailable { .. } | Self::NoSource { .. } => None,
+            Self::Unavailable { .. }
+            | Self::NoSource { .. }
+            | Self::DescriptorsExhausted { .. } => None,
         }
     }
 
     fn reason(&self) -> Option<&str> {
         match self {
             Self::Complete { .. } => None,
-            Self::Unavailable { reason } | Self::NoSource { reason } => Some(reason),
+            Self::Unavailable { reason }
+            | Self::NoSource { reason }
+            | Self::DescriptorsExhausted { reason } => Some(reason),
         }
     }
 }
 
-/// Why a reading did not produce a count. `NoSource` is the world; `Unread`
-/// is a read that failed and may yet succeed.
+/// Why a reading did not produce a count. `NoSource` and
+/// `DescriptorsExhausted` are facts about the world; `Unread` is a read that
+/// failed and may yet succeed.
 enum CensusFailure {
     NoSource(String),
+    DescriptorsExhausted(String),
     Unread(String),
 }
 
@@ -916,8 +935,14 @@ enum CensusFailure {
 /// read failure and holds.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn classify_proc_dir_error(error: &io::Error) -> CensusFailure {
-    if no_descriptor_left(error) || error.kind() == io::ErrorKind::NotFound {
-        CensusFailure::NoSource(format!("cannot read /proc: {error}"))
+    if no_descriptor_left(error) {
+        CensusFailure::DescriptorsExhausted(format!(
+            "descriptors-exhausted (cannot read /proc: {error})"
+        ))
+    } else if error.kind() == io::ErrorKind::NotFound {
+        CensusFailure::NoSource(format!(
+            "no /proc directory on this host (cannot read /proc: {error})"
+        ))
     } else {
         CensusFailure::Unread(format!("/proc unavailable: {error}"))
     }
@@ -955,6 +980,9 @@ fn census_with(
             Ok(count) => return Census::complete(count),
             // A fact about the world. Re-reading cannot change it, so stop.
             Err(CensusFailure::NoSource(reason)) => return Census::no_source(reason),
+            Err(CensusFailure::DescriptorsExhausted(reason)) => {
+                return Census::descriptors_exhausted(reason)
+            }
             Err(CensusFailure::Unread(reason)) => last = reason,
         }
         if attempt < attempts {
@@ -1306,8 +1334,8 @@ fn snapshot_linux() -> Result<Vec<ProcessRow>, CensusFailure> {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) if no_descriptor_left(&error) => {
-                return Err(CensusFailure::NoSource(format!(
-                    "no descriptor left to read the process table (cannot read /proc: {error})"
+                return Err(CensusFailure::DescriptorsExhausted(format!(
+                    "descriptors-exhausted (cannot read /proc: {error})"
                 )));
             }
             Err(error) => {
@@ -1332,8 +1360,8 @@ fn snapshot_linux() -> Result<Vec<ProcessRow>, CensusFailure> {
             // capacity, not a failed measurement (the macOS arm's rule).
             Err(error) if pid_gone(&error) => continue,
             Err(error) if no_descriptor_left(&error) => {
-                return Err(CensusFailure::NoSource(format!(
-                    "no descriptor left to read the process table (cannot read pid={pid} stat: {error})"
+                return Err(CensusFailure::DescriptorsExhausted(format!(
+                    "descriptors-exhausted (cannot read pid={pid} stat: {error})"
                 )));
             }
             Err(error) => {
@@ -1668,6 +1696,16 @@ mod tests {
         assert_eq!(decision, AdmissionDecision::Admit);
     }
 
+    /// The fourth outcome admits too, and never reads as an absent host.
+    #[test]
+    fn a_census_with_descriptors_exhausted_admits() {
+        let decision = decide_processes(
+            &Census::descriptors_exhausted("descriptors-exhausted (cannot read /proc)"),
+            MaxProcesses::new(2),
+        );
+        assert_eq!(decision, AdmissionDecision::Admit);
+    }
+
     /// The guard against retry-then-hold-forever: a NoSource answer stops
     /// the loop on its first answer, with no wait spent.
     #[test]
@@ -1676,23 +1714,46 @@ mod tests {
         let census = census_with(
             || {
                 calls += 1;
-                Err(CensusFailure::NoSource("no descriptor left".into()))
+                Err(CensusFailure::NoSource("no /proc on this host".into()))
             },
             4,
             std::time::Duration::from_millis(1),
         );
-        assert_eq!(census, Census::no_source("no descriptor left"));
+        assert_eq!(census, Census::no_source("no /proc on this host"));
+        assert_eq!(calls, 1);
+    }
+
+    /// The famine answer stops the loop the same way.
+    #[test]
+    fn census_stops_at_the_first_descriptors_exhausted_answer() {
+        let mut calls = 0;
+        let census = census_with(
+            || {
+                calls += 1;
+                Err(CensusFailure::DescriptorsExhausted(
+                    "descriptors-exhausted (cannot read /proc: Too many open files)".into(),
+                ))
+            },
+            4,
+            std::time::Duration::from_millis(1),
+        );
+        assert_eq!(
+            census,
+            Census::descriptors_exhausted(
+                "descriptors-exhausted (cannot read /proc: Too many open files)"
+            )
+        );
         assert_eq!(calls, 1);
     }
 
     /// EMFILE/ENFILE are the famine; EACCES/EIO are read failures.
     #[test]
-    fn an_exhausted_descriptor_budget_is_no_source() {
+    fn an_exhausted_descriptor_budget_is_descriptors_exhausted() {
         for errno in [libc::EMFILE, libc::ENFILE] {
             assert!(
                 matches!(
                     classify_proc_dir_error(&io::Error::from_raw_os_error(errno)),
-                    CensusFailure::NoSource(_)
+                    CensusFailure::DescriptorsExhausted(_)
                 ),
                 "{errno}"
             );
