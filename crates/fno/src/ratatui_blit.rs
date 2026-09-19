@@ -36,9 +36,11 @@ pub fn blit(buf: &Buffer, cells: &mut [proto::Cell], frame_cols: usize) {
                 bg: map_color(src.bg),
                 flags: map_flags(src.modifier),
             };
-            if wide {
+            if wide && x + 1 < frame_cols {
                 // The glyph claims the next column; the compositor skips a
                 // WIDE_SPACER so the glyph's right half is never overdrawn.
+                // At the frame stride the next cell is the NEXT ROW - the
+                // spacer must never spill there.
                 if let Some(pad) = cells.get_mut(y * frame_cols + x + 1) {
                     *pad = proto::Cell {
                         flags: cell_flags::WIDE_SPACER,

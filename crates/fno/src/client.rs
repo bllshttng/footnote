@@ -7733,6 +7733,13 @@ impl View {
                 let start = range.start;
                 for (n, c) in range.clone().enumerate() {
                     let is_pad = n + 1 == DENSITY_BTN_W; // the trailing cell is the pad
+                                                         // The button yields to a blitted row's own cells: an
+                                                         // agent row scrolled to the top keeps its right-aligned
+                                                         // PR and age, and the density cycle keeps its keybind
+                                                         // (Locked Decision 5) - the button is never the only way.
+                    if cells[c].c != ' ' {
+                        continue;
+                    }
                     cells[c] = Cell {
                         c: if c == start { glyph } else { ' ' },
                         fg: Color::Default,
