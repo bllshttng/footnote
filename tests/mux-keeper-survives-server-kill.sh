@@ -29,6 +29,9 @@ export FNO_AGENTS_WORKER_BIN="$WORKER_BIN"
 SESSION="fk-$$"
 export SESSION
 SERVER_PID=""
+# Set before the EXIT trap can fire: cleanup sweeps these, and under `set -u`
+# a failure before the first assignment would otherwise mask the real error.
+SURVIVOR_PIDS=""
 
 # The worker needs a durable session identity: a harness-stub `claude` whose
 # resume form carries a real session id, so the pane is ADDRESSABLE - a
