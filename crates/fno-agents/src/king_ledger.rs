@@ -1137,9 +1137,13 @@ mod tests {
 
     #[test]
     fn writes_atomically_and_names_the_path() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("reign-ledger-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &dir);
         let court_path = dir.join("court.json");
         let graph_path = dir.join("graph.json");
         let out_path = dir.join("reign.html");
@@ -1165,6 +1169,7 @@ mod tests {
             .filter_map(Result::ok)
             .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
         assert!(!leftovers);
+        std::env::remove_var("FNO_AGENTS_HOME");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1172,9 +1177,13 @@ mod tests {
     #[cfg(unix)]
     fn publishes_reign_html_at_mode_0600() {
         use std::os::unix::fs::PermissionsExt;
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("reign-ledger-mode-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &dir);
         let court_path = dir.join("court.json");
         let graph_path = dir.join("graph.json");
         let out_path = dir.join("reign.html");
@@ -1196,6 +1205,7 @@ mod tests {
         assert_eq!(run_reign_ledger(&args), 0);
         let mode = std::fs::metadata(&out_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "reign.html must match graph.html's 600 mode");
+        std::env::remove_var("FNO_AGENTS_HOME");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
