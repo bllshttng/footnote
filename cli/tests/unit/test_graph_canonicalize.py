@@ -19,6 +19,7 @@ from fno.graph.store import (
     canonical_field_order,
     canonicalize_entries,
     commit_rows_via_store,
+    read_graph_strict,
     _read_json,
 )
 
@@ -117,7 +118,9 @@ def test_legacy_graph_lock_timestamp_migrates_once_without_nested_rename(tmp_pat
 
     commit_rows_via_store(path, _noop)
 
-    raw = _read_json(path)[0]
+    # The stored row through the store read: the migration renamed the
+    # top-level stamp and left the nested sessions one alone.
+    raw = read_graph_strict(path)[0]
     assert raw["locked_at"] == timestamp
     assert "claimed_at" not in raw
     assert raw["sessions"][0]["claimed_at"] == timestamp

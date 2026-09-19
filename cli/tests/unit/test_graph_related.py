@@ -154,9 +154,7 @@ def test_related_keeps_the_other_fields_of_the_same_update(tmp_graph):
         ["backlog", "update", "x-aaaa", "--details", "marker-5934", "--related", "x-bbbb"],
     )
     assert result.exit_code == 0, result.output
-    node = next(
-        e for e in json.loads(tmp_graph.read_text())["entries"] if e["id"] == "x-aaaa"
-    )
+    node = next(e for e in read_graph_strict(tmp_graph) if e["id"] == "x-aaaa")
     assert node["related"] == ["x-bbbb"]
     assert node["details"] == "marker-5934"
 
@@ -447,8 +445,7 @@ def test_related_combined_with_other_flags_lands_every_field(tmp_graph):
         ],
     )
     assert r.exit_code == 0, r.output
-    entries = json.loads(tmp_graph.read_text())["entries"]
-    node = next(e for e in entries if e["id"] == "x-aaaa")
+    node = next(e for e in read_graph_strict(tmp_graph) if e["id"] == "x-aaaa")
     assert node.get("related") == ["x-bbbb"]
     assert node.get("blocked_by") == ["x-cccc"]
     assert node.get("size") == "L"
