@@ -44,7 +44,7 @@ Quiet is only ever the second conjunct. Every release rests on a positive marker
 
 ## Ten programs stop or remove a session
 
-Ten programs stop, retire, or remove a session or one of its parts. A reader who watches one and concludes the others are broken has mixed them up. This exact confusion cost a real session: the arms readout showed `acted=0 skip=held` while the manual verb retired 3 rows in the same minute. Each row cites its entry point as file plus symbol; a line cite rots, a symbol cite survives a move.
+Ten programs stop, retire, or remove a session or one of its parts. A reader who watches one and concludes the others are broken has mixed them up. This exact confusion cost a real session: the arms readout showed `acted=0 skip=held` while the manual verb retired 3 rows in the same minute. Each row cites its entry point as file plus symbol, because a line cite rots and a symbol cite survives a move.
 
 | # | Program | Entry point | Trigger and cadence | Removes | Keeps | What it reads about an open PR |
 |---|---|---|---|---|---|---|
@@ -69,7 +69,7 @@ A fourth tool answers to a related name. `fno-agents roster-reap` removes claude
 
 These five move or remove state around sessions. None stops or removes a session, so do not look for them in the table above.
 
-- Claim reclaim: lazy, on a competing `acquire`; the old lockfile moves to `.expired/` (`claims.rs` `acquire`, `claims.rs` `classify`). No daemon arm reclaims claims.
+- Claim reclaim: lazy, on a competing `acquire`. The old lockfile moves to `.expired/` (`claims.rs` `acquire`, `claims.rs` `classify`). No daemon arm reclaims claims.
 - The nudge ladder: keeps the row and sends input instead (`pr_nudge.rs` `run_ladder`). It fires on the daemon arm only. The manual dry run prints its plan as `would nudge {id} ({action})` and takes no effect.
 - The state-file sweep: removes expired claims, stale plan locks, agent locks, the pr-status cache, and claim tmp files (`gc.rs` `state_file_sweep`). No row is touched.
 - The liveness sweep: bands the machine and writes status. It removes nothing (`daemon.rs` `liveness_sweep`).
@@ -305,7 +305,7 @@ Each item here cost a real session time. One corrects an older belief.
 
 ## Every JSON key
 
-Every top-level key of `fno agents reap --json`, one row each. The dry run renders the same object with `dry_run` true. `render_reap` emits the summary keys (`reap_render.rs` `render_reap`), and `render_reap_with_inventory` splices two more, `inventory` and `mux` (`reap_render.rs` `render_reap_with_inventory`), so one JSON read carries the verdicts and the world they were judged against.
+Every top-level key of `fno agents reap --json`, one row each. The dry run renders the same object with `dry_run` true. `render_reap` emits the summary keys (`reap_render.rs` `render_reap`). `render_reap_with_inventory` splices two more, `inventory` and `mux` (`reap_render.rs` `render_reap_with_inventory`). One JSON read carries the verdicts and the world they were judged against.
 
 | Key | Report line it feeds | Explained at |
 |---|---|---|
