@@ -52,10 +52,12 @@ pub fn run(args: &[String]) -> i32 {
             .map(str::to_string)
     });
 
-    // grok sends camelCase keys and no transcript path; normalize before the
-    // ownership read. A payload without grok's `hookEventName: "stop"` is not
-    // a grok fire and none of this moves: claude, codex and gemini read
-    // snake_case and resolve the transcript straight from the payload.
+    // grok sends camelCase keys with snake_case copies. Its transcript path
+    // names updates.jsonl, not the chat_history.jsonl store the reader needs,
+    // so normalize before the ownership read. A payload without grok's
+    // `hookEventName: "stop"` is not a grok fire and none of this moves:
+    // claude, codex and gemini read snake_case and resolve the transcript
+    // straight from the payload.
     let mut session_id = session_id;
     let mut transcript_path = transport_path;
     let mut payload_cwd = payload_cwd;
@@ -127,9 +129,10 @@ enum GrokFire {
 }
 
 /// Recognize a grok Stop payload and map it onto the snake_case fields. Fires
-/// only on grok's camelCase `hookEventName: "stop"`; claude and codex send
-/// snake_case and carry their own transcript path, so `None` leaves them on
-/// today's path. A subagent stop and the session-end fire (no `promptId`)
+/// only on grok's camelCase `hookEventName: "stop"`; claude and codex send no
+/// such key, so `None` leaves them on today's path. grok's own
+/// `transcript_path` copy names updates.jsonl, so the store path comes from
+/// the chat_history.jsonl lookup below instead. A subagent stop and the session-end fire (no `promptId`)
 /// answer `Skip`: neither is this session's turn gate, so `hook stop` exits 0
 /// with no output and no event.
 fn normalize_grok_envelope(parsed: &Value) -> Option<GrokFire> {
