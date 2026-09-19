@@ -10604,8 +10604,7 @@ fn observe_decision(args: &[String], output: &str) {
 }
 
 pub fn decide(args: &[String]) -> (i32, String) {
-    let result = decide_inner(args);
-    let result = session_binding::render_continuation_for_harness(args, result);
+    let result = session_binding::render_continuation_for_harness(args, decide_inner(args));
     if result.0 == 0 {
         observe_decision(args, &result.1);
     }
