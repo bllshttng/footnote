@@ -854,12 +854,20 @@ case "$payload_mode" in
       slash)
         # Prefix-swap, idempotent: a command already in the native namespaced
         # form (`/fno:target`, e.g. copied from opencode's palette) must NOT be
-        # double-prefixed to `/fno:fno:target` (mirrors normalize_command).
+        # double-prefixed (mirrors normalize_command). A row with its own
+        # prefix owns the namespaced rung: the `fno:` spelling strips first,
+        # so pi renders /skill:target, never /skill:fno:target.
         _prefix="$(slash_prefix "$provider")"
-        if [[ -n "$_prefix" && "$msg" == "/$_prefix"* ]]; then
-          message="$msg"
+        if [[ -n "$_prefix" ]]; then
+          _base="${msg#/fno:}"
+          [[ "$_base" == "$msg" ]] && _base="${msg#/}"
+          if [[ "$_base" == "$_prefix"* ]]; then
+            message="$_base"
+          else
+            message="/${_prefix}${_base}"
+          fi
         else
-          message="/${_prefix}${msg#/}"
+          message="$msg"
         fi
         ;;
       codex-skill)

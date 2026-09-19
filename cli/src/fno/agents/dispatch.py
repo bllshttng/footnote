@@ -984,6 +984,8 @@ def _lane_b_thread_spawn(
     add_dir: Optional[str] = None,
     resume_session_id: Optional[str] = None,
     effort: Optional[str] = None,
+    tools: Optional[str] = None,
+    deny_tools: Optional[str] = None,
     passthrough: Optional[Sequence[str]] = None,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
 ) -> dict:
@@ -1075,6 +1077,8 @@ def _lane_b_thread_spawn(
             permission_mode=permission_mode,
             add_dir=add_dir,
             effort=effort,
+            tools=tools,
+            deny_tools=deny_tools,
         )
         if passthrough:
             from fno.agents.mux_spawn import pane_passthrough_tokens

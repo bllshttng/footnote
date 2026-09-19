@@ -158,6 +158,8 @@ def complete_launch_argv(
     permission_mode: Optional[str],
     add_dir: Optional[str],
     effort: Optional[str],
+    tools: Optional[str] = None,
+    deny_tools: Optional[str] = None,
 ) -> list[str]:
     """The declared create form plus the axes this harness's PANE arm appends.
     One ORDER serves every lane: flag order is not how a binary launches."""
@@ -180,7 +182,7 @@ def complete_launch_argv(
         # name a bare --model without its provider.
         from fno.agents.spawn_axes_client import pi_route
 
-        return [*argv, *pi_route(model, effort)]
+        return [*argv, *pi_route(model, effort, tools, deny_tools)]
     if arm.get("takes_model") and model:
         argv = [*argv, "--model", model]
     if arm.get("takes_effort") and effort:
