@@ -17,7 +17,7 @@ GATE="$(cd "${SCRIPT_DIR}/../.." && pwd)/scripts/ci/check-file-budget.sh"
 # The caller's git config (signing, hooks) must not reach the scratch repos.
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
-unset FILE_BUDGET_LINES PY_TREE_ALLOWANCE PR_BASE_REF PR_REMOTE FILE_BUDGET_BASE_SHA FILE_BUDGET_EXCEPTION_LABEL
+unset FILE_BUDGET_LINES PY_ADDED_BUDGET PR_BASE_REF PR_REMOTE FILE_BUDGET_BASE_SHA FILE_BUDGET_EXCEPTION_LABEL
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -62,21 +62,49 @@ check() {
   fi
 }
 
-# --- the Python tree allowance ------------------------------------------------
+# --- the Python added-line budget ---------------------------------------------
 fresh; lines 150 grow >> cli/src/fno/keep.py; commit
-check 'growth over the allowance is refused' 1 'net +150 (allowance 100)'
+check 'growth over the added-line budget is refused' 1 'added +150 lines (added-line budget 30'
 
 fresh; git rm -q cli/src/fno/dead.py; commit
-check 'a deleted module banks its lines' 0 'cli/src/fno net -50, allowance 100'
+check 'a deleted module adds nothing' 0 'cli/src/fno added +0, budget 30'
 
 fresh; git rm -q cli/src/fno/dead.py; lines 120 grow >> cli/src/fno/sub/old.py; commit
-check 'a deleted module offsets nested growth' 0 'cli/src/fno net +70, allowance 100'
+check 'a deleted module does not offset nested growth' 1 'added +120 lines (added-line budget 30'
 
 fresh; git mv scripts/tool.py cli/src/fno/tool.py; commit
-check 'a module moved into the tree counts as growth' 1 'net +150 (allowance 100)'
+check 'a module moved into the tree counts as growth' 1 'added +150 lines (added-line budget 30'
 
 fresh; mkdir -p cli/src/fno/tests; lines 150 t > cli/src/fno/tests/test_x.py; commit
-check 'test files do not count against the tree' 0 'cli/src/fno net +0, allowance 100'
+check 'test files do not count against the tree' 0 'cli/src/fno added +0, budget 30'
+
+# The specimen that proved the hole: a branch that deletes far more than it
+# adds is still refused, because the ceiling is on added lines, never net.
+fresh; lines 152 extra > cli/src/fno/extra.py; commit
+git rm -q cli/src/fno/extra.py cli/src/fno/dead.py cli/src/fno/sub/old.py
+lines 101 fresh > cli/src/fno/fresh.py; commit
+check 'the delete-heavy rewrite is refused on added lines' 1 'added +101 lines (added-line budget 30'
+
+fresh; lines 12 grow >> cli/src/fno/keep.py; commit
+check 'added lines under the budget pass' 0 'cli/src/fno added +12, budget 30'
+
+fresh; lines 12 grow >> cli/src/fno/keep.py; commit
+check 'the env override moves the budget' 1 'budget 5' PY_ADDED_BUDGET=5
+
+# A config answer moves the budget when no env override is set.
+CONFIGBIN="$(mktemp -d)"
+cat > "$CONFIGBIN/fno" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "config get" && "${3:-}" == "blueprint.python_repair_added_lines" ]]; then
+    echo 5
+    exit 0
+fi
+exit 1
+STUB
+chmod +x "$CONFIGBIN/fno"
+fresh; lines 12 grow >> cli/src/fno/keep.py; commit
+check 'the config key moves the budget' 1 'budget 5' PATH="$CONFIGBIN:$PATH"
+rm -rf "$CONFIGBIN"
 
 # --- the operator label exception ---------------------------------------------
 fresh; lines 150 grow >> cli/src/fno/keep.py; commit
@@ -84,9 +112,9 @@ check 'the label waives the tree allowance and names itself' 0 \
   'label file-budget-exception waives the tree allowance' \
   FILE_BUDGET_EXCEPTION_LABEL=file-budget-exception
 
-fresh; lines 50 grow >> cli/src/fno/keep.py; commit
+fresh; lines 20 grow >> cli/src/fno/keep.py; commit
 out="$(FILE_BUDGET_EXCEPTION_LABEL=file-budget-exception bash "$GATE" 2>&1)"
-if [[ "$out" == *'net +50, allowance 100'* && "$out" != *'waives'* ]]; then
+if [[ "$out" == *'added +20, budget 30'* && "$out" != *'waives'* ]]; then
   PASS=$((PASS + 1))
 else
   FAIL=$((FAIL + 1))
@@ -127,7 +155,7 @@ check 'an untracked module is named, not read as no growth' 0 \
 
 fresh; lines 150 grow >> cli/src/fno/keep.py; commit
 out="$(bash "$GATE" 2>&1)"
-if [[ "$out" == *'net +150'* && "$out" != *'not counted'* ]]; then
+if [[ "$out" == *'added +150'* && "$out" != *'not counted'* ]]; then
   PASS=$((PASS + 1))
 else
   FAIL=$((FAIL + 1))

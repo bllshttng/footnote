@@ -977,6 +977,10 @@ mkdir -p "$STUBBIN"
     echo '    echo "no decision carries it"'
     echo '    exit 0'
     echo 'fi'
+    echo 'if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then'
+    echo '    echo 30'
+    echo '    exit 0'
+    echo 'fi'
     if [[ -n "$REAL_FNO" ]]; then
         printf 'exec %q "$@"\n' "$REAL_FNO"
     else
@@ -997,7 +1001,7 @@ created: 2099-01-01
 
 | File | Action |
 |------|--------|
-| `cli/src/fno/mail/cli.py` | Grant d-1234abcd |
+| `cli/src/fno/mail/cli.py` | Grant d-1234abcd +5 |
 EOF
 OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_NNPY_E" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 NNPY_OUT=$(nnpy "$OUTPUT")
@@ -1020,7 +1024,7 @@ created: 2099-01-01
 
 | File | Action |
 |------|--------|
-| `cli/src/fno/mail/cli.py` | Grant d-9999abcd |
+| `cli/src/fno/mail/cli.py` | Grant d-9999abcd +5 |
 EOF
 OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_NNPY_F" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
 NNPY_OUT=$(nnpy "$OUTPUT")
@@ -1238,6 +1242,103 @@ if grep -q "the filename names x-dcc5 but no node:/claims: key does (created 202
     pass "AC12d: pre-gate plan warns with its created date"
 else
     fail "AC12d: expected the pre-gate WARN: $OUTPUT"
+fi
+
+# AC12f: a Grant row declaring over the budget errors naming the count, the
+# budget and the config key.
+PLAN_BIND_F="$TMPDIR_BASE/20990101-binding-f.md"
+cat > "$PLAN_BIND_F" <<'EOF'
+---
+project: fno
+status: ready
+kind: quick-plan
+created: 2099-01-01
+difficulty: low
+join: manual
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
+kill_criteria:
+  - name: iteration_ceiling
+    predicate: iteration > 15
+    reason: "too many"
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/mail/cli.py` | Grant d-1234abcd +101 |
+EOF
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_BIND_F" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "declare +101 added cli/src/fno lines against a budget of 30 (config blueprint.python_repair_added_lines)" <<< "$OUTPUT"; then
+    pass "AC12f: over-budget Grant errors naming count, budget and key"
+else
+    fail "AC12f: expected the budget ERROR: $OUTPUT"
+fi
+
+# AC12g: a Grant row with no +N errors naming the missing size.
+PLAN_BIND_G="$TMPDIR_BASE/20990101-binding-g.md"
+sed 's/Grant d-1234abcd +101/Grant d-1234abcd/' "$PLAN_BIND_F" > "$PLAN_BIND_G"
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_BIND_G" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "with no declared size - write the row as Grant d-1234abcd +N" <<< "$OUTPUT"; then
+    pass "AC12g: unsized Grant errors naming the +N remedy"
+else
+    fail "AC12g: expected the missing-size ERROR: $OUTPUT"
+fi
+
+# AC12h: Grant rows are summed - one plan is one PR and the ceiling is the PR's.
+PLAN_BIND_H="$TMPDIR_BASE/20990101-binding-h.md"
+cat > "$PLAN_BIND_H" <<'EOF'
+---
+project: fno
+status: ready
+kind: quick-plan
+created: 2099-01-01
+difficulty: low
+join: manual
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
+kill_criteria:
+  - name: iteration_ceiling
+    predicate: iteration > 15
+    reason: "too many"
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/mail/cli.py` | Grant d-1234abcd +20 |
+| `cli/src/fno/mail/send.py` | Grant d-1234abcd +20 |
+EOF
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_BIND_H" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "declare +40 added cli/src/fno lines against a budget of 30" <<< "$OUTPUT"; then
+    pass "AC12h: Grant rows sum against the budget"
+else
+    fail "AC12h: expected the summed budget ERROR: $OUTPUT"
+fi
+
+# AC12i: a missing config key falls back to 30, so the gate still bites.
+FAILBIN="$TMPDIR_BASE/failbin"
+mkdir -p "$FAILBIN"
+{
+    echo '#!/bin/bash'
+    echo 'if [[ "${1:-} ${2:-}" == "backlog decisions" && "${3:-}" == "d-1234abcd" ]]; then'
+    echo '    echo "LIVE  LAW  d-1234abcd  2026-09-12T00:00:00Z  new-code-language  stub"'
+    echo '    exit 0'
+    echo 'fi'
+    echo 'exit 1'
+} > "$FAILBIN/fno"
+chmod +x "$FAILBIN/fno"
+PLAN_BIND_I="$TMPDIR_BASE/20990101-binding-i.md"
+sed 's/Grant d-1234abcd +101/Grant d-1234abcd +31/' "$PLAN_BIND_F" > "$PLAN_BIND_I"
+OUTPUT=$(PATH="$FAILBIN:$PATH" bash "$VALIDATE" "$PLAN_BIND_I" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "against a budget of 30" <<< "$OUTPUT"; then
+    pass "AC12i: unreadable config falls back to the 30-line budget"
+else
+    fail "AC12i: expected the fallback-budget ERROR: $OUTPUT"
 fi
 
 # --- Summary ---

@@ -141,11 +141,11 @@ Start the row's Action cell with one of three words:
 
 - `Port` - the behavior moves to `crates/`. The same table names the `crates/` row it lands in.
 - `Delete` - the row removes Python and adds none.
-- `Grant d-XXXXXXXX` - the operator ruled that this change can extend Python. The id must read `LIVE` in `fno backlog decisions <id>`.
+- `Grant d-XXXXXXXX +N` - the operator ruled that this change can extend Python. The id must read `LIVE` in `fno backlog decisions <id>`, and the row declares the added lines it spends as `+N`. The rows are summed against `config.blueprint.python_repair_added_lines` (default 30); a Grant with no `+N` is a finding.
 
 Any other action, such as `Modify` or `Create`, plans new Python. Move that change to `crates/` before you write the plan. A path cited only in prose writes nothing, so it does not trigger the gate.
 
-`scripts/validate-plan.sh` refuses a plan that breaks this rule. A plan created before the gate shipped gets a warning. `scripts/ci/check-file-budget.sh` stays as the push-time backstop: it refuses net Python growth past `PY_TREE_ALLOWANCE` (default 100), whatever the plan said. The allowance is a backstop, not a budget to plan against. Never state a net delta under it as the reason a Python row is fine.
+`scripts/validate-plan.sh` refuses a plan that breaks this rule. A plan created before the gate shipped gets a warning. `scripts/ci/check-file-budget.sh` stays as the push-time backstop: it refuses a change that ADDS more Python lines than `config.blueprint.python_repair_added_lines`, whatever the plan said, and deletions do not offset the count. The budget is a backstop, not a budget to plan against. Never state a net delta under it as the reason a Python row is fine.
 
 ## Answerer Enumeration Gate (graduated, every plan that changes a read, write, or feed)
 

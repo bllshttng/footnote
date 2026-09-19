@@ -114,6 +114,7 @@ FIELD_META: dict[str, Meta] = {
     ),
     # --- config.blueprint.* ---
     "blueprint.max_prs_per_epic": Meta("advanced", "Default cap on group PRs per decomposed epic; an epic plan-doc's max_children frontmatter overrides it per-epic and --max-prs may only tighten it."),
+    "blueprint.python_repair_added_lines": Meta("advanced", "Added lines a king-approved repair may add to cli/src/fno Python under law d-a9cddc93 (default 30). Added lines only: deletions do not offset, so larger work ports to crates/ even when it deletes more than it adds. Read by the plan gate in validate-plan.sh and by the push-time tally in check-file-budget.sh."),
     # --- config.backlog.* ---
     "backlog.maintain.staleness_days": Meta("advanced", "Age (days) before an idea is flagged stale."),
     "backlog.maintain.max_failed_attempts": Meta("advanced", "Consecutive failures before a node auto-defers."),

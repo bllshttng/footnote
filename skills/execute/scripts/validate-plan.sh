@@ -1535,6 +1535,16 @@ check_python_rows_file() {
         END { exit(found ? 0 : 1) }' "$file" && has_crates_row=1
 
     local path act word id
+    # One plan is one PR, and the ruling's ceiling is the PR's: every Grant
+    # row declares the added lines it spends as +N, and the rows are summed
+    # against the budget. Missing, empty or non-numeric config answers fall
+    # back to the ruling's starting value, so a checkout without the key
+    # still gates.
+    local grant_budget declared grant_total=0
+    # || true: the read fails on a checkout whose fno predates the key, which
+    # is the fallback case, never a reason to skip the plan's other findings.
+    grant_budget=$(fno config get blueprint.python_repair_added_lines 2>/dev/null | sed -n 1p || true)
+    [[ "$grant_budget" =~ ^[0-9]+$ ]] || grant_budget=30
     while IFS=$'\t' read -r path act; do
         [[ -z "$path" ]] && continue
         word=$(printf '%s' "$act" | sed -E 's/^[^A-Za-z]*//; s/[^A-Za-z].*$//' | tr '[:upper:]' '[:lower:]')
@@ -1546,11 +1556,20 @@ check_python_rows_file() {
                 id=$(printf '%s' "$act" | grep -oE 'd-[0-9a-f]{8}' | sed -n 1p || true)
                 if [[ -z "$id" ]] || ! fno backlog decisions "$id" 2>/dev/null | grep -qE "^LIVE[[:space:]].*$id"; then
                     findings+=("$path is a Grant, but ${id:-no decision id} reads no LIVE line in fno backlog decisions ${id:-<id>}")
+                fi
+                declared=$(printf '%s' "$act" | grep -oE '\+[0-9]+' | sed -n 1p || true)
+                if [[ -z "$declared" ]]; then
+                    findings+=("$path is a Grant naming $id with no declared size - write the row as Grant $id +N naming the added lines the ruling's budget covers, so the rows can be summed")
+                else
+                    grant_total=$((grant_total + ${declared#+}))
                 fi ;;
             *)
-                findings+=("$path is '$act'. New code lands in crates/, and cli/src/fno Python is only ported or deleted. Mark the row Port (with the crates/ row it lands in), Delete, or Grant d-XXXXXXXX naming a live operator ruling, or move the change to crates/") ;;
+                findings+=("$path is '$act'. New code lands in crates/, and cli/src/fno Python is only ported or deleted. Mark the row Port (with the crates/ row it lands in), Delete, or Grant d-XXXXXXXX +N naming a live operator ruling and the added lines it covers, or move the change to crates/") ;;
         esac
     done <<< "$rows"
+    if (( grant_total > grant_budget )); then
+        findings+=("the Grant rows declare +$grant_total added cli/src/fno lines against a budget of $grant_budget (config blueprint.python_repair_added_lines) - port the change to crates/, or cut it under the budget")
+    fi
     local s
     while IFS= read -r s; do
         [[ -z "$s" ]] && continue
