@@ -121,34 +121,6 @@ def _sandbox_project_spaces(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_SPACES_DIR", str(tmp_path / "spaces"))
 
 
-@pytest.fixture(autouse=True)
-def _sandbox_graph_store(tmp_path, monkeypatch):
-    """Keep every test off the live ``~/.fno`` graph store.
-
-    ``paths.graph_json()`` with no settings resolves the operator's real
-    store, and a store touch three layers under a test (a new
-    ``commit_rows_via_store`` call site, a stray keeper spawn) then imports,
-    stamps, or writes the real graph through this checkout's binary.
-    Measured 2026-09-18: a worktree status verb resolved a branch-built
-    worker against the live path and stamped it. Autouse because the touch
-    happens below any test that triggers it.
-
-    The pin rides HOME: the state_dir default derives from it, and every
-    test that installs its own home (the pr-watch, sidecar and worktree
-    fixtures) overwrites this one cleanly. A settings-file pin (FNO_CONFIG
-    or the global-slot override) instead would hide the repo-local and
-    HOME-pinned configs whole test files install and read back. Config
-    VALUES from a dev checkout's real repo-local config can still reach an
-    unpinned test; only CI sees the fully-empty config. The canonical-root
-    candidate is suppressed with the loader's own hermetic switch, so a
-    linked worktree's real config cannot outrank the tmp home either.
-    """
-    home = tmp_path / ".fno-home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("FNO_NO_CANONICAL_CONFIG", "1")
-
-
 @pytest.fixture
 def _no_global_tick_events(monkeypatch):
     """Capture pr-watch tick emissions instead of hitting the live events log.
