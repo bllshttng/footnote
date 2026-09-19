@@ -958,6 +958,14 @@ def _hermetic_resume_pin(monkeypatch):
         row = pin.get("row") or {}
         model = row.get("requested_model") or row.get("model")
         if model is None:
+            # A routed resume never refuses; the route owns the argv model.
+            if pin.get("routed"):
+                return {
+                    "model": None,
+                    "effort": row.get("effort"),
+                    "route_model": None,
+                    "source": "registry",
+                }
             return {"refusal": "stubbed: no model on the row"}
         if pin.get("routed"):
             return {
