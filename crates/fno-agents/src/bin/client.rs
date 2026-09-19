@@ -128,6 +128,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "task-context-show",
     "task-context-stage",
     "territory-rows",
+    "territory-stamp",
     "territory-verdict",
     "trace",
     "verify-evidence",
@@ -819,6 +820,9 @@ async fn run(args: Vec<String>) -> i32 {
     }
     if verb == "territory-verdict" {
         return fno_agents::spawn_gate::run_territory_verdict(&args[1..]);
+    }
+    if verb == "territory-stamp" {
+        return fno_agents::spawn_gate::run_territory_stamp(&args[1..]);
     }
 
     // `board`: the king board collector, read-only, daemon-free. Not a
