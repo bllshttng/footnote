@@ -157,13 +157,13 @@ def test_import_without_a_file_stamps_nothing_and_folds_later(tmp_path, monkeypa
         ).fetchone()
     assert stamped is None, "no archive file, no stamp: a restored file must still fold"
 
-    # The restored file arrives AFTER the first spawn: a fresh keeper (the
-    # fold probes once per process) must fold it and stamp v2.
+    # The restored file arrives AFTER the first open: the exec lane's
+    # one-shot child re-runs the import probes per request, so the next
+    # open folds it and stamps v2.
     (tmp_path / "graph-archive.json").write_text(
         json.dumps({"entries": [_row("x-late", archived_at="2026-08-01T00:00:00Z")]}),
         encoding="utf-8",
     )
-    store_mod.reap_spawned_keepers(timeout=15.0)
     store_mod._client_for(graph).request("api", {"op": "decisions"})
     rows = {r["id"] for r in wire_rows(path=graph, include_archived=True)}
     assert "x-late" in rows, "the later-restored archive folded on the next spawn"
@@ -195,7 +195,6 @@ def test_a_v1_poisoned_stamp_voids_and_the_file_folds(tmp_path, monkeypatch):
         json.dumps({"entries": [_row("x-v1", archived_at="2026-08-01T00:00:00Z")]}),
         encoding="utf-8",
     )
-    store_mod.reap_spawned_keepers(timeout=15.0)
     store_mod._client_for(graph).request("api", {"op": "decisions"})
     rows = {r["id"] for r in wire_rows(path=graph, include_archived=True)}
     assert "x-v1" in rows, "the v1 stamp did not block the fold"
