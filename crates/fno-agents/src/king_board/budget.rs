@@ -80,11 +80,24 @@ impl RunFailure {
 /// the real `fno` front door), which then keep writing into whatever HOME the
 /// caller staged - under test, a tempdir that dies with the test, recreating
 /// it after the drop (measured: 23.5 GB of leaked `.tmp*` fake-HOMEs).
+pub(crate) struct RunOutput {
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+}
+
 pub(crate) fn run_with_timeout(
     cmd: &[String],
     cwd: &Path,
     timeout: Duration,
 ) -> Result<Vec<u8>, RunFailure> {
+    run_with_timeout_full(cmd, cwd, timeout).map(|o| o.stdout)
+}
+
+pub(crate) fn run_with_timeout_full(
+    cmd: &[String],
+    cwd: &Path,
+    timeout: Duration,
+) -> Result<RunOutput, RunFailure> {
     use std::io::Read;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -142,7 +155,7 @@ pub(crate) fn run_with_timeout(
                         detail.chars().take(500).collect::<String>()
                     )));
                 }
-                return Ok(stdout);
+                return Ok(RunOutput { stdout, stderr });
             }
             Ok(None) => {
                 if Instant::now() >= deadline {

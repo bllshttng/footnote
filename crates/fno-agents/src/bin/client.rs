@@ -116,6 +116,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "spawn-gate",
     "spawn-overlay",
     "spawn-axes",
+    "launch-workdir",
     "fallback-chain",
     "state",
     "status",
@@ -645,6 +646,14 @@ async fn run(args: Vec<String>) -> i32 {
     // projects the seam's facts and applies the returned plan verbatim.
     if verb == "spawn-axes" {
         return fno_agents::spawn_axes::run_spawn_axes(&args[1..]);
+    }
+
+    // `launch-workdir`: the spawn door's launch-cwd resolution (see
+    // launch_workdir.rs doc). Direct dispatch; no daemon RPC. The Python
+    // node-seed path sends one JSON payload and reads the answer back; a
+    // `hold` answer is a valid exit-0 answer the caller renders.
+    if verb == "launch-workdir" {
+        return fno_agents::launch_workdir::run_launch_workdir(&args[1..]);
     }
 
     // `permission-tokens`: the one permission vocabulary and mappability
