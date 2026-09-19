@@ -18,22 +18,29 @@ use tempfile::TempDir;
 /// afterwards. A static mutex serializes the tests: the env var is
 /// process-global and a concurrent test removing it mid-run would send the
 /// gate at the LIVE machine registry, which these tests must never open.
-struct HomeGuard(std::sync::MutexGuard<'static, ()>, TempDir);
+struct HomeGuard {
+    // Held only for its Drop: while alive it serializes the tests against
+    // the process-global FNO_AGENTS_HOME env var. No test reads the lock
+    // itself, so the leading underscore (not #[allow(dead_code)]) is the
+    // honest marker - a poisoned-lock guard genuinely carries no data.
+    _lock: std::sync::MutexGuard<'static, ()>,
+    dir: TempDir,
+}
 
 impl HomeGuard {
     fn new() -> Self {
         static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         let lock = ENV_LOCK.get_or_init(|| std::sync::Mutex::new(()));
-        let guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let _lock = lock.lock().unwrap_or_else(|p| p.into_inner());
         let dir = TempDir::new().unwrap();
         std::env::set_var("FNO_AGENTS_HOME", dir.path());
-        HomeGuard(guard, dir)
+        HomeGuard { _lock, dir }
     }
 
     fn seed_registry(&self, rows: &[String]) {
-        fs::create_dir_all(self.1.path()).unwrap();
+        fs::create_dir_all(self.dir.path()).unwrap();
         fs::write(
-            self.1.path().join("registry.json"),
+            self.dir.path().join("registry.json"),
             format!(
                 r#"{{"schema_version":{},"agents":[{}]}}"#,
                 fno_agents::state::REGISTRY_SCHEMA_VERSION,
@@ -44,8 +51,8 @@ impl HomeGuard {
     }
 
     fn write_invalid_registry(&self) {
-        fs::create_dir_all(self.1.path()).unwrap();
-        fs::write(self.1.path().join("registry.json"), "not json at all {{{").unwrap();
+        fs::create_dir_all(self.dir.path()).unwrap();
+        fs::write(self.dir.path().join("registry.json"), "not json at all {{{").unwrap();
     }
 }
 
