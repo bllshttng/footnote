@@ -2157,6 +2157,82 @@ def _open_rows(rows: dict, url_owner: str = "test-owner/test-repo"):
     return lambda **kw: payload
 
 
+def test_open_pr_heal_rebinds_a_closed_primary(cli_env, tmp_path, monkeypatch):
+    """A node whose primary PR went CLOSED while its -v2 successor is open:
+    pr_number becomes the open PR and the closed id survives as the FIRST
+    additional ref - never dropped the way the hand heal dropped it."""
+    graph_path, _sentinel = cli_env
+    _make_graph(graph_path, [_node("ab-c1ea", pr_number=2150, cwd=str(tmp_path))])
+    monkeypatch.setattr(rec, "list_open_pr_branches", _open_rows({2151: "feature/ab-c1ea-v2"}))
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({2150: "CLOSED", 2151: "OPEN"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--json"])
+    assert result.exit_code == 0, result.output
+    entries = _read_entries(graph_path)
+    node = next(e for e in entries if e["id"] == "ab-c1ea")
+    assert node["pr_number"] == 2151
+    assert node["pr_url"].endswith("/pull/2151")
+    assert node["additional_prs"][0]["number"] == 2150
+
+
+def test_open_pr_heal_never_rebinds_an_open_primary(cli_env, tmp_path, monkeypatch):
+    """A node whose primary is itself open, plus a second open PR on its -v2
+    branch: the classifier reads the pairing ambiguous, so nothing moves."""
+    graph_path, _sentinel = cli_env
+    _make_graph(graph_path, [_node("ab-c2eb", pr_number=10, cwd=str(tmp_path))])
+    monkeypatch.setattr(
+        rec,
+        "list_open_pr_branches",
+        _open_rows({10: "feature/ab-c2eb", 11: "feature/ab-c2eb-v2"}),
+    )
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--json"])
+    assert result.exit_code == 0, result.output
+    entries = _read_entries(graph_path)
+    node = next(e for e in entries if e["id"] == "ab-c2eb")
+    assert node["pr_number"] == 10
+    assert node["additional_prs"] == []
+
+
+def test_open_pr_heal_never_rebinds_a_merged_primary(cli_env, tmp_path, monkeypatch):
+    """A MERGED primary is not rebound: the forward scan closes the node on
+    the merged ref, so the rebind has nothing to fix."""
+    graph_path, _sentinel = cli_env
+    _make_graph(graph_path, [_node("ab-c3fc", pr_number=20, cwd=str(tmp_path))])
+    monkeypatch.setattr(rec, "list_open_pr_branches", _open_rows({21: "feature/ab-c3fc-v2"}))
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({20: "MERGED"}))
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--json"])
+    assert result.exit_code == 0, result.output
+    entries = _read_entries(graph_path)
+    node = next(e for e in entries if e["id"] == "ab-c3fc")
+    assert node["pr_number"] == 20
+    assert node["additional_prs"] == []
+
+
+def test_open_pr_heal_rebind_is_dry_run_safe(cli_env, tmp_path, monkeypatch):
+    """--dry-run rebinds in memory only: the report names the would-be fill,
+    and the graph file never moves."""
+    graph_path, _sentinel = cli_env
+    _make_graph(graph_path, [_node("ab-c4ad", pr_number=30, cwd=str(tmp_path))])
+    monkeypatch.setattr(rec, "list_open_pr_branches", _open_rows({31: "feature/ab-c4ad-v2"}))
+    monkeypatch.setattr(rec, "query_pr_merge_state", _stub_query({30: "CLOSED", 31: "OPEN"}))
+    before = graph_path.read_bytes()
+
+    result = runner.invoke(app, ["backlog", "reconcile", "--dry-run", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["open_pr_bound"] == [
+        {
+            "node": "ab-c4ad",
+            "pr": 31,
+            "url": "https://github.com/test-owner/test-repo/pull/31",
+            "would": True,
+        }
+    ]
+    assert graph_path.read_bytes() == before
+
+
 def test_open_pr_heal_fills_an_unstamped_node(cli_env, tmp_path, monkeypatch):
     """AC3: an open PR on feature/<id> + that open node with no PR refs ->
     reconcile fills pr_number/pr_url, reports open_pr_bound, closes nothing."""
