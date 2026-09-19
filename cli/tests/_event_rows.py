@@ -21,9 +21,11 @@ from typing import Any, Optional
 
 def event_rows(events_path: Path, *, types: Optional[list[str]] = None) -> list[dict[str, Any]]:
     """Committed envelopes for one journal, optionally filtered by type."""
-    from fno.events.store_client import read_committed_lines, store_db_path
+    from fno.events.store_client import import_journal, read_committed_lines, store_db_path
 
     events_path = Path(events_path)
+    if events_path.exists() and events_path.stat().st_size > 0:
+        import_journal(events_path)
     if not store_db_path(events_path).exists():
         rows: list[dict[str, Any]] = []
         if events_path.exists():

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat as stat_module
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
@@ -56,6 +57,38 @@ def store_db_path(events_path: Path) -> Path:
     if stem.rsplit(".", 1)[-1].isdigit():
         stem = stem.rsplit(".", 1)[0]
     return resolved.with_name(f"{stem}.db")
+
+
+def import_journal(events_path: Path, *, timeout: float = 30) -> Optional[dict[str, Any]]:
+    """Ingest every uncommitted generation of the journal into the store.
+
+    Mirrors the Rust readers, which run the same sync before their queries:
+    seeded fixtures and pre-cutover bytes become visible to committed-row
+    readers. Best-effort by policy here; callers that must distinguish a
+    refused import raise on the receipt themselves.
+    """
+    events_path = Path(events_path)
+    try:
+        st = events_path.stat()
+        if not stat_module.S_ISREG(st.st_mode) or st.st_size == 0:
+            return None
+    except OSError:
+        return None
+    try:
+        bin_path = resolve_native_bin()
+    except EventStoreUnavailable:
+        return None
+    cmd = [bin_path, "doctor", "event", "import", "--events", str(events_path)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
 
 
 def read_committed_lines(events_path: Path) -> list[str]:

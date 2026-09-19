@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 /// The verbs the native surface serves today. `find`/`audit`/`gc` join when
 /// their Python output contracts are ported (reader cutover wave).
-pub const NATIVE_EVENT_SUBCOMMANDS: &[&str] = &["emit-envelope", "export"];
+pub const NATIVE_EVENT_SUBCOMMANDS: &[&str] = &["emit-envelope", "export", "import"];
 
 /// Classify `fno doctor event <sub> ...` for the front door: `Some(rest)`
 /// runs natively, `None` forwards to the Python CLI.
@@ -38,8 +38,9 @@ pub fn run(args: &[OsString]) -> i32 {
     match sub {
         "emit-envelope" => run_emit_envelope(rest),
         "export" => run_export(rest),
+        "import" => run_import(rest),
         _ => {
-            eprintln!("error: expected a subcommand (emit-envelope | export)");
+            eprintln!("error: expected a subcommand (emit-envelope | export | import)");
             2
         }
     }
@@ -90,6 +91,46 @@ fn run_emit_envelope(args: &[OsString]) -> i32 {
                 "inserted": r.inserted,
             });
             println!("{receipt}");
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+/// Ingest every uncommitted generation of the journal into the store, the
+/// same sync the Rust readers run before their queries. Python readers call
+/// this before reading so seeded fixtures and pre-cutover bytes are visible.
+fn run_import(args: &[OsString]) -> i32 {
+    let mut journal: Option<PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(tok) = it.next() {
+        let tok = match tok.to_str() {
+            Some(t) => t,
+            None => continue,
+        };
+        if tok == "--events" {
+            journal = it.next().map(PathBuf::from);
+        }
+    }
+    let journal = match journal {
+        Some(j) => j,
+        None => {
+            eprintln!("error: --events is required");
+            return 2;
+        }
+    };
+    match fno_event_store::import_all(&journal) {
+        Ok(receipt) => {
+            let payload = serde_json::json!({
+                "success": true,
+                "store": receipt.store.display().to_string(),
+                "ingested": receipt.ingested,
+                "corrupt": receipt.corrupt,
+            });
+            println!("{payload}");
             0
         }
         Err(e) => {

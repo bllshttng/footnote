@@ -264,6 +264,32 @@ def append_question_event(event: dict[str, Any], root: Path) -> None:
 
 def _read_question_events(path: Path, *, missing_hint: bool) -> "list[dict[str, Any]]":
     """Read valid question envelopes, distinguishing absent from unreadable."""
+    # The store commit is the write boundary: with a store beside the index,
+    # committed rows are the whole history and the raw check never runs.
+    from fno.events.store_client import import_journal, read_committed_lines, store_db_path
+
+    try:
+        if path.stat().st_size > 0:
+            import_journal(path)
+    except OSError:
+        pass
+    if store_db_path(path).exists():
+        events: "list[dict[str, Any]]" = []
+        for line in read_committed_lines(path):
+            try:
+                rec = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(rec, dict) or rec.get("type") not in {
+                QUESTION_EVENT,
+                QUESTION_CLOSED_EVENT,
+                "operator_decision",
+            }:
+                continue
+            data = rec.get("data")
+            if isinstance(data, dict) and data.get("question_id"):
+                events.append(rec)
+        return events
     try:
         path.stat()
     except FileNotFoundError:
@@ -283,23 +309,22 @@ def _read_question_events(path: Path, *, missing_hint: bool) -> "list[dict[str, 
     except OSError as exc:
         raise OutstandingError(f"cannot read question index {path}: {exc}") from exc
 
-    events: "list[dict[str, Any]]" = []
+    events = []
     try:
-        with path.open(encoding="utf-8") as fh:
-            for line in _iter_question_lines(fh):
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if not isinstance(rec, dict) or rec.get("type") not in {
-                    QUESTION_EVENT,
-                    QUESTION_CLOSED_EVENT,
-                    "operator_decision",
-                }:
-                    continue
-                data = rec.get("data")
-                if isinstance(data, dict) and data.get("question_id"):
-                    events.append(rec)
+        for line in _iter_question_lines(path.read_text(encoding="utf-8").splitlines()):
+            try:
+                rec = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(rec, dict) or rec.get("type") not in {
+                QUESTION_EVENT,
+                QUESTION_CLOSED_EVENT,
+                "operator_decision",
+            }:
+                continue
+            data = rec.get("data")
+            if isinstance(data, dict) and data.get("question_id"):
+                events.append(rec)
     except (OSError, UnicodeDecodeError) as exc:
         raise OutstandingError(f"cannot read question index {path}: {exc}") from exc
     return events
