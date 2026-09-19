@@ -329,6 +329,7 @@ fn run_build_admit(args: &[String]) -> i32 {
     // The reason is decided inside the wait (a takeover) but read by opts,
     // so it travels through a RefCell the two closures share.
     let takeover_reason = std::cell::RefCell::new(None::<String>);
+
     let opts = |_: usize| crate::claims::AcquireOpts {
         pid: Some(cargo_pid),
         reason: Some(
@@ -351,6 +352,12 @@ fn run_build_admit(args: &[String]) -> i32 {
             // which is how two waiters racing stay safe) and let the next
             // poll acquire.
             let compiling = holder_compiling_map(parent, table, holder_pid as u32)?;
+            // A takeover reason names the holder it displaced. When the
+            // claim passes to a different holder, the guard resets, so this
+            // waiter can still take over the new holder when it idles.
+            if idle.holder().is_some_and(|seen| seen != h.as_str()) {
+                *takeover_reason.borrow_mut() = None;
+            }
             let idle_for = idle.observe(h, compiling, Instant::now());
             if idle_for >= build_idle_window() && takeover_reason.borrow().is_none() {
                 let waited = idle_for.as_secs();
@@ -676,6 +683,9 @@ fn runs_under_map(
         })
 }
 
+/// Test-shape wrappers over the map-taking walks. Production callers build
+/// the parent map once per scan and route through the `_map` forms.
+#[cfg(test)]
 fn runs_under(
     rows: &[crate::census::ProcRow],
     holder_pid: u32,
@@ -693,6 +703,7 @@ fn is_cargo_row(row: &crate::census::ProcRow) -> bool {
 }
 
 /// True when a `cargo` process other than `holder_pid` runs under it.
+#[cfg(test)]
 fn runs_nested_cargo(rows: &[crate::census::ProcRow], holder_pid: u32) -> bool {
     runs_under(rows, holder_pid, is_cargo_row)
 }
@@ -719,6 +730,7 @@ fn is_compile(row: &crate::census::ProcRow) -> bool {
 /// Whether the holder cargo shows a compile process. `None` when the table
 /// cannot see the holder at all, so an invisible holder is never read as
 /// idle. `Some(false)` means the holder has no compile under it right now.
+#[cfg(test)]
 fn holder_compiling(rows: &[crate::census::ProcRow], holder_pid: u32) -> Option<bool> {
     holder_compiling_map(&parent_map(rows), rows, holder_pid)
 }
@@ -762,6 +774,9 @@ impl HolderIdle {
             self.since = now;
         }
         now - self.since
+    }
+    fn holder(&self) -> Option<&str> {
+        self.holder.as_deref()
     }
 }
 

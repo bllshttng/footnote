@@ -38,10 +38,10 @@ admit() {
 }
 
 # The execute door: cargo calls this script with --run before every test
-# binary and doctest (the [target.'cfg(all())'] runner line), the same way
-# it calls it without --run before every compile. One admission contract at
-# both doors: a slot keyed to the cargo pid, no TTL, free on cargo exit; a
-# signal that stops the wait stops the compile or run too.
+# binary and doctest (the macOS triple runner lines in .cargo/config.toml),
+# the same way it calls it without --run before every compile. One admission
+# contract at both doors: a slot keyed to the cargo pid, no TTL, free on
+# cargo exit; a signal that stops the wait stops the compile or run too.
 if [[ "${1:-}" == "--run" ]]; then
     shift
     if [[ $# -eq 0 ]]; then
