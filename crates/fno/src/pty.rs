@@ -1295,7 +1295,16 @@ fn spawn_keeper_reader(
             }
             exited.store(true, Ordering::Release);
             reader_done.store(true, Ordering::Release);
-            let _ = exit_tx.blocking_send(pane_id);
+            // The lost-exit fault seam, mirrored from the Local reader: a
+            // keeper pane's exit is a notification too, so the defensive
+            // reaper's sweep is exercisable for it the same way.
+            if std::env::var_os("FNO_E2E").is_some()
+                && std::env::var_os("FNO_E2E_DROP_PTY_EXIT").is_some()
+            {
+                eprintln!("fno mux e2e: deliberately dropped exit for pane {pane_id}");
+            } else {
+                let _ = exit_tx.blocking_send(pane_id);
+            }
         })
         .expect("spawn keeper reader thread");
 }
