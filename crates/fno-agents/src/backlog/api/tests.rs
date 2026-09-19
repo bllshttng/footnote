@@ -726,8 +726,7 @@ fn readers_follow_store_rows_reflect_mutations() {
 
 #[test]
 fn api_session_end_writes_an_explicit_instant_on_both_fill_branches() {
-    let (_d1, _d2, json_store, _sqlite_store) = both_stores();
-    let store = &json_store;
+    let (_d1, ref store) = one_store();
     session_append(store, "ab-one", session_row("s-explicit")).unwrap();
     let payload = session_end(
         store,
@@ -775,7 +774,7 @@ fn api_session_end_writes_an_explicit_instant_on_both_fill_branches() {
     )
     .unwrap();
     assert!(payload.success);
-    let entries = rows(store).unwrap();
+    let entries = rows(store, true).unwrap();
     let raw = entries
         .iter()
         .find(|e| crate::graph_store::entry_id(e) == Some("ab-raw1"))
