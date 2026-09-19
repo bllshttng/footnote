@@ -561,7 +561,7 @@ class PrRowBindResult:
         return [
             binding.node_id
             for binding in self.bindings
-            if binding.action in ("filled_primary", "appended_additional", "rebound_primary")
+            if binding.action in ("filled_primary", "appended_additional")
         ]
 
 
@@ -647,7 +647,7 @@ def bind_pr_rows(
             old = {"number": node["pr_number"], "url": node.get("pr_url")}
             node["additional_prs"] = [old, *(node.get("additional_prs") or [])]
             node["pr_number"], node["pr_url"], node["merge_status"] = pr_number, pr_url, None
-            action = "rebound_primary"
+            action = "appended_additional"
         elif not isinstance(node.get("pr_number"), int):
             node["pr_number"] = pr_number
             node["pr_url"] = pr_url
@@ -2021,10 +2021,8 @@ def collect_open_binding_heals(
     heals: list[OpenPrBinding] = []
     advisories: list[str] = []
     _deadline = time.monotonic() + REVERSE_MAP_BUDGET_S
-
     def _primary_closed(node, cwd) -> bool:
-        number = node.get("pr_number")
-        if not isinstance(number, int):
+        if not isinstance(number := node.get("pr_number"), int):
             return False
         try:
             return query_pr_merge_state(number, cwd=cwd).state == "CLOSED"

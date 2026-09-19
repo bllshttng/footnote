@@ -9095,9 +9095,7 @@ def _reconcile_once(
                         (entry for entry in _entries if entry.get("id") == h.node_id),
                         None,
                     )
-                    if current is None or not node_is_open(current) or (
-                        node_pr_refs(current) and h.verdict != "rebind"
-                    ):
+                    if current is None or not node_is_open(current) or (node_pr_refs(current) and h.verdict != "rebind"):
                         continue
                     result = bind_pr_rows(
                         _entries, [h.node_id], pr_number=h.pr_number,
