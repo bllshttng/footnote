@@ -518,6 +518,32 @@ pub fn orphan_min_elapsed_secs(cwd: &Path) -> u64 {
     .unwrap_or(DEFAULT_ORPHAN_MIN_ELAPSED_SECS)
 }
 
+/// The default run-slot cap for [`max_cargo_runs`]: how many cargo runs may
+/// hold the machine at once (compile or execute doors together).
+pub const DEFAULT_MAX_CARGO_RUNS: u32 = 2;
+
+/// Resolve `test.max_cargo_runs` for the cargo run-slot admission, same
+/// precedence + fail-open degrade as [`orphan_min_elapsed_secs`]: a value
+/// below 1, or one that is not an integer, gives the default, so a typo
+/// never walls off every cargo on the machine.
+pub fn max_cargo_runs(cwd: &Path) -> u32 {
+    resolve(cwd, table_max_cargo_runs).unwrap_or(DEFAULT_MAX_CARGO_RUNS)
+}
+
+fn table_max_cargo_runs(t: &toml::Table) -> Option<u32> {
+    t.get("test")?
+        .as_table()?
+        .get("max_cargo_runs")?
+        .as_integer()
+        .and_then(|i| u32::try_from(i).ok())
+        .filter(|v| *v > 0)
+}
+
+#[cfg(test)]
+pub(crate) fn read_max_cargo_runs(content: &str) -> Option<u32> {
+    table_max_cargo_runs(&parse_config(content)?)
+}
+
 /// Resolve `agents.reap_receipts.retain_days` for the GC sweep's receipt
 /// expiry, same precedence + fail-open degrade as [`retire_grace_secs`]:
 /// an unparseable value degrades to the default rather than deleting every
@@ -1615,6 +1641,25 @@ mod tests {
         assert_eq!(
             open_work_retire_secs(Path::new("/nonexistent-open-work")),
             DEFAULT_OPEN_WORK_RETIRE_SECS
+        );
+    }
+
+    // change 1.1: the run-slot cap reads test.max_cargo_runs and fails open
+    // to the default, so a typo or a 0 never walls off every cargo.
+    #[test]
+    fn max_cargo_runs_reads_test_block_and_coerces_invalid_to_default() {
+        assert_eq!(read_max_cargo_runs("[test]\nmax_cargo_runs = 3\n"), Some(3));
+        // No block, wrong type, 0, negative: all absence, so the default wins.
+        assert_eq!(read_max_cargo_runs("schema_version = 1\n"), None);
+        assert_eq!(
+            read_max_cargo_runs("[test]\nmax_cargo_runs = \"3\"\n"),
+            None
+        );
+        assert_eq!(read_max_cargo_runs("[test]\nmax_cargo_runs = 0\n"), None);
+        assert_eq!(read_max_cargo_runs("[test]\nmax_cargo_runs = -1\n"), None);
+        assert_eq!(
+            max_cargo_runs(Path::new("/nonexistent-max-cargo-runs")),
+            DEFAULT_MAX_CARGO_RUNS
         );
     }
 

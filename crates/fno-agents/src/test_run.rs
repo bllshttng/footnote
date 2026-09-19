@@ -29,8 +29,13 @@ const SUITE_CLAIM_KEY: &str = "test:suite";
 const BUILD_CLAIM_KEY: &str = "build:cargo";
 /// How often a held build repeats its holding line on stderr.
 const BUILD_HOLD_NOTICE: Duration = Duration::from_secs(30);
-/// How often a held build scans for a cargo nested under the holder.
+/// How often a held build scans for a cargo nested under the holder, and for
+/// whether the holder is still compiling.
 const NESTED_SCAN_INTERVAL: Duration = Duration::from_secs(5);
+/// How long a build-admit waiter lets the holder cargo run no compile before
+/// it takes the slot. Compilation is what needs one-at-a-time; a test run
+/// does not.
+const BUILD_IDLE_TAKEOVER: Duration = Duration::from_secs(30);
 /// Grace window for a SIGTERM to land before escalating to SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(3);
 /// Poll interval while waiting on a held admission claim or the child.
@@ -217,31 +222,37 @@ enum OnHeld {
     Stop(i32),
 }
 
-/// Block until `key` is ours, or `on_held` admits or stops. A contender
-/// spawns ZERO workers while waiting: the loop returns before any `Command`
-/// is built.
+/// Block until one of `keys` is ours, or `on_held` admits or stops. Each
+/// poll tries the keys in order and returns on the first acquire; when every
+/// key refuses, `on_held` sees every refused `(holder, pid, host)` row. A
+/// contender spawns ZERO workers while waiting: the loop returns before any
+/// `Command` is built.
 fn acquire_claim_blocking(
-    key: &str,
+    keys: &[String],
     holder: &str,
-    opts: impl Fn() -> crate::claims::AcquireOpts,
-    mut on_held: impl FnMut(String, Option<i32>, String) -> OnHeld,
+    opts: impl Fn(usize) -> crate::claims::AcquireOpts,
+    mut on_held: impl FnMut(&[(String, Option<i32>, String)]) -> OnHeld,
 ) -> Result<(), i32> {
     loop {
-        match crate::claims::acquire(key, holder, opts()) {
-            crate::claims::AcquireOutcome::Acquired(_) => return Ok(()),
-            crate::claims::AcquireOutcome::HeldByOther {
-                holder: h,
-                pid,
-                host,
-            } => match on_held(h, pid, host) {
-                OnHeld::Wait => std::thread::sleep(POLL_INTERVAL.max(Duration::from_millis(500))),
-                OnHeld::Admit => return Ok(()),
-                OnHeld::Stop(code) => return Err(code),
-            },
-            crate::claims::AcquireOutcome::Error(e) => {
-                eprintln!("fno-agents test-run: claim error: {e}");
-                return Err(2);
+        let mut held: Vec<(String, Option<i32>, String)> = Vec::with_capacity(keys.len());
+        for (i, key) in keys.iter().enumerate() {
+            match crate::claims::acquire(key, holder, opts(i)) {
+                crate::claims::AcquireOutcome::Acquired(_) => return Ok(()),
+                crate::claims::AcquireOutcome::HeldByOther {
+                    holder: h,
+                    pid,
+                    host,
+                } => held.push((h, pid, host)),
+                crate::claims::AcquireOutcome::Error(e) => {
+                    eprintln!("fno-agents test-run: claim error: {e}");
+                    return Err(2);
+                }
             }
+        }
+        match on_held(&held) {
+            OnHeld::Wait => std::thread::sleep(POLL_INTERVAL.max(Duration::from_millis(500))),
+            OnHeld::Admit => return Ok(()),
+            OnHeld::Stop(code) => return Err(code),
         }
     }
 }
@@ -252,15 +263,22 @@ fn acquire_suite_claim(
     root: Option<&Path>,
     deadline: Instant,
 ) -> Result<(), i32> {
-    let opts = || crate::claims::AcquireOpts {
+    let opts = |_: usize| crate::claims::AcquireOpts {
         pid: Some(std::process::id()),
         ttl_ms: Some(3_600_000),
         reason: Some("test-run".to_string()),
         root: root.map(PathBuf::from),
         ..Default::default()
     };
-    acquire_claim_blocking(SUITE_CLAIM_KEY, holder, opts, |h, pid, host| {
-        let fields = [("holder", h), ("pid", format!("{pid:?}")), ("host", host)];
+    acquire_claim_blocking(&[SUITE_CLAIM_KEY.to_string()], holder, opts, |rows| {
+        let Some((h, pid, host)) = rows.first() else {
+            return OnHeld::Wait;
+        };
+        let fields = [
+            ("holder", h.to_string()),
+            ("pid", format!("{pid:?}")),
+            ("host", host.to_string()),
+        ];
         if Instant::now() >= deadline {
             emit(run_id, "suite_wait_timeout", &fields);
             return OnHeld::Stop(124);
@@ -274,10 +292,13 @@ fn acquire_suite_claim(
 /// calls this before every compile. One cargo per machine holds
 /// `build:cargo`; the claim carries the cargo pid and no TTL, so it frees
 /// itself the moment that cargo exits. A TTL would keep a dead cargo's claim
-/// Suspect, and so refused, until the TTL ran out.
+/// Suspect, and so refused, until the TTL ran out. Compilation is what needs
+/// one-at-a-time, so a waiter also takes the claim from a holder cargo that
+/// has run no compile process for [`BUILD_IDLE_TAKEOVER`] - a cargo in its
+/// test phase, or a `cargo run` program, walls nothing for long.
 fn run_build_admit(args: &[String]) -> i32 {
     install_signal_handlers();
-    let (cargo_pid, worktree) = match parse_build_admit_args(args) {
+    let (cargo_pid, worktree) = match parse_cargo_admit_args(args) {
         Ok(parsed) => parsed,
         Err(e) => {
             eprintln!("fno-agents test-run build-admit: {e}");
@@ -297,69 +318,245 @@ fn run_build_admit(args: &[String]) -> i32 {
         }
     }
 
-    let marker = crate::claims::build_waiters_dir().map(|dir| {
-        dir.join(format!(
-            "{}.json",
-            crate::claims::encode_key(&worktree.to_string_lossy())
-        ))
-    });
-    let started = Instant::now();
-    let mut last_notice: Option<Instant> = None;
-    let mut last_nested_scan: Option<Instant> = None;
-    let mut marked = false;
-    let opts = || crate::claims::AcquireOpts {
+    // Lock order: a run slot first, then build:cargo, so no cargo ever waits
+    // on build:cargo while it holds no slot.
+    if let Err(code) = admit_run_slot(cargo_pid, &worktree) {
+        return code;
+    }
+
+    let mut wait = CargoWait::new(cargo_pid, &worktree);
+    let mut idle = HolderIdle::new();
+    // The reason is decided inside the wait (a takeover) but read by opts,
+    // so it travels through a RefCell the two closures share.
+    let takeover_reason = std::cell::RefCell::new(None::<String>);
+
+    let opts = |_: usize| crate::claims::AcquireOpts {
         pid: Some(cargo_pid),
-        reason: Some("cargo build".to_string()),
+        reason: Some(
+            takeover_reason
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| "cargo build".to_string()),
+        ),
         events_dir: Some(worktree.clone()),
         ..Default::default()
     };
-    let result = acquire_claim_blocking(BUILD_CLAIM_KEY, &holder, opts, |h, pid, _host| {
-        if pid.is_some_and(|p| p > 0 && is_self_or_ancestor(p as u32, cargo_pid)) {
-            return OnHeld::Admit;
-        }
-        // Cargo takes its build-dir lock before it calls the wrapper. A cargo
-        // under the holder can wait on the lock this cargo holds, and then
-        // each waits on the other forever. The waiter yields instead, and the
-        // two builds overlap only while the holder runs its nested cargo.
-        if last_nested_scan.is_none_or(|t| t.elapsed() >= NESTED_SCAN_INTERVAL) {
-            last_nested_scan = Some(Instant::now());
-            if pid.is_some_and(|p| {
-                p > 0 && runs_nested_cargo(&crate::census::process_table().0, p as u32)
-            }) {
-                return OnHeld::Admit;
+    let result = acquire_claim_blocking(&[BUILD_CLAIM_KEY.to_string()], &holder, opts, |rows| {
+        let mut scan = |table: &[crate::census::ProcRow], parent: &ParentMap| -> Option<OnHeld> {
+            let (h, pid, _) = rows.first()?;
+            let holder_pid = (*pid).filter(|p| *p > 0)?;
+            // A holder that has stopped compiling keeps the slot for no
+            // one. Feed the idle clock on the scan poll_held already makes;
+            // when the window is out, release the holder's claim by its
+            // exact holder string (a holder mismatch is a silent no-op,
+            // which is how two waiters racing stay safe) and let the next
+            // poll acquire.
+            let compiling = holder_compiling_map(parent, table, holder_pid as u32)?;
+            // A takeover reason names the holder it displaced. When the
+            // claim passes to a different holder, the guard resets, so this
+            // waiter can still take over the new holder when it idles.
+            if idle.holder().is_some_and(|seen| seen != h.as_str()) {
+                *takeover_reason.borrow_mut() = None;
             }
-        }
-        if let Some(sig) = received_signal() {
-            return OnHeld::Stop(128 + sig);
-        }
-        if !marked {
-            if let Some(path) = &marker {
-                write_waiter_marker(path, cargo_pid, &worktree, &h);
+            let idle_for = idle.observe(h, compiling, Instant::now());
+            if idle_for >= build_idle_window() && takeover_reason.borrow().is_none() {
+                let waited = idle_for.as_secs();
+                eprintln!(
+                    "cargo admission: taking over; {h} (pid {holder_pid}) ran no compile for {waited}s"
+                );
+                let _ = crate::claims::release(BUILD_CLAIM_KEY, h, None, Some(&worktree));
+                *takeover_reason.borrow_mut() = Some(format!(
+                    "cargo build; took over from {h}, no compile for {waited}s"
+                ));
             }
-            marked = true;
-        }
-        if last_notice.is_none_or(|t| t.elapsed() >= BUILD_HOLD_NOTICE) {
-            eprintln!(
-                "cargo admission: holding; {h} is building (pid {}, waited {}s)",
-                pid.map_or("?".to_string(), |p| p.to_string()),
-                started.elapsed().as_secs()
-            );
-            last_notice = Some(Instant::now());
-        }
-        OnHeld::Wait
+            None
+        };
+        wait.poll_held(rows, None, Some(&mut scan))
     });
-    if marked {
-        if let Some(path) = &marker {
-            let _ = std::fs::remove_file(path);
-        }
-    }
+    wait.clear_marker();
     match result {
         Ok(()) => 0,
         Err(code) => code,
     }
 }
 
-fn parse_build_admit_args(args: &[String]) -> Result<(u32, PathBuf), String> {
+/// `test-run run-admit --cargo-pid PID --worktree PATH`: the cargo target
+/// runner calls this before every test binary and doctest. The cargo holds
+/// one of `test.max_cargo_runs` machine-wide run slots (`test:cargo-run:<i>`),
+/// keyed to its pid with no TTL, so the slot frees when the cargo exits. The
+/// status pass writes nothing: a slot already naming this holder, or one
+/// whose pid is this cargo or an ancestor (a nested cargo, a doctest's
+/// rustdoc), admits at once without a second claim.
+fn admit_run_slot(cargo_pid: u32, worktree: &Path) -> Result<(), i32> {
+    install_signal_handlers();
+    let worktree = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    let holder = format!("cargo:{}:{cargo_pid}", worktree.display());
+    let cap = crate::agents_config::max_cargo_runs(&worktree) as usize;
+    let keys: Vec<String> = (0..cap).map(|i| format!("test:cargo-run:{i}")).collect();
+
+    for key in &keys {
+        if let (crate::claims::ClaimState::Live, Some(rec)) = crate::claims::status(key, None) {
+            let ancestor = rec
+                .pid
+                .is_some_and(|p| p > 0 && is_self_or_ancestor(p as u32, cargo_pid));
+            if rec.holder == holder || ancestor {
+                return Ok(());
+            }
+        }
+    }
+
+    let mut wait = CargoWait::new(cargo_pid, &worktree);
+    let started = wait.started;
+    let opts = |i: usize| crate::claims::AcquireOpts {
+        pid: Some(cargo_pid),
+        reason: Some(format!(
+            "cargo run slot {i} of {cap}, waited {}s",
+            started.elapsed().as_secs()
+        )),
+        events_dir: Some(worktree.clone()),
+        ..Default::default()
+    };
+    let result = acquire_claim_blocking(&keys, &holder, opts, |rows| {
+        wait.poll_held(rows, Some((cap, "cargo run slots")), None)
+    });
+    wait.clear_marker();
+    result
+}
+
+/// Parse and wait for a `run-admit` ask. Exits with the admission's code;
+/// the wrapper execs the test binary only on 0.
+fn run_run_admit(args: &[String]) -> i32 {
+    let (cargo_pid, worktree) = match parse_cargo_admit_args(args) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!("fno-agents test-run run-admit: {e}");
+            return 2;
+        }
+    };
+    match admit_run_slot(cargo_pid, &worktree) {
+        Ok(()) => 0,
+        Err(code) => code,
+    }
+}
+
+/// The shared wait state of a cargo admission waiter: which cargo it stands
+/// for, its waiter marker, and the notice and scan throttles. Both doors
+/// poll through [`Self::poll_held`], so a verdict on a holder is decided
+/// once, not per door.
+struct CargoWait {
+    cargo_pid: u32,
+    worktree: PathBuf,
+    marker: Option<PathBuf>,
+    marked: bool,
+    last_notice: Option<Instant>,
+    last_scan: Option<Instant>,
+    started: Instant,
+}
+
+impl CargoWait {
+    fn new(cargo_pid: u32, worktree: &Path) -> Self {
+        let marker = crate::claims::build_waiters_dir().map(|dir| {
+            dir.join(format!(
+                "{}.json",
+                crate::claims::encode_key(&worktree.to_string_lossy())
+            ))
+        });
+        Self {
+            cargo_pid,
+            worktree: worktree.to_path_buf(),
+            marker,
+            marked: false,
+            last_notice: None,
+            last_scan: None,
+            started: Instant::now(),
+        }
+    }
+
+    /// One poll of a held admission: the wait policy both cargo doors share.
+    /// Admit when a holder pid is this cargo or an ancestor; every
+    /// [`NESTED_SCAN_INTERVAL`], admit when a holder runs a nested cargo, and
+    /// hand `scan_hook` the same process-table read (the build door's idle
+    /// takeover rides it); stop with `128 + signal` on SIGINT or SIGTERM;
+    /// write the waiter marker once; name every holder at most every
+    /// [`BUILD_HOLD_NOTICE`]. `slot_context` is `Some((cap, label))` for the
+    /// run-slot pool, `None` for the build claim.
+    fn poll_held(
+        &mut self,
+        rows: &[(String, Option<i32>, String)],
+        slot_context: Option<(usize, &'static str)>,
+        scan_hook: Option<&mut dyn FnMut(&[crate::census::ProcRow], &ParentMap) -> Option<OnHeld>>,
+    ) -> OnHeld {
+        for (_, pid, _) in rows {
+            if pid.is_some_and(|p| p > 0 && is_self_or_ancestor(p as u32, self.cargo_pid)) {
+                return OnHeld::Admit;
+            }
+        }
+        if self
+            .last_scan
+            .is_none_or(|t| t.elapsed() >= NESTED_SCAN_INTERVAL)
+        {
+            self.last_scan = Some(Instant::now());
+            let table = crate::census::process_table().0;
+            let parent = parent_map(&table);
+            for (_, pid, _) in rows {
+                if pid.is_some_and(|p| {
+                    p > 0 && runs_under_map(&parent, &table, p as u32, is_cargo_row)
+                }) {
+                    return OnHeld::Admit;
+                }
+            }
+            if let Some(hook) = scan_hook {
+                if let Some(verdict) = hook(&table, &parent) {
+                    return verdict;
+                }
+            }
+        }
+        if let Some(sig) = received_signal() {
+            return OnHeld::Stop(128 + sig);
+        }
+        if !self.marked {
+            if let (Some(path), Some((holder, _, _))) = (&self.marker, rows.first()) {
+                write_waiter_marker(path, self.cargo_pid, &self.worktree, holder);
+            }
+            self.marked = true;
+        }
+        if self
+            .last_notice
+            .is_none_or(|t| t.elapsed() >= BUILD_HOLD_NOTICE)
+        {
+            let held = rows
+                .iter()
+                .map(|(h, pid, _)| {
+                    format!(
+                        "{h} (pid {})",
+                        pid.map_or("?".to_string(), |p| p.to_string())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let context = slot_context
+                .map(|(cap, label)| format!("{} of {cap} {label} held by ", rows.len()))
+                .unwrap_or_default();
+            eprintln!(
+                "cargo admission: holding; {context}{held}; waited {}s",
+                self.started.elapsed().as_secs()
+            );
+            self.last_notice = Some(Instant::now());
+        }
+        OnHeld::Wait
+    }
+
+    fn clear_marker(&mut self) {
+        if self.marked {
+            if let Some(path) = &self.marker {
+                let _ = std::fs::remove_file(path);
+            }
+            self.marked = false;
+        }
+    }
+}
+
+fn parse_cargo_admit_args(args: &[String]) -> Result<(u32, PathBuf), String> {
     let mut cargo_pid = None;
     let mut worktree = None;
     let mut i = 0;
@@ -451,18 +648,26 @@ fn live_waiter_hold(dir: &Path, checkout: &Path) -> Option<String> {
     ))
 }
 
-/// True when a `cargo` process other than `holder_pid` runs under it.
-fn runs_nested_cargo(rows: &[crate::census::ProcRow], holder_pid: u32) -> bool {
-    let parent: std::collections::HashMap<u32, u32> =
-        rows.iter().map(|row| (row.pid, row.ppid)).collect();
+/// The pid->ppid map over one process-table read, shared by every predicate
+/// that read feeds.
+type ParentMap = std::collections::HashMap<u32, u32>;
+
+fn parent_map(rows: &[crate::census::ProcRow]) -> ParentMap {
+    rows.iter().map(|row| (row.pid, row.ppid)).collect()
+}
+
+/// True when some process other than the holder itself, matching `pred`,
+/// sits anywhere under `holder_pid` in the process table. The walk follows
+/// each matching row's ppid chain, at most 64 hops.
+fn runs_under_map(
+    parent: &ParentMap,
+    rows: &[crate::census::ProcRow],
+    holder_pid: u32,
+    pred: impl Fn(&crate::census::ProcRow) -> bool,
+) -> bool {
     rows.iter()
         .filter(|row| row.pid != holder_pid)
-        .filter(|row| {
-            let argv0 = row.command.split_whitespace().next().unwrap_or("");
-            Path::new(argv0)
-                .file_name()
-                .is_some_and(|name| name == "cargo")
-        })
+        .filter(|row| pred(row))
         .any(|row| {
             let mut current = row.ppid;
             for _ in 0..64 {
@@ -476,6 +681,103 @@ fn runs_nested_cargo(rows: &[crate::census::ProcRow], holder_pid: u32) -> bool {
             }
             false
         })
+}
+
+/// Test-shape wrappers over the map-taking walks. Production callers build
+/// the parent map once per scan and route through the `_map` forms.
+#[cfg(test)]
+fn runs_under(
+    rows: &[crate::census::ProcRow],
+    holder_pid: u32,
+    pred: impl Fn(&crate::census::ProcRow) -> bool,
+) -> bool {
+    runs_under_map(&parent_map(rows), rows, holder_pid, pred)
+}
+
+/// A row whose program is cargo.
+fn is_cargo_row(row: &crate::census::ProcRow) -> bool {
+    let argv0 = row.command.split_whitespace().next().unwrap_or("");
+    Path::new(argv0)
+        .file_name()
+        .is_some_and(|name| name == "cargo")
+}
+
+/// True when a `cargo` process other than `holder_pid` runs under it.
+#[cfg(test)]
+fn runs_nested_cargo(rows: &[crate::census::ProcRow], holder_pid: u32) -> bool {
+    runs_under(rows, holder_pid, is_cargo_row)
+}
+
+/// A compile process: a token of the argv naming `rustc` (a bare rustc, an
+/// sccache client's target, or this wrapper's argument), or an argv0 that is
+/// a build-script binary. The holder's own argv never counts: the walk below
+/// excludes the holder row itself.
+fn is_compile(row: &crate::census::ProcRow) -> bool {
+    let argv0 = row.command.split_whitespace().next().unwrap_or("");
+    if Path::new(argv0)
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with("build-script-"))
+    {
+        return true;
+    }
+    row.command.split_whitespace().any(|token| {
+        Path::new(token)
+            .file_name()
+            .is_some_and(|name| name == "rustc")
+    })
+}
+
+/// Whether the holder cargo shows a compile process. `None` when the table
+/// cannot see the holder at all, so an invisible holder is never read as
+/// idle. `Some(false)` means the holder has no compile under it right now.
+#[cfg(test)]
+fn holder_compiling(rows: &[crate::census::ProcRow], holder_pid: u32) -> Option<bool> {
+    holder_compiling_map(&parent_map(rows), rows, holder_pid)
+}
+
+fn holder_compiling_map(
+    parent: &ParentMap,
+    rows: &[crate::census::ProcRow],
+    holder_pid: u32,
+) -> Option<bool> {
+    let visible = rows.iter().any(|row| row.pid == holder_pid);
+    visible.then(|| runs_under_map(parent, rows, holder_pid, is_compile))
+}
+
+/// The idle window for a build-admit waiter. `FNO_TEST_BUILD_IDLE_SECS`
+/// shrinks it so tests need not wait out the real 30 seconds.
+fn build_idle_window() -> Duration {
+    std::env::var("FNO_TEST_BUILD_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(BUILD_IDLE_TAKEOVER)
+}
+
+/// How long the current holder has shown no compile process. A holder change
+/// or a compile resets the clock.
+struct HolderIdle {
+    holder: Option<String>,
+    since: Instant,
+}
+
+impl HolderIdle {
+    fn new() -> Self {
+        Self {
+            holder: None,
+            since: Instant::now(),
+        }
+    }
+    fn observe(&mut self, holder: &str, compiling: bool, now: Instant) -> Duration {
+        if self.holder.as_deref() != Some(holder) || compiling {
+            self.holder = Some(holder.to_string());
+            self.since = now;
+        }
+        now - self.since
+    }
+    fn holder(&self) -> Option<&str> {
+        self.holder.as_deref()
+    }
 }
 
 /// True when `holder_pid` is `pid` or one of its process ancestors: a cargo
@@ -608,8 +910,10 @@ fn cleanup_group(pgid: i32) -> bool {
 }
 
 pub fn run_test_run(args: &[String]) -> i32 {
-    if args.first().map(String::as_str) == Some("build-admit") {
-        return run_build_admit(&args[1..]);
+    match args.first().map(String::as_str) {
+        Some("build-admit") => return run_build_admit(&args[1..]),
+        Some("run-admit") => return run_run_admit(&args[1..]),
+        _ => {}
     }
     install_signal_handlers();
     let opts = match parse_args(args) {
@@ -966,14 +1270,83 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert!(parse_build_admit_args(&args).is_err());
+        assert!(parse_cargo_admit_args(&args).is_err());
         let args: Vec<String> = ["--cargo-pid", "12", "--worktree", "/tmp/x"]
             .iter()
             .map(|s| s.to_string())
             .collect();
         assert_eq!(
-            parse_build_admit_args(&args),
+            parse_cargo_admit_args(&args),
             Ok((12, PathBuf::from("/tmp/x")))
         );
+    }
+
+    fn proc_row(pid: u32, ppid: u32, command: &str) -> crate::census::ProcRow {
+        crate::census::test_proc_row(pid, ppid, command)
+    }
+
+    #[test]
+    fn compile_processes_mark_a_holder_as_compiling() {
+        for child in [
+            "sccache /t/bin/rustc --crate-name a",
+            "/t/bin/rustc --crate-name a",
+            "bash /r/scripts/lib/cargo-rustc-wrapper.sh /t/bin/rustc --crate-name a",
+            "/r/target/debug/build/ring-0a1b/build-script-build",
+        ] {
+            let rows = vec![proc_row(100, 1, "cargo check"), proc_row(101, 100, child)];
+            assert_eq!(holder_compiling(&rows, 100), Some(true), "{child}");
+        }
+        // A grandchild counts too: rustc under an sccache client under cargo.
+        let rows = vec![
+            proc_row(100, 1, "cargo check"),
+            proc_row(101, 100, "sccache"),
+            proc_row(102, 101, "/t/bin/rustc --crate-name a"),
+        ];
+        assert_eq!(holder_compiling(&rows, 100), Some(true));
+    }
+
+    #[test]
+    fn a_holder_running_only_a_test_binary_reads_idle() {
+        let rows = vec![
+            // The holder's own argv names rustc; it is not its own descendant.
+            proc_row(100, 1, "cargo rustc -- -C x"),
+            proc_row(101, 100, "/r/target/debug/deps/fno_agents-0123abcd"),
+            // An unrelated cargo with a compile child changes nothing.
+            proc_row(300, 1, "cargo check"),
+            proc_row(301, 300, "/t/bin/rustc --crate-name b"),
+        ];
+        assert_eq!(holder_compiling(&rows, 100), Some(false));
+    }
+
+    #[test]
+    fn a_holder_missing_from_the_table_gets_no_verdict() {
+        let rows = vec![
+            proc_row(200, 1, "cargo check"),
+            proc_row(201, 200, "/t/bin/rustc --crate-name a"),
+        ];
+        assert_eq!(holder_compiling(&rows, 100), None);
+    }
+
+    #[test]
+    fn the_idle_clock_restarts_on_a_new_holder_or_a_compile() {
+        let mut clock = HolderIdle::new();
+        let t0 = Instant::now();
+        assert_eq!(clock.observe("cargo:/a:100", false, t0), Duration::ZERO);
+        let t1 = t0 + Duration::from_secs(9);
+        assert_eq!(
+            clock.observe("cargo:/a:100", false, t1),
+            Duration::from_secs(9)
+        );
+        // A compile resets the clock.
+        let t2 = t1 + Duration::from_secs(4);
+        assert_eq!(clock.observe("cargo:/a:100", true, t2), Duration::ZERO);
+        let t3 = t2 + Duration::from_secs(2);
+        assert_eq!(
+            clock.observe("cargo:/a:100", false, t3),
+            Duration::from_secs(2)
+        );
+        // A different holder restarts the watch.
+        let t4 = t3 + Duration::from_secs(30);
+        assert_eq!(clock.observe("cargo:/b:200", false, t4), Duration::ZERO);
     }
 }
