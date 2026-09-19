@@ -266,16 +266,12 @@ def _read_question_events(path: Path, *, missing_hint: bool) -> "list[dict[str, 
     """Read valid question envelopes, distinguishing absent from unreadable."""
     # The store commit is the write boundary: with a store beside the index,
     # committed rows are the whole history and the raw check never runs.
-    from fno.events.store_client import import_journal, read_committed_lines, store_db_path
+    from fno.events.store_client import native_rows, store_db_path
 
-    try:
-        if path.stat().st_size > 0:
-            import_journal(path)
-    except OSError:
-        pass
-    if store_db_path(path).exists():
+    committed = native_rows(path, include_rejected=True)
+    if committed is not None:
         events: "list[dict[str, Any]]" = []
-        for line in read_committed_lines(path):
+        for line in committed:
             try:
                 rec = json.loads(line)
             except (json.JSONDecodeError, ValueError):
@@ -289,6 +285,13 @@ def _read_question_events(path: Path, *, missing_hint: bool) -> "list[dict[str, 
             data = rec.get("data")
             if isinstance(data, dict) and data.get("question_id"):
                 events.append(rec)
+        if not events and not store_db_path(path).exists() and not path.exists():
+            if missing_hint:
+                print(
+                    f"outstanding: question index {path} is missing; run "
+                    "`fno inbox outstanding reindex` to recover project questions.",
+                    file=sys.stderr,
+                )
         return events
     try:
         path.stat()
@@ -576,10 +579,15 @@ def _question_journals(root: Path) -> "list[Path]":
     """Every graph-named project journal, deduped by physical file."""
     seen: "set[tuple[int, int]]" = set()
     journals: "list[Path]" = []
+    from fno.events.store_client import store_db_path
+
     for project_root in _capture_project_roots(root):
         path = events_path(project_root)
+        # The store commit is the write boundary: a journal whose bytes were
+        # never written still owns a readable store beside it.
+        probe = path if path.exists() else store_db_path(path)
         try:
-            stat = path.stat()
+            stat = probe.stat()
         except OSError:
             continue
         key = (stat.st_dev, stat.st_ino)

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 /// The verbs the native surface serves today. `find`/`audit`/`gc` join when
 /// their Python output contracts are ported (reader cutover wave).
-pub const NATIVE_EVENT_SUBCOMMANDS: &[&str] = &["emit-envelope", "export", "import"];
+pub const NATIVE_EVENT_SUBCOMMANDS: &[&str] = &["emit-envelope", "export", "import", "rows"];
 
 /// Classify `fno doctor event <sub> ...` for the front door: `Some(rest)`
 /// runs natively, `None` forwards to the Python CLI.
@@ -39,8 +39,9 @@ pub fn run(args: &[OsString]) -> i32 {
         "emit-envelope" => run_emit_envelope(rest),
         "export" => run_export(rest),
         "import" => run_import(rest),
+        "rows" => run_rows(rest),
         _ => {
-            eprintln!("error: expected a subcommand (emit-envelope | export | import)");
+            eprintln!("error: expected a subcommand (emit-envelope | export | import | rows)");
             2
         }
     }
@@ -91,6 +92,71 @@ fn run_emit_envelope(args: &[OsString]) -> i32 {
                 "inserted": r.inserted,
             });
             println!("{receipt}");
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+/// One read pass for thin clients: import, then print every committed
+/// envelope as a JSON array of lines. A missing store yields an empty array,
+/// never an error, so callers keep one code path.
+fn run_rows(args: &[OsString]) -> i32 {
+    let mut journal: Option<PathBuf> = None;
+    let mut types: Vec<String> = Vec::new();
+    let mut include_rejected = false;
+    let mut it = args.iter();
+    while let Some(tok) = it.next() {
+        let tok = match tok.to_str() {
+            Some(t) => t,
+            None => continue,
+        };
+        match tok {
+            "--events" => journal = it.next().map(PathBuf::from),
+            "--type" => {
+                if let Some(v) = it.next() {
+                    types.push(v.to_string_lossy().into_owned());
+                }
+            }
+            "--include-rejected" => include_rejected = true,
+            _ => {}
+        }
+    }
+    let journal = match journal {
+        Some(j) => j,
+        None => {
+            eprintln!("error: --events is required");
+            return 2;
+        }
+    };
+    // A journal that was never written must not gain a store as a side
+    // effect of being read: absence is a fact callers distinguish. A
+    // non-regular journal (a directory standing in for the index) is a
+    // failed read, so the caller's own error path names it.
+    if !journal.exists() && !fno_event_store::store_path(&journal).exists() {
+        println!("[]");
+        return 0;
+    }
+    if journal.exists() && !journal.is_file() {
+        eprintln!(
+            "error: {} is not a regular file",
+            journal.display()
+        );
+        return 1;
+    }
+    let _ = fno_event_store::import_all(&journal);
+    let query = fno_event_store::EventQuery {
+        types,
+        include_rejected,
+        ..Default::default()
+    };
+    match fno_event_store::query_events(&journal, &query) {
+        Ok(rows) => {
+            let lines: Vec<&str> = rows.iter().map(|r| r.line.as_str()).collect();
+            println!("{}", serde_json::to_string(&lines).unwrap_or_else(|_| "[]".into()));
             0
         }
         Err(e) => {
