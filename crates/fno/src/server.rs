@@ -2893,6 +2893,14 @@ impl Core {
             if let Some(entry) = self.panes.get_mut(&id) {
                 entry.unkept = true;
             }
+            // `notice_all` only reaches attached clients (Locked 5's own
+            // broadcast contract), so a keeper failure with nobody attached
+            // yet (the common case at spawn) never reaches the server's own
+            // log - the one place a headless caller (a stress script, CI)
+            // can see why a pane came up unkept. Say it here too.
+            eprintln!(
+                "fno mux: keeper unavailable for pane {id} ({keeper_err}); running unkept inline"
+            );
             self.notice_all(format!(
                 "keeper unavailable for pane {id} ({keeper_err}); running unkept inline"
             ));
