@@ -269,10 +269,8 @@ def _pi_extension_src() -> Path:
 
 
 def _pi_is_installed() -> bool:
-    # Installed == the dest file exists AND matches the shipped source, so a
-    # stale copy (older footnote) reports not-installed and gets refreshed.
-    # The read runs in the Rust pi arm of plugin-install, honoring
-    # PI_CODING_AGENT_DIR the way pi itself does.
+    # True only when the dest exists AND matches the shipped source, so a
+    # stale copy reports not-installed; the read is the Rust pi arm.
     from fno.rust_binary import call_binary_json
 
     _err, payload = call_binary_json(
@@ -291,17 +289,13 @@ def _pi_install() -> IntegrationResult:
         ["pi", "--extension-src", str(_pi_extension_src()), "--json"],
     )
     if payload and payload.get("installed"):
-        return IntegrationResult(
-            "pi",
-            label,
-            "installed",
-            note="extension -> {}, skills: {}".format(
-                payload.get("dest", "?"), payload.get("skills", "unresolved")
-            ),
+        note = "extension -> {}, skills: {}".format(
+            payload.get("dest", "?"), payload.get("skills", "unresolved")
         )
-    detail = payload.get("refused") if payload else _err
-    if not detail:
-        detail = "the fno-agents binary is missing or failed; run fno doctor update --rust"
+        return IntegrationResult("pi", label, "installed", note=note)
+    detail = (payload.get("refused") if payload else _err) or (
+        "the fno-agents binary is missing or failed; run fno doctor update --rust"
+    )
     return IntegrationResult("pi", label, "failed", note=str(detail))
 
 

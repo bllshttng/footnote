@@ -34,13 +34,6 @@ def _answer_or_raise(answer: dict[str, Any], field: str) -> Any:
     return value
 
 
-def _print_note(head: str, note: str) -> None:
-    """One owner note to stderr, once per ask."""
-    import sys
-
-    print(f"{head} - {note}", file=sys.stderr)
-
-
 def keeper_posture(
     harness: str,
     lane: str,
@@ -60,10 +53,9 @@ def keeper_posture(
     tokens = _answer_or_raise(answer, "tokens")
     note = answer.get("note") or ""
     if note:
-        _print_note(
-            f"agy posture: {answer.get('effective')} ({answer.get('source')})",
-            note,
-        )
+        import sys
+        head = f"agy posture: {answer.get('effective')} ({answer.get('source')})"
+        print(f"{head} - {note}", file=sys.stderr)
     return [str(t) for t in tokens]
 
 
@@ -85,11 +77,10 @@ def agy_mint_argv(
 
 
 def pi_session_lookup(cwd: str, session_id: str) -> dict[str, Any]:
-    """What a ``(cwd, session_id)`` pair resolves to in pi's session store,
-    from the Rust owner: ``state`` is one of ``unknown|none|one|duplicate``,
-    with ``files``, ``directory`` and ``reason`` as they carry."""
-    ask = {"cwd": str(cwd), "session_id": session_id}
-    return spawn_axes_call({"pi_session_lookup": ask})
+    """A ``(cwd, session_id)`` pair's store answer from the Rust owner."""
+    return spawn_axes_call(
+        {"pi_session_lookup": {"cwd": str(cwd), "session_id": session_id}}
+    )
 
 
 def pi_route(
@@ -99,17 +90,15 @@ def pi_route(
     deny_tools: str | None = None,
 ) -> list[str]:
     """The provider/model/effort tokens a pi launch carries, from the Rust
-    owner; the route note prints once to stderr as
-    ``pi route: <route_source> - <note>``."""
-    ask = {
-        "model": model or "",
-        "effort": effort or "",
-        "tools": tools or "",
-        "deny_tools": deny_tools or "",
-    }
+    owner; the note prints once to stderr as ``pi route: <source> - <note>``."""
+    ask = {"model": model or "", "effort": effort or "",
+           "tools": tools or "", "deny_tools": deny_tools or ""}
     answer = spawn_axes_call({"pi_route": ask})
     tokens = _answer_or_raise(answer, "tokens")
-    note = answer.get("note") or ""
-    if note:
-        _print_note(f"pi route: {answer.get('route_source')}", note)
+    if answer.get("note"):
+        import sys
+        print(
+            f"pi route: {answer.get('route_source')} - {answer['note']}",
+            file=sys.stderr,
+        )
     return [str(t) for t in tokens]
