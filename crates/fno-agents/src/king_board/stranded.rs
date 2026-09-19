@@ -18,6 +18,8 @@ use std::time::{Duration, UNIX_EPOCH};
 /// not a knob: a knob comes when someone needs to tune it.
 pub(crate) const STRANDED_GRACE_MINUTES: i64 = 60;
 
+const BUDGET_EXHAUSTED: &str = "stranded tree probe: killed at its slice of the board budget";
+
 /// One linked tree: its path and its full branch ref (`None` = detached).
 type TreeEntry = (PathBuf, Option<String>);
 
@@ -90,33 +92,45 @@ fn short_branch(branch: &Option<String>) -> String {
         .to_string()
 }
 
+/// One tree's work-at-risk read: dirty count, unpushed count, and idle
+/// minutes since the newest write among the index, the reflog, and each
+/// dirty path. Every git call takes its own slice of the board's shared
+/// deadline, so three probes can never sum past the one whole-board budget;
+/// a budget kill propagates as over-budget (never a clean zero), any other
+/// git failure fails the tree.
 fn run_git(args: &[String], cwd: &Path, slice: Duration) -> Result<String, RunFailure> {
     run_with_timeout(args, cwd, slice).map(|out| String::from_utf8_lossy(&out).into_owned())
 }
 
-/// One tree's work-at-risk read: dirty count, unpushed count, and idle
-/// minutes since the newest write among the index, the reflog, and each
-/// dirty path. Every git call rides the caller's slice of the board budget;
-/// any git failure fails the tree, never the source.
-fn probe_tree(tree: &Path, branch: &Option<String>, slice: Duration) -> Result<Value, String> {
-    let mut git = |mut args: Vec<&str>| {
+fn probe_tree(
+    tree: &Path,
+    branch: &Option<String>,
+    budget: &mut Budget,
+) -> Result<Value, RunFailure> {
+    let mut git = |args: Vec<&str>, budget: &mut Budget| -> Result<String, RunFailure> {
+        let slice = match budget.start("stranded tree probe") {
+            Some(s) => s,
+            None => return Err(RunFailure::KilledAtSlice(BUDGET_EXHAUSTED.to_string())),
+        };
         let mut cmd: Vec<String> = vec![
             "git".to_string(),
             "-C".to_string(),
             tree.to_string_lossy().into_owned(),
         ];
-        cmd.extend(args.drain(..).map(str::to_string));
+        cmd.extend(args.into_iter().map(str::to_string));
         run_git(&cmd, Path::new("."), slice)
     };
-    let dirty_text = git(vec!["status", "--porcelain"]).map_err(|e| e.message().to_string())?;
+    let dirty_text = git(vec!["status", "--porcelain"], budget)?;
     let dirty = dirty_text.lines().filter(|l| !l.trim().is_empty()).count() as i64;
-    let unpushed_text = git(vec!["rev-list", "--count", "HEAD", "--not", "--remotes"])
-        .map_err(|e| e.message().to_string())?;
+    let unpushed_text = git(
+        vec!["rev-list", "--count", "HEAD", "--not", "--remotes"],
+        budget,
+    )?;
     let unpushed: i64 = unpushed_text.trim().parse().unwrap_or(0);
 
     // Newest write among the git dir's index + reflog and the dirty paths.
     let mut newest: Option<std::time::SystemTime> = None;
-    let git_dir_out = git(vec!["rev-parse", "--git-dir"]).map_err(|e| e.message().to_string())?;
+    let git_dir_out = git(vec!["rev-parse", "--git-dir"], budget)?;
     let git_dir = tree.join(git_dir_out.trim());
     for tail in ["index", "logs/HEAD"] {
         if let Ok(m) = std::fs::metadata(git_dir.join(tail)) {
@@ -190,16 +204,16 @@ pub(crate) fn read_stranded_trees(
             if !candidates.contains(&id) {
                 continue;
             }
-            let Some(slice) = budget.start("stranded tree probe") else {
-                return SourceRead::over_budget(budget.spent_error());
-            };
-            match probe_tree(&tree, &branch, slice) {
+            match probe_tree(&tree, &branch, budget) {
                 Ok(mut row) => {
                     if let Some(obj) = row.as_object_mut() {
                         obj.insert("id".to_string(), json!(id));
                         obj.insert("resumable".to_string(), json!(resumable));
                     }
                     rows.push(row);
+                }
+                Err(e) if e.over_budget() => {
+                    return SourceRead::over_budget(e.message().to_string())
                 }
                 Err(_) => continue,
             }
@@ -285,7 +299,7 @@ branch refs/heads/feature/x-eeee
             Some(("x-ffff".to_string(), true))
         );
         assert_eq!(
-            tree_node_id(Path::new("/repo/.claude/worktrees/x-2222-prep"), None),
+            tree_node_id(Path::new("/base/repo/x-2222-prep"), None),
             Some(("x-2222".to_string(), false))
         );
         assert_eq!(
