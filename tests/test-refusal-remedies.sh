@@ -59,6 +59,7 @@ require_before() { # require_before <haystack-file> <first> <second> <label>
 HOOK="$REPO_ROOT/scripts/setup/worktree-create-hook.sh"
 PRE="$REPO_ROOT/scripts/ci/preflight.sh"
 CV="$REPO_ROOT/crates/fno-agents/src/client_verbs.rs"
+RG="$REPO_ROOT/crates/fno-agents/src/resume_gate.rs"
 
 # --- 1. worktree-create-hook.sh -------------------------------------------
 # Reuse rung named.
@@ -105,8 +106,9 @@ require "$PRE" "rm -rf '\$LOCKDIR'" "preflight: rm -rf remains the last rung"
 require "$CV" "the row is the resume handle" "resume(rust): messages name the handle cost"
 require "$CV" "fno agents adopt" "resume(rust): rm-then-adopt rebind pair named"
 require "$CV" "gone for good" "resume(rust): rm framed as the gone-for-good case"
-require "$CV" "recoverable first" "resume(rust): path-recovery check precedes the remedy"
-require "$CV" "nothing resumable" "resume(rust): idless row told the truth, no id claim"
+# The two resume-cwd refusal messages moved to the resume gate module.
+require "$RG" "recoverable first" "resume(rust): path-recovery check precedes the remedy"
+require "$RG" "nothing resumable" "resume(rust): idless row told the truth, no id claim"
 
 # --- 4. rm-naming refusals: the Rust ask twins ---------------------------------
 # The Python rm-fallback refusals retired with the rm twin (the Python side of

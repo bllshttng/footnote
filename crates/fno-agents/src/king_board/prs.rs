@@ -1,7 +1,8 @@
 //! One PR listing, binding classification, mergeable filter (pr/_status).
 use super::budget::{fno_py_cmd, run_json, run_with_timeout};
 use super::queues::NODE_ID_BODY;
-use super::{s_i64, s_str, SourceRead, LEGACY_DEFER_PREFIX, TERMINAL_RUNGS};
+use super::{is_terminal, s_i64, s_str, SourceRead};
+use crate::graph_store::entry_id;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -553,6 +554,16 @@ fn classify_pr_bindings(rows: &[Value], entries: &[Value]) -> (Vec<Value>, Vec<S
     (bound, warnings)
 }
 
+/// Ids of every entry whose PR bindings contain `pr` (working graph plus
+/// archive; duplicates possible, harmless: the same claim is re-read).
+pub(crate) fn nodes_binding_pr<'a>(entries: &'a [Value], pr: i64) -> Vec<&'a str> {
+    entries
+        .iter()
+        .filter(|e| node_pr_refs(e).iter().any(|(n, _)| *n == pr))
+        .filter_map(|e| entry_id(e))
+        .collect()
+}
+
 /// (pr_number, pr_url) pairs for a node, primary first, deduped
 /// (graph/_reconcile.node_pr_refs).
 pub(crate) fn node_pr_refs(node: &Value) -> Vec<(i64, Option<String>)> {
@@ -588,19 +599,7 @@ pub(crate) fn node_pr_refs(node: &Value) -> Vec<(i64, Option<String>)> {
 /// The one status string every reader of a row agrees on
 /// (graph/statuses.derived_status).
 pub(crate) fn derived_status(entry: &Value) -> String {
-    let terminal = {
-        let status_terminal = s_str(entry, "status")
-            .map(|s| TERMINAL_RUNGS.contains(&s))
-            .unwrap_or(false);
-        let superseded = entry.get("superseded_by").is_some_and(|v| !v.is_null());
-        let completed = entry
-            .get("completed_at")
-            .and_then(Value::as_str)
-            .map(|c| !c.is_empty() && !c.starts_with(LEGACY_DEFER_PREFIX))
-            .unwrap_or(false);
-        status_terminal || superseded || completed
-    };
-    if terminal && entry.get("completed_at").is_some_and(|v| !v.is_null()) {
+    if is_terminal(entry) && entry.get("completed_at").is_some_and(|v| !v.is_null()) {
         return "done".to_string();
     }
     s_str(entry, "status").unwrap_or("unknown").to_string()
