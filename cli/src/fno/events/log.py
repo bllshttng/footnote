@@ -228,10 +228,20 @@ def read_events(
     # SQL authority: committed rows in commit order; a missing store falls
     # back to the raw journal (a fixture or pre-cutover bytes nothing has
     # imported yet), and an unreadable store raises rather than reading empty.
-    from fno.events.store_client import import_journal, store_db_path
+    from fno.events.store_client import native_rows, store_db_path
 
-    if events_path.exists() and events_path.stat().st_size > 0:
-        import_journal(events_path)
+    committed = native_rows(events_path)
+    if committed is not None:
+        rows = []
+        for raw in committed:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                rows.append(json.loads(raw))
+            except json.JSONDecodeError:
+                continue
+        return _filter_by_session(rows, session_id)
     if not store_db_path(events_path).exists():
         raw_rows: List[Dict[str, Any]] = []
         if events_path.exists():

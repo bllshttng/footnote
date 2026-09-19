@@ -8,9 +8,11 @@ events.jsonl. One helper serves every test that used to slurp the journal:
 
     rows = event_rows(tmp_path / "events.jsonl")
 
-Semantics mirror the Rust readers (``event_lines``): a store that does not
-exist yet falls back to raw journal bytes, so a fixture seeded before any
+The read rides the native ``doctor event rows`` verb, which imports any
+uncommitted journal bytes before querying, so a fixture seeded before any
 store-backed write stays visible. Rows are parsed envelopes in commit order.
+When the native binary is unavailable the helper falls back to raw journal
+bytes, mirroring the pre-store reader.
 """
 from __future__ import annotations
 
@@ -21,33 +23,23 @@ from typing import Any, Optional
 
 def event_rows(events_path: Path, *, types: Optional[list[str]] = None) -> list[dict[str, Any]]:
     """Committed envelopes for one journal, optionally filtered by type."""
-    from fno.events.store_client import import_journal, read_committed_lines, store_db_path
+    from fno.events.store_client import native_rows
 
     events_path = Path(events_path)
-    if events_path.exists() and events_path.stat().st_size > 0:
-        import_journal(events_path)
-    if not store_db_path(events_path).exists():
-        rows: list[dict[str, Any]] = []
+    committed = native_rows(events_path)
+    if committed is None:
+        committed = []
         if events_path.exists():
-            for raw in events_path.read_text(encoding="utf-8").splitlines():
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    rows.append(json.loads(raw))
-                except json.JSONDecodeError:
-                    continue
-        else:
-            rows = []
-    else:
-        rows = []
-        for line in read_committed_lines(events_path):
-            if not line.strip():
-                continue
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+            committed = events_path.read_text(encoding="utf-8").splitlines()
+    rows: list[dict[str, Any]] = []
+    for line in committed:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
     if types is not None:
         rows = [r for r in rows if r.get("type") in set(types)]
     return rows

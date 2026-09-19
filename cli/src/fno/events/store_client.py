@@ -59,26 +59,28 @@ def store_db_path(events_path: Path) -> Path:
     return resolved.with_name(f"{stem}.db")
 
 
-def import_journal(events_path: Path, *, timeout: float = 30) -> Optional[dict[str, Any]]:
-    """Ingest every uncommitted generation of the journal into the store.
+def native_rows(
+    events_path: Path,
+    *,
+    types: Optional[list[str]] = None,
+    include_rejected: bool = False,
+    timeout: float = 30,
+) -> Optional[list[str]]:
+    """One native read pass: import, then committed envelope lines.
 
-    Mirrors the Rust readers, which run the same sync before their queries:
-    seeded fixtures and pre-cutover bytes become visible to committed-row
-    readers. Best-effort by policy here; callers that must distinguish a
-    refused import raise on the receipt themselves.
+    The whole reader contract lives in the binary; this is the transport.
+    None means the native side was unavailable and the caller falls back to
+    its legacy raw-journal behavior.
     """
-    events_path = Path(events_path)
-    try:
-        st = events_path.stat()
-        if not stat_module.S_ISREG(st.st_mode) or st.st_size == 0:
-            return None
-    except OSError:
-        return None
     try:
         bin_path = resolve_native_bin()
     except EventStoreUnavailable:
         return None
-    cmd = [bin_path, "doctor", "event", "import", "--events", str(events_path)]
+    cmd = [bin_path, "doctor", "event", "rows", "--events", str(events_path)]
+    for ty in types or []:
+        cmd += ["--type", ty]
+    if include_rejected:
+        cmd.append("--include-rejected")
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -92,11 +94,11 @@ def import_journal(events_path: Path, *, timeout: float = 30) -> Optional[dict[s
 
 
 def read_committed_lines(events_path: Path) -> list[str]:
-    """The committed envelope lines for one journal's store, in commit order.
+    """Committed envelope lines, direct SQL, never importing.
 
-    Direct stdlib read of the SQL store; readers that only need the envelope
-    text use this instead of opening the journal. A store that does not exist
-    yet is an empty history, never an error.
+    A read with no side effects: retention pruning rides the import the
+    rows verb runs, so callers asserting exact store contents (gc, parity)
+    use this and stay out of the retention business.
     """
     import sqlite3
 
