@@ -143,7 +143,14 @@ pub(crate) fn project_repo_paths(cwd: &Path) -> Vec<PathBuf> {
                         continue;
                     };
                     let path = expand_home(raw);
-                    if path.is_dir() && !out.contains(&path) {
+                    // A non-git project (a vault, worktree.policy = never)
+                    // would make every `git worktree list` there fail and
+                    // read the whole source unreadable; the stranded read
+                    // only means anything at a repository root.
+                    if path.is_dir()
+                        && crate::paths::canonical_repo_root(&path).is_some()
+                        && !out.contains(&path)
+                    {
                         out.push(path);
                     }
                 }

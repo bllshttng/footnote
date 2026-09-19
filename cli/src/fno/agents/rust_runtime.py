@@ -285,6 +285,10 @@ RUST_CLIENT_VERBS = frozenset(
         # Python calls it via fno.agents.spawn_axes_client. A `node_seed`
         # field routes the payload to the node-seed decision instead.
         "spawn-axes",
+        # The spawn door's launch-cwd resolution: payload JSON in, the
+        # {workdir} or {hold} answer out; a hold is a valid exit-0 answer.
+        # Python calls it via fno.agents.node_dispatch.ensure_launch_workdir.
+        "launch-workdir",
         # The failover chain walk: payload JSON in, the
         # {eligible} answer out; Python calls it via fno.rust_binary.verb_call.
         "fallback-chain",
@@ -546,6 +550,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "blueprint-feed": "Territory feed for the backlog supervisor's blueprinter tick: --scope <s> prints the standing worker + unfed ideas as JSON; --deliver mails the window; --repair <r> records a failed delivery.",
     "spawn-overlay": "Harness-keyed spawn-defaults resolver: JSON payload on stdin, the {refusal, effective, bundle} answer on stdout; invoked by fno.agents.spawn_overlay_client, not `fno agents` routing.",
     "spawn-axes": "Spawn-seam billing axes (route/account/model): JSON payload on stdin, the {inject, applied, suppressed, messages} plan on stdout; a `node_seed` field instead answers the node-verb check. Invoked by fno.agents.spawn_axes_client and the spawn seam, not `fno agents` routing.",
+    "launch-workdir": "Spawn door launch-cwd resolution: JSON payload {recorded_cwd, node, harness} on stdin, the {workdir} or {hold} answer on stdout (hold is a valid exit-0 answer). Invoked by fno.agents.node_dispatch.ensure_launch_workdir, not `fno agents` routing.",
     "fallback-chain": "Failover chain walk: JSON payload on stdin, the {eligible} answer on stdout; invoked by fno.recovery, not `fno agents` routing.",
     "authorized-merge": "The one authorized merge operation: JSON payload on stdin, one receipt (merged|armed|authorized|held|refused|head_changed|unknown|failed) on stdout; invoked by fno.rust_binary.verb_call from the merge and verify verbs, not `fno agents` routing.",
     "census": "One JSON row per long-lived process (daemon, keepers, mux servers) with its build-drift verdict; invoked by fno.update.running_components, not `fno agents` routing.",
