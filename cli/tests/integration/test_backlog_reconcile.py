@@ -634,6 +634,10 @@ def cli_env(tmp_path, monkeypatch):
     """Tmp graph + tmp retro sentinel dir + a no-op plan stamp."""
     graph_path = tmp_path / "graph.json"
     _patch_graph_path(monkeypatch, graph_path)
+    # The reconcile single-flight gate locks on the claims root, which
+    # otherwise resolves to the fleet-shared canonical claim dir: a live
+    # sync elsewhere makes every gate-gated test skip noisily.
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
 
     sentinel_dir = tmp_path / "retro-pending"
     import fno.paths as paths

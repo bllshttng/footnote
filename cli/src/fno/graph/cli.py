@@ -7469,10 +7469,10 @@ def _status_drift(path: Path) -> dict[str, tuple[str, str]]:
     import copy
 
     from fno.graph.statuses import recompute_statuses
-    from fno.graph.store import read_graph_strict
+    from fno.graph.store import _read_json, read_graph_strict
 
     persisted: dict[str, str] = {}
-    for entry in read_graph_strict(path):
+    for entry in _read_json(path):
         node_id = entry.get("id") if isinstance(entry, dict) else None
         status = entry.get("status") if isinstance(entry, dict) else None
         if isinstance(node_id, str) and isinstance(status, str):
