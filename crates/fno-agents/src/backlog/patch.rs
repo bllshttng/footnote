@@ -944,6 +944,8 @@ pub fn defer_facts(
             obj.insert("deferred_kind".to_string(), Value::String(k.to_string()));
         }
         None => {
+            // No kind: the key is REMOVED, so a re-deferral clears a stale
+            // stamp; the columnar store materializes the wire's null.
             obj.shift_remove("deferred_kind");
         }
     }
