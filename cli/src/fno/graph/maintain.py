@@ -2094,9 +2094,7 @@ AbandonedDoRow = namedtuple("AbandonedDoRow", "node harness session_id verdict r
 
 
 def do_row_session_gone(harness, session_id, cwd, *, quiet_after_s, now_s):
-    """Proof of session death from transcript truth; False holds with a named reason. Never raises.
-
-    Returns (gone, reason, tail_epoch); the epoch is None on every not-gone path."""
+    """Proof of session death from transcript truth; False holds with a named reason. Never raises."""
     try:
         from fno.provenance.observed import FILE_BACKED_HARNESSES, resolve_transcript_path
         from fno.agents.watchdog import finished_with_the_tree, tail_facts
