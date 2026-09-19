@@ -186,9 +186,21 @@ fn stamp_test_setup(
     (dir, home, emitter, quiet, transcripts)
 }
 
+/// The settled row read back from the store: the seed graph.json folds in
+/// on open, and the store (not the demoted seed file) holds the stamp.
+fn settled_extra(home: &AgentsHome) -> Value {
+    let store = crate::backlog::api::Store::new(&gc_sweep::graph_path(home));
+    let rows = crate::backlog::api::rows(&store, true).unwrap();
+    rows.iter()
+        .find(|row| row["id"] == "x-stamp")
+        .and_then(|row| row["additional_prs"].as_array())
+        .and_then(|extras| extras.first().cloned())
+        .unwrap_or(Value::Null)
+}
+
 #[test]
 fn ac2_a_merged_answer_stamps_and_settles() {
-    let (dir, home, emitter, quiet, _t) = stamp_test_setup("x-stamp");
+    let (_dir, home, emitter, quiet, _t) = stamp_test_setup("x-stamp");
     let mut read = |path: &str, _cwd: &str| {
         assert_eq!(path, "repos/{owner}/{repo}/pulls/1523");
         Some(gc_sweep::PrState::Merged)
@@ -205,10 +217,8 @@ fn ac2_a_merged_answer_stamps_and_settles() {
         "refused: {:?}",
         summary.settle_refused
     );
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-    let extras = &raw["entries"][0]["additional_prs"];
-    assert_eq!(extras[0]["merge_status"], json!("merged"));
+    let extras = settled_extra(&home);
+    assert_eq!(extras["merge_status"], json!("merged"));
     assert_eq!(
         summary.settled_do_rows,
         vec![("x-stamp".into(), "claude".into(), "sess-stamp".into())]
@@ -218,7 +228,7 @@ fn ac2_a_merged_answer_stamps_and_settles() {
 
 #[test]
 fn ac3_a_closed_answer_stamps_and_settles() {
-    let (dir, home, emitter, quiet, _t) = stamp_test_setup("x-stamp");
+    let (_dir, home, emitter, quiet, _t) = stamp_test_setup("x-stamp");
     let mut read = |path: &str, _cwd: &str| {
         assert_eq!(path, "repos/{owner}/{repo}/pulls/1523");
         Some(gc_sweep::PrState::Closed)
@@ -235,10 +245,8 @@ fn ac3_a_closed_answer_stamps_and_settles() {
         vec![("x-stamp".into(), "claude".into(), "sess-stamp".into())]
     );
     assert!(summary.retired.iter().any(|(id, _)| id == "row-stamp"));
-    let raw: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
-    let extras = &raw["entries"][0]["additional_prs"];
-    assert_eq!(extras[0]["merge_status"], json!("closed"));
+    let extras = settled_extra(&home);
+    assert_eq!(extras["merge_status"], json!("closed"));
 }
 
 #[test]
