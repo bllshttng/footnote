@@ -1123,7 +1123,7 @@ impl PrState {
 /// CI conclusion vocabulary (fu-4faa3d). `render()` reproduces the exact
 /// legacy strings ("FAILURE:{name}" carries the failing check name).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-enum CiConclusion {
+pub(crate) enum CiConclusion {
     Success,
     /// Failing check name when one was identified.
     Failure(Option<String>),
@@ -2917,14 +2917,14 @@ fn without_coverage_statuses(checks: &Value) -> Value {
     )
 }
 
-/// One truth table for a `gh pr checks --json` payload: dedup to the latest
-/// run per name, drop the coverage projections, then derive the conclusion,
-/// the failing names, and the pending flag. A rollup the filter EMPTIED
-/// (only the two coverage contexts existed) reads Pending - "CI has not
-/// reported yet", never the declared-none None, matching the Python twin's
-/// unknown - and its pending flag is set too, so the wait stays watchable
-/// instead of a non-idlable re-invoke loop.
-fn classify_checks_payload(checks: &Value) -> Result<(CiConclusion, Vec<String>, bool), String> {
+/// One truth table for a `gh pr checks --json` payload: dedup to the latest run per name, drop the
+/// coverage projections, then derive the conclusion, the failing names, and the pending flag. A
+/// rollup the filter EMPTIED (only the two coverage contexts existed) reads Pending - "CI has not
+/// reported yet", never the declared-none None, matching the Python twin's unknown - and its
+/// pending flag is set too, so the wait stays watchable instead of a non-idlable re-invoke loop.
+pub(crate) fn classify_checks_payload(
+    checks: &Value,
+) -> Result<(CiConclusion, Vec<String>, bool), String> {
     let deduped = latest_per_name(checks);
     let had_rows = deduped.as_array().map(|a| !a.is_empty()).unwrap_or(false);
     let filtered = without_coverage_statuses(&deduped);
@@ -2948,12 +2948,11 @@ fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
         return Ok(CiConclusion::None);
     }
 
-    // `gh pr checks --json` classifies each check into a rollup `bucket`:
-    // pass | fail | pending | skipping | cancel. (`conclusion` is NOT an
-    // available field on this subcommand; requesting it errored the read on
-    // every fire - follow-on, previously masked by the budget
-    // bug terminating sessions before this read ran.) Unknown or missing
-    // buckets fail closed as Pending - never green.
+    // `gh pr checks --json` classifies each check into a rollup `bucket`: pass | fail | pending |
+    // skipping | cancel. (`conclusion` is NOT an available field on this subcommand; requesting it
+    // errored the read on every fire - follow-on, previously masked by the budget bug terminating
+    // sessions before this read ran.) Unknown or missing buckets fail closed as Pending - never
+    // green.
     let bucket_of = |check: &Value| -> String {
         check
             .get("bucket")
