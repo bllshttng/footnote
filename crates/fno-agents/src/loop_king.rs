@@ -1471,7 +1471,14 @@ mod tests {
         // comparing; a raw trim let a row stored as 'alpha' and a walk for
         // the short name 'a' miss each other - the double-rule the guard
         // exists to stop.
-        let _root = crate::paths::DeclaredRoot::declare("kingalias");
+        // The declared root pins process env for the whole test body, so hold
+        // the env lock across it (declare_held: declare itself would take it
+        // twice and deadlock); otherwise a locked test mid-flight sees this
+        // pin and resolves its state into the wrong root.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _root = crate::paths::DeclaredRoot::declare_held("kingalias");
         let dir = _root.path().to_path_buf();
         fs::create_dir_all(&dir).unwrap();
         let config = dir.join(".fno").join("config.toml");

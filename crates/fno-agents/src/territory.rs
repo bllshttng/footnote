@@ -1434,10 +1434,41 @@ mod resolve_tests {
     use super::*;
     use serde_json::json;
 
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+    /// Interlocked, restoring env scope: holds the shared env lock and
+    /// restores the variables these tests pin on drop, so an assert-panic
+    /// mid-test cannot leak a pin toward a deleted tempdir into every later
+    /// test in the process.
+    struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn take() -> Self {
+            let lock = crate::claims::test_env_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let saved = ["FNO_CONFIG", "FNO_HOME"]
+                .iter()
+                .map(|var| (*var, std::env::var_os(var)))
+                .collect();
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (var, saved) in &self.saved {
+                match saved {
+                    Some(v) => std::env::set_var(var, v),
+                    None => std::env::remove_var(var),
+                }
+            }
+        }
+    }
+
+    fn env_guard() -> EnvGuard {
+        EnvGuard::take()
     }
 
     fn write_fixture(
@@ -1675,6 +1706,7 @@ path = "/repo/alpha"
         let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         std::env::set_var("FNO_CONFIG", tmp.path().join("config.toml"));
+        std::env::set_var("FNO_HOME", tmp.path());
         std::fs::write(tmp.path().join("config.toml"), "").unwrap();
         let mut rec = read_record(tmp.path(), "x-a,x-b");
         assert_eq!(rec["worker"], Value::Null);
@@ -1687,10 +1719,6 @@ path = "/repo/alpha"
         let reread = read_record(tmp.path(), "x-a,x-b");
         assert_eq!(reread["worker"]["name"], "blueprinter-x-a-x-b-abc123");
         assert_eq!(reread["fed"]["e-9"]["ok"], true);
-        // env_guard interlocks but restores nothing: without this removal the
-        // pinned FNO_CONFIG outlives the test and every later config-reading
-        // test in the process resolves against this deleted tempdir.
-        std::env::remove_var("FNO_CONFIG");
     }
 
     #[test]
