@@ -98,7 +98,8 @@ def test_defer_without_kind_classifies_exact_match_only(tmp_graph):
     r = runner.invoke(cli, ["defer", "x-cccc", "-R", "fresh unclassifiable prose"])
     assert r.exit_code == 0, r.output
     node = {e["id"]: e for e in read_graph_strict(tmp_graph)}["x-cccc"]
-    assert "deferred_kind" not in node
+    # The columnar store materializes the wire's null: no stamp reads as None.
+    assert node.get("deferred_kind") is None
 
 
 def test_defer_rejects_unknown_kind(tmp_graph):
@@ -155,7 +156,7 @@ def test_backfill_dry_run_counts_and_writes_nothing(tmp_graph):
     assert report["would_stamp"] == {"expired": 1, "wont_do": 1}
     assert report["unclassified"] == 1
     rows = {e["id"]: e for e in read_graph_strict(tmp_graph)}
-    assert "deferred_kind" not in rows["x-aaaa"]
+    assert rows["x-aaaa"].get("deferred_kind") is None
 
 
 def test_backfill_apply_is_exact_and_idempotent(tmp_graph):
@@ -165,7 +166,7 @@ def test_backfill_apply_is_exact_and_idempotent(tmp_graph):
     rows = {e["id"]: e for e in read_graph_strict(tmp_graph)}
     assert rows["x-aaaa"]["deferred_kind"] == "expired"  # code table
     assert rows["x-bbbb"]["deferred_kind"] == "wont_do"  # map
-    assert "deferred_kind" not in rows["x-cccc"]  # honest unknown
+    assert rows["x-cccc"].get("deferred_kind") is None  # honest unknown
     assert rows["x-dddd"].get("deferred_kind") is None  # never non-deferred
     # idempotent: a second run stamps 0
     r2 = runner.invoke(cli, ["backfill-deferred-kind", "-J", "--map", str(map_file), "--apply"])

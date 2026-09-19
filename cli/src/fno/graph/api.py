@@ -129,19 +129,15 @@ def wire_rows(*, path: Path = GRAPH_JSON, include_archived: bool = False) -> lis
             continue
         if dumped.get("persisted_status"):
             dumped["status"] = dumped["persisted_status"]
-        # Timestamps and stamps a writer never set read as ABSENT, never as
-        # null: "ended_at: None" would present an open session row as one
-        # the writer explicitly measured and left open, and a materialized
-        # "deferred_kind: None" reads as a retraction stamp nobody wrote.
-        if isinstance(row, dict):
-            for key in ("deferred_kind",):
-                if dumped.get(key) is None and key not in row:
-                    del dumped[key]
-            for session in dumped.get("sessions") or []:
-                if isinstance(session, dict):
-                    for key in ("ended_at", "ended_by"):
-                        if session.get(key) is None:
-                            session.pop(key, None)
+        # An open session reads as never-ended, not as ended-None: the file
+        # leg this store read replaces omitted the null keys at export, and
+        # "ended_at: None" would present an open session as one the writer
+        # explicitly measured and left open. Closed sessions carry the stamp.
+        for session in dumped.get("sessions") or []:
+            if isinstance(session, dict):
+                for key in ("ended_at", "ended_by"):
+                    if session.get(key) is None:
+                        session.pop(key, None)
         out.append(dumped)
     return out
 
