@@ -478,7 +478,8 @@ pub fn needs_attention(row: &ArmStatus) -> bool {
 /// fired exited non-zero), and active_backlog's `env_broken` (the resolver
 /// shelled out and failed: no usable `fno`, non-zero exit, unreadable
 /// receipt -): an arm that could not compute its input, or whose
-/// action failed, has not skipped - it has failed. `degraded` is
+/// action failed, has not skipped - it has failed. `select-unmeasured` is a
+/// bounded selection that the arm_watch heal lane retries. `degraded` is
 /// deliberately absent: it is emitted by an arm that ran and acted while one
 /// read came back thin, and one transient gh read failure must not turn a
 /// fresh row red.
@@ -487,6 +488,7 @@ const FAILURE_SKIPS: &[&str] = &[
     "error",
     "failures",
     "next-error",
+    "select-unmeasured",
     "spawn-failed",
     "env_broken",
     "wake_failed",
@@ -1733,6 +1735,35 @@ mod tests {
         assert!(ac.failing, "an unreadable selection is a failed run");
         assert!(ac.line.contains("FAIL"), "line: {}", ac.line);
         assert!(ac.line.contains("skip=next-error"), "line: {}", ac.line);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_fresh_select_unmeasured_fails_the_auto_continue_arm() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-04T11:58:20Z",
+                "auto_continue",
+                "session",
+                0,
+                json!("select-unmeasured"),
+                1800,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+
+        let mut rows = read_arms(&[journal], now);
+        explain(&mut rows, &DaemonFacts::Unknown);
+        let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
+        assert!(ac.failing, "an unmeasured selection is a failed run");
+        assert!(
+            ac.line.contains("skip=select-unmeasured"),
+            "line: {}",
+            ac.line
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
