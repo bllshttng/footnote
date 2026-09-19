@@ -561,7 +561,7 @@ class PrRowBindResult:
         return [
             binding.node_id
             for binding in self.bindings
-            if binding.action in ("filled_primary", "appended_additional")
+            if binding.action in ("filled_primary", "appended_additional", "rebound_primary")
         ]
 
 
@@ -573,6 +573,7 @@ def bind_pr_rows(
     pr_url: Optional[str],
     repo: Optional[str] = None,
     owner: Optional[str] = None,
+    rebind: bool = False,
 ) -> PrRowBindResult:
     """Validate and bind every PR claim as one graph-owned mutation.
 
@@ -642,6 +643,11 @@ def bind_pr_rows(
             action = "already_bound"
         elif not node_is_open(node):
             action = "already_done"
+        elif rebind and isinstance(node.get("pr_number"), int):
+            old = {"number": node["pr_number"], "url": node.get("pr_url")}
+            node["additional_prs"] = [old, *(node.get("additional_prs") or [])]
+            node["pr_number"], node["pr_url"], node["merge_status"] = pr_number, pr_url, None
+            action = "rebound_primary"
         elif not isinstance(node.get("pr_number"), int):
             node["pr_number"] = pr_number
             node["pr_url"] = pr_url
@@ -1953,6 +1959,7 @@ def _group_refless_by_repo(
     *,
     node_id: Optional[Union[str, Iterable[str]]] = None,
     memo: dict[str, str],
+    with_refs: bool = False,
 ) -> "tuple[dict[str, list[dict]], dict[str, str], list[str]]":
     """Group open ref-less candidates by repo: (by_repo, cwd_by_nid, skipped).
 
@@ -1970,7 +1977,7 @@ def _group_refless_by_repo(
             continue
         if _scope is not None and nid not in _scope:
             continue
-        if not node_is_open(node) or node_pr_refs(node):
+        if not node_is_open(node) or (node_pr_refs(node) and not with_refs):
             continue
         cwd = node.get("cwd")
         # str-only: a corrupt non-string cwd would be a bad dict key and a
@@ -2008,12 +2015,22 @@ def collect_open_binding_heals(
     cache = listings if listings is not None else _ListingCache()
 
     by_repo, cwd_by_nid, _skipped = _group_refless_by_repo(
-        entries, node_id=node_id, memo=cache._repo_keys
+        entries, node_id=node_id, memo=cache._repo_keys, with_refs=True
     )
 
     heals: list[OpenPrBinding] = []
     advisories: list[str] = []
     _deadline = time.monotonic() + REVERSE_MAP_BUDGET_S
+
+    def _primary_closed(node, cwd) -> bool:
+        number = node.get("pr_number")
+        if not isinstance(number, int):
+            return False
+        try:
+            return query_pr_merge_state(number, cwd=cwd).state == "CLOSED"
+        except ReconcileError as exc:
+            advisories.append(f"open-binding rebind: {node.get('id')} PR #{number} unreadable ({exc})")
+            return False
     _groups = list(by_repo.items())
     for _i, (_key, nodes) in enumerate(_groups):
         if time.monotonic() >= _deadline:
@@ -2037,6 +2054,11 @@ def collect_open_binding_heals(
                     f"open PR #{binding.pr_number} binding ambiguous: {binding.detail}"
                 )
             elif binding.verdict == "missing" and binding.node_id in nids:
+                node = next(n for n in nodes if n.get("id") == binding.node_id)
+                if node_pr_refs(node) and not _primary_closed(node, gh_cwd):
+                    continue
+                if node_pr_refs(node):
+                    binding.verdict = "rebind"
                 heals.append(binding)
     return heals, advisories
 

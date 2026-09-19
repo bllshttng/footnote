@@ -1101,7 +1101,8 @@ fn node_binding_from_entries(root: &Path, entries: &[Value], facts: &PrFacts) ->
         return ProbeOutcome::Refused(format!(
             "PR {n} is unbound: {detail}. A merge the graph cannot see is refused. \
              Bind it: pick or file the node (fno backlog idea \"...\"), run \
-             fno do pr closure-trailer <id>, append the printed line to the PR \
+             fno do pr closure-trailer <id> [--extra <id> ...], append the \
+             printed ONE line to the PR \
              body, then retry. A revert or hotfix binds the same way; no flag \
              bypasses this gate.",
             n = facts.number

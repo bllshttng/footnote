@@ -67,7 +67,6 @@ def run_sync_catchup() -> dict[str, Any]:
             "outcome": "unknown",
             "detail": f"native verb unavailable: {exc}",
         }
-    _echo_lines(answer)
     return _answer_fields(answer)
 
 

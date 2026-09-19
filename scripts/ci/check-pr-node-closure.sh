@@ -135,13 +135,27 @@ done
 # that wrote no trailer at all names zero ids and fails here.
 claimed=$(( ${#candidates[@]} - ${#missing[@]} ))
 if [[ $claimed -eq 0 ]]; then
+  # How many exact trailer lines the body holds, and what the LAST one (the
+  # only line this gate and parse_closure_trailer read) names - the shape a
+  # two-line body needs to understand before it can be fixed.
+  trailer_count=$(printf '%s\n' "$PR_BODY" | grep -icE '^Backlog-Closure:[[:space:]]*' || true)
   {
     echo "check-pr-node-closure: HEAD ref '$PR_HEAD_REF' names $(IFS=,; echo "${candidates[*]}"), and the exact trailer claims none of them."
-    echo "  Add a line reading:"
-    echo "    Backlog-Closure: <the node id this PR closes>"
-    echo "  Generate it with: fno do pr closure-trailer <node-id>, which checks the"
-    echo "  id against the graph and PRINTS the line. The verb does not edit the"
-    echo "  PR: append the printed line to the PR body yourself. Do NOT paste a"
+    if [[ "$trailer_count" -eq 1 ]]; then
+      echo "  The body holds 1 Backlog-Closure line; this gate reads only the LAST one."
+    else
+      echo "  The body holds $trailer_count Backlog-Closure lines; this gate reads only the LAST one."
+    fi
+    if [[ -n "$trailer_body" ]]; then
+      echo "  That last line names: $trailer_body"
+    else
+      echo "  That last line names: nothing"
+    fi
+    echo "  The gate wanted: ${candidates[*]}"
+    echo "  Remedy: fno do pr closure-trailer <node-id> --extra <id> [--extra <id> ...]"
+    echo "  prints ONE line naming every id. Replace EVERY Backlog-Closure line in"
+    echo "  the PR body with that one line. The verb checks the ids against the"
+    echo "  graph and PRINTS the line; it does not edit the PR. Do NOT paste a"
     echo "  candidate from this message:"
     echo "  a branch segment can match the id grammar without being a real node,"
     echo "  and one unknown id voids the whole binding at merge."
