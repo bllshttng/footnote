@@ -64,7 +64,11 @@ from fno.graph._constants import (  # noqa: F401  GRAPH_MD re-exported: patched 
 # exponential delay (uniform in [0, base * 2**attempt], ceiling-capped) that
 # decorrelates them instead of waking every loser at the same instant. Five
 # attempts stay; the terminal error when they are spent is unchanged.
-_TX_ATTEMPTS = 5
+# 5 -> 8: the in-transaction base-version check fires on every genuinely
+# concurrent same-row write, and the two-writer barrier probe exhausted 5
+# attempts (each attempt pays two worker spawns, so the window per attempt is
+# wide); 8 with the full-jitter backoff converges.
+_TX_ATTEMPTS = 8
 
 # Full-jitter backoff between retries. An immediate `continue` made N
 # concurrent writers re-ship the whole graph in lockstep and collide again

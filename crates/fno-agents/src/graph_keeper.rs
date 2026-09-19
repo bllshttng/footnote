@@ -241,6 +241,10 @@ pub(crate) struct StoreState {
     /// dropped its guard before exit and a later request died mid-frame with
     /// its client reading a hangup for a write that answered ok).
     pub(crate) inflight: RwLock<()>,
+    pub(crate) cache: RwLock<Option<std::sync::Arc<CachedGraph>>>,
+    pub(crate) fill: Mutex<()>,
+    pub(crate) file_opens: std::sync::atomic::AtomicU64,
+    pub(crate) snapshots: Mutex<std::collections::VecDeque<(String, std::sync::Arc<Vec<Value>>)>>,
     pub(crate) write_ledger: Mutex<std::collections::VecDeque<WriteLedgerEntry>>,
     pub(crate) gate_metrics: Mutex<GateMetrics>,
     /// The instant of the last successful publish. The render trigger reads
@@ -630,6 +634,10 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         inflight: RwLock::new(()),
         write_ledger: Mutex::new(std::collections::VecDeque::new()),
         gate_metrics: Mutex::new(GateMetrics::new()),
+        cache: RwLock::new(None),
+        fill: Mutex::new(()),
+        file_opens: std::sync::atomic::AtomicU64::new(0),
+        snapshots: Mutex::new(std::collections::VecDeque::new()),
         last_write: Mutex::new(None),
         render_in_flight: std::sync::atomic::AtomicBool::new(false),
         render_failures: std::sync::atomic::AtomicU32::new(0),
@@ -933,6 +941,15 @@ fn serve_client(
                 // that is mid-publish or mid-reply cannot be cut by an
                 // exiting keeper.
                 let _inflight = state.inflight.read().unwrap_or_else(|e| e.into_inner());
+                // The splice fast path: read and begin stream the cache's
+                // serialized bytes with no reply-tree copy. Everything else,
+                // and any splice refusal, keeps today's handle_request path.
+                if let Some(spliced) = splice_reply(&state, &payload) {
+                    if spliced.write_to(&mut stream).is_ok() {
+                        continue;
+                    }
+                    return;
+                }
                 let reply = handle_request(&state, &payload);
                 let body = serde_json::to_vec(&reply).unwrap_or_else(|_| {
                     json!({"id": 0, "ok": false,
@@ -967,6 +984,124 @@ fn store_err_kind(err: &StoreError) -> &'static str {
         StoreError::Sqlite(_) => "sqlite",
         StoreError::Io(_) => "io",
     }
+}
+
+/// One cached graph snapshot: the key its rows were validated against, the
+/// version token (begin's tx token), the parsed entries shared with every
+/// concurrent reader via one `Arc`, and the lazily serialized views the
+/// reply paths splice instead of re-copying the tree.
+pub(crate) struct CachedGraph {
+    key: CacheKey,
+    version: String,
+    entries: std::sync::Arc<Vec<Value>>,
+    /// serde_json::to_vec(&*entries), filled once per version.
+    pub(crate) entries_json: std::sync::OnceLock<std::sync::Arc<Vec<u8>>>,
+    /// canonical_row_digests(&*entries) serialized, filled once per version.
+    pub(crate) base_digests_json: std::sync::OnceLock<std::sync::Arc<Vec<u8>>>,
+}
+
+/// The store version a cached snapshot was validated against. The json
+/// file-key half of main's cache is gone with the json leg; the store owns
+/// every row, so the version token is the only identity a hit needs.
+enum CacheKey {
+    Db(String),
+}
+
+enum GraphRead {
+    Cached(std::sync::Arc<CachedGraph>),
+    // The Fresh arm's payload is consumed by main's cache consumers; the
+    // splice fast path only distinguishes the variant, so its fields stay
+    // unread here until the cached read lands in the handlers.
+    Fresh(
+        #[allow(dead_code)] std::sync::Arc<Vec<Value>>,
+        #[allow(dead_code)] String,
+    ),
+}
+
+fn sqlite_unreadable(state: &StoreState, error: String) -> StoreError {
+    StoreError::Unreadable(
+        crate::backlog::database_path(&state.graph)
+            .display()
+            .to_string(),
+        error,
+    )
+}
+
+fn cached_hit(state: &StoreState, key: &CacheKey) -> Option<std::sync::Arc<CachedGraph>> {
+    let cache = state.cache.read().unwrap_or_else(|e| e.into_inner());
+    let cached = cache.as_ref()?;
+    match (&cached.key, key) {
+        (CacheKey::Db(a), CacheKey::Db(b)) if a == b => Some(std::sync::Arc::clone(cached)),
+        _ => None,
+    }
+}
+
+/// The sqlite half of main's gated read: version pre-check, export, version
+/// re-read; only a version that did not move between the two reads and a
+/// non-empty list is cached. CALLER MUST HOLD `state.gate` in read mode.
+fn read_graph_gated(state: &StoreState, _strict: bool) -> Result<GraphRead, StoreError> {
+    let pre =
+        crate::backlog::version(&state.graph).map_err(|error| sqlite_unreadable(state, error))?;
+    if let Some(hit) = cached_hit(state, &CacheKey::Db(pre.clone())) {
+        return Ok(GraphRead::Cached(hit));
+    }
+    let _fill = state.fill.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(hit) = cached_hit(state, &CacheKey::Db(pre.clone())) {
+        return Ok(GraphRead::Cached(hit));
+    }
+    state
+        .file_opens
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut entries = crate::backlog::read_entries(&state.graph)
+        .map_err(|error| sqlite_unreadable(state, error))?;
+    graph_store::apply_defaults(&mut entries, false);
+    let entries = std::sync::Arc::new(entries);
+    let post =
+        crate::backlog::version(&state.graph).map_err(|error| sqlite_unreadable(state, error))?;
+    if post == pre && !entries.is_empty() {
+        let graph = std::sync::Arc::new(CachedGraph {
+            key: CacheKey::Db(pre.clone()),
+            version: pre.clone(),
+            entries: std::sync::Arc::clone(&entries),
+            entries_json: std::sync::OnceLock::new(),
+            base_digests_json: std::sync::OnceLock::new(),
+        });
+        *state.cache.write().unwrap_or_else(|e| e.into_inner()) =
+            Some(std::sync::Arc::clone(&graph));
+        return Ok(GraphRead::Cached(graph));
+    }
+    Ok(GraphRead::Fresh(entries, pre))
+}
+
+fn remember_snapshot(state: &StoreState, version: &str, entries: &std::sync::Arc<Vec<Value>>) {
+    let mut snapshots = state
+        .snapshots
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if snapshots.iter().any(|(stored, _)| stored == version) {
+        return;
+    }
+    snapshots.push_back((version.to_string(), std::sync::Arc::clone(entries)));
+    while snapshots.len() > 2 {
+        snapshots.pop_front();
+    }
+}
+
+fn canonical_row_digests(entries: &[Value]) -> std::collections::BTreeMap<String, String> {
+    use sha2::Digest as _;
+
+    let mut canonical = entries.to_vec();
+    graph_store::ensure_slugs(&mut canonical);
+    graph_store::recompute_statuses_with_plan_rungs(&mut canonical, None);
+    graph_store::canonicalize_entries(&mut canonical);
+    canonical
+        .iter()
+        .filter_map(|row| {
+            let id = graph_store::entry_id(row)?.to_string();
+            let digest = sha2::Sha256::digest(graph_store::to_python_json(row).as_bytes());
+            Some((id, format!("{digest:x}")[..16].to_string()))
+        })
+        .collect()
 }
 
 pub(crate) fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
@@ -2384,13 +2519,15 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Store
         })
         .unwrap_or_default();
     let _gate = state.gate.write().unwrap_or_else(|e| e.into_inner());
-    if let Some(expected) = base {
-        if state_version(state)? != expected {
-            return Err(StoreError::Conflict);
-        }
-    }
-    let entries = crate::backlog::apply_client_rows(&state.graph, "commit_rows", changed, removed)
-        .map_err(StoreError::Invalid)?;
+    let entries =
+        crate::backlog::apply_client_rows(&state.graph, "commit_rows", changed, removed, base)
+            .map_err(|error| {
+                if error == "graph conflict: base version moved" {
+                    StoreError::Conflict
+                } else {
+                    StoreError::Invalid(error)
+                }
+            })?;
     Ok(json!({
         "dropped": 0,
         "backup": Value::Null,
@@ -2826,6 +2963,10 @@ mod tests {
             events: None,
             sock_ino: None,
             startup_fp: None,
+            cache: RwLock::new(None),
+            fill: Mutex::new(()),
+            file_opens: std::sync::atomic::AtomicU64::new(0),
+            snapshots: Mutex::new(std::collections::VecDeque::new()),
         }
     }
 
@@ -2950,6 +3091,10 @@ mod tests {
             events: None,
             sock_ino: None,
             startup_fp: None,
+            cache: RwLock::new(None),
+            fill: Mutex::new(()),
+            file_opens: std::sync::atomic::AtomicU64::new(0),
+            snapshots: Mutex::new(std::collections::VecDeque::new()),
         }
     }
 
@@ -3235,6 +3380,10 @@ mod tests {
             events: None,
             sock_ino: None,
             startup_fp: None,
+            cache: RwLock::new(None),
+            fill: Mutex::new(()),
+            file_opens: std::sync::atomic::AtomicU64::new(0),
+            snapshots: Mutex::new(std::collections::VecDeque::new()),
         };
         let stale = json!({
             "name": "update_fields",
@@ -3425,6 +3574,10 @@ mod tests {
             events,
             sock_ino: None,
             startup_fp: None,
+            cache: RwLock::new(None),
+            fill: Mutex::new(()),
+            file_opens: std::sync::atomic::AtomicU64::new(0),
+            snapshots: Mutex::new(std::collections::VecDeque::new()),
         }
     }
 

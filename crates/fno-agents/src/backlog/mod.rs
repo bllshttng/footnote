@@ -656,8 +656,20 @@ pub fn apply_client_rows(
     mutation: &str,
     mut changed: Vec<Value>,
     removed: Vec<String>,
+    expected_version: Option<&str>,
 ) -> Result<Vec<Value>, String> {
     mutate_single_row(graph, mutation, move |rows: &mut Vec<Value>| {
+        // The optimistic-token check INSIDE the write transaction: a
+        // pre-transaction `state_version` probe leaves a window where another
+        // writer lands between check and commit, and the tx would silently
+        // overwrite its rows (measured: 53 of 100 concurrent same-row notes
+        // survived). The tx's own authoritative rows are what the client's
+        // base_version must still name.
+        if let Some(expected) = expected_version {
+            if content_version(rows) != expected {
+                return Err("graph conflict: base version moved".into());
+            }
+        }
         rows.retain(|row| {
             crate::graph_store::entry_id(row).map_or(true, |id| !removed.contains(&id.to_string()))
         });
