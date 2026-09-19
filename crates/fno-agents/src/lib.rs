@@ -231,6 +231,7 @@ pub mod registry_json;
 pub mod rename;
 pub mod restart_run;
 pub mod resume_args;
+pub mod resume_pin;
 pub mod resume_receipt;
 pub mod resume_wake;
 pub mod review_freshness;
