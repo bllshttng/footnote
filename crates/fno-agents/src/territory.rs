@@ -1687,6 +1687,10 @@ path = "/repo/alpha"
         let reread = read_record(tmp.path(), "x-a,x-b");
         assert_eq!(reread["worker"]["name"], "blueprinter-x-a-x-b-abc123");
         assert_eq!(reread["fed"]["e-9"]["ok"], true);
+        // env_guard interlocks but restores nothing: without this removal the
+        // pinned FNO_CONFIG outlives the test and every later config-reading
+        // test in the process resolves against this deleted tempdir.
+        std::env::remove_var("FNO_CONFIG");
     }
 
     #[test]
