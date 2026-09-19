@@ -177,18 +177,9 @@ class SessionLookup:
 
 
 def lookup_sessions(cwd: Path | str, session_id: str) -> SessionLookup:
-    """Read the session files for one ``(cwd, session_id)`` pair, oldest first.
-
-    The read lives in the Rust owner (``crates/fno-agents/src/pi.rs``, reached
-    through the ``pi_session_lookup`` field of ``spawn-axes``): one store
-    reader, honoring ``PI_CODING_AGENT_DIR`` and the session-dir settings the
-    way pi itself does.
-
-    Ordering is by FILENAME, which carries an ISO-8601 timestamp prefix
-    (``<ISO>_<session-id>.jsonl``), so a lexicographic sort is chronological
-    and needs no stat call and no parse. Ranking by CONTENT is forbidden; an
-    empty assistant ``content`` array marks a turn that was attempted and
-    failed, which is usually the one a human needs to read.
+    """One ``(cwd, session_id)`` pair's store answer, oldest first, from the
+    Rust owner. Ranking by CONTENT is forbidden: an empty assistant array
+    marks a turn attempted and failed, often the one a human needs.
     """
     try:
         answer = pi_session_lookup(str(cwd), session_id)
@@ -198,11 +189,10 @@ def lookup_sessions(cwd: Path | str, session_id: str) -> SessionLookup:
             directory=Path(""),
             reason="fno-agents is missing or failed; run fno doctor update --rust",
         )
-    files = tuple(Path(f) for f in answer.get("files", []))
     return SessionLookup(
         state=str(answer.get("state", "unknown")),
         directory=Path(str(answer.get("directory", "") or "")),
-        files=files,
+        files=tuple(Path(f) for f in answer.get("files", [])),
         reason=str(answer.get("reason", "")),
     )
 

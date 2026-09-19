@@ -176,9 +176,7 @@ def complete_launch_argv(
 
     argv = [*argv, *keeper_posture(harness, "thread", permission_mode, yolo)]
     if harness == "pi":
-        # pi's route is one owner for keeper and pane: a `provider/id` model
-        # stays `--model` only, a bare model carries the provider, and no
-        # model defers to pi's own settings. The generic adds below would
+        # One route owner for keeper and pane; the generic adds below would
         # name a bare --model without its provider.
         from fno.agents.spawn_axes_client import pi_route
 
