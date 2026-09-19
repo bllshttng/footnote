@@ -292,8 +292,11 @@ fn write_targets(command: &str) -> Vec<String> {
             at_command = true;
         } else if nxt {
             nxt = false;
-            if !bound(tok) && !tok.contains('>') && !is_fd(tok) {
-                targets.push(tok.clone());
+            // A `)` glued into the word by an open `$( ` (and the matching
+            // backtick) is a substitution closer, not part of the path.
+            let w = tok.trim_end_matches([')', '`']);
+            if !w.contains('>') && !is_fd(w) {
+                targets.push(w.to_string());
             }
         } else if is_redirect(tok) {
             // `lex` emits redirects as their own tokens (`2>`, `>`, `>>`,
@@ -341,6 +344,11 @@ fn write_targets(command: &str) -> Vec<String> {
         }
     }
     flush(&verb, &pool, &mut targets);
+    // The verb-operand flush saw the glued closers too; strip them here so
+    // `N=$(cmd | tee out.txt)` names `out.txt`, not `out.txt)`.
+    for t in &mut targets {
+        t.truncate(t.trim_end_matches([')', '`']).len());
+    }
     targets.retain(|t| !t.is_empty());
     targets
 }
@@ -762,6 +770,34 @@ mod tests {
         assert!(
             targets("cmd 2>&1 | tee").is_empty(),
             "fd dup is not a write"
+        );
+        // A dup inside a command substitution: `lex` glues the closers
+        // into the word while `$( ` is open, so `1)` must still read as fd.
+        assert!(
+            targets("N=$(cmd 2>&1)").is_empty(),
+            "subst dup is not a write"
+        );
+        assert!(
+            targets("N=`cmd 2>&1`").is_empty(),
+            "backtick dup is not a write"
+        );
+        assert!(
+            targets("N=$(a $(b 2>&1))").is_empty(),
+            "nested subst dup is not a write"
+        );
+        assert!(
+            targets("N=$(cmd >&2)").is_empty(),
+            "reversed dup is not a write"
+        );
+        assert_eq!(
+            targets("X=$(cmd > out.txt)"),
+            vec!["out.txt"],
+            "a real write inside a substitution still binds"
+        );
+        assert_eq!(
+            targets("N=$(cmd | tee out.txt)"),
+            vec!["out.txt"],
+            "tee inside a substitution still binds"
         );
         // Quoted "a > b" is one word, not an operator.
         assert!(targets("echo \"a > b\"").is_empty());
