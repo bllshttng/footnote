@@ -31,18 +31,31 @@ def load_graph(path: Path | None = None, *, keep_malformed: bool = False) -> lis
     if path is None:
         path = GRAPH_JSON
 
-    # The store, not the seed file, is what holds the rows now: a store
+    # The store, not any seed file, is what holds the rows now: a store
     # born from a write never materializes graph.json, so an absent seed
-    # file means "read the store", not "nothing exists".
-    from fno.graph.store import read_graph_strict
+    # file means "read the store", not "nothing exists". The typed read
+    # carries a row it cannot represent verbatim, which is what
+    # ``keep_malformed`` callers count; corruption raises rather than
+    # answering empty.
+    from fno.graph.store import (
+        GraphCorruptError,
+        GraphMalformedRootError,
+        GraphUnreadableError,
+        StoreUnavailable,
+        read_graph_strict,
+    )
 
-    if not path.exists():
+    try:
         return read_graph_strict(Path(path))
-
-    from fno.graph.store import read_file_bytes
-
-    raw_bytes = read_file_bytes(Path(path))
-    return _entries(json.loads(raw_bytes), keep_malformed=keep_malformed)
+    except (
+        GraphCorruptError,
+        GraphMalformedRootError,
+        GraphUnreadableError,
+        StoreUnavailable,
+    ) as exc:
+        # Unreadable is NOT empty: every load_graph caller treats ValueError
+        # as "the store could not be read" (absence cannot be proven).
+        raise ValueError(f"graph store unreadable: {path}") from exc
 
 
 def _entries(data: object, *, keep_malformed: bool = False) -> list[dict]:

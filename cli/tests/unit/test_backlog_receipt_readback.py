@@ -50,7 +50,9 @@ def test_update_refuses_when_the_row_does_not_read_back(tmp_path, monkeypatch):
 
     assert result.exit_code == 1, result.output
     assert "write did not land" in result.output
-    assert json.loads(graph.read_text())["entries"][0]["title"] == "new"
+    from fno.graph.store import read_graph_strict
+
+    assert read_graph_strict(graph)[0]["title"] == "new"
 
 
 def test_update_receipt_names_the_resolved_id(tmp_path, monkeypatch):
