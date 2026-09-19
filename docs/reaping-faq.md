@@ -77,9 +77,9 @@ These five move or remove state around sessions. None stops or removes a session
 
 ## In what order
 
-**Across programs, no arbiter exists.** Each daemon arm runs off-loop behind its own one-in-flight gate, so the tick's issue order, the retire arm, then the worktree task, then the orphan test-binary sweep, then liveness, then terminal-stop (`daemon.rs` select arm), is not a completion order. The first program to act wins and the others find the row gone. The merge reaper and the retire arm share one stage and commit. The merge reaper calls them with no release, so it is the stricter of the two.
+**Across programs, no arbiter exists.** Each daemon arm runs off-loop behind its own one-in-flight gate. The tick's issue order is the retire arm, then the worktree task, then the orphan test-binary sweep, then liveness, then terminal-stop (`daemon.rs` select arm). That issue order is not a completion order. The first program to act wins and the others find the row gone. The merge reaper and the retire arm share one stage and commit. The merge reaper calls them with no release, so it is the stricter of the two.
 
-**Inside the retire arm**, in this order: state-file sweep, registry sweep, nudge ladder, unowned sweeps, roster sweep, mux tab prune (`gc.rs` `maybe_retirement_sweep`). The roster sweep runs after the registry sweep on purpose: a row the registry sweep retires this pass is already gone from the registry the roster sweep loads, and a session the roster sweep removes becomes a corpse for the next registry pass.
+**Inside the retire arm**, in this order: state-file sweep, registry sweep, nudge ladder, unowned sweeps, roster sweep, mux tab prune (`gc.rs` `maybe_retirement_sweep`). The roster sweep runs after the registry sweep on purpose. A row the registry sweep retires this pass is already gone from the registry the roster sweep loads. A session the roster sweep removes becomes a corpse for the next registry pass.
 
 **Inside the registry sweep, per row**, the first gate that answers decides. Fourteen steps, derived from `gc_sweep.rs` `run_with_release` and `gc.rs` `gc_decide`:
 
@@ -298,9 +298,9 @@ Each item here cost a real session time. One corrects an older belief.
 2. **A second claude account holds rows the ambient account cannot see.** `no job matching <id>` from one root is a wrong-root absence.
 3. **`claude rm` takes the short id.** The full session id answers `No job matching` and exits 0. The exit code reads as success.
 4. **`claude rm` refuses a session whose cwd has uncommitted changes.** In a canonical checkout that cwd never goes clean.
-5. **A keeper-held pane reads dead to a fresh server while its child lives.** Positive death evidence decides a stop (`gc_sweep.rs` `claude_death_reason`).
+5. **A keeper pane reads dead to a fresh server.** Its child lives. Death evidence decides the stop (`gc_sweep.rs` `claude_death_reason`).
 6. **A daemon older than the installed binary reports every status as `unknown`.** Unknown keeps rows. Run `fno agents list` and read its warning. Measured on 2026-09-10: one restart turned 57 unknown rows into 26 orphaned, 16 writing, 12 quiet, and 2 parked.
-7. **The mux tab prune runs on the manual verb and the daemon's retire arm.** An older belief held that nothing scheduled it. Today the manual verb runs it with `--include-used-shells` (`client.rs` `run_reap`), the daemon retire arm runs it with default flags (`gc.rs` `maybe_retirement_sweep`), and `--no-mux` skips it on the manual verb.
+7. **The mux tab prune is scheduled, not manual-only.** An older belief held that nothing scheduled it. The manual verb adds `--include-used-shells` (`client.rs` `run_reap`). The daemon retire arm uses default flags (`gc.rs` `maybe_retirement_sweep`). `--no-mux` skips it on the manual verb.
 8. **A row refused on every pass stays, and the report names the refusal each time.** Older builds discarded the reason. Today the render carries it (`reap_render.rs` `render_reap`).
 
 ## Every JSON key
