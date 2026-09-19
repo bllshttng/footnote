@@ -886,12 +886,15 @@ fn run_catchup(deps: &Deps, cwd: &Path) -> CatchupOut {
         inner(command, dir)
     });
 
+    // Catch-up runs inline during `reconcile --json`; every progress line
+    // from the wrapped sync must land on stderr, never stdout, or the JSON
+    // caller's stdout stops parsing. The direct `sync` action keeps its own
+    // stdout untouched - only this wrapper redirects.
     let (rc, so, se) = run_sync_with_shell(deps, cwd, newest.number, &tracking);
     if rc != 0 {
         let mut out = CatchupOut::bare("failed");
         out.exit = rc;
-        out.stdout = so;
-        out.stderr = se;
+        out.stderr = so.into_iter().chain(se).collect();
         out.stderr.push(format!(
             "post-merge sync catch-up: sync of PR #{} failed (exit {rc}); markers withheld, will retry",
             newest.number
@@ -901,8 +904,8 @@ fn run_catchup(deps: &Deps, cwd: &Path) -> CatchupOut {
         out.stale = st.state == "stale";
         return out;
     }
-    let mut stdout = so;
-    let mut stderr = se;
+    let stdout: Vec<String> = Vec::new();
+    let mut stderr: Vec<String> = so.into_iter().chain(se).collect();
 
     if !synced_marker(&canonical, &newest.sha).exists() {
         let mut out = CatchupOut::bare("skipped");
@@ -935,7 +938,7 @@ fn run_catchup(deps: &Deps, cwd: &Path) -> CatchupOut {
             swept += 1;
         }
     }
-    stdout.push(format!(
+    stderr.push(format!(
         "post-merge sync catch-up: synced PR #{}{}",
         newest.number,
         if swept > 0 {
@@ -1556,6 +1559,28 @@ mod tests {
         ] {
             assert!(synced_marker(tmp.path(), sha).exists(), "{sha}");
         }
+    }
+
+    #[test]
+    fn catchup_progress_goes_to_stderr_not_stdout() {
+        // Catch-up runs inline during `reconcile --json`; its own progress
+        // and the wrapped sync's progress must both land on stderr, or the
+        // JSON caller's stdout stops parsing (the bug main fixed for the old
+        // Python implementation in 1c4a346d55).
+        let tmp = tempfile::tempdir().unwrap();
+        write_cfg(tmp.path(), CFG_BODY);
+        let (shell, _ran) = spy_shell(0);
+        let rows = list_rows(&[(7, &iso_at_hours_before(1), SHA)]);
+        let deps = catchup_deps(ListStub::Rows(rows), shell, Rc::new(|_| json!({})));
+        let out = run_catchup(&deps, tmp.path());
+        assert_eq!(out.outcome, "synced");
+        assert!(out.stdout.is_empty(), "{:?}", out.stdout);
+        let stderr = out.stderr.join("\n");
+        assert!(stderr.contains("post-merge sync: running in"), "{stderr}");
+        assert!(
+            stderr.contains("post-merge sync catch-up: synced PR #7"),
+            "{stderr}"
+        );
     }
 
     #[test]
