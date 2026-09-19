@@ -159,7 +159,10 @@ chmod +x "$_DRIVE_STUB/fno"
 _DRIVE_OUT=$(printf '%s' '{"tool_name":"Edit","tool_input":{"file_path":"/proj/.fno/artifacts/proof.md","old_string":"a","new_string":"b"}}' \
   | PATH="$_DRIVE_STUB:$PATH" FNO_AGENTS_SELF_SHORT_ID=drive-test EVENTS_FILE="$_DRIVE_EVENTS" bash "$GUARD" 2>/dev/null)
 if [[ "$_DRIVE_OUT" == "{}" ]] \
-  && jq -e 'select(.type == "operator_initiated" and .source == "hook" and .data.action_type == "artifact_edited_operator_initiated" and .data.file_path == "/proj/.fno/artifacts/proof.md")' "$_DRIVE_EVENTS" >/dev/null 2>&1; then
+  && _ROWS_BIN="${FNO_BIN:-${REPO_ROOT}/crates/fno/target/debug/fno}" \
+  && [[ -x "$_ROWS_BIN" ]] \
+  && "$_ROWS_BIN" doctor event rows --events "$_DRIVE_EVENTS" 2>/dev/null \
+     | jq -e '.[] | fromjson | select(.type == "operator_initiated" and .source == "hook" and .data.action_type == "artifact_edited_operator_initiated" and .data.file_path == "/proj/.fno/artifacts/proof.md")' >/dev/null 2>&1; then
   pass "artifact edit emits canonical operator audit"
 else
   fail "artifact edit canonical operator audit: verdict=$_DRIVE_OUT events=$(cat "$_DRIVE_EVENTS" 2>/dev/null)"
