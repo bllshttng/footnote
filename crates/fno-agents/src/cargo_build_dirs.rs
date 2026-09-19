@@ -1453,6 +1453,139 @@ mod tests {
         assert!(rep.lines.iter().any(|l| l.contains("reaped lane=cap")));
     }
 
+    /// Run git in `dir`, panicking with git's own stderr when it fails.
+    /// Ambient config is pinned to `/dev/null` so a signing key or template
+    /// on this machine can never make the fixture commit fail.
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} in {dir:?} did not run: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} in {dir:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+
+    fn git_available() -> bool {
+        Command::new("git").arg("--version").output().is_ok()
+    }
+
+    /// The bug this guards: `live_shards` matched a live cwd against the
+    /// FIRST registered tree whose path prefixes it, which for a nested
+    /// worktree (`<repo>/.claude/worktrees/<name>`) is always the outer,
+    /// main checkout - `git worktree list` prints that one first. A cargo
+    /// process running inside the NESTED tree then had its build dir
+    /// credited to the OUTER tree, so the outer tree's row was the one kept
+    /// live and the nested tree's own build dir - the one actually in use -
+    /// went to the cap lane. The fix picks the LONGEST matching tree.
+    #[test]
+    fn cap_keeps_a_nested_worktrees_live_row_not_the_outer_trees() {
+        if !git_available() {
+            return;
+        }
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Tag carries no "nested" substring - it would otherwise land in the
+        // outer tree's own manifest path and defeat the keyed fake cargo
+        // below.
+        let env = setup("wtlive", "never-broken");
+
+        git(&env.root, &["init", "-q"]);
+        git(&env.root, &["config", "user.email", "t@t"]);
+        git(&env.root, &["config", "user.name", "t"]);
+        git(&env.root, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let nested = env.root.join(".claude/worktrees/nested");
+        git(
+            &env.root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                nested.to_str().unwrap(),
+                "-b",
+                "nested-live",
+            ],
+        );
+        std::fs::create_dir_all(nested.join("crates/fake")).unwrap();
+        std::fs::write(
+            nested.join("crates/fake/Cargo.toml"),
+            "[package]\nname = 'nestedpkg'\nversion = '0.1.0'\n",
+        )
+        .unwrap();
+
+        // Keyed by `--manifest-path`, not by which tree invoked cargo: the
+        // outer tree's manifest and the nested tree's manifest must resolve
+        // to DIFFERENT build dirs, so each tree gets its own row.
+        std::fs::write(
+            env.root.join("bin/cargo"),
+            "#!/bin/sh\n\
+             manifest=\"\"\n\
+             prev=\"\"\n\
+             for a in \"$@\"; do\n\
+             if [ \"$prev\" = \"--manifest-path\" ]; then manifest=\"$a\"; fi\n\
+             prev=\"$a\"\n\
+             done\n\
+             case \"$manifest\" in\n\
+             *nested*) fno=\"$CBD_FNO_NESTED\"; fb=\"$CBD_FB_NESTED\"; pkg=nestedpkg ;;\n\
+             *) fno=\"$CBD_FNO_BASE\"; fb=\"$CBD_FB_BASE\"; pkg=basepkg ;;\n\
+             esac\n\
+             if [ -n \"$CARGO_BUILD_BUILD_DIR\" ]; then\n\
+             printf '{\"build_directory\":\"%s\",\"packages\":[{\"name\":\"%s\"}]}\\n' \"$fno\" \"$pkg\"\n\
+             else\n\
+             printf '{\"build_directory\":\"%s\",\"packages\":[{\"name\":\"%s\"}]}\\n' \"$fb\" \"$pkg\"\n\
+             fi\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            env.root.join("bin/cargo"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        // Both under the fno base, so ownership never depends on membership.
+        // The nested row is the OLDER (larger quiet) of the two, so the cap
+        // lane's oldest-first sort tries it before the outer row - the case
+        // that would go untested if the live veto were checked only after
+        // the min-quiet floor already saved it.
+        let outer_row = plant(&env.fno_base, "00", "aaaa11", 3600, false);
+        let nested_row = plant(&env.fno_base, "00", "bbbb22", 2 * 3600, false);
+        std::env::set_var("CBD_FNO_BASE", &outer_row);
+        std::env::set_var("CBD_FNO_NESTED", &nested_row);
+        std::env::set_var("CBD_FB_BASE", env.fb_base.join("00").join("cccc33"));
+        std::env::set_var("CBD_FB_NESTED", env.fb_base.join("00").join("dddd44"));
+        let unit = crate::reclaim::tree_bytes(&nested_row);
+        std::env::set_var("FNO_CARGO_FREE_BYTES", unit.to_string());
+        // The live cwd is the nested tree's own path - a `starts_with`
+        // prefix match for BOTH the outer tree and the nested tree, so only
+        // the longest match may claim it.
+        std::env::set_var("FNO_TEST_LIVE_CARGO_CWDS", &nested);
+
+        let rep = sweep(&env.root, true, SystemTime::now());
+
+        std::env::remove_var("CBD_FNO_BASE");
+        std::env::remove_var("CBD_FNO_NESTED");
+        std::env::remove_var("CBD_FB_BASE");
+        std::env::remove_var("CBD_FB_NESTED");
+
+        assert!(
+            nested_row.exists(),
+            "the nested worktree's own live build dir must survive the cap"
+        );
+        assert!(
+            !outer_row.exists(),
+            "the outer tree's unrelated row still goes under cap pressure"
+        );
+        assert_eq!(rep.reaped, 1, "{rep:?}");
+        assert!(rep.lines.iter().any(|l| l.contains("kept lane=cargo-live")));
+        assert!(rep.lines.iter().any(|l| l.contains("reaped lane=cap")));
+    }
+
     /// AC4-HP: a dry run that plans one age reap reports the bytes it WOULD
     /// reclaim, not the bytes left behind.
     #[test]
