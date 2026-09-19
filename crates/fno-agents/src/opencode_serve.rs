@@ -948,6 +948,9 @@ fn dispatch_opencode_serve_inner(
             "session_id": session_id,
             "short_id": session_id,
             "serve_url": serve.base_url.clone(),
+            // The generated serve config writes `{"permission":{"*":"allow"}}`;
+            // the receipt NAMES that posture instead of leaving it unnamed.
+            "permission_posture": "explicit allow-all (serve config permission.{*}=allow)",
             "durability": "daemon-owned",
             "incarnation": format!("{}:{}", serve.pid, serve.pid_start.unwrap_or_default()),
             "endpoint": serve.base_url,

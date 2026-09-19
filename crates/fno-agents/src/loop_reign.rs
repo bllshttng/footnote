@@ -35,7 +35,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 /// The four terminal row statuses, Python's `TERMINAL_STATUSES` exactly.
-fn is_terminal(row: &RegistryEntry) -> bool {
+pub(crate) fn is_terminal(row: &RegistryEntry) -> bool {
     matches!(
         row.status,
         crate::AgentStatus::Exited
@@ -722,7 +722,7 @@ pub struct OrphanCrown {
 /// Normalized territory key for held matching: comma-split members, trimmed,
 /// sorted - "a, b" and "b,a" are one territory, mirroring crown's
 /// `_territory_key` so the sweep and the grant-time checks cannot disagree.
-fn territory_key(scope: &str) -> String {
+pub(crate) fn territory_key(scope: &str) -> String {
     let mut members: Vec<String> = scope
         .split(',')
         .map(|m| m.trim())

@@ -119,9 +119,18 @@ def resolve_account_binding(
             return _at(UNKNOWN, reason="bearer-needs-record")
         try:
             # claude reads the scoped Keychain item and the probe reads the
-            # unscoped one, so a proven bearer is still unattributable here.
-            if cred_root is None and len(managed.canonical_slot_blobs(harness)) > 1:
-                return _at(AMBIGUOUS, reason="ambiguous-slot")
+            # unscoped one, so the slot must present ONE principal, however
+            # many blobs hold it. principal_of_blobs is the door the unbound
+            # lane below uses; counting here read one account twice as two.
+            if cred_root is None:
+                _principal, _proven, failure = managed.principal_of_blobs(
+                    managed.canonical_slot_blobs(harness)
+                )
+                if failure is not None:
+                    return _at(
+                        AMBIGUOUS if failure == "ambiguous-slot" else UNKNOWN,
+                        reason=failure,
+                    )
             verdict = managed.bearer_principal_verdict(
                 harness, requested, root, bearer, now=now, ttl=ttl
             )

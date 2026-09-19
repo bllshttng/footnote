@@ -9938,11 +9938,11 @@ def _reconcile_once(
 
             _cu = run_sync_catchup()
             sync_catchup = {
-                "outcome": _cu.outcome, "stale": _cu.stale,
-                "pr_number": _cu.pr_number, "swept": _cu.swept, "detail": _cu.detail,
+                "outcome": _cu["outcome"], "stale": _cu.get("stale", False),
+                "pr_number": _cu.get("pr_number"), "swept": _cu.get("swept", 0), "detail": _cu.get("detail", ""),
             }
-            if _cu.outcome not in ("disabled", "fresh") and not json_out:
-                typer.echo(f"sync catch-up: {_cu.outcome}", err=True)
+            if _cu["outcome"] not in ("disabled", "fresh") and not json_out:
+                typer.echo(f"sync catch-up: {_cu['outcome']}", err=True)
         except Exception as _cu_exc:  # noqa: BLE001 - never abort the sweep
             sync_catchup = {"outcome": "error", "detail": str(_cu_exc)[:200]}
             if not json_out:

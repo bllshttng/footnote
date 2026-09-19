@@ -151,6 +151,16 @@ fn main() {
     if args.first().map(String::as_str) == Some("surface-check") {
         std::process::exit(fno_agents::surface_check::run_surface_check(&args[1..]));
     }
+    // cli/src/fno/pr/_sync_canonical.py transports HERE through verb_call:
+    // the post-merge canonical sync + its catch-up sweep and staleness
+    // alarm, native. Registers no verb (the shrink law allows no new
+    // action); the transport reaches it through resolve_binary like the
+    // other early arms.
+    if args.first().map(String::as_str) == Some("sync-canonical") {
+        std::process::exit(fno_agents::sync_canonical::run_sync_canonical_verb(
+            &args[1..],
+        ));
+    }
     // hooks/context-run.sh is the only caller.
     if args.first().map(String::as_str) == Some("context-run") {
         std::process::exit(fno_agents::context_run::run_context_run(&args[1..]));
@@ -665,6 +675,14 @@ async fn run(args: Vec<String>) -> i32 {
     // payload and reads the answer back; binary-first like `publish-review`.
     if verb == "canonical-check" {
         return fno_agents::canonical_check::run_canonical_check(&args[1..]);
+    }
+
+    // `sync-canonical`: the post-merge canonical sync + its catch-up sweep
+    // and staleness alarm, native. The Python `fno do pr sync-canonical`
+    // transport sends one JSON payload and reads the answer back;
+    // binary-first like `canonical-check`.
+    if verb == "sync-canonical" {
+        return fno_agents::sync_canonical::run_sync_canonical_verb(&args[1..]);
     }
 
     // `reign-state`/`reign-shape`: the reign reader and the shape rewrite (see

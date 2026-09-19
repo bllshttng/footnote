@@ -342,9 +342,25 @@ fn fact(v: Option<&Value>, label: &str, bad: bool) -> String {
     format!("<div class=\"{cls}\"><span class=\"fv\">{shown}</span><span class=\"fl\">{label}</span></div>")
 }
 
+/// The tile for a reading that could not run at all: a dash, never 0 and
+/// never ?, because nothing was measured rather than a count the reader
+/// dropped. Distinct from [`fact`]'s "?" on purpose: a missing summary key
+/// and a read that failed are different facts.
+fn fact_unmeasured(label: &str) -> String {
+    format!(
+        "<div class=\"fact\"><span class=\"fv\">-</span><span class=\"fl\">{label}</span></div>"
+    )
+}
+
 /// Four states, never a falsely healthy page: the court cannot be read, it
-/// holds no crowns, it agrees with itself, or it disagrees with itself.
-fn verdict_card(court: &Value, summary: &Value) -> String {
+/// holds no crowns, it agrees with itself, or it disagrees with itself. The
+/// registry split read arrives precomputed so the card stays pure and a
+/// test can pass a fabricated reading.
+fn verdict_card(
+    court: &Value,
+    summary: &Value,
+    split_read: &Result<crate::crown_split::CrownSplits, String>,
+) -> String {
     let crowns = court.get("crowns").and_then(|c| c.as_array());
     let (cls, body) = match crowns {
         None => (
@@ -364,13 +380,44 @@ fn verdict_card(court: &Value, summary: &Value) -> String {
             let disagreements = as_i64(summary, "disagreements");
             let unknowns = as_i64(summary, "unknowns");
             let splits = as_i64(summary, "splits");
-            let (cls, mark, text) = if disagreements == 0 && unknowns == 0 && splits == 0 {
+            let (double_ruled, split_tiles, split_note) = match split_read {
+                Ok(cs) => {
+                    let d = cs.double_ruled.len() as i64;
+                    let s = cs.stale.len() as i64;
+                    (
+                        Some(d),
+                        format!(
+                            "{}{}",
+                            fact(Some(&json!(d)), "double ruled", d > 0),
+                            fact(Some(&json!(s)), "stale crowns", s > 0),
+                        ),
+                        String::new(),
+                    )
+                }
+                Err(reason) => (
+                    None,
+                    format!(
+                        "{}{}",
+                        fact_unmeasured("double ruled"),
+                        fact_unmeasured("stale crowns")
+                    ),
+                    format!(
+                        "<p class=\"vnote\">crown split read failed: {}</p>",
+                        esc(reason)
+                    ),
+                ),
+            };
+            let (cls, mark, text) = if disagreements == 0
+                && unknowns == 0
+                && splits == 0
+                && double_ruled.unwrap_or(0) == 0
+            {
                 ("verdict", "✓", "The court agrees with itself.")
             } else {
                 ("verdict bad", "!", "The court disagrees with itself.")
             };
             let tiles = format!(
-                "{}{}{}{}{}",
+                "{}{}{}{}{}{}",
                 fact(summary.get("total"), "crowns", false),
                 fact(summary.get("splits"), "splits", splits > 0),
                 fact(summary.get("disagreements"), "disagreements", disagreements > 0),
@@ -380,12 +427,13 @@ fn verdict_card(court: &Value, summary: &Value) -> String {
                     "manifest only",
                     as_i64(summary, "manifest_only") > 0
                 ),
+                split_tiles,
             );
             (
                 cls,
                 format!(
                     "<div class=\"vmain\"><span class=\"mark\">{mark}</span><span>{text}</span></div>\
-                     <div class=\"facts\">{tiles}</div>"
+                     <div class=\"facts\">{tiles}</div>{split_note}"
                 ),
             )
         }
@@ -734,7 +782,13 @@ fn read_court(path: &Path, stdin: &mut dyn std::io::Read) -> Result<String, Stri
 
 /// The whole page. Four verdict states; an unreadable registry and an empty
 /// court are measurements, never a blank or falsely healthy page.
-pub fn render(court: &Value, entries: &[Value], generated: &str, reload_s: i64) -> String {
+pub fn render(
+    court: &Value,
+    entries: &[Value],
+    generated: &str,
+    reload_s: i64,
+    split_read: &Result<crate::crown_split::CrownSplits, String>,
+) -> String {
     let projects: Result<HashMap<String, String>, String> =
         crate::king_board::project_map(&std::env::current_dir().unwrap_or_default());
     let summary = court.get("summary").cloned().unwrap_or(json!({}));
@@ -753,7 +807,7 @@ pub fn render(court: &Value, entries: &[Value], generated: &str, reload_s: i64) 
          <p class=\"dek\">Who rules which territory in the fleet, what each crown still owes, and whether the manifest and the registry tell the same story about any of it.</p>\
          </header>"
     );
-    out.push_str(&verdict_card(court, &summary));
+    out.push_str(&verdict_card(court, &summary, split_read));
     if let Some(crowns) = &crowns {
         if !crowns.is_empty() {
             // Rungs: level ascending, null level last, court order within a
@@ -932,7 +986,16 @@ pub fn run_reign_ledger(args: &[String]) -> i32 {
         &std::env::current_dir().unwrap_or_default(),
         &["backlog", "page_reload_s"],
     ));
-    if let Err(e) = write_atomic(&out_path, &render(&court, &entries, &generated, reload)) {
+    // The split read is the ledger's own registry read, once per render,
+    // fed to the verdict card alongside the court payload.
+    let split_read =
+        crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json())
+            .map(|registry| crate::crown_split::read_crown_splits(&registry.entries))
+            .map_err(|e| e.to_string());
+    if let Err(e) = write_atomic(
+        &out_path,
+        &render(&court, &entries, &generated, reload, &split_read),
+    ) {
         eprintln!("fno-agents reign-ledger: {e}");
         return 1;
     }
@@ -946,7 +1009,13 @@ mod tests {
     use serde_json::json;
 
     fn page(court: Value, entries: Vec<Value>) -> String {
-        render(&court, &entries, "2026-09-12T00:00:00Z", 60)
+        render(
+            &court,
+            &entries,
+            "2026-09-12T00:00:00Z",
+            60,
+            &Ok(crate::crown_split::CrownSplits::default()),
+        )
     }
 
     fn base_crown() -> Value {
@@ -1068,9 +1137,13 @@ mod tests {
 
     #[test]
     fn writes_atomically_and_names_the_path() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("reign-ledger-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &dir);
         let court_path = dir.join("court.json");
         let graph_path = dir.join("graph.json");
         let out_path = dir.join("reign.html");
@@ -1096,6 +1169,7 @@ mod tests {
             .filter_map(Result::ok)
             .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
         assert!(!leftovers);
+        std::env::remove_var("FNO_AGENTS_HOME");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1103,9 +1177,13 @@ mod tests {
     #[cfg(unix)]
     fn publishes_reign_html_at_mode_0600() {
         use std::os::unix::fs::PermissionsExt;
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("reign-ledger-mode-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &dir);
         let court_path = dir.join("court.json");
         let graph_path = dir.join("graph.json");
         let out_path = dir.join("reign.html");
@@ -1127,6 +1205,7 @@ mod tests {
         assert_eq!(run_reign_ledger(&args), 0);
         let mode = std::fs::metadata(&out_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "reign.html must match graph.html's 600 mode");
+        std::env::remove_var("FNO_AGENTS_HOME");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1174,6 +1253,69 @@ mod tests {
         assert!(page.contains(
             "<div class=\"fact\"><span class=\"fv\">1</span><span class=\"fl\">crowns</span></div>"
         ));
+    }
+
+    #[test]
+    fn double_rule_flips_the_verdict_and_marks_the_tile_bad() {
+        let splits = Ok(crate::crown_split::CrownSplits {
+            double_ruled: vec![crate::crown_split::ScopeSplit {
+                scope: "shared".into(),
+                holders: vec!["king-a".into(), "king-b".into()],
+            }],
+            stale: Vec::new(),
+        });
+        let page = render(
+            &base_court(json!([base_crown()])),
+            &[],
+            "2026-09-12T00:00:00Z",
+            60,
+            &splits,
+        );
+        assert!(page.contains("The court disagrees with itself."));
+        assert!(page.contains(
+            "<div class=\"fact bad\"><span class=\"fv\">1</span><span class=\"fl\">double ruled</span></div>"
+        ));
+    }
+
+    #[test]
+    fn stale_crowns_mark_their_tile_without_flipping_the_verdict() {
+        let splits = Ok(crate::crown_split::CrownSplits {
+            double_ruled: Vec::new(),
+            stale: vec![crate::crown_split::StaleCrown {
+                row: "king-dead".into(),
+                scope: "shared".into(),
+                stored_status: "orphaned".into(),
+            }],
+        });
+        let page = render(
+            &base_court(json!([base_crown()])),
+            &[],
+            "2026-09-12T00:00:00Z",
+            60,
+            &splits,
+        );
+        assert!(page.contains("The court agrees with itself."));
+        assert!(page.contains(
+            "<div class=\"fact bad\"><span class=\"fv\">1</span><span class=\"fl\">stale crowns</span></div>"
+        ));
+    }
+
+    #[test]
+    fn an_unread_registry_renders_dashes_with_the_reason_never_zero() {
+        let page = render(
+            &base_court(json!([base_crown()])),
+            &[],
+            "2026-09-12T00:00:00Z",
+            60,
+            &Err("crown split read failed: boom".to_string()),
+        );
+        assert!(page.contains(
+            "<div class=\"fact\"><span class=\"fv\">-</span><span class=\"fl\">double ruled</span></div>"
+        ));
+        assert!(page.contains(
+            "<div class=\"fact\"><span class=\"fv\">-</span><span class=\"fl\">stale crowns</span></div>"
+        ));
+        assert!(page.contains("crown split read failed: boom"));
     }
 
     #[test]

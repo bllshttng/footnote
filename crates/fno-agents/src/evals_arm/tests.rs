@@ -132,6 +132,19 @@ fn full_gate() -> GateReading {
     }
 }
 
+/// The clear verdict as a closure run_tick_mode reads; the incident test
+/// passes `armed` instead.
+fn clear() -> crate::loops_pause::DispatchPause {
+    crate::loops_pause::DispatchPause::Clear
+}
+
+fn armed() -> crate::loops_pause::DispatchPause {
+    crate::loops_pause::DispatchPause::FleetIncident {
+        generation: 9,
+        reason: "rustc storm".to_string(),
+    }
+}
+
 // AC2-HP: summary 9 days old, schedule 7, gate headroom, fixture appends 3
 // rows -> one evals_scheduled_run with task_count 3, claim free at the end.
 #[test]
@@ -148,7 +161,7 @@ fn fires_past_window_journals_run_and_frees_claim() {
     let args = base_args(&tmp, &["--summary-json", summary]);
     let o = parse_args(&args).unwrap();
 
-    run_tick_mode(&o, &ok_gate, &thread_spawner());
+    run_tick_mode(&o, &ok_gate, &clear, &thread_spawner());
 
     let row = wait_for_row(&events, "evals_scheduled_run", Duration::from_secs(20))
         .expect("scheduled-run row within 20s");
@@ -165,12 +178,48 @@ fn skips_when_fresh() {
     let tmp = TempDir::new().unwrap();
     let args = base_args(&tmp, &["--summary-json", r#"{"age_days": 2.0}"#]);
     let o = parse_args(&args).unwrap();
-    let code = run_tick_mode(&o, &ok_gate, &|_argv| panic!("spawner must not run"));
+    let code = run_tick_mode(&o, &ok_gate, &clear, &|_argv| {
+        panic!("spawner must not run")
+    });
     assert_eq!(code, 0);
     assert_eq!(
         count_kind(&tmp.path().join("events.jsonl"), "evals_stale"),
         0
     );
+}
+
+// The durable stop outranks the capacity counters: an armed incident holds
+// the arm with fleet_stop even with gate headroom, and a clear verdict in
+// the same world still reads the fleet_full case.
+#[test]
+fn incident_outranks_the_capacity_gate() {
+    let tmp = TempDir::new().unwrap();
+    let notify_log = tmp.path().join("notify.log");
+    let events = tmp.path().join("events.jsonl");
+    write_fixture(&tmp, &[], &tmp.path().join("history.jsonl"), &notify_log);
+    let summary = r#"{"age_days": 15.0, "never_ran": false}"#;
+    let args = base_args(&tmp, &["--summary-json", summary]);
+    let o = parse_args(&args).unwrap();
+    let never = |_argv: &[String]| -> Result<u32, String> {
+        panic!("spawner must not run under an armed incident")
+    };
+
+    let code = run_tick_mode(&o, &ok_gate, &armed, &never);
+
+    assert_eq!(code, 0);
+    // The skip token rides the stdout receipt; the journal row carries the
+    // pause detail.
+    let text = fs::read_to_string(&events).unwrap_or_default();
+    assert!(
+        text.contains("fleet incident stopped at generation 9"),
+        "{text}"
+    );
+    assert!(!text.contains("fleet_full"), "{text}");
+
+    // Positive control: a clear verdict and a full gate still read fleet_full.
+    run_tick_mode(&o, &full_gate, &clear, &never);
+    let text = fs::read_to_string(&events).unwrap_or_default();
+    assert!(text.contains("spawn gate refused: fleet_full"), "{text}");
 }
 
 // AC2-ERR: refusing gate twice inside one window -> no child, two evals_stale
@@ -188,8 +237,8 @@ fn refusing_gate_journals_stale_and_notice_deduped() {
         panic!("spawner must not run under a refusing gate")
     };
 
-    run_tick_mode(&o, &full_gate, &never);
-    run_tick_mode(&o, &full_gate, &never);
+    run_tick_mode(&o, &full_gate, &clear, &never);
+    run_tick_mode(&o, &full_gate, &clear, &never);
 
     assert_eq!(count_kind(&events, "evals_stale"), 2);
     let notices = fs::read_to_string(&notify_log).unwrap_or_default();
@@ -210,7 +259,7 @@ fn no_notice_when_emit_fails() {
     args[idx + 1] = events_dir.to_string_lossy().into_owned();
     let o = parse_args(&args).unwrap();
 
-    run_tick_mode(&o, &full_gate, &|_a| panic!("must not spawn"));
+    run_tick_mode(&o, &full_gate, &clear, &|_a| panic!("must not spawn"));
 
     assert!(!notify_log.exists(), "no notice without its journal row");
 }
@@ -253,7 +302,7 @@ fn rows_attributed_by_timestamp_not_count() {
     let args = base_args(&tmp, &["--summary-json", r#"{"age_days": 9.0}"#]);
     let o = parse_args(&args).unwrap();
 
-    run_tick_mode(&o, &ok_gate, &thread_spawner());
+    run_tick_mode(&o, &ok_gate, &clear, &thread_spawner());
 
     let row = wait_for_row(&events, "evals_scheduled_run", Duration::from_secs(20)).unwrap();
     assert_eq!(row["data"]["task_count"], Value::from(3));
@@ -295,7 +344,7 @@ fn live_holder_skips_in_flight() {
     let args = base_args(&tmp, &["--summary-json", r#"{"age_days": 9.0}"#]);
     let o = parse_args(&args).unwrap();
 
-    run_tick_mode(&o, &ok_gate, &|_a| panic!("must not spawn"));
+    run_tick_mode(&o, &ok_gate, &clear, &|_a| panic!("must not spawn"));
 
     assert_eq!(
         count_kind(&tmp.path().join("events.jsonl"), "evals_stale"),
@@ -318,7 +367,7 @@ fn dead_holder_journals_stale_releases_and_continues() {
     let args = base_args(&tmp, &["--summary-json", r#"{"age_days": 9.0}"#]);
     let o = parse_args(&args).unwrap();
 
-    run_tick_mode(&o, &ok_gate, &|argv: &[String]| {
+    run_tick_mode(&o, &ok_gate, &clear, &|argv: &[String]| {
         // Record that the tick reached the launch step, then decline so the
         // claim's post-release state stays observable.
         fs::write(tmp.path().join("launched"), "1").unwrap();

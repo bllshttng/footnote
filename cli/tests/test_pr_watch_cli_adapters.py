@@ -827,6 +827,142 @@ def test_fleet_tail_phases_stagger_across_three_ticks(monkeypatch, _no_global_ti
         assert all("next tick" in (d.get("detail") or "") for d in off_rows)
 
 
+_ARMED_RECORD = {
+    "version": 1,
+    "state": "stopped",
+    "generation": 11,
+    "changed_at": "2026-09-18T00:00:00Z",
+    "changed_by": "op",
+    "reason": "28 open PRs, zero merge scans",
+    "source": "file",
+}
+
+
+def _arm_incident(monkeypatch, tmp_path) -> None:
+    import json as _json
+
+    agents = tmp_path / "agents-home"
+    agents.mkdir()
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(agents))
+    (agents / "fleet-stop.json").write_text(_json.dumps(_ARMED_RECORD), encoding="utf-8")
+
+
+def test_armed_breaker_completes_the_tick(monkeypatch, _no_global_tick_events, tmp_path):
+    """With the fleet incident armed, the tick runs its legs, mints the
+    watermark and ends ok - never paused: the entry gate is gone, the merge
+    leg reports its grant-queue scan, and each spawning leg answers to the
+    admission gate on its own row."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch._dispatch import TickResult
+
+    _arm_incident(monkeypatch, tmp_path)
+
+    settings = _cadence_settings()
+    settings.pr_watch.enabled = True
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+    monkeypatch.setattr("time.time", lambda: 1.0)  # stranded's slot; others skip
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_kw: (
+            _kw["emit"]("pr_watch_tick", {"open_prs": 0, "acted": 0}),
+            TickResult(open_prs=0, acted=0),
+        )[1],
+    )
+    # The merge leg's queue read: an empty grant queue still reports its scan.
+    monkeypatch.setattr(
+        "fno.rust_binary.verb_call",
+        lambda verb, payload, **kw: {"candidates": 0, "verdicts": {}, "queue": []},
+    )
+    monkeypatch.setattr(prcli, "_run_notify_watch_phase",
+                        lambda _roots=None, timeout_s=None: None, raising=True)
+    monkeypatch.setattr(prcli, "_catchup_roots", lambda: [], raising=True)
+    monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [], raising=True)
+    monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
+    monkeypatch.setattr(prcli, "_ROSTER_FLOOR_S", 10_000.0, raising=True)
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    result = CliRunner().invoke(app, [])
+
+    assert result.exit_code == 0, result.output
+    ticks = [d for t, d in _no_global_tick_events if t == "pr_watch_tick"]
+    assert len(ticks) == 1, "the watermark minted"
+    ends = [d for t, d in _no_global_tick_events if t == "pr_watch_tick_end"]
+    assert ends and ends[-1]["outcome"] == "ok"
+    assert not any(
+        d.get("outcome") == "paused" for t, d in _no_global_tick_events
+    )
+    rows = [d for t, d in _no_global_tick_events
+            if t == "control_plane_tick" and d.get("arm") == "pr_watch_merge"]
+    assert rows and "candidates=" in rows[-1].get("detail", ""), rows
+
+
+def test_armed_breaker_leaves_the_report_legs_alone(
+    monkeypatch, _no_global_tick_events, tmp_path
+):
+    """On the recovery and watchdog slots the heartbeat is written and the
+    unfinished-work report is published, and neither leg's row carries a
+    fleet_stop token: a read-plus-report leg is worth more during an
+    incident than its refused spawn costs, and the admission gate owns the
+    refusal."""
+    import typer
+    from typer.testing import CliRunner
+
+    from fno import fleet_state as fs
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch._dispatch import TickResult
+
+    _arm_incident(monkeypatch, tmp_path)
+
+    settings = _cadence_settings()
+    settings.pr_watch.enabled = True
+    settings.recovery.enabled = True
+    settings.autonomy.enabled = True
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_kw: (
+            _kw["emit"]("pr_watch_tick", {"open_prs": 0, "acted": 0}),
+            TickResult(open_prs=0, acted=0),
+        )[1],
+    )
+    monkeypatch.setattr(
+        "fno.rust_binary.verb_call",
+        lambda verb, payload, **kw: {"candidates": 0, "verdicts": {}, "queue": []},
+    )
+    monkeypatch.setattr(prcli, "_run_notify_watch_phase",
+                        lambda _roots=None, timeout_s=None: None, raising=True)
+    monkeypatch.setattr(prcli, "_catchup_roots", lambda: [], raising=True)
+    monkeypatch.setattr("fno.recovery.run_recovery_sweep", lambda _cfg, **_kw: 3)
+    monkeypatch.setattr("fno.agents.sweep.run_sweep", lambda **_kw: ([], 0))
+    hb = tmp_path / "fleet-sweep-state.json"
+    monkeypatch.setattr(fs, "fleet_state_path", lambda: hb)
+    monkeypatch.setattr("fno.agents.watchdog.lane_armed", lambda _s: True)
+    published: list[int] = []
+    monkeypatch.setattr("fno.agents.unfinished_work.build_report",
+                        lambda roots, **_kw: {"roots": len(list(roots))})
+    monkeypatch.setattr("fno.agents.unfinished_work.publish_report",
+                        lambda *a, **_kw: published.append(1))
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    for bucket in (1, 2):
+        monkeypatch.setattr("time.time", lambda b=bucket: b * 600 + 1.0)
+        start = len(_no_global_tick_events)
+        result = CliRunner().invoke(app, [])
+        assert result.exit_code == 0, result.output
+        rows = [d for t, d in _no_global_tick_events[start:]
+                if t == "control_plane_tick"]
+        holds = [d for d in rows if d.get("skip_reason") == "fleet_stop"]
+        assert not holds, rows
+
+    assert hb.exists(), "the fleet heartbeat is written on the recovery slot"
+    assert published, "the unfinished-work report is published on the watchdog slot"
+
+
 def test_cut_sweep_hands_back_scan_progress(monkeypatch, _no_global_tick_events):
     """A sweep cut at its slice emits its arm row with the scan counter the
     dispatch loop wrote, not a bare timeout."""
@@ -850,8 +986,9 @@ def test_cut_sweep_hands_back_scan_progress(monkeypatch, _no_global_tick_events)
     app = typer.Typer()
     app.command()(prcli.tick)
     result = CliRunner().invoke(app, [])
-    # A cut tick exits 75 (the launchd timeout verdict), not 0.
-    assert result.exit_code == prcli._TICK_TIMEOUT_EXIT, result.output
+    # A cut tick completes; the slice it spent lives on cut/saturated, and
+    # the sweep cut itself reads as error without a watermark, not timeout.
+    assert result.exit_code == 0, result.output
     rows = [d for _t, d in _no_global_tick_events
             if d.get("arm") == "pr_watch_sweep"]
     assert rows, "a cut sweep must mint its arm row"
@@ -886,7 +1023,7 @@ def test_cut_before_body_reports_zero_progress(monkeypatch, _no_global_tick_even
     app = typer.Typer()
     app.command()(prcli.tick)
     result = CliRunner().invoke(app, [])
-    assert result.exit_code == prcli._TICK_TIMEOUT_EXIT, result.output
+    assert result.exit_code == 0, result.output
     rows = [d for _t, d in _no_global_tick_events
             if d.get("arm") == "pr_watch_sweep"]
     assert rows
@@ -894,6 +1031,60 @@ def test_cut_before_body_reports_zero_progress(monkeypatch, _no_global_tick_even
     # stale pre-seeded note is gone.
     assert "scanned" not in rows[0]["detail"]
     assert "999" not in rows[0]["detail"]
+
+
+def test_slice_saturated_tick_mints_its_watermark(monkeypatch, _no_global_tick_events):
+    """A phase that saturates its own p90 cap does not make the tick a
+    timeout: every phase runs, the tick ends ok, cut/saturated name the
+    overrun, and the sweep's watermark still mints - so no arm reads
+    tick_overdue on a tick that finished its work."""
+    import time as _time
+    import typer
+    from typer.testing import CliRunner
+
+    from fno.pr_watch import cli as prcli
+    from fno.pr_watch._dispatch import TickResult
+
+    settings = _cadence_settings()
+    settings.king = SimpleNamespace(wake_enabled=True, wake_debounce_seconds=900)
+    monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+    monkeypatch.setattr("time.time", lambda: 1.0)  # stranded's slot; others skip
+    monkeypatch.setattr(
+        "fno.pr_watch._dispatch.tick",
+        lambda **_kw: (
+            _kw["emit"]("pr_watch_tick", {"open_prs": 0, "acted": 0}),
+            TickResult(open_prs=0, acted=0),
+        )[1],
+    )
+    monkeypatch.setitem(prcli._PHASE_CAP_S, "king_wake", 1)
+
+    def _saturate(_settings, emit, **_kw):
+        _time.sleep(1.5)
+        return {"woke": [], "crowns": 0}
+
+    monkeypatch.setattr(
+        "fno.pr_watch._king_wake.run_king_wake", _saturate, raising=True,
+    )
+    monkeypatch.setattr(prcli, "_run_notify_watch_phase",
+                        lambda _roots=None, timeout_s=None: None, raising=True)
+    monkeypatch.setattr(prcli, "_catchup_roots", lambda: [], raising=True)
+    monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [], raising=True)
+    monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
+    monkeypatch.setattr(prcli, "_ROSTER_FLOOR_S", 10_000.0, raising=True)
+
+    app = typer.Typer()
+    app.command()(prcli.tick)
+    result = CliRunner().invoke(app, [])
+
+    assert result.exit_code == 0, result.output
+    ends = [d for t, d in _no_global_tick_events if t == "pr_watch_tick_end"]
+    assert ends and ends[-1]["outcome"] == "ok"
+    assert "why" not in ends[-1]
+    assert ends[-1].get("cut") == ["king_wake"]
+    assert ends[-1].get("saturated") == ["king_wake"]
+    assert "king_wake" in ends[-1].get("phase_s", {})
+    # The completed sweep minted the liveness watermark inside this tick.
+    assert any(t == "pr_watch_tick" for t, _d in _no_global_tick_events)
 
 
 def test_notify_timeout_falls_back_to_the_phase_deadline(monkeypatch):

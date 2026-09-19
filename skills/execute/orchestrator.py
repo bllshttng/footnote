@@ -33,6 +33,8 @@ _CLI_SRC = _SKILLS_DIR.parents[1] / "cli" / "src"
 if str(_CLI_SRC) not in sys.path:
     sys.path.insert(0, str(_CLI_SRC))
 
+from fno import dispatch_flags, harness_names  # noqa: E402  (path set above)
+
 
 # ---------------------------------------------------------------------------
 # Impeccable executor constants
@@ -231,51 +233,35 @@ def _parse_scalar(value: str):
     return value.strip('"').strip("'")
 
 
-# The --harness/--provider value names the invoking HARNESS (which CLI binary
-# runs the work), not the model vendor. These are the values detect_provider()
-# can return and that an explicit argument may name.
-_KNOWN_HARNESSES = ("claude", "codex", "gemini")
-
-
-def detect_provider(env: Optional[dict] = None) -> str:
-    """Sniff the invoking harness from environment variables.
-
-    Compatibility FALLBACK only. Prefer an explicit ``--harness``/``--provider``
-    argument via :func:`resolve_invoking_harness`, which surfaces this sniff as
-    a fallback source so a Codex session that has not exported
-    ``CODEX_PLUGIN_ROOT`` cannot silently redirect its waves to Claude
-    subagents. Returns a harness (``claude`` | ``codex`` | ``gemini``), not a
-    model vendor.
-    """
-    environ = os.environ if env is None else env
-    if environ.get("CODEX_PLUGIN_ROOT"):
-        return "codex"
-    if environ.get("GEMINI_PROJECT_DIR"):
-        return "gemini"
-    return "claude"
-
-
 def resolve_invoking_harness(
     explicit: Optional[str] = None,
     env: Optional[dict] = None,
 ) -> tuple[str, str]:
-    """Resolve the invoking harness, explicit-first, env-sniff as a surfaced fallback.
+    """Resolve the invoking harness from the canonical roster and identity.
 
-    Returns ``(harness, source)`` where ``source`` is ``"explicit"`` or
-    ``"env-fallback"``. An explicit value wins and is validated against the
-    known harnesses; the env sniff runs only when no explicit value was given,
-    and its result is reported as a fallback rather than reading as a deliberate
-    choice. The value is a harness, never a model vendor.
+    Returns ``(harness, source)`` where ``source`` is ``"explicit"``,
+    ``"env-marker"`` or ``"env-default"``. An explicit value wins and is
+    validated against :data:`fno.harness_names.KNOWN_HARNESSES` (the L0 roster
+    every other caller shares); with no explicit value the ambient identity is
+    resolved through :func:`fno.dispatch_flags.infer_invoking_harness`, which
+    maps ``CODEX_THREAD_ID`` to codex and ``OPENCODE_SESSION_ID`` to opencode
+    and answers None when markers disagree. ``"env-default"`` (claude) is
+    distinguishable from ``"env-marker"``, so a caller that requires a
+    positively identified harness can refuse on the difference. The value is a
+    harness, never a model vendor.
     """
     if explicit is not None and explicit.strip():
         h = explicit.strip().lower()
-        if h not in _KNOWN_HARNESSES:
+        if h not in harness_names.KNOWN_HARNESSES:
             raise ValueError(
                 f"unknown harness {explicit!r}; expected one of "
-                f"{', '.join(_KNOWN_HARNESSES)}"
+                f"{', '.join(harness_names.KNOWN_HARNESSES)}"
             )
         return h, "explicit"
-    return detect_provider(env=env), "env-fallback"
+    inferred = dispatch_flags.infer_invoking_harness(env)
+    if inferred:
+        return inferred, "env-marker"
+    return "claude", "env-default"
 
 
 def load_project_constraints() -> List[str]:
@@ -1866,7 +1852,7 @@ if __name__ == "__main__":
     # the env sniff; the sniff stays as a surfaced fallback so an absent
     # CODEX_PLUGIN_ROOT cannot silently redirect a Codex session to Claude.
     # `provider` here is the EXPLICIT arg (None when no flag); each downstream
-    # resolver re-runs resolve_invoking_harness so the explicit/env-fallback
+    # resolver re-runs resolve_invoking_harness so the explicit/env-marker
     # source is surfaced correctly rather than collapsed to "explicit".
     provider: Optional[str] = None
     for flag in ("--harness", "--provider"):

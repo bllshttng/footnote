@@ -153,11 +153,15 @@ fn command_stub(verb: &str, description: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// The OpenCode agent file for one shipped `agents/*.md`: the same five-line
-/// mapping `toOpencodeAgent` performs, as frontmatter OpenCode reads before
-/// any plugin runs. Bare model names are dropped so the child falls back to
+/// The OpenCode agent file for one shipped `agents/*.md`: the same mapping
+/// the plugin translator performs, as frontmatter OpenCode reads before any
+/// plugin runs. Bare model names are dropped so the child falls back to
 /// OpenCode's default; a `provider/model` string passes through.
-fn agent_file(stem: &str, md: &str) -> Vec<u8> {
+/// Restrictions follow the translator's contract: `disallowedTools` carries
+/// into OpenCode's disable-only `tools` record, and a `tools` allowlist
+/// CANNOT be expressed there, so the agent is skipped rather than installed
+/// unrestricted. `None` means skipped-with-reason (already named on stderr).
+fn agent_file(stem: &str, md: &str) -> Option<Vec<u8>> {
     let (front, body) = split_frontmatter(md);
     let field = |key: &str| -> Option<String> {
         front
@@ -166,6 +170,12 @@ fn agent_file(stem: &str, md: &str) -> Vec<u8> {
             .map(|(_, v)| v.trim().to_string())
             .filter(|v| !v.is_empty())
     };
+    if field("tools").map(|v| v.starts_with('[')).unwrap_or(false) {
+        eprintln!(
+            "opencode install: agent {stem} skipped: a tools allowlist cannot be expressed in OpenCode's agent vocabulary; convert it to disallowedTools"
+        );
+        return None;
+    }
     let description = field("description").unwrap_or_else(|| stem.to_string());
     let mut text = format!(
         "---\ndescription: {}\nmode: subagent\n",
@@ -174,9 +184,26 @@ fn agent_file(stem: &str, md: &str) -> Vec<u8> {
     if let Some(model) = field("model").filter(|m| m.contains('/')) {
         text.push_str(&format!("model: {model}\n"));
     }
+    if let Some(disallowed) = field("disallowedTools").filter(|v| v.starts_with('[')) {
+        let names: Vec<String> = disallowed
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .split(',')
+            .map(|x| x.trim().trim_matches('"').trim_matches('\'').to_lowercase())
+            .filter(|x| !x.is_empty())
+            .collect();
+        if !names.is_empty() {
+            let record = names
+                .iter()
+                .map(|n| format!("{n}: false"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            text.push_str(&format!("tools: {{{record}}}\n"));
+        }
+    }
     text.push_str("---\n\n");
     text.push_str(body.trim_start());
-    text.into_bytes()
+    Some(text.into_bytes())
 }
 
 fn walk_files(dir: &Path, rel: &str, out: &mut BTreeMap<String, Vec<u8>>) -> Result<(), String> {
@@ -231,7 +258,9 @@ fn build_entries(root: &Path) -> Result<BTreeMap<String, Vec<u8>>, String> {
             };
             let md = std::fs::read_to_string(&path)
                 .map_err(|e| format!("opencode install: {}: {e}", path.display()))?;
-            entries.insert(format!("agent/fno:{stem}.md"), agent_file(stem, &md));
+            if let Some(bytes) = agent_file(stem, &md) {
+                entries.insert(format!("agent/fno:{stem}.md"), bytes);
+            }
         }
     }
     if let Ok(skills) = std::fs::read_dir(root.join("skills")) {

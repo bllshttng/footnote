@@ -200,11 +200,11 @@ pub fn run(_args: &[String]) -> i32 {
 }
 
 /// The two-line refusal. The shell twin is a pure exec shim, so this text is
-/// the only copy.
+/// the only copy of the rule it enforces.
 fn deny_text(target: &str, repo_root: &Path) -> String {
     format!(
         "king-delegation-guard: write target '{target}' is inside the repo ({repo}), and a crowned session does not write SOURCE.\n\
-         Everything outside the repo allows; the repo's .fno state tree stays allowed.\n",
+         A king operates the machine and does not author it: deploy and repair verbs (fno config plugin install, fno doctor update) run, build output and everything outside the repo allow, repo source does not. Delegate the edit or escalate.\n",
         repo = repo_root.display(),
     )
 }
@@ -224,17 +224,19 @@ fn emit_telemetry(cwd: &Path, tool: &str, denied: bool) {
 
 // ── Shell write classification (the tokenizer port) ──────────────────────────
 
-/// Write targets a Bash command binds, classified the way the shell saw them:
-/// redirects, tee/sponge/truncate operands, cp/mv/install destinations, dd
-/// of=, in-place sed/perl files, ed/ex files. A `shlex::split` failure means
-/// no targets (a malformed shell never executes).
+/// Write targets a Bash command binds: redirects, tee/sponge/truncate
+/// operands, cp/mv/install destinations, dd of=, in-place sed/perl files,
+/// ed/ex files. A `lex` failure (unterminated quote) means no targets - a
+/// malformed shell never executes.
 fn write_targets(command: &str) -> Vec<String> {
-    let Some(tokens) = shlex::split(command) else {
+    let Some(tokens) = lex(command) else {
         return Vec::new();
     };
     // Python's re.fullmatch over `[&\d]+`: a token made only of `&` and digits.
     let is_fd = |t: &str| !t.is_empty() && t.bytes().all(|b| b == b'&' || b.is_ascii_digit());
-    let bound = |t: &str| matches!(t, ";" | "|" | "&&" | "||" | "&");
+    let bound = |t: &str| {
+        matches!(t, ";" | ";;" | "|" | "||" | "&&" | "&" | "(" | ")" | "\n") || t.starts_with('<')
+    };
     let flush = |verb: &Option<String>, pool: &[String], targets: &mut Vec<String>| {
         let Some(verb) = verb else {
             return;
@@ -279,6 +281,7 @@ fn write_targets(command: &str) -> Vec<String> {
     let mut pool: Vec<String> = Vec::new();
     let mut nxt = false;
     let mut val = false;
+    let mut at_command = true;
     for tok in &tokens {
         if bound(tok) {
             flush(&verb, &pool, &mut targets);
@@ -286,55 +289,51 @@ fn write_targets(command: &str) -> Vec<String> {
             pool.clear();
             nxt = false;
             val = false;
+            at_command = true;
         } else if nxt {
             nxt = false;
             if !bound(tok) && !tok.contains('>') && !is_fd(tok) {
                 targets.push(tok.clone());
             }
         } else if is_redirect(tok) {
+            // `lex` emits redirects as their own tokens (`2>`, `>`, `>>`,
+            // `>&`, `&>`, `>|`, `>`!), so every shape here just arms `nxt`
+            // and the next word is judged as the redirect target.
             let rest = tok.trim_start_matches(|c: char| c.is_ascii_digit());
-            if let Some(stripped) = rest.strip_prefix("&>") {
-                if stripped.is_empty() {
-                    nxt = true;
-                } else {
-                    targets.push(stripped.to_string());
-                }
-            } else if rest == ">&" {
+            let plain = rest.strip_prefix('&').unwrap_or(rest);
+            if rest == "&>" || matches!(plain, ">" | ">>" | ">|" | ">!" | ">&") {
                 nxt = true;
-            } else {
-                let plain = rest.trim_start_matches('&');
-                if matches!(plain, ">" | ">>" | ">|" | ">!") {
-                    nxt = true;
-                } else {
-                    let body = plain
-                        .trim_start_matches('>')
-                        .trim_end_matches([';', '|', '&']);
-                    if !body.is_empty() && !is_fd(body) {
-                        targets.push(body.to_string());
-                    }
-                }
             }
         } else if val {
             val = false;
-        } else if verb.is_none() {
-            if matches!(
-                tok.as_str(),
-                "tee"
-                    | "sponge"
-                    | "truncate"
-                    | "cp"
-                    | "mv"
-                    | "install"
-                    | "dd"
-                    | "sed"
-                    | "perl"
-                    | "ed"
-                    | "ex"
-            ) {
-                verb = Some(tok.clone());
-                pool.clear();
+        } else if at_command {
+            // The verb table only applies in command position, so `install`
+            // in `fno config plugin install claude` stays a positional word.
+            // An assignment (`B=/path mv a b`) and a wrapper word (sudo, env,
+            // command, nohup, time) hand command position to the next word.
+            if !is_assignment(tok)
+                && !matches!(tok.as_str(), "sudo" | "env" | "command" | "nohup" | "time")
+            {
+                at_command = false;
+                if matches!(
+                    tok.as_str(),
+                    "tee"
+                        | "sponge"
+                        | "truncate"
+                        | "cp"
+                        | "mv"
+                        | "install"
+                        | "dd"
+                        | "sed"
+                        | "perl"
+                        | "ed"
+                        | "ex"
+                ) {
+                    verb = Some(tok.clone());
+                    pool.clear();
+                }
             }
-        } else {
+        } else if verb.is_some() {
             if matches!(tok.as_str(), "-e" | "-f" | "-i") {
                 val = true;
             }
@@ -344,6 +343,173 @@ fn write_targets(command: &str) -> Vec<String> {
     flush(&verb, &pool, &mut targets);
     targets.retain(|t| !t.is_empty());
     targets
+}
+
+/// Lex a command into words and operator tokens; `None` on an unterminated
+/// quote (a malformed shell never executes). Unlike `shlex::split`, unquoted
+/// `;` `|` `&` `(` `)` newline and redirects arrive as their own tokens, so
+/// `2>&1|tail` can never read as one word.
+///
+/// `<<DELIM`/`<<-DELIM` heredoc bodies are swallowed whole, never re-lexed as
+/// more shell text - unless the reading command is a shell (bash/sh/zsh), in
+/// which case the body is lexed again and its tokens spliced in, so `bash
+/// <<EOF` still judges a real write in its body, but a heredoc mailed as a
+/// file body never donates a phantom write target.
+fn lex(command: &str) -> Option<Vec<String>> {
+    let mut toks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    // Glued `(`/`)` inside a word: an open command substitution survives a
+    // whitespace split (`$(pick x)` lexes as `$(pick` + `x)`), so a depth
+    // counter, not the current word, decides whether `)` is literal.
+    let mut subst = 0usize;
+    // Set right after a `<<`/`<<-` token: (strip_tabs, reader_is_shell), for
+    // the newline arm to act on once the delimiter word lands in `toks`.
+    let mut heredoc: Option<(bool, bool)> = None;
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if let Some(&n) = chars.peek() {
+                    cur.push(n);
+                    chars.next();
+                } else {
+                    cur.push('\\');
+                }
+            }
+            '\'' => loop {
+                match chars.next() {
+                    Some('\'') => break,
+                    Some(ch) => cur.push(ch),
+                    None => return None,
+                }
+            },
+            '"' => loop {
+                match chars.next() {
+                    Some('"') => break,
+                    // Inside double quotes a backslash keeps its special
+                    // meaning only before these four characters.
+                    Some('\\') if matches!(chars.peek(), Some('"' | '\\' | '$' | '`')) => {
+                        cur.push(chars.next()?);
+                    }
+                    Some(ch) => cur.push(ch),
+                    None => return None,
+                }
+            },
+            ' ' | '\t' | '\r' => {
+                if !cur.is_empty() {
+                    toks.push(std::mem::take(&mut cur));
+                }
+            }
+            ';' | '|' | '&' | '\n' => {
+                if !cur.is_empty() {
+                    toks.push(std::mem::take(&mut cur));
+                }
+                if c == '\n' && heredoc.is_some() {
+                    let (strip_tabs, reader_is_shell) = heredoc.take().unwrap();
+                    let delim = toks.last().cloned().unwrap_or_default();
+                    let mut body = String::new();
+                    let mut line = String::new();
+                    while let Some(bc) = chars.next() {
+                        if bc != '\n' {
+                            line.push(bc);
+                            continue;
+                        }
+                        let bare = if strip_tabs {
+                            line.trim_start_matches('\t')
+                        } else {
+                            &line[..]
+                        };
+                        if bare == delim {
+                            break;
+                        }
+                        body.push_str(&line);
+                        body.push('\n');
+                        line.clear();
+                    }
+                    if reader_is_shell {
+                        if let Some(sub) = lex(&body) {
+                            toks.extend(sub);
+                        }
+                    }
+                    toks.push("\n".to_string());
+                    continue;
+                }
+                let mut op = c.to_string();
+                while chars.peek() == Some(&c) {
+                    op.push(c);
+                    chars.next();
+                }
+                // `&>` redirects both streams; it is not the background `&`.
+                if c == '&' && chars.peek() == Some(&'>') {
+                    chars.next();
+                    op.push('>');
+                }
+                toks.push(op);
+            }
+            '(' | ')' => {
+                // Parens are operators at a word boundary; inside a word
+                // they are literal while a `$(...)` substitution is open,
+                // so `$(mktemp)` stays one word.
+                if c == '(' && !cur.is_empty() {
+                    cur.push(c);
+                    subst += 1;
+                } else if c == ')' && subst > 0 {
+                    cur.push(c);
+                    subst -= 1;
+                } else {
+                    if !cur.is_empty() {
+                        toks.push(std::mem::take(&mut cur));
+                    }
+                    toks.push(c.to_string());
+                }
+            }
+            '<' | '>' => {
+                let mut redir = String::new();
+                if c == '>' && !cur.is_empty() && cur.bytes().all(|b| b.is_ascii_digit()) {
+                    // The digits are the fd prefix of `2>`.
+                    redir.push_str(&cur);
+                    cur.clear();
+                } else if !cur.is_empty() {
+                    toks.push(std::mem::take(&mut cur));
+                }
+                redir.push(c);
+                while matches!(chars.peek(), Some('>' | '<' | '&' | '|' | '!')) {
+                    redir.push(chars.next()?);
+                }
+                if redir == "<<" && chars.peek() == Some(&'-') {
+                    redir.push('-');
+                    chars.next();
+                }
+                // The reader is just the word right before `<<DELIM`: real
+                // heredocs are always `bash <<EOF`, never preceded by a
+                // redirect target, so the immediate predecessor suffices.
+                if redir == "<<" || redir == "<<-" {
+                    let shell = toks.last().is_some_and(|t| {
+                        matches!(t.rsplit('/').next().unwrap_or(t), "bash" | "sh" | "zsh")
+                    });
+                    heredoc = Some((redir == "<<-", shell));
+                }
+                toks.push(redir);
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        toks.push(cur);
+    }
+    Some(toks)
+}
+
+/// `^[A-Za-z_][A-Za-z0-9_]*=`: a leading assignment keeps command position,
+/// so `B=/path mv a b` is a mv, not a command named `B=/path`.
+fn is_assignment(t: &str) -> bool {
+    let Some(eq) = t.find('=') else {
+        return false;
+    };
+    let name = &t[..eq];
+    let mut ch = name.chars();
+    matches!(ch.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && ch.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// `^\d*&?>`: optional leading fd digits, optional `&`, then a redirect.
@@ -473,11 +639,28 @@ fn real_prefix(p: &str, cwd: &Path, root: &Path) -> bool {
 }
 
 /// The inverted step-10 predicate (2026-09-17 ruling): SOURCE is any path
-/// realpath-inside the repo root, with one carve-out for the repo's `.fno`
-/// state tree so a vault-less user keeps the default plans path. The vault
-/// is not source; a write outside the repo allows wherever it lands.
+/// realpath-inside the repo root, with carve-outs for the repo's `.fno`
+/// state tree and for build output. The vault is not source; a write
+/// outside the repo allows wherever it lands.
 fn write_denied(t: &str, cwd: &Path, repo_root: &Path) -> bool {
-    real_prefix(t, cwd, repo_root) && !real_prefix(t, cwd, &repo_root.join(".fno"))
+    real_prefix(t, cwd, repo_root)
+        && !real_prefix(t, cwd, &repo_root.join(".fno"))
+        && !is_build_output(t, cwd)
+}
+
+/// A path whose nearest ancestor directory holds a `CACHEDIR.TAG` is build
+/// output, not source. Cargo target dirs sit inside the repo and outside
+/// `.fno`; matched by the tag file, never by the name `target`, which is
+/// also a source directory name (`.claude/rules/worktrees.md`).
+fn is_build_output(t: &str, cwd: &Path) -> bool {
+    let mut dir = real_of(t, cwd).parent().map(Path::to_path_buf);
+    while let Some(d) = dir {
+        if d.join("CACHEDIR.TAG").is_file() {
+            return true;
+        }
+        dir = d.parent().map(Path::to_path_buf);
+    }
+    false
 }
 
 // ── Limb signatures ──────────────────────────────────────────────────────────
@@ -586,11 +769,12 @@ mod tests {
 
     #[test]
     fn verb_operands_bind() {
-        // The shell policy took EVERY tee operand as a write, including stdin
-        // redirection words (`<`, the file): over-broad by design, fail-closed.
+        // `<` now lexes as a read operator, so the stdin file is no
+        // longer bound as a tee write (deliberate narrowing of the old
+        // over-broad rule; the real writes still bind).
         assert_eq!(
             targets("tee /tmp/x /tmp/y < /tmp/in"),
-            vec!["/tmp/x", "/tmp/y", "<", "/tmp/in"]
+            vec!["/tmp/x", "/tmp/y"]
         );
         // `-s`'s value is treated as a file too (the shell policy never
         // modelled option values; over-broad, fail-closed).
@@ -617,6 +801,108 @@ mod tests {
     #[test]
     fn malformed_shell_never_judged() {
         assert!(targets("echo 'unterminated").is_empty());
+        assert!(targets("echo \"unterminated").is_empty());
+    }
+
+    /// A cwd-only helper for the heredoc specimens below: session cwd is
+    /// already the repo root, so a relative path resolves inside it exactly
+    /// as a real crowned session would see it.
+    fn bash_allowed_in(repo: &Path, cmd: &str) -> bool {
+        targets(cmd).iter().all(|t| !write_denied(t, repo, repo))
+    }
+
+    #[test]
+    fn heredoc_append_to_job_tmp_allows() {
+        // Regression: a heredoc body that happens to quote a shell command
+        // as prose (a mail draft showing `cat > payload-e9d6.txt` as an
+        // example) must not donate that relative path as a write target.
+        let repo = std::env::temp_dir().join(format!("kgd-heredoc-jobtmp-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&repo);
+        let cmd = "cat >> /Users/bb16/.claude/jobs/X/tmp/payload.txt <<'EOF'\n\
+                   run: cat > payload-e9d6.txt\nEOF";
+        assert!(
+            bash_allowed_in(&repo, cmd),
+            "a heredoc body must not donate a phantom write target"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn heredoc_body_naming_a_repo_path_still_allows() {
+        // The body names a real repo path next to a write-verb word (`cp`);
+        // `cat` never reads its own stdin as commands, so the whole body is
+        // inert text, not a `cp` invocation to classify.
+        let repo = std::env::temp_dir().join(format!("kgd-heredoc-body-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&repo);
+        let cmd = "cat >> /tmp/out.txt <<'EOF'\n\
+                   example: cp notes.txt crates/fno-agents/src/lib.rs\nEOF";
+        assert!(bash_allowed_in(&repo, cmd));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn shell_reading_heredoc_body_still_refuses_a_real_write() {
+        // `bash <<'EOF'` DOES read its stdin as commands, so a real write
+        // inside that body still refuses.
+        let repo = std::env::temp_dir().join(format!("kgd-heredoc-shell-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&repo);
+        let cmd = "bash <<'EOF'\ncat > crates/fno-agents/src/lib.rs\nEOF";
+        assert!(!bash_allowed_in(&repo, cmd));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn plain_in_repo_heredoc_write_still_refuses() {
+        // A heredoc attached to the command's OWN redirect, not its body,
+        // still refuses - the heredoc parsing never loosens a real write.
+        let repo = std::env::temp_dir().join(format!("kgd-heredoc-plain-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&repo);
+        let cmd = "cat > crates/fno-agents/src/lib.rs <<'EOF'\nbody\nEOF";
+        assert!(!bash_allowed_in(&repo, cmd));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn operators_and_positionals_never_bind() {
+        // Crown-session specimens, refused on main, each a subcommand
+        // argument or fd
+        // duplication, never a path the command writes.
+        assert!(targets("fno config plugin install claude").is_empty());
+        assert!(targets("brew install jq").is_empty());
+        assert!(targets("npm install --save-dev x").is_empty());
+        assert!(
+            targets("/usr/bin/git fetch origin pull/2175/head --quiet 2>&1|tail -1").is_empty()
+        );
+        // `;` glued to a word is a boundary: the printf operand never joins
+        // the mv operand pool.
+        assert_eq!(
+            targets("B=x; mv a b; ls -l c; printf '{}' | bash h.sh"),
+            vec!["b"]
+        );
+        // A subshell boundary flushes the pool like `;` does.
+        assert_eq!(targets("(cd /tmp && mv a b)"), vec!["b"]);
+        // Command substitution stays one word: no phantom operand.
+        assert_eq!(targets("cp $(mktemp) /tmp/d"), vec!["/tmp/d"]);
+        // An open substitution survives a whitespace split: the real
+        // destination binds, never a fragment inside `$( )`.
+        assert_eq!(targets("mv $(pick_build x) /tmp/out"), vec!["/tmp/out"]);
+        assert_eq!(targets("mv $(a $(b) c) /tmp/z"), vec!["/tmp/z"]);
+    }
+
+    #[test]
+    fn command_position_still_binds_real_writes() {
+        // A genuine redirect binds, today and after (positive control).
+        assert_eq!(
+            targets("echo hi > cli/src/fno/x.py"),
+            vec!["cli/src/fno/x.py"]
+        );
+        // A real `install` in command position binds its destination.
+        assert_eq!(targets("install -d /tmp/x"), vec!["/tmp/x"]);
+        // The keep words hand command position to the write verb.
+        assert_eq!(targets("sudo mv a /tmp/b"), vec!["/tmp/b"]);
+        assert_eq!(targets("command mv a /tmp/b"), vec!["/tmp/b"]);
+        assert_eq!(targets("env FOO=bar cp /tmp/a /tmp/b"), vec!["/tmp/b"]);
+        assert_eq!(targets("B=/path mv a b"), vec!["b"]);
     }
 
     #[test]
@@ -714,6 +1000,33 @@ mod tests {
         let r = roots("dotfno");
         assert!(allowed(&r, &r.repo.join(".fno/plans/foo.md")));
         let _ = std::fs::remove_dir_all(&r.base);
+    }
+
+    #[test]
+    fn build_output_with_cachedir_tag_is_allowed() {
+        // Build output inside the repo is not source, matched by the
+        // CACHEDIR.TAG file, never by the directory name (a name-based sweep
+        // once deleted 66 real `target` source dirs).
+        let r = roots("cachedir");
+        let bin = r.repo.join("crates/fno-agents/target/debug/fno-agents");
+        let _ = std::fs::create_dir_all(bin.parent().unwrap());
+        let _ = std::fs::write(
+            r.repo.join("crates/fno-agents/target/CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        );
+        assert!(allowed(&r, &bin));
+        // A name-alike source dir with no tag above it stays refused.
+        assert!(!allowed(&r, &r.repo.join("skills/target/SKILL.md")));
+        let _ = std::fs::remove_dir_all(&r.base);
+    }
+
+    #[test]
+    fn refusal_names_the_rule_in_two_lines() {
+        let text = deny_text("cli/src/fno/x.py", Path::new("/repo"));
+        assert_eq!(text.lines().count(), 2, "two lines: {text:?}");
+        assert!(text.contains("operates the machine and does not author it"));
+        assert!(text.contains("fno config plugin install"));
+        assert!(text.contains("Delegate the edit or escalate"));
     }
 
     #[test]
