@@ -541,7 +541,9 @@ _EVIDENCE = {
     "working": "active",
     "stalled": "silent",
     "dead": "falsified",
+    "exited": "resumable",
 }
+RESUMABLE_BASES = frozenset({"exit-recorded", "process-gone", "pane-gone"})  # resume relaunches
 
 
 def _humanize_age(seconds: Optional[int]) -> str:
