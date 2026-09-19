@@ -33,7 +33,9 @@
 # composer still badges `working`, because osc_title_working (1100) and
 # composer_working (1050) beat live_prompt_box (950). The title is the
 # authority when present; the pinned grid markers carry the busy signal when
-# it is not (a portal view's title reads None).
+# it is not (a portal seat carries the viewed session's title, measured
+# 2026-09-17 on claude 2.1.274; composer_working stays as the busy signal
+# when a title is absent).
 #
 # ponytail: the braille spinner (U+2800-28FF), the "✳ " idle title, the
 # rule-bordered composer, and the `esc to interrupt` / `Press up to edit queued
@@ -59,8 +61,9 @@ region = "osc_title"
 gate = { regex = '^[\x{2800}-\x{28FF}\x{25D0}-\x{25D3}]' }
 
 # The pinned mid-turn / queued markers sit just above the composer (claude
-# 2.1.268, pinned 2026-09-11). The title is None on a portal view, so this grid
-# rule carries the busy signal the title used to carry. A false `working` is
+# 2.1.268, pinned 2026-09-11). A portal seat carries the viewed session's
+# title (measured 2026-09-17 on claude 2.1.274), so this grid rule carries
+# the busy signal when a title is absent. A false `working` is
 # the safe direction; a missed one lets the idle composer rule send into a
 # busy claude - the one direction exists to close.
 [[rule]]
