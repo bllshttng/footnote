@@ -1210,12 +1210,14 @@ def build_pane_argv(
         # half - the spawn lane serialises via
         # `fno.agents.harnesses.pi.create_decision`; this builder only composes
         # argv. The route is the ONE pi route owner (keeper and pane share
-        # it). pi ships no permission popups, so `yolo` maps to nothing;
-        # `--approve` trusts files, a different axis, and stays an operator
-        # choice.
-        from fno.agents.spawn_axes_client import pi_route
+        # it): a `provider/id` model stays `--model` only, a bare model
+        # carries `--provider`, no model defers to pi's own settings. pi
+        # ships no permission popups, so `yolo` maps to nothing.
+        from fno.agents.spawn_axes_client import spawn_axes_call
+        from fno.agents.keeper_thread import _pi_axes
 
-        argv = [*identity, *pi_route(model, effort)]
+        route = spawn_axes_call({"pi_route": _pi_axes(model, effort, None, None)})
+        argv = [*identity, *(str(t) for t in route["tokens"])]
         if permission_mode:
             argv += permission_pane_tokens("pi", permission_mode)
         argv += tier3
