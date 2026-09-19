@@ -1455,13 +1455,24 @@ rm -rf "$S" "$STUB"
 # An fno-agents stand-in whose `reclaim remove-for` mirrors the lane's
 # ownership answer: it deletes the planted hash dir only when the dir sits
 # under the managed base named by FNO_CARGO_TARGETS_BASE. /bin/rm directly,
-# so the PATH rm-stub never sees a binary-lane delete.
+# so the PATH rm-stub never sees a binary-lane delete. It also answers
+# `worktree-reapable` with the real classifier's receipt shape (a clean
+# fixture tree always reads reapable=yes), since archive-worktree.sh now
+# routes its strict check through this same binary.
 new_agents_stub() {
     local bin="$1" hash_dir="$2"
     mkdir -p "$bin"
     cat > "$bin/fno-agents" <<EOF
 #!/usr/bin/env bash
-if [[ "\$1 \$2" == "reclaim remove-for" && -n "\$FNO_CARGO_TARGETS_BASE" ]]; then
+if [[ "\$1" == "worktree-reapable" ]]; then
+    target="\${@: -1}"
+    if [[ -z "\$(git -C "\$target" status --porcelain 2>/dev/null)" ]]; then
+        printf 'reapable=yes reason=clean recoverable_deletions=0\n'
+        exit 0
+    fi
+    printf 'reapable=no reason=dirty\n'
+    exit 1
+elif [[ "\$1 \$2" == "reclaim remove-for" && -n "\$FNO_CARGO_TARGETS_BASE" ]]; then
     case "$hash_dir/" in
         "\$FNO_CARGO_TARGETS_BASE"/*) /bin/rm -rf "$hash_dir"; printf '{"removed": 1}\n' ;;
         *) printf '{"removed": 0}\n' ;;
