@@ -479,11 +479,9 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _events(root: Path) -> list[dict]:
-    return [
-        json.loads(line)
-        for line in project_log("events.jsonl", project_root=root).read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    from tests._event_rows import event_rows
+
+    return event_rows(project_log("events.jsonl", project_root=root))
 
 
 def _write_decision_index(index: Path, *rows: dict) -> None:

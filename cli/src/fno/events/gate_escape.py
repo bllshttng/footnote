@@ -178,25 +178,26 @@ def already_emitted(
     if pr is None and dedup_key is None:
         return False
     try:
-        # Stream line-by-line: the canonical events log grows unboundedly, so
-        # never slurp it whole just to scan for a dup (gemini review on #241).
-        with Path(events_path).open("r", encoding="utf-8") as fh:
-            for line in fh:
-                if '"gate_escape"' not in line:
-                    continue
-                try:
-                    ev = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(ev, dict) or ev.get("type") != "gate_escape":
-                    continue
-                data = ev.get("data")
-                if not isinstance(data, dict) or data.get("reason") != reason:
-                    continue
-                if pr is not None and data.get("pr") == pr:
-                    return True
-                if dedup_key is not None and data.get("dedup_key") == dedup_key:
-                    return True
+        # Committed rows from the store: the writer commits in SQL, so the
+        # dedup must read what a reader would see, never journal bytes.
+        from fno.events.store_client import read_committed_lines
+
+        for line in read_committed_lines(Path(events_path)):
+            if '"gate_escape"' not in line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(ev, dict) or ev.get("type") != "gate_escape":
+                continue
+            data = ev.get("data")
+            if not isinstance(data, dict) or data.get("reason") != reason:
+                continue
+            if pr is not None and data.get("pr") == pr:
+                return True
+            if dedup_key is not None and data.get("dedup_key") == dedup_key:
+                return True
     except (OSError, UnicodeDecodeError):
         return False
     return False
