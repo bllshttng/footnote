@@ -259,10 +259,10 @@ fn context_concluded(rows: Option<&Vec<Value>>, context: &str) -> bool {
 /// to parse the workflow file, the run minted no check run, and every
 /// check-run-shaped reader would otherwise skip it.
 pub(crate) struct ZeroJobRun {
-    path: String,
-    url: String,
-    conclusion: String,
-    created_at: String,
+    pub(crate) path: String,
+    pub(crate) url: String,
+    pub(crate) conclusion: String,
+    pub(crate) created_at: String,
 }
 
 /// The runs that failed before minting a job. A run a check run links to
