@@ -506,14 +506,15 @@ def test_post_merge_followups_mints_cleanup_request(tmp_path, monkeypatch):
     # carrying merged_at, the closed node ids, and the session identity.
     import fno.agents.events as E
     import fno.pr._merge as M
-    import fno.worktree_reapable as WR
 
     log = _patch_events_log(monkeypatch, tmp_path)
     _stub_gh_merged(monkeypatch, M)
     _stub_git_root(monkeypatch, M, tmp_path)
     M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
     _write_manifest(tmp_path)
-    monkeypatch.setattr(WR, "is_linked_worktree", lambda p: True)
+    # A linked worktree's `.git` is a FILE; this fixture needs the merge
+    # cleanup to see cwd as one (x-7b9c inlined the predicate in _merge.py).
+    (tmp_path / ".git").write_text("gitdir: /elsewhere/worktrees/t/.git\n")
     monkeypatch.setattr(
         E, "rows_for_cleanup",
         lambda worktree, node_ids, runner=None: ["target-x-07dc-a1"],
@@ -538,14 +539,12 @@ def test_merge_with_no_bound_nodes_still_mints_empty(tmp_path, monkeypatch):
     # Held shape: a reconcile that bound nothing still mints, with
     # node_ids [] - the daemon's doneness re-read holds that request.
     import fno.pr._merge as M
-    import fno.worktree_reapable as WR
 
     log = _patch_events_log(monkeypatch, tmp_path)
     _stub_gh_merged(monkeypatch, M)
     _stub_git_root(monkeypatch, M, tmp_path)
     M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
     _write_manifest(tmp_path)
-    monkeypatch.setattr(WR, "is_linked_worktree", lambda p: False)
 
     M._run_post_merge_followups(9, "squash", str(tmp_path), bound_node_ids=[])
 
@@ -679,14 +678,12 @@ def test_merge_mint_recovers_node_ids_from_sidecar(tmp_path, monkeypatch):
     # names what it can reap instead of holding on no-node-ids for a day.
     import fno.agents.events as E
     import fno.pr._merge as M
-    import fno.worktree_reapable as WR
 
     log = _patch_events_log(monkeypatch, tmp_path)
     _stub_gh_merged(monkeypatch, M, url="https://github.com/owner/repo/pull/7")
     _stub_git_root(monkeypatch, M, tmp_path)
     M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
     _write_manifest(tmp_path)
-    monkeypatch.setattr(WR, "is_linked_worktree", lambda p: False)
     _patch_sidecar(monkeypatch, [
         {"id": "fno-abc1", "pr_number": 7,
          "pr_url": "https://github.com/owner/repo/pull/7"}])
@@ -724,14 +721,12 @@ def test_merge_mint_excludes_foreign_repo_sidecar_nodes(tmp_path, monkeypatch):
     # AC1-EDGE: a sidecar node whose pr_url names another repo sharing the
     # PR number stays out of the recovered ids (repo-scoped, never guessed).
     import fno.pr._merge as M
-    import fno.worktree_reapable as WR
 
     log = _patch_events_log(monkeypatch, tmp_path)
     _stub_gh_merged(monkeypatch, M, url="https://github.com/owner/repo/pull/7")
     _stub_git_root(monkeypatch, M, tmp_path)
     M._REPO_ROOT_CACHE[str(tmp_path)] = str(tmp_path)
     _write_manifest(tmp_path)
-    monkeypatch.setattr(WR, "is_linked_worktree", lambda p: False)
     _patch_sidecar(monkeypatch, [
         {"id": "fno-forei", "pr_number": 7,
          "pr_url": "https://github.com/other/repo/pull/7"}])

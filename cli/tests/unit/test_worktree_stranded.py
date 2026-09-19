@@ -4,8 +4,8 @@
 subprocess involved. The one thing that must NOT be pure-fixture-tested is
 the unsound-probe regression: a prior sweep proved that a branch existing on
 origin at an OLDER sha reads as healthy under a name-existence check, so
-that one drives a real temp git repo the same way test_worktree_reapable.py
-does, exercising the actual `wt_unpushed_count` shell function classify()'s
+that one drives a real temp git repo the same way the gate corpus does,
+exercising the actual `wt_unpushed_count` shell function classify()'s
 git input comes from.
 """
 import subprocess

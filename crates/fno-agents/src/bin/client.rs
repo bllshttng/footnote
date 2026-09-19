@@ -161,6 +161,14 @@ fn main() {
             &args[1..],
         ));
     }
+    // `worktree-reapable`: the worktree-removal gate, daemon-free, a
+    // transport-only arm like surface-check - it registers NO client action
+    // (the shrink law allows none), because its callers exec the binary
+    // directly: the Python typer leaf, worktree_gate.py, and
+    // scripts/lib/worktree-reapable.sh.
+    if args.first().map(String::as_str) == Some("worktree-reapable") {
+        std::process::exit(fno_agents::worktree_reapable::run_client(&args[1..]));
+    }
     // hooks/context-run.sh is the only caller.
     if args.first().map(String::as_str) == Some("context-run") {
         std::process::exit(fno_agents::context_run::run_context_run(&args[1..]));

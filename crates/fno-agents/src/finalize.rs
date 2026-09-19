@@ -136,7 +136,7 @@ Reason values: DonePRGreen|DoneAdvisory|DoneDelivery|DoneBatched|DoneAwaitingMer
 /// The three manifest fields finalize needs itself (everything else is read by
 /// the shelled Python helpers from the same manifest path).
 #[derive(Debug, Default)]
-struct ManifestFields {
+pub(crate) struct ManifestFields {
     /// Target-minted session id: idempotency key, handoff filename, event data.
     session_id: Option<String>,
     /// Canonical target-minted id, retained separately so it wins regardless of
@@ -149,7 +149,7 @@ struct ManifestFields {
     /// Feature title for the handoff header.
     input: Option<String>,
     /// Backlog node id (lives in the manifest BODY, below the frontmatter).
-    graph_node_id: Option<String>,
+    pub(crate) graph_node_id: Option<String>,
     /// Harness (conversation) session id captured at init: the do-stamp's
     /// identity-continuity input, passed through to the Python primitive.
     harness_session_id: Option<String>,
@@ -210,7 +210,7 @@ fn ends_quoted_scalar(line: &str) -> bool {
 /// Scan the WHOLE manifest (frontmatter AND body) for the keys we need.
 /// `graph_node_id`/`target_claim_*` live below the closing `---`, so a
 /// frontmatter-only parse (like loop-check's) would miss them.
-fn parse_manifest_fields(content: &str) -> ManifestFields {
+pub(crate) fn parse_manifest_fields(content: &str) -> ManifestFields {
     let mut m = ManifestFields::default();
     // Init writes the run's raw argument as `input: "<...>"` (init:839), so a
     // MULTI-LINE argument spills real newlines into the manifest and every

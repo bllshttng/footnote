@@ -1083,7 +1083,13 @@ case "${1:-status}" in
             fi
 
             N_TOTAL=0; N_REAP=0; N_FAIL=0
-            N_DIRTY=0; N_UNPUSHED=0; N_UNMERGED=0; N_LIVE=0; N_PROC=0; N_SALVAGE=0; N_NEEDCONF=0; N_APP_OWNED=0; N_PERM=0; N_UNBORN=0
+            N_DIRTY=0; N_UNPUSHED=0; N_UNMERGED=0; N_LIVE=0; N_PROC=0; N_SALVAGE=0; N_NEEDCONF=0; N_APP_OWNED=0; N_PERM=0; N_UNBORN=0; N_DONE=0
+            # The done-node arm is a MERGED-mode authority: a tree
+            # whose node reads done/superseded (or, node-less, whose branch is
+            # merged) with clean tracked content may go, branch kept, untracked
+            # files salvaged first. Other sweep modes and the daemon probes
+            # never set it.
+            WT_REAPABLE_DONE_NODE=1
             # Every tree git reports minus the canonical checkout, counted
             # before the --prefix filter: a truncated read must never be
             # indistinguishable from a partial sweep.
@@ -1137,6 +1143,15 @@ case "${1:-status}" in
                     fi
                     printf '%-18s %-34s %s  (%s)\n' "kept (dirty)" "$branch" "$wt" "$reason"; N_DIRTY=$((N_DIRTY + 1)); continue
                 fi
+                # 1b. The done-node receipt: the gate said yes BECAUSE
+                #     the node reads done/superseded (or the branch is merged)
+                #     and nothing untracked goes unsalvaged. Step 2's merged
+                #     filter is subsumed by the arm's evidence; the live-session
+                #     and process checks below still run.
+                reason="${WT_REAPABLE_LINE#*reason=}"; reason="${reason%% *}"
+                DN_FLAG=""
+                if [[ "$reason" == "done-node" ]]; then
+                    N_DONE=$((N_DONE + 1)); DN_FLAG="--done-node"
                 # 2. merged into origin/main? A detached HEAD is judged by
                 #    content, not by the branch-name proxy: the tree is kept
                 #    only while it holds commits no remote carries
@@ -1145,7 +1160,7 @@ case "${1:-status}" in
                 #    meant the disk-reclaim verb could never reap the
                 #    population that grows. Branched trees keep the
                 #    merged-or-upstream logic below unchanged.
-                if [[ "$branch" == "HEAD" || -z "$head" ]]; then
+                elif [[ "$branch" == "HEAD" || -z "$head" ]]; then
                     if [[ "$(wt_unpushed_count "$wt")" -gt 0 ]]; then
                         # The fail-safe count (1) is indistinguishable from a
                         # real one in the status column, so the row names an
@@ -1205,7 +1220,9 @@ case "${1:-status}" in
                 # explicit --dry-run wins even if --apply was also passed
                 # (a safety wrapper appending --dry-run must never be ignored).
                 if [[ -z "$APPLY" || -n "$DRY_RUN" ]]; then
-                    printf '%-18s %-34s %s\n' "would-archive" "$branch" "$wt"
+                    DN_LABEL="would-archive"
+                    [[ -n "$DN_FLAG" ]] && DN_LABEL="would-archive (done-node)"
+                    printf '%-18s %-34s %s\n' "$DN_LABEL" "$branch" "$wt"
                     [[ -n "$ROWS" ]] && wt_occupancy_print_rows "$ROWS"
                     N_REAP=$((N_REAP + 1)); continue
                 fi
@@ -1218,7 +1235,7 @@ case "${1:-status}" in
                 # names this path in the worktree_removed event row it emits. No
                 # --yes is passed: the removal-time classification re-reads the
                 # tree and only inert rows are signalled.
-                FNO_WT_REMOVE_CALLER="cleanup --merged" bash "$ARCHIVE" "$wt" $YES >&2
+                FNO_WT_REMOVE_CALLER="cleanup --merged" bash "$ARCHIVE" "$wt" $DN_FLAG $YES >&2
                 rc=$?
                 case "$rc" in
                     0) printf '%-18s %-34s %s\n' "archived" "$branch" "$wt"; N_REAP=$((N_REAP + 1))
@@ -1246,8 +1263,8 @@ case "${1:-status}" in
                 EXECUTED=""; [[ -n "$APPLY" && -z "$DRY_RUN" ]] && EXECUTED="1"
                 VERB="would archive"; [[ -n "$EXECUTED" ]] && VERB="archived"
                 SUFFIX=""; [[ -z "$EXECUTED" ]] && SUFFIX="  [dry-run: no changes made; pass --apply to execute]"
-                printf 'Summary: %d %s, %d kept (%d unmerged, %d unpushed, %d unborn, %d dirty, %d live-session, %d processes, %d salvage-failed, %d needs-confirmation, %d app-owned, %d permanent), %d failed, enumerated %d judged %d%s\n' \
-                    "$N_REAP" "$VERB" "$KEPT" "$N_UNMERGED" "$N_UNPUSHED" "$N_UNBORN" "$N_DIRTY" "$N_LIVE" "$N_PROC" "$N_SALVAGE" "$N_NEEDCONF" "$N_APP_OWNED" "$N_PERM" "$N_FAIL" "$N_ENUM" "$N_TOTAL" "$SUFFIX"
+                printf 'Summary: %d %s (%d done-node), %d kept (%d unmerged, %d unpushed, %d unborn, %d dirty, %d live-session, %d processes, %d salvage-failed, %d needs-confirmation, %d app-owned, %d permanent), %d failed, enumerated %d judged %d%s\n' \
+                    "$N_REAP" "$VERB" "$N_DONE" "$KEPT" "$N_UNMERGED" "$N_UNPUSHED" "$N_UNBORN" "$N_DIRTY" "$N_LIVE" "$N_PROC" "$N_SALVAGE" "$N_NEEDCONF" "$N_APP_OWNED" "$N_PERM" "$N_FAIL" "$N_ENUM" "$N_TOTAL" "$SUFFIX"
             fi
             exit 0
         fi

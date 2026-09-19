@@ -3180,11 +3180,13 @@ def _classify_worktree_occupancy(wt_path: Path) -> tuple[str, Optional[dict]]:
     transcript makes a free/stale claim available for takeover.
     """
     try:
-        from fno.worktree_reapable import reapable
+        from fno.worktree_gate import reapable_receipt
 
-        dirt = reapable(wt_path)
+        dirt = reapable_receipt(str(wt_path))
     except Exception as exc:  # noqa: BLE001 - takeover must fail closed
         return "unknown", {"reason": "probe-failed", "detail": str(exc)}
+    if dirt is None:
+        return "unknown", {"reason": "probe-failed", "detail": "gate binary unavailable"}
     if dirt.reapable:
         return "available", None
     if dirt.reason == "probe-failed":

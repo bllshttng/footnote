@@ -716,24 +716,6 @@ pub(crate) fn cascade_codex_index(
     }
 }
 
-/// Is `cwd` a LINKED git worktree, as opposed to the canonical checkout or a
-/// plain directory?
-///
-/// A linked worktree's `.git` is a FILE containing a `gitdir:` pointer; the
-/// canonical checkout's `.git` is a directory. That difference is the whole
-/// test, it needs no subprocess, and it is what separates a row that owns
-/// something removable from one that merely ran somewhere.
-///
-/// Fails closed in the useful direction: a path we cannot read is "owns
-/// nothing", so its row is judged on terminal status and grace alone rather
-/// than pinned forever by a cleanliness answer that could never arrive.
-pub(crate) fn is_linked_worktree(cwd: &str) -> bool {
-    if cwd.is_empty() {
-        return false;
-    }
-    std::path::Path::new(cwd).join(".git").is_file()
-}
-
 /// Can this worktree-owning row's `cwd` be removed without destroying work?
 /// `Some(true)` yes, `Some(false)` no, `None` the probe could not determine it
 /// -> the caller fails closed and keeps the row.
@@ -749,25 +731,14 @@ pub(crate) fn is_linked_worktree(cwd: &str) -> bool {
 /// indistinguishable from any other non-answer, so every unknown degrades to
 /// `None` and the row is kept. That is exactly the prior behaviour.
 pub(crate) fn worktree_clean_probe(cwd: &str) -> Option<bool> {
-    let out = std::process::Command::new("fno")
-        .current_dir(cwd)
-        .args(["agents", "workspace", "worktree", "reapable", cwd])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    if out.status.success() {
-        // Never read a bare exit 0 as permission: an empty stdout (a shim that
-        // swallowed the verb) would otherwise reap a live worktree.
-        return if text.contains("reapable=yes") {
-            Some(true)
-        } else {
-            None
-        };
+    // In-process since the gate port: same answers the shelled verb
+    // gave, without a subprocess per row. A probe that cannot answer
+    // (probe-failed) reads None -> the caller keeps the row, fail closed.
+    let v = crate::worktree_reapable::reapable(cwd);
+    if v.reason == "probe-failed" {
+        return None;
     }
-    if text.contains("reapable=no") {
-        return Some(false);
-    }
-    None
+    Some(v.reapable)
 }
 
 /// The reapable gate's answer for a removed row's worktree: the
@@ -784,117 +755,27 @@ const RM_SUBPROCESS_TIMEOUT_SECS: u64 = 60;
 
 use crate::bounded_cmd::output_with_timeout;
 
-/// Is the worktree's branch merged into the repo's main line? The rm door's
-/// half of the third bucket: the `--merged` sweep merge-filters BEFORE its
-/// gate, and this caller has no such pre-filter, so it asks here. `None`:
-/// nothing names the work or the main line (detached HEAD, no main ref, git
-/// error) - the caller keeps the tree. Mirrors
-/// `fno.worktree_reapable.branch_merged`, the Python door's same question.
-pub(crate) fn branch_merged(cwd: &str) -> Option<bool> {
-    let mut bases = vec!["origin/main".to_string(), "main".to_string()];
-    if let Some(out) = output_with_timeout(
-        {
-            let mut cmd = std::process::Command::new("git");
-            cmd.current_dir(cwd)
-                .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
-            cmd
-        },
-        RM_SUBPROCESS_TIMEOUT_SECS,
-    ) {
-        let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if out.status.success() && !head.is_empty() {
-            bases.insert(0, head);
-        }
-    }
-    let mut base: Option<String> = None;
-    for candidate in &bases {
-        let known = output_with_timeout(
-            {
-                let mut cmd = std::process::Command::new("git");
-                cmd.current_dir(cwd)
-                    .args(["rev-parse", "--verify", "--quiet", candidate]);
-                cmd
-            },
-            RM_SUBPROCESS_TIMEOUT_SECS,
-        );
-        if known.is_some_and(|out| out.status.success()) {
-            base = Some(candidate.clone());
-            break;
-        }
-    }
-    let base = base?;
-    let branch = output_with_timeout(
-        {
-            let mut cmd = std::process::Command::new("git");
-            cmd.current_dir(cwd).args(["branch", "--show-current"]);
-            cmd
-        },
-        RM_SUBPROCESS_TIMEOUT_SECS,
-    )?;
-    if !branch.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
-    if branch.is_empty() {
-        return None;
-    }
-    let merged = output_with_timeout(
-        {
-            let mut cmd = std::process::Command::new("git");
-            cmd.current_dir(cwd)
-                .args(["merge-base", "--is-ancestor", &branch, &base]);
-            cmd
-        },
-        RM_SUBPROCESS_TIMEOUT_SECS,
-    )?;
-    match merged.status.code() {
-        Some(0) => Some(true),
-        Some(1) => Some(false),
-        _ => None,
-    }
-}
+pub(crate) use crate::worktree_reapable::{branch_merged, is_linked_worktree};
 
-/// Ask `fno agents workspace worktree reapable` - the same verb the `--merged`
-/// sweep, `archive-worktree.sh` and the GC probe ask - and read BOTH the
-/// literal marker and the reason, so a kept tree's receipt can name why. A
-/// `yes` then meets the merge check, because this door has no sweep-style
-/// pre-filter: a clean-but-unmerged branch is exactly where abandoned-but-real
-/// work lives, and the contract keeps it for a human.
+/// The gate, in-process since the port: the module runs the same
+/// git probes the shelled `fno agents workspace worktree reapable` ran, so
+/// the rm door keeps its answers without a subprocess per row. A `yes` then
+/// meets the merge check, because this door has no sweep-style pre-filter:
+/// a clean-but-unmerged branch is exactly where abandoned-but-real work
+/// lives, and the contract keeps it for a human.
 fn worktree_gate(cwd: &str) -> WorktreeGate {
-    let out = match output_with_timeout(
-        {
-            let mut cmd = std::process::Command::new("fno");
-            cmd.args(["agents", "workspace", "worktree", "reapable", cwd]);
-            cmd
-        },
-        RM_SUBPROCESS_TIMEOUT_SECS,
-    ) {
-        Some(out) => out,
-        None => {
-            return WorktreeGate::Unanswerable("the reapable probe could not run".into());
-        }
-    };
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let reason = |fallback: &str| -> String {
-        text.split("reason=")
-            .nth(1)
-            .and_then(|r| r.split_whitespace().next())
-            .unwrap_or(fallback)
-            .to_string()
-    };
-    // The literal marker, never a bare exit code a shim could swallow - the
-    // same double permission `worktree_clean_probe` needs.
-    if out.status.success() && text.contains("reapable=yes") {
+    let v = crate::worktree_reapable::reapable(cwd);
+    if v.reason == "probe-failed" {
+        return WorktreeGate::Unanswerable("the reapable probe could not answer".into());
+    }
+    if v.reapable {
         return match branch_merged(cwd) {
             Some(true) => WorktreeGate::Reapable,
             Some(false) => WorktreeGate::Blocked("clean but the branch is not merged".into()),
             None => WorktreeGate::Unanswerable("the merged-branch probe could not answer".into()),
         };
     }
-    if text.contains("reapable=no") {
-        return WorktreeGate::Blocked(reason("blocked"));
-    }
-    WorktreeGate::Unanswerable("the reapable probe could not answer".into())
+    WorktreeGate::Blocked(v.reason)
 }
 
 /// A human removed ONE named row: its worktree goes with it, through the

@@ -1359,7 +1359,6 @@ def _emit_merge_cleanup_request(
     is not a legal outcome: a merge that mints nothing must say why."""
     from fno.agents.events import emit_merge_cleanup_requested, rows_for_cleanup
     from fno.graph._reconcile import repo_slug_from_url
-    from fno.worktree_reapable import is_linked_worktree
 
     res = _gh(["pr", "view", str(pr_number), "--json", "state,headRefName,url,mergedAt"], cwd)
     if not res.ok:
@@ -1391,7 +1390,10 @@ def _emit_merge_cleanup_request(
         return
     branch = meta["headRefName"]
     repo, project = _merge_request_repo_and_project(cwd)
-    worktree = cwd if is_linked_worktree(cwd) else None
+    # A linked worktree's `.git` is a FILE; the canonical checkout's is a
+    # directory. Inlined from the deleted Python gate: one line, so
+    # the import that kept a second implementation alive went with it.
+    worktree = cwd if (Path(cwd) / ".git").is_file() else None
     emit_merge_cleanup_requested(
         repo=repo,
         project=project,

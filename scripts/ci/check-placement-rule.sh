@@ -131,10 +131,13 @@
 #      scripts/setup/setup-worktree.sh symlinks .claude/{agents,commands,
 #      skills,settings.local.json,scheduled_tasks.*,...} from the canonical
 #      checkout into a worktree per that same documented contract.
-#      worktree_reapable.py reads the OTHER end of that contract: to decide
-#      whether an untracked path is one of those links, it has to name the
-#      `.claude` segment setup wrote. It never constructs a path to store
-#      anything - the only `.claude` it forms is a link target it compares.
+#      the Rust gate (worktree_reapable.rs) reads the OTHER end of that
+#      contract: to decide whether an untracked path is one of those links,
+#      it has to name the `.claude` segment setup wrote. It never constructs
+#      a path to store anything - the only `.claude` it forms is a link
+#      target it compares. archive-worktree.sh's salvage step skips the same
+#      shape for the same reason: copying a setup-written link would copy a
+#      slice of the canonical checkout through it.
 #   3. autocorrect's OWN remaining ~/.claude/ files that this wave
 #      deliberately did NOT move (proposed-patches/, corrections-malformed.log,
 #      the various watermark files, insights.md) - only corrections.log and
@@ -274,7 +277,6 @@ cli/src/fno/wake/detect.py
 cli/src/fno/worker/review.py
 cli/src/fno/worktree_cli/cli.py
 cli/src/fno/worktree_paths.py
-cli/src/fno/worktree_reapable.py
 cli/src/fno/worktree.py
 crates/fno-agents/src/claude_adopt.rs
 crates/fno-agents/src/claude_ask.rs
@@ -298,6 +300,7 @@ crates/fno-agents/src/session_start_bytes.rs
 crates/fno-agents/src/state.rs
 crates/fno-agents/src/stream_worker.rs
 crates/fno-agents/src/test_run.rs
+crates/fno-agents/src/worktree_reapable.rs
 crates/fno-agents/src/bin/client.rs
 crates/fno-agents/tests/claude_ask_dispatch.rs
 crates/fno-agents/tests/claude_ask_parity.rs
@@ -337,6 +340,7 @@ scripts/metrics/register-session-cost.sh
 scripts/migrate-events-shape.py
 scripts/diagnostics/token-diagnose.py
 scripts/rename/rename-to-fno.sh
+scripts/setup/archive-worktree.sh
 scripts/setup/setup-worktree.sh
 scripts/setup/worktree-create-hook.sh
 scripts/worktree-lifecycle.sh

@@ -550,9 +550,13 @@ def reapable(
     """Say whether removing <path> can destroy anything. Read-only.
 
     Prints one line, e.g. `reapable=yes reason=clean recoverable_deletions=76
-    discounted=0`. Exit 0 when reapable, 1 when something blocks. The three
-    removal call sites (the --merged sweep, archive-worktree.sh, the Rust
-    row-GC probe) read this instead of each deciding for itself.
+    discounted=0`. Exit 0 when reapable, 1 when something blocks. The gate
+    itself is the fno-agents binary (crates/fno-agents/src/
+    worktree_reapable.rs), the single implementation since the port; this leaf
+    only execs it, so Python and Rust cannot drift apart. The done-node arm is
+    the merged sweep's flag (`WT_REAPABLE_DONE_NODE`), which reaches the
+    binary through scripts/lib/worktree-reapable.sh - the Python flag surface
+    never grows.
 
     A missing tracked file never blocks: HEAD holds its content, so removal
     loses nothing. Nor do the symlinks setup-worktree.sh writes, which
@@ -562,11 +566,17 @@ def reapable(
     moved blocks too (`reason=unborn`); `--allow-unborn` lifts exactly that,
     for the one-tree orphan recovery, never for a bulk sweep.
     """
-    from fno.worktree_reapable import reapable as _classify
+    from fno.agents.rust_runtime import refuse_without_binary, route_to_rust
+    from fno.rust_binary import resolve_binary
 
-    verdict = _classify(path, allow_unborn=allow_unborn)
-    typer.echo(verdict.line())
-    raise typer.Exit(code=0 if verdict.reapable else 1)
+    binary = resolve_binary()
+    if binary is None:
+        refuse_without_binary("worktree-reapable")
+    flags = [path]
+    if allow_unborn:
+        flags.append("--allow-unborn")
+    # os.execv never returns; the binary prints the receipt and sets the exit.
+    route_to_rust(["worktree-reapable", *flags], binary=binary)
 
 
 @app.command()
