@@ -10,6 +10,7 @@
 
 pub mod king_guard;
 pub mod stop;
+pub mod test_run_guard;
 
 use serde_json::json;
 use std::io::Read;
