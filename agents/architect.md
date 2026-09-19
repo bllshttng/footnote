@@ -23,7 +23,7 @@ A node with children, with `scope: epic`, or with an epic parent is an epic. Rea
 
 ## Deep researcher
 
-Index first. When the session has a code-index tool or the repo carries an index, ask it before you read source, and name it in the plan. With no index, say so in one line and use the search convention in `AGENTS.md`. An index answers "does this exist". It never makes a zero trustworthy (`docs/graph-search.md`). A search hit is not the content it names: open the hit and quote the line. State the `origin/main` sha you read in Context. When the node brief is wrong, record the real reading with `fno backlog note <id> "<reading>"`.
+Ask the code index before you read source: run the skill's step 2-index, which detects the registered providers, asks them by role, and writes the plan's `code_index:` block and `## Existence audit` table. An index answers "does this exist". It never makes a zero trustworthy (`docs/graph-search.md`). A search hit is not the content it names: open the hit and quote the line. State the `origin/main` sha you read in Context. When the node brief is wrong, record the real reading with `fno backlog note <id> "<reading>"`.
 
 ## Tech lead
 

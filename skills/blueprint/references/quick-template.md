@@ -112,6 +112,21 @@ surface:
 # answerer (dual-logic or shared-vocabulary); an `out-of-scope` answerer needs
 # only its reason. `count_after` turns the gate from a permanent tax into a
 # decreasing one: it is the number the next plan on this question will find.
+# code_index: the step 2-index receipt. main_sha is the origin/main sha the
+#                                 # plan read; providers is one entry per index
+#                                 # asked, or [] when none is present. MANDATORY
+#                                 # on plans created after 2026-09-17: the
+#                                 # validator's Code Index Audit refuses a plan
+#                                 # that skipped a present index. status is
+#                                 # answered | unavailable | error; fresh is
+#                                 # yes | no | unknown.
+code_index:
+  main_sha: <7-40 hex>                     # the origin/main sha the plan read
+  providers:
+    - name: codegraph                      # one entry per index detection finds, or providers: []
+      role: symbol
+      status: answered
+      fresh: yes
 # kill_criteria: abort conditions target/do evaluate at wave + iteration boundaries.
 # Emit these defaults unless the plan overrides them (see SKILL.md "Kill Criteria
 # Declaration"). They live HERE in frontmatter, never under a `## Kill Criteria` heading.
@@ -129,6 +144,17 @@ kill_criteria:
 ---
 
 # [Title — descriptive, not generic]
+
+## Existence audit
+
+[The plan's first section, always. One row per claim the plan rests on; the
+verdict cell starts exists, absent, partial or unanswered, and an absent
+row's evidence states the confirming search (`after <exact command>`). When
+no index is present, the first line says so.]
+
+| Claim | Kind | Verdict | Evidence |
+|---|---|---|---|
+| <claim> | code | exists at <file:line> | <the quoted line> |
 
 ## Context
 
