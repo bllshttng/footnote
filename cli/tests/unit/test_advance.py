@@ -3993,13 +3993,13 @@ def test_undispatched_observer_timeout_names_command_and_budget(monkeypatch):
 def test_undispatched_observer_normal_answer_returned_unchanged(monkeypatch):
     receipt = {"status": "ok", "entries_scanned": 1, "rows": [{"id": "x-open"}]}
 
-    def fake_run(cmd, **kwargs):
-        passthrough = _naming_passthrough(cmd, **kwargs)
-        if passthrough is not None:
-            return passthrough
-        return _FakeProc(0, json.dumps(receipt))
+    def fake_call(verb, args, *, timeout):
+        assert verb == "select-read"
+        assert args == ["undispatched", "--project", "fno"]
+        assert timeout is None
+        return None, {"status": "ok", "answer": receipt}
 
-    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    monkeypatch.setattr("fno.rust_binary.call_binary_json", fake_call)
 
     assert adv._undispatched_nodes("fno") == receipt
 
