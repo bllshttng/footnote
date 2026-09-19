@@ -18,19 +18,14 @@ use crate::proto::{self, cell_flags};
 /// The symbol's first char becomes `Cell::c`; a double-width glyph writes a
 /// `WIDE_SPACER` space over the following cell and the next glyph is read from
 /// the cell after that, so a CJK/emoji name shifts the rest of the row by
-/// exactly its own width. Buffer cells beyond `cells` (a wider Buffer than the
-/// frame) and `skip` cells are left untouched.
+/// exactly its own width. Buffer cells beyond `cells` (a wider Buffer than
+/// the frame) are left untouched.
 pub fn blit(buf: &Buffer, cells: &mut [proto::Cell], frame_cols: usize) {
     let area = buf.area;
-    let mut x = 0usize;
     for y in 0..area.height as usize {
-        x = 0;
+        let mut x = 0usize;
         while x < area.width as usize {
             let src = &buf.content[y * area.width as usize + x];
-            if src.skip {
-                x += 1;
-                continue;
-            }
             let wide = src.cell_width() == 2;
             let Some(slot) = cells.get_mut(y * frame_cols + x) else {
                 break;
@@ -102,6 +97,42 @@ fn map_flags(modifier: Modifier) -> u8 {
         flags |= cell_flags::DIM;
     }
     flags
+}
+
+/// The inverse of [`map_color`] for building Buffer cells from the proto
+/// colors the rest of the client speaks (`sideline_color`, the theme accent).
+/// Only the three proto variants exist here, so the named-color round trip
+/// the blit performs never runs backwards.
+pub fn rt_color(color: proto::Color) -> RtColor {
+    match color {
+        proto::Color::Default => RtColor::Reset,
+        proto::Color::Indexed(i) => RtColor::Indexed(i),
+        proto::Color::Rgb(r, g, b) => RtColor::Rgb(r, g, b),
+    }
+}
+
+/// The inverse of [`map_flags`]: proto flag bits to the ratatui `Modifier`
+/// the Buffer cells carry. `WIDE_SPACER` has no ratatui half - the Buffer's
+/// own width handling covers it - so it is dropped here like the blit drops
+/// blink and crossed-out on the way back.
+pub fn rt_modifier(flags: u8) -> Modifier {
+    let mut modifier = Modifier::empty();
+    if flags & cell_flags::BOLD != 0 {
+        modifier |= Modifier::BOLD;
+    }
+    if flags & cell_flags::ITALIC != 0 {
+        modifier |= Modifier::ITALIC;
+    }
+    if flags & cell_flags::UNDERLINE != 0 {
+        modifier |= Modifier::UNDERLINED;
+    }
+    if flags & cell_flags::INVERSE != 0 {
+        modifier |= Modifier::REVERSED;
+    }
+    if flags & cell_flags::DIM != 0 {
+        modifier |= Modifier::DIM;
+    }
+    modifier
 }
 
 #[cfg(test)]

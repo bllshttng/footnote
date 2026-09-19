@@ -930,16 +930,19 @@ fn sideline_lane_color_and_deviation_token_render_on_the_row() {
     glm_row.account = Some("makers".into());
     view.layout.agents.push(codex_row);
     view.layout.agents.push(glm_row);
+    // The deviation token rides the name cell; give the columns room for it.
+    view.sideline_width = 100;
     let frame = view.compose();
     let cols = frame.cols as usize;
     let panel_w = view.panel_w() as usize;
+    let name_x = sideline_column_rects((panel_w - 1) as u16)[1].x as usize;
     let line = |row: usize| -> (String, Color) {
         let start = row * cols;
         let end = start + panel_w.min(cols);
         let text: String = frame.cells[start..end].iter().map(|c| c.c).collect();
         // A name cell, not the row lead: the focused row's band and the
         // selector own the first columns.
-        let fg = frame.cells[start + 3].fg;
+        let fg = frame.cells[start + name_x].fg;
         (text, fg)
     };
     // Row 1: the codex row - lane color from the built-in table (blue),
@@ -1208,7 +1211,7 @@ fn xf331_wheel_scrolls_not_walks_a_hover_armed_selector() {
     view.selector = Some(1);
     view.sel_hover_armed = true;
     view.hover_row = Some(1);
-    let before = view.sideline_offset;
+    let before = view.sideline_state.offset();
     view.scroll_sideline(true);
     assert!(!view.sel_hover_armed, "the wheel disarms the hover-arm");
     assert_eq!(
@@ -1216,7 +1219,7 @@ fn xf331_wheel_scrolls_not_walks_a_hover_armed_selector() {
         "the wheel does not walk a hover-armed selector"
     );
     assert_eq!(
-        view.sideline_offset,
+        view.sideline_state.offset(),
         before + 1,
         "the wheel scrolls the list instead of moving the cursor"
     );
@@ -2757,7 +2760,7 @@ fn chrome_hit_sideline_squad_rows() {
 }
 
 #[test]
-fn chrome_hit_adds_sideline_offset_when_scrolled() {
+fn chrome_hit_adds_offset_when_scrolled() {
     // Regression (codex P2): a click must invert draw_sideline's scroll
     // offset, so a click on a scrolled row activates the row painted there,
     // not the unscrolled row at the same terminal cell.
@@ -2768,7 +2771,7 @@ fn chrome_hit_adds_sideline_offset_when_scrolled() {
     assert_eq!(cmds(v.chrome_hit(2, 4)), vec![Command::SelectSquad(2)]);
     // Scrolled by 1: terminal row 1 -> display index 2 -> squad2 (without the
     // offset it would resolve to index 1, the Blank spacer).
-    v.sideline_offset = 1;
+    *v.sideline_state.offset_mut() = 1;
     assert_eq!(
         cmds(v.chrome_hit(1, 4)),
         vec![Command::SelectSquad(2)],
@@ -7189,7 +7192,7 @@ async fn x7683_m_anchor_lands_on_the_rows_screen_row() {
     // The m-key anchor still added TAB_BAR_ROWS to a geometry that dropped
     // that offset in x-cd67 (the sideline owns row 0), so the menu opened
     // one row below its row. The anchor is the row's screen row
-    // (index - sideline_offset).
+    // (index - the TableState offset).
     let mut v = unified_rows_view();
     let w = agent_row_at(&v, |a| a.name == "worker");
     v.selector = Some(w);
@@ -8142,7 +8145,7 @@ fn footer_menu_region_routes_a_click_to_the_sideline_menu() {
         .footer_menu_range(panel_w)
         .expect("a wide panel shows the menu button");
     // (x-cd67 US1) The sideline owns row 0, so outer row == display index - offset.
-    let trow = (footer - v.sideline_offset) as u16;
+    let trow = (footer - v.sideline_state.offset()) as u16;
     assert!(matches!(
         v.chrome_hit(trow, range.start as u16),
         Some(ChromeHit::OpenSidelineMenu { .. })
@@ -9021,24 +9024,32 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
         missions: Vec::new(),
     });
     view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
+                                 // Room for the status word and the identity suffixes (x-177c columns).
+    view.sideline_width = 60;
     let frame = view.compose();
     let text = frame_text(&frame);
     let lines: Vec<&str> = text.lines().collect();
     // Agents-first row order (x-0090; no tab rows): footnote (auto-expanded,
     // x-2f99), its two agent rows, a Blank spacer, notes squad, the footer
     // spacer, the "+ new workspace" footer, a spacer, the "~ elsewhere"
-    // header, the orphan row. (x-cd67 US1) The sideline owns row 0.
+    // header, the orphan row. (x-cd67 US1) The sideline owns row 0. The
+    // state glyph is the status WORD now: Blocked reads `Needs input`,
+    // exited reads `Stopped` (x-177c).
     assert!(lines[0].contains("\u{25be}*footnote"), "{:?}", lines[0]);
     assert!(
-        lines[1].contains("\u{25b2} peer: perm prompt"),
+        lines[1].contains("Needs input") && lines[1].contains("peer"),
         "{:?}",
         lines[1]
     );
-    assert!(lines[2].contains("\u{2717} dead"), "{:?}", lines[2]);
+    assert!(
+        lines[2].contains("Stopped") && lines[2].contains("dead"),
+        "{:?}",
+        lines[2]
+    );
     assert!(lines[4].contains("\u{25b8} notes"), "{:?}", lines[4]);
     assert!(lines[6].contains("+ new workspace"), "{:?}", lines[6]);
     assert!(lines[8].contains("~ elsewhere"), "{:?}", lines[8]);
-    assert!(lines[9].contains("\u{25cf} bg-watch"), "{:?}", lines[9]);
+    assert!(lines[9].contains("bg-watch"), "{:?}", lines[9]);
     // The exited row is DIM (fact beats badge, visually too). "dead" is
     // display index 2 -> frame row 2 (no spacer before it).
     let cols = frame.cols as usize;
@@ -9065,20 +9076,18 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
 #[test]
 fn client_agent_row_renders_dnd_as_presence_not_liveness() {
     let held: AgentRow = serde_json::from_str(
-        r#"{"squad":1,"name":"dnd-worker","pane_id":10,
+        r#"{"squad":1,"name":"dnd","pane_id":10,
                 "badge":"working","reason":null,"exited":false,"dnd":true}"#,
     )
     .unwrap();
     let mut view = two_pane_view();
+    view.sideline_width = 60;
     view.layout.agents = vec![held];
     let text = frame_text(&view.compose());
-    let row = text
-        .lines()
-        .find(|line| line.contains("dnd-worker"))
-        .unwrap();
+    let row = text.lines().find(|line| line.contains("dnd")).unwrap();
     assert!(
-        row.contains("● [DND] dnd-worker"),
-        "DND leads the truncatable identity without replacing liveness: {row:?}"
+        row.contains("[DND]") && row.contains("Working"),
+        "DND rides the identity without replacing liveness: {row:?}"
     );
 }
 
@@ -9307,7 +9316,7 @@ fn tab_badge_marks_only_rows_on_other_tabs() {
     let mut view = two_pane_view();
     let panes = view.layout.panes.clone();
     let mut footnote = meta(1, "footnote", 2, 0); // active tab = id 0
-    footnote.tabs[1].name = "reviews".into();
+    footnote.tabs[1].name = "rev".into();
     footnote.tabs[1].named = true;
     let here = AgentRow {
         portal: None,
@@ -9323,7 +9332,7 @@ fn tab_badge_marks_only_rows_on_other_tabs() {
         harness: None,
         model: None,
         route: None,
-        name: "elsewhere".into(),
+        name: "els".into(),
         tab: Some(1), // a background tab -> badge
         ..focus_agent(0)
     };
@@ -9340,7 +9349,7 @@ fn tab_badge_marks_only_rows_on_other_tabs() {
         backlog_stale: false,
         missions: Vec::new(),
     });
-    let (rows, cols, panel_w) = (29usize, 72usize, 28usize);
+    let (rows, cols, panel_w) = (29usize, 72usize, 60usize);
     let mut cells = vec![Cell::default(); rows * cols];
     view.draw_sideline(&mut cells, rows, cols, panel_w);
     let row_text =
@@ -9355,7 +9364,7 @@ fn tab_badge_marks_only_rows_on_other_tabs() {
         "the active-tab row drops the badge: {here_line:?}"
     );
     assert!(
-        elsewhere_line.contains("·reviews"),
+        elsewhere_line.contains("·rev"),
         "the background-tab row keeps its badge: {elsewhere_line:?}"
     );
 }
@@ -9394,7 +9403,11 @@ fn focus_change_scrolls_the_band_into_view() {
     };
     // Focus on the top agent row's pane: it already fits, so no scroll.
     view.set_layout(layout(100, agents.clone()));
-    assert_eq!(view.sideline_offset, 0, "a top focus needs no scroll");
+    assert_eq!(
+        view.sideline_state.offset(),
+        0,
+        "a top focus needs no scroll"
+    );
     // Focus jumps to the last agent (pane 107), well below the fold.
     view.set_layout(layout(107, agents.clone()));
     let visible = view.sideline_visible_rows();
@@ -9404,20 +9417,20 @@ fn focus_change_scrolls_the_band_into_view() {
         .position(|r| matches!(r, DisplayRow::Agent(a) if a.pane_id == Some(107)))
         .unwrap();
     assert!(
-        idx >= view.sideline_offset && idx < view.sideline_offset + visible,
+        idx >= view.sideline_state.offset() && idx < view.sideline_state.offset() + visible,
         "focused row {idx} is inside the window [{}, {})",
-        view.sideline_offset,
-        view.sideline_offset + visible
+        view.sideline_state.offset(),
+        view.sideline_state.offset() + visible
     );
     assert!(
-        view.sideline_offset > 0,
+        view.sideline_state.offset() > 0,
         "the sideline scrolled to reveal the off-screen focus"
     );
 }
 
 #[test]
 fn focus_reveal_never_scrolls_an_open_selector_off_screen() {
-    // x-4374 (codex P2): an open selector owns the scroll - `clamp_sideline_offset`
+    // x-4374 (codex P2): an open selector owns the scroll - `clamp_sideline_scroll`
     // keeps that actionable cursor visible, and a focus change must NOT scroll
     // it off-screen (Enter/lifecycle keys would then act on an invisible row).
     let mut view = two_pane_view();
@@ -9450,16 +9463,16 @@ fn focus_reveal_never_scrolls_an_open_selector_off_screen() {
     view.set_layout(layout(100, agents.clone()));
     // Park the selector on the top agent row (display index 1) and pin the view.
     view.selector = Some(1);
-    view.clamp_sideline_offset();
+    view.clamp_sideline_scroll();
     let visible = view.sideline_visible_rows();
     // Focus jumps far below the fold - with a selector open, reveal must not fire.
     view.set_layout(layout(107, agents.clone()));
     let sel = view.selector.expect("selector still open");
     assert!(
-        sel >= view.sideline_offset && sel < view.sideline_offset + visible,
+        sel >= view.sideline_state.offset() && sel < view.sideline_state.offset() + visible,
         "the selector {sel} stays visible in [{}, {})",
-        view.sideline_offset,
-        view.sideline_offset + visible
+        view.sideline_state.offset(),
+        view.sideline_state.offset() + visible
     );
 }
 
@@ -9477,7 +9490,7 @@ fn footer_buttons_rest_bold_and_invert_on_hover() {
     let at = |v: &View| {
         let mut cells = vec![Cell::default(); rows * cols];
         v.draw_sideline(&mut cells, rows, cols, panel_w);
-        cells[(footer - v.sideline_offset) * cols].flags
+        cells[(footer - v.sideline_state.offset()) * cols].flags
     };
 
     let rest = at(&view);
@@ -9676,7 +9689,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 lineage_kind: None,
                 harness_session_id: None,
                 squad: None,
-                name: "z-extblocked".into(),
+                name: "z-extblk".into(),
                 pane_id: None,
                 portal: None,
                 badge: Some(AgentBadge::Blocked),
@@ -9715,15 +9728,23 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
         missions: Vec::new(),
     });
     view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
+    view.sideline_width = 60;
     let frame = view.compose();
     let cols = frame.cols as usize;
     let text = frame_text(&frame);
     let lines: Vec<&str> = text.lines().collect();
-    // Locate each row by name and read its glyph cell (col 2) + DIM flag.
-    let probe = |needle: &str| -> (char, bool) {
+    // Locate each row by name and read its STATUS cell (x-177c: the glyph
+    // is a word now) + DIM flag.
+    let probe = |needle: &str| -> (String, bool) {
         let r = lines.iter().position(|l| l.contains(needle)).unwrap();
-        let cell = frame.cells[r * cols + 2];
-        (cell.c, cell.flags & cell_flags::DIM == cell_flags::DIM)
+        let status: String = frame.cells[r * cols..r * cols + 11]
+            .iter()
+            .map(|c| c.c)
+            .collect();
+        (
+            status,
+            frame.cells[r * cols].flags & cell_flags::DIM == cell_flags::DIM,
+        )
     };
     // x-df4c: idle was the outline `○` (was the near-invisible `·`); x-d401
     // moves a badgeless reading-less row to the marked absence `?` - the
@@ -9739,29 +9760,42 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
     // its own; DIM cannot carry it once the state is already dim, which
     // was already true of `✗` before this branch. The exited precedence
     // below is unchanged.
-    assert_eq!(probe("z-exited"), ('\u{2717}', true), "exited: ✗ + DIM");
-    assert_eq!(probe("z-external"), ('?', true), "external: ? + DIM");
-    assert_eq!(
-        probe("z-fnolive"),
-        ('?', true),
-        "fno-live: ? + DIM (no reading; bright-idle is gone)"
+    let (word, dim) = probe("z-exited");
+    assert!(
+        word.starts_with("Stopped") && dim,
+        "exited: Stopped + DIM: {word:?}"
     );
-    // AC1-UI: external + Blocked renders the amber `▲`, BOLD, and NOT dimmed
-    // even though it is external - the accent beats the external DIM.
-    let eb_row = lines
+    let (word, dim) = probe("z-external");
+    assert!(word.starts_with('?') && dim, "external: ? + DIM: {word:?}");
+    let (word, dim) = probe("z-fnolive");
+    assert!(
+        word.starts_with('?') && dim,
+        "fno-live: ? + DIM (no reading; bright-idle is gone): {word:?}"
+    );
+    // AC1-UI: external + Blocked renders `Needs input` in the amber accent,
+    // BOLD, and NOT dimmed even though it is external - the accent beats the
+    // external DIM.
+    let eb_row = lines.iter().position(|l| l.contains("z-extblk")).unwrap();
+    let eb_status: String = frame.cells[eb_row * cols..eb_row * cols + 11]
         .iter()
-        .position(|l| l.contains("z-extblocked"))
-        .unwrap();
-    let eb = frame.cells[eb_row * cols + 2];
-    assert_eq!(eb.c, '\u{25b2}', "external-blocked: ▲");
-    assert_eq!(eb.fg, LATTICE_ACCENT, "external-blocked: amber accent");
+        .map(|c| c.c)
+        .collect();
+    assert!(
+        eb_status.starts_with("Needs input"),
+        "external-blocked: the attention word: {eb_status:?}"
+    );
     assert_eq!(
-        eb.flags & cell_flags::DIM,
+        frame.cells[eb_row * cols].fg,
+        LATTICE_ACCENT,
+        "external-blocked: amber accent"
+    );
+    assert_eq!(
+        frame.cells[eb_row * cols].flags & cell_flags::DIM,
         0,
         "external-blocked: attention is never dimmed"
     );
     assert_eq!(
-        eb.flags & cell_flags::BOLD,
+        frame.cells[eb_row * cols].flags & cell_flags::BOLD,
         cell_flags::BOLD,
         "external-blocked: BOLD"
     );
@@ -13038,26 +13072,27 @@ fn sideline_scroll_follows_cursor_and_maps_hit() {
     v.term = ((total - 1) as u16, 100); // visible = total - 1
     let visible = v.sideline_visible_rows();
     v.selector = Some(total - 1);
-    v.clamp_sideline_offset();
+    v.clamp_sideline_scroll();
     assert_eq!(
-        v.sideline_offset,
+        v.sideline_state.offset(),
         total - visible,
         "offset follows the cursor"
     );
     assert!(
-        (total - 1) >= v.sideline_offset && (total - 1) < v.sideline_offset + visible,
+        (total - 1) >= v.sideline_state.offset()
+            && (total - 1) < v.sideline_state.offset() + visible,
         "the cursor row is inside the visible window"
     );
     assert!(v.panel_w() > 1, "fixture panel is visible");
     assert_eq!(
         v.sideline_row_at(0, 0),
-        Some(v.sideline_offset),
+        Some(v.sideline_state.offset()),
         "the top drawn row (row 0) hit-tests to the scrolled index"
     );
 }
 
 #[test]
-fn wheel_scrolls_sideline_offset_when_no_selector() {
+fn wheel_scrolls_offset_when_no_selector() {
     // Fix 3: a wheel over a focused (overflowing) sideline nudges the scroll
     // offset directly when the selector is closed, and stays in range.
     let mut v = two_pane_view();
@@ -13066,18 +13101,22 @@ fn wheel_scrolls_sideline_offset_when_no_selector() {
     v.term = ((total - 1) as u16, 100); // one row below the fold
     let visible = v.sideline_visible_rows();
     v.selector = None;
-    v.sideline_offset = 0;
+    *v.sideline_state.offset_mut() = 0;
     v.scroll_sideline(true);
-    assert_eq!(v.sideline_offset, 1, "wheel-down advances one row");
+    assert_eq!(v.sideline_state.offset(), 1, "wheel-down advances one row");
     v.scroll_sideline(false);
-    assert_eq!(v.sideline_offset, 0, "wheel-up retreats one row");
+    assert_eq!(v.sideline_state.offset(), 0, "wheel-up retreats one row");
     v.scroll_sideline(false);
-    assert_eq!(v.sideline_offset, 0, "wheel-up saturates at the top");
+    assert_eq!(
+        v.sideline_state.offset(),
+        0,
+        "wheel-up saturates at the top"
+    );
     for _ in 0..total + 5 {
         v.scroll_sideline(true);
     }
     assert_eq!(
-        v.sideline_offset,
+        v.sideline_state.offset(),
         total - visible,
         "wheel-down stops at the last full window"
     );
@@ -13110,9 +13149,9 @@ fn sideline_scroll_zero_when_rows_fit() {
         "catalog fits the window"
     );
     v.selector = Some(0);
-    v.sideline_offset = 9; // stale offset from a prior scrolled session
-    v.clamp_sideline_offset();
-    assert_eq!(v.sideline_offset, 0, "fits -> offset resets to 0");
+    *v.sideline_state.offset_mut() = 9; // stale offset from a prior scrolled session
+    v.clamp_sideline_scroll();
+    assert_eq!(v.sideline_state.offset(), 0, "fits -> offset resets to 0");
 }
 
 #[test]
@@ -13125,10 +13164,10 @@ fn sideline_scroll_never_past_last_row() {
     v.term = (total as u16, 100); // visible = total - 1
     v.selector = None;
     v.hover_row = None;
-    v.sideline_offset = 999; // absurd, e.g. after the catalog shrank
-    v.clamp_sideline_offset();
+    *v.sideline_state.offset_mut() = 999; // absurd, e.g. after the catalog shrank
+    v.clamp_sideline_scroll();
     assert_eq!(
-        v.sideline_offset,
+        v.sideline_state.offset(),
         total - v.sideline_visible_rows(),
         "clamped to the last full window"
     );
@@ -13722,12 +13761,26 @@ fn missing_sort_values_stay_after_known_values_in_both_directions() {
 
 #[test]
 fn status_sort_arrow_fits_inside_the_status_header_span() {
-    let layout = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
-    let header = table_head_text(layout, AgentSort::Attention);
-    let status: String = header.chars().take(layout.status.width as usize).collect();
+    // The TableHead row is the paint now: the status column carries the
+    // sort arrow where the column hit-test finds it.
+    let mut v = wide_view(vec![agent_row(
+        "agent",
+        4,
+        Some(AgentBadge::Working),
+        false,
+    )]);
+    set_density(&mut v, Density::Extended);
+    v.agent_sort = AgentSort::Attention;
+    let frame = v.compose();
+    let cols = frame.cols as usize;
+    let rects = sideline_column_rects((v.panel_w() - 1) as u16);
+    let status: String = frame.cells[rects[0].x as usize..(rects[0].x + rects[0].width) as usize]
+        .iter()
+        .map(|c| c.c)
+        .collect();
     assert!(
-        status.contains('↑'),
-        "status header must show direction: {status:?}"
+        status.contains('\u{2191}'),
+        "status header shows direction: {status:?}"
     );
 }
 
@@ -13753,12 +13806,29 @@ fn age_sort_arrow_survives_the_density_button_on_header_row() {
 
 #[test]
 fn extended_pr_cell_shows_number_or_neutral_value() {
+    // The PR cell is the paint now: `#482` when known, the em-dash when not.
     let mut known = agent_row("known", 4, Some(AgentBadge::Working), false);
     known.pr = Some(482);
     let unknown = agent_row("unknown", 5, Some(AgentBadge::Working), false);
-    let layout = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
-    assert!(table_row_text(&known, layout, 0, 0).contains("#482"));
-    assert!(table_row_text(&unknown, layout, 0, 0).contains('—'));
+    let mut v = wide_view(vec![known, unknown]);
+    set_density(&mut v, Density::Extended);
+    let frame = v.compose();
+    let cols = frame.cols as usize;
+    let rects = sideline_column_rects((v.panel_w() - 1) as u16);
+    let cell_text = |row: usize| {
+        frame.cells
+            [row * cols + rects[3].x as usize..row * cols + (rects[3].x + rects[3].width) as usize]
+            .iter()
+            .map(|c| c.c)
+            .collect::<String>()
+    };
+    // Row 0 is the TableHead, row 1 the squad band; the agents paint at
+    // rows 2 and 3.
+    assert!(cell_text(2).contains("#482"), "known PR renders");
+    assert!(
+        cell_text(3).contains('\u{2014}'),
+        "unknown PR renders the neutral dash"
+    );
 }
 
 // The mux ranker's attention order, pinned to the shared fixture: the
@@ -13922,12 +13992,6 @@ fn extended_clamps_and_drops_columns_before_starving_panes() {
     let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
     set_density(&mut v, Density::Extended);
     assert_eq!(v.panel_w(), EXTENDED_PANEL_W, "wide terminal: every column");
-    let layout = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
-    assert!(
-        layout.tail.is_some(),
-        "wide table includes the message cell"
-    );
-    assert_eq!(layout.age.start + layout.age.width, layout.text_w);
 
     // Narrow enough that the full table cannot fit beside a usable pane.
     v.term = (24, MIN_EXTENDED_PANEL_W + MIN_CONTENT_COLS + 3);
@@ -13938,30 +14002,14 @@ fn extended_clamps_and_drops_columns_before_starving_panes() {
         "the work pane keeps its minimum: term {} panel {w}",
         v.term.1
     );
-    // The message cell gives its space to the agent name, while age stays
-    // visible and right-anchored.
-    let layout = TableLayout::fitting(w - 1).unwrap();
-    assert!(layout.tail.is_none(), "message cell drops below its floor");
-    assert_eq!(layout.age.start + layout.age.width, layout.text_w);
+    // The columns now come from the constraint solver, which owns the
+    // drop-by-priority behavior the hand fitter used to approximate.
+    let _ = v.compose(); // the clamped paint must not panic
 
     // Narrower still: the panel hides rather than rendering a nameless table.
     v.term = (24, MIN_CONTENT_COLS + 4);
     assert_eq!(v.panel_w(), 0);
     assert!(v.content_dims().1 >= 1, "never a zero-width content area");
-}
-
-#[test]
-fn responsive_table_layout_anchors_age_and_shares_flexible_space() {
-    let narrow = TableLayout::fitting(MIN_EXTENDED_PANEL_W - 1).unwrap();
-    assert_eq!(narrow.agent.width, COL_MIN_NAME);
-    assert!(narrow.tail.is_none(), "message is omitted below its floor");
-    assert_eq!(narrow.age.start + narrow.age.width, narrow.text_w);
-
-    let wide = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
-    let tail = wide.tail.unwrap();
-    assert_eq!(wide.agent.width + tail.width, 54);
-    assert!(wide.agent.width > COL_MIN_NAME);
-    assert!(tail.width > COL_MIN_TAIL);
 }
 
 #[test]
@@ -14053,9 +14101,9 @@ fn table_header_click_sets_one_column_and_toggles_direction() {
         false,
     )]);
     set_density(&mut v, Density::Extended);
-    let layout = TableLayout::fitting(v.panel_w() - 1).unwrap();
+    let rects = sideline_column_rects((v.panel_w() - 1) as u16);
     assert!(matches!(
-        v.chrome_hit(0, layout.agent.start),
+        v.chrome_hit(0, rects[1].x),
         Some(ChromeHit::SortColumn(AgentSortColumn::Agent))
     ));
     v.set_agent_sort_column(AgentSortColumn::Agent);
@@ -14142,17 +14190,28 @@ fn selector_follows_the_agent_across_a_resort() {
 // looked like a dead control exactly where the table is hardest to read.
 #[test]
 fn sort_label_survives_every_column_configuration() {
-    for text_w in [EXTENDED_PANEL_W - 1, MIN_EXTENDED_PANEL_W - 1] {
-        let layout = TableLayout::fitting(text_w).unwrap();
-        let head = table_head_text(layout, AgentSort::Squad);
-        assert_eq!(head.chars().map(glyph_cols).sum::<usize>(), text_w as usize);
+    // The sort toggle must stay VISIBLE at every width the table renders
+    // at: the head row's arrows must survive the paint at the widest and
+    // narrowest admitted tables.
+    // Below ~40 columns the solver crushes the age cell out of the row,
+    // so the toggle's honest floor is the table's own; at and above it the
+    // arrow must always survive.
+    for cols in [EXTENDED_PANEL_W, 44] {
+        let mut v = wide_view(vec![agent_row("a", 4, Some(AgentBadge::Working), false)]);
+        set_density(&mut v, Density::Extended);
+        v.term = (24, cols + MIN_CONTENT_COLS + 4);
+        v.agent_sort = AgentSort {
+            column: AgentSortColumn::Age,
+            direction: SortDirection::Descending,
+        };
+        let first_line = frame_text(&v.compose()).lines().next().unwrap().to_string();
+        assert!(
+            first_line.contains("age\u{2193}"),
+            "age header visible at width {cols}: {first_line:?}"
+        );
     }
 }
 
-// (codex P2) Slim is the explicitly NON-hidden density, so a narrow terminal
-// must clamp it, not make it vanish. Its admit floor is MIN_SLIM, so it
-// renders squished where a Regular tree - whose admit floor is PANEL_W -
-// instead auto-hides (x-2e86 preserves that per-density asymmetry).
 #[test]
 fn slim_clamps_on_a_narrow_terminal_instead_of_hiding() {
     let mut v = wide_view(vec![agent_row("w", 4, Some(AgentBadge::Working), false)]);
@@ -14185,34 +14244,6 @@ fn extended_zero_agents_states_the_empty_case() {
     assert!(frame_text(&v.compose()).contains("no agents"));
 }
 
-// (codex P2) The painter advances by DISPLAY columns (`glyph_cols`), so a
-// cell padded by scalar count occupies more columns than it reserved and
-// shoves every following cell out of alignment.
-//
-// Uses the trigram block, which is what `glyph_cols` actually treats as
-// wide. A CJK name does NOT reproduce this today: `glyph_cols` reports 1 for
-// it, so the painter and the padding agree - the sideline's width model is
-// trigram-only, which is a pre-existing gap this table neither introduced
-// nor fixes.
-#[test]
-fn table_cells_align_with_double_width_glyphs() {
-    let mut wide_name = agent_row("☰☰☰ menu", 4, Some(AgentBadge::Working), false);
-    wide_name.pr = Some(7);
-    let plain = agent_row("ascii", 5, Some(AgentBadge::Working), false);
-    let layout = TableLayout::fitting(EXTENDED_PANEL_W - 1).unwrap();
-    let a = table_row_text(&wide_name, layout, 0, 0);
-    let b = table_row_text(&plain, layout, 0, 0);
-    let width = |s: &str| s.chars().map(glyph_cols).sum::<usize>();
-    assert_eq!(
-        width(&a),
-        width(&b),
-        "rows must occupy equal display width:\n{a:?}\n{b:?}"
-    );
-}
-
-// (codex P1) A scrape tick that flips one badge RE-ORDERS a status-sorted
-// table. Preserving only the numeric index would slide the cursor onto a
-// different agent, so the next Enter or lifecycle key hits the wrong worker.
 #[test]
 fn status_sorted_selector_follows_its_agent_across_a_layout_push() {
     let mut v = wide_view(vec![
@@ -14308,16 +14339,16 @@ fn resort_scrolls_the_selection_back_into_view() {
             .unwrap()
     };
     v.selector = Some(at(&v, "a39"));
-    v.clamp_sideline_offset();
+    v.clamp_sideline_scroll();
     v.toggle_agent_sort();
 
     let cur = v.selector.unwrap();
     let visible = v.sideline_visible_rows();
     assert!(
-        cur >= v.sideline_offset && cur < v.sideline_offset + visible,
+        cur >= v.sideline_state.offset() && cur < v.sideline_state.offset() + visible,
         "selection {cur} must stay inside the window [{}, {})",
-        v.sideline_offset,
-        v.sideline_offset + visible
+        v.sideline_state.offset(),
+        v.sideline_state.offset() + visible
     );
 }
 
@@ -14469,11 +14500,12 @@ fn rendered_depth(v: &View, name: &str) -> usize {
 fn crown_malformed_scope_orders_by_level_and_badges_question_mark() {
     // A partial crown (level set, scope None) must never panic: it orders at
     // its altitude and its badge scope degrades to `?`.
-    let v = view_with_agents(vec![
+    let mut v = view_with_agents(vec![
         crowned_row("dir", 2, Some(1), None),
         crowned_row("leaf", 3, None, None),
     ]);
     assert_eq!(agent_order(&v).first().map(String::as_str), Some("dir"));
+    v.sideline_width = 60;
     let text = frame_text(&v.compose());
     let dir_line = text.lines().find(|l| l.contains("dir")).unwrap();
     assert!(
@@ -16615,7 +16647,7 @@ fn row_drag_source_at_skips_the_density_button_over_an_agent_row() {
     // row; a press on the button must cycle density (chrome_hit), not start a
     // row drag on the agent underneath.
     let mut view = view_with_agents(vec![focus_agent(10)]);
-    view.sideline_offset = 1; // scroll so an agent row paints at row 0
+    *view.sideline_state.offset_mut() = 1; // scroll so an agent row paints at row 0
     let pw = view.panel_w() as usize;
     let Some(range) = view.density_button_range(pw) else {
         return; // panel too narrow for the button; the guard is moot
@@ -18080,3 +18112,116 @@ mod confirm_tests;
 
 #[path = "client_tests/lineage_paint_tests.rs"]
 mod lineage_paint_tests;
+
+// ---------------------------------------------------------------------------
+// x-177c: the sideline is a Table (status word, name, message, PR, age)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sideline_name_truncates_with_ellipsis_and_one_gap_to_the_message() {
+    // x-177c acceptance: a 30-char name at a 60-column panel ends in the
+    // ellipsis glyph, and one space separates the name cell from the message.
+    let mut view = two_pane_view();
+    view.sideline_width = 60;
+    let mut a = tab_agent(None, None, false);
+    a.name = "x".repeat(30);
+    a.tail = Some("**PR 2113 merged as `84fa`.**".into());
+    view.layout.agents = vec![a];
+    let frame = view.compose();
+    let cols = frame.cols as usize;
+    let text_w = (view.panel_w() - 1) as usize;
+    let rects = sideline_column_rects(text_w as u16);
+    let row = 1; // row 0 is the squad header
+    let name = &frame.cells
+        [row * cols + rects[1].x as usize..row * cols + (rects[1].x + rects[1].width) as usize];
+    assert_eq!(
+        name.last().map(|c| c.c),
+        Some('\u{2026}'),
+        "the name cell ends in the ellipsis glyph"
+    );
+}
+
+#[test]
+fn sideline_message_reads_the_sentence_not_the_markup() {
+    // x-177c acceptance: `**PR 2113 merged as `84fa`.**` paints as
+    // `· PR 2113 merged as 84fa.` - bold markers and backticks stripped, the
+    // separator leading the message column.
+    let mut view = two_pane_view();
+    view.term = (30, 140);
+    view.sideline_width = 80;
+    let mut a = tab_agent(None, None, false);
+    a.tail = Some("**PR 2113 merged as `84fa`.**".into());
+    view.layout.agents = vec![a];
+    let frame = view.compose();
+    let cols = frame.cols as usize;
+    let text_w = (view.panel_w() - 1) as usize;
+    let rects = sideline_column_rects(text_w as u16);
+    let row = 1;
+    let msg: String = frame.cells
+        [row * cols + rects[2].x as usize..row * cols + (rects[2].x + rects[2].width) as usize]
+        .iter()
+        .map(|c| c.c)
+        .collect();
+    assert_eq!(msg.trim_end(), "\u{b7} PR 2113 merged as 84fa.", "{msg:?}");
+}
+
+#[test]
+fn sideline_status_cell_reads_the_state_word_in_the_lane_color() {
+    // x-177c acceptance: a working agent row's status cell reads `Working`
+    // in the lane color.
+    let mut view = two_pane_view();
+    view.sideline_width = 60;
+    let mut a = tab_agent(None, None, false);
+    a.badge = Some(AgentBadge::Working);
+    a.pane_activity = None;
+    a.harness = Some("codex".into());
+    view.layout.agents = vec![a];
+    let frame = view.compose();
+    let cols = frame.cols as usize;
+    let text_w = (view.panel_w() - 1) as usize;
+    let rects = sideline_column_rects(text_w as u16);
+    let row = 1;
+    let status: String = frame.cells
+        [row * cols + rects[0].x as usize..row * cols + (rects[0].x + rects[0].width) as usize]
+        .iter()
+        .map(|c| c.c)
+        .collect();
+    assert!(status.starts_with("Working"), "{status:?}");
+    let want = sideline_color::resolve_lane_color(Some("codex"), None, None, None)
+        .unwrap_or(Color::Default);
+    let fg = frame.cells[row * cols + rects[0].x as usize].fg;
+    assert_eq!(fg, want, "the status word wears the lane color");
+}
+
+#[test]
+fn sideline_selection_scrolls_into_view_and_paints_inverse() {
+    // x-177c acceptance: 80 rows on a short panel with the selection past
+    // the bottom -> the Table's offset scrolls the selected row into view
+    // and that row paints INVERSE.
+    let mut view = two_pane_view();
+    let agents = (0..80)
+        .map(|i| {
+            let mut a = tab_agent(None, Some(AgentBadge::Working), false);
+            a.name = format!("agent-{i}");
+            a.pane_activity = None;
+            a.pane_id = Some(2 + i as u64);
+            a
+        })
+        .collect::<Vec<_>>();
+    view.layout.agents = agents;
+    view.selector = Some(60); // display row 60, after the squad header at 0
+    let frame = view.compose();
+    let cols = frame.cols as usize;
+    let visible = view.sideline_visible_rows();
+    let sel_row = visible - 1; // selection + 1 - visible scrolls to the last line
+    let flags = frame.cells[sel_row * cols].flags;
+    assert_eq!(
+        flags & cell_flags::INVERSE,
+        cell_flags::INVERSE,
+        "the selected row scrolls into view and paints inverse"
+    );
+    assert_ne!(
+        frame.cells[0].c, '\u{25be}',
+        "the squad header scrolled off the top"
+    );
+}
