@@ -18,6 +18,28 @@ import fno.doctor_cli  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
+def _reset_project_resolve_cache():
+    """Clear the project-name resolver's cache before and after every test.
+
+    ``fno.projects.resolve`` caches ``~/.fno/config.toml`` in a module-level
+    dict on first use and never invalidates it. Several tests point
+    ``SETTINGS_PATH`` at a tmp fixture and call ``_clear_cache()`` before
+    reading, but not after, so the fixture's project map (e.g. ``etl`` ->
+    some canonical name) survives into whatever test runs next in the same
+    xdist worker. That flaked
+    ``test_project_scope_compiles_to_the_project_union`` in smoke-pytest
+    shard 8: a leaked ``etl`` alias from an unrelated test made a raw
+    ``etl`` project no longer match its own canonicalization. Autouse so a
+    future test with the same shape does not need to remember this itself.
+    """
+    from fno.projects import resolve as proj_resolve
+
+    proj_resolve._clear_cache()
+    yield
+    proj_resolve._clear_cache()
+
+
+@pytest.fixture(autouse=True)
 def _quiet_gh_budget(monkeypatch):
     """Keep every test off the real fleet GitHub request ledger.
 
