@@ -12875,8 +12875,7 @@ mod tests {
         std::fs::remove_dir_all(maintenance).unwrap();
         std::fs::remove_dir_all(lock).unwrap();
         assert!(
-            crate::events::committed_journal_text(&project)
-                .contains("maintenance_handoff_probe"),
+            crate::events::committed_journal_text(&project).contains("maintenance_handoff_probe"),
             "the probe row was dropped"
         );
     }
@@ -14493,7 +14492,8 @@ git_bounded();";
                 line("BBB", "pass"),
                 line("BBB", "fail"),
             ]
-            .join("\n") + "\n",
+            .join("\n")
+                + "\n",
         )
         .unwrap();
         let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC", "feature/x");
@@ -14524,7 +14524,8 @@ git_bounded();";
                 line("BBB", "fail"),
                 line("AAA", "fail"),
             ]
-            .join("\n") + "\n",
+            .join("\n")
+                + "\n",
         )
         .unwrap();
         let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC", "feature/x");

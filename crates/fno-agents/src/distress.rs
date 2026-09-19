@@ -514,7 +514,9 @@ mod tests {
             &d
         ));
         assert_eq!(
-            crate::events::committed_journal_text(&project).lines().count(),
+            crate::events::committed_journal_text(&project)
+                .lines()
+                .count(),
             1,
             "identical distress must not append a second row"
         );
@@ -567,7 +569,9 @@ mod tests {
             &project, &global, "run-a", None, None, &d
         ));
         assert_eq!(
-            crate::events::committed_journal_text(&project).lines().count(),
+            crate::events::committed_journal_text(&project)
+                .lines()
+                .count(),
             1
         );
     }
