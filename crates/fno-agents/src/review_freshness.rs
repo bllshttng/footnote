@@ -1057,7 +1057,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bare = tmp.path().join("origin.git");
         std::fs::create_dir_all(&bare).unwrap();
-        git(&bare, &["init", "-q", "--bare"]);
+        git(&bare, &["init", "-q", "--bare", "-b", "main"]);
         git(&bare, &["config", "uploadpack.allowAnySHA1InWant", "true"]);
         let writer = tmp.path().join("w");
         git(tmp.path(), &["clone", "-q", bare.to_str().unwrap(), "w"]);
@@ -1110,7 +1110,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bare = tmp.path().join("origin.git");
         std::fs::create_dir_all(&bare).unwrap();
-        git(&bare, &["init", "-q", "--bare"]);
+        git(&bare, &["init", "-q", "--bare", "-b", "main"]);
         git(&bare, &["config", "uploadpack.allowAnySHA1InWant", "true"]);
         let writer = tmp.path().join("w");
         git(tmp.path(), &["clone", "-q", bare.to_str().unwrap(), "w"]);
