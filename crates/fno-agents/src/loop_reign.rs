@@ -832,11 +832,14 @@ pub fn court_orphans(
             let harness = crate::claude_adopt::manifest_field(content, "harness");
             if harness.as_deref().map(|h| h == "claude").unwrap_or(true) {
                 let snapshot = roster_read.get_or_insert_with(roster);
-                let holder = crate::state::RegistryEntry {
-                    harness: Some("claude".into()),
-                    harness_session_id: Some(session),
-                    ..Default::default()
-                };
+                // The synthesized holder is a query object, never a minted
+                // row; ::new is still the sanctioned base, so the mint guard
+                // sees the canonical session identity named positionally.
+                let mut holder = crate::state::RegistryEntry::new(
+                    Some(session.clone()),
+                    crate::state::Lineage::captured((None, None, None)),
+                );
+                holder.harness = Some("claude".into());
                 if crate::gc_sweep::claude_death_reason(&holder, snapshot).is_some() {
                     continue;
                 }
