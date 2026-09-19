@@ -171,16 +171,30 @@ def _parse_inline_yaml_list(src: str) -> list[str] | None:
     return parts
 
 
+def _declares_values(raw: object) -> bool:
+    if isinstance(raw, list):
+        return any(str(x).strip() for x in raw)
+    if isinstance(raw, str):
+        s = raw.strip()
+        return bool(s) and s != "[]"
+    return False
+
+
 def _collect_frontmatter_depends(plan_path: str) -> tuple[list[str], Path]:
-    """Read depends_on from a plan file's frontmatter.
+    """Read a plan's declared blockers from its frontmatter.
 
     Returns (raw_values, plan_dir) where plan_dir is the directory used as
     the base for resolving relative dependency paths.
 
+    The canonical key is `blocked_by` (`fno do plan migrate-keys` RENAME);
+    `depends_on` is a one-release fallback (the policy plan/schema.py
+    states). When both carry values, `blocked_by` wins and the ignored
+    key is named on stderr.
+
     Value forms accepted in the frontmatter:
-    - Block list (preferred): `depends_on:` followed by `- entry` lines.
-    - Inline YAML list: `depends_on: [a, b]` or `depends_on: []`.
-    - Scalar string: `depends_on: ab-xxxxxxxx` or a single slug. Coerced
+    - Block list (preferred): the key followed by `- entry` lines.
+    - Inline YAML list: `blocked_by: [a, b]` or `blocked_by: []`.
+    - Scalar string: `blocked_by: ab-xxxxxxxx` or a single slug. Coerced
       to a one-element list.
 
     Complex inline forms (nested brackets, escaped commas) fall back to
@@ -194,7 +208,16 @@ def _collect_frontmatter_depends(plan_path: str) -> tuple[list[str], Path]:
         return [], Path(plan_path).parent
     if not fm:
         return [], plan_dir
-    raw = fm.get("depends_on")
+    canonical = fm.get("blocked_by")
+    legacy = fm.get("depends_on")
+    if _declares_values(canonical) and _declares_values(legacy):
+        print(
+            f"Warning: {plan_path} declares both blocked_by and depends_on; "
+            "using blocked_by and ignoring depends_on. Migrate the plan "
+            "(`fno do plan migrate-keys`).",
+            file=sys.stderr,
+        )
+    raw = canonical if _declares_values(canonical) else legacy
     if isinstance(raw, list):
         return [str(x).strip() for x in raw if str(x).strip()], plan_dir
     if isinstance(raw, str) and raw.strip():
@@ -204,9 +227,9 @@ def _collect_frontmatter_depends(plan_path: str) -> tuple[list[str], Path]:
             if parsed is not None:
                 return parsed, plan_dir
             print(
-                f"Warning: depends_on in {plan_path} uses an inline-list form "
+                f"Warning: {plan_path} declares blockers in an inline-list form "
                 "this parser can't read (nested brackets or escaped commas). "
-                "Switch to block form (`depends_on:` then `- entry` lines).",
+                "Switch to block form (`- entry` lines).",
                 file=sys.stderr,
             )
             return [], plan_dir
