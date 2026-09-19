@@ -34,6 +34,13 @@ def _answer_or_raise(answer: dict[str, Any], field: str) -> Any:
     return value
 
 
+def _print_note(head: str, note: str) -> None:
+    """One owner note to stderr, once per ask."""
+    import sys
+
+    print(f"{head} - {note}", file=sys.stderr)
+
+
 def keeper_posture(
     harness: str,
     lane: str,
@@ -53,10 +60,10 @@ def keeper_posture(
     tokens = _answer_or_raise(answer, "tokens")
     note = answer.get("note") or ""
     if note:
-        import sys
-
-        head = f"agy posture: {answer.get('effective')} ({answer.get('source')})"
-        print(f"{head} - {note}", file=sys.stderr)
+        _print_note(
+            f"agy posture: {answer.get('effective')} ({answer.get('source')})",
+            note,
+        )
     return [str(t) for t in tokens]
 
 
@@ -104,10 +111,5 @@ def pi_route(
     tokens = _answer_or_raise(answer, "tokens")
     note = answer.get("note") or ""
     if note:
-        import sys
-
-        print(
-            f"pi route: {answer.get('route_source')} - {note}",
-            file=sys.stderr,
-        )
+        _print_note(f"pi route: {answer.get('route_source')}", note)
     return [str(t) for t in tokens]
