@@ -392,7 +392,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::write(&path, &raw).unwrap();
+        std::fs::write(&path, format!("{raw}\n")).unwrap();
         let journals = vec![path.clone()];
         let holds = scan_open_holds(&journals, "sess-a", "x-n");
         assert_eq!(holds.len(), 1);
@@ -412,7 +412,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::write(&path, &raw).unwrap();
+        std::fs::write(&path, format!("{raw}\n")).unwrap();
         let journals = vec![path.clone()];
         let holds = scan_open_holds(&journals, "sess-b", "x-n");
         assert_eq!(holds.len(), 1);
@@ -436,7 +436,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::write(&path, &raw).unwrap();
+        std::fs::write(&path, format!("{raw}\n")).unwrap();
         let journals = vec![path.clone()];
         let mine = scan_open_holds(&journals, "sess-c", "x-n");
         assert_eq!(mine.len(), 1, "only the open one holds");

@@ -253,12 +253,13 @@ fn no_notice_when_emit_fails() {
     let tmp = TempDir::new().unwrap();
     let notify_log = tmp.path().join("notify.log");
     write_fixture(&tmp, &[], &tmp.path().join("history.jsonl"), &notify_log);
-    // The events path IS a directory: the emitter's append fails, so the
-    // journal cannot carry the receipt and no notice may ride.
+    // The STORE path is a directory: the emitter's commit cannot open it, so
+    // the journal cannot carry the receipt and no notice may ride.
     let mut args = base_args(&tmp, &["--summary-json", r#"{"age_days": 15.0}"#]);
     let idx = args.iter().position(|a| a == "--events").unwrap();
     let events_dir = tmp.path().join("events-dir");
     std::fs::create_dir(&events_dir).unwrap();
+    std::fs::create_dir(tmp.path().join("events-dir.db")).unwrap();
     args[idx + 1] = events_dir.to_string_lossy().into_owned();
     let o = parse_args(&args).unwrap();
 

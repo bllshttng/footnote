@@ -98,24 +98,23 @@ pub(crate) fn newest_assistant_text_via_reader(
 /// this a session whose newest message still carries the same distress would
 /// re-mail the parent on each fire.
 fn blocked_distress_already_emitted(project_events: &Path, run: &str, reason: &str) -> bool {
-    let Ok(file) = std::fs::File::open(project_events) else {
+    // Committed rows, not journal bytes: the store commit is the write
+    // boundary, so the dedup reads what a reader would see.
+    let Ok(rows) = fno_event_store::query_events(
+        project_events,
+        &fno_event_store::EventQuery {
+            types: vec!["blocked".to_string()],
+            ..Default::default()
+        },
+    ) else {
         return false;
     };
-    use std::io::BufRead;
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
-    while reader.read_line(&mut line).unwrap_or(0) > 0 {
-        if let Ok(v) = serde_json::from_str::<Value>(&line) {
-            if v.get("type").and_then(|t| t.as_str()) == Some("blocked")
-                && v.get("run").and_then(|r| r.as_str()) == Some(run)
-                && v.pointer("/data/reason").and_then(|r| r.as_str()) == Some(reason)
-            {
-                return true;
-            }
-        }
-        line.clear();
-    }
-    false
+    rows.iter().any(|r| {
+        serde_json::from_str::<Value>(&r.line).map_or(false, |v| {
+            v.get("run").and_then(|x| x.as_str()) == Some(run)
+                && v.pointer("/data/reason").and_then(|x| x.as_str()) == Some(reason)
+        })
+    })
 }
 
 /// Free-text cap shared with the emit CLI (`_PROTOCOL_DATA_STR_CAP`) and
@@ -496,7 +495,7 @@ mod tests {
         assert_eq!(row["data"]["reason"], "missing dependency");
         assert_eq!(row["data"]["evidence"], "plan 4.2");
         assert_eq!(
-            std::fs::read_to_string(&global).unwrap().trim(),
+            crate::events::committed_journal_text(&global).trim(),
             serde_json::to_string(&row).unwrap(),
             "the global mirror carries the identical row"
         );

@@ -2184,11 +2184,7 @@ fn gc_sweep_restores_row_when_dead_dispatch_receipt_cannot_persist() {
     // store path refuses to open as SQLite, so the receipt persist fails the
     // same way a journal append to a directory did pre-cutover.
     std::fs::create_dir_all(global_events_path(&home)).unwrap();
-    std::fs::create_dir_all(std::path::PathBuf::from(format!(
-        "{}.db",
-        global_events_path(&home).display()
-    )))
-    .unwrap();
+    std::fs::create_dir_all(global_events_path(&home).with_file_name("events.db")).unwrap();
 
     let summary = retire_sweep(
         &home,

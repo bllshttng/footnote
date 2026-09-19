@@ -1042,11 +1042,15 @@ fn moved_members(home: &AgentsHome, lane: &str) -> Vec<String> {
         if !(name.starts_with(&prefix) && name.ends_with(".jsonl")) {
             continue;
         }
-        let Ok(body) = std::fs::read_to_string(e.path()) else {
+        // Committed rows, not journal bytes: the ladder's own steps are
+        // store-committed, so the moved-set reads them back from the store.
+        let Ok(rows) =
+            fno_event_store::query_events(&e.path(), &fno_event_store::EventQuery::default())
+        else {
             continue;
         };
-        for line in body.lines() {
-            let Ok(v) = serde_json::from_str::<Value>(line) else {
+        for r in rows {
+            let Ok(v) = serde_json::from_str::<Value>(&r.line) else {
                 continue;
             };
             if v.get("step").and_then(Value::as_str) == Some("spawn-confirmed") {
