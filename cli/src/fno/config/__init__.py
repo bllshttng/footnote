@@ -249,6 +249,8 @@ class BlueprintBlock(BaseModel):
 
     max_prs_per_epic: int = 4
 
+    python_repair_added_lines: int = Field(default=30, ge=0)
+
     @field_validator("max_prs_per_epic")
     @classmethod
     def max_prs_per_epic_positive(cls, v: int) -> int:

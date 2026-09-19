@@ -40,6 +40,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `user.name` | str | `` | always | What fno calls you. Empty falls back to `git config user.name`. |
 | `sandbox.on_unavailable` | typing.Literal['refuse', 'warn'] | `refuse` | advanced | When a headless harness has no confinement backend: refuse before spawn (default) or explicitly warn and continue unconfined. |
 | `blueprint.max_prs_per_epic` | int | `4` | advanced | Default cap on group PRs per decomposed epic; an epic plan-doc's max_children frontmatter overrides it per-epic and --max-prs may only tighten it. |
+| `blueprint.python_repair_added_lines` | int | `30` | advanced | Added lines a king-approved repair may add to cli/src/fno Python under law d-a9cddc93 (default 30). Added lines only: deletions do not offset, so larger work ports to crates/ even when it deletes more than it adds. Read by the plan gate in validate-plan.sh and by the push-time tally in check-file-budget.sh. |
 | `backlog.maintain.staleness_days` | int | `30` | advanced | Age (days) before an idea is flagged stale. |
 | `backlog.maintain.max_failed_attempts` | int | `3` | advanced | Consecutive failures before a node auto-defers. |
 | `backlog.maintain.abandoned_do_row_hours` | int | `24` | advanced | Transcript-quiet hours before `maintain --apply` reaps an open do row whose session is provably gone. |

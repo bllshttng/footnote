@@ -47,6 +47,26 @@ if ! mv "$PLAN" "$new" 2>/dev/null; then
   exit 0
 fi
 
+# Key the frontmatter with the minted id when the plan names none. The
+# filename alone encodes the id only for humans; the validator's node-id
+# gates and the graph readers read the frontmatter, and a name-without-key
+# plan fails the Plan Node Binding check on every later validation. The
+# probe reads the frontmatter block only: a body line starting `node:` is
+# prose, not a key.
+fm_key=$(awk '/^---[[:space:]]*$/{c++; next} c<2 && /^(node|claims):/{print "y"; exit}' "$new")
+if [[ -z "$fm_key" ]]; then
+  tmp="$new.tmp"
+  if awk -v id="$NODE" '
+      /^---[[:space:]]*$/ && !done { print; print "node: " id; done=1; next }
+      { print }
+    ' "$new" > "$tmp" 2>/dev/null && mv "$tmp" "$new"; then
+    :
+  else
+    rm -f "$tmp"
+    echo "warn: frontmatter key write failed for $NODE (file renamed to $new)" >&2
+  fi
+fi
+
 # Repoint the node. Non-fatal: the file already moved, and a stale plan_path is
 # recoverable, so a CLI hiccup must not fail the blueprint handoff.
 if command -v fno >/dev/null 2>&1; then

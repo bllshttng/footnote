@@ -107,6 +107,8 @@ on_unavailable = "refuse"
 [blueprint]
 # Default cap on group PRs per decomposed epic; an epic plan-doc's max_children frontmatter overrides it per-epic and --max-prs may only tighten it.
 max_prs_per_epic = 4
+# Added lines a king-approved repair may add to cli/src/fno Python under law d-a9cddc93 (default 30). Added lines only: deletions do not offset, so larger work ports to crates/ even when it deletes more than it adds. Read by the plan gate in validate-plan.sh and by the push-time tally in check-file-budget.sh.
+python_repair_added_lines = 30
 
 [backlog]
 # Prefix for minted node IDs (<=7 chars; not cv-/fu-/tgt-).
