@@ -15,6 +15,7 @@ use crate::heal::{cargo_test_names, pytest_nodeids};
 use crate::tick_ledger::parse_rfc3339_unix;
 use regex::Regex;
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -50,6 +51,7 @@ pub fn run_op(op: &str, payload: &Value) -> String {
     match op {
         "status-merge-blocker" => merge_blocker(&RealGhProbe, payload).to_string(),
         "status-failure-cause" => failure_cause(payload).to_string(),
+        "status-zero-job-runs" => zero_job_runs_op(&RealGhProbe, payload).to_string(),
         other => json!({"error": format!("unknown op {other}")}).to_string(),
     }
 }
@@ -247,6 +249,144 @@ fn context_concluded(rows: Option<&Vec<Value>>, context: &str) -> bool {
             "SUCCESS" | "NEUTRAL" | "SKIPPED"
         )
     })
+}
+
+// ---------------------------------------------------------------------------
+// status-zero-job-runs
+// ---------------------------------------------------------------------------
+
+/// One Actions run that completed as `failure` with zero jobs: GitHub failed
+/// to parse the workflow file, the run minted no check run, and every
+/// check-run-shaped reader would otherwise skip it.
+pub(crate) struct ZeroJobRun {
+    path: String,
+    url: String,
+    conclusion: String,
+    created_at: String,
+}
+
+/// The runs that failed before minting a job. A run a check run links to
+/// already owns its row; a run whose newest verdict at its path is not a
+/// completed failure is superseded or green. `jobs_total` is the read that
+/// proves the zero, kept a seam so the rule stays pure.
+pub(crate) fn zero_job_failures(
+    runs: &[Value],
+    check_runs: &[Value],
+    jobs_total: &dyn Fn(u64) -> Result<u64, String>,
+) -> Result<Vec<ZeroJobRun>, String> {
+    let linked: HashSet<String> = check_runs
+        .iter()
+        .filter_map(|cr| {
+            let url = cr
+                .get("details_url")
+                .and_then(Value::as_str)
+                .or_else(|| cr.get("html_url").and_then(Value::as_str))
+                .unwrap_or("");
+            crate::heal::run_id(url)
+        })
+        .collect();
+    // Newest run per workflow path wins, as parse_failing_run_ids does: a
+    // newer run of the same workflow supersedes an older failure.
+    let mut newest: BTreeMap<&str, &Value> = BTreeMap::new();
+    for run in runs {
+        let Some(path) = run.get("path").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(id) = run.get("id").and_then(Value::as_u64) else {
+            continue;
+        };
+        let newer = newest
+            .get(path)
+            .is_none_or(|prev| prev.get("id").and_then(Value::as_u64).unwrap_or(0) < id);
+        if newer {
+            newest.insert(path, run);
+        }
+    }
+    let mut out = Vec::new();
+    for (path, run) in newest {
+        let status = run.get("status").and_then(Value::as_str).unwrap_or("");
+        let conclusion = run
+            .get("conclusion")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if status != "completed" || !matches!(conclusion, "failure" | "startup_failure") {
+            continue;
+        }
+        let Some(id) = run.get("id").and_then(Value::as_u64) else {
+            continue;
+        };
+        if linked.contains(&id.to_string()) {
+            continue;
+        }
+        if jobs_total(id)? != 0 {
+            continue;
+        }
+        out.push(ZeroJobRun {
+            path: path.to_string(),
+            url: run
+                .get("html_url")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            conclusion: conclusion.to_string(),
+            created_at: run
+                .get("created_at")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// The `status-zero-job-runs` op: `slug` + the raw runs/check-runs arrays
+/// in, the Python rollup rows out. `jobs_total` rides the gh probe seam.
+fn zero_job_runs_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
+    let slug = payload
+        .get("slug")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let cwd = PathBuf::from(payload.get("cwd").and_then(Value::as_str).unwrap_or("."));
+    let Some(runs) = payload.get("runs").and_then(Value::as_array) else {
+        return json!({"error": "status-zero-job-runs needs a runs array"});
+    };
+    let Some(check_runs) = payload.get("check_runs").and_then(Value::as_array) else {
+        return json!({"error": "status-zero-job-runs needs a check_runs array"});
+    };
+    let Some(slug) = slug else {
+        return json!({"error": "status-zero-job-runs needs a non-empty slug"});
+    };
+    let jobs_total = |id: u64| -> Result<u64, String> {
+        let args = vec![
+            "api".to_string(),
+            format!("repos/{slug}/actions/runs/{id}/jobs?per_page=1"),
+        ];
+        let (ok, stdout, _stderr) = probes.run_gh(&cwd, &args)?;
+        if !ok {
+            return Err(format!("the jobs read for run {id} failed"));
+        }
+        serde_json::from_str::<Value>(&stdout)
+            .map_err(|e| format!("the jobs read for run {id} was unparseable: {e}"))?
+            .get("total_count")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("the jobs read for run {id} carried no total_count"))
+    };
+    match zero_job_failures(runs, check_runs, &jobs_total) {
+        Err(err) => json!({"error": err}),
+        Ok(rows) => json!({"rows": rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "name": r.path,
+                    "status": "completed",
+                    "conclusion": r.conclusion,
+                    "startedAt": r.created_at,
+                    "detailsUrl": r.url,
+                    "workflow": r.path,
+                })
+            })
+            .collect::<Vec<_>>()}),
+    }
 }
 
 // ---------------------------------------------------------------------------
