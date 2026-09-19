@@ -5111,7 +5111,6 @@ fn valid_session_uuid_accepts_only_lowercase_8_4_4_4_12_hex() {
     assert!(!valid_session_uuid("12345678-1234-1234-1234-1234567890a")); // short group
 }
 
-
 #[test]
 fn an_active_mission_header_renders_but_never_groups_worker_rows() {
     // The header renders with done/total, and its synthetic id reaches no

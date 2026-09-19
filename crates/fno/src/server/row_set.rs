@@ -38,7 +38,9 @@ impl Core {
             .backlog_holders
             .iter()
             .filter_map(|(node, holder)| {
-                self.backlog_driver.get(node).map(|d| (holder.as_str(), d.clone()))
+                self.backlog_driver
+                    .get(node)
+                    .map(|d| (holder.as_str(), d.clone()))
             })
             .collect();
         // 1. Pane rows: one per live tab leaf, deterministic (squad -> tab ->

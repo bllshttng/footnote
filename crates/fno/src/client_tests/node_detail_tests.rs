@@ -32,7 +32,9 @@ async fn enter_on_a_card_opens_the_detail_overlay() {
 
     // A Vec<u8> is the wire sink; the open writes nothing.
     let mut sock = Vec::new();
-    selector_apply_row_action(&mut view, cur, &mut sock).await;
+    selector_apply_row_action(&mut view, cur, &mut sock)
+        .await
+        .unwrap();
 
     let nd = view
         .node_detail
