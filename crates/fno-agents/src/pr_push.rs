@@ -134,7 +134,7 @@ pub(crate) fn read_checks_rows(gh_bin: &str, cwd: &Path, head: &str) -> Result<V
         }
     }
     // A run that failed before minting a job owns no check run; the shared
-    // rule adds its row so the failure cannot read green (x-5cf9).
+    // rule adds its row so the failure cannot read green.
     rows.extend(zero_job_rows(gh_bin, cwd, head, &raw)?);
     // The check-runs endpoint returns ONLY check-runs. A commit StatusContext
     // lives on a different endpoint, and reading one without the other is a
@@ -143,7 +143,7 @@ pub(crate) fn read_checks_rows(gh_bin: &str, cwd: &Path, head: &str) -> Result<V
     Ok(rows)
 }
 
-/// The rows for the Actions runs that failed before minting a job (x-5cf9):
+/// The rows for the Actions runs that failed before minting a job:
 /// the head_sha-scoped runs listing, the shared rule in
 /// `pr_status_facts::zero_job_failures`, and this module's row shape. A
 /// failed runs read is an `Err`, like a failed check-runs read.

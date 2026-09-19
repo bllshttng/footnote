@@ -408,7 +408,7 @@ fn unknown_ops_are_refused_by_name() {
     assert!(out.contains("unknown op status-nonsense"));
 }
 
-// --- zero-job runs (x-5cf9): a run that failed before minting a job ------
+// --- zero-job runs: a run that failed before minting a job ---------------
 
 /// The 504b255 specimen: two failed cli-ci runs with 0 jobs (one newest),
 /// one successful rust-ci run a check run links to.
