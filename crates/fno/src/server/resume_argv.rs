@@ -24,10 +24,13 @@ thread_local! {
 }
 
 /// One harness's declared `interactive_resume` form: the tokens the
-/// capability table carries, with the `{session_id}` placeholder intact.
+/// capability table carries, with the `{session_id}` placeholder intact,
+/// plus any `pre_exec` the form declares (the shared-daemon ownership
+/// assertion codex's resume row carries).
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct DeclaredResumeForm {
     tokens: Vec<String>,
+    pre_exec: Vec<String>,
 }
 
 /// The `interactive_resume` form `harness` declares, or `None` when
@@ -44,6 +47,7 @@ pub(super) fn declared_resume_form(harness: &str) -> Option<DeclaredResumeForm> 
     }
     crate::agents_view::resume_form(harness).map(|form| DeclaredResumeForm {
         tokens: form.tokens,
+        pre_exec: form.pre_exec,
     })
 }
 
@@ -57,7 +61,10 @@ pub(super) fn set_declared_resume_form(harness: &str, form: Option<Vec<String>>)
             .get_or_insert_with(std::collections::HashMap::new)
             .insert(
                 harness.to_string(),
-                form.map(|tokens| DeclaredResumeForm { tokens }),
+                form.map(|tokens| DeclaredResumeForm {
+                    tokens,
+                    pre_exec: Vec::new(),
+                }),
             );
     });
 }
@@ -235,6 +242,18 @@ pub(super) fn resume_argv_for(harness: &str, session_id: &str) -> Result<Vec<Str
     if !filled {
         return Err(format!("{harness} resume form fills no session id"));
     }
+    // A declared `pre_exec` composes exactly the way the attach renderer
+    // does (one `sh -c` whose script runs the pre-exec then execs the
+    // filled argv): the fail-open render keeps the same ownership
+    // assertion the native builder runs.
+    if !form.pre_exec.is_empty() {
+        let script = format!(
+            "{}; exec {}",
+            crate::agents_view::shell_join(&form.pre_exec),
+            crate::agents_view::shell_join(&argv),
+        );
+        return Ok(vec!["sh".to_string(), "-c".to_string(), script]);
+    }
     Ok(argv)
 }
 
@@ -384,10 +403,18 @@ mod tests {
         assert!(err.contains("iambad"), "{err}");
         // Codex's declared form IS the fail-open render: what a
         // gesture runs when `fno-agents resume-argv` is unavailable. The
+        // declared `pre_exec` (the shared-daemon ownership assertion)
+        // composes exactly the way the native builder composes it. The
         // grant-bearing gesture argv is asserted on the staging tests.
         assert_eq!(
             resume_argv_for("codex", "01a027ad").unwrap(),
-            vec!["codex".to_string(), "resume".to_string(), "01a027ad".into()],
+            vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "'codex' 'app-server' 'daemon' 'start'; exec 'codex' 'resume' '01a027ad' \
+                 '--remote' 'unix://'"
+                    .to_string(),
+            ],
         );
     }
 }

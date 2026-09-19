@@ -256,10 +256,6 @@ kind = "subcommand"
 pre_exec = ["codex", "app-server", "daemon", "start"]
 tokens = ["codex", "--remote", "unix://"]
 
-[harness.codex.resume_strategy.forms.interactive_resume]
-kind = "subcommand"
-tokens = ["codex", "resume", "{session_id}"]
-
 # `codex resume <id>` execs codex's OWN TUI on a thread the shared app-server
 # daemon holds. fno renders nothing.
 #
@@ -280,6 +276,19 @@ tokens = ["codex", "resume", "{session_id}"]
 # `{session_id}`, never `{short_id}`: a codex UUIDv7 head-8 is a ~65.5s clock
 # bucket, so siblings spawned in one minute collide and a short id would
 # attach the wrong worker.
+#
+# The resume row carries the SAME ownership assertion as attach (one
+# shared-daemon launch plan owns every persistent Codex path): a bare
+# `codex resume <id>` is the private-owner shape the explicit override has
+# to ask for by name, never a default.
+[harness.codex.resume_strategy.forms.interactive_resume]
+kind = "subcommand"
+pre_exec = ["codex", "app-server", "daemon", "start"]
+tokens = ["codex", "resume", "{session_id}", "--remote", "unix://"]
+
+# Attach shares the resume row's ownership assertion and its measured
+# story; both doors go through the same daemon-started, `--remote unix://`
+# shape.
 [harness.codex.resume_strategy.forms.interactive_attach]
 kind = "subcommand"
 pre_exec = ["codex", "app-server", "daemon", "start"]

@@ -166,7 +166,7 @@ def test_resume_by_predecessor_full_uuid_keeps_that_exact_id() -> None:
         execvp=lambda *_a, **_k: None,
     )
     assert res.exit_code == 0
-    assert res.exec_argv[-2:] == ["resume", A], (
+    assert res.exec_argv[-4:] == ["resume", A, "--remote", "unix://"], (
         "exact-id resume reopens A, not the row's current B"
     )
 
@@ -191,7 +191,7 @@ def test_resume_by_name_keeps_the_current_session() -> None:
         execvp=lambda *_a, **_k: None,
     )
     assert res.exit_code == 0
-    assert res.exec_argv[-2:] == ["resume", B], (
+    assert res.exec_argv[-4:] == ["resume", B, "--remote", "unix://"], (
         "a current address (name) selects the current session"
     )
 

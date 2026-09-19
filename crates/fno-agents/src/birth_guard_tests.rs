@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 //! Rust birth guard: every `agent_spawned` emit in production Rust builds
 //! its payload through `spawn_edge::birth_event`, the one builder that
 //! stamps the lineage triple or the reason a birth could not name a parent

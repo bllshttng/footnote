@@ -37,6 +37,47 @@ pub struct ProcRow {
 }
 
 /// A synthetic row for tests that walk a table without a live census.
+
+/// The shared Codex app-server's census row: health and installed-version
+/// readiness are DIFFERENT axes, so the row carries both. A healthy daemon
+/// running a version older than the installed CLI reads healthy + stale,
+/// never healthy alone and never no row.
+fn codex_app_server_rows() -> Vec<Value> {
+    let readiness = crate::codex_daemon_readiness::codex_daemon_readiness();
+    let verdict = match readiness.verdict {
+        crate::codex_daemon_readiness::VersionVerdict::Current => "current",
+        crate::codex_daemon_readiness::VersionVerdict::Stale => "stale",
+        crate::codex_daemon_readiness::VersionVerdict::Ahead => "ahead",
+        crate::codex_daemon_readiness::VersionVerdict::Unknown => "unknown",
+    };
+    let health = if readiness.healthy { "healthy" } else { "down" };
+    let evidence = format!(
+        "installed {}, live {}, {}, home {}",
+        readiness
+            .installed_version
+            .as_deref()
+            .unwrap_or("unreadable"),
+        readiness.live_version.as_deref().unwrap_or("unreadable"),
+        health,
+        readiness.codex_home,
+    );
+    // No exe: the readiness reader knows the pid, never the binary path, and
+    // the exe-position field must not carry a directory and read like one.
+    let mut row = row(
+        "codex-app-server",
+        readiness.pid,
+        Some("codex-app-server".to_string()),
+        None,
+        readiness.start_token.map(|t| t as f64),
+        verdict,
+        evidence.as_str(),
+    );
+    row["installed_version"] = json!(readiness.installed_version);
+    row["live_version"] = json!(readiness.live_version);
+    row["codex_home"] = json!(readiness.codex_home);
+    vec![row]
+}
+
 #[cfg(test)]
 pub(crate) fn test_proc_row(pid: u32, ppid: u32, command: &str) -> ProcRow {
     ProcRow {
@@ -491,6 +532,10 @@ fn fate(component: &str) -> (&'static str, &'static str) {
         "daemon" => ("restarts", "workers and panes"),
         "store-keeper" => ("cycles; the next read respawns it", "the graph on disk"),
         "mux-server" => ("kept; only `--mux` replaces it", "its panes"),
+        "codex-app-server" => (
+            "safe upgrade only through the session-preserving transaction",
+            "threads survive the daemon swap",
+        ),
         _ => ("kept", "its pane; current only when that pane ends"),
     }
 }
@@ -714,7 +759,7 @@ fn mux_rows(table: &[ProcRow]) -> Vec<Value> {
             .get("session")
             .and_then(Value::as_str)
             .unwrap_or("unnamed");
-        let panes = r.get("panes").and_then(Value::as_u64).unwrap_or(0);
+        let _panes = r.get("panes").and_then(Value::as_u64).unwrap_or(0);
         let pid = r.get("pid").and_then(Value::as_u64).map(|p| p as u32);
         let (verdict, evidence) = match pid {
             Some(pid) => {
@@ -738,16 +783,50 @@ fn mux_rows(table: &[ProcRow]) -> Vec<Value> {
             verdict,
             evidence,
         );
-        row["on_restart"] = json!(if panes > 0 {
-            format!("kept; only `--mux` replaces it, ending {panes} shell(s)")
-        } else {
-            "kept; auto-restarts (pane-less)".to_string()
-        });
-        row["survives"] = json!(if panes > 0 {
-            format!("{panes} panes")
-        } else {
-            "no panes".to_string()
-        });
+        // The kept/unkept split: kept panes survive the server (their keeper
+        // re-adopts them); unkept ones end with it. The wording names both
+        // counts so an operator sees exactly who a restart would cost.
+        let mut kept = 0u64;
+        let mut unkept = 0u64;
+        if let Ok(pane_out) = std::process::Command::new(&fno)
+            .args(["mux", "pane", "ls", "--session", session, "--json"])
+            .output()
+        {
+            if let Ok(keeper_out) = std::process::Command::new(&fno)
+                .args(["mux", "pane", "keeper", "list", "--json"])
+                .output()
+            {
+                let keeper_rows: Vec<Value> =
+                    serde_json::from_slice(&keeper_out.stdout).unwrap_or_default();
+                let live_keepers: Vec<u64> = keeper_rows
+                    .iter()
+                    .filter(|k| k.get("session").and_then(Value::as_str) == Some(session))
+                    .filter(|k| k.get("stale").is_none())
+                    .filter_map(|k| k.get("child_pid").and_then(Value::as_u64))
+                    .collect();
+                if let Ok(pane_rows) = serde_json::from_slice::<Vec<Value>>(&pane_out.stdout) {
+                    for pane in &pane_rows {
+                        let child = pane.get("child_pid").and_then(Value::as_u64);
+                        if child.is_some_and(|c| live_keepers.contains(&c)) {
+                            kept += 1;
+                        } else {
+                            unkept += 1;
+                        }
+                    }
+                }
+            }
+        }
+        row["on_restart"] = json!(format!(
+            "ending {unkept} unkept shell(s); keeps {kept} kept pane(s)"
+        ));
+        row["survives"] = json!(format!(
+            "{kept} kept pane(s){}; {unkept} unkept",
+            if kept + unkept == 0 {
+                " (no panes)"
+            } else {
+                ""
+            }
+        ));
         out.push(row);
     }
     out
@@ -782,6 +861,7 @@ pub async fn census() -> Vec<Value> {
     let mut rows = vec![daemon_row().await];
     rows.extend(keeper_rows_from(&table));
     rows.extend(mux_rows(&table));
+    rows.extend(codex_app_server_rows());
     rows
 }
 

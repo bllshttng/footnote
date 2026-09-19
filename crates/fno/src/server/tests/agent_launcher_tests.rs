@@ -20,7 +20,7 @@ fn launch_req(id: u64, cwd: &str, harness: &str) -> crate::proto::AgentLaunchReq
 
 #[tokio::test]
 async fn agent_launch_refuses_pre_birth_and_settles_the_desk() {
-    let (out_tx, _out_rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
+    let (out_tx, _out_rx) = mpsc::channel::<(u64, PaneChunk)>(8);
     let (exit_tx, _exit_rx) = mpsc::channel::<u64>(8);
     let (self_tx, mut self_rx) = mpsc::channel::<CoreMsg>(8);
     let mut core = empty_core_with(self_tx);
@@ -45,7 +45,7 @@ async fn agent_launch_refuses_pre_birth_and_settles_the_desk() {
 
 #[tokio::test]
 async fn duplicate_request_id_replays_without_a_second_attempt() {
-    let (out_tx, _out_rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
+    let (out_tx, _out_rx) = mpsc::channel::<(u64, PaneChunk)>(8);
     let (exit_tx, _exit_rx) = mpsc::channel::<u64>(8);
     let (self_tx, _self_rx) = mpsc::channel::<CoreMsg>(8);
     let mut core = empty_core_with(self_tx);

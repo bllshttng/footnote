@@ -622,7 +622,9 @@ pub(crate) fn build_resume_argv_split(
     // tokens already end in --trust, and a second one is a duplicated flag,
     // never a stronger one. Python's builder renders the same form with no
     // cursor arm, so runtimes stay byte-identical by rendering and nothing else.
-    let mut argv = crate::harness_capabilities::render_session_argv(
+    // Raw render, splice, compose last: the composed `sh -c` script would
+    // put a spliced grant OUTSIDE the codex command it must precede.
+    let mut argv = crate::harness_capabilities::render_session_argv_raw(
         provider,
         "interactive_resume",
         Some(session_id),
@@ -677,7 +679,7 @@ pub(crate) fn build_resume_argv_split(
             }
         }
     }
-    Some(argv)
+    crate::harness_capabilities::compose_pre_exec(provider, "interactive_resume", argv).ok()
 }
 
 /// The env(1) assignment tokens for one env pair set, prefixed ahead of the

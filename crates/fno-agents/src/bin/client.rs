@@ -1071,6 +1071,7 @@ async fn run(args: Vec<String>) -> i32 {
             parsed.force,
             parsed.json.json,
             parsed.if_drifted,
+            parsed.mux,
         )
         .await;
     }

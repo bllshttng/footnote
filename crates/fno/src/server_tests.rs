@@ -53,39 +53,6 @@ mod pane_send_gate_tests;
 mod dead_row_resume_tests;
 
 #[test]
-fn node_from_argv_reads_the_wrapper_token() {
-    // env(1) wrapper prefix: `env FNO_AGENT_SELF=... FNO_NODE=x-66e8 ... claude`.
-    let argv: Vec<String> = [
-        "env",
-        "FNO_AGENT_SELF=peer",
-        "FNO_NODE=x-66e8",
-        "FNO_SLUG=some-slug",
-        "claude",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    assert_eq!(node_from_argv(&argv), Some("x-66e8".to_string()));
-}
-
-#[test]
-fn node_from_argv_is_none_for_ad_hoc_pane() {
-    let ad_hoc = |a: &[&str]| node_from_argv(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-    // A plain `pane run htop` (no wrapper) has no provenance.
-    assert_eq!(ad_hoc(&["htop"]), None);
-    // An empty-valued token is treated as absent (no empty-string exports).
-    assert_eq!(ad_hoc(&["env", "FNO_NODE=", "sh"]), None);
-    // A command that merely MENTIONS FNO_NODE= in its own args is not
-    // provenance: scanning stops at the command (first non-`NAME=` token).
-    assert_eq!(
-        ad_hoc(&["env", "FOO=1", "grep", "FNO_NODE=x", "file"]),
-        None
-    );
-    // No `env` wrapper at all -> never scanned, even with a bare token.
-    assert_eq!(ad_hoc(&["grep", "FNO_NODE=x", "file"]), None);
-}
-
-#[test]
 fn account_from_argv_reads_the_fno_account_token() {
     // x-c914: the birth account rides the same env(1) wrapper as FNO_NODE.
     let from = |a: &[&str]| account_from_argv(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
@@ -917,9 +884,12 @@ fn bare_pane_row_carries_its_own_activity_and_age() {
     );
     core.agents = vec![];
     // Feed an open command block (OSC 133 A then C, no D): Running.
-    let (tx, mut rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
-    tx.try_send((pid, b"\x1b]133;A\x07\x1b]133;C\x07workload".to_vec()))
-        .unwrap();
+    let (tx, mut rx) = mpsc::channel::<(u64, PaneChunk)>(8);
+    tx.try_send((
+        pid,
+        PaneChunk::Output(b"\x1b]133;A\x07\x1b]133;C\x07workload".to_vec()),
+    ))
+    .unwrap();
     drop(tx);
     let mut first_out = HashSet::new();
     drain_pty_output(&mut core, &mut rx, None, &mut first_out);
@@ -8862,7 +8832,7 @@ fn node_id_shape_check() {
 // -- Observer attach (x-6a14 web read-only bridge) --------------------------
 
 pub(super) fn empty_core() -> Core {
-    let (out_tx, _out_rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
+    let (out_tx, _out_rx) = mpsc::channel::<(u64, PaneChunk)>(8);
     let (exit_tx, _exit_rx) = mpsc::channel::<u64>(8);
     let (self_tx, _self_rx) = mpsc::channel::<CoreMsg>(8);
     Core {
@@ -8929,6 +8899,8 @@ pub(super) fn empty_core() -> Core {
         batch_plans: HashMap::new(),
         pending_thread_reply: None,
         keeper_adopted: Vec::new(),
+        shell_rc_dirs: std::collections::HashMap::new(),
+        portal_session_guards: std::collections::BTreeMap::new(),
     }
 }
 

@@ -2189,13 +2189,17 @@ fn hold_fixture(store_name: &str) -> StoreScratch {
             portal: Some(PortalSlot {
                 index: 1,
                 row: "deadbee1".into(),
+                harness: None,
+                session_id: None,
             }),
+            pane_id: None,
         },
         crate::proto::LayoutSlot {
             name: "p2".into(),
             binding: LayoutBinding::Shell,
             cwd: None,
             portal: None,
+            pane_id: None,
         },
     ];
     crate::squad_store::set_tab_trees(
@@ -2286,7 +2290,10 @@ fn restore_sends_a_clashed_portal_index_to_the_next_free_one() {
                 portal: Some(PortalSlot {
                     index: 1,
                     row: "deadbee9".into(),
+                    harness: None,
+                    session_id: None,
                 }),
+                pane_id: None,
             }],
             focus: None,
         }],
@@ -2338,7 +2345,10 @@ fn the_restore_notice_names_both_held_kinds() {
             portal: Some(PortalSlot {
                 index: 2,
                 row: "deadbee2".into(),
+                harness: None,
+                session_id: None,
             }),
+            pane_id: None,
         }],
         focus: None,
     });
@@ -2574,7 +2584,10 @@ fn a_portal_onto_a_done_row_prunes_with_the_done_set() {
                 portal: Some(PortalSlot {
                     index: 1,
                     row: "deadbee1".into(),
+                    harness: None,
+                    session_id: None,
                 }),
+                pane_id: None,
             }],
             focus: None,
         }],
