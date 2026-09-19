@@ -283,9 +283,6 @@ const BOARD_QUEUES: [(&str, &str, &str); 4] = [
     ),
 ];
 
-const CHECK_BAD: [&str; 4] = ["failure", "timed_out", "startup_failure", "action_required"];
-const CHECK_GOOD: [&str; 3] = ["success", "neutral", "skipped"];
-
 /// A commit younger than this with an empty check-run list is still in its
 /// launch window, not a "jobs never ran" state. Path-filtered CI stays empty
 /// forever, so the arm waits out the window once and then reports it.
@@ -459,13 +456,17 @@ fn rows_token(rows: Option<&Vec<Value>>) -> String {
     format!("{:x}", h.finalize())
 }
 
-/// Fold one repo's check runs into `(population, verdict)`, or None when
-/// there is no state to report: a pending run is not a state (notifying on
-/// it would spam), and an empty list inside the launch window is the same
-/// not-a-state. An empty list past the grace is its own state and never
-/// folds into success.
-fn fold_check_runs(conclusions: &[&str], head_age_s: Option<u64>) -> Option<(usize, String)> {
-    if conclusions.is_empty() {
+/// Fold the shared reader's classified main-CI conclusion into
+/// `(population, verdict)`, or None when there is no state to report: a
+/// pending read is not a state (notifying on it would spam), and an empty
+/// list inside the launch window is the same not-a-state. An empty list past
+/// the grace is its own state and never folds into success.
+fn fold_check_runs(
+    conclusion: crate::loopcheck::CiConclusion,
+    population: usize,
+    head_age_s: Option<u64>,
+) -> Option<(usize, String)> {
+    if population == 0 {
         let old_enough = head_age_s
             .map(|age| age >= EMPTY_RUNS_GRACE_S)
             .unwrap_or(true);
@@ -475,13 +476,28 @@ fn fold_check_runs(conclusions: &[&str], head_age_s: Option<u64>) -> Option<(usi
             None
         };
     }
-    if conclusions.iter().any(|c| CHECK_BAD.contains(c)) {
-        Some((conclusions.len(), "failure".to_string()))
-    } else if conclusions.iter().all(|c| CHECK_GOOD.contains(c)) {
-        Some((conclusions.len(), "success".to_string()))
-    } else {
-        None
+    match conclusion {
+        crate::loopcheck::CiConclusion::Failure(_) => Some((population, "failure".to_string())),
+        crate::loopcheck::CiConclusion::Success => Some((population, "success".to_string())),
+        _ => None,
     }
+}
+
+/// The sample body: a failure names its checks, so a run that failed before
+/// minting a job reads by its workflow path and not as a count alone.
+fn main_ci_body(slug: &str, population: usize, verdict: &str, failing: &[String]) -> String {
+    if population == 0 {
+        return format!("main CI on {slug}: no check runs (population 0); jobs may not have run.");
+    }
+    if verdict == "failure" {
+        let names = if failing.is_empty() {
+            "unnamed".to_string()
+        } else {
+            failing.join(", ")
+        };
+        return format!("main CI on {slug}: {verdict} ({population} check run(s)): {names}.");
+    }
+    format!("main CI on {slug}: {verdict} ({population} check run(s)).")
 }
 
 fn gh_on_path() -> bool {
@@ -521,37 +537,45 @@ fn main_ci_sample(root: &Path) -> Option<(String, String, String, String)> {
         branch
     };
     let ref_enc = percent_encode_ref(&branch);
-    let runs_out = run_captured(
+    // The branch head sha, so the shared reader reads the commit and not the
+    // ref name (read_checks_rows pins a sha against check runs).
+    let sha_out = run_captured(
         "gh",
-        &["api", &format!("repos/{slug}/commits/{ref_enc}/check-runs")],
+        &[
+            "api",
+            &format!("repos/{slug}/commits/{ref_enc}"),
+            "--jq",
+            ".sha",
+        ],
         root,
         Duration::from_secs(30),
     )?;
-    let runs: Vec<Value> = serde_json::from_str::<Value>(runs_out.trim())
-        .ok()?
-        .get("check_runs")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let conclusions: Vec<&str> = runs
-        .iter()
-        .filter_map(|r| r.get("conclusion").and_then(Value::as_str))
-        .collect();
-    let head_age_s = if conclusions.is_empty() {
+    let sha = sha_out.trim().to_string();
+    let rows = crate::pr_push::read_checks_rows("gh", root, &sha).ok()?;
+    let population = rows.len();
+    let head_age_s = if population == 0 {
         Some(head_commit_age_s(root, &slug, &ref_enc)?)
     } else {
         None
     };
-    let (population, verdict) = fold_check_runs(&conclusions, head_age_s)?;
-    let token = format!("{population}:{verdict}");
-    let body = if population == 0 {
-        format!("main CI on {slug}: no check runs (population 0); jobs may not have run.")
-    } else {
-        format!("main CI on {slug}: {verdict} ({population} check run(s)).")
-    };
+    let failing: Vec<String> = rows
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.get("bucket").and_then(Value::as_str),
+                Some("fail") | Some("cancel")
+            )
+        })
+        .filter_map(|r| r.get("name").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    let conclusion = crate::loopcheck::classify_checks_payload(&Value::Array(rows))
+        .ok()?
+        .0;
+    let (population, verdict) = fold_check_runs(conclusion, population, head_age_s)?;
+    let body = main_ci_body(&slug, population, &verdict, &failing);
     Some((
         format!("main_ci:{slug}"),
-        token,
+        format!("{population}:{verdict}"),
         body,
         format!("https://github.com/{slug}/actions"),
     ))
@@ -930,31 +954,52 @@ mod tests {
 
     #[test]
     fn fold_reports_population_and_keeps_empty_out_of_success() {
-        let good = ["success", "neutral"];
+        use crate::loopcheck::CiConclusion;
         assert_eq!(
-            fold_check_runs(&good, None),
+            fold_check_runs(CiConclusion::Success, 2, None),
             Some((2, "success".to_string()))
         );
-        let bad = ["success", "failure"];
+        // AC4-ERR: the zero-job run's failure folds, population whole.
         assert_eq!(
-            fold_check_runs(&bad, None),
-            Some((2, "failure".to_string()))
+            fold_check_runs(
+                CiConclusion::Failure(Some(".github/workflows/cli-ci.yml".into())),
+                11,
+                None
+            ),
+            Some((11, "failure".to_string()))
         );
         // Pending is not a state.
-        assert_eq!(fold_check_runs(&["success", "in_progress"], None), None);
+        assert_eq!(fold_check_runs(CiConclusion::Pending, 2, None), None);
         // Empty inside the launch window is not a state...
-        assert_eq!(fold_check_runs(&[], Some(60)), None);
+        assert_eq!(fold_check_runs(CiConclusion::Success, 0, Some(60)), None);
         // ...but past the grace it is its own token, never success.
         assert_eq!(
-            fold_check_runs(&[], Some(EMPTY_RUNS_GRACE_S)),
+            fold_check_runs(CiConclusion::Success, 0, Some(EMPTY_RUNS_GRACE_S)),
             Some((0, "none".to_string()))
         );
         assert_eq!(
-            fold_check_runs(&[], Some(3_600)),
+            fold_check_runs(CiConclusion::Success, 0, Some(3_600)),
             Some((0, "none".to_string()))
         );
         // Unreadable head age reads as old: the state reports.
-        assert_eq!(fold_check_runs(&[], None), Some((0, "none".to_string())));
+        assert_eq!(
+            fold_check_runs(CiConclusion::Success, 0, None),
+            Some((0, "none".to_string()))
+        );
+    }
+
+    #[test]
+    fn the_failure_body_names_the_failing_workflow_path() {
+        let body = main_ci_body(
+            "o/r",
+            11,
+            "failure",
+            &[".github/workflows/cli-ci.yml".to_string()],
+        );
+        assert!(
+            body.contains(".github/workflows/cli-ci.yml"),
+            "body must name the file: {body}"
+        );
     }
 
     #[test]
