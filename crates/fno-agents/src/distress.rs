@@ -100,6 +100,10 @@ pub(crate) fn newest_assistant_text_via_reader(
 fn blocked_distress_already_emitted(project_events: &Path, run: &str, reason: &str) -> bool {
     // Committed rows, not journal bytes: the store commit is the write
     // boundary, so the dedup reads what a reader would see.
+    // Import first: pre-cutover bytes beside the journal are part of the
+    // history the dedup must see, and a read on an absent store is an
+    // honest no.
+    let _ = fno_event_store::import_all(project_events);
     let Ok(rows) = fno_event_store::query_events(
         project_events,
         &fno_event_store::EventQuery {
@@ -429,13 +433,14 @@ mod tests {
         let path = tmp.path().join("events.jsonl");
         let mk = |run: &str, reason: &str| {
             serde_json::to_string(&serde_json::json!({
+                "ts": "2026-01-01T00:00:00Z", "source": "test",
                 "type": "blocked", "run": run,
                 "data": {"reason": reason}
             }))
             .unwrap()
                 + "\n"
         };
-        std::fs::write(&path, mk("run-a", "missing dependency")).unwrap();
+        std::fs::write(&path, format!("{}\n", mk("run-a", "missing dependency"))).unwrap();
         // Same run + reason -> already emitted.
         assert!(blocked_distress_already_emitted(
             &path,
