@@ -191,6 +191,8 @@ spawn; it is never sent a Claude slash command and is never reported as `claude 
 
 ## Dependency Model
 
+The shared daemon is visible three ways, and each is a different claim. `thread/loaded/list` names the id (daemon listing). `thread/read` answers with the same id and history (same-id read, what the upgrade transaction verifies). The id opening in ChatGPT mobile Remote Control with a new message loading (operator visibility, read by a person after merge). A test that proves the first two has not proven the third.
+
 Core dependencies:
 
 - `bash`

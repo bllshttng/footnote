@@ -78,7 +78,15 @@ def test_packaged_contract_is_complete_for_every_known_harness():
                 "c-1",
             ],
         ),
-        ("codex", "interactive_resume", "cx-1", ["codex", "resume", "cx-1"]),
+        # The resume row carries the same shared-daemon ownership assertion
+        # as attach: `--remote unix://` makes a daemon-down resume a named
+        # failure instead of a silently private in-process owner.
+        (
+            "codex",
+            "interactive_resume",
+            "cx-1",
+            ["codex", "resume", "cx-1", "--remote", "unix://"],
+        ),
         ("codex", "headless_resume", "cx-1", ["codex", "exec", "resume", "cx-1"]),
         # agy's resume primitive, measured 2026-08-26 on 1.1.19 and 1.1.21:
         # a fresh process quotes a token planted in an earlier turn

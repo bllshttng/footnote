@@ -86,6 +86,8 @@ pub mod cli_args;
 pub mod client;
 pub mod client_verbs;
 pub mod codex_ask;
+pub mod codex_daemon_readiness;
+pub mod codex_daemon_upgrade;
 /// Test support: a fake shared codex app-server daemon. Public because the
 /// in-crate daemon tests and the integration tests both need one fake, and
 /// only a library item reaches both.
@@ -893,6 +895,29 @@ mod tests {
     /// kind is dynamic and not statically checkable. The line number (1-based)
     /// is reported so a drift failure points straight at the offending call.
     fn scan_emit_kinds(src: &str) -> Vec<(String, usize)> {
+        // Comment lines are blanked (offsets preserved) first: a doc comment
+        // may SHOW an emit shape (`.emit("...")` in prose) and the scan reads
+        // bytes, not syntax.
+        let bytes = src.as_bytes();
+        let mut blanked = bytes.to_vec();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let line_end = bytes[i..]
+                .iter()
+                .position(|&c| c == b'\n')
+                .map(|p| i + p)
+                .unwrap_or(bytes.len());
+            let first = bytes[i..line_end]
+                .iter()
+                .find(|&&c| c != b' ' && c != b'\t');
+            if first == Some(&b'/') {
+                for b in &mut blanked[i..line_end] {
+                    *b = b' ';
+                }
+            }
+            i = line_end + 1;
+        }
+        let src = std::str::from_utf8(&blanked).unwrap_or(src);
         let bytes = src.as_bytes();
         let mut kinds = Vec::new();
         for needle in [".emit", ".emit_fields"] {

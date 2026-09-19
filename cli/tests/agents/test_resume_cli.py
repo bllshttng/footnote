@@ -75,9 +75,9 @@ def test_codex_resume_builds_correct_argv_and_cwd() -> None:
     assert "resume" in res.exec_argv
     sid = "00000000-1111-2222-3333-444444444444"
     assert res.exec_argv.index("resume") < res.exec_argv.index(sid)
-    # Assert the tail too, not just the order. Order alone passes with a token
-    # appended after the id, which is exactly what the comment above denies.
-    assert res.exec_argv[-2:] == ["resume", sid]
+    # Assert the tail too, not just the order: "resume", the id, then the
+    # daemon-attach flag the resume_strategy form always appends.
+    assert res.exec_argv[-4:] == ["resume", sid, "--remote", "unix://"]
     # The -c grant is global, so it must still precede the subcommand.
     assert any("writable_roots=" in arg for arg in res.exec_argv)
     grant_at = next(
@@ -137,7 +137,9 @@ def test_codex_resume_grants_git_metadata_write_in_a_repo(tmp_path) -> None:
     # the test fail on a second global that was correctly placed.
     assert argv.index("-c") < argv.index("resume")
     assert argv.index("--cd") < argv.index("resume")
-    assert argv[-2:] == ["resume", "00000000-1111-2222-3333-444444444444"]
+    assert argv[-4:] == [
+        "resume", "00000000-1111-2222-3333-444444444444", "--remote", "unix://",
+    ]
 
 
 def test_agent_resumed_event_emitted_before_execvp() -> None:
@@ -1819,8 +1821,9 @@ def test_codex_resume_argv_omits_cd_when_no_cwd_is_known() -> None:
     argv = _build_resume_argv("codex", "sid-1")
     assert argv is not None
     assert "--cd" not in argv
-    # With no cwd there is no grant either, so the identity render stands alone.
-    assert argv == ["codex", "resume", "sid-1"]
+    # With no cwd there is no grant either, so the identity render stands
+    # alone with the daemon-attach flag the resume form always appends.
+    assert argv == ["codex", "resume", "sid-1", "--remote", "unix://"]
 
 
 def test_non_codex_resume_argv_is_untouched_by_the_codex_modal_flags() -> None:

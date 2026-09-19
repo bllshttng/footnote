@@ -271,3 +271,15 @@ The journey shape `opencode_serve.rs` established, kept here as the standing bar
 `attach_id` is never a binding key. A codex UUIDv7 head-8 is a roughly 65.5-second clock bucket. Siblings spawned in one minute collide. A join on it binds the wrong session for exactly the burst-spawned workers most likely to be present. Every RPC above names the full `threadId`. None accepts a short id.
 
 A missing registry row is never evidence of death. Read the claim lockfile pid and probe that pid.
+
+## The upgrade transaction
+
+A stale daemon (live version older than the installed CLI) upgrades only through one transaction in `crates/fno-agents/src/codex_daemon_upgrade.rs`. It is the ONLY caller of the vendor `codex app-server daemon restart`. Nobody signals the daemon pid by hand.
+
+The order is fixed. Acquire the provider-daemon lock. Re-read readiness under it, so a concurrent upgrade reads reused-current instead of double-swapping. Snapshot every loaded thread: full id, cwd, runtime status, and its fno registry row. When a thread reads active or systemError, or any status is unreadable, refuse before ANY mutation.
+
+Then, and only then, run the vendor restart with the resolved `CODEX_HOME`. Verify after. The recorded incarnation must have changed. Initialize must answer. Both version readers must agree the daemon now equals the installed CLI. Every snapshot id must re-read with the same cwd. The config bytes must be unchanged. Every check passing makes the receipt `upgraded`. Any failure makes it `failed` with the missing ids named. Never a success-shaped line on failure. Never a blind retry.
+
+`fno agents restart` runs the transaction as one more component in its own receipt. A current daemon is reused. A stale but unsafe daemon is reported and held, and does not fail the verb, because nothing was mutated. A post-restart verification failure DOES fail the verb.
+
+Tests run against `codex_fake_daemon` plus a fake `codex` CLI (`FNO_CODEX_BIN`) that models the vendor verbs in `crates/fno-agents/tests/codex_daemon_upgrade.rs`. The live two-version journey is wave 11's operator acceptance, never a probe against the fleet's real daemon.

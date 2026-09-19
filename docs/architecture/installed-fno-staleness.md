@@ -96,7 +96,7 @@ The gate path **instructs only**. It never invokes `fno doctor update`. Auto-fix
 
 `fno doctor` answers whether the installed CLI is stale. It never reaches an operator sitting inside a mux session rather than a terminal running `doctor` in another pane. `fno doctor update --check --json` is the **single resolver** for that surface. It answers a related but distinct question: not just whether an update is waiting, but what running it costs right now. The mux TUI (`crates/fno/src/client.rs`) renders that answer. The TUI computes nothing itself: no staleness logic, no wire comparison, no shell counting lives in Rust. It runs the CLI probe off its UI loop, an async subprocess mirroring the existing Connections-modal read. It parses the JSON and folds it into a sideline-menu row and an overlay.
 
-The one input `doctor` lacks is whether an update breaks the live mux **wire protocol**. A server whose wire is below `MIN_COMPAT_PROTO` rejects the handshake outright. `update_readiness` (in `cli/src/fno/update.py`) reads the running server's own gate rather than the source consts. Each live row's `stale` verdict comes from `fno mux ls --json` and is `SessionRow::wire_stale` in `crates/fno/src/mux_cli.rs`. A stale row, a missing wire verdict, or a server newer than the source all read as a wire bump. The newer-than-source case guards a downgrade: the older installed binary's equality gate refuses the running newer server. A pane-less stale-wire server is auto-restarted. A server with live panes is reported and spared unless the operator passes `fno agents restart --mux`. A forced restart names the shells it ends and the workers `--revive` brings back, via the shared `is_revivable` predicate in `cli/src/fno/restart.py`. A compatible wire means the shells survive a plain `fno doctor update` and reattach.
+The one input `doctor` lacks is whether an update breaks the live mux **wire protocol**. A server whose wire is below `MIN_COMPAT_PROTO` rejects the handshake outright. `update_readiness` (in `cli/src/fno/update.py`) reads the running server's own gate rather than the source consts. Each live row's `stale` verdict comes from `fno mux ls --json` and is `SessionRow::wire_stale` in `crates/fno/src/mux_cli.rs`. A stale row, a missing wire verdict, or a server newer than the source all read as a wire bump. The newer-than-source case guards a downgrade: the older installed binary's equality gate refuses the running newer server. A pane-less stale-wire server is auto-restarted. A server with live panes is reported and spared unless the operator passes `fno agents restart --mux`. A forced restart runs the shared kill selector in the Rust mux leg, and its receipt names the panes preserved and the shells ended. A compatible wire means the shells survive a plain `fno doctor update` and reattach.
 
 Guidance names `fno agents restart` for pane-less wire skew. When the operator accepts ending live panes, it names `fno agents restart --mux`. It names `fno mux kill-server` for a wedged server a plain restart cannot reach. `kill-server` no longer depends only on the control channel it exists to recover from. It escalates through SIGTERM then SIGKILL, using a pid sidecar the server writes at bind. That makes it work in the wedged or wire-rejecting case an operator reaches for it. Every operator surface (`mux ls`, the attach error, `restart.py`) names this escalation, not a manual kill.
 
@@ -163,6 +163,7 @@ Binary freshness is half the picture. A rebuilt binary says nothing about the pr
 | store-keeper | cycles; the next read respawns it | the graph on disk |
 | mux-server with panes | kept; only `--mux` replaces it, ending N shells | N panes |
 | pane-keeper, thread-keeper | kept | its pane; current only when that pane ends |
+| codex-app-server | safe upgrade only through the session-preserving transaction | threads survive the daemon swap |
 
 Each row carries `component`, `pid`, `name`, `exe`, `started_at`, `verdict` (`current` / `stale` / `unknown`), `evidence`, `on_restart`, and `survives`. A probe that cannot decide reads `unknown` with the failure named in `evidence`, never `current`.
 
@@ -176,4 +177,16 @@ When crates/fno can depend on fno-agents and every Identify carries `drift`, the
 `fno agents restart` reaches the daemon (terminate, escalate, verify), every stale store keeper (Shutdown + respawn, one per socket), and pane-less stale-wire mux servers. It never reaches a pane keeper, because cycling one can only end its pane, and surviving a restart is the pane keeper's whole purpose. A stale pane keeper is reported as kept. The census rows are the split, and no surface says "everything restarts" and "panes are kept" in one sentence.
 
 When the running daemon reads `drifted` after the triad sync, `fno doctor update` chains `fno-agents restart --if-drifted`, and never the mux leg.
+
+## The Codex app-server: health and readiness are different axes
+
+`is_healthy` answers "is a daemon alive and answering initialize". Readiness answers a different question: is that daemon the version the installed CLI starts? The two never substitute for each other. A symlink moved to 0.154.0 does not change PID 27454's 0.153.4 executable.
+
+`crates/fno-agents/src/codex_daemon_readiness.rs` owns the readiness snapshot. It carries `healthy`, pid, start token, endpoint, `CODEX_HOME`, the installed CLI version (`codex --version`), the live version, and a `verdict` of `current`, `stale`, `ahead`, or `unknown`.
+
+The live version needs TWO agreeing positive readings. One is the initialize response's server info. The other is the vendor `codex app-server daemon version` verb as a positive control. Disagreeing or unreadable readers read `unknown`, never `current`. A socket or pid answer alone is never evidence of a version.
+
+The census emits one `codex-app-server` row from this single owner. A healthy daemon on an older version reads healthy + `stale`, never healthy alone. `fno agents census --json` exposes it beside the daemon, keeper, and mux rows.
+
+When `restart` handles the daemon, the row's `on_restart` field carries the upgrade stance. A stale daemon upgrades only through the session-preserving transaction, never a bare daemon kill. The transaction itself is wave 7's `codex_daemon_upgrade.rs`.
 

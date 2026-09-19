@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 /// The keeper frame protocol version. Bump on any frame-shape change; a
 /// client reading a NEWER version than it speaks refuses the keeper.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Bounded recent-output retention when `--ring-bytes` is not given. A
 /// re-adopting server replays this, so it bounds how much of the detached
@@ -56,6 +56,16 @@ pub(crate) const TAG_IDENTIFY: u8 = 4;
 pub(crate) const TAG_IDENTIFY_REPLY: u8 = 5;
 pub(crate) const TAG_OUTPUT: u8 = 6;
 pub(crate) const TAG_EXITED: u8 = 7;
+/// Sent AFTER `master.resize()` applies, carrying the same dims the Resize
+/// frame requested. The client applies its own VT resize only on receipt of
+/// this frame (never eagerly when it sends Resize) - it round-trips through
+/// the same `client` write lock as every Output frame, so it lands in the
+/// client's ordered per-pane stream after any output already queued to send
+/// and before any output the child produces once the resize is visible to
+/// it. Without this, a client that flips its local VT size the instant it
+/// ISSUES a resize races trailing pre-resize output still in flight over the
+/// socket, feeding it into the wrong-size grid (byte-exact reattach bug).
+pub(crate) const TAG_RESIZE_ACK: u8 = 8;
 
 /// One keeper-protocol frame.
 #[derive(Debug, PartialEq)]
@@ -67,6 +77,7 @@ pub enum Frame {
     IdentifyReply(Vec<u8>),
     Output(Vec<u8>),
     Exited(i32),
+    ResizeAck(u16, u16),
 }
 
 /// Encode one frame: tag byte + u32 LE length + payload.
@@ -86,6 +97,11 @@ pub fn encode(frame: &Frame) -> Vec<u8> {
         Frame::Exited(code) => {
             owned.extend_from_slice(&code.to_le_bytes());
             (TAG_EXITED, &owned)
+        }
+        Frame::ResizeAck(rows, cols) => {
+            owned.extend_from_slice(&rows.to_le_bytes());
+            owned.extend_from_slice(&cols.to_le_bytes());
+            (TAG_RESIZE_ACK, &owned)
         }
     };
     let mut out = Vec::with_capacity(5 + payload.len());
@@ -130,6 +146,10 @@ pub fn decode(buf: &[u8]) -> Decode {
         TAG_EXITED if payload.len() == 4 => Frame::Exited(i32::from_le_bytes([
             payload[0], payload[1], payload[2], payload[3],
         ])),
+        TAG_RESIZE_ACK if payload.len() == 4 => Frame::ResizeAck(
+            u16::from_le_bytes([payload[0], payload[1]]),
+            u16::from_le_bytes([payload[2], payload[3]]),
+        ),
         _ => {
             return Decode::Violation(format!(
                 "frame tag {tag} with {len} payload byte(s) is not a keeper frame"
@@ -608,13 +628,21 @@ fn serve_client(
                             }
                         }
                         Frame::Resize(rows, cols) => {
-                            let master = keeper.master.lock().unwrap_or_else(|e| e.into_inner());
-                            let _ = master.resize(PtySize {
-                                rows: rows.max(1),
-                                cols: cols.max(1),
-                                pixel_width: 0,
-                                pixel_height: 0,
-                            });
+                            {
+                                let master =
+                                    keeper.master.lock().unwrap_or_else(|e| e.into_inner());
+                                let _ = master.resize(PtySize {
+                                    rows: rows.max(1),
+                                    cols: cols.max(1),
+                                    pixel_width: 0,
+                                    pixel_height: 0,
+                                });
+                            }
+                            // Tell the client the resize took effect, so it
+                            // can apply its own VT resize at this point in
+                            // the ordered stream rather than the instant it
+                            // sent Resize (see TAG_RESIZE_ACK).
+                            keeper.send(&Frame::ResizeAck(rows, cols));
                         }
                         Frame::Kill => {
                             // A deliberate close kills the CHILD (the keeper
@@ -728,6 +756,7 @@ mod tests {
             Frame::IdentifyReply(br#"{"v":1}"#.to_vec()),
             Frame::Output(vec![0u8, 1, 2, 255]),
             Frame::Exited(-1),
+            Frame::ResizeAck(40, 120),
         ] {
             let encoded = encode(&frame);
             match decode(&encoded) {
@@ -741,6 +770,9 @@ mod tests {
                         (Frame::IdentifyReply(a), Frame::IdentifyReply(b)) => a == b,
                         (Frame::Output(a), Frame::Output(b)) => a == b,
                         (Frame::Exited(a), Frame::Exited(b)) => a == b,
+                        (Frame::ResizeAck(ar, ac), Frame::ResizeAck(br, bc)) => {
+                            ar == br && ac == bc
+                        }
                         _ => false,
                     };
                     assert!(matches, "{frame:?} must round-trip, got {decoded:?}");

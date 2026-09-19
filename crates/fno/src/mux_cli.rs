@@ -62,6 +62,7 @@ mod server_axis;
 pub use crate::cli_args::{BlockAnnotateArgs, BlockPipeArgs, MuxCommon};
 
 mod block_args;
+pub mod kill_policy;
 mod pane_args;
 use block_args::{parse_block_annotate, parse_block_args};
 use clap::Parser as _;
@@ -795,56 +796,6 @@ const SIGTERM_GRACE: Duration = Duration::from_secs(3);
 /// Unrecoverable. SIGKILL is immediate; this only bounds a slow reap.
 const SIGKILL_GRACE: Duration = Duration::from_secs(1);
 
-/// `fno mux kill-server [<name>]`: shut one session down. A live server Byes
-/// its clients, kills every pane child, and exits (its SocketGuard unlinks
-/// the socket); a stale socket is unlinked here with a message (exit 0); no
-/// socket at all is "no server" (exit 1). A wedged holder - one that never
-/// accepted, or accepted and never answered - is escalated through SIGTERM
-/// and SIGKILL to unlink: a recovery verb must not depend on the
-/// subsystem it recovers. Every run prints which rung ended it, and an
-/// unrecoverable state names the next action instead of leaving a dead `&&`
-/// chain with no hint.
-pub fn kill_server(session: &str, json: bool) -> i32 {
-    let sock = match proto::socket_path(session) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("fno: {e}");
-            return EXIT_USAGE;
-        }
-    };
-    if !sock.exists() {
-        eprintln!("fno: no server for session {session:?}");
-        return EXIT_ERROR;
-    }
-    let outcome = kill_server_inner(session, &sock);
-    match outcome.path {
-        KillPath::Unrecoverable => eprintln!("{}", outcome.note),
-        _ => {
-            // On success `--json` prints `{session, killed, note, path}`;
-            // errors stay on stderr (mirrors the pane verbs' json/error split).
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "session": session,
-                        "killed": true,
-                        "note": outcome.note,
-                        "path": outcome.path.json_tag(),
-                    })
-                );
-            } else {
-                println!("{}", outcome.note);
-            }
-        }
-    }
-    outcome.exit_code()
-}
-
-/// The work of `kill-server`, returning the rung taken instead of printing.
-/// Both dead ends of the old verb - a connect that timed out, and a graceful
-/// request the connected server never answered - enter the same escalation
-/// ladder instead of refusing, because that is exactly the state the verb
-/// exists for.
 fn kill_server_inner(session: &str, sock: &Path) -> KillOutcome {
     let stream = match proto::connect_unix_timeout(sock, PROBE_TIMEOUT) {
         Ok(s) => s,
@@ -6332,14 +6283,18 @@ mod tests {
         // session uses resolves to a socket that does not exist -> exit 1.
         // The full live/stale matrix runs e2e against FNO_MUX_DIR-scoped
         // servers in 3.6.
-        let code = kill_server(&format!("fno-test-absent-{}", std::process::id()), false);
+        let code = kill_server(
+            &format!("fno-test-absent-{}", std::process::id()),
+            false,
+            false,
+        );
         assert_eq!(code, EXIT_ERROR, "missing socket must exit 1");
     }
 
     #[test]
     fn mux_kill_server_invalid_name_is_usage_exit_2() {
         assert_eq!(
-            kill_server("../evil", false),
+            kill_server("../evil", false, false),
             EXIT_USAGE,
             "validation precedes any I/O"
         );
@@ -7927,3 +7882,5 @@ mod tests {
         assert_eq!(take_workspace_flag("v", vec!["6".into()]).unwrap().0, None);
     }
 }
+
+pub use kill_policy::{kill_selector, kill_server};

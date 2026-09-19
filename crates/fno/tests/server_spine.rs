@@ -242,7 +242,15 @@ fn send(stream: &mut UnixStream, msg: &ClientMsg) {
 #[test]
 fn server_spine_child_spawn_emfile_keeps_typed_ceiling_diagnostic() {
     let scratch = Scratch::new("child-emfile");
-    let mut command = server_command(&scratch.sock(), "/bin/sh", &[]);
+    // Admission is off because the test's subject is the pty spawn ceiling,
+    // not the gate: the 64-fd cap exhausts the census's own descriptors on
+    // Linux, and the gate's fail-closed refusal would mask the typed error
+    // this test exists to hold.
+    let mut command = server_command(
+        &scratch.sock(),
+        "/bin/sh",
+        &[("FNO_PROCESS_ADMISSION", "off")],
+    );
     cap_child_nofile(&mut command, 64, true);
     let _server = Server(command.spawn().unwrap());
     let _probe = connect_with_retry(&scratch.sock());

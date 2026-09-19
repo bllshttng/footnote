@@ -4208,73 +4208,6 @@ mod tests {
     }
 
     #[test]
-    fn session_id_field_and_resume_argv_match_python() {
-        // Pin ambient dispatch dirs empty; they fold into the codex grant and
-        // break the byte-identity argv pinned below.
-        std::env::remove_var("FNO_WORKER_ADD_DIRS");
-        assert_eq!(session_id_field("claude"), Some("short_id"));
-        assert_eq!(session_id_field("codex"), Some("harness_session_id"));
-        assert_eq!(session_id_field("gemini"), Some("harness_session_id"));
-        assert_eq!(session_id_field("agy"), Some("harness_session_id"));
-        assert_eq!(session_id_field("opencode"), Some("harness_session_id"));
-        assert_eq!(session_id_field("cursor-agent"), Some("harness_session_id"));
-        assert_eq!(session_id_field("unknown"), None);
-
-        // --cd lands the resume in the row's own tree, beside the -c grant
-        // BEFORE the subcommand where codex's globals go; token ORDER is
-        // load-bearing (byte-identical to Python `_build_resume_argv`).
-        assert_eq!(
-            build_resume_argv("codex", "uuid-1", Some("/path/that/does/not/exist")),
-            Some(vec![
-                "codex".into(),
-                "-c".into(),
-                "sandbox_workspace_write.writable_roots=[\"/path/that/does/not/exist/.fno/plans\"]"
-                    .into(),
-                "--cd".into(),
-                "/path/that/does/not/exist".into(),
-                "resume".into(),
-                "uuid-1".into(),
-            ])
-        );
-        // No cwd means no --cd: a bare flag fails parsing, and inventing a
-        // directory is the wrong-tree failure this exists to prevent.
-        assert_eq!(
-            build_resume_argv("codex", "uuid-2", None),
-            Some(vec!["codex".into(), "resume".into(), "uuid-2".into()])
-        );
-        // An EMPTY cwd is absent too, which is what Python's `if cwd` does.
-        // Pinned here because nothing else is: drop the `.filter` and this is
-        // the only assertion that fails, instead of a bare `--cd ""` reaching
-        // codex, which cannot start on it.
-        assert_eq!(
-            build_resume_argv("codex", "uuid-3", Some("")),
-            Some(vec!["codex".into(), "resume".into(), "uuid-3".into()]),
-            "empty cwd must be treated as absent, matching the Python twin"
-        );
-        assert_eq!(
-            build_resume_argv("claude", "abc123", None),
-            Some(vec!["claude".into(), "--resume".into(), "abc123".into()])
-        );
-        assert_eq!(
-            build_resume_argv("gemini", "g-1", None),
-            Some(vec!["gemini".into(), "--resume".into(), "g-1".into()])
-        );
-        assert_eq!(
-            build_resume_argv("opencode", "ses_1", None),
-            Some(vec!["opencode".into(), "--session".into(), "ses_1".into()])
-        );
-        // The measured primitive (fresh process quoting an earlier turn's
-        // token over `--conversation`, 2026-08-26): the argv renders, and a
-        // row carrying a canonical harness_session_id reaches it. No spawn
-        // lane records one yet, so `resume` on today's agy rows still stops
-        // at the missing-session-id refusal.
-        assert_eq!(
-            build_resume_argv("agy", "x", None),
-            Some(vec!["agy".into(), "--conversation".into(), "x".into()])
-        );
-    }
-
-    #[test]
     fn is_uuid_shaped_accepts_only_lowercase_8_4_4_4_12_hex() {
         assert!(is_uuid_shaped("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"));
         assert!(!is_uuid_shaped("")); // empty
@@ -5575,3 +5508,7 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 }
+
+#[cfg(test)]
+#[path = "client_verbs_tests.rs"]
+mod client_verbs_tests;
