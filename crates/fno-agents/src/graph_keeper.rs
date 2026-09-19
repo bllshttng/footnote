@@ -31,8 +31,11 @@
 use crate::graph_store::{self, FieldUpdate, MutateInput, StoreError};
 use crate::identity::{harness_of_session_id, shape_known_harness};
 
+mod seat_lock;
+
 mod splice;
 
+use seat_lock::take_seat;
 use splice::splice_reply;
 
 use serde_json::{json, Map, Value};
@@ -669,78 +672,9 @@ fn run_render_pass() -> Result<(), (i32, String)> {
     Err((code, tail))
 }
 
-/// Seat-ladder pacing, mirroring daemon.rs's LOCK_ACQUIRE_* shape: a probe
-/// holds the seat lock for microseconds, an incumbent for life, and only
-/// duration separates them.
-const SEAT_LOCK_ATTEMPTS: usize = 6;
-const SEAT_LOCK_RETRY: Duration = Duration::from_millis(25);
-
 /// How often an idle keeper re-checks that the socket path still names the
 /// inode it bound.
 const SEAT_CHECK_EVERY: Duration = Duration::from_secs(1);
-
-fn seat_lock_path(sock: &Path) -> PathBuf {
-    let mut s = sock.as_os_str().to_os_string();
-    s.push(".lock");
-    PathBuf::from(s)
-}
-
-/// Take the exclusive seat flock on `<sock>.lock`, held for the process
-/// life (the returned File keeps it). `None` = the seat is owned: the
-/// daemon's bind_supervisor_socket rule, applied to the store.
-fn take_seat(sock: &Path) -> Option<std::fs::File> {
-    let lock_path = seat_lock_path(sock);
-    if let Some(parent) = lock_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    // Two open-and-lock rounds: the daemon's startup sweep unlinks an
-    // orphaned lock while holding its own flock, so a keeper that opened
-    // the file just before that unlink would otherwise succeed on an
-    // unnamed inode and share the seat with a replacement. Re-stat the
-    // path after locking: anything but the exact inode we hold means the
-    // name moved, and one fresh reopen settles it; a second mismatch
-    // means the name is being cycled faster than we can claim it, which
-    // reads as the seat being owned.
-    for _round in 0..2 {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)
-            .ok()?;
-        let mut name_moved = false;
-        for attempt in 0..SEAT_LOCK_ATTEMPTS {
-            match file.try_lock() {
-                Ok(()) => {
-                    let named_ok = std::fs::metadata(&lock_path)
-                        .ok()
-                        .zip(file.metadata().ok())
-                        .is_some_and(|(named, held)| {
-                            named.dev() == held.dev() && named.ino() == held.ino()
-                        });
-                    if named_ok {
-                        return Some(file);
-                    }
-                    name_moved = true;
-                    break;
-                }
-                Err(e) => {
-                    let io_err: std::io::Error = e.into();
-                    if io_err.kind() != std::io::ErrorKind::WouldBlock {
-                        return None;
-                    }
-                    if attempt + 1 < SEAT_LOCK_ATTEMPTS {
-                        std::thread::sleep(SEAT_LOCK_RETRY * (attempt as u32 + 1));
-                    }
-                }
-            }
-        }
-        if !name_moved {
-            return None; // the lock never came free: the seat is owned
-        }
-    }
-    None
-}
 
 /// One Identify with a short reply bound: true only when something behind
 /// the path answers. An answering incumbent predates the seat lock (it was
