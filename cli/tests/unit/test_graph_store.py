@@ -678,8 +678,8 @@ def test_two_open_do_rows_keep_progress_until_last_row_closes(tmp_path):
     assert json.loads(path.read_text())["entries"][0]["status"] == "ready"
 
 
-def test_reap_open_session_record_removes_exact_open_row_with_readback(tmp_path):
-    """AC3/AC4: observer reaping removes one exact open row and settles status."""
+def test_reap_open_session_record_fills_exact_open_row_with_readback(tmp_path):
+    """AC3/AC4: observer reaping fills one exact open row and settles status."""
     _plan, entry = _ready_plan_entry(tmp_path, "ab-reap0001")
     path = _make_graph(tmp_path, [entry])
     for session_id in ("dead-session", "live-session"):
@@ -707,9 +707,9 @@ def test_reap_open_session_record_removes_exact_open_row_with_readback(tmp_path)
     assert result == {
         "found": True,
         "settled": True,
-        "row_removed": True,
-        # x-4342: the do path removes; only non-do phases close by filling.
-        "row_closed": False,
+        "row_removed": False,
+        # x-7214: every phase, do included, closes by filling ended_at.
+        "row_closed": True,
         "status_before": "in_progress",
         "status_after": "in_progress",
         "remaining_open_do": 1,
@@ -717,7 +717,10 @@ def test_reap_open_session_record_removes_exact_open_row_with_readback(tmp_path)
         "node_ids": ["ab-reap0001"],
     }
     rows = json.loads(path.read_text())["entries"][0]["sessions"]
-    assert [(r["harness"], r["session_id"]) for r in rows] == [("codex", "live-session")]
+    assert [(r["harness"], r["session_id"], bool(r.get("ended_at"))) for r in rows] == [
+        ("codex", "dead-session", True),
+        ("codex", "live-session", False),
+    ]
 
 
 def test_reap_open_session_record_does_not_remove_closed_row(tmp_path):

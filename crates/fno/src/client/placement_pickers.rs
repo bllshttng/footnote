@@ -283,7 +283,23 @@ impl View {
             " hjkl/arrows move · 1-9 jump · enter place · esc/q cancel",
             W,
         ));
+        // The commit axis on the + row, one line below the navigation footer:
+        // neither line exceeds W, so nothing ellipsizes.
+        lines.push(pad_to(" on + new portal: shift+HJKL split · t new tab", W));
         lines
+    }
+}
+
+/// The split direction a capitalized key names, one map for both placement
+/// pickers so the vocabulary cannot fork: `H` left, `J` down, `K` up,
+/// `L` right. Uppercase acts on geometry, the mux-wide rule keys.rs sets.
+pub(crate) fn split_dir(key: u8) -> Option<Dir> {
+    match key {
+        b'H' => Some(Dir::Left),
+        b'J' => Some(Dir::Down),
+        b'K' => Some(Dir::Up),
+        b'L' => Some(Dir::Right),
+        _ => None,
     }
 }
 
@@ -370,17 +386,13 @@ pub(crate) async fn attach_place_keys(
         // rather than freed, so the muscle memory from when `.` was the only
         // "here" binding still works.
         let (split, here) = match key {
-            b'H' => (Some(Some(Dir::Left)), false),
-            b'J' => (Some(Some(Dir::Down)), false),
-            b'K' => (Some(Some(Dir::Up)), false),
-            b'L' => (Some(Some(Dir::Right)), false),
             b'\r' | b'\n' | b't' => (Some(None), false),
             b' ' | b'.' => (Some(None), true),
             0x1b | b'q' => {
                 view.attach_place = None;
                 return Ok(StdinFlow::Continue);
             }
-            _ => (None, false),
+            key => (split_dir(key).map(Some), false),
         };
         let Some(split) = split else { continue };
         let picker = view.attach_place.take().unwrap();
@@ -433,9 +445,13 @@ pub(crate) async fn attach_place_keys(
 /// The portal picker's keys, mirrored on [`attach_place_keys`] so one
 /// interaction never grows a second vocabulary: lowercase hjkl and the arrows
 /// MOVE the cursor, `1`-`9` jump the cursor to that list row, Enter commits,
-/// esc/q cancels. The list is re-derived per key from the live layout, so a
-/// portal that closed under the open picker is gone from the rows the very
-/// next keypress - and the commit - sees.
+/// esc/q cancels. On the new-portal row the commit axis widens: shift+HJKL
+/// opens the new portal as a SPLIT beside the focused pane and `t` is Enter's
+/// alias, both reusing [`split_dir`]; on an open-portal row those keys send
+/// nothing (a repoint keeps its geometry by design, so the split would only
+/// earn the server's refusal). The list is re-derived per key from the live
+/// layout, so a portal that closed under the open picker is gone from the
+/// rows the very next keypress - and the commit - sees.
 pub(crate) async fn portal_pick_keys(
     view: &mut View,
     bytes: &[u8],
@@ -494,63 +510,89 @@ pub(crate) async fn portal_pick_keys(
             continue;
         }
 
-        match key {
-            0x1b | b'q' => {
+        // The commit vocabulary: Enter and its `t` alias on every row, plus
+        // shift+HJKL as a new-portal-only commit. One shared tail re-checks
+        // the agent and sends, so a second commit path cannot grow its own
+        // staleness rules.
+        let split = split_dir(key);
+        if split.is_none() && !matches!(key, b'\r' | b'\n' | b't') {
+            if key == 0x1b || key == b'q' {
                 view.portal_pick = None;
                 return Ok(StdinFlow::Continue);
             }
-            b'\r' | b'\n' => {
-                let pick = view.portal_pick.take().unwrap();
-                // The agent is re-checked at commit, the way the attach picker
-                // re-checks its target: the row can exit or gain a pane while
-                // the picker sits open, and the server's stale-id refusal must
-                // not be the first thing that tells the operator.
-                let attachable = view.layout.agents.iter().any(|a| {
-                    a.pane_id.is_none()
-                        && !a.exited
-                        && a.attach_id
-                            .as_deref()
-                            .map(|s| s == pick.id.as_str())
-                            .unwrap_or(a.name == pick.id)
-                });
-                if !attachable {
-                    view.set_notice("agent is no longer attachable".into());
-                    return Ok(StdinFlow::Continue);
-                }
-                // Resolve the cursor against the CURRENT portal set: the list
-                // is derived per frame, so the cursor only guarantees a row in
-                // the list as drawn now. A commit past the new-portal row means
-                // portals closed under the picker; refuse rather than act on
-                // the stale list (AC5-EDGE), exactly the attach picker's
-                // "workspace is no longer available" shape.
-                let rows = view.open_portal_rows();
-                let placement = if pick.cursor < rows.len() {
-                    PanePlacement {
-                        portal: Some(rows[pick.cursor].1),
-                        ..PanePlacement::default()
-                    }
-                } else if pick.cursor == rows.len() {
-                    PanePlacement {
-                        portal_new: true,
-                        ..PanePlacement::default()
-                    }
-                } else {
-                    view.set_notice("portal is no longer available".into());
-                    return Ok(StdinFlow::Continue);
-                };
-                write_msg(
-                    sock_w,
-                    &ClientMsg::Command(Command::AttachAgent {
-                        id: pick.id,
-                        placement,
-                    }),
-                )
-                .await
-                .map_err(|e| format!("portal placement send failed: {e}"))?;
+            continue;
+        }
+        let pick = view.portal_pick.take().unwrap();
+        // The agent is re-checked at commit, the way the attach picker
+        // re-checks its target: the row can exit or gain a pane while
+        // the picker sits open, and the server's stale-id refusal must
+        // not be the first thing that tells the operator.
+        let attachable = view.layout.agents.iter().any(|a| {
+            a.pane_id.is_none()
+                && !a.exited
+                && a.attach_id
+                    .as_deref()
+                    .map(|s| s == pick.id.as_str())
+                    .unwrap_or(a.name == pick.id)
+        });
+        if !attachable {
+            view.set_notice("agent is no longer attachable".into());
+            return Ok(StdinFlow::Continue);
+        }
+        // Resolve the cursor against the CURRENT portal set: the list
+        // is derived per frame, so the cursor only guarantees a row in
+        // the list as drawn now. A commit past the new-portal row means
+        // portals closed under the picker; refuse rather than act on
+        // the stale list (AC5-EDGE), exactly the attach picker's
+        // "workspace is no longer available" shape. The index is copied out
+        // before any mutable borrow, so the refusals below can reuse `view`.
+        let rows = view.open_portal_rows();
+        let portal_at_cursor = rows.get(pick.cursor).map(|(_, p)| *p);
+        let at_new_row = pick.cursor == rows.len();
+        let placement = if !at_new_row && portal_at_cursor.is_none() {
+            view.set_notice("portal is no longer available".into());
+            return Ok(StdinFlow::Continue);
+        } else if !at_new_row {
+            if split.is_some() {
+                // A split or `t` is a NEW-PORTAL gesture, so on an open
+                // portal it names a row that cannot take it. Nothing is
+                // sent - the picker keeps its state and the rest of the
+                // read is dropped, the out-of-range digit's discipline:
+                // the trailing bytes were typed against a model that just
+                // proved wrong.
+                let _ = raw_out(b"\x07");
+                view.set_notice("a split or t opens a new portal: move to the + row".into());
+                view.portal_pick = Some(pick);
                 return Ok(StdinFlow::Continue);
             }
-            _ => {}
-        }
+            PanePlacement {
+                portal: portal_at_cursor,
+                ..PanePlacement::default()
+            }
+        } else {
+            match split {
+                Some(dir) => PanePlacement {
+                    portal_new: true,
+                    split: Some(dir),
+                    target: PaneTarget::SquadId(view.layout.active_squad),
+                    ..PanePlacement::default()
+                },
+                None => PanePlacement {
+                    portal_new: true,
+                    ..PanePlacement::default()
+                },
+            }
+        };
+        write_msg(
+            sock_w,
+            &ClientMsg::Command(Command::AttachAgent {
+                id: pick.id,
+                placement,
+            }),
+        )
+        .await
+        .map_err(|e| format!("portal placement send failed: {e}"))?;
+        return Ok(StdinFlow::Continue);
     }
     Ok(StdinFlow::Continue)
 }

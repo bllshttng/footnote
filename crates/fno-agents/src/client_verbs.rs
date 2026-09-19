@@ -1315,8 +1315,8 @@ fn synthesized_name(short: &str) -> String {
 }
 
 /// Build the registry row for an orphan adopted from a target manifest. Harness-
-/// generic ([`crate::claude_adopt::mint_adopted_entry`] is claude+RosterWorker-
-/// specific): the harness-appropriate session id comes from the manifest, claude
+/// generic (the retired `claude_adopt` mint was claude+RosterWorker-specific):
+/// the harness-appropriate session id comes from the manifest, claude
 /// also records the full uuid for its dead-arm `claude --resume`, and `fno_id`
 /// links the row to its node. `status: Idle`, no pid, default `exec` host_mode:
 /// a registered-but-not-driven row the GC keeps (non-terminal, no confirmed-dead

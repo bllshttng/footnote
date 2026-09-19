@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::server::portal_reach::portal_replay_placement;
+
 // ---- (x-8f9d) portals: the one thread pane becomes an addressable set --
 
 /// The reach command naming an explicit portal index.
@@ -1435,6 +1437,224 @@ fn portal_fresh_open_honors_caller_tab_and_split() {
             .any(|t| t.contains("tab full")),
         "a fresh open with room never falls back"
     );
+}
+
+/// The new-portal reach the `P` picker's shift+HJKL sends: allocate the
+/// index, split beside the viewed workspace.
+fn portal_new_split_cmd(id: &str) -> Command {
+    Command::AttachAgent {
+        id: id.into(),
+        placement: PanePlacement {
+            portal_new: true,
+            split: Some(Dir::Right),
+            target: PaneTarget::SquadId(1),
+            ..Default::default()
+        },
+    }
+}
+
+#[test]
+fn portal_new_split_lands_beside_the_focused_pane() {
+    // (x-4572, AC2-HP + AC2-EDGE) A new-portal reach with split Right lands
+    // in the TARGET tab beside its shell - no tab added - and the STALE
+    // reuse of that index keeps the direction: the open-close-split-again
+    // loop splits right twice, never falling to place_with's Down default.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, p1, mut rx) = thread_core();
+    core.agents = vec![
+        bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+        bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+    ];
+    let tabs_before = core.session.squad(1).unwrap().tabs.len();
+
+    // The split reach first, while tab 1 is the viewed tab: a placement
+    // naming no tab splits beside the squad's ACTIVE tab, so the AC's
+    // precondition is "the viewed tab holds the shell".
+    core.command(client_id, portal_new_split_cmd("deadbee1"));
+
+    let seat = core.portals.get(&0).expect("portal 0 open").seat;
+    assert_eq!(
+        core.portals.get(&0).map(|e| e.tab),
+        Some(1),
+        "the split lands in the targeted tab"
+    );
+    assert_eq!(
+        core.session.squad(1).unwrap().tabs.len(),
+        tabs_before,
+        "no tab is added"
+    );
+    {
+        let tab = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == 1)
+            .unwrap();
+        match &tab.root {
+            Node::Branch { axis, .. } => {
+                assert_eq!(*axis, crate::tree::Axis::Horizontal, "a RIGHT split");
+            }
+            other => panic!("expected a split root, got {other:?}"),
+        }
+        let mut leaves = tree::leaves(&tab.root);
+        leaves.sort_unstable();
+        let mut expected = vec![p1, seat];
+        expected.sort_unstable();
+        assert_eq!(leaves, expected, "beside the shell, nothing else moved");
+    }
+    assert!(
+        !drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("tab full")),
+        "a split with room never falls back"
+    );
+
+    // AC2-EDGE: a second portal now, so the split portal (0) is not the
+    // last index - the reuse scan has a live index to skip. It opens
+    // unplaced (a fresh tab of its own). portal_new, not the thread_pane
+    // alias: that alias names portal 0, which is live and would repoint.
+    core.command(
+        client_id,
+        Command::AttachAgent {
+            id: "deadbee2".into(),
+            placement: PanePlacement {
+                portal_new: true,
+                ..Default::default()
+            },
+        },
+    );
+    assert_eq!(core.portals.get(&1).map(|e| e.tab), Some(2));
+    // Close the split seat while portal 1 stays live. The reuse of
+    // index 0 remembers tab 1; the caller's direction must survive it.
+    let stale_seat = core.portals.get(&0).unwrap().seat;
+    core.close_pane(stale_seat);
+    core.command(client_id, portal_new_split_cmd("deadbee1"));
+    let seat2 = core.portals.get(&0).expect("portal 0 reused").seat;
+    assert_ne!(seat2, stale_seat, "a fresh viewer took the seat");
+    assert_eq!(
+        core.portals.get(&0).map(|e| e.tab),
+        Some(1),
+        "the reused index lands in the remembered tab"
+    );
+    let tab = core
+        .session
+        .squad(1)
+        .unwrap()
+        .tabs
+        .iter()
+        .find(|t| t.id == 1)
+        .unwrap();
+    match &tab.root {
+        Node::Branch { axis, .. } => {
+            assert_eq!(
+                *axis,
+                crate::tree::Axis::Horizontal,
+                "the remembered tab keeps the caller's RIGHT, not a Down default"
+            );
+        }
+        other => panic!("expected a split root, got {other:?}"),
+    }
+    let mut leaves = tree::leaves(&tab.root);
+    leaves.sort_unstable();
+    let mut expected = vec![p1, seat2];
+    expected.sort_unstable();
+    assert_eq!(leaves, expected, "beside the shell again");
+}
+
+#[tokio::test]
+async fn portal_new_split_on_a_claude_row_survives_the_reentry_replay() {
+    // (x-4572, AC2-ERR) A claude row's first reach pass parks; the replay
+    // carries the placement the Drive arm built. That replay must name the
+    // portal AND keep the caller's split and target, or every claude-row
+    // split silently becomes a new tab - the common case.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, client_id, p1, _rx) = thread_core();
+    core.agents = vec![claude_row("claude-row", "deadbee1")];
+    let caller = PanePlacement {
+        portal_new: true,
+        split: Some(Dir::Right),
+        target: PaneTarget::SquadId(1),
+        ..Default::default()
+    };
+    let replay = portal_replay_placement(&caller, 0);
+    assert_eq!(replay.portal, Some(0), "the replay names the reached index");
+    assert!(!replay.portal_new);
+    assert_eq!(replay.split, caller.split, "the split survives");
+    assert_eq!(replay.target, caller.target, "the target survives");
+
+    let panes_before = core.panes.len();
+    core.command(
+        client_id,
+        Command::AttachAgent {
+            id: "deadbee1".into(),
+            placement: caller,
+        },
+    );
+    assert!(core.portals.is_empty(), "the parked reach opens no portal");
+    assert_eq!(
+        core.panes.len(),
+        panes_before,
+        "the parked reach opens no pane"
+    );
+
+    core.handle(CoreMsg::ReentryPlanReady {
+        id: client_id,
+        request: Box::new(ReentrySpawnRequest::Attach {
+            attach_id: "deadbee1".into(),
+            placement: portal_replay_placement(
+                &PanePlacement {
+                    portal_new: true,
+                    split: Some(Dir::Right),
+                    target: PaneTarget::SquadId(1),
+                    ..Default::default()
+                },
+                0,
+            ),
+        }),
+        verdict: Ok(ReentryVerdict {
+            argv: vec!["/bin/cat".into()],
+            env: vec![],
+            config_dir: None,
+            mechanism: None,
+        }),
+    });
+
+    let seat = core
+        .portals
+        .get(&0)
+        .expect("the replay opens portal 0")
+        .seat;
+    assert_eq!(
+        core.portals.get(&0).map(|e| e.tab),
+        Some(1),
+        "the replayed split lands in the targeted tab, not a new one"
+    );
+    assert_eq!(core.session.squad(1).unwrap().tabs.len(), 1);
+    let tab = core
+        .session
+        .squad(1)
+        .unwrap()
+        .tabs
+        .iter()
+        .find(|t| t.id == 1)
+        .unwrap();
+    match &tab.root {
+        Node::Branch { axis, .. } => {
+            assert_eq!(*axis, crate::tree::Axis::Horizontal, "beside the shell");
+        }
+        other => panic!("expected a split root, got {other:?}"),
+    }
+    let mut leaves = tree::leaves(&tab.root);
+    leaves.sort_unstable();
+    let mut expected = vec![p1, seat];
+    expected.sort_unstable();
+    assert_eq!(
+        leaves, expected,
+        "the replayed split lands beside the shell"
+    );
+    core.reap_pane(seat); // don't leak the stand-in child
 }
 
 #[test]

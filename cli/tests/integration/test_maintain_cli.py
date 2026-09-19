@@ -902,12 +902,13 @@ def no_roster_workers(monkeypatch):
     )
 
 
-def test_maintain_abandoned_leg_reaps_gone_holds_active(
+def test_maintain_abandoned_leg_settles_gone_holds_active(
     tmp_graph, tmp_path, no_roster_workers, monkeypatch
 ):
     """AC1-HP + AC3-HP at the CLI level: a node whose only open do row names a
-    session with a quiet transcript is reaped (row_removed true, status_after
-    idea); its active-transcript twin is held by name and keeps the row."""
+    session with a quiet transcript is settled (row filled at the transcript
+    tail instant, status_after idea); its active-transcript twin is held by
+    name and keeps the row open."""
     _fixture_transcript(tmp_path, monkeypatch, _SID_GONE, age_hours=72)
     _fixture_transcript(tmp_path, monkeypatch, _SID_LIVE, age_hours=0)
     _seed(tmp_graph, [
@@ -924,15 +925,19 @@ def test_maintain_abandoned_leg_reaps_gone_holds_active(
     result = _invoke(["--apply", "--no-validity"])
 
     assert result.exit_code == 0, result.output
-    assert "row_removed true" in result.output
+    assert "settled do row ab-gone01" in result.output
+    assert "row_closed true" in result.output
     assert "status_after idea" in result.output
     assert "ab-held01" in result.output
     assert "transcript active" in result.output
 
     by_id = {n["id"]: n for n in _read(tmp_graph)}
-    assert by_id["ab-gone01"]["sessions"] == []
+    gone_rows = by_id["ab-gone01"]["sessions"]
+    assert len(gone_rows) == 1, "the settled do row is filled and kept"
+    assert gone_rows[0]["ended_at"], "ended_at comes from the transcript tail"
     assert by_id["ab-gone01"]["status"] == "idea"
     live_rows = by_id["ab-held01"]["sessions"]
     assert len(live_rows) == 1
+    assert live_rows[0].get("ended_at") is None
     assert live_rows[0]["session_id"] == _SID_LIVE
     assert "ended_at" not in live_rows[0]

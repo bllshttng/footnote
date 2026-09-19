@@ -151,8 +151,13 @@ async fn portal_pick_lists_open_portals_and_preselects_new() {
         "1-9 jump",
         "enter place",
         "esc/q cancel",
+        "shift+HJKL split",
+        "t new tab",
     ] {
         assert!(overlay.contains(label), "missing {label}: {overlay}");
+    }
+    for line in v.portal_pick_lines(&v.portal_pick.as_ref().unwrap()) {
+        assert!(!line.contains('…'), "an ellipsis: {line}");
     }
 }
 
@@ -273,6 +278,69 @@ async fn portal_pick_hjkl_move_and_q_esc_cancel() {
     portal_pick_keys(&mut v, b"q", &mut buf).await.unwrap();
     assert!(v.portal_pick.is_none(), "q cancels");
     assert!(buf.is_empty(), "motion and cancel never send");
+}
+
+#[tokio::test]
+async fn portal_pick_shift_l_on_new_row_sends_a_right_split() {
+    // AC1-HP: on the + row, shift+L asks for the new portal as a RIGHT
+    // split of the pane the operator is looking at, and the picker closes.
+    let mut v = portal_pick_view();
+    open_portal_pick_by_key(&mut v).await;
+    let mut buf = Vec::new();
+    portal_pick_keys(&mut v, b"L", &mut buf).await.unwrap();
+    assert!(v.portal_pick.is_none(), "the commit closes the picker");
+    let mut cur = std::io::Cursor::new(&buf);
+    match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+        ClientMsg::Command(Command::AttachAgent { id, placement }) => {
+            assert_eq!(id, "c19cd2c3");
+            assert!(placement.portal_new, "asks the server to allocate");
+            assert_eq!(placement.portal, None, "no index is named");
+            assert_eq!(placement.split, Some(Dir::Right));
+            assert_eq!(
+                placement.target,
+                PaneTarget::SquadId(v.layout.active_squad),
+                "the split lands in the workspace the operator views"
+            );
+            assert!(!placement.here);
+        }
+        other => panic!("expected AttachAgent, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn portal_pick_split_on_an_open_portal_row_sends_nothing() {
+    // AC1-ERR: shift+HJKL on an OPEN-portal row cannot commit (a repoint
+    // keeps its geometry by design), so nothing is sent, the cursor never
+    // moves, the rest of the read is dropped, and the notice names the + row.
+    let mut v = portal_pick_view();
+    open_portal_pick_by_key(&mut v).await;
+    portal_pick_keys(&mut v, b"2", &mut Vec::new())
+        .await
+        .unwrap(); // cursor to list row 1
+    let mut buf = Vec::new();
+    portal_pick_keys(&mut v, b"Lj", &mut buf).await.unwrap();
+    assert!(buf.is_empty(), "nothing commits");
+    let pick = v.portal_pick.as_ref().expect("the picker stays open");
+    assert_eq!(pick.cursor, 1, "the trailing j never moves the cursor");
+    let (notice, _) = v.notice.expect("the miss is named on screen");
+    assert!(
+        notice.contains("move to the + row"),
+        "the + row is named: {notice}"
+    );
+}
+
+#[tokio::test]
+async fn portal_pick_t_on_new_row_equals_enter() {
+    // AC1-EDGE: `t` is Enter's keyboard-only alias, byte for byte.
+    let mut v1 = portal_pick_view();
+    open_portal_pick_by_key(&mut v1).await;
+    let mut b1 = Vec::new();
+    portal_pick_keys(&mut v1, b"\r", &mut b1).await.unwrap();
+    let mut v2 = portal_pick_view();
+    open_portal_pick_by_key(&mut v2).await;
+    let mut b2 = Vec::new();
+    portal_pick_keys(&mut v2, b"t", &mut b2).await.unwrap();
+    assert_eq!(b1, b2, "t sends exactly what Enter sends");
 }
 
 // ---- task 1.2: `l`/Right on an agent row reaches portal 0 ----------------

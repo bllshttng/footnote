@@ -1816,12 +1816,13 @@ def test_do_row_session_gone_true_on_quiet_disengaged_tail(tmp_path, monkeypatch
         ],
     )
     now = datetime(2026, 9, 10, 10, 0, 0, tzinfo=timezone.utc).timestamp()
-    gone, reason = m.do_row_session_gone(
+    gone, reason, epoch = m.do_row_session_gone(
         "claude", _CLAUDE_SID, "/some/worktree", quiet_after_s=24 * 3600, now_s=now
     )
     assert gone is True
     assert "quiet 4320m" in reason
     assert "tail not engaged" in reason
+    assert epoch == datetime(2026, 9, 7, 10, 0, 0, tzinfo=timezone.utc).timestamp()
 
 
 def test_do_row_session_gone_holds_on_active_transcript(tmp_path, monkeypatch):
@@ -1835,10 +1836,9 @@ def test_do_row_session_gone_holds_on_active_transcript(tmp_path, monkeypatch):
         [_do_record("assistant", "still mid-task", fresh_at)],
     )
     now = datetime(2026, 9, 10, 10, 0, 0, tzinfo=timezone.utc).timestamp()
-    gone, reason = m.do_row_session_gone(
+    assert m.do_row_session_gone(
         "claude", _CLAUDE_SID, "/some/worktree", quiet_after_s=24 * 3600, now_s=now
-    )
-    assert (gone, reason) == (False, "transcript active")
+    ) == (False, "transcript active", None)
 
 
 def test_do_row_session_gone_holds_when_transcript_unresolved(tmp_path, monkeypatch):
@@ -1847,7 +1847,7 @@ def test_do_row_session_gone_holds_when_transcript_unresolved(tmp_path, monkeypa
     monkeypatch.setattr(resolver, "_DEFAULT_PROJECTS_ROOT", tmp_path / "absent")
     assert m.do_row_session_gone(
         "claude", _CLAUDE_SID, "/some/worktree", quiet_after_s=1, now_s=1.0
-    ) == (False, "transcript unresolved")
+    ) == (False, "transcript unresolved", None)
 
 
 def test_do_row_session_gone_holds_when_transcript_unreadable(tmp_path, monkeypatch):
@@ -1856,7 +1856,7 @@ def test_do_row_session_gone_holds_when_transcript_unreadable(tmp_path, monkeypa
     p.write_bytes(b"\xff\xfe not utf-8")
     assert m.do_row_session_gone(
         "claude", _CLAUDE_SID, "/some/worktree", quiet_after_s=1, now_s=1.0
-    ) == (False, "transcript unreadable")
+    ) == (False, "transcript unreadable", None)
 
 
 def test_do_row_session_gone_holds_opencode_without_a_file():
@@ -1864,7 +1864,7 @@ def test_do_row_session_gone_holds_opencode_without_a_file():
     name, before any file lookup."""
     assert m.do_row_session_gone(
         "opencode", "sess_abc", "/some/worktree", quiet_after_s=1, now_s=1.0
-    ) == (False, "harness not file-backed")
+    ) == (False, "harness not file-backed", None)
 
 
 def _do_node(nid, sid=_CLAUDE_SID, **over):
@@ -1884,11 +1884,11 @@ def _do_node(nid, sid=_CLAUDE_SID, **over):
 
 
 def _gone_prover(harness, sid, cwd, *, quiet_after_s, now_s):
-    return True, "transcript quiet 999m, tail not engaged"
+    return True, "transcript quiet 999m, tail not engaged", 1727000000.0
 
 
 def _active_prover(harness, sid, cwd, *, quiet_after_s, now_s):
-    return False, "transcript active"
+    return False, "transcript active", None
 
 
 def test_detect_abandoned_do_rows_stamps_a_proven_gone_row():
