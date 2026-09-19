@@ -86,6 +86,30 @@ def _read_overlap_events(journal: Path) -> tuple[list[dict], dict]:
         "path": str(journal),
     }
     events: list[dict] = []
+    # The store commit is the write boundary: committed rows are the history.
+    # Raw bytes remain only the legacy fallback, with the same honest coverage.
+    from fno.events.store_client import native_rows
+
+    committed = native_rows(journal)
+    if committed is not None:
+        for line in committed:
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                coverage["malformed_lines"] += 1
+                continue
+            if not isinstance(e, dict):
+                coverage["malformed_lines"] += 1
+                continue
+            if e.get("type") == "worktree_overlap_observed":
+                try:
+                    validate(e)
+                except ValidationError:
+                    coverage["malformed_lines"] += 1
+                    continue
+                events.append(e)
+        coverage["state"] = "complete" if events else "no_data"
+        return events, coverage
     try:
         text = journal.read_text(encoding="utf-8")
     except FileNotFoundError:
