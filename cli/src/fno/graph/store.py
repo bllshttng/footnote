@@ -17,13 +17,13 @@ one cannot be reached or spawned, every call raises
 :class:`StoreUnavailable` naming the keeper-lane state - an unreachable
 store is NEVER read as an empty graph (the absence-as-answer trap).
 
-The mutation cycle is a versioned transaction: ``begin`` returns the
-defaulted entries plus the file's content digest, the mutator runs
-client-side against that snapshot, and ``commit`` refuses to publish over a
-changed file, so an interleaved writer turns into a retry instead of a
-silent clobber. The claim-release hook, renders, and the active-backlog
-nudge run after the commit lands, exactly where the flock version ran them
-after the lock dropped.
+The mutation cycle is a versioned transaction: the client reads one
+snapshot through the keeper's gated read (the content digest is the
+version), mutates it client-side, and publishes the row diff through the
+``commit_rows`` op, which refuses over a changed base so an interleaved
+writer turns into a retry instead of a silent clobber. The claim-release
+hook, renders, and the active-backlog nudge run after the publish lands,
+exactly where the flock version ran them after the lock dropped.
 
 Read-failure taxonomy (unchanged): :class:`GraphCorruptError` (the soft
 read's parse failure, swallowed to [] by read_graph, exit 1 by the mutate
@@ -1368,12 +1368,18 @@ def _promote_linked_rows(entries: list[dict]) -> None:
     """
     from fno.graph.ladder import Rung, plan_rung
 
+    # One doc read per distinct plan document per publish: rows sharing a
+    # scaffold path (the decompose family) would otherwise re-read it per row.
+    rung_cache: "dict[tuple[str, str], Rung]" = {}
     for entry in entries:
-        if (
-            isinstance(entry, dict)
-            and entry.get("status") == "idea"
-            and plan_rung(entry) not in (Rung.IDEA, Rung.NONE)
-        ):
+        if not isinstance(entry, dict) or entry.get("status") != "idea":
+            continue
+        key = (str(entry.get("cwd") or ""), str(entry.get("plan_path") or ""))
+        rung = rung_cache.get(key)
+        if rung is None:
+            rung = plan_rung(entry)
+            rung_cache[key] = rung
+        if rung not in (Rung.IDEA, Rung.NONE):
             entry["status"] = "ready"
 
 
