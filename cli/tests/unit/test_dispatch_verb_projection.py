@@ -28,12 +28,6 @@ from types import SimpleNamespace
 import pytest
 
 from fno.backlog import advance as adv
-from fno.rust_binary import resolve_binary
-
-requires_rust = pytest.mark.skipif(
-    resolve_binary() is None,
-    reason="no fno-agents binary resolvable (the name mint shells it)",
-)
 
 
 @pytest.fixture(autouse=True)
@@ -49,6 +43,7 @@ def _no_native_claim_verdicts(monkeypatch):
 
     monkeypatch.setattr("fno.claims.verdict.claim_verdicts", _free)
     monkeypatch.setattr("fno.claims.core.claim_verdicts", _free)
+    monkeypatch.setattr("fno.agents.naming._mint", lambda *a, **k: "wk-projection-lane")
     monkeypatch.setenv("FNO_SPAWN_GATE", "0")
 
 BRIEF_SENTINEL = "brief-sentinel-7f31 blueprint-not-target"
@@ -322,7 +317,6 @@ def test_field_absent_node_dict_refuses_naming_the_loss(iso, monkeypatch):
     assert "dispatch_verb" in failed[0]["data"]["error"]
 
 
-@requires_rust
 def test_lane_fill_declared_verb_reaches_spawn_argv(iso, monkeypatch):
     """The lane-fill door (`_ready_nodes` -> `dispatch_lanes`) shells the same
     `fno backlog ready` surface, so it eats declared verbs identically."""
