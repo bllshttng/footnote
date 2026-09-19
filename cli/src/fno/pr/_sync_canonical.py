@@ -52,8 +52,13 @@ def run_sync_canonical(pr_number: int) -> int:
     return int(answer.get("exit", 1))
 
 
-def run_sync_catchup() -> dict[str, Any]:
-    """Catch-up sweep over the native verb; the answer dict drives the tick."""
+def run_sync_catchup(*, echo: bool = True) -> dict[str, Any]:
+    """Catch-up sweep over the native verb; the answer dict drives the tick.
+
+    ``echo`` prints the native verb's own lines (the human path). A
+    ``--json`` caller passes ``echo=False`` - those lines would land inside
+    the captured JSON stdout otherwise.
+    """
     from fno.rust_binary import VerbUnavailable, verb_call
 
     try:
@@ -67,6 +72,8 @@ def run_sync_catchup() -> dict[str, Any]:
             "outcome": "unknown",
             "detail": f"native verb unavailable: {exc}",
         }
+    if echo:
+        _echo_lines(answer)
     return _answer_fields(answer)
 
 

@@ -9936,7 +9936,7 @@ def _reconcile_once(
         try:
             from fno.pr._sync_canonical import run_sync_catchup
 
-            _cu = run_sync_catchup()
+            _cu = run_sync_catchup(echo=not json_out)
             sync_catchup = {
                 "outcome": _cu["outcome"], "stale": _cu.get("stale", False),
                 "pr_number": _cu.get("pr_number"), "swept": _cu.get("swept", 0), "detail": _cu.get("detail", ""),
