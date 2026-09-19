@@ -11,7 +11,6 @@ reflex. The keeper's version conflict is what serializes writers now.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from fno.graph._constants import GRAPH_JSON
