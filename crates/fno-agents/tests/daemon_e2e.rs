@@ -2571,7 +2571,8 @@ async fn status_json_carries_the_drift_label() {
 /// that worktree is reaped, because main() pins its cwd to the canonical
 /// checkout before any child can inherit it. Fails on pre-pin code: the daemon
 /// holds the removed worktree as its cwd for life, and every child spawned
-/// without an explicit cwd dies with it (x-96a0, x-8681).
+/// without an explicit cwd dies with it - the measured shapes were roster
+/// reads exiting 1 and reconcile-style runs failing in os.getcwd.
 #[tokio::test]
 async fn daemon_cwd_survives_a_reaped_launch_worktree() {
     fn e2e_git(dir: &Path, args: &[&str]) {
