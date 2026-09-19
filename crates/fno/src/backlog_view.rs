@@ -354,6 +354,14 @@ pub fn board_scope_from_spawn_env() -> (BoardScope, String) {
     }
 }
 
+/// The scope reason alone, for paint. The client's spawn latch IS the resolved
+/// `resolve_board_scope` answer (the spawner resolved config and latched the
+/// env), so this is the reason to show on the backlog header. Read per call:
+/// the read is an env lookup, and a cache would freeze a test's env change.
+pub fn board_scope_reason() -> String {
+    board_scope_from_spawn_env().1
+}
+
 /// Resolve the board scope once, at CLIENT spawn time (and for `mux doctor`).
 ///
 /// Ladder, first hit wins:

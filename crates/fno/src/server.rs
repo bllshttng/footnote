@@ -11463,7 +11463,7 @@ impl Core {
                 // pick. An unknown or non-ready id fails closed to a notice, like
                 // the other catalog-named commands (and covers an empty id).
                 if card_ready_to_dispatch(&self.backlog, &node) {
-                    self.dispatch_next(client_id, Some(node), account);
+                    self.dispatch_next(client_id, Some(node), account, false);
                 } else if let Some(route) = self.inflight_route(&node) {
                     // The client's Layout was stale: the card went in-flight
                     // between publish and click, but the server can route it -
@@ -11476,6 +11476,19 @@ impl Core {
                     // In flight but unroutable: say where the work is, the
                     // same copy a routed v18 card click would show.
                     self.notice(client_id, hint);
+                } else {
+                    self.notice(client_id, "card not ready to dispatch");
+                }
+                Flow::Continue
+            }
+            Command::DispatchPlan { node, account } => {
+                // The card menu's Plan entry: the SAME readiness re-check and
+                // in-flight routing as a dispatch, but the spawn pins the
+                // architect sub-agent and the blueprint message. The spawn
+                // gate behind the door still answers - a refusal here is the
+                // product, never a synthesized launch.
+                if card_ready_to_dispatch(&self.backlog, &node) {
+                    self.dispatch_next(client_id, Some(node), account, true);
                 } else {
                     self.notice(client_id, "card not ready to dispatch");
                 }
@@ -12460,7 +12473,7 @@ impl Core {
                 Flow::Continue
             }
             CoreMsg::DispatchNext { id, account } => {
-                self.dispatch_next(id, None, account);
+                self.dispatch_next(id, None, account, false);
                 Flow::Continue
             }
             CoreMsg::DispatchResult { id, notice } => {

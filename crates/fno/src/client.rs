@@ -1030,6 +1030,15 @@ struct View {
     feed_offset: usize,
     hover_feed_border: bool,
     feed_drag: Option<SidelineDrag>,
+    /// The node detail overlay over a backlog card (Enter on a card): the
+    /// node's sessions with a derived launch action per row, its plan, its
+    /// king, its notes and decisions, folded off-loop from `fno backlog
+    /// get`. `None` closed; the fold/kick/render behavior lives in
+    /// `node_detail`.
+    node_detail: Option<node_detail::NodeDetailOverlay>,
+    /// Pending escape bytes in node-detail mode (same split-arrow safety as
+    /// [`View::feed_esc`]).
+    node_detail_esc: Vec<u8>,
     /// The event-derived needs-me leg: the last `fno-agents needs` fold
     /// result while the overlay is open (`None` = live-only, not yet fetched
     /// this open). Merged with the live badge leg by [`View::needs_queue`].
@@ -1705,6 +1714,11 @@ enum MenuAction {
     Focus,
     /// Open the read-only peek overlay.
     Peek,
+    /// The card menu's Plan entry: the dispatch door pinned to the
+    /// architect sub-agent with the blueprint message. The server's
+    /// readiness re-check and the door's spawn gate answer as always; a
+    /// refusal is the visible outcome, never a synthesized launch.
+    PlanSpawn,
     /// Toggle the git working-diff pane for this row's worktree.
     Diff,
     /// Stop a live row (StopAgent, or StopExternal for a daemon-roster row).
@@ -1961,16 +1975,24 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
 /// one up in about a minute, and the guards it applies (containers, batching,
 /// stale candidates, project scope) are not modeled here, so the hint promises
 /// nothing.
+/// The one card label: `<id> <slug>`, id FIRST - the id is the handle every
+/// verb takes, so it leads and the slug reads after it. An empty slug renders
+/// the id alone. Every paint site folds through this so the four rows cannot
+/// drift apart again.
+fn card_label(c: &BacklogCard) -> String {
+    if c.slug.is_empty() {
+        c.id.clone()
+    } else {
+        format!("{} {}", c.id, c.slug)
+    }
+}
+
 fn build_card_menu(
     card: &BacklogCard,
     obsidian: &crate::digest_overlay::ObsidianCfg,
     anchor: Anchor,
 ) -> RowMenu {
-    let label = if card.slug.is_empty() {
-        &card.id
-    } else {
-        &card.slug
-    };
+    let label = card_label(card);
     let float_hint = match card.state {
         CardState::Ready => "may dispatch",
         _ => "",
@@ -1990,15 +2012,24 @@ fn build_card_menu(
             hint: String::new(),
             enabled: true,
         },
+        PopupRow::Entry {
+            glyph: "✎".into(),
+            label: "Plan".into(),
+            hint: "spawn a blueprint".into(),
+            enabled: true,
+        },
     ];
     let mut actions = vec![
         MenuAction::Backlog(BacklogVerb::RankTop),
         MenuAction::Backlog(BacklogVerb::Defer),
+        MenuAction::PlanSpawn,
     ];
     // LD7: a node with no plan is greyed (state can change; the item will
     // apply later). Obsidian off is absent instead - no state change in this
     // menu can unlock it, so a permanently-greyed item would advertise a
-    // capability nothing here can turn on.
+    // capability nothing here can turn on. The Plan entry sits ahead of it:
+    // a blueprint for the node, spawned through the dispatch door pinned to
+    // the architect sub-agent; the door's spawn gate answers as always.
     match crate::link::plan_link(card.plan_path.as_deref().map(Path::new), obsidian) {
         crate::link::PlanLink::Unavailable(crate::link::PlanUnavailable::NoPlan) => {
             rows.push(PopupRow::Entry {
@@ -2290,10 +2321,10 @@ fn build_kanban(cards: &[BacklogCard], counts: &[(String, usize)], anchor: Ancho
         rows.push(PopupRow::Header(format!("{lane}  {total}")));
         let mut shown = 0usize;
         for c in cards.iter().filter(|c| card_lane(c) == lane.as_str()) {
-            let label = if c.slug.is_empty() { &c.id } else { &c.slug };
+            let label = card_label(c);
             rows.push(PopupRow::Entry {
                 glyph: lattice_glyph(card_lattice_state(c.state)).0.into(),
-                label: label.clone(),
+                label,
                 hint: if c.head {
                     "head".into()
                 } else {
@@ -2326,6 +2357,7 @@ fn card_lane(c: &BacklogCard) -> &str {
 /// The bucket for cards carrying no `_kanban_column`.
 const UNLANED: &str = "unlaned";
 
+mod node_detail;
 mod update_menu;
 
 // The sideline new-agent launcher: composer state, input folding,
@@ -2474,6 +2506,8 @@ impl View {
             feed_offset: 0,
             hover_feed_border: false,
             feed_drag: None,
+            node_detail: None,
+            node_detail_esc: Vec::new(),
             needs_fold: None,
             mine_fold: None,
             needs_fold_at: None,
@@ -5083,7 +5117,7 @@ impl View {
         // (card_hit), no squad switch. A blocked/in-flight card reads as
         // Blocked/Working so the state filter surfaces stuck work uniformly.
         for c in &self.layout.backlog {
-            let label = if c.slug.is_empty() { &c.id } else { &c.slug };
+            let label = card_label(c);
             out.push(NavRow::new(
                 format!("{label} {}", c.priority),
                 card_state(c),
@@ -6481,6 +6515,28 @@ impl View {
                 &self.theme,
                 None,
             );
+        } else if let Some(nd) = &self.node_detail {
+            // Node detail (Enter on a card): the node's sessions, king,
+            // plan and notes, from the last fold. Drawn above nav in the
+            // same overlay pass as peek.
+            let lines = node_detail::overlay_lines(
+                nd,
+                &self.layout.agents,
+                overlay_dims.1.saturating_sub(chrome::Chrome::FRAME_COLS),
+            );
+            let chrome =
+                chrome::Chrome::new(&nd.node_id, Anchor::Center).footer("enter/a act · esc close");
+            draw_lines_overlay(
+                &mut cells,
+                rows,
+                cols,
+                overlay_origin,
+                overlay_dims,
+                &chrome,
+                &lines,
+                &self.theme,
+                node_detail::selected_line(nd),
+            );
         } else if let Some(nav) = &self.nav {
             // navigator: the filtered flat catalog + query/chip line. Rows
             // recompute per frame from the live layout (no cache), so a push
@@ -6518,6 +6574,7 @@ impl View {
             && self.portal_pick.is_none()
             && self.nav.is_none()
             && self.peek.is_none()
+            && self.node_detail.is_none()
             && self.connections.is_none()
             && self.keys_modal.is_none()
             && self.row_menu.is_none()
@@ -7629,6 +7686,13 @@ impl View {
                 key: SectionKey::WorkQueue,
                 view,
             });
+            // The board's scope rides under the header as its subline, so an
+            // empty or surprising board answers WHY it looks the way it does
+            // (the spawn latch's own words), never a bare pill to decode.
+            out.push(DisplayRow::Sub(format!(
+                "scope: {}",
+                crate::backlog_view::board_scope_reason()
+            )));
             // Binary: a card has no exited state, so the queue never enters
             // `LiveOnly` (see [`next_view`]) and only `Collapsed` hides rows.
             if view != SectionView::Collapsed {
@@ -7934,7 +7998,7 @@ impl View {
                     // accent instead of the old bare DIM (attention, not muted).
                     let style = lattice_style(card_lattice_state(c.state), self.theme.accent);
                     let glyph = style.glyph;
-                    let label = if c.slug.is_empty() { &c.id } else { &c.slug };
+                    let label = card_label(c);
                     // The head of the queue is stated, not inferred from
                     // position: the section can be scrolled or the top card
                     // claimed, and either would make "first row" a lie. Labelled
@@ -10489,6 +10553,12 @@ async fn attach_and_run(
     let (feed_tx, mut feed_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, crate::feed_overlay::FoldResult)>();
 
+    // the node detail fold, the feed leg's exact shape - off the UI loop,
+    // gen-tagged, one fold in flight; a result for a closed/superseded
+    // overlay is discarded.
+    let (detail_tx, mut detail_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, node_detail::FoldResult)>();
+
     // task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
     // and reports back here. Single-flight (`mine_acting`), ungated by
     // generation - a mutation always applies wherever the overlay currently
@@ -10611,6 +10681,8 @@ async fn attach_and_run(
         }
         // kick a wanted feed fold off the UI loop, same discipline.
         feed_view::maybe_kick(&mut view, &feed_tx);
+        // kick a wanted node-detail fold off the UI loop, same discipline.
+        node_detail::maybe_kick(&mut view, &detail_tx);
         // task 2.2: kick a queued MINE mutation off the UI loop.
         // `mine_acting` is already set by the stdin handler at enqueue time
         // (mirrors `Connections::acting`), so a second x/d/add press before
@@ -11212,6 +11284,15 @@ async fn attach_and_run(
                 // same-generation panel (a result for a closed/superseded open
                 // is discarded, the needs arm's contract, one consumer).
                 feed_view::apply_fold(&mut view, gen, outcome);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            Some((gen, outcome)) = detail_rx.recv() => {
+                // a node-detail fold landed; apply only to the still-open,
+                // same-generation overlay (a result for a closed/superseded
+                // open is discarded, the feed arm's contract, one consumer).
+                node_detail::apply_fold(&mut view, gen, outcome);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -12378,6 +12459,13 @@ async fn handle_stdin(
         // selector it replaced - same precedence slot as its sibling.
         return portal_pick_keys(view, &passthrough, sock_w).await;
     }
+    if view.node_detail.is_some() {
+        // The node detail overlay (Enter on a card): routed before the
+        // selector, same precedence slot as peek - it sits ON TOP, its keys
+        // (j/k, a/r, Enter, Esc) never leak to the selector underneath, and
+        // Esc drops back one layer.
+        return node_detail::detail_keys(view, &passthrough, sock_w).await;
+    }
     if view.peek.is_some() {
         // peek sits ON TOP of the selector; routed BEFORE it so its keys
         // (j/k, Esc, later digit/attach) never leak to the selector underneath.
@@ -13171,6 +13259,27 @@ async fn execute_row_menu_action(
             .map_err(|e| format!("backlog verb send failed: {e}"))?;
             return Ok(());
         }
+        // The card menu's Plan entry: the dispatch door pinned to the
+        // architect sub-agent and the blueprint message. The card must
+        // still be in the feed (the server re-checks freshness anyway);
+        // the door's spawn gate answers as always, and its refusal
+        // renders verbatim through the dispatch notice path.
+        (MenuTarget::Card(node), MenuAction::PlanSpawn) => {
+            if !view.layout.backlog.iter().any(|c| c.id == node) {
+                view.set_notice(format!("{node} is no longer in the backlog"));
+                return Ok(());
+            }
+            write_msg(
+                sock_w,
+                &ClientMsg::Command(Command::DispatchPlan {
+                    node,
+                    account: view.active_account.clone(),
+                }),
+            )
+            .await
+            .map_err(|e| format!("plan spawn send failed: {e}"))?;
+            return Ok(());
+        }
         // Open a Backlog card's plan. Re-resolved at execute (not carried from
         // the menu build), so a plan_path or obsidian config change between
         // open and pick is honored rather than acting on a stale target.
@@ -13643,6 +13752,10 @@ async fn execute_row_menu_action(
         | MenuAction::TabMoveTo
         | MenuAction::TabJoin(_)
         | MenuAction::TabClose => view.set_notice("tab actions need a tab cell".into()),
+        // Unreachable the same way: PlanSpawn pairs with `MenuTarget::Card`,
+        // which returns in the target match above. Visible refusal over a
+        // no-op.
+        MenuAction::PlanSpawn => view.set_notice("plan spawn needs a card".into()),
     }
     Ok(())
 }
@@ -14683,6 +14796,15 @@ async fn selector_apply_row_action(
     cur: usize,
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<(), String> {
+    // Enter on a backlog card opens the node detail overlay - the card's
+    // menu (float/defer/open plan/plan) stays on `m` and right-click. The
+    // selector stays open underneath, so Esc from the detail drops back
+    // into it.
+    if let Some(DisplayRow::Card(c)) = view.display_rows().get(cur) {
+        let id = c.id.clone();
+        node_detail::open_for(view, id);
+        return Ok(());
+    }
     // row_action resolves against the CURRENT catalog (AC6-FR) and returns an
     // OWNED hit, so applying it can mutate the view.
     match view.row_action(cur) {
@@ -16365,6 +16487,10 @@ mod court_block_tests;
 #[cfg(test)]
 #[path = "client_tests/update_modal_tests.rs"]
 mod update_modal_tests;
+
+#[cfg(test)]
+#[path = "client_tests/node_detail_tests.rs"]
+mod node_detail_tests;
 
 #[cfg(test)]
 #[path = "client_tests/feed_view_tests.rs"]

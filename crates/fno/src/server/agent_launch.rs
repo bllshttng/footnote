@@ -26,6 +26,7 @@ pub(crate) async fn run_dispatch_one(
     session: &str,
     node: Option<&str>,
     account: Option<&str>,
+    plan: bool,
 ) -> String {
     let dispatch_timeout = crate::dispatch_launch::dispatch_timeout();
     let deadline = tokio::time::Instant::now() + dispatch_timeout;
@@ -58,14 +59,19 @@ pub(crate) async fn run_dispatch_one(
 
     // Step 3: the door launches. The argv builder is pure and unit-pinned; no
     // --harness/--model/--route and no message ride, so the grid picks the
-    // lane and the door renders the seed.
-    let argv = crate::dispatch_launch::dispatch_spawn_argv(
-        &fno,
-        &node_id,
-        session,
-        account,
-        parent.as_deref(),
-    );
+    // lane and the door renders the seed. A plan spawn pins the architect
+    // sub-agent and the blueprint message on the SAME door flags.
+    let argv = if plan {
+        crate::dispatch_launch::plan_spawn_argv(&fno, &node_id, session, account, parent.as_deref())
+    } else {
+        crate::dispatch_launch::dispatch_spawn_argv(
+            &fno,
+            &node_id,
+            session,
+            account,
+            parent.as_deref(),
+        )
+    };
     let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
     // Step 4: the outcome maps to the operator's one-liner. Both streams are
     // captured - the door's refusal receipt lives on stderr.
@@ -188,11 +194,18 @@ impl super::Core {
     /// appears through the existing registry reader; the outcome (dispatched /
     /// no-work / refusal / failure) routes back as `DispatchResult` for a
     /// one-line notice. (move from `server.rs`.)
-    pub(super) fn dispatch_next(&mut self, id: u64, node: Option<String>, account: Option<String>) {
+    pub(super) fn dispatch_next(
+        &mut self,
+        id: u64,
+        node: Option<String>,
+        account: Option<String>,
+        plan: bool,
+    ) {
         let session = self.session_name.clone();
         let core_tx = self.self_tx.clone();
         tokio::spawn(async move {
-            let notice = run_dispatch_one(&session, node.as_deref(), account.as_deref()).await;
+            let notice =
+                run_dispatch_one(&session, node.as_deref(), account.as_deref(), plan).await;
             let _ = core_tx
                 .send(super::CoreMsg::DispatchResult { id, notice })
                 .await;

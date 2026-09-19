@@ -323,7 +323,10 @@ fn default_true() -> bool {
 /// v84: `AgentRow.spawned_by_name` + `AgentRow.lineage_reason` (serde
 /// default), the parent's registry name and the birth's reason, derived
 /// server-side; floor stays 58.
-pub const PROTO_VERSION: u32 = 84;
+/// v85: `Command::DispatchPlan`, the card menu's Plan entry - the dispatch
+/// door pinned to the architect agent and the blueprint message; floor
+/// stays 58.
+pub const PROTO_VERSION: u32 = 85;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1624,6 +1627,16 @@ pub enum Command {
     /// (v31) `account` rides the same session-local active-account
     /// passthrough as `DispatchNext`; `None` = the default account.
     DispatchNode {
+        node: String,
+        #[serde(default)]
+        account: Option<String>,
+    },
+    /// (v85) The card menu's Plan entry: the same dispatch door and gates as
+    /// [`Command::DispatchNode`], with the spawn pinned to the architect
+    /// sub-agent and the blueprint message, so a planner launches for the
+    /// node without leaving the mux. The server's freshness re-check and the
+    /// door's own spawn gate answer exactly as they do for a dispatch.
+    DispatchPlan {
         node: String,
         #[serde(default)]
         account: Option<String>,

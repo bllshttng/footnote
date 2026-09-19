@@ -2550,9 +2550,9 @@ fn chrome_hit_card_opens_confirm_with_node() {
     });
     view.expand_pull_sections(); // (x-c5ee) ~ backlog now defaults Collapsed
                                  // display_rows (x-0090, no tab rows): [footnote squad, + new workspace,
-                                 // Header, Card] -> the card is index 3, at outer row 3 (x-cd67 US1: the
+                                 // Header, scope subline, Card] -> the card is index 4 (x-cd67 US1: the
                                  // sideline owns row 0, so outer row == display index).
-    match view.chrome_hit(3, 5) {
+    match view.chrome_hit(4, 5) {
         Some(ChromeHit::Confirm(a)) => {
             assert!(
                 matches!(&a.action, ConfirmKind::Dispatch { node } if node == "x-a496"),
@@ -2609,13 +2609,14 @@ fn chrome_hit_non_ready_card_is_notice_not_confirm() {
     });
     view.expand_pull_sections(); // (x-c5ee) ~ backlog now defaults Collapsed
                                  // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
-                                 // blocked, in-flight] -> the cards paint at outer rows 3, 4 (x-cd67 US1).
+                                 // scope subline, blocked, in-flight] -> the cards paint at outer rows 4, 5
+                                 // (x-cd67 US1).
     assert!(
-        matches!(view.chrome_hit(3, 5), Some(ChromeHit::Notice(_))),
+        matches!(view.chrome_hit(4, 5), Some(ChromeHit::Notice(_))),
         "blocked card -> notice, not confirm"
     );
     assert!(
-        matches!(view.chrome_hit(4, 5), Some(ChromeHit::Notice(_))),
+        matches!(view.chrome_hit(5, 5), Some(ChromeHit::Notice(_))),
         "in-flight card -> notice, not confirm"
     );
 }
@@ -2672,17 +2673,17 @@ fn chrome_hit_inflight_card_routes_pane_then_attach_then_hint() {
     });
     view.expand_pull_sections(); // (x-c5ee) ~ backlog now defaults Collapsed
                                  // display_rows (x-0090, no tab rows): [squad, + new workspace, Header,
-                                 // 4 cards] -> rows 3-6 (x-cd67 US1: outer row == display index).
-    assert_eq!(cmds(view.chrome_hit(3, 5)), vec![Command::FocusPane(11)]);
+                                 // scope subline, 4 cards] -> rows 4-7 (x-cd67 US1: outer row == index).
+    assert_eq!(cmds(view.chrome_hit(4, 5)), vec![Command::FocusPane(11)]);
     assert_eq!(
-        cmds(view.chrome_hit(4, 5)),
+        cmds(view.chrome_hit(5, 5)),
         vec![Command::attach_agent("deadbee2")]
     );
-    match view.chrome_hit(5, 5) {
+    match view.chrome_hit(6, 5) {
         Some(ChromeHit::Notice(msg)) => assert_eq!(msg, "in flight - worked by t:abc"),
         other => panic!("expected hint notice, got {}", chrome_hit_label(&other)),
     }
-    match view.chrome_hit(6, 5) {
+    match view.chrome_hit(7, 5) {
         Some(ChromeHit::Notice(msg)) => {
             assert_eq!(msg, "card in flight - no session visible here")
         }
@@ -10512,17 +10513,18 @@ fn card_menu_open_plan_follows_ld7_grey_versus_absent() {
     };
 
     // Obsidian disabled: the item cannot apply no matter what the operator
-    // does in this menu, so LD7 says absent, never greyed.
+    // does in this menu, so LD7 says absent, never greyed. Rows: Header,
+    // Rule, Float, Defer, Plan.
     card.plan_path = Some("/tmp/vault/plans/x-a.md".into());
     let m = build_card_menu(&card, &off, Anchor::Center);
     assert_eq!(
         m.popup.rows.len(),
-        4,
+        5,
         "no open-plan row when obsidian is off"
     );
     assert_eq!(
         m.actions.len(),
-        2,
+        3,
         "no OpenPlan action when obsidian is off"
     );
 
@@ -10530,7 +10532,7 @@ fn card_menu_open_plan_follows_ld7_grey_versus_absent() {
     // says greyed with the reason, not absent.
     card.plan_path = None;
     let m = build_card_menu(&card, &on, Anchor::Center);
-    match &m.popup.rows[4] {
+    match &m.popup.rows[5] {
         PopupRow::Entry {
             label,
             hint,
@@ -10545,23 +10547,32 @@ fn card_menu_open_plan_follows_ld7_grey_versus_absent() {
     }
     assert_eq!(
         m.actions.len(),
-        2,
+        3,
         "a disabled entry contributes no action slot"
     );
 
-    // Plan present and obsidian on: enabled, and the third action lines up
-    // with the third selectable target.
+    // Plan present and obsidian on: enabled, and the fourth action lines up
+    // with the fourth selectable target (after the Plan entry).
     card.plan_path = Some("/tmp/vault/plans/x-a.md".into());
     let m = build_card_menu(&card, &on, Anchor::Center);
-    match &m.popup.rows[4] {
+    match &m.popup.rows[5] {
         PopupRow::Entry { label, enabled, .. } => {
             assert_eq!(label, "Open plan");
             assert!(enabled);
         }
         other => panic!("expected the open-plan entry, got {other:?}"),
     }
-    assert_eq!(m.actions.len(), 3);
-    assert_eq!(m.actions[2], MenuAction::OpenPlan);
+    assert_eq!(m.actions.len(), 4);
+    assert_eq!(m.actions[3], MenuAction::OpenPlan);
+    // The Plan entry rides between Defer and Open plan, action-aligned.
+    match &m.popup.rows[4] {
+        PopupRow::Entry { label, enabled, .. } => {
+            assert_eq!(label, "Plan");
+            assert!(enabled);
+        }
+        other => panic!("expected the plan entry, got {other:?}"),
+    }
+    assert_eq!(m.actions[2], MenuAction::PlanSpawn);
 }
 
 #[test]
@@ -10676,17 +10687,25 @@ fn selector_nav_skips_headers_and_clamps() {
     // AC2-UI + Boundaries: j/k stop on every actionable row, skip the two
     // section headers, and clamp (no wrap) at both ends.
     // Blank spacers sit at 2, 4, 6, 10 (the 4 = footer spacer); footer at 5,
-    // headers at 7 and 11.
+    // headers at 7 and 11; the backlog scope subline is inert at 12.
     let v = unified_rows_view();
     assert_eq!(
         v.selector_down(5),
         8,
         "j from the footer skips the spacer + '~ elsewhere'"
     );
-    assert_eq!(v.selector_down(9), 12, "j skips the spacer + '~ backlog'");
-    assert_eq!(v.selector_down(14), 14, "clamp at the last row");
+    assert_eq!(
+        v.selector_down(9),
+        13,
+        "j skips the spacer + '~ backlog' + its inert scope subline"
+    );
+    assert_eq!(v.selector_down(15), 15, "clamp at the last row");
     assert_eq!(v.selector_up(8), 5, "k skips '~ elsewhere' + spacer upward");
-    assert_eq!(v.selector_up(12), 9, "k skips '~ backlog' + spacer upward");
+    assert_eq!(
+        v.selector_up(13),
+        9,
+        "k skips the scope subline + '~ backlog' + spacer upward"
+    );
     assert_eq!(v.selector_up(0), 0, "clamp at the top");
 }
 
@@ -10694,11 +10713,12 @@ fn selector_nav_skips_headers_and_clamps() {
 fn selector_anchor_steps_off_headers() {
     // AC1-FR / AC2-EDGE: a re-anchored cursor never rests on a Header -
     // forward first, and an out-of-range index clamps to the last row.
-    // Headers sit at 7 and 11 (Blank spacers at 2, 4, 6, 10).
+    // Headers sit at 7 and 11 (Blank spacers at 2, 4, 6, 10; the scope
+    // subline is inert at 12).
     let v = unified_rows_view();
     assert_eq!(v.selector_anchor(7), Some(8), "header steps forward");
-    assert_eq!(v.selector_anchor(11), Some(12), "header steps forward");
-    assert_eq!(v.selector_anchor(50), Some(14), "stale index clamps");
+    assert_eq!(v.selector_anchor(11), Some(13), "header steps forward");
+    assert_eq!(v.selector_anchor(50), Some(15), "stale index clamps");
     assert_eq!(v.selector_anchor(0), Some(0), "actionable row stays put");
 }
 
@@ -12303,8 +12323,10 @@ async fn selector_enter_refusal_keeps_selector_open() {
         .find(|a| a.name == "bg-other")
         .unwrap()
         .exited = true; // the dead paneless row
-                        // bg-other (9), blocked card (13), in-flight card (14).
-    for row in [9usize, 13, 14] {
+                        // bg-other (9). The card rows left this contract: Enter on a
+                        // card now opens the node detail, whose dim reasons carry the
+                        // refusal (node_detail_tests covers that).
+    for row in [9usize] {
         v.selector = Some(row);
         v.notice = None;
         let mut buf: Vec<u8> = Vec::new();
@@ -12316,21 +12338,23 @@ async fn selector_enter_refusal_keeps_selector_open() {
 }
 
 #[tokio::test]
-async fn selector_enter_ready_card_opens_confirm() {
-    // AC2-HP: Enter on a Ready card closes the selector and arms the
-    // one-keypress dispatch confirm - nothing on the wire yet; the second
-    // Enter (confirm_keys) sends the DispatchNode (AC2-FR: the confirm
-    // takes the action, so one dispatch at most).
+async fn selector_enter_ready_card_opens_node_detail() {
+    // Enter on a card opens the node detail overlay and keeps the selector
+    // underneath (Esc unwinds one layer). Nothing reaches the wire; the
+    // dispatch confirm stays on the click path (chrome_hit_card_opens_*).
     let mut v = unified_rows_view();
-    v.selector = Some(12); // ready card
+    v.selector = Some(13); // ready card, past the scope subline
     let mut buf: Vec<u8> = Vec::new();
     selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
-    assert!(buf.is_empty(), "confirm first, dispatch on the next Enter");
-    assert_eq!(v.selector, None);
-    assert!(
-        matches!(&v.confirm.as_ref().unwrap().action, ConfirmKind::Dispatch { node } if node == "x-rdy"),
-        "the Ready card's node is armed for dispatch"
-    );
+    assert!(buf.is_empty(), "the open sends nothing");
+    let nd = v
+        .node_detail
+        .as_ref()
+        .expect("Enter on a card opened the node detail");
+    assert_eq!(nd.node_id, "x-rdy");
+    assert!(nd.want, "the open arms a fold");
+    assert_eq!(v.selector, Some(13), "the selector survives underneath");
+    assert!(v.confirm.is_none(), "no dispatch is armed by an open");
 }
 
 #[tokio::test]
@@ -12387,11 +12411,11 @@ fn short_terminal_degrades_prompts_to_notices() {
     // prompt cannot render, so a Ready card and the footer refuse with a
     // notice instead of arming an invisible modal (which could dispatch
     // blind on the next Enter).
-    // ready card at 12, footer at 5.
+    // ready card at 13 (after the scope subline), footer at 5.
     let mut v = unified_rows_view();
     v.term.0 = MIN_ROWS_FOR_STATUS - 1;
     assert!(
-        matches!(v.row_action(12), Some(ChromeHit::Notice(_))),
+        matches!(v.row_action(13), Some(ChromeHit::Notice(_))),
         "ready card refuses on a too-short terminal"
     );
     assert!(
@@ -12400,7 +12424,7 @@ fn short_terminal_degrades_prompts_to_notices() {
     );
     // At the minimum height both act normally again.
     v.term.0 = MIN_ROWS_FOR_STATUS;
-    assert!(matches!(v.row_action(12), Some(ChromeHit::Confirm(_))));
+    assert!(matches!(v.row_action(13), Some(ChromeHit::Confirm(_))));
     assert!(matches!(v.row_action(5), Some(ChromeHit::OpenCreate)));
 }
 
@@ -18097,3 +18121,65 @@ mod confirm_tests;
 
 #[path = "client_tests/lineage_paint_tests.rs"]
 mod lineage_paint_tests;
+
+#[test]
+fn card_label_leads_with_the_id() {
+    // AC1: the id is the handle every verb takes, so it leads and the slug
+    // follows; an empty slug renders the id alone.
+    let mk = |id: &str, slug: &str| -> String {
+        card_label(&BacklogCard {
+            id: id.into(),
+            slug: slug.into(),
+            priority: "p1".into(),
+            state: CardState::Ready,
+            pane_id: None,
+            attach_id: None,
+            where_hint: None,
+            project: None,
+            lane: None,
+            plan_path: None,
+            head: false,
+        })
+    };
+    assert_eq!(
+        mk("x-85a0", "agent-native-backlog-view"),
+        "x-85a0 agent-native-backlog-view"
+    );
+    assert_eq!(mk("x-2", ""), "x-2");
+}
+
+#[test]
+fn the_backlog_header_states_its_scope() {
+    // AC2: the scope reason rides under the header as the section's subline.
+    let mut view = two_pane_view();
+    view.layout.backlog = vec![BacklogCard {
+        id: "x-1".into(),
+        slug: "feat".into(),
+        priority: "p1".into(),
+        state: CardState::Ready,
+        pane_id: None,
+        attach_id: None,
+        where_hint: None,
+        project: None,
+        lane: None,
+        plan_path: None,
+        head: false,
+    }];
+    view.expand_pull_sections();
+    let rows = view.display_rows();
+    let hdr = rows
+        .iter()
+        .position(|r| matches!(r, DisplayRow::Header { label, .. } if label.contains("backlog")))
+        .expect("the backlog header paints");
+    match rows.get(hdr + 1) {
+        Some(DisplayRow::Sub(s)) => assert!(
+            s.starts_with("scope: "),
+            "the subline names the scope, got: {s}"
+        ),
+        other => panic!(
+            "the scope subline is not the row under the backlog header at {} (got {:?})",
+            hdr + 1,
+            other.is_some()
+        ),
+    }
+}
