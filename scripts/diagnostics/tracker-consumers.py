@@ -321,6 +321,19 @@ def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
                 # A raw parse with no graph_json() in the enclosing body is
                 # another file's parse, not a graph-store read.
                 continue
+            if _is_read_graph(site):
+                # The strict store read: since the cutover the graph store is
+                # footnote-owned regardless of the tracker backend, so every
+                # read_graph_strict site is legal by definition. The raw-parse
+                # modality below still guards hand-rolled file access.
+                total += 1
+                if verbose:
+                    print(
+                        f"  {'store-read':<18} "
+                        f"{Path(rel).relative_to(REPO_ROOT)}:{site.lineno} in "
+                        f"{top.name if top else '<module>'}()"
+                    )
+                continue
             klass, problem = _classify_site(
                 site,
                 top,

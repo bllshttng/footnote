@@ -1004,10 +1004,7 @@ pub fn apply_defaults(entries: &mut Vec<Value>, keep_malformed: bool) {
             continue;
         }
         let obj = e.as_object_mut().unwrap();
-        if let Some(old) = obj.get("_status").cloned() {
-            obj.entry("status".to_string()).or_insert(old);
-            obj.shift_remove("_status");
-        }
+        obj.shift_remove("_status");
         if let Some(old) = obj.get("priority").and_then(Value::as_str) {
             if let Some(new) = migration(old) {
                 obj.insert("priority".to_string(), Value::String(new.to_string()));
@@ -2774,7 +2771,8 @@ mod tests {
         })];
         apply_defaults(&mut entries, false);
         let e = &entries[0];
-        assert_eq!(s_str(e, "status"), Some("in_progress"));
+        // The KEY spelling is not a modeled field: dropped, no promotion.
+        assert_eq!(s_str(e, "status"), None);
         assert_eq!(s_str(e, "priority"), Some("p1"));
         assert_eq!(s_str(e, "parent"), None);
         assert!(e.get("children").unwrap().is_array());
