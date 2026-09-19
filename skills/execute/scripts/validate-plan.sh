@@ -930,8 +930,8 @@ check_consolidation_file() {
     # and cannot run. Say NOT CHECKED here, in bash, where the absence is
     # readable - the delegate's W channel is fail-closed, for a damaged
     # index, not for a plan that names no node.
-    if [[ -z "$(_plan_node_id "$file")" ]]; then
-        warn "$label: decisions_acknowledged check NOT CHECKED (no node:/claims: id in frontmatter) - not a pass"
+    if [[ -z "$(_plan_node_id "$file")" ]] || [[ ! "$(_plan_node_id "$file")" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
+        warn "$label: decisions_acknowledged check NOT CHECKED (no well-formed node:/claims: id in frontmatter) - not a pass"
     fi
     _src="$(_fno_source_python)"
     if [[ -n "$_src" ]]; then
@@ -1378,6 +1378,11 @@ check_node_binding_file() {
             error "$label: the filename names $fn_node but no node:/claims: key does - the plan binds to nothing and the node-id gates skip it. Add node: $fn_node to the frontmatter"
         fi
     else
+        if [[ -n "$fm_node" && ! "$fm_node" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
+            # A malformed id mutes the id-keyed gates exactly like an absent
+            # one, so it gets the same NOT CHECKED voice, not a clean OK.
+            warn "$label: the node:/claims: id in frontmatter is malformed - the id-keyed gates run NOT CHECKED against it. Use one well-formed id like ${fn_node:-x-abc123}"
+        fi
         ok "plan node binding: frontmatter id ${fm_node:-<none>}, filename id ${fn_node:-<none>}"
     fi
 }
@@ -1539,12 +1544,15 @@ check_python_rows_file() {
     # row declares the added lines it spends as +N, and the rows are summed
     # against the budget. Missing, empty or non-numeric config answers fall
     # back to the ruling's starting value, so a checkout without the key
-    # still gates.
-    local grant_budget declared grant_total=0
+    # still gates. The budget is read only when a Grant row exists, so the
+    # common Port/Delete plan pays no fno subprocess.
+    local grant_budget=30 declared grant_total=0
     # || true: the read fails on a checkout whose fno predates the key, which
     # is the fallback case, never a reason to skip the plan's other findings.
-    grant_budget=$(fno config get blueprint.python_repair_added_lines 2>/dev/null | sed -n 1p || true)
-    [[ "$grant_budget" =~ ^[0-9]+$ ]] || grant_budget=30
+    if grep -qi 'grant' <<< "$rows"; then
+        grant_budget=$(fno config get blueprint.python_repair_added_lines 2>/dev/null | sed -n 1p || true)
+        [[ "$grant_budget" =~ ^[0-9]+$ ]] || grant_budget=30
+    fi
     while IFS=$'\t' read -r path act; do
         [[ -z "$path" ]] && continue
         word=$(printf '%s' "$act" | sed -E 's/^[^A-Za-z]*//; s/[^A-Za-z].*$//' | tr '[:upper:]' '[:lower:]')

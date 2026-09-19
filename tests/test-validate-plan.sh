@@ -1341,6 +1341,18 @@ else
     fail "AC12i: expected the fallback-budget ERROR: $OUTPUT"
 fi
 
+# AC12j: a malformed frontmatter id mutes the id-keyed gates exactly like an
+# absent one, so the binding check warns instead of printing a clean OK.
+PLAN_BIND_J="$TMPDIR_BASE/20990101-binding-j-x-dcc5.md"
+sed 's/^join: manual$/join: manual\nclaims: [one, two]/' "$PLAN_BIND_A" > "$PLAN_BIND_J"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_BIND_J" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "the node:/claims: id in frontmatter is malformed" <<< "$OUTPUT" \
+    && grep -q "decisions_acknowledged check NOT CHECKED" <<< "$OUTPUT"; then
+    pass "AC12j: malformed id warns from the binding check and the decisions gate"
+else
+    fail "AC12j: expected the malformed-id warnings: $OUTPUT"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Test Results ==="
