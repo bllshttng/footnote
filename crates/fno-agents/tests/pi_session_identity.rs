@@ -7,9 +7,7 @@
 //! codex, so a change to either fails here rather than drifting into a viewport
 //! that opens a different session from the one `fno agents attach` opens.
 
-use fno_agents::pi::{
-    duplicate_resume_refusal, encode_cwd, pi_attach_argv, SessionLookup,
-};
+use fno_agents::pi::{duplicate_resume_refusal, encode_cwd, pi_attach_argv, SessionLookup};
 use std::path::{Path, PathBuf};
 
 #[test]

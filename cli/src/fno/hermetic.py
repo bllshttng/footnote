@@ -198,6 +198,13 @@ _ENVIRONMENT: tuple[str, ...] = (
     # the sandbox itself, and it is read here only to widen the config ceiling
     # so a test's OWN config stays findable.
     "TMPDIR",
+    # pi's own relocation knobs (its agent dir and flat session store). A
+    # store test sets them on the parent so the Rust child reads the fixture
+    # store; scrubbing them would point every spawn-axes read back at the
+    # developer's real tree, which is exactly the leak the fixtures exist to
+    # prevent.
+    "PI_CODING_AGENT_DIR",
+    "PI_CODING_AGENT_SESSION_DIR",
 )
 
 # Set deliberately by a CI workflow, not inherited from a developer's shell.
