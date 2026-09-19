@@ -259,14 +259,14 @@ mod tests {
             "--title",
             "t",
             "--head",
-            "feature/x-3830",
+            "feature/body-check",
             "--base",
             "develop",
         ]))
         .unwrap();
         assert_eq!(a.body_file, "-");
         assert_eq!(a.title, "t");
-        assert_eq!(a.head.as_deref(), Some("feature/x-3830"));
+        assert_eq!(a.head.as_deref(), Some("feature/body-check"));
         assert_eq!(a.base, "develop");
     }
 
