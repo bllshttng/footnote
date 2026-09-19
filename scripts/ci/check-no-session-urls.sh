@@ -116,5 +116,6 @@ fi
     echo "      git rebase -i ${BASE}      # reword each flagged commit"
     echo "    then force-push the branch; the leak is gone only once the commit"
     echo "    carrying it is rewritten."
+    echo "  Check an edited body before you send it: fno-agents pr-body-check --body-file <file>"
 } >&2
 exit 1
