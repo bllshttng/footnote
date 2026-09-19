@@ -1425,13 +1425,7 @@ fn run_pi_arm(status: bool, json: bool, extension_src: Option<&str>) -> i32 {
                 installed = files_byte_equal(Path::new(src), &dest).unwrap_or(false);
             }
         }
-        print_pi_receipt(
-            installed,
-            &dest,
-            agent_dir_source,
-            &skills,
-            json,
-        );
+        print_pi_receipt(installed, &dest, agent_dir_source, &skills, json);
         return 0;
     }
     let Some(src) = extension_src else {
