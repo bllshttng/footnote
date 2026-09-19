@@ -763,7 +763,7 @@ enum KeeperConfirm {
 fn resolve_keeper_confirm(
     target: &KeeperTarget,
     session: &str,
-    pi_root: &Path,
+    pi_store: Option<&crate::pi::PiStore>,
     grok_root: &Path,
 ) -> KeeperConfirm {
     match target.hosted_harness.as_str() {
@@ -773,21 +773,26 @@ fn resolve_keeper_confirm(
         // confirm could grep, and pty paint is not acceptance evidence.
         // Both type and stay unconfirmed.
         "cursor-agent" | "agy" => KeeperConfirm::Unconfirmable,
-        "pi" => match crate::pi::lookup_sessions_under(pi_root, &target.cwd, session) {
-            crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
-                baseline: transcript_len(&file),
-                path: file,
-            },
-            crate::pi::SessionLookup::None => KeeperConfirm::PendingStore {
-                harness: "pi".to_string(),
-            },
-            crate::pi::SessionLookup::Duplicate { .. } => {
-                KeeperConfirm::Refused("duplicate-session-store")
+        "pi" => {
+            let Some(store) = pi_store else {
+                return KeeperConfirm::Refused("session-store-unreadable");
+            };
+            match crate::pi::lookup_sessions_in(store, &target.cwd, session) {
+                crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
+                    baseline: transcript_len(&file),
+                    path: file,
+                },
+                crate::pi::SessionLookup::None => KeeperConfirm::PendingStore {
+                    harness: "pi".to_string(),
+                },
+                crate::pi::SessionLookup::Duplicate { .. } => {
+                    KeeperConfirm::Refused("duplicate-session-store")
+                }
+                crate::pi::SessionLookup::Unknown { .. } => {
+                    KeeperConfirm::Refused("session-store-unreadable")
+                }
             }
-            crate::pi::SessionLookup::Unknown { .. } => {
-                KeeperConfirm::Refused("session-store-unreadable")
-            }
-        },
+        }
         "grok" => match crate::grok_store::lookup_session(grok_root, session) {
             crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
                 baseline: transcript_len(&file),
@@ -825,7 +830,7 @@ pub fn deliver_via_keeper_socket(
 ) -> Result<(), &'static str> {
     deliver_via_keeper_socket_in(
         &crate::paths::AgentsHome::from_env(),
-        &crate::pi::pi_sessions_root(),
+        None,
         &crate::grok_store::grok_sessions_root(),
         session,
         text,
@@ -836,12 +841,15 @@ pub fn deliver_via_keeper_socket(
 }
 
 /// Deliver `text` to a keeper-hosted lane-B thread against an explicit
-/// agents home, pi sessions root, and grok sessions root: the seam the
+/// agents home, pi session store, and grok sessions root: the seam the
 /// keeper journey test drives, so the fixtures resolve rows and confirm
-/// targets exactly as the verb does.
+/// targets exactly as the verb does. `pi_store` of `None` resolves the
+/// store for the row's cwd exactly as production does, honoring
+/// `PI_CODING_AGENT_DIR` and the session-dir settings; a test injects a
+/// scratch store through `Some`.
 pub fn deliver_via_keeper_socket_in(
     home: &crate::paths::AgentsHome,
-    pi_root: &Path,
+    pi_store: Option<&crate::pi::PiStore>,
     grok_root: &Path,
     session: &str,
     text: &str,
@@ -852,7 +860,20 @@ pub fn deliver_via_keeper_socket_in(
     let target = resolve_keeper_target_in(home, session)?;
     let stream =
         std::os::unix::net::UnixStream::connect(&target.sock).map_err(|_| "no-keeper-listener")?;
-    let confirm = resolve_keeper_confirm(&target, session, pi_root, grok_root);
+    let store_fallback;
+    let store: Option<&crate::pi::PiStore> = match pi_store {
+        Some(s) => Some(s),
+        None => match crate::pi::pi_store(&target.cwd) {
+            Ok(s) => {
+                store_fallback = s;
+                Some(&store_fallback)
+            }
+            // The store cannot be resolved for this cwd, so no confirm is
+            // possible; the typed refusal names it and nothing gets typed.
+            Err(_) => None,
+        },
+    };
+    let confirm = resolve_keeper_confirm(&target, session, store, grok_root);
     if let KeeperConfirm::Refused(reason) = confirm {
         // Connected but never typed into: closing without a keystroke is the
         // honest outcome, and the reason names why nothing was pasted.
@@ -897,7 +918,10 @@ pub fn deliver_via_keeper_socket_in(
             }
             KeeperConfirm::PendingStore { harness } => {
                 let hit = match harness.as_str() {
-                    "pi" => crate::pi::lookup_sessions_under(pi_root, &target.cwd, session),
+                    "pi" => match store {
+                        Some(s) => crate::pi::lookup_sessions_in(s, &target.cwd, session),
+                        None => return false,
+                    },
                     _ => crate::grok_store::lookup_session(grok_root, session),
                 };
                 match hit {
@@ -3021,7 +3045,7 @@ mod tests {
 
         let outcome = deliver_via_keeper_socket_in(
             &home,
-            &pi_root,
+            Some(&crate::pi::PiStore::cwd_scoped(pi_root.clone())),
             &grok_root,
             "sess-grok-ok",
             text,
@@ -3057,7 +3081,7 @@ mod tests {
 
         let outcome = deliver_via_keeper_socket_in(
             &home,
-            &pi_root,
+            Some(&crate::pi::PiStore::cwd_scoped(pi_root.clone())),
             &grok_root,
             "sess-grok-bas",
             text,
@@ -3098,7 +3122,7 @@ mod tests {
 
         let outcome = deliver_via_keeper_socket_in(
             &home,
-            &pi_root,
+            Some(&crate::pi::PiStore::cwd_scoped(pi_root.clone())),
             &grok_root,
             "sess-grok-dup",
             "<fno_mail>ping</fno_mail>",
@@ -3128,7 +3152,7 @@ mod tests {
 
         let outcome = deliver_via_keeper_socket_in(
             &home,
-            &pi_root,
+            Some(&crate::pi::PiStore::cwd_scoped(pi_root.clone())),
             &base.join("grokstore"),
             session,
             text,
@@ -3169,7 +3193,7 @@ mod tests {
 
         let outcome = deliver_via_keeper_socket_in(
             &home,
-            &pi_root,
+            Some(&crate::pi::PiStore::cwd_scoped(pi_root.clone())),
             &base.join("grokstore"),
             "sess-dead",
             "<fno_mail>ping</fno_mail>",
@@ -3204,7 +3228,7 @@ mod tests {
 
         let outcome = deliver_via_keeper_socket_in(
             &home,
-            &pi_root,
+            Some(&crate::pi::PiStore::cwd_scoped(pi_root.clone())),
             &grok_root,
             "sess-grok",
             "<fno_mail>ping</fno_mail>",
