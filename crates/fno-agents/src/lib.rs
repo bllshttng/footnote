@@ -49,6 +49,8 @@ pub mod active_backlog;
 mod agent_lock;
 pub mod agents_config;
 pub mod agy_ask;
+pub mod agy_hooks;
+pub mod agy_launch;
 pub mod announce;
 pub mod arm_repair;
 pub mod arm_watch;

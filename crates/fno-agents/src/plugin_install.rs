@@ -660,6 +660,11 @@ struct PluginInstallArgs {
     uninstall: bool,
     status: bool,
     quick: bool,
+    hooks: bool,
+    hooks_status: bool,
+    adapter: Option<String>,
+    crown: Option<String>,
+    hooks_file: Option<String>,
 }
 
 fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
@@ -672,6 +677,11 @@ fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
         uninstall: false,
         status: false,
         quick: false,
+        hooks: false,
+        hooks_status: false,
+        adapter: None,
+        crown: None,
+        hooks_file: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -682,6 +692,18 @@ fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
             }
             "--stage" => {
                 parsed.stage = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--adapter" => {
+                parsed.adapter = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--crown" => {
+                parsed.crown = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--hooks-file" => {
+                parsed.hooks_file = args.get(i + 1).cloned();
                 i += 2;
             }
             "--json" | "-J" => {
@@ -699,6 +721,14 @@ fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
             }
             "--installed" => {
                 parsed.quick = true;
+                i += 1;
+            }
+            "--hooks" => {
+                parsed.hooks = true;
+                i += 1;
+            }
+            "--hooks-status" => {
+                parsed.hooks_status = true;
                 i += 1;
             }
             "--check" | "--restage" | "--stage-only" | "--env-only" => {
@@ -728,7 +758,23 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
         uninstall,
         status,
         quick,
+        hooks,
+        hooks_status,
+        adapter,
+        crown,
+        hooks_file,
     } = parse_plugin_install_args(args);
+    if hooks || hooks_status {
+        return run_agy_hooks(
+            mode.as_deref(),
+            hooks,
+            hooks_status,
+            adapter.as_deref(),
+            crown.as_deref(),
+            hooks_file.as_deref(),
+            json,
+        );
+    }
     match mode.as_deref() {
         // Byte verdict for the stage; doctor's plugin_cache leg calls this.
         Some("--check") => {
@@ -1063,7 +1109,96 @@ fn install_agy(stage: &Path, force: bool) -> Result<String, String> {
         ],
         None,
     )?;
-    Ok("agy plugin imported, hooks.json carries the stop hook".to_string())
+    // The old receipt CLAIMED "hooks.json carries the stop hook" without
+    // reading it. Report the real state of the global file against the
+    // stage's own shipped adapters instead.
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let Some(home) = home else {
+        return Ok("agy plugin imported; hooks.json status unknown (no HOME)".to_string());
+    };
+    let hooks = home.join(".gemini").join("config").join("hooks.json");
+    let adapter = stage.join("hooks").join("agy-target-stop-hook.sh");
+    let crown = stage.join("hooks").join("agy-crown-inject.sh");
+    let s = crate::agy_hooks::status(
+        &hooks,
+        adapter.is_file().then_some(adapter.as_path()),
+        crown.is_file().then_some(crown.as_path()),
+    );
+    Ok(format!("agy plugin imported; {}", s.summary()))
+}
+
+/// The `plugin-install agy --hooks / --hooks-status` arm: an agy hooks.json
+/// read or preserving-install that builds no plugin stage and needs no repo
+/// checkout. Exit 0 on success; exit 1 on an install refusal (message on
+/// stderr); exit 2 on a usage fault (missing adapter, no HOME, flags on a
+/// non-agy harness).
+fn run_agy_hooks(
+    harness: Option<&str>,
+    _hooks: bool,
+    status_flag: bool,
+    adapter: Option<&str>,
+    crown: Option<&str>,
+    hooks_file: Option<&str>,
+    json: bool,
+) -> i32 {
+    if harness != Some("agy") {
+        eprintln!("plugin install: --hooks/--hooks-status apply to the agy arm; name it: plugin-install agy --hooks");
+        return 2;
+    }
+    let Some(home) = std::env::var_os("HOME") else {
+        eprintln!("plugin install agy --hooks: no HOME; cannot resolve the hooks file");
+        return 2;
+    };
+    let hooks_path = match hooks_file {
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(home)
+            .join(".gemini")
+            .join("config")
+            .join("hooks.json"),
+    };
+    if status_flag {
+        let adapter = adapter.map(PathBuf::from);
+        let crown = crown.map(PathBuf::from);
+        let s = crate::agy_hooks::status(&hooks_path, adapter.as_deref(), crown.as_deref());
+        if json {
+            match serde_json::to_string(&s) {
+                Ok(text) => println!("{text}"),
+                Err(e) => {
+                    eprintln!("plugin install agy --hooks-status: serialization error: {e}");
+                    return 1;
+                }
+            }
+        } else {
+            println!("agy hooks {}: {}", hooks_path.display(), s.summary());
+        }
+        return 0;
+    }
+    // --hooks (install)
+    let Some(adapter) = adapter else {
+        eprintln!("plugin install agy --hooks: --adapter <path> is required");
+        return 2;
+    };
+    let crown = crown.map(PathBuf::from);
+    match crate::agy_hooks::install(&hooks_path, Path::new(adapter), crown.as_deref()) {
+        Ok(receipt) => {
+            if json {
+                match serde_json::to_string(&receipt) {
+                    Ok(text) => println!("{text}"),
+                    Err(e) => {
+                        eprintln!("plugin install agy --hooks: serialization error: {e}");
+                        return 1;
+                    }
+                }
+            } else {
+                println!("{}", receipt.note);
+            }
+            0
+        }
+        Err(reason) => {
+            eprintln!("plugin install agy --hooks refused: {reason}");
+            1
+        }
+    }
 }
 
 /// Read whether footnote's hooks reach grok on THIS machine: run

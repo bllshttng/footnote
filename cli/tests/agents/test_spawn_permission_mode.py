@@ -41,7 +41,7 @@ CWD = Path("/tmp")
             ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
         ),
         ("opencode", "auto", ["--auto"]),
-        ("agy", "skip", []),  # argv already carries --dangerously-skip-permissions
+        ("agy", "skip", ["--dangerously-skip-permissions"]),
     ],
 )
 def test_mapping_accepts_provider_native_values(provider, mode, expected):
@@ -52,7 +52,7 @@ def test_mapping_accepts_provider_native_values(provider, mode, expected):
     "provider,mode",
     [
         ("opencode", "acceptEdits"),  # AC3-ERR: only 'auto' maps
-        ("agy", "plan"),  # only 'skip' maps
+        ("agy", "yolo-please"),  # not in agy's own vocabulary
         ("codex", "bogus"),  # not a shortcut or colon form
         ("codex", "workspace-write"),  # colon form needs both axes
         ("claude", ""),  # empty value required
@@ -62,6 +62,42 @@ def test_mapping_fail_closed_on_unmappable(provider, mode):
     with pytest.raises(DispatchAskError) as exc:
         permission_pane_tokens(provider, mode)
     assert exc.value.exit_code == 2
+
+
+# --- agy pane posture: default bypass, explicit mode replaces it -------------
+
+
+@pytest.fixture
+def rust_door(monkeypatch):
+    """Pin the posture door to THIS checkout's fno-agents build; skip where
+    the checkout has none (the same contract conftest.native_backlog_door
+    implements). A stale installed binary must not answer for this tree."""
+    from fno.rust_binary import find_dev_binary
+
+    binary = find_dev_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
+
+
+def test_agy_pane_default_keeps_bypass(rust_door, capsys):
+    argv = build_pane_argv("agy", "hi", CWD, False, "uuid", None, None)
+    assert "--dangerously-skip-permissions" in argv
+    # The launch names the posture it ran with, once, on stderr.
+    captured = capsys.readouterr().err
+    assert "agy posture: bypass (lane-default)" in captured
+
+
+def test_agy_pane_mode_replaces_bypass(rust_door):
+    argv = build_pane_argv("agy", "hi", CWD, False, "uuid", None, "plan")
+    assert "--mode" in argv and "plan" in argv
+    assert "--dangerously-skip-permissions" not in argv
+
+
+def test_agy_pane_yolo_plus_mode_refuses(rust_door):
+    # AC13-ERR flavor: one knob at a time, before any spawn.
+    with pytest.raises(DispatchAskError):
+        build_pane_argv("agy", "hi", CWD, True, "uuid", None, "plan")
 
 
 # --- build_pane_argv integration -------------------------------------------

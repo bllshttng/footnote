@@ -426,7 +426,8 @@ route_on_pane = false
 # agy, measured 2026-08-28: hooks/agy-target-stop-hook.sh is a real adapter that
 # shells the same loop-check, and `fno config setup` registers it in agy's
 # ~/.gemini/config/hooks.json under the `footnote` namespace key as a `Stop`
-# handler (_agy_install in cli/src/fno/setup/integration.py). agy's hooks carry
+# handler (crates/fno-agents/src/agy_hooks.rs is the writer; the Python setup
+# adapter is a transport door over it). agy's hooks carry
 # claude-shaped event names over a Gemini-family wire format, so the adapter
 # translates rather than reusing target-stop-hook.sh verbatim; the authority is
 # the same binary.
@@ -543,6 +544,9 @@ passthrough = ["*"]
 ready_marker = "? for shortcuts"
 headless_refusal = "agy's headless lane is unmeasured: `agy -p` prints and exits, and nothing has run it as an fno worker. Use --substrate thread for a persistent worker or --substrate pane for an attended one."
 bypass_flag = "--dangerously-skip-permissions"
+# bypass_always is the LANE DEFAULT, not a mandate: an explicit
+# --permission-mode replaces it (agy_launch.keeper_posture), and every launch
+# names the posture it ran with.
 bypass_always = true
 takes_model = true
 takes_effort = true
