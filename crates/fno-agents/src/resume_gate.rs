@@ -223,25 +223,25 @@ mod tests {
         let sid = "8c58eaf1-old";
         let entries = vec![
             json!({
-                "id": "x-39e2",
+                "id": "x-aaaa",
                 "status": "in_progress",
                 "pr_number": 2187,
                 "sessions": [{"phase": "do", "session_id": sid}],
             }),
             json!({
-                "id": "x-fb90",
+                "id": "x-bbbb",
                 "status": "in_progress",
                 "additional_prs": [{"number": 2187, "url": "https://example.com/pr/2187"}],
                 "sessions": [{"phase": "do", "session_id": "fbf271b1-new"}],
             }),
         ];
         let holder_of = holder_of_staged(HashMap::from([(
-            "node:x-fb90",
+            "node:x-bbbb",
             "target-session:fbf271b1-ee03",
         )]));
         let hit = other_holder(&entries, sid, &holder_of).expect("must refuse");
-        assert_eq!(hit.node, "x-fb90");
-        assert_eq!(hit.session_node, "x-39e2");
+        assert_eq!(hit.node, "x-bbbb");
+        assert_eq!(hit.session_node, "x-aaaa");
         assert_eq!(hit.pr, Some(2187));
         assert_eq!(hit.holder, "target-session:fbf271b1-ee03");
     }
@@ -251,17 +251,17 @@ mod tests {
     fn own_node_claim_taken_over_refuses() {
         let sid = "8c58eaf1-old";
         let entries = vec![json!({
-            "id": "x-39e2",
+            "id": "x-aaaa",
             "status": "in_progress",
             "pr_number": 2187,
             "sessions": [{"phase": "do", "session_id": sid}],
         })];
         let holder_of = holder_of_staged(HashMap::from([(
-            "node:x-39e2",
+            "node:x-aaaa",
             "target-session:fbf271b1-ee03",
         )]));
         let hit = other_holder(&entries, sid, &holder_of).expect("must refuse");
-        assert_eq!(hit.node, "x-39e2");
+        assert_eq!(hit.node, "x-aaaa");
         assert_eq!(hit.pr, Some(2187));
     }
 
@@ -269,9 +269,9 @@ mod tests {
     #[test]
     fn suspect_holder_refuses() {
         let sid = "8c58eaf1-old";
-        let entries = vec![do_entry("x-39e2", sid)];
+        let entries = vec![do_entry("x-aaaa", sid)];
         let holder_of = holder_of_staged(HashMap::from([(
-            "node:x-39e2",
+            "node:x-aaaa",
             "target-session:suspect-one",
         )]));
         assert!(other_holder(&entries, sid, &holder_of).is_some());
@@ -281,9 +281,9 @@ mod tests {
     #[test]
     fn own_session_holder_does_not_refuse() {
         let sid = "8c58eaf1-old";
-        let entries = vec![do_entry("x-39e2", sid)];
+        let entries = vec![do_entry("x-aaaa", sid)];
         let holder_of = holder_of_staged(HashMap::from([(
-            "node:x-39e2",
+            "node:x-aaaa",
             "target-session:8c58eaf1-old",
         )]));
         assert!(other_holder(&entries, sid, &holder_of).is_none());
@@ -292,9 +292,9 @@ mod tests {
     // AC4-EDGE: no node carries a do-row for this session.
     #[test]
     fn no_session_node_does_not_refuse() {
-        let entries = vec![do_entry("x-39e2", "someone-else")];
+        let entries = vec![do_entry("x-aaaa", "someone-else")];
         let holder_of = holder_of_staged(HashMap::from([(
-            "node:x-39e2",
+            "node:x-aaaa",
             "target-session:fbf271b1-ee03",
         )]));
         assert!(other_holder(&entries, "8c58eaf1-old", &holder_of).is_none());
@@ -304,10 +304,10 @@ mod tests {
     #[test]
     fn terminal_session_node_does_not_refuse() {
         let sid = "8c58eaf1-old";
-        let mut entry = do_entry("x-39e2", sid);
+        let mut entry = do_entry("x-aaaa", sid);
         entry["status"] = json!("done");
         let holder_of = holder_of_staged(HashMap::from([(
-            "node:x-39e2",
+            "node:x-aaaa",
             "target-session:fbf271b1-ee03",
         )]));
         assert!(other_holder(&[entry], sid, &holder_of).is_none());
