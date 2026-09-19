@@ -1293,6 +1293,25 @@ def _launch_harness_axis(launch: str, node_cwd: Optional[str] = None) -> Optiona
     return rec if rec and harness_map.is_declared(rec) else None
 
 
+def _territory_stamp(node_id: str) -> dict:
+    """The territory stamp: three values, never two. ``kingless`` is False on
+    a crowned territory, True on a kingless one, None when nothing could read
+    the attribution. Reads the territory-verdict door; its unknown receipt
+    omits both fields, so ``.get`` is the whole fold and an absence stamps
+    null. Any read failure degrades to nulls with one warning.
+    """
+    try:
+        from fno.rust_binary import call_binary_json
+
+        error, verdict = call_binary_json("territory-verdict", ["--node", node_id])
+        if error is not None:
+            raise RuntimeError(error)
+        return {"territory": verdict.get("territory"), "kingless": verdict.get("kingless")}
+    except Exception as exc:  # noqa: BLE001
+        print(f"advance: WARNING: territory verdict unreadable for {node_id}: {exc}", file=sys.stderr)
+        return {"territory": None, "kingless": None}
+
+
 def _spawn_worker(
     node_id: str,
     node_cwd: Optional[str],
@@ -1365,6 +1384,9 @@ def _spawn_worker(
         )
         if reused:
             return reused
+    # The stamp lands on the cold-spawn path only: a reuse dispatch runs no
+    # subprocess at all. The record, not the veto: a kingless territory drains.
+    row.update(_territory_stamp(node_id))
     from fno.harness_identity import (
         CODEX_SHORT_ADDRESS_RULE,
         is_unsafe_short_address,
@@ -1482,7 +1504,8 @@ def _finish_spawn(
     if receipt is not None:
         receipt.update({
             key: row[key] for key in
-            ("short_id", "substrate", "harness", "verb", "verb_source", "agent_name")
+            ("short_id", "substrate", "harness", "verb", "verb_source", "agent_name",
+             "territory", "kingless")
         } | {"notes": notes})
     return row["short_id"]
 
@@ -3534,7 +3557,12 @@ def advance(
             f"brief={_brief_tag})",
             file=sys.stderr,
         )
-    _tick(1, None, f"node={node_id} worker={short_id}")
+    # The same word the drain readout renders (active_backlog.rs): a dispatch
+    # into a kingless territory names it on the arm line an operator reads.
+    tick_detail = f"node={node_id} worker={short_id}"
+    if next_receipt.get("kingless") is True:
+        tick_detail += " kingless"
+    _tick(1, None, tick_detail)
     # Wake the active-backlog drain daemon (node): a successor may now be
     # unblocked. Best-effort; the poll floor is the guarantee.
     try:

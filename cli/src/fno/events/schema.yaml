@@ -4358,6 +4358,12 @@ event_types:
         decision:
           type: string
           description: "The resolver's decision trail joined with '; ' (harness=config(codex); substrate=default(thread); ...): which rung supplied each axis."
+        territory:
+          type: string
+          description: "The territory key the verdict door attributed this dispatch to (a crown scope, or loose:<project>); null when nothing could read the attribution."
+        kingless:
+          type: boolean
+          description: "False on a crowned territory, true on a kingless one, null when the attribution was unreadable (territory_unknown or a read failure) - an absence is never read as a boolean. The record, not the veto: a kingless territory still drains."
     consumers: [operator]
 
   - name: advance_dispatched
