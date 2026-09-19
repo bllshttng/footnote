@@ -468,8 +468,14 @@ printf 'artifact' > "$S/wt/target/file"
 STUBDIR=$(mktemp -d -t cwd-recheck-stub.XXXXXX)
 COUNTFILE="$STUBDIR/lsof.log"; : > "$COUNTFILE"
 PROTECTED_WT="$(cd "$S/wt" && pwd -P)"
+# live_shards()'s own `lsof -a -d cwd -c cargo -Fn` probe shares this PATH
+# stub. It must not touch the counter this test uses to pace the cwd-recheck
+# snapshots: a bump here shifts count-gated responses by one call.
 cat > "$STUBDIR/lsof" <<'EOF'
 #!/usr/bin/env bash
+case " $* " in
+    *" -c cargo "*) exit 0 ;;
+esac
 echo "$*" >> "$COUNTFILE"
 n=$(wc -l < "$COUNTFILE" | tr -d ' ')
 if [[ "$n" -ge 2 ]]; then

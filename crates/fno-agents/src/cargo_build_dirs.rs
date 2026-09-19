@@ -7,22 +7,37 @@
 //! env-independently: it resolves every workspace manifest both ways and
 //! classifies each tagged hash dir through four lanes (fresh, orphan, age,
 //! cap), guarded by an exclusive `flock` on each profile's `.cargo-lock`
-//! before any delete. Rows are matched by `CACHEDIR.TAG`, base, and member
-//! fingerprint - never by name.
+//! before any delete. Over the cap the lane reaps owned rows least recently
+//! used first, fresh rows included, down to a short `CAP_MIN_QUIET_SECS`
+//! floor it never crosses; a live cargo holding that lock keeps a row, and
+//! so does a row whose tree a currently running cargo process's cwd falls
+//! under - the lock alone misses the gap between two test binaries in one
+//! `cargo test` run, where nothing is locked or open yet the run still needs
+//! the dir. Rows are matched by `CACHEDIR.TAG`, base, and member fingerprint
+//! - never by name.
 //!
 //! Surfaced as the `cargo_build_dirs` lane of `fno doctor reclaim`, the
 //! `fno-agents reclaim cargo-build-dirs` / `remove-for` subcommands, and the
 //! in-process `remove_for` the merge reaper calls.
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-/// A build quieter than this is live: cargo touched it inside the window.
+/// A build quieter than this is live: it keeps a row out of the orphan and
+/// age lanes and orders the cap lane (quieter sorts last), but never vetoes
+/// a cap reap.
 const FRESH_SECS: u64 = 6 * 3600;
 /// An owned build quiet for 3 days is reaped by the age lane.
 const AGE_SECS: u64 = 3 * 24 * 3600;
+/// The cap lane's own floor, far short of `FRESH_SECS` so a busy fleet's rows
+/// still clear it: a row touched within this window never goes under cap
+/// pressure, live-cargo detection or not. A held `.cargo-lock` and a live
+/// process's cwd are the precise signals; this is the backstop for when
+/// neither fires - `lsof` absent, an odd process name - a lock gap must
+/// never read as idle.
+const CAP_MIN_QUIET_SECS: u64 = 15 * 60;
 /// The cap lane never defends more than this, and no more than half the free
 /// space (whichever is smaller) - the same shape as the bash sweep's
 /// `min(--cap-bytes, free-share-pct% of free)`.
@@ -401,18 +416,11 @@ fn has_membership(dir: &Path, names: &BTreeSet<String>) -> bool {
     false
 }
 
-/// Last gate before a delete. `recheck_quiet` (the sweep path: classification
-/// and deletion are separate walks, and a row touched in between is being
-/// written) refuses rows quiet under the fresh window; the tree-removal path
-/// (`remove_for`) skips it - a tree being removed was active until now, so
-/// the flock is the build-in-progress test there. `flock(LOCK_EX |
-/// LOCK_NB)` on every profile's `.cargo-lock`: any held lock keeps the row.
-/// Lock fds stay open until the removal returns so the guard cannot be
-/// released underneath it.
-fn guard_remove(dir: &Path, now: SystemTime, recheck_quiet: bool) -> Result<(), &'static str> {
-    if recheck_quiet && quiet_of(dir, now) < Duration::from_secs(FRESH_SECS) {
-        return Err("build-in-progress");
-    }
+/// The live-build test, shared by `guard_remove` and the cap lane's dry-run
+/// probe: `flock(LOCK_EX | LOCK_NB)` on every profile's `.cargo-lock`. Any
+/// held lock returns `Err("build-in-progress")`; otherwise the open lock
+/// files come back, and the locks last while they live.
+fn take_locks(dir: &Path) -> Result<Vec<std::fs::File>, &'static str> {
     let mut locks = Vec::new();
     if let Ok(profiles) = std::fs::read_dir(dir) {
         for profile in profiles.flatten() {
@@ -431,6 +439,20 @@ fn guard_remove(dir: &Path, now: SystemTime, recheck_quiet: bool) -> Result<(), 
             return Err("build-in-progress");
         }
     }
+    Ok(locks)
+}
+
+/// Last gate before a delete. `recheck_quiet` (the orphan and age lanes:
+/// classification and deletion are separate walks, and a row touched in
+/// between is being written) refuses rows quiet under the fresh window; the
+/// cap lane and the tree-removal path (`remove_for`) skip it - there the
+/// flock alone is the build-in-progress test. Lock fds stay open until the
+/// removal returns so the guard cannot be released underneath it.
+fn guard_remove(dir: &Path, now: SystemTime, recheck_quiet: bool) -> Result<(), &'static str> {
+    if recheck_quiet && quiet_of(dir, now) < Duration::from_secs(FRESH_SECS) {
+        return Err("build-in-progress");
+    }
+    let _locks = take_locks(dir)?;
     std::fs::remove_dir_all(dir).map_err(|_| "delete-failed")
 }
 
@@ -439,6 +461,71 @@ fn remove_empty_shard(dir: &Path) -> bool {
         return std::fs::remove_dir(shard).is_ok();
     }
     false
+}
+
+/// Every currently running `cargo` process's cwd, via one `lsof` read (the
+/// same tool `pane_stop.rs` already relies on; works on both macOS and
+/// Linux). `lsof` missing or erroring reads as no live process - the flock
+/// still catches the pure-compile window either way.
+///
+/// `FNO_TEST_LIVE_CARGO_CWDS` (colon-separated paths) substitutes for the
+/// real read in tests: a process whose kernel-reported name is genuinely
+/// `cargo` can't be spawned to order (the name comes from the executed
+/// file's own path, not argv0 or a script's shebang target), so the seam is
+/// what lets a test drive the tree-to-shard mapping below deterministically.
+///
+/// `Err` only when `lsof` itself could not be run (missing binary): a normal
+/// "no cargo running right now" read is `Ok(vec![])`, never an error.
+fn live_cargo_cwds() -> Result<Vec<PathBuf>, ()> {
+    if let Ok(raw) = std::env::var("FNO_TEST_LIVE_CARGO_CWDS") {
+        return Ok(raw
+            .split(':')
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .collect());
+    }
+    let Ok(output) = Command::new("lsof")
+        .args(["-a", "-d", "cwd", "-c", "cargo", "-Fn"])
+        .output()
+    else {
+        return Err(());
+    };
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix('n'))
+        .map(PathBuf::from)
+        .collect())
+}
+
+/// Every hash dir a live cargo command might still need, plus whether the
+/// read can be trusted. `cargo test` drops its `.cargo-lock` once compiling
+/// ends, so the flock reads free for the whole run phase - the gap between
+/// one test binary exiting and the next one starting has no lock and no open
+/// file under the dir the cap lane is about to judge. The live process's cwd
+/// is the only signal left: whichever registered tree it falls under has a
+/// cargo command in flight, so every dir that tree's manifests resolve to
+/// stays off the cap lane's table. A cwd can sit under more than one
+/// registered tree - a worktree nested inside its own checkout - so the
+/// LONGEST matching tree owns it, never the first one
+/// `git worktree list` happens to print (that would always be the main
+/// checkout). `Err` when `lsof` failed to run or a live cwd's own tree
+/// cannot answer its manifests: either way the returned set may be missing
+/// entries, so the caller must fail closed rather than trust an empty one.
+fn live_shards(trees: &[PathBuf], fno_base: &Path) -> Result<BTreeSet<PathBuf>, ()> {
+    let mut shards = BTreeSet::new();
+    for cwd in live_cargo_cwds()? {
+        let cwd = phys(&cwd);
+        let tree = trees
+            .iter()
+            .filter(|t| cwd.starts_with(phys(t)))
+            .max_by_key(|t| phys(t).as_os_str().len());
+        let Some(tree) = tree else {
+            continue;
+        };
+        let answer = answer_tree(tree, fno_base).map_err(|_| ())?;
+        shards.extend(answer.dirs.iter().map(|d| phys(d)));
+    }
+    Ok(shards)
 }
 
 // --- free space --------------------------------------------------------------
@@ -481,6 +568,12 @@ pub struct SweepReport {
     pub projected_bytes: u64,
     pub after_bytes: u64,
     pub effective_cap_bytes: u64,
+    /// Bytes read across both bases before any lane ran.
+    pub before_bytes: u64,
+    /// `before_bytes` started over the effective cap.
+    pub cap_exceeded: bool,
+    /// Why bytes are still over the cap at the end: kept reason -> row count.
+    pub cap_held: BTreeMap<&'static str, usize>,
     /// `None` = the orphan lane ran; `Some(manifest)` = disabled, named.
     pub orphan_lane: Option<String>,
     pub shards_removed: usize,
@@ -509,8 +602,8 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
 
     let mut names: BTreeSet<String> = BTreeSet::new();
     let mut resolved: BTreeSet<PathBuf> = BTreeSet::new();
-    for tree in trees {
-        match answer_tree(&tree, &fno_base) {
+    for tree in &trees {
+        match answer_tree(tree, &fno_base) {
             Ok(answer) => {
                 rep.trees_resolved += 1;
                 names.extend(answer.names);
@@ -521,6 +614,20 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
             }
         }
     }
+    // A live `cargo` (build or test) holds `.cargo-lock` only while it
+    // compiles; `cargo test` drops it before running the built binaries, so
+    // the gap between one test binary exiting and the next one starting has
+    // no lock and no open file under the dir the cap lane is about to judge.
+    // The live process itself is the only signal left standing: whichever
+    // tree its cwd falls under is a tree with a cargo command in flight, so
+    // every dir that tree's manifests resolve to is off the table this
+    // sweep, cap pressure or not. An unreadable live set (`live_reliable =
+    // false`) is never treated as "nothing is live" - the cap lane falls
+    // back to the far more conservative `FRESH_SECS` floor instead.
+    let (live, live_reliable) = match live_shards(&trees, &fno_base) {
+        Ok(shards) => (shards, true),
+        Err(()) => (BTreeSet::new(), false),
+    };
 
     let mut rows: Vec<Row> = Vec::new();
     for base in &bases {
@@ -540,6 +647,8 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
     }
     rep.rows = rows.len();
     let before_bytes: u64 = rows.iter().map(|r| r.bytes).sum();
+    rep.before_bytes = before_bytes;
+    rep.cap_exceeded = before_bytes > rep.effective_cap_bytes;
 
     // Lanes, first match wins: fresh, orphan, age. Cap runs after, over
     // whatever is still standing.
@@ -550,8 +659,11 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
     let mut decisions: Vec<Decision> = Vec::with_capacity(rows.len());
     let mut planned: Vec<usize> = Vec::new();
     let mut planned_bytes: u64 = 0;
+    let mut refusal_of: BTreeMap<usize, &'static str> = BTreeMap::new();
     for (i, row) in rows.iter().enumerate() {
-        let decision = if row.quiet < Duration::from_secs(FRESH_SECS) {
+        let decision = if live.contains(&phys(&row.path)) {
+            Decision::Keep("cargo-live")
+        } else if row.quiet < Duration::from_secs(FRESH_SECS) {
             Decision::Keep("fresh")
         } else if rep.orphan_lane.is_none()
             && !resolved.contains(&phys(&row.path))
@@ -574,48 +686,6 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
             }
         };
         decisions.push(decision);
-    }
-
-    // Cap: while the total still exceeds the effective ceiling, reap owned
-    // rows quiet 6h or more, oldest quiet first. Fresh rows never qualify.
-    let mut remaining = before_bytes.saturating_sub(planned_bytes);
-    if remaining > rep.effective_cap_bytes {
-        let mut candidates: Vec<usize> = rows
-            .iter()
-            .enumerate()
-            .filter(|(i, r)| {
-                (r.under_fno || r.membership)
-                    && r.quiet >= Duration::from_secs(FRESH_SECS)
-                    && !planned.contains(i)
-            })
-            .map(|(i, _)| i)
-            .collect();
-        candidates.sort_by(|a, b| rows[*b].quiet.cmp(&rows[*a].quiet));
-        for i in candidates {
-            if remaining <= rep.effective_cap_bytes {
-                break;
-            }
-            planned.push(i);
-            planned_bytes += rows[i].bytes;
-            remaining -= rows[i].bytes;
-            decisions[i] = Decision::Reap("cap");
-        }
-    }
-
-    for (i, row) in rows.iter().enumerate() {
-        match &decisions[i] {
-            Decision::Keep(lane) => {
-                let line = format!(
-                    "cargo-build-dir kept lane={lane} bytes={} quiet_h={:.1} path={}",
-                    row.bytes,
-                    row.quiet.as_secs_f64() / 3600.0,
-                    row.path.display()
-                );
-                println!("{line}");
-                rep.lines.push(line);
-            }
-            Decision::Reap(_) => {}
-        }
     }
 
     for &i in &planned {
@@ -652,6 +722,7 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
                 }
             }
             Err(reason) => {
+                refusal_of.insert(i, reason);
                 let line = format!(
                     "cargo-build-dir kept lane={reason} bytes={} quiet_h={:.1} path={}",
                     row.bytes,
@@ -661,6 +732,117 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
                 println!("{line}");
                 rep.lines.push(line);
             }
+        }
+    }
+
+    // Cap: while the bytes actually left exceed the effective ceiling, reap
+    // owned rows least recently used first, rows past CAP_MIN_QUIET_SECS
+    // included - FRESH_SECS instead when the live-cargo read cannot be
+    // trusted, since an empty live set is then not proof nothing is live.
+    // The flock, the live-cargo check, and that floor are the only vetoes
+    // here (no FRESH_SECS recheck on TOP of that in the trustworthy case),
+    // and a refused row never ends the loop - the next-oldest candidate
+    // still goes. Both the live set and each candidate's own quiet are
+    // re-read right before its `guard_remove`: the walk above and the
+    // orphan/age deletes both take real time, and a cargo command starting
+    // mid-sweep is exactly the gap this lane exists to close.
+    let cap_floor_secs = if live_reliable {
+        CAP_MIN_QUIET_SECS
+    } else {
+        FRESH_SECS
+    };
+    let mut remaining = if apply {
+        before_bytes.saturating_sub(rep.reclaimed_bytes)
+    } else {
+        before_bytes.saturating_sub(planned_bytes)
+    };
+    if remaining > rep.effective_cap_bytes {
+        let mut candidates: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(i, r)| {
+                (r.under_fno || r.membership)
+                    && !planned.contains(i)
+                    && !live.contains(&phys(&r.path))
+                    && r.quiet >= Duration::from_secs(cap_floor_secs)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        candidates.sort_by(|a, b| rows[*b].quiet.cmp(&rows[*a].quiet));
+        for i in candidates {
+            if remaining <= rep.effective_cap_bytes {
+                break;
+            }
+            let row = &rows[i];
+            let now2 = SystemTime::now();
+            let (recheck_live, recheck_reliable) = match live_shards(&trees, &fno_base) {
+                Ok(shards) => (shards, true),
+                Err(()) => (BTreeSet::new(), false),
+            };
+            let recheck_floor = if recheck_reliable {
+                CAP_MIN_QUIET_SECS
+            } else {
+                FRESH_SECS
+            };
+            let outcome = if recheck_live.contains(&phys(&row.path)) {
+                Err("cargo-live")
+            } else if quiet_of(&row.path, now2) < Duration::from_secs(recheck_floor) {
+                Err("build-in-progress")
+            } else if apply {
+                guard_remove(&row.path, now2, false)
+            } else {
+                take_locks(&row.path).map(|_| ())
+            };
+            match outcome {
+                Ok(()) => {
+                    planned.push(i);
+                    planned_bytes += row.bytes;
+                    remaining -= row.bytes;
+                    decisions[i] = Decision::Reap("cap");
+                    let verb = if apply { "reaped" } else { "would-reap" };
+                    let line = format!(
+                        "cargo-build-dir {verb} lane=cap bytes={} quiet_h={:.1} path={}",
+                        row.bytes,
+                        row.quiet.as_secs_f64() / 3600.0,
+                        row.path.display()
+                    );
+                    println!("{line}");
+                    rep.lines.push(line);
+                    if apply {
+                        rep.reaped += 1;
+                        rep.reclaimed_bytes += row.bytes;
+                        if remove_empty_shard(&row.path) {
+                            rep.shards_removed += 1;
+                        }
+                    }
+                }
+                Err(reason) => {
+                    refusal_of.insert(i, reason);
+                    let line = format!(
+                        "cargo-build-dir kept lane={reason} bytes={} quiet_h={:.1} path={}",
+                        row.bytes,
+                        row.quiet.as_secs_f64() / 3600.0,
+                        row.path.display()
+                    );
+                    println!("{line}");
+                    rep.lines.push(line);
+                }
+            }
+        }
+    }
+
+    // Keep lines print after the cap pass so a row the cap reaped never also
+    // reads as kept.
+    for (i, row) in rows.iter().enumerate() {
+        if let Decision::Keep(lane) = &decisions[i] {
+            let line = format!(
+                "cargo-build-dir kept lane={lane} bytes={} quiet_h={:.1} path={}",
+                row.bytes,
+                row.quiet.as_secs_f64() / 3600.0,
+                row.path.display()
+            );
+            println!("{line}");
+            rep.lines.push(line);
         }
     }
 
@@ -690,15 +872,39 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
     rep.projected_bytes = if apply {
         rep.reclaimed_bytes
     } else {
-        before_bytes.saturating_sub(planned_bytes)
+        planned_bytes
     };
 
     let orphan_lane = match &rep.orphan_lane {
         None => "on".to_string(),
         Some(manifest) => format!("disabled:{manifest}"),
     };
+    // cap_held answers "why are bytes still over the cap": counted only when
+    // the sweep ended over it, with every standing row's reason - refusals
+    // named by the reason they were refused, keeps by their lane.
+    if rep.after_bytes > rep.effective_cap_bytes {
+        for i in 0..rows.len() {
+            if matches!(decisions[i], Decision::Reap(_)) {
+                continue;
+            }
+            let reason = refusal_of.get(&i).copied().unwrap_or(match &decisions[i] {
+                Decision::Keep(lane) => *lane,
+                Decision::Reap(_) => unreachable!("reap rows are skipped above"),
+            });
+            *rep.cap_held.entry(reason).or_insert(0) += 1;
+        }
+    }
+    let cap_held = if rep.cap_held.is_empty() {
+        "-".to_string()
+    } else {
+        rep.cap_held
+            .iter()
+            .map(|(reason, count)| format!("{reason}:{count}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     let summary = format!(
-        "cargo-build-dirs mode={} bases={} rows={} trees_resolved={} orphans={} reaped={} reclaimed_bytes={} after_bytes={} effective_cap_bytes={} orphan_lane={orphan_lane} shards_removed={}",
+        "cargo-build-dirs mode={} bases={} rows={} trees_resolved={} orphans={} reaped={} reclaimed_bytes={} after_bytes={} effective_cap_bytes={} orphan_lane={orphan_lane} shards_removed={} before_bytes={} cap_exceeded={} cap_held={cap_held}",
         if apply { "apply" } else { "dry-run" },
         rep.bases,
         rep.rows,
@@ -709,6 +915,8 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
         rep.after_bytes,
         rep.effective_cap_bytes,
         rep.shards_removed,
+        rep.before_bytes,
+        rep.cap_exceeded,
     );
     println!("{summary}");
     rep.lines.push(summary);
@@ -840,6 +1048,10 @@ mod tests {
         std::env::set_var("CBD_FNO_ANSWER", fno_base.join("00").join("aaaa11"));
         std::env::set_var("CBD_FB_ANSWER", fb_base.join("00").join("bbbb22"));
         std::env::set_var("FNO_CARGO_TARGETS_BASE", &fno_base);
+        // Pin the free-space read: the cap lane now reaps fresh rows, so a
+        // nearly full host would shrink the cap to 1 byte and reap the very
+        // rows these tests mean to keep.
+        std::env::set_var("FNO_CARGO_FREE_BYTES", (1u64 << 50).to_string());
         Env {
             root,
             fno_base,
@@ -854,6 +1066,8 @@ mod tests {
             std::env::remove_var("CBD_FNO_ANSWER");
             std::env::remove_var("CBD_FB_ANSWER");
             std::env::remove_var("FNO_CARGO_TARGETS_BASE");
+            std::env::remove_var("FNO_CARGO_FREE_BYTES");
+            std::env::remove_var("FNO_TEST_LIVE_CARGO_CWDS");
             let _ = std::fs::remove_dir_all(&self.root);
             let _ = std::fs::remove_dir_all(&self.fb_parent);
         }
@@ -1040,5 +1254,351 @@ mod tests {
         std::env::remove_var("CBD_FB");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(found.as_deref(), Some(script.as_path()), "{found:?}");
+    }
+
+    /// AC1-HP: 18 owned rows all quiet under the fresh window, none locked,
+    /// total over the cap - the cap lane reaps exactly the oldest-quiet rows
+    /// needed to drop under the cap, and every survivor is younger than every
+    /// row reaped.
+    #[test]
+    fn cap_reaps_fresh_rows_least_recently_used_first_until_under_cap() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("caplru", "never-broken");
+        let mut rows = Vec::new();
+        for i in 0..18 {
+            let hash = format!("f{i:04x}");
+            let quiet = 1100 * (i + 1); // 0.3h..5.5h: every row under 6h
+            rows.push((quiet, plant(&env.fno_base, "00", &hash, quiet, false)));
+        }
+        // Each planted row carries its CACHEDIR.TAG too, so size one row the
+        // way the sweep does and set the cap to exactly 8 rows' bytes.
+        let unit = crate::reclaim::tree_bytes(&rows[0].1);
+        std::env::set_var("FNO_CARGO_FREE_BYTES", (unit * 16).to_string());
+
+        let rep = sweep(&env.root, true, SystemTime::now());
+
+        assert_eq!(rep.before_bytes, unit * 18, "{rep:?}");
+        assert_eq!(rep.effective_cap_bytes, unit * 8, "{rep:?}");
+        assert!(rep.cap_exceeded);
+        assert_eq!(rep.reaped, 10, "{rep:?}");
+        assert_eq!(rep.after_bytes, unit * 8, "{rep:?}");
+        assert!(rep.after_bytes <= rep.effective_cap_bytes, "{rep:?}");
+        let reaped: Vec<u64> = rows
+            .iter()
+            .filter(|(_, p)| !p.exists())
+            .map(|(q, _)| *q)
+            .collect();
+        let kept: Vec<u64> = rows
+            .iter()
+            .filter(|(_, p)| p.exists())
+            .map(|(q, _)| *q)
+            .collect();
+        assert_eq!(reaped.len(), 10);
+        assert_eq!(kept.len(), 8);
+        assert_eq!(*reaped.iter().min().unwrap(), 1100 * 9, "{reaped:?}");
+        assert_eq!(*kept.iter().max().unwrap(), 1100 * 8, "{kept:?}");
+        assert!(rep.lines.iter().any(|l| l.contains("reaped lane=cap")));
+        assert!(rep.lines.iter().any(|l| l.contains("kept lane=fresh")));
+        let summary = rep.lines.last().unwrap();
+        assert!(summary.contains("cap_exceeded=true"), "{summary}");
+        assert!(summary.contains("cap_held=-"), "{summary}");
+    }
+
+    /// AC1-ERR: two owned fresh rows over the cap, the older one's
+    /// `.cargo-lock` flock-held - the locked row stays build-in-progress, the
+    /// loop continues, the unlocked row goes lane=cap, and the summary names
+    /// every standing row's reason (AC3-ERR: a refusal and a foreign keep).
+    #[test]
+    fn cap_keeps_a_locked_row_and_says_so() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("caplock", "never-broken");
+        let older = plant(&env.fno_base, "00", "cafe0001", 2 * 3600, false);
+        let younger = plant(&env.fno_base, "00", "cafe0002", 1 * 3600, false);
+        let foreign = plant(&env.fb_base, "00", "cafe0004", seven_h(), false);
+        std::fs::create_dir_all(older.join("debug")).unwrap();
+        let lock_path = older.join("debug/.cargo-lock");
+        std::fs::write(&lock_path, b"").unwrap();
+        // A held lock file with a fresh mtime reads as an active build via the
+        // quiet guard alone; age it so this test exercises the flock itself.
+        age_every(&older, 2 * 3600);
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&lock_path)
+            .unwrap();
+        unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) };
+        // Cap at half a row's bytes: even after the younger row goes, the
+        // held row keeps the total over the cap, so cap_held must say why.
+        let unit = crate::reclaim::tree_bytes(&younger);
+        std::env::set_var("FNO_CARGO_FREE_BYTES", unit.to_string());
+
+        let rep = sweep(&env.root, true, SystemTime::now());
+
+        assert!(older.exists(), "a held cargo lock protects the row");
+        assert!(foreign.exists(), "a foreign row is never a candidate");
+        assert!(!younger.exists(), "the unlocked row is reaped lane=cap");
+        assert_eq!(rep.reaped, 1, "{rep:?}");
+        assert!(rep.lines.iter().any(|l| l.contains("reaped lane=cap")));
+        assert!(rep
+            .lines
+            .iter()
+            .any(|l| l.contains("kept lane=build-in-progress")));
+        let summary = rep.lines.last().unwrap();
+        assert!(summary.contains("cap_exceeded=true"), "{summary}");
+        assert!(
+            summary.contains("cap_held=build-in-progress:1,foreign:1"),
+            "{summary}"
+        );
+        drop(lock);
+    }
+
+    /// The CI incident this guards against: `cargo test` drops `.cargo-lock`
+    /// once compiling ends, so the gap between one test binary exiting and
+    /// the next one starting holds no lock and no open file - the cap lane
+    /// reaped the build dir a live `cargo test` was still running out of.
+    /// The live process's own tree stays off the cap lane's table even when
+    /// it is the only row standing between the sweep and the cap.
+    #[test]
+    fn cap_keeps_a_row_a_live_cargo_process_owns() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("caplive", "never-broken");
+        // The fake cargo always answers CBD_FNO_ANSWER for this tree, so
+        // this is the exact dir a live cargo process running from
+        // `env.root` would own. Quiet past CAP_MIN_QUIET_SECS, and OLDER
+        // than `other`, so the oldest-first sort would pick this row before
+        // `other` if the live veto ever broke - at quiet 0 the floor alone
+        // would save it, and the veto itself would go untested.
+        let live = plant(&env.fno_base, "00", "aaaa11", 2 * 3600, false);
+        let other = plant(&env.fno_base, "00", "other01", 3600, false);
+        let unit = crate::reclaim::tree_bytes(&live);
+        std::env::set_var("FNO_CARGO_FREE_BYTES", unit.to_string());
+        std::env::set_var("FNO_TEST_LIVE_CARGO_CWDS", &env.root);
+
+        let rep = sweep(&env.root, true, SystemTime::now());
+
+        assert!(
+            live.exists(),
+            "a live cargo process's own build dir is never a cap candidate"
+        );
+        assert!(
+            !other.exists(),
+            "an unrelated row still goes under cap pressure"
+        );
+        assert_eq!(rep.reaped, 1, "{rep:?}");
+        assert!(rep.lines.iter().any(|l| l.contains("kept lane=cargo-live")));
+        assert!(rep.lines.iter().any(|l| l.contains("reaped lane=cap")));
+        let summary = rep.lines.last().unwrap();
+        assert!(summary.contains("cap_exceeded=true"), "{summary}");
+        assert!(summary.contains("cap_held=cargo-live:1"), "{summary}");
+    }
+
+    /// AC-ERR: a live cargo cwd whose OWN tree cannot answer its manifests
+    /// makes the live read itself untrustworthy - an empty live set is then
+    /// not proof nothing is live. The cap lane must fail closed to
+    /// `FRESH_SECS`, not fall back to the far shorter `CAP_MIN_QUIET_SECS`
+    /// floor a trustworthy read would use.
+    #[test]
+    fn an_unreadable_live_tree_falls_the_cap_floor_back_to_fresh_secs() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("livefail", "broken");
+        std::fs::create_dir_all(env.root.join("crates/broken")).unwrap();
+        std::fs::write(
+            env.root.join("crates/broken/Cargo.toml"),
+            "[package]\nname = 'broken'\nversion = '0.1.0'\n",
+        )
+        .unwrap();
+        // A live cargo cwd inside `env.root` itself: `answer_tree` cannot
+        // answer this tree (the broken manifest), so `live_shards` comes
+        // back `Err`, not an empty `Ok`.
+        std::env::set_var("FNO_TEST_LIVE_CARGO_CWDS", &env.root);
+        // Quiet past CAP_MIN_QUIET_SECS but short of FRESH_SECS: a
+        // trustworthy live read would let the cap lane reap this row.
+        let row = plant(&env.fno_base, "00", "cafe5678", 1000, false);
+        std::env::set_var("FNO_CARGO_FREE_BYTES", "0");
+
+        let rep = sweep(&env.root, true, SystemTime::now());
+
+        assert!(
+            row.exists(),
+            "an unreadable live read must fail closed to FRESH_SECS, not CAP_MIN_QUIET_SECS"
+        );
+        assert_eq!(rep.reaped, 0, "{rep:?}");
+    }
+
+    /// Defense in depth: with no live cargo process detected at all (`lsof`
+    /// absent, an odd process name, the test seam left empty), a row touched
+    /// two minutes ago is still never a cap candidate - `CAP_MIN_QUIET_SECS`
+    /// is the backstop for whatever the live-cargo check misses. A lock gap
+    /// must never read as idle.
+    #[test]
+    fn cap_never_crosses_its_own_min_quiet_floor() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("capfloor", "never-broken");
+        let recent = plant(&env.fno_base, "00", "recent1", 120, false);
+        let other = plant(&env.fno_base, "00", "other02", 3600, false);
+        let unit = crate::reclaim::tree_bytes(&recent);
+        std::env::set_var("FNO_CARGO_FREE_BYTES", unit.to_string());
+
+        let rep = sweep(&env.root, true, SystemTime::now());
+
+        assert!(
+            recent.exists(),
+            "a row inside the cap's own min-quiet floor is never a cap candidate"
+        );
+        assert!(
+            !other.exists(),
+            "an unrelated row past the floor still goes under cap pressure"
+        );
+        assert_eq!(rep.reaped, 1, "{rep:?}");
+        assert!(rep.lines.iter().any(|l| l.contains("kept lane=fresh")));
+        assert!(rep.lines.iter().any(|l| l.contains("reaped lane=cap")));
+    }
+
+    /// Run git in `dir`, panicking with git's own stderr when it fails.
+    /// Ambient config is pinned to `/dev/null` so a signing key or template
+    /// on this machine can never make the fixture commit fail.
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} in {dir:?} did not run: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} in {dir:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+
+    fn git_available() -> bool {
+        Command::new("git").arg("--version").output().is_ok()
+    }
+
+    /// The bug this guards: `live_shards` matched a live cwd against the
+    /// FIRST registered tree whose path prefixes it, which for a worktree
+    /// nested inside its own checkout is always the outer, main checkout -
+    /// `git worktree list` prints that one first. A cargo
+    /// process running inside the NESTED tree then had its build dir
+    /// credited to the OUTER tree, so the outer tree's row was the one kept
+    /// live and the nested tree's own build dir - the one actually in use -
+    /// went to the cap lane. The fix picks the LONGEST matching tree.
+    #[test]
+    fn cap_keeps_a_nested_worktrees_live_row_not_the_outer_trees() {
+        if !git_available() {
+            return;
+        }
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Tag carries no "nested" substring - it would otherwise land in the
+        // outer tree's own manifest path and defeat the keyed fake cargo
+        // below.
+        let env = setup("wtlive", "never-broken");
+
+        git(&env.root, &["init", "-q"]);
+        git(&env.root, &["config", "user.email", "t@t"]);
+        git(&env.root, &["config", "user.name", "t"]);
+        git(&env.root, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let nested = env.root.join("wt/nested");
+        git(
+            &env.root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                nested.to_str().unwrap(),
+                "-b",
+                "nested-live",
+            ],
+        );
+        std::fs::create_dir_all(nested.join("crates/fake")).unwrap();
+        std::fs::write(
+            nested.join("crates/fake/Cargo.toml"),
+            "[package]\nname = 'nestedpkg'\nversion = '0.1.0'\n",
+        )
+        .unwrap();
+
+        // Keyed by `--manifest-path`, not by which tree invoked cargo: the
+        // outer tree's manifest and the nested tree's manifest must resolve
+        // to DIFFERENT build dirs, so each tree gets its own row.
+        std::fs::write(
+            env.root.join("bin/cargo"),
+            "#!/bin/sh\n\
+             manifest=\"\"\n\
+             prev=\"\"\n\
+             for a in \"$@\"; do\n\
+             if [ \"$prev\" = \"--manifest-path\" ]; then manifest=\"$a\"; fi\n\
+             prev=\"$a\"\n\
+             done\n\
+             case \"$manifest\" in\n\
+             *nested*) fno=\"$CBD_FNO_NESTED\"; fb=\"$CBD_FB_NESTED\"; pkg=nestedpkg ;;\n\
+             *) fno=\"$CBD_FNO_BASE\"; fb=\"$CBD_FB_BASE\"; pkg=basepkg ;;\n\
+             esac\n\
+             if [ -n \"$CARGO_BUILD_BUILD_DIR\" ]; then\n\
+             printf '{\"build_directory\":\"%s\",\"packages\":[{\"name\":\"%s\"}]}\\n' \"$fno\" \"$pkg\"\n\
+             else\n\
+             printf '{\"build_directory\":\"%s\",\"packages\":[{\"name\":\"%s\"}]}\\n' \"$fb\" \"$pkg\"\n\
+             fi\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            env.root.join("bin/cargo"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        // Both under the fno base, so ownership never depends on membership.
+        // The nested row is the OLDER (larger quiet) of the two, so the cap
+        // lane's oldest-first sort tries it before the outer row - the case
+        // that would go untested if the live veto were checked only after
+        // the min-quiet floor already saved it.
+        let outer_row = plant(&env.fno_base, "00", "aaaa11", 3600, false);
+        let nested_row = plant(&env.fno_base, "00", "bbbb22", 2 * 3600, false);
+        std::env::set_var("CBD_FNO_BASE", &outer_row);
+        std::env::set_var("CBD_FNO_NESTED", &nested_row);
+        std::env::set_var("CBD_FB_BASE", env.fb_base.join("00").join("cccc33"));
+        std::env::set_var("CBD_FB_NESTED", env.fb_base.join("00").join("dddd44"));
+        let unit = crate::reclaim::tree_bytes(&nested_row);
+        std::env::set_var("FNO_CARGO_FREE_BYTES", unit.to_string());
+        // The live cwd is the nested tree's own path - a `starts_with`
+        // prefix match for BOTH the outer tree and the nested tree, so only
+        // the longest match may claim it.
+        std::env::set_var("FNO_TEST_LIVE_CARGO_CWDS", &nested);
+
+        let rep = sweep(&env.root, true, SystemTime::now());
+
+        std::env::remove_var("CBD_FNO_BASE");
+        std::env::remove_var("CBD_FNO_NESTED");
+        std::env::remove_var("CBD_FB_BASE");
+        std::env::remove_var("CBD_FB_NESTED");
+
+        assert!(
+            nested_row.exists(),
+            "the nested worktree's own live build dir must survive the cap"
+        );
+        assert!(
+            !outer_row.exists(),
+            "the outer tree's unrelated row still goes under cap pressure"
+        );
+        assert_eq!(rep.reaped, 1, "{rep:?}");
+        assert!(rep.lines.iter().any(|l| l.contains("kept lane=cargo-live")));
+        assert!(rep.lines.iter().any(|l| l.contains("reaped lane=cap")));
+    }
+
+    /// AC4-HP: a dry run that plans one age reap reports the bytes it WOULD
+    /// reclaim, not the bytes left behind.
+    #[test]
+    fn dry_run_projects_reclaimable_bytes() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("capproj", "never-broken");
+        let aged = plant(&env.fno_base, "00", "cafe0003", 4 * 24 * 3600, false);
+        let unit = crate::reclaim::tree_bytes(&aged);
+
+        let rep = sweep(&env.root, false, SystemTime::now());
+
+        assert!(aged.exists(), "a dry run deletes nothing");
+        assert_eq!(rep.projected_bytes, unit, "{rep:?}");
+        assert_eq!(rep.after_bytes, 0, "after_bytes is the bytes left");
     }
 }

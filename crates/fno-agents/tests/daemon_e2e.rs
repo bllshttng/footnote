@@ -131,6 +131,10 @@ fn start_daemon_with_bin(home: &AgentsHome, daemon_bin: &Path) -> DaemonChild {
         .envs(fno_agents::test_run::self_owner_env())
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
         .env("FNO_EVENTS_PATH", home.root().join(".fno/events.jsonl"))
+        // Outside any git checkout, so the daily reclaim sweep's cargo-build-dirs
+        // lane (`crate::reclaim::maybe_run_daily`) finds no workspace manifest to
+        // resolve and never reaches the real machine's build base.
+        .current_dir(home.root())
         .stderr(std::process::Stdio::from(stderr));
     let child = cmd.spawn().expect("daemon spawns");
     common::wait_for_path(&home.supervisor_sock(), Duration::from_secs(10));
@@ -153,6 +157,10 @@ fn start_daemon_env(home: &AgentsHome, extra: &[(&str, &str)]) -> DaemonChild {
         .env("FNO_AGENTS_WORKER_BIN", WORKER_BIN)
         .env("FNO_AGENTS_IDLE_EXIT_SECS", "3600")
         .env("FNO_EVENTS_PATH", home.root().join(".fno/events.jsonl"))
+        // Outside any git checkout, so the daily reclaim sweep's cargo-build-dirs
+        // lane (`crate::reclaim::maybe_run_daily`) finds no workspace manifest to
+        // resolve and never reaches the real machine's build base.
+        .current_dir(home.root())
         .stderr(std::process::Stdio::from(stderr));
     for (k, v) in extra {
         cmd.env(k, v);

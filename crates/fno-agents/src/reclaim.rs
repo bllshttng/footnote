@@ -296,20 +296,34 @@ fn uv_prune_apply() -> bool {
     }
 }
 
-/// The build-base lane: `cargo_build_dirs::sweep` per registry root (plus the
-/// cwd's canonical repo on a hand run). Roots with no `crates/*/Cargo.toml`
-/// are skipped - sweeping a manifest-less root under a shared base could only
-/// ever misjudge rows it cannot resolve. The note carries each root's summary
-/// line; bytes are reclaimed (apply) or projected (dry run).
-fn cargo_build_dirs_lane(home: &AgentsHome, apply: bool) -> Lane {
-    let mut lane = Lane::new("cargo_build_dirs", Vec::new());
+/// Every root this run's cargo-build-dirs lane sweeps: every registry root,
+/// plus the cwd's canonical repo when `include_cwd_root` says so. That extra
+/// root is a HAND-run convenience only (a person typing `fno doctor reclaim
+/// --apply` from inside a repo wants that repo swept even if it never
+/// registered) - the daemon's own daily tick passes `false` so an arbitrary
+/// launch cwd, real or a test's, never adds a sweep root the registry did
+/// not already name.
+fn cargo_build_dirs_roots(home: &AgentsHome, include_cwd_root: bool) -> Vec<String> {
     let mut roots = crate::daemon::worktree_sweep::registry_repo_roots(home);
-    if let Some(repo) = canonical_repo_root(&std::env::current_dir().unwrap_or_default()) {
-        let repo = repo.to_string_lossy().into_owned();
-        if !roots.contains(&repo) {
-            roots.push(repo);
+    if include_cwd_root {
+        if let Some(repo) = canonical_repo_root(&std::env::current_dir().unwrap_or_default()) {
+            let repo = repo.to_string_lossy().into_owned();
+            if !roots.contains(&repo) {
+                roots.push(repo);
+            }
         }
     }
+    roots
+}
+
+/// The build-base lane: `cargo_build_dirs::sweep` per root from
+/// [`cargo_build_dirs_roots`]. Roots with no `crates/*/Cargo.toml` are
+/// skipped - sweeping a manifest-less root under a shared base could only
+/// ever misjudge rows it cannot resolve. The note carries each root's summary
+/// line; bytes are reclaimed (apply) or projected (dry run).
+fn cargo_build_dirs_lane(home: &AgentsHome, apply: bool, include_cwd_root: bool) -> Lane {
+    let mut lane = Lane::new("cargo_build_dirs", Vec::new());
+    let roots = cargo_build_dirs_roots(home, include_cwd_root);
     let mut notes: Vec<String> = Vec::new();
     for root in roots {
         let root = PathBuf::from(&root);
@@ -377,7 +391,11 @@ fn now_stamp() -> String {
 
 /// The daemon's daily gate: run `--apply` when the receipt is missing or
 /// older than a day. Receipt and effect are one file, so a crashed child
-/// simply reads as stale on the next tick.
+/// simply reads as stale on the next tick. Goes straight to
+/// [`run_reclaim_lanes`] with `include_cwd_root = false`: the daemon's launch
+/// cwd is not a repo a person asked to sweep, it is wherever the process
+/// happened to start (a test's checkout, an arbitrary shell) - the cwd
+/// fallback in `cargo_build_dirs_roots` is a hand-run convenience only.
 pub fn maybe_run_daily(home: &AgentsHome) {
     let stale = match std::fs::metadata(receipt_path(home)) {
         Ok(meta) => meta
@@ -389,7 +407,7 @@ pub fn maybe_run_daily(home: &AgentsHome) {
         Err(_) => true,
     };
     if stale {
-        let _ = run_reclaim(&["--apply".to_string()], home);
+        run_reclaim_lanes(home, true, false, false);
     }
 }
 
@@ -440,7 +458,16 @@ pub fn run_reclaim(args: &[String], home: &AgentsHome) -> i32 {
             }
         }
     }
+    // A hand run: the cwd is wherever the person typing this ran it from, so
+    // the cargo-build-dirs lane sweeps that repo too even if unregistered.
+    run_reclaim_lanes(home, apply, verbose, true)
+}
 
+/// The full lane set (every `run_reclaim` lane but the leading subcommands),
+/// shared by the hand-run CLI path and the daemon's daily tick. Only
+/// `include_cwd_root` differs between the two callers - see
+/// [`cargo_build_dirs_roots`].
+fn run_reclaim_lanes(home: &AgentsHome, apply: bool, verbose: bool, include_cwd_root: bool) -> i32 {
     let mut lanes = vec![
         Lane::new("plugin_cache_build_copies", plugin_cache_copies()),
         Lane::new("leaked_test_homes", leaked_test_homes()),
@@ -455,7 +482,7 @@ pub fn run_reclaim(args: &[String], home: &AgentsHome) -> i32 {
             }
         }
     }
-    lanes.push(cargo_build_dirs_lane(home, apply));
+    lanes.push(cargo_build_dirs_lane(home, apply, include_cwd_root));
     let mut uv = Lane::new("uv_cache_prune", Vec::new());
     match uv_cache_dir() {
         None => uv.note = "uv not found".to_string(),
@@ -723,6 +750,41 @@ pub(crate) mod tests {
             "the note names each root's summary line"
         );
         let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    /// The incident this guards against: a test daemon's first idle tick ran
+    /// `maybe_run_daily` with its cwd still inside the real checkout, and
+    /// `cargo_build_dirs_lane` added that checkout as a sweep root the
+    /// registry never named. With an empty registry the cwd fallback is the
+    /// ONLY way a root can appear, so `include_cwd_root = false` (the
+    /// daemon's own path) must come back empty every time, whatever the
+    /// process's actual cwd is.
+    #[test]
+    fn cargo_build_dirs_roots_excludes_cwd_unless_asked() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let state = temp_lane_root("cargo-roots");
+        let home = AgentsHome::at(state.join("agents"));
+        home.ensure_root().unwrap();
+        std::fs::write(
+            home.registry_json(),
+            serde_json::to_string(&serde_json::json!({"entries": []})).unwrap(),
+        )
+        .unwrap();
+
+        let daemon_roots = cargo_build_dirs_roots(&home, false);
+        let hand_roots = cargo_build_dirs_roots(&home, true);
+
+        assert!(
+            daemon_roots.is_empty(),
+            "the daemon path must never add the cwd repo root: {daemon_roots:?}"
+        );
+        if let Some(this_repo) = canonical_repo_root(&std::env::current_dir().unwrap()) {
+            assert!(
+                hand_roots.contains(&this_repo.to_string_lossy().into_owned()),
+                "a hand run still sweeps its own cwd repo: {hand_roots:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&state);
     }
 }
