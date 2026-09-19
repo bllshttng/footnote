@@ -21,7 +21,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::paths::AgentsHome;
-use crate::transcript_activity::{Activity, FoldReceipt, Roots, Slowdown, TICK_READ_BUDGET};
+use crate::transcript_activity::{
+    hour_string, Activity, FoldReceipt, Roots, Slowdown, TICK_READ_BUDGET,
+};
 
 /// The verb's default budget: bounded, so a plain `--fleet` never scans the
 /// whole corpus; `--backfill` lifts it.
@@ -92,10 +94,6 @@ fn percentile_25(mut values: Vec<f64>) -> Option<f64> {
     values.sort_by(|a, b| a.total_cmp(b));
     let k = values.len().div_ceil(4);
     values.get(k - 1).copied()
-}
-
-fn hour_string(dt: DateTime<Utc>) -> String {
-    dt.format("%Y-%m-%dT%H").to_string()
 }
 
 const EVENT_TYPES: &[&str] = &[
@@ -387,9 +385,10 @@ pub(crate) fn analyze(inputs: &Inputs) -> FleetReport {
         row.cargo = counts.cargo;
         row.pytest = counts.pytest;
     }
+    let now_ms = inputs.now.timestamp_millis();
     let mut refusals_per_hour: HashMap<String, u64> = HashMap::new();
     for p in &pass.refusals {
-        if p.ts_ms < floor_ms {
+        if p.ts_ms < floor_ms || p.ts_ms > now_ms {
             continue;
         }
         let hour = &p.ts[..13];
@@ -402,7 +401,7 @@ pub(crate) fn analyze(inputs: &Inputs) -> FleetReport {
     let mut loads_per_hour: HashMap<String, Vec<f64>> = HashMap::new();
     let mut busy_per_hour: HashMap<String, Vec<f64>> = HashMap::new();
     for r in &pass.readings {
-        if r.ts_ms < floor_ms {
+        if r.ts_ms < floor_ms || r.ts_ms > now_ms {
             continue;
         }
         loads_per_hour
@@ -422,7 +421,7 @@ pub(crate) fn analyze(inputs: &Inputs) -> FleetReport {
     }
     let mut mem_per_hour: HashMap<String, Vec<MemoryPoint>> = HashMap::new();
     for m in &pass.memory {
-        if m.ts_ms < floor_ms {
+        if m.ts_ms < floor_ms || m.ts_ms > now_ms {
             continue;
         }
         mem_per_hour
@@ -438,7 +437,7 @@ pub(crate) fn analyze(inputs: &Inputs) -> FleetReport {
         row.swap_gb_median = median(&mut s);
     }
     for p in &pass.live {
-        if p.ts_ms < floor_ms {
+        if p.ts_ms < floor_ms || p.ts_ms > now_ms {
             continue;
         }
         let row = hour_of(&mut hours, p.ts[..13].to_string());
@@ -539,12 +538,14 @@ fn with_threshold_curve_cap(
         set_curve(report, &hour_snaps, None);
         return;
     }
-    let threshold = percentile_25(at_slowdowns);
-    report.threshold = threshold;
+    let Some(threshold) = percentile_25(at_slowdowns) else {
+        return;
+    };
+    report.threshold = Some(threshold);
     report.threshold_reason = format!(
         "25th percentile of the load_15m at {n_with_reading} slowdown turns with a reading"
     );
-    set_curve(report, &hour_snaps, threshold);
+    set_curve(report, &hour_snaps, Some(threshold));
     // Cap: walk the buckets upward, skipping buckets with fewer than 6
     // hours. The cap is the top of the last bucket whose median stays under
     // the threshold before the first bucket at or above it.
@@ -554,10 +555,9 @@ fn with_threshold_curve_cap(
         report.cap_reason = "no bucket holds 6 hours or more".to_string();
         return;
     }
-    let over = qualifying.iter().position(|b| {
-        b.load_15m_median
-            .is_some_and(|m| threshold.is_some_and(|t| m >= t))
-    });
+    let over = qualifying
+        .iter()
+        .position(|b| b.load_15m_median.is_some_and(|m| m >= threshold));
     match over {
         Some(0) => {
             report.cap_reason =

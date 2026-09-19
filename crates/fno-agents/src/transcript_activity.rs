@@ -133,7 +133,7 @@ fn slow_re() -> &'static regex::Regex {
     })
 }
 
-fn hour_string(dt: DateTime<Utc>) -> String {
+pub(crate) fn hour_string(dt: DateTime<Utc>) -> String {
     dt.format("%Y-%m-%dT%H").to_string()
 }
 
@@ -313,11 +313,19 @@ pub(crate) fn fold(
                     c.clone()
                 }
             }
+            // A file whose head sample cannot be read gets no cursor at all:
+            // the next fold retries it fresh instead of carrying an empty
+            // head that would read as a replacement forever.
             None => {
                 let head_len = file.size.min(HEAD_SAMPLE_BYTES);
+                let Some(head) = head_sample(&file.path, head_len) else {
+                    receipt.pending_files += 1;
+                    receipt.pending_bytes += file.size;
+                    continue;
+                };
                 Cursor {
                     offset: 0,
-                    head: head_sample(&file.path, head_len).unwrap_or_default(),
+                    head,
                     head_len,
                     last_hour: None,
                 }
