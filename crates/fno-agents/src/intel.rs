@@ -516,6 +516,16 @@ fn harness_total(s: &SessionRow) -> u64 {
 
 /// CLI entry: the flag parse, the env-resolved inputs, the fold, one output.
 pub fn run_intel(args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print!(
+            "fno-agents intel [--days N] [--node <id>] [--session <id>] [--json] [--all-projects]\n\n\
+             The provenance fold: per-session operator/relay/harness/keepalive counters,\n\
+             tool_use, commits, the node and PR join, and the relay facets of every bus\n\
+             row addressed to the session. Default window 14 days; --days 0 means every\n\
+             transcript. Exit 3 when the window holds no sessions.\n"
+        );
+        return 0;
+    }
     let mut days = DEFAULT_DAYS;
     let mut node: Option<String> = None;
     let mut session: Option<String> = None;
