@@ -40,6 +40,8 @@ bundles:
         dest: scripts/lib/node-id.sh
       - source: scripts/validate-plan.sh
         dest: scripts/validate-plan.sh
+      - source: scripts/lib/code-index-detect.sh
+        dest: scripts/lib/code-index-detect.sh
       - source: scripts/check-product-md.sh
         dest: scripts/check-product-md.sh
 
