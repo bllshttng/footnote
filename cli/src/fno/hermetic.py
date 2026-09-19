@@ -72,11 +72,6 @@ _AMBIENT_PREFIXES = ("FNO_", "TARGET_")
 # is already derived from HARNESS_SESSION_MARKERS because a hand-maintained copy
 # had already lost CLAUDE_SESSION_ID once.
 _AMBIENT_NAMES: tuple[str, ...] = (
-    # pi's session store root. It relocates the (cwd, session_id) lookup
-    # wholesale, which is exactly the state a test must not read from a
-    # developer's machine: unscrubbed, a duplicate-refusal test would see real
-    # sessions. Scrubbed, the lookup falls back to the sandboxed HOME.
-    "PI_HOME",
     *AMBIENT_IDENTITY_ENV,
     # Harness config roots. resolve_plugin_script takes the plugin roots as
     # authoritative, so a suite run inside a live session resolves the
@@ -89,7 +84,7 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "GEMINI_PROJECT_DIR",
     "GEMINI_SANDBOX",
     "OPENCODE_CONFIG_DIR",  # opencode's config root; same category as CODEX_HOME
-    "GROK_HOME",  # grok's session store root; same category as PI_HOME
+    "GROK_HOME",  # grok's session store root; the same category pi once read a store-root var for
     "GROK_SESSION_ID",  # a live grok session marker; identity, not test input
     "CLAUDE_CLI",
     "CLI",  # legacy harness selector; CLI=codex flips harness resolution
