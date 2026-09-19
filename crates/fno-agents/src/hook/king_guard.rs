@@ -349,6 +349,12 @@ fn write_targets(command: &str) -> Vec<String> {
 /// quote (a malformed shell never executes). Unlike `shlex::split`, unquoted
 /// `;` `|` `&` `(` `)` newline and redirects arrive as their own tokens, so
 /// `2>&1|tail` can never read as one word.
+///
+/// `<<DELIM`/`<<-DELIM` heredoc bodies are swallowed whole, never re-lexed as
+/// more shell text - unless the reading command is a shell (bash/sh/zsh), in
+/// which case the body is lexed again and its tokens spliced in, so `bash
+/// <<EOF` still judges a real write in its body, but a heredoc mailed as a
+/// file body never donates a phantom write target.
 fn lex(command: &str) -> Option<Vec<String>> {
     let mut toks: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -356,6 +362,9 @@ fn lex(command: &str) -> Option<Vec<String>> {
     // whitespace split (`$(pick x)` lexes as `$(pick` + `x)`), so a depth
     // counter, not the current word, decides whether `)` is literal.
     let mut subst = 0usize;
+    // Set right after a `<<`/`<<-` token: (strip_tabs, reader_is_shell), for
+    // the newline arm to act on once the delimiter word lands in `toks`.
+    let mut heredoc: Option<(bool, bool)> = None;
     let mut chars = command.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
@@ -394,6 +403,36 @@ fn lex(command: &str) -> Option<Vec<String>> {
             ';' | '|' | '&' | '\n' => {
                 if !cur.is_empty() {
                     toks.push(std::mem::take(&mut cur));
+                }
+                if c == '\n' && heredoc.is_some() {
+                    let (strip_tabs, reader_is_shell) = heredoc.take().unwrap();
+                    let delim = toks.last().cloned().unwrap_or_default();
+                    let mut body = String::new();
+                    let mut line = String::new();
+                    while let Some(bc) = chars.next() {
+                        if bc != '\n' {
+                            line.push(bc);
+                            continue;
+                        }
+                        let bare = if strip_tabs {
+                            line.trim_start_matches('\t')
+                        } else {
+                            &line[..]
+                        };
+                        if bare == delim {
+                            break;
+                        }
+                        body.push_str(&line);
+                        body.push('\n');
+                        line.clear();
+                    }
+                    if reader_is_shell {
+                        if let Some(sub) = lex(&body) {
+                            toks.extend(sub);
+                        }
+                    }
+                    toks.push("\n".to_string());
+                    continue;
                 }
                 let mut op = c.to_string();
                 while chars.peek() == Some(&c) {
@@ -436,6 +475,19 @@ fn lex(command: &str) -> Option<Vec<String>> {
                 redir.push(c);
                 while matches!(chars.peek(), Some('>' | '<' | '&' | '|' | '!')) {
                     redir.push(chars.next()?);
+                }
+                if redir == "<<" && chars.peek() == Some(&'-') {
+                    redir.push('-');
+                    chars.next();
+                }
+                // The reader is just the word right before `<<DELIM`: real
+                // heredocs are always `bash <<EOF`, never preceded by a
+                // redirect target, so the immediate predecessor suffices.
+                if redir == "<<" || redir == "<<-" {
+                    let shell = toks.last().is_some_and(|t| {
+                        matches!(t.rsplit('/').next().unwrap_or(t), "bash" | "sh" | "zsh")
+                    });
+                    heredoc = Some((redir == "<<-", shell));
                 }
                 toks.push(redir);
             }
@@ -750,6 +802,64 @@ mod tests {
     fn malformed_shell_never_judged() {
         assert!(targets("echo 'unterminated").is_empty());
         assert!(targets("echo \"unterminated").is_empty());
+    }
+
+    /// A cwd-only helper for the heredoc specimens below: session cwd is
+    /// already the repo root, so a relative path resolves inside it exactly
+    /// as a real crowned session would see it.
+    fn bash_allowed_in(repo: &Path, cmd: &str) -> bool {
+        targets(cmd).iter().all(|t| !write_denied(t, repo, repo))
+    }
+
+    #[test]
+    fn heredoc_append_to_job_tmp_allows() {
+        // Regression: a heredoc body that happens to quote a shell command
+        // as prose (a mail draft showing `cat > payload-e9d6.txt` as an
+        // example) must not donate that relative path as a write target.
+        let repo = std::env::temp_dir().join(format!("kgd-heredoc-jobtmp-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&repo);
+        let cmd = "cat >> /Users/bb16/.claude/jobs/X/tmp/payload.txt <<'EOF'\n\
+                   run: cat > payload-e9d6.txt\nEOF";
+        assert!(
+            bash_allowed_in(&repo, cmd),
+            "a heredoc body must not donate a phantom write target"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn heredoc_body_naming_a_repo_path_still_allows() {
+        // The body names a real repo path next to a write-verb word (`cp`);
+        // `cat` never reads its own stdin as commands, so the whole body is
+        // inert text, not a `cp` invocation to classify.
+        let repo = std::env::temp_dir().join(format!("kgd-heredoc-body-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&repo);
+        let cmd = "cat >> /tmp/out.txt <<'EOF'\n\
+                   example: cp notes.txt crates/fno-agents/src/lib.rs\nEOF";
+        assert!(bash_allowed_in(&repo, cmd));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn shell_reading_heredoc_body_still_refuses_a_real_write() {
+        // `bash <<'EOF'` DOES read its stdin as commands, so a real write
+        // inside that body still refuses.
+        let repo = std::env::temp_dir().join(format!("kgd-heredoc-shell-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&repo);
+        let cmd = "bash <<'EOF'\ncat > crates/fno-agents/src/lib.rs\nEOF";
+        assert!(!bash_allowed_in(&repo, cmd));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn plain_in_repo_heredoc_write_still_refuses() {
+        // A heredoc attached to the command's OWN redirect, not its body,
+        // still refuses - the heredoc parsing never loosens a real write.
+        let repo = std::env::temp_dir().join(format!("kgd-heredoc-plain-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&repo);
+        let cmd = "cat > crates/fno-agents/src/lib.rs <<'EOF'\nbody\nEOF";
+        assert!(!bash_allowed_in(&repo, cmd));
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]
