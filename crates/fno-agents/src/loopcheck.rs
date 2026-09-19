@@ -1979,6 +1979,18 @@ pub struct UnattestedReviewer {
     failed_at_head: bool,
 }
 
+/// The committed event lines for one journal family: the store's rows in
+/// commit order, pre-cutover bytes imported first (hash-dedupe free).
+pub(crate) fn event_lines(journal: &Path) -> Result<Vec<String>, String> {
+    fno_event_store::import_all(journal)?;
+    let q = fno_event_store::EventQuery {
+        include_rejected: true,
+        ..Default::default()
+    };
+    let rows = fno_event_store::query_events(journal, &q)?;
+    Ok(rows.into_iter().map(|r| r.line).collect())
+}
+
 /// The `config.review.reviewers` entries NOT satisfied by a head-pinned
 /// `review_attestation` event. A
 /// reviewer is satisfied when events.jsonl carries a line with
@@ -2019,20 +2031,22 @@ pub fn unattested_reviewers_scan(
     head_sha: &str,
     rounds_exhausted: bool,
 ) -> (Vec<UnattestedReviewer>, usize) {
-    // Read across rotation generations: a round that rotated out still counts.
-    // An empty or unreadable store leaves the gate unmet (fail closed).
-    let content = crate::events_store::review_text(events_path);
-    if content.is_empty() {
-        let unsatisfied = reviewers
-            .iter()
-            .map(|r| UnattestedReviewer {
-                name: r.trim_start_matches('/').to_string(),
-                superseded_head: None,
-                failed_at_head: false,
-            })
-            .collect();
-        return (unsatisfied, 0);
-    }
+    // no committed evidence -> gate unmet (fail closed); an unreadable store
+    // is the same shape, never an empty-but-satisfied read
+    let content = match event_lines(events_path) {
+        Ok(lines) => lines.join("\n"),
+        Err(_) => {
+            let unsatisfied = reviewers
+                .iter()
+                .map(|r| UnattestedReviewer {
+                    name: r.trim_start_matches('/').to_string(),
+                    superseded_head: None,
+                    failed_at_head: false,
+                })
+                .collect();
+            return (unsatisfied, 0);
+        }
+    };
     unattested_reviewers_scan_text(
         &content,
         reviewers,
@@ -2063,7 +2077,12 @@ struct OpenFinding {
 /// failure yields no findings (the gate is only ADDED by evidence, never
 /// invented from an unreadable file).
 fn open_review_findings(events_path: &Path, node: &str) -> (Vec<OpenFinding>, usize) {
-    let content = crate::events_store::review_text(events_path);
+    // Any read failure yields no findings (the gate is only ADDED by
+    // evidence, never invented from an unreadable store).
+    let content = match event_lines(events_path) {
+        Ok(lines) => lines.join("\n"),
+        Err(_) => return (Vec::new(), 0),
+    };
     // Preserve first-seen order via a Vec of (id, first_line); a later duplicate
     // id (shouldn't happen - ids are minted) just refreshes the first_line.
     let mut findings: Vec<(String, String)> = Vec::new();
@@ -2300,9 +2319,10 @@ fn read_pr_info(
     // log). Mirrors of rows the project log still holds are deduped, so a
     // round is never counted twice. An unreadable journal degrades to
     // project-only, today's behavior.
-    let project_text = crate::events_store::review_text(events_path);
-    let global_text =
-        attestation_journal::tail_text(global_events_path, attestation_journal::GLOBAL_TAIL_BYTES);
+    let project_text = event_lines(events_path).unwrap_or_default().join("\n");
+    let global_text = event_lines(global_events_path)
+        .unwrap_or_default()
+        .join("\n");
     let extra_global = missing_global_attestations(&global_text, &project_text, repo_slug);
     let events_text = if extra_global.is_empty() {
         project_text
@@ -6853,8 +6873,9 @@ fn read_prior_fires(
     now: DateTime<Utc>,
     min_gap_secs: i64,
 ) -> (u64, u64, Option<String>, i64) {
-    let Ok(content) = std::fs::read_to_string(events_path) else {
-        return (0, 0, None, 0);
+    let content = match event_lines(events_path) {
+        Ok(lines) => lines.join("\n"),
+        Err(_) => return (0, 0, None, 0),
     };
 
     let mut total: u64 = 0;
@@ -6953,8 +6974,9 @@ fn read_prior_fires(
 /// session: the journal's copy of the last observed world, so a fire that
 /// reads no PR state can still record comparable row fields .
 fn read_last_row_fields(events_path: &Path, session_id: &str) -> (String, String) {
-    let Ok(content) = std::fs::read_to_string(events_path) else {
-        return ("none".to_string(), "none".to_string());
+    let content = match event_lines(events_path) {
+        Ok(lines) => lines.join("\n"),
+        Err(_) => return ("none".to_string(), "none".to_string()),
     };
     for line in content.lines().rev() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
@@ -7018,36 +7040,20 @@ fn append_loop_event(path: &Path, event_type: &str, data: serde_json::Value) {
         eprintln!("loop-check: failed to serialize event {event_type}");
         return;
     };
-    let mut retried_after_timeout = false;
-    loop {
-        match crate::claims::append_event_line(path, &event, std::time::Duration::from_secs(2)) {
-            Ok(()) => return,
-            Err(error)
-                if error.contains("events.jsonl lock timeout")
-                    && crate::claims::event_maintenance_active(path) =>
-            {
-                crate::claims::wait_for_event_maintenance(path);
-            }
-            Err(error) if error.contains("events.jsonl lock timeout") && !retried_after_timeout => {
-                retried_after_timeout = true;
-            }
-            Err(error) => {
-                eprintln!(
-                    "loop-check: failed to write event {event_type} to {}: {error}",
-                    path.display()
-                );
-                return;
-            }
-        }
+    // One store commit is the acknowledgement: the journal lock-timeout and
+    // maintenance retry legs retired with the mutex they served.
+    if let Err(error) =
+        crate::claims::append_event_line(path, &event, std::time::Duration::from_secs(2))
+    {
+        eprintln!(
+            "loop-check: failed to write event {event_type} to {}: {error}",
+            path.display()
+        );
     }
 }
 
-/// Append to both project and global event logs.
-///
-/// pub(crate): the `finalize` verb (step 6, ) emits its
-/// `session_finalized` / `session_finalize_failed` events through the same
-/// writer so they land in both logs with the identical `{ts,type,source,data}`
-/// envelope loop-check uses.
+/// Append to both project and global event logs; `finalize` ships its
+/// session events through the same writer, so all envelopes stay identical.
 pub(crate) fn emit_to_both(
     project_events: &Path,
     global_events: &Path,
@@ -11846,6 +11852,7 @@ mod tests {
 
     fn attestation_line(reviewer: &str, head: &str, verdict: &str) -> String {
         serde_json::json!({
+            "ts": "2026-01-01T00:00:00Z", "source": "test",
             "type": "review_attestation",
             "data": {"reviewer": reviewer, "head_sha": head, "verdict": verdict,
                      "attester_session_id": "sess-author"}
@@ -11864,6 +11871,7 @@ mod tests {
         branch: &str,
     ) -> String {
         serde_json::json!({
+            "ts": "2026-01-01T00:00:00Z", "source": "test",
             "type": "review_attestation",
             "data": {"reviewer": reviewer, "head_sha": head, "verdict": verdict,
                      "attester_session_id": "sess-author", "branch": branch}
@@ -11980,6 +11988,8 @@ mod tests {
             "{}\n{}",
             attestation_line("code-review", "h", "pass"),
             serde_json::json!({
+                "ts": "2026-01-01T00:00:00Z",
+                "source": "test",
                 "type": "review_attestation",
                 "data": {"reviewer": "sigma", "head_sha": "h", "verdict": "pass",
                          "attester_session_id": "sess-peer"}
@@ -12073,6 +12083,7 @@ mod tests {
         // ABSENT (the pre-landed backlog) still counts - absence must never
         // be read as zero.
         let zero = serde_json::json!({
+            "ts": "2026-01-01T00:00:00Z", "source": "test",
             "type": "review_attestation",
             "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
                      "attester_session_id": "sess-author", "reviewed_line_count": 0}
@@ -12116,6 +12127,7 @@ mod tests {
         // lines AND 0 files is the empty-diff shape the producer refuses, so
         // the gate must refuse it too, whatever else the line claims.
         let zero = serde_json::json!({
+            "ts": "2026-01-01T00:00:00Z", "source": "test",
             "type": "review_attestation",
             "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
                      "attester_session_id": "sess-author",
@@ -12147,6 +12159,7 @@ mod tests {
         // it would strand exactly those PRs (images, fonts, renames) with no
         // satisfiable producer path.
         let binary = serde_json::json!({
+            "ts": "2026-01-01T00:00:00Z", "source": "test",
             "type": "review_attestation",
             "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
                      "attester_session_id": "sess-author",
@@ -12173,6 +12186,7 @@ mod tests {
         // reads a separate scan; a review of nothing must not satisfy it
         // there either, only on the coverage axis.
         let zero = serde_json::json!({
+            "ts": "2026-01-01T00:00:00Z", "source": "test",
             "type": "review_attestation",
             "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
                      "attester_session_id": "sess-author",
@@ -12207,6 +12221,8 @@ mod tests {
         let mut text = String::new();
         text.push_str(
             &serde_json::json!({
+                "ts": "2026-01-01T00:00:00Z",
+                "source": "test",
                 "type": "review_attestation",
                 "data": {"reviewer": "code-review", "head_sha": "head2", "verdict": "pass",
                          "attester_session_id": "sess-a", "branch": "b",
@@ -12217,6 +12233,8 @@ mod tests {
         text.push('\n');
         text.push_str(
             &serde_json::json!({
+                "ts": "2026-01-01T00:00:00Z",
+                "source": "test",
                 "type": "review_attestation",
                 "data": {"reviewer": "code-review", "head_sha": "head1", "verdict": "fail",
                          "attester_session_id": "sess-a", "branch": "b",
@@ -12242,6 +12260,8 @@ mod tests {
         let mut text = String::new();
         text.push_str(
             &serde_json::json!({
+                "ts": "2026-01-01T00:00:00Z",
+                "source": "test",
                 "type": "review_attestation",
                 "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
                          "attester_session_id": "sess-a", "branch": "b",
@@ -12252,6 +12272,8 @@ mod tests {
         text.push('\n');
         text.push_str(
             &serde_json::json!({
+                "ts": "2026-01-01T00:00:00Z",
+                "source": "test",
                 "type": "review_attestation",
                 "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "fail",
                          "attester_session_id": "sess-a", "branch": "b",
@@ -12343,6 +12365,7 @@ mod tests {
         // the retracting session's own entry stays untouched - undoing an
         // impersonation must not require performing it a second time.
         let pass = serde_json::json!({
+            "ts": "2026-01-01T00:00:00Z", "source": "test",
             "type": "review_attestation",
             "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
                      "attester_session_id": "sess-A", "branch": "feature/x"}
@@ -12362,6 +12385,7 @@ mod tests {
         assert_eq!(control.coverage, Coverage::Covered(1));
 
         let retraction = serde_json::json!({
+            "ts": "2026-01-01T00:00:00Z", "source": "test",
             "type": "review_attestation",
             "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "fail",
                      "attester_session_id": "sess-operator",
@@ -12395,11 +12419,15 @@ mod tests {
         let events = format!(
             "{}\n{}",
             serde_json::json!({
+                "ts": "2026-01-01T00:00:00Z",
+                "source": "test",
                 "type": "review_attestation",
                 "data": {"reviewer": "code-review", "head_sha": "head-1", "verdict": "pass",
                          "attester_session_id": "sess-A", "branch": "feature/x"}
             }),
             serde_json::json!({
+                "ts": "2026-01-01T00:00:00Z",
+                "source": "test",
                 "type": "review_attestation",
                 "data": {"reviewer": "code-review", "head_sha": "head-2", "verdict": "pass",
                          "attester_session_id": "sess-B", "branch": "feature/x"}
@@ -12544,7 +12572,7 @@ mod tests {
         let p = dir.path().join("events.jsonl");
         std::fs::write(
             &p,
-            attestation_line_on_branch("code-review", "oldhead", "pass", "feature/x"),
+            attestation_line_on_branch("code-review", "oldhead", "pass", "feature/x") + "\n",
         )
         .unwrap();
         let reviewers = vec!["code-review".to_string()];
@@ -12664,7 +12692,7 @@ mod tests {
             ),
         );
         for path in [&project, &global] {
-            let text = std::fs::read_to_string(path).unwrap();
+            let text = crate::events::committed_journal_text(path);
             assert!(text.contains("review_coverage"), "missing in {path:?}");
             assert!(
                 text.contains("\"repo\":\"github.com/bllshttng/footnote\""),
@@ -12688,29 +12716,22 @@ mod tests {
     }
 
     #[test]
-    fn target_stream_emit_waits_for_shared_mutex() {
+    fn target_stream_emit_lands_beside_legacy_lock_dirs() {
+        // The store commit owns serialization now; a legacy lock or
+        // maintenance marker beside the journal neither blocks nor drops a
+        // hook emission.
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("events.jsonl");
         let global = dir.path().join("global-events.jsonl");
-        let lock = dir.path().join("events.jsonl.lock.d");
-        std::fs::create_dir(&lock).unwrap();
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let thread_barrier = std::sync::Arc::clone(&barrier);
+        std::fs::create_dir(dir.path().join("events.jsonl.lock.d")).unwrap();
+        std::fs::create_dir(dir.path().join("events.jsonl.gc.d")).unwrap();
 
-        let handle = std::thread::spawn(move || {
-            thread_barrier.wait();
-            emit_to_both(&project, &global, "mutex_probe", serde_json::json!({}));
-            project
-        });
-        barrier.wait();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(!dir.path().join("events.jsonl").exists());
+        emit_to_both(&project, &global, "mutex_probe", serde_json::json!({}));
 
-        std::fs::remove_dir_all(lock).unwrap();
-        let project = handle.join().unwrap();
-        assert!(std::fs::read_to_string(project)
-            .unwrap()
-            .contains("mutex_probe"));
+        for path in [&project, &global] {
+            let text = crate::events::committed_journal_text(path);
+            assert!(text.contains("mutex_probe"), "missing in {path:?}");
+        }
     }
 
     #[test]
@@ -12770,7 +12791,7 @@ mod tests {
         );
 
         assert_eq!(legacy, allow_output("block", None, "keep working", 2, None));
-        let telemetry = std::fs::read_to_string(events).unwrap();
+        let telemetry = crate::events::committed_journal_text(&events);
         assert!(telemetry.contains("\"type\":\"transition_rejected\""));
         assert!(telemetry.contains("invalid transition Closed + DispatchClassified"));
     }
@@ -12793,41 +12814,31 @@ mod tests {
         );
 
         assert!(!run_log.exists());
-        assert!(std::fs::read_to_string(events)
-            .unwrap()
+        assert!(crate::events::committed_journal_text(&events)
             .contains("manifest carries no valid full run id"));
     }
 
     #[test]
-    fn target_stream_emit_waits_through_expected_maintenance_contention() {
+    fn target_stream_emit_lands_during_legacy_maintenance_markers() {
+        // The store commit is the acknowledgement; a maintenance marker
+        // beside the journal retires no emission.
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("events.jsonl");
-        let lock = dir.path().join("events.jsonl.lock.d");
-        let maintenance = dir.path().join("events.jsonl.gc.d");
-        std::fs::create_dir(&lock).unwrap();
-        std::fs::create_dir(&maintenance).unwrap();
+        std::fs::create_dir(dir.path().join("events.jsonl.lock.d")).unwrap();
+        std::fs::create_dir(dir.path().join("events.jsonl.gc.d")).unwrap();
 
-        let handle = std::thread::spawn(move || {
-            append_loop_event(&project, "review_coverage", serde_json::json!({}));
-            project
-        });
+        append_loop_event(&project, "review_coverage", serde_json::json!({}));
 
-        std::thread::sleep(std::time::Duration::from_millis(2_300));
         assert!(
-            !handle.is_finished(),
+            crate::events::committed_journal_text(&project).contains("review_coverage"),
             "review coverage was dropped during expected maintenance"
         );
-
-        std::fs::remove_dir_all(lock).unwrap();
-        std::fs::remove_dir_all(maintenance).unwrap();
-        let project = handle.join().unwrap();
-        assert!(std::fs::read_to_string(project)
-            .unwrap()
-            .contains("review_coverage"));
     }
 
     #[test]
-    fn target_stream_emit_retries_when_maintenance_marker_disappears_near_timeout() {
+    fn target_stream_emit_lands_when_legacy_markers_clear_mid_flight() {
+        // Markers created and removed around the emission: the store commit
+        // is the acknowledgement boundary, so the row lands regardless.
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("events.jsonl");
         let lock = dir.path().join("events.jsonl.lock.d");
@@ -12835,20 +12846,14 @@ mod tests {
         std::fs::create_dir(&lock).unwrap();
         std::fs::create_dir(&maintenance).unwrap();
 
-        let handle = std::thread::spawn(move || {
-            append_loop_event(&project, "maintenance_handoff_probe", serde_json::json!({}));
-            project
-        });
+        append_loop_event(&project, "maintenance_handoff_probe", serde_json::json!({}));
 
-        std::thread::sleep(std::time::Duration::from_millis(1_900));
         std::fs::remove_dir_all(maintenance).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
         std::fs::remove_dir_all(lock).unwrap();
-
-        let project = handle.join().unwrap();
-        assert!(std::fs::read_to_string(project)
-            .unwrap()
-            .contains("maintenance_handoff_probe"));
+        assert!(
+            crate::events::committed_journal_text(&project).contains("maintenance_handoff_probe"),
+            "the probe row was dropped"
+        );
     }
 
     /// The list half of the scan. Production reads the count too, so this
@@ -14323,22 +14328,14 @@ git_bounded();";
         assert!(!unattested_reviewers(&missing, &sigma, "h", "").is_empty());
 
         let stale = tmp.path().join("stale.jsonl");
-        std::fs::write(
-            &stale,
-            r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
-        )
-        .unwrap();
+        std::fs::write(&stale, format!("{}\n", r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#)).unwrap();
         let out = unattested_reviewers(&stale, &sigma, "NEW", "feature/x");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].superseded_head.as_deref(), Some("OLD"));
         assert!(!out[0].failed_at_head);
 
         let failed = tmp.path().join("fail.jsonl");
-        std::fs::write(
-            &failed,
-            r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"h","verdict":"fail"}}"#,
-        )
-        .unwrap();
+        std::fs::write(&failed, format!("{}\n", r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","head_sha":"h","verdict":"fail"}}"#)).unwrap();
         let out = unattested_reviewers(&failed, &sigma, "h", "");
         assert_eq!(out.len(), 1);
         // A head-pinned fail is not a superseded pass; do not offer a stale head.
@@ -14362,7 +14359,10 @@ git_bounded();";
         let p = tmp.path().join("e.jsonl");
         std::fs::write(
             &p,
-            r#"{"type":"review_attestation","data":{"reviewer":"sigma","verdict":"pass"}}"#,
+            format!(
+                "{}\n",
+                r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","verdict":"pass"}}"#
+            ),
         )
         .unwrap();
         let out = unattested_reviewers(&p, &["sigma".to_string()], "", "");
@@ -14376,11 +14376,7 @@ git_bounded();";
         // old-head fail rendered that way invents a review that never passed.
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("e.jsonl");
-        std::fs::write(
-            &p,
-            r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail","branch":"feature/x"}}"#,
-        )
-        .unwrap();
+        std::fs::write(&p, format!("{}\n", r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail","branch":"feature/x"}}"#)).unwrap();
         let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW", "feature/x");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].superseded_head, None);
@@ -14394,13 +14390,13 @@ git_bounded();";
         // node deletes. The sibling review_finding scanner already counts its
         // malformed lines; this one did not.
         let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("e.jsonl");
+        let p = tmp.path().join("e1.jsonl");
         std::fs::write(
             &p,
             concat!(
-                r#"{"type":"review_attestation","data":{"reviewer":"sigma","hea"#,
+                r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","hea"#,
                 "\n",
-                r#"{"type":"loop_check","data":{}}"#,
+                r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"loop_check","data":{}}"#,
             ),
         )
         .unwrap();
@@ -14427,7 +14423,12 @@ git_bounded();";
         );
 
         // A clean file adds nothing to the message.
-        std::fs::write(&p, r#"{"type":"loop_check","data":{}}"#).unwrap();
+        let p = tmp.path().join("e2.jsonl");
+        std::fs::write(
+            &p,
+            r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"loop_check","data":{}}"#,
+        )
+        .unwrap();
         assert_eq!(
             unattested_reviewers_scan(
                 &p,
@@ -14452,10 +14453,11 @@ git_bounded();";
         // guidance this whole node exists to delete, reappearing in exactly the
         // multi-round review/fix cycle that produces this sequence.
         let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("e.jsonl");
+        // One journal per scenario: a rewrite would leak rows across them.
+        let p = tmp.path().join("e1.jsonl");
         let line = |head: &str, verdict: &str| {
             format!(
-                r#"{{"type":"review_attestation","data":{{"reviewer":"sigma","head_sha":"{head}","verdict":"{verdict}","branch":"feature/x"}}}}"#
+                r#"{{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{{"reviewer":"sigma","head_sha":"{head}","verdict":"{verdict}","branch":"feature/x"}}}}"#
             )
         };
         std::fs::write(
@@ -14465,7 +14467,8 @@ git_bounded();";
                 line("BBB", "pass"),
                 line("BBB", "fail"),
             ]
-            .join("\n"),
+            .join("\n")
+                + "\n",
         )
         .unwrap();
         let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC", "feature/x");
@@ -14477,11 +14480,17 @@ git_bounded();";
         );
 
         // The newest STILL-PASSING head wins when several are valid.
-        std::fs::write(&p, [line("AAA", "pass"), line("BBB", "pass")].join("\n")).unwrap();
+        let p = tmp.path().join("e2.jsonl");
+        std::fs::write(
+            &p,
+            [line("AAA", "pass"), line("BBB", "pass")].join("\n") + "\n",
+        )
+        .unwrap();
         let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC", "feature/x");
         assert_eq!(out[0].superseded_head.as_deref(), Some("BBB"));
 
         // Every old head retracted -> nothing to name.
+        let p = tmp.path().join("e3.jsonl");
         std::fs::write(
             &p,
             [
@@ -14490,7 +14499,8 @@ git_bounded();";
                 line("BBB", "fail"),
                 line("AAA", "fail"),
             ]
-            .join("\n"),
+            .join("\n")
+                + "\n",
         )
         .unwrap();
         let out = unattested_reviewers(&p, &["sigma".to_string()], "CCC", "feature/x");
@@ -14504,13 +14514,14 @@ git_bounded();";
         // kept claiming that head was successfully attested after its latest
         // verdict retracted exactly that (codex P2 on this PR).
         let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("e.jsonl");
+        let p = tmp.path().join("e1.jsonl");
         std::fs::write(
             &p,
             concat!(
-                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
+                r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
                 "\n",
-                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail","branch":"feature/x"}}"#,
+                r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail","branch":"feature/x"}}"#,
+                "\n",
             ),
         )
         .unwrap();
@@ -14524,17 +14535,24 @@ git_bounded();";
         // A re-run pass after the fail restores it: revocation is latest-wins,
         // not a one-way latch.
         std::fs::write(
-            &p,
+            &tmp.path().join("e2.jsonl"),
             concat!(
-                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
+                r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
                 "\n",
-                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail","branch":"feature/x"}}"#,
+                r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"fail","branch":"feature/x"}}"#,
                 "\n",
-                r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
+                // Distinct ts: byte-dedupe would drop an identical row.
+                r#"{"ts":"2026-01-01T00:00:01Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","head_sha":"OLD","verdict":"pass","branch":"feature/x"}}"#,
+                "\n",
             ),
         )
         .unwrap();
-        let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW", "feature/x");
+        let out = unattested_reviewers(
+            &tmp.path().join("e2.jsonl"),
+            &["sigma".to_string()],
+            "NEW",
+            "feature/x",
+        );
         assert_eq!(out[0].superseded_head.as_deref(), Some("OLD"));
     }
 
@@ -14724,11 +14742,7 @@ git_bounded();";
         // rather than leaving is_empty() as a convention every reader re-derives.
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("e.jsonl");
-        std::fs::write(
-            &p,
-            r#"{"type":"review_attestation","data":{"reviewer":"sigma","head_sha":"","verdict":"pass"}}"#,
-        )
-        .unwrap();
+        std::fs::write(&p, format!("{}\n", r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"sigma","head_sha":"","verdict":"pass"}}"#)).unwrap();
         let out = unattested_reviewers(&p, &["sigma".to_string()], "NEW", "");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].superseded_head, None);
@@ -15314,11 +15328,7 @@ git_bounded();";
         // holds it - the floor is satisfiable by the self-serve route, not a wait.
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("e.jsonl");
-        std::fs::write(
-            &p,
-            r#"{"type":"review_attestation","data":{"reviewer":"code-review","head_sha":"h","verdict":"pass"}}"#,
-        )
-        .unwrap();
+        std::fs::write(&p, format!("{}\n", r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"code-review","head_sha":"h","verdict":"pass"}}"#)).unwrap();
         let out = unattested_reviewers(&p, &["code-review".to_string()], "h", "");
         assert!(
             out.is_empty(),
@@ -15623,7 +15633,7 @@ git_bounded();";
         // The PERSISTED row keeps the bare schema: stdout-only diagnostics, no
         // event-contract fork. Pin the destination, not the tag - the row must
         // lack the diagnostic keys, and carry the unknown verdict as emitted.
-        let log = std::fs::read_to_string(&events).expect("the verb emitted a row");
+        let log = crate::events::committed_journal_text(&events);
         let row: Value =
             serde_json::from_str(log.lines().next().expect("one row")).expect("row is JSON");
         assert_eq!(row["type"], "review_coverage");
@@ -16410,11 +16420,7 @@ git_bounded();";
     fn session_cost_from_ledger_sums_session_only() {
         let tmp = tempfile::tempdir().unwrap();
         let ledger = tmp.path().join("l.json");
-        std::fs::write(
-            &ledger,
-            r#"[{"session_id":"a","cost_usd":1.0},{"session_id":"b","cost_usd":0.5},{"session_id":"a","cost_usd":0.25}]"#,
-        )
-        .unwrap();
+        std::fs::write(&ledger, format!("{}\n", r#"[{"session_id":"a","cost_usd":1.0},{"session_id":"b","cost_usd":0.5},{"session_id":"a","cost_usd":0.25}]"#)).unwrap();
         let cost = session_cost_from_ledger(&ledger, "a");
         assert!((cost - 1.25).abs() < 0.001, "expected 1.25, got {cost}");
     }
@@ -16861,7 +16867,7 @@ git_bounded();";
 
     fn write_events(dir: &Path, lines: &[&str]) -> std::path::PathBuf {
         let p = dir.join("events.jsonl");
-        std::fs::write(&p, lines.join("\n")).unwrap();
+        std::fs::write(&p, lines.join("\n") + "\n").unwrap();
         p
     }
 
@@ -17379,18 +17385,10 @@ git_bounded();";
     fn local_peer_attestation_is_head_pinned() {
         let td = tempfile::tempdir().unwrap();
         let events = td.path().join("events.jsonl");
-        std::fs::write(
-            &events,
-            r#"{"type":"review_attestation","data":{"reviewer":"peer","head_sha":"OLD","verdict":"pass"}}"#,
-        )
-        .unwrap();
+        std::fs::write(&events, format!("{}\n", r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"peer","head_sha":"OLD","verdict":"pass"}}"#)).unwrap();
         let peer = vec![LOCAL_PEER_REVIEWER.to_string()];
         assert!(!reviewers_all_attested(&events, &peer, "NEW"));
-        std::fs::write(
-            &events,
-            r#"{"type":"review_attestation","data":{"reviewer":"peer","head_sha":"NEW","verdict":"pass"}}"#,
-        )
-        .unwrap();
+        std::fs::write(&events, format!("{}\n", r#"{"ts":"2026-01-01T00:00:00Z","source":"test","type":"review_attestation","data":{"reviewer":"peer","head_sha":"NEW","verdict":"pass"}}"#)).unwrap();
         assert!(reviewers_all_attested(&events, &peer, "NEW"));
     }
 

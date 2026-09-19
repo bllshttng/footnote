@@ -79,6 +79,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "io-st
 # (a JSON string field) or WS control frames; base64 keeps the transport
 # text-safe without a bespoke escape scheme.
 base64 = "0.22"
+# One store library for both binaries: schema, migration, ingest, retention.
+# The write boundary and every reader port onto this crate.
+fno-event-store = { version = "0.1.0", path = "../fno-event-store" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 # Drive (Wave 4): WebSocket upgrade on the supervisor socket after the
 # `agent.drive` JSON-RPC ack (LD21: tokio-tungstenite standard handshake).

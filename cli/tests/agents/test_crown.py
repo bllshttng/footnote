@@ -340,12 +340,9 @@ def test_pane_spawn_clears_a_terminal_holder_before_reclaiming_its_scope(
     # the dead row, the grant for the new one.
     from fno import paths
 
-    journal = paths.state_dir() / "events.jsonl"
-    events = [
-        json.loads(line)
-        for line in journal.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    from tests._event_rows import event_rows
+
+    events = event_rows(paths.state_dir() / "events.jsonl")
     vacates = [e for e in events if e["kind"] == "agent_crown_vacated"]
     assert len(vacates) == 1
     assert vacates[0]["cause"] == "holder_terminal"
@@ -2048,13 +2045,11 @@ def _mission_events() -> list[dict]:
     agent_* rows from the crown telemetry, which share the tmp root)."""
     from fno.paths import project_events_json
 
-    path = project_events_json()
-    if not path.exists():
-        return []
+    from tests._event_rows import event_rows
+
     return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip() and json.loads(line).get("type") == "mission_activated"
+        e for e in event_rows(project_events_json())
+        if e.get("type") == "mission_activated"
     ]
 
 

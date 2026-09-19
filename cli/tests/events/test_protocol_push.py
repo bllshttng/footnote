@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 
 import pytest
+
+from fno.events.store_client import read_committed_lines
 from typer.testing import CliRunner
 
 from fno.events.cli import _resolve_parent_handle
@@ -32,7 +34,20 @@ def _emit_blocked(runner, tmp_path, monkeypatch, *, parent, run_fn):
     events = tmp_path / ".fno" / "events.jsonl"
     state = tmp_path / ".fno" / "target-state.md"
     monkeypatch.setattr("fno.events.cli._resolve_parent_handle", lambda explicit: parent)
-    monkeypatch.setattr("fno.events.cli.subprocess.run", run_fn)
+
+    # Only the parent-push leg is faked. The event store client shares the
+    # subprocess.run module attribute, so its native commit passes through to
+    # the real implementation; a blanket fake would swallow the receipt.
+    import subprocess as _subprocess
+
+    original_run = _subprocess.run
+
+    def _routed(argv, **kw):
+        if argv[:3] == ["fno", "agents", "mail"]:
+            return run_fn(argv, **kw)
+        return original_run(argv, **kw)
+
+    monkeypatch.setattr("fno.events.cli.subprocess.run", _routed)
     result = runner.invoke(
         event_cli,
         ["emit", "--events", str(events), "--state", str(state),
@@ -59,7 +74,7 @@ def test_blocked_pushes_to_parent(runner, tmp_path, monkeypatch) -> None:
 
     result, events = _emit_blocked(runner, tmp_path, monkeypatch, parent="claude-parent99", run_fn=fake_run)
     assert result.exit_code == 0, result.output
-    ev = json.loads(events.read_text().splitlines()[-1])
+    ev = json.loads(read_committed_lines(events)[-1])
     assert ev["type"] == "blocked"
     # P2: parent is resolved into the durable envelope, not only the push path
     assert ev["parent"] == "claude-parent99"
@@ -74,9 +89,18 @@ def test_blocked_pushes_to_parent(runner, tmp_path, monkeypatch) -> None:
 def test_run_summary_emit_does_not_push(runner, tmp_path, monkeypatch) -> None:
     calls: list = []
 
+    # Route like _emit_blocked: the store client shares this subprocess.run
+    # module attribute, so a blanket fake would swallow the native commit's
+    # receipt and fail the emit itself. Only the mail leg is faked.
+    import subprocess as _subprocess
+
+    original_run = _subprocess.run
+
     def fake_run(argv, **kw):
         calls.append(argv)
-        return _R(0)
+        if argv[:3] == ["fno", "agents", "mail"]:
+            return _R(0)
+        return original_run(argv, **kw)
 
     events = tmp_path / ".fno" / "events.jsonl"
     state = tmp_path / ".fno" / "target-state.md"
@@ -93,7 +117,10 @@ def test_run_summary_emit_does_not_push(runner, tmp_path, monkeypatch) -> None:
          })],
     )
     assert result.exit_code == 0, result.output
-    assert events.exists()
+    # The store is the record; the cutover stopped journal appends.
+    from fno.events.store_client import store_db_path
+
+    assert store_db_path(events).exists()
     assert not any(a[:4] == ["fno", "agents", "mail", "send"] for a in calls)
 
 
@@ -130,7 +157,7 @@ def test_no_parent_no_push(runner, tmp_path, monkeypatch) -> None:
 
     result, events = _emit_blocked(runner, tmp_path, monkeypatch, parent=None, run_fn=fake_run)
     assert result.exit_code == 0, result.output
-    assert events.exists()  # event still written
+    assert read_committed_lines(events)  # event still written
     assert not any(a[:4] == ["fno", "agents", "mail", "send"] for a in calls)
 
 
@@ -142,7 +169,7 @@ def test_push_failure_keeps_event(runner, tmp_path, monkeypatch) -> None:
 
     result, events = _emit_blocked(runner, tmp_path, monkeypatch, parent="claude-parent99", run_fn=boom)
     assert result.exit_code == 0, result.output  # push failure is non-fatal
-    ev = json.loads(events.read_text().splitlines()[-1])
+    ev = json.loads(read_committed_lines(events)[-1])
     assert ev["type"] == "blocked"  # events.jsonl line intact, independent of push
 
 

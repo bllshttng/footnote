@@ -4884,7 +4884,7 @@ mod tests {
             None,
             "a failed pass never stamps"
         );
-        let journal = std::fs::read_to_string(&events_path).unwrap();
+        let journal = crate::events::committed_journal_text(&events_path);
         assert!(journal.contains("graph_render_failed"), "{journal}");
         assert!(journal.contains("boom"), "{journal}");
         assert!(journal.contains("\"exit\":3"), "{journal}");

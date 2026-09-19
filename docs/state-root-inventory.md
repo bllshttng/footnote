@@ -29,8 +29,8 @@ One file per install. These belong at the root.
 | `ledger.json` | `paths.ledger_json()` | permanent |
 | `config.toml`, `.lock` | `paths.config_toml()` | permanent |
 | `settings.yaml`, `.lock` | `fno/config/__init__.py` loader | permanent |
-| `events.jsonl`, `.1` | `paths.global_events_json()`, rotated at 8 MB by `crates/fno-agents/src/events.rs`; the rename happens only after `events_store::sync` ingested the file, so one generation on disk loses no durable row | rotated |
-| `events.db`, `.db-wal`, `.db-shm` | `crates/fno-agents/src/events_store.rs`, filled before every rotation and every history read | durable rows for 30 days |
+| `events.jsonl`, `.1` | `paths.global_events_json()`; LEGACY bytes only. Since the event-store cutover every writer commits to `events.db` and no reader treats the file as authoritative; retained generations are imported on first store open | legacy import source |
+| `events.db`, `.db-wal`, `.db-shm` | the `fno-event-store` crate: the AUTHORITATIVE event store (schema v2: seq/event_id/retention_class/identity columns). Every writer commits here; every reader queries here | durable and gate rows forever, ephemeral rows 672 h |
 | `decisions.jsonl` | `paths.decisions_jsonl()`, written by `decide/__init__.py` | permanent |
 | `questions.jsonl` | `paths.questions_jsonl()`, written by `fno inbox outstanding` | permanent; a question does not expire |
 | `decisions.jsonl.corrupt` | `decide/__init__.py::_compact_index` | permanent; the only copy of a row whose source journal is gone |
@@ -81,8 +81,8 @@ Every subfolder and file below was found in the real root unnamed at the 2026-09
 | `briefs/` | `paths.briefs_dir()` | permanent sidecar discovery briefs |
 | `bus/` | `paths.bus_dir()`, written by `cli/src/fno/bus/` (`messages.jsonl`, `cursors/`) | append-only mail log; each consumer's cursor is overwritten |
 | `cache/` | `cli/src/fno/pr/_cache.py` (`cache/pr-status`), `cli/src/fno/king/drain_cache.py` (`cache/king-drain.json`) | regenerated PR-status cache; king-drain counts keyed on graph stat identity, rewritten per fresh drain read |
-| `events.jsonl.ephemeral` | `crates/fno-agents/src/claims.rs` (ephemeral retention class) | claim events whose retention class is ephemeral |
-| `events.jsonl.shell-writers.d/` | `cli/src/fno/events/gc.py` | writer-liveness markers, GC'd with the journal |
+| `events.jsonl.ephemeral` | retired. Ephemeral-class rows commit to the store with `retention_class = 'ephemeral'` and expire at the schema floor | no new writes |
+| `events.jsonl.shell-writers.d/` | retired. The shell writer makes one native store commit; no writer-liveness markers exist | no new writes |
 | `failover-state.json`, `.lock` | `cli/src/fno/adapters/providers/failover.py`, `runtime_state.py` | permanent breaker state: storm-cap and no-swap-back phases |
 | `graph.json.fts5` | `cli/src/fno/graph/fts.py` | derived full-text index beside the graph; regenerated, safe to delete |
 | `graph.json.history/notes.jsonl` | `crates/fno-agents/src/backlog/note_history.rs::history_path` | PERMANENT node-prose history keyed to the graph file (the bounded-state change): every replaced or cleared `current_state` pre-image and every evacuated note; append-only, hash-verified on write, deduped by (node, reason, prior revision, hash). Never rotates, never prunes; the only copy of evacuated prose. Safe to copy with the graph, fatal to delete. |
@@ -218,8 +218,8 @@ Project state left the checkout. One space per repository, keyed on the CANONICA
 
 | Entry | Writer | Lifetime |
 |---|---|---|
-| `<space>/events.jsonl` | `paths.project_events_json()` and `fno-agents` journal writers | append-only per repository; rotated at 8 MB, and only after `events_store::sync` ingested the file |
-| `<space>/events.db`, `.db-wal`, `.db-shm` | `crates/fno-agents/src/events_store.rs`, filled before every rotation and every history read | durable rows for 30 days |
+| `<space>/events.jsonl` | `paths.project_events_json()`; legacy bytes only since the event-store cutover | import source |
+| `<space>/events.db`, `.db-wal`, `.db-shm` | the `fno-event-store` crate, the authoritative event store beside each journal | durable and gate rows forever, ephemeral 672 h |
 | `<space>/claims/` | `fno.claims` for repo-local keys (`walker:`, `review:`, `reap:`); global-id keys (`node:`, `dispatch:`, ...) stay at the global root | re-acquirable leases |
 | `<space>/kings/<scope>.md` | `cli/src/fno/king/state.py` via coronation or `fno agents king init` | one loop-state file per live crown scope; stale files are inert without a live registry crown and cleanup is best-effort (`fno agents king done` on abdication) |
 | `<space>/kings/<scope>.md.lock`, `.md.tmp` | `state.py` / `loop_king.rs` / `king/wake.py` over the manifest lock | lock lives only for the critical section; tmp is replaced on every locked write |

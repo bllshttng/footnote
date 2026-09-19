@@ -98,24 +98,27 @@ pub(crate) fn newest_assistant_text_via_reader(
 /// this a session whose newest message still carries the same distress would
 /// re-mail the parent on each fire.
 fn blocked_distress_already_emitted(project_events: &Path, run: &str, reason: &str) -> bool {
-    let Ok(file) = std::fs::File::open(project_events) else {
+    // Committed rows, not journal bytes: the store commit is the write
+    // boundary, so the dedup reads what a reader would see.
+    // Import first: pre-cutover bytes beside the journal are part of the
+    // history the dedup must see, and a read on an absent store is an
+    // honest no.
+    let _ = fno_event_store::import_all(project_events);
+    let Ok(rows) = fno_event_store::query_events(
+        project_events,
+        &fno_event_store::EventQuery {
+            types: vec!["blocked".to_string()],
+            ..Default::default()
+        },
+    ) else {
         return false;
     };
-    use std::io::BufRead;
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
-    while reader.read_line(&mut line).unwrap_or(0) > 0 {
-        if let Ok(v) = serde_json::from_str::<Value>(&line) {
-            if v.get("type").and_then(|t| t.as_str()) == Some("blocked")
-                && v.get("run").and_then(|r| r.as_str()) == Some(run)
-                && v.pointer("/data/reason").and_then(|r| r.as_str()) == Some(reason)
-            {
-                return true;
-            }
-        }
-        line.clear();
-    }
-    false
+    rows.iter().any(|r| {
+        serde_json::from_str::<Value>(&r.line).map_or(false, |v| {
+            v.get("run").and_then(|x| x.as_str()) == Some(run)
+                && v.pointer("/data/reason").and_then(|x| x.as_str()) == Some(reason)
+        })
+    })
 }
 
 /// Free-text cap shared with the emit CLI (`_PROTOCOL_DATA_STR_CAP`) and
@@ -430,13 +433,14 @@ mod tests {
         let path = tmp.path().join("events.jsonl");
         let mk = |run: &str, reason: &str| {
             serde_json::to_string(&serde_json::json!({
+                "ts": "2026-01-01T00:00:00Z", "source": "test",
                 "type": "blocked", "run": run,
                 "data": {"reason": reason}
             }))
             .unwrap()
                 + "\n"
         };
-        std::fs::write(&path, mk("run-a", "missing dependency")).unwrap();
+        std::fs::write(&path, format!("{}\n", mk("run-a", "missing dependency"))).unwrap();
         // Same run + reason -> already emitted.
         assert!(blocked_distress_already_emitted(
             &path,
@@ -481,8 +485,7 @@ mod tests {
             Some("codex"),
             &d,
         );
-        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&project)
-            .unwrap()
+        let rows: Vec<serde_json::Value> = crate::events::committed_journal_text(&project)
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
@@ -497,7 +500,7 @@ mod tests {
         assert_eq!(row["data"]["reason"], "missing dependency");
         assert_eq!(row["data"]["evidence"], "plan 4.2");
         assert_eq!(
-            std::fs::read_to_string(&global).unwrap().trim(),
+            crate::events::committed_journal_text(&global).trim(),
             serde_json::to_string(&row).unwrap(),
             "the global mirror carries the identical row"
         );
@@ -511,7 +514,9 @@ mod tests {
             &d
         ));
         assert_eq!(
-            std::fs::read_to_string(&project).unwrap().lines().count(),
+            crate::events::committed_journal_text(&project)
+                .lines()
+                .count(),
             1,
             "identical distress must not append a second row"
         );
@@ -524,8 +529,7 @@ mod tests {
         assert!(append_blocked_event(
             &project, &global, "run-a", None, None, &d2
         ));
-        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&project)
-            .unwrap()
+        let rows: Vec<serde_json::Value> = crate::events::committed_journal_text(&project)
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
@@ -550,8 +554,7 @@ mod tests {
             &project, &global, "run-a", None, None, &d
         ));
         let row: serde_json::Value = serde_json::from_str(
-            std::fs::read_to_string(&project)
-                .unwrap()
+            crate::events::committed_journal_text(&project)
                 .lines()
                 .next()
                 .unwrap(),
@@ -566,7 +569,9 @@ mod tests {
             &project, &global, "run-a", None, None, &d
         ));
         assert_eq!(
-            std::fs::read_to_string(&project).unwrap().lines().count(),
+            crate::events::committed_journal_text(&project)
+                .lines()
+                .count(),
             1
         );
     }
@@ -609,7 +614,7 @@ mod tests {
             &distress.unwrap()
         ));
         let row: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+            serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
         assert_eq!(row["type"], serde_json::json!("blocked"));
         assert_eq!(
             row["data"]["reason"],
@@ -688,7 +693,7 @@ mod tests {
 
         assert!(wrote);
         let row: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+            serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
         assert_eq!(row["data"]["reason"], "worktree-init-blocked");
         assert_eq!(row["data"]["evidence"], "Operation not permitted");
         assert_eq!(row["node"], "x-bbbb");
@@ -788,8 +793,7 @@ print(rec["payload"]["content"][0]["text"], end="")
 
         assert_eq!(code, 0);
         assert_eq!(code2, 0);
-        let rows: Vec<serde_json::Value> = std::fs::read_to_string(&project)
-            .unwrap()
+        let rows: Vec<serde_json::Value> = crate::events::committed_journal_text(&project)
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();

@@ -1773,7 +1773,7 @@ mod tests {
             "court"
         );
         let path = manifest_path(&root, "alpha").unwrap();
-        let binding = fs::read_to_string(&path).unwrap();
+        let binding = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = binding.lines().collect();
         assert_eq!(lines[0], "---");
         assert!(
@@ -1809,7 +1809,7 @@ mod tests {
         )
         .unwrap();
         set_manifest_shape(&root, "legacy", "court", None).unwrap();
-        let binding = fs::read_to_string(&path).unwrap();
+        let binding = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = binding.lines().collect();
         assert_eq!(lines[0], "---");
         assert_eq!(lines[1], "shape: court");
@@ -1849,12 +1849,12 @@ mod tests {
             events.display().to_string(),
         ]);
         assert_eq!(rc, 0);
-        let content = fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
+        let content = std::fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
         assert!(
             content.lines().any(|l| l.trim() == "term: span:72h"),
             "manifest was {content}"
         );
-        let logged = fs::read_to_string(&events).unwrap();
+        let logged = crate::events::committed_journal_text(&events);
         assert_eq!(
             logged.lines().filter(|l| l.contains("king_term")).count(),
             1
@@ -1883,7 +1883,7 @@ mod tests {
         };
         assert_eq!(declare("span:48h", vec![]), 0);
         assert_eq!(declare("span:120h", vec![]), 1);
-        let content = fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
+        let content = std::fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
         assert!(
             content.lines().any(|l| l.trim() == "term: span:48h"),
             "extension without --reason must not touch the manifest: {content}"
@@ -1898,7 +1898,7 @@ mod tests {
             ),
             0
         );
-        let content = fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
+        let content = std::fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
         assert!(content.lines().any(|l| l.trim() == "term: span:120h"));
         assert!(content
             .lines()
@@ -1926,7 +1926,7 @@ mod tests {
             root.display().to_string(),
         ]);
         assert_eq!(rc, 1);
-        let content = fs::read_to_string(&path).unwrap();
+        let content = std::fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
         assert!(!content.contains("term:"), "manifest was {content}");
     }
 
@@ -1948,7 +1948,7 @@ mod tests {
             root.display().to_string(),
         ]);
         assert_eq!(rc, 1);
-        let content = fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
+        let content = std::fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
         assert!(!content.contains("term:"), "manifest was {content}");
     }
 

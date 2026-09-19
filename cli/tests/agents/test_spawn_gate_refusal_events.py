@@ -47,10 +47,9 @@ def journal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _refusals(journal: Path) -> list[dict[str, Any]]:
-    if not journal.exists():
-        return []
-    rows = [json.loads(line) for line in journal.read_text().splitlines() if line.strip()]
-    return [r for r in rows if r.get("kind") == "spawn_gate_refused"]
+    from tests._event_rows import event_rows
+
+    return [r for r in event_rows(journal) if r.get("kind") == "spawn_gate_refused"]
 
 
 def test_provider_cap_refusal_names_provider_cap_and_count(journal: Path) -> None:

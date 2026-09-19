@@ -35,7 +35,9 @@ def _events(cwd: Path) -> list[dict]:
     p = cwd / ".fno" / "events.jsonl"
     if not p.exists():
         return []
-    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+    from tests._event_rows import event_rows
+
+    return event_rows(p)
 
 
 def _gate_escapes(cwd: Path) -> list[dict]:

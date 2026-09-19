@@ -3,7 +3,7 @@
 Format: one JSON object per line in .fno/events.jsonl
 Schema: {type, campaign_id, session_id, nonce, ts, payload}
 
-Writes are atomic via filelock so concurrent processes can't interleave bytes.
+Writes commit through the native event store; no file lock is needed.
 """
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TypedDict
 
-import filelock
 import yaml
 
 
@@ -137,9 +136,9 @@ def emit_event(
         # backlog/advance both carried: a hand-built path consults neither
         # FNO_EVENTS_PATH nor FNO_REPO_ROOT, so a test emitting through this
         # writer lands a production-shaped row in the developer's journal. This
-        # module writes under its own filelock rather than through
-        # append_event, so it never meets that guard and resolving correctly is
-        # the whole protection it gets.
+        # module wrote under its own filelock rather than through
+        # append_event; resolving through fno.paths is still what keeps a
+        # test emit out of the developer's production journal.
         from fno.paths import project_events_json
 
         events_path = project_events_json()
@@ -168,28 +167,37 @@ def emit_event(
     nonce = mint_nonce()
     ts = datetime.now(timezone.utc).isoformat()
 
-    event: LegacyEvent = {
-        "type": event_type,
-        "campaign_id": campaign_id,
-        "session_id": session_id,
-        "nonce": nonce,
-        "ts": ts,
-        "payload": payload,
-    }
-    line = json.dumps(event, ensure_ascii=False) + "\n"
+    # The legacy envelope becomes canonical at the storage boundary: the
+    # store only commits {ts, type, source, data}, so the legacy fields land
+    # under data and the row stays joinable by every canonical reader
+    # (normalize_event projects either shape on the read side).
+    data: Dict[str, Any] = dict(payload)
+    if session_id:
+        data.setdefault("session_id", session_id)
+    if campaign_id:
+        data.setdefault("campaign_id", campaign_id)
+    data.setdefault("nonce", nonce)
+    envelope = {"ts": ts, "type": event_type, "source": "legacy", "data": data}
+    from fno.events.store_client import emit_envelope
 
-    # Ensure parent directory exists
-    events_path.parent.mkdir(parents=True, exist_ok=True)
-
-    lock_path = str(events_path) + ".lock"
-    with filelock.FileLock(lock_path, timeout=10):
-        with events_path.open("a", encoding="utf-8") as fh:
-            fh.write(line)
-
+    emit_envelope(envelope, events_path, timeout=10)
     return nonce
 
 
 # -- Read / filter --
+
+def _filter_by_session(
+    rows: List[Dict[str, Any]], session_id: Optional[str]
+) -> List[Dict[str, Any]]:
+    if session_id is None:
+        return rows
+    out: List[Dict[str, Any]] = []
+    for event in rows:
+        normalized = normalize_event(event)
+        if session_id in {normalized["session_id"], normalized["holder_session_id"]}:
+            out.append(event)
+    return out
+
 
 def read_events(
     events_path: Optional[Path] = None,
@@ -217,29 +225,27 @@ def read_events(
 
     events_path = Path(events_path)
 
-    if not events_path.exists():
-        return []
+    # SQL authority: committed rows in commit order; a journal with no store
+    # answers its raw pre-cutover bytes via the verb's legacy fallback. The
+    # legacy raw-only parse below fires only when no binary is available.
+    from fno.events.store_client import native_rows
 
-    results: List[Dict[str, Any]] = []
-    for lineno, raw in enumerate(events_path.read_text(encoding="utf-8").splitlines(), start=1):
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            event = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"Corrupted events.jsonl at line {lineno}: {exc}. "
-                "Repair or truncate the file before continuing."
-            ) from exc
-        normalized = normalize_event(event)
-        if session_id is None or session_id in {
-            normalized["session_id"],
-            normalized["holder_session_id"],
-        }:
-            results.append(event)
+    committed = native_rows(events_path, legacy_fallback=True)
+    if committed is not None:
+        rows = []
+        for raw in committed:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                rows.append(json.loads(raw))
+            except json.JSONDecodeError:
+                continue
+        return _filter_by_session(rows, session_id)
 
-    return results
+    from fno.events.store_client import query_rows
+
+    return _filter_by_session(query_rows(events_path), session_id)
 
 
 # -- Audit --
@@ -268,19 +274,21 @@ def audit_session(
     if not strict:
         return {"ok": True, "events": events}
 
-    # Find all phases that had a phase_init
+    # Store rows nest the legacy payload under data; raw pre-cutover lines
+    # carry it as payload. Accept either so the audit reads both shapes.
     phases_initiated: set[str] = set()
     for event in events:
         if event["type"] == "phase_init":
-            phase = event.get("payload", {}).get("phase")
+            body = event.get("payload") or event.get("data") or {}
+            phase = body.get("phase")
             if phase:
                 phases_initiated.add(phase)
 
-    # Find all phases that had a gate_written
     phases_gate_written: set[str] = set()
     for event in events:
         if event["type"] == "gate_written":
-            phase = event.get("payload", {}).get("phase")
+            body = event.get("payload") or event.get("data") or {}
+            phase = body.get("phase")
             if phase:
                 phases_gate_written.add(phase)
 

@@ -465,12 +465,14 @@ pub fn blob_hashes(repo_root: &Path, paths: &[&Path]) -> HashMap<PathBuf, String
 // Journal + graph reads (the dedupe index)
 // ---------------------------------------------------------------------------
 
-/// Tolerant per-line parse of a JSONL events journal.
+/// The committed rows of an events journal, tolerant per-line parse kept for
+/// the folded shapes the consolidation decisions read.
 fn read_events(path: &Path) -> Vec<serde_json::Value> {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(lines) = crate::loopcheck::event_lines(path) else {
         return Vec::new();
     };
-    text.lines()
+    lines
+        .iter()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .collect()
 }
@@ -1425,9 +1427,14 @@ mod tests {
     }
 
     fn journal_count(journal: &Path, needle: &str) -> usize {
-        std::fs::read_to_string(journal)
-            .map(|t| t.lines().filter(|l| l.contains(needle)).count())
-            .unwrap_or(0)
+        // Committed rows, not journal bytes: the store cutover commits
+        // sweep rows in the store beside the journal.
+        let _ = fno_event_store::import_all(journal);
+        fno_event_store::query_events(journal, &fno_event_store::EventQuery::default())
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.line.contains(needle))
+            .count()
     }
 
     fn now_ts() -> String {

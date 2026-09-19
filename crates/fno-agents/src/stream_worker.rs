@@ -1795,7 +1795,7 @@ cat >/dev/null
         );
 
         let events = AgentsHome::at(&home).events_jsonl();
-        let text = std::fs::read_to_string(&events).expect("events.jsonl missing");
+        let text = crate::events::committed_journal_text(&events);
         let ev = text
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
@@ -2109,7 +2109,7 @@ done
             .expect("run() returned an error");
 
         let events = AgentsHome::at(&home).events_jsonl();
-        let text = std::fs::read_to_string(&events).expect("events.jsonl missing");
+        let text = crate::events::committed_journal_text(&events);
         let ev = text
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())

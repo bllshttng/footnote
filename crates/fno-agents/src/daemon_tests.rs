@@ -131,10 +131,14 @@ fn socket_inode_matches_detects_unlink_and_rebind() {
 }
 
 fn read_events(home: &AgentsHome) -> Vec<Value> {
-    std::fs::read_to_string(home.events_jsonl())
+    // Committed rows, not journal bytes: the store cutover stopped journal
+    // appends, so emitted events live only in the store beside the journal.
+    let journal = home.events_jsonl();
+    let _ = fno_event_store::import_all(&journal);
+    fno_event_store::query_events(&journal, &fno_event_store::EventQuery::default())
         .unwrap_or_default()
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .iter()
+        .filter_map(|r| serde_json::from_str::<Value>(&r.line).ok())
         .collect()
 }
 
@@ -1554,10 +1558,9 @@ fn emit_inside_leg_completion_publishes_only_for_report_bearing_rows() {
     emit_inside_leg_completion(&emitter, &with_report);
     emit_inside_leg_completion(&emitter, &rentry("plain", AgentStatus::Live, None));
 
-    let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    let log = read_events(&home);
     let events: Vec<serde_json::Value> = log
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
+        .into_iter()
         .filter(|v: &serde_json::Value| v["type"] == "inside_leg_completed")
         .collect();
     assert_eq!(
@@ -1637,7 +1640,7 @@ fn flush_buffered_inside_leg_drains_onto_row_under_seq_gate() {
     // event. A newer report that raced onto the row's store path first is NOT
     // regressed (codex P2: highest-seq-wins survives the flush).
     let home = tmp_home("inside-leg-flush");
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let report = |seq| state::InsideLegReport {
         state: state::InsideLegState::Working,
         seq,
@@ -2802,33 +2805,12 @@ pub(super) fn probe_with_age(
 }
 
 pub(super) fn test_ctx(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
-    Ctx {
-        home,
-        emitter: EventEmitter::new(std::path::PathBuf::from("/dev/null"), "daemon"),
-        opts: DaemonOptions {
-            idle_exit: Duration::from_secs(1800),
-            worker_bin,
-            reconcile_on_start: true,
-            agents_config_cwd: PathBuf::from("/dev/null"),
-            // Off in tests: a unit test must never spawn a real `fno inbox notify`.
-            notify_on_blocked: false,
-            notify_on_done: false,
-        },
-        started_at: std::time::Instant::now(),
-        exe_fingerprint: crate::drift::ExeFingerprint::current(),
-        pid_start_time: process_start_time(std::process::id()),
-        pending_inside_leg: std::sync::Mutex::new(std::collections::HashMap::new()),
-        codex_threads: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-    }
-}
-
-/// Like `test_ctx` but wires the emitter to `home.events_jsonl()` so
-/// that tests checking emitted events can read them back with `read_events`.
-fn test_ctx_with_events(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
+    // The emitter commits to the store beside the home journal: `/dev/null`
+    // was a sink under the journal regime, but the store needs a real path.
     let events_path = home.events_jsonl();
     Ctx {
-        home,
         emitter: EventEmitter::new(events_path, "daemon"),
+        home,
         opts: DaemonOptions {
             idle_exit: Duration::from_secs(1800),
             worker_bin,
@@ -4225,7 +4207,7 @@ async fn switchboard_drives_b_and_mirrors_into_a() {
     seed_stream_row(&home, "B", "swB");
     let _a = start_stream_worker(&home, "swA", FAKE_STREAM_EMITTER).await;
     let _b = start_stream_worker(&home, "swB", FAKE_STREAM_EMITTER).await;
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent-worker"));
 
     let req = Request::new(
         1,
@@ -4387,7 +4369,7 @@ async fn switchboard_failed_drive_does_not_orphan_restamped_recipient() {
     let restamp_done = home.root().join("restamp-done");
     let script = format!(
         r#"
-printf '%s\n' '{{"type":"system","subtype":"init","session_id":"s1"}}'
+printf '%s\n' '{{"ts":"2026-01-01T00:00:00Z","source":"test","type":"system","subtype":"init","session_id":"s1"}}'
 while IFS= read -r line; do
   touch '{}'
   while [ ! -f '{}' ]; do sleep 0.01; done
@@ -4398,7 +4380,7 @@ done
         restamp_done.display()
     );
     let _b = start_stream_worker(&home, "swB", &script).await;
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent-worker"));
 
     let registry_path = home.registry_json();
     let restamp_signal = turn_started.clone();
@@ -4748,7 +4730,7 @@ async fn handle_ask_resolves_a_full_session_id_to_the_named_row() {
 fn handle_report_stores_on_matching_row() {
     let home = tmp_home("report-store");
     seed_stream_row(&home, "worker-A", "repA"); // claude_session_uuid = uuid-repA
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let req = Request::new(
         1,
         "agent.report",
@@ -4790,7 +4772,7 @@ fn handle_report_marks_a_matching_model_as_verified() {
         r.entries[0].model_basis = Some("requested".into());
     })
     .unwrap();
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let resp = handle_report(
         &ctx,
         &Request::new(
@@ -4830,7 +4812,7 @@ fn handle_report_capability_flip_clears_screen_state() {
         });
     })
     .unwrap();
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let resp = handle_report(
         &ctx,
         &Request::new(
@@ -4869,7 +4851,7 @@ fn handle_report_blocked_stores_reason_and_clears_screen_state() {
         });
     })
     .unwrap();
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let resp = handle_report(
         &ctx,
         &Request::new(
@@ -4901,7 +4883,7 @@ fn handle_report_blocked_stores_reason_and_clears_screen_state() {
 fn handle_report_drops_stale_seq() {
     let home = tmp_home("report-stale");
     seed_stream_row(&home, "worker-A", "repB");
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     // seq=2 stored, then a reordered seq=1 arrives.
     let _ = handle_report(
         &ctx,
@@ -4942,7 +4924,7 @@ fn handle_report_drops_stale_seq() {
 #[test]
 fn handle_report_buffers_early_push_for_unknown_session() {
     let home = tmp_home("report-unknown");
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("fno-agents-worker"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let resp = handle_report(
         &ctx,
         &Request::new(

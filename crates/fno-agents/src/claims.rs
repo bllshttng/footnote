@@ -1711,56 +1711,14 @@ fn remove_reaped(path: &Path) {
 pub(crate) fn append_event_line(
     events_path: &Path,
     event: &Value,
-    lock_timeout: Duration,
+    _lock_timeout: Duration,
 ) -> Result<(), String> {
-    let mut line = serde_json::to_vec(event).map_err(|e| e.to_string())?;
-    line.push(b'\n');
-    // Honor the declared retention class: ephemeral rows (the claim
-    // lifecycle, single_flight_gate) go to the sibling journal - the same
-    // routing EventEmitter::write_line and the Python append_event apply - so
-    // an event lands in one store whichever language emitted it.
-    let ephemeral = event
-        .get("type")
-        .and_then(Value::as_str)
-        .is_some_and(crate::events::is_ephemeral_event);
-    loop {
-        // Setup can replace a local journal with a canonical-journal symlink
-        // while this writer waits on the old mutex. Re-resolve after acquiring
-        // and retry whenever the leaf changed during that handoff.
-        let resolved_path =
-            std::fs::canonicalize(events_path).unwrap_or_else(|_| events_path.to_path_buf());
-        let target_path = if ephemeral {
-            crate::events::ephemeral_path(&resolved_path)
-        } else {
-            resolved_path.clone()
-        };
-        if let Some(parent) = target_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let lock_dir = target_path.with_file_name(format!(
-            "{}.lock.d",
-            target_path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "events.jsonl".into())
-        ));
-        let token = acquire_dir_mutex(&lock_dir, lock_timeout, true)
-            .ok_or_else(|| format!("events.jsonl lock timeout: {}", lock_dir.display()))?;
-        let current_path =
-            std::fs::canonicalize(events_path).unwrap_or_else(|_| events_path.to_path_buf());
-        if current_path != resolved_path {
-            release_dir_mutex(&lock_dir, &token);
-            continue;
-        }
-        let res = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&target_path)
-            .and_then(|mut f| f.write_all(&line))
-            .map_err(|e| e.to_string());
-        release_dir_mutex(&lock_dir, &token);
-        return res;
-    }
+    // One native commit is the acknowledgement boundary: the store's SQL
+    // transaction serializes writers in every language, so the mkdir mutex,
+    // symlink re-resolve loop, and sibling routing are all retired. The
+    // retention class comes from the event type inside the store.
+    let line = serde_json::to_string(event).map_err(|e| e.to_string())?;
+    fno_event_store::append_envelope(events_path, &line, None).map(|_| ())
 }
 
 fn event_maintenance_dir(events_path: &Path) -> PathBuf {
@@ -2968,6 +2926,14 @@ mod tests {
 
     use support::*;
 
+    /// Committed rows in the store beside this journal.
+    fn committed_row_count(events: &std::path::Path) -> usize {
+        let _ = fno_event_store::import_all(events);
+        fno_event_store::query_events(events, &fno_event_store::EventQuery::default())
+            .unwrap_or_default()
+            .len()
+    }
+
     fn opts_in(root: &TempDir) -> AcquireOpts {
         AcquireOpts {
             root: Some(root.path().to_path_buf()),
@@ -3030,7 +2996,7 @@ mod tests {
         // .ephemeral sibling since retention routing. Read both files
         // so the assertions below keep describing the full audit trail.
         let mut text =
-            std::fs::read_to_string(root.path().join(".fno/events.jsonl")).unwrap_or_default();
+            crate::events::committed_journal_text(&root.path().join(".fno/events.jsonl"));
         text.push_str(
             &std::fs::read_to_string(root.path().join(".fno/events.jsonl.ephemeral"))
                 .unwrap_or_default(),
@@ -4651,9 +4617,9 @@ mod tests {
     }
 
     #[test]
-    fn events_lock_corpse_is_stolen_within_the_daemon_budget() {
-        // AC5-ERR: the 2s hot-path budget still holds -- a corpse is stolen on
-        // the first spin rather than burning the whole deadline.
+    fn events_write_lands_beside_a_corpse_lock() {
+        // The store commit is the write boundary: a stale lock dir beside the
+        // journal neither blocks nor gets touched by an append.
         let td = TempDir::new().unwrap();
         let events = td.path().join(".fno/events.jsonl");
         std::fs::create_dir_all(events.parent().unwrap()).unwrap();
@@ -4664,14 +4630,13 @@ mod tests {
         let started = Instant::now();
         let res = append_event_line(
             &events,
-            &json!({"ts": "t", "type": "x"}),
+            &json!({"ts": "2026-01-01T00:00:00Z", "source": "test", "type": "x", "data": {}}),
             Duration::from_secs(2),
         );
 
         assert!(res.is_ok(), "{res:?}");
         assert!(started.elapsed() < Duration::from_secs(2));
-        assert!(!lock.exists());
-        assert_eq!(std::fs::read_to_string(&events).unwrap().lines().count(), 1);
+        assert_eq!(committed_row_count(&events), 1);
     }
 
     #[test]
@@ -4703,8 +4668,9 @@ mod tests {
     }
 
     #[test]
-    fn events_lock_fresh_contention_still_times_out() {
-        // AC2-EDGE: honest contention keeps today's log-and-skip behavior.
+    fn events_write_lands_despite_a_fresh_foreign_lock() {
+        // The store serializes writers in SQL: a live-looking lock dir beside
+        // the journal is foreign state an append neither waits on nor drops.
         let td = TempDir::new().unwrap();
         let events = td.path().join(".fno/events.jsonl");
         std::fs::create_dir_all(events.parent().unwrap()).unwrap();
@@ -4712,51 +4678,12 @@ mod tests {
 
         let res = append_event_line(
             &events,
-            &json!({"ts": "t", "type": "x"}),
+            &json!({"ts": "2026-01-01T00:00:00Z", "source": "test", "type": "x", "data": {}}),
             Duration::from_secs(2),
         );
 
-        assert!(res.is_err(), "fresh lock was stolen");
-    }
-
-    #[test]
-    fn event_append_retries_when_setup_retargets_leaf_while_waiting() {
-        let td = TempDir::new().unwrap();
-        let local = td.path().join("worktree-events.jsonl");
-        std::fs::write(&local, b"").unwrap();
-        let canonical = td.path().join("canonical-events.jsonl");
-        std::fs::write(&canonical, b"").unwrap();
-        let local_lock = td.path().join("worktree-events.jsonl.lock.d");
-        let canonical_lock = td.path().join("canonical-events.jsonl.lock.d");
-        std::fs::create_dir(&local_lock).unwrap();
-        std::fs::create_dir(&canonical_lock).unwrap();
-
-        let writer_path = local.clone();
-        let writer = std::thread::spawn(move || {
-            append_event_line(
-                &writer_path,
-                &json!({"ts": "t", "type": "handoff"}),
-                Duration::from_secs(5),
-            )
-        });
-        std::thread::sleep(Duration::from_millis(100));
-        std::fs::rename(&local, td.path().join("local-backup.jsonl")).unwrap();
-        std::os::unix::fs::symlink(&canonical, &local).unwrap();
-        std::fs::remove_dir_all(&local_lock).unwrap();
-
-        std::thread::sleep(Duration::from_millis(200));
-        assert_eq!(
-            std::fs::metadata(&canonical).unwrap().len(),
-            0,
-            "writer bypassed the canonical mutex after the symlink handoff"
-        );
-
-        std::fs::remove_dir_all(&canonical_lock).unwrap();
-        writer.join().unwrap().unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&canonical).unwrap().lines().count(),
-            1
-        );
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(committed_row_count(&events), 1);
     }
 
     #[test]
@@ -4821,7 +4748,7 @@ mod tests {
                 std::thread::spawn(move || {
                     append_event_line(
                         &events,
-                        &json!({"ts": "t", "type": "x", "i": i}),
+                        &json!({"ts": "2026-01-01T00:00:00Z", "source": "test", "type": "x", "data": {"i": i}}),
                         // The assertion is that all four lines land whole with
                         // one rename winner, never that they land fast, so the
                         // budget is generous. But it must EXCEED STALE_MUTEX_STEAL,
@@ -4843,7 +4770,7 @@ mod tests {
             h.join().unwrap().unwrap();
         }
 
-        assert_eq!(std::fs::read_to_string(&events).unwrap().lines().count(), 4);
+        assert_eq!(committed_row_count(&events), 4);
     }
 
     #[test]

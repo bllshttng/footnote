@@ -2828,6 +2828,7 @@ mod tests {
         std::env::set_var("FNO_AGENTS_HOME", dir.path().join("agents"));
         std::env::set_var("FNO_SPACES_DIR", dir.path().join("spaces"));
         std::env::set_var("HOME", dir.path());
+        crate::paths::pin_test_claims_root(dir.path());
         let script = dir.path().join("sleepy-fno-py");
         std::fs::write(&script, "#!/bin/sh\nexec sleep 5\n").unwrap();
         {

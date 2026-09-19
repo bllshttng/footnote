@@ -1,0 +1,19 @@
+[package]
+name = "fno-event-store"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "The authoritative SQLite runtime event store: schema, migration, ingest, retention"
+license = "Apache-2.0"
+repository = "https://github.com/bllshttng/footnote"
+
+[dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["std", "alloc", "clock"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

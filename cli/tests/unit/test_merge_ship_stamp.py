@@ -494,10 +494,11 @@ def _stub_git_root(monkeypatch, module, root: Path):
 
 
 def _requested_rows(log: Path) -> list[dict]:
+    from tests._event_rows import event_rows
+
     return [
-        json.loads(line)
-        for line in log.read_text().splitlines()
-        if json.loads(line).get("type") == "merge_cleanup_requested"
+        row for row in event_rows(log)
+        if row.get("type") == "merge_cleanup_requested"
     ]
 
 

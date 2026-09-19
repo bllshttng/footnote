@@ -1693,8 +1693,7 @@ mod tests {
             true,
         );
 
-        let lines: Vec<String> = std::fs::read_to_string(&path)
-            .unwrap()
+        let lines: Vec<String> = crate::events::committed_journal_text(&path)
             .lines()
             .map(String::from)
             .collect();
@@ -1725,8 +1724,7 @@ mod tests {
             true,
         );
         let last: serde_json::Value = serde_json::from_str(
-            std::fs::read_to_string(&path)
-                .unwrap()
+            crate::events::committed_journal_text(&path)
                 .lines()
                 .last()
                 .unwrap(),

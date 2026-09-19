@@ -18,7 +18,7 @@ crossing	crates/fno-agents/src/daemon.rs	6855	let out = std::process::Command::n
 crossing	crates/fno-agents/src/distress.rs	148	.or_else(|| newest_assistant_text_via_reader(&loopcheck_fno_bin(), transcript_path, cwd));
 crossing	crates/fno-agents/src/distress.rs	271	std::ffi::OsStr::new(&loopcheck_fno_bin()),
 crossing	crates/fno-agents/src/distress.rs	350	let text = newest_assistant_text_via_reader(&loopcheck_fno_bin(), &transcript, &cwd);
-crossing	crates/fno-agents/src/finalize.rs	486	let mut cmd = Command::new("fno");
+crossing	crates/fno-agents/src/finalize_run_summary.rs	164	let mut cmd = Command::new("fno");
 crossing	crates/fno-agents/src/finalize.rs	1928	let mut command = Command::new("fno");
 crossing	crates/fno-agents/src/finalize.rs	1984	let ok = Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	2356	let ok = Command::new("fno")
