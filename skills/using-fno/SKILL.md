@@ -75,7 +75,7 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 
 **Citizens vs limbs.** `fno agents spawn` makes an addressable, durable roster citizen. A native subagent is a one-shot, observable-only limb. Spawn work that must outlive you, hold a claim, or receive mail. Use a limb for a result consumed next turn. [Details](docs/architecture/coordination.md).
 
-**Mail is user-shaped.** Fallback when a worker's invocation is refused: `fno agents mail send <worker> --raw '/<verb>'`. A mail probe proves user-triggered behavior, never autonomy. No live king means [advisory self-review](docs/architecture/review-lanes.md).
+**Mail is user-shaped.** Fallback when a worker's own invocation is refused: `fno agents mail send <worker> --raw '/<verb>'`. A mail probe proves user-triggered behavior, never autonomy. No live king means [advisory self-review](docs/architecture/review-lanes.md).
 
 **Fix what you find. Carve out only what is too big.** A problem you spot mid-task gets FIXED in this PR as its own commit, unrelated or not. SIZE is the only justification for filing instead: `fno backlog carveout add --kind deferred|oos-bug "<what + why>"`. Harvested at merge, cleared only by `fno backlog retro sweep-carveouts --apply`. Prefer a node. Applies in every pipeline.
 
