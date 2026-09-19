@@ -438,9 +438,29 @@ pub fn admit_fleet() -> Result<AdmissionPermit, AdmissionFailure> {
         }),
         decision => Err(AdmissionFailure {
             decision,
-            detail: census.reason().unwrap_or_default().to_string(),
+            detail: census.reason().map(enrich_fd_ceiling).unwrap_or_default(),
         }),
     }
+}
+
+/// When the census died to descriptor exhaustion, the refusal is the
+/// open-file ceiling, not a broken measurement: the same wall the pty spawn
+/// names, so the operator reads one diagnostic wherever the wall surfaces.
+/// The count equals the limit exactly when allocation was refused with
+/// EMFILE, so the rendered numbers are true.
+fn enrich_fd_ceiling(detail: &str) -> String {
+    let exhausted = detail.contains("os error 24")
+        || detail.contains("os error 23")
+        || detail.contains("Too many open files");
+    if !exhausted {
+        return detail.to_string();
+    }
+    let limit = crate::pty::nofile_limit();
+    format!(
+        "{detail}; failed to spawn pty child: this mux server is at its open-file \
+         ceiling ({limit} of {limit} fds in use). Raise it with setrlimit(RLIMIT_NOFILE) at \
+         server start, or restart the server to reclaim descriptors (this kills live panes)"
+    )
 }
 
 /// Acquire the same machine lock for a pane-tab decision. The pane count is
