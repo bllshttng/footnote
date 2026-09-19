@@ -2634,6 +2634,21 @@ fn card_ready_to_dispatch(backlog: &[BacklogCard], node: &str) -> bool {
         .any(|c| (c.id == node || c.slug == node) && c.state == CardState::Ready)
 }
 
+/// Rewrite every `Leaf(from)` in `node` to `Leaf(to)`, leaving branches and
+/// other leaves untouched. Used by the home-shell reclaim: the stored shell's
+/// pane takes the leaf its slot recorded, the stand-in retires.
+fn subtree_swap(node: &mut Node, from: u64, to: u64) {
+    match node {
+        Node::Leaf(pid) if *pid == from => *pid = to,
+        Node::Branch { children, .. } => {
+            for (_, child) in children {
+                subtree_swap(child, from, to);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Whether `name` carries `node` as an exact token (plan Locked 6):
 /// the id appears with no alphanumeric neighbor on either side, so
 /// `tgt-` and `` match but `x-54f` inside `` (or ``
@@ -5728,10 +5743,28 @@ impl Core {
         let (cwd, _) = restore_member_cwd(stored_cwd, fallback_cwd, |path| {
             std::path::Path::new(path).is_dir()
         });
-        let pid = self.spawn_pane(rows, cols, &cwd)?;
-        if let Some(entry) = self.panes.get_mut(&pid) {
-            entry.name = Some(facts.name.clone());
+        // The placeholder's identity rides its argv (the same wrapper the
+        // worker spawn path uses): every pane is keeper-hosted, so the
+        // placeholder outlives this server, and the next one re-derives whose
+        // seat it holds from the argv instead of minting a twin beside it.
+        let candidates: Vec<String> = self
+            .shells
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        let mut spawned = Err("no shell candidate for held placeholder".to_string());
+        for shell in &candidates {
+            let argv = vec![
+                "env".to_string(),
+                format!("FNO_AGENT_SELF={}", facts.name),
+                shell.clone(),
+            ];
+            spawned = self.spawn_pane_cmd(&argv, rows, cols, &cwd);
+            if spawned.is_ok() {
+                break;
+            }
         }
+        let pid = spawned?;
         self.write_restore_message(
             pid,
             &format!(
@@ -6572,6 +6605,35 @@ impl Core {
             tab_trees,
             active_tab: Some(active_tab),
         })
+    }
+
+    /// Seat `adopted` (a keeper shell re-adopted at its birth id) into the
+    /// home tab's leaf in place of the just-spawned attach stand-in, which is
+    /// then reaped: it was born this attach, holds nothing, and leaving both
+    /// alive would accrete a shell tab on every restart.
+    fn reclaim_home_shell(&mut self, home_sid: u64, adopted: u64) {
+        let fresh = self
+            .session
+            .squad(home_sid)
+            .and_then(|sq| sq.tabs.first())
+            .and_then(|tab| tree::leaves(&tab.root).first().copied());
+        let Some(fresh) = fresh else {
+            return;
+        };
+        if fresh == adopted {
+            return;
+        }
+        if let Some(tab) = self
+            .session
+            .squad_mut(home_sid)
+            .and_then(|sq| sq.tabs.first_mut())
+        {
+            subtree_swap(&mut tab.root, fresh, adopted);
+            if tab.focus == fresh {
+                tab.focus = adopted;
+            }
+        }
+        self.reap_pane(fresh);
     }
 
     /// Capture squad `sid`'s whole tab topology into store shape -
@@ -7899,6 +7961,17 @@ impl Core {
                         && kept_slots[0].portal.is_none();
                     if pure_shell_unnamed && fresh_home_shell_claim {
                         fresh_home_shell_claim = false;
+                        // The fresh home shell stands in for the stored tab.
+                        // The stored slot's own keeper shell re-adopted at its
+                        // birth id, though: seat THAT pane in the home tab (the
+                        // operator keeps their shell, ring included) and retire
+                        // the just-minted stand-in, so a restart converges
+                        // instead of accreting a shell tab every cycle.
+                        if let Some(birth) = kept_slots.first().and_then(|slot| slot.pane_id) {
+                            if let Some(adopted) = self.take_adopted_for_slot(birth) {
+                                self.reclaim_home_shell(home_sid, adopted);
+                            }
+                        }
                         continue;
                     }
                     let mut slot_pane: HashMap<&str, u64> = HashMap::new();
