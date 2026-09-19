@@ -16,6 +16,9 @@ import pytest
 from fno.pr import _quota, _rest, _status
 from fno.pr._proc import Result
 
+# The real zero-job wrapper, captured before any fixture stubs it.
+_REAL_ZERO_JOB_ROWS = _rest._zero_job_rows
+
 _PULLS = {
     "html_url": "https://github.com/Owner/Repo/pull/42",
     "state": "open",
@@ -999,3 +1002,84 @@ def test_failed_workflow_run_listing_is_loud_not_a_silent_degrade():
     )
     assert pr_json is None
     assert "secondary rate limit" in reason
+
+
+_ZERO_JOB_ROW = {
+    "name": ".github/workflows/cli-ci.yml",
+    "status": "completed",
+    "conclusion": "failure",
+    "startedAt": "2026-09-19T07:00:00Z",
+    "detailsUrl": "https://github.com/Owner/Repo/actions/runs/35337460787",
+    "workflow": ".github/workflows/cli-ci.yml",
+}
+
+
+def test_zero_job_failure_rows_read_red(monkeypatch):
+    """AC3-HP: the op's rows join the rollup and the verdict reads red."""
+    import fno.rust_binary as rust_binary
+
+    monkeypatch.setattr(_rest, "_zero_job_rows", _REAL_ZERO_JOB_ROWS)
+    payloads: list[dict] = []
+
+    def fake_verb(verb, payload, **kw):
+        payloads.append(payload)
+        assert verb == "authorized-merge"
+        return {"rows": [dict(_ZERO_JOB_ROW)]}
+
+    monkeypatch.setattr(rust_binary, "verb_call", fake_verb)
+    pr_json, reason = _rest.fetch_pr_rest(
+        "42",
+        runner=_runner(
+            check_runs=[_cr("rust-ci", "completed", "success")],
+            workflow_runs=[
+                {
+                    "id": 35337460787,
+                    "name": "cli-ci",
+                    "path": ".github/workflows/cli-ci.yml",
+                    "status": "completed",
+                    "conclusion": "failure",
+                }
+            ],
+        ),
+    )
+    assert reason == "" and pr_json is not None
+    rollup = pr_json["statusCheckRollup"]
+    assert _ZERO_JOB_ROW in rollup
+    verdict, exit_code, counts = _status.verdict_for(rollup)
+    assert (verdict, exit_code) == ("red", 1)
+    assert counts["fail"] == 1
+    payload = payloads[0]
+    assert payload["op"] == "status-zero-job-runs"
+    # _slug_or_reason lowercases the remote's owner/repo.
+    assert payload["slug"] == "owner/repo"
+    assert payload["runs"] and payload["check_runs"]
+
+
+def test_zero_job_read_failure_is_loud_never_green(monkeypatch):
+    """AC3-ERR: an unavailable binary answers (None, reason) - the module's
+    loud-failure contract, which run_status renders as verdict: error."""
+    import fno.rust_binary as rust_binary
+
+    monkeypatch.setattr(_rest, "_zero_job_rows", _REAL_ZERO_JOB_ROWS)
+
+    def boom(verb, payload, **kw):
+        raise rust_binary.VerbUnavailable("binary not found")
+
+    monkeypatch.setattr(rust_binary, "verb_call", boom)
+    pr_json, reason = _rest.fetch_pr_rest(
+        "42",
+        runner=_runner(
+            check_runs=[_cr("rust-ci", "completed", "success")],
+            workflow_runs=[
+                {
+                    "id": 35337460787,
+                    "name": "cli-ci",
+                    "path": ".github/workflows/cli-ci.yml",
+                    "status": "completed",
+                    "conclusion": "failure",
+                }
+            ],
+        ),
+    )
+    assert pr_json is None
+    assert "zero-job run read failed" in reason
