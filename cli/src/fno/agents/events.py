@@ -90,7 +90,15 @@ def emit(kind: str, *, path: Optional[Path] = None, **data: Any) -> None:
     # rows round-trip them verbatim, which keeps every kind-keyed reader on
     # the shared history working through the same rows.
     records = [
-        {**record, "type": kind, "source": "agents", "data": dict(data)}
+        {
+            **record,
+            "type": kind,
+            # A caller-supplied ``source`` kwarg is a legacy top-level field
+            # (e.g. register_session's --source resume); it outranks the
+            # channel identity so kind-keyed readers keep their semantics.
+            "source": data.get("source") or "agents",
+            "data": dict(data),
+        }
     ]
     if kind != "provider_rate_limited" and "429" in diagnostic and "1313" in diagnostic:
         records.append(

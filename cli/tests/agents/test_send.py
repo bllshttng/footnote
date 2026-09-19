@@ -3196,7 +3196,13 @@ def _team_fake_writer(monkeypatch, returncode: int = 0, stdout: str = "", stderr
     class _Proc:
         pass
 
+    real_run = subprocess.run
+
     def fake_run(args, **kwargs):
+        if {"doctor", "event"} <= set(args):
+            # Event emission rides the same subprocess seam; let it reach the
+            # real binary so only true writer calls land in `calls`.
+            return real_run(args, **kwargs)
         calls.append({
             "args": args,
             "input": kwargs.get("input"),

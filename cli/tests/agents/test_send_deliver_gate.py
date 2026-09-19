@@ -1263,10 +1263,9 @@ def test_relay_loop_persists_stop_event(tmp_path: Path, monkeypatch) -> None:
         "B", "A", "r1", 6, recipient_identities=_sb_identities("A", "B")
     )
 
-    records = [
-        json.loads(line)
-        for line in (tmp_path / ".fno/events.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
+    from tests._event_rows import event_rows
+
+    records = event_rows(tmp_path / ".fno" / "events.jsonl")
     assert records[-1]["kind"] == "agent_relay_stopped"
     assert records[-1]["target"] == "A"
     assert records[-1]["turn"] == 2

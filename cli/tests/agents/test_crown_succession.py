@@ -367,18 +367,13 @@ def test_an_attended_human_may_grant_anything(court, monkeypatch) -> None:
 
 
 def _events() -> list:
-    """Every parsed line of the tmp journal. The real events.emit writes the
-    real file; a monkeypatched list would re-prove only the call."""
+    """Every committed row of the tmp journal. The real events.emit commits
+    through the store; a monkeypatched list would re-prove only the call."""
     from fno import paths
 
-    journal = paths.state_dir() / "events.jsonl"
-    if not journal.is_file():
-        return []
-    return [
-        json.loads(line)
-        for line in journal.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    from tests._event_rows import event_rows
+
+    return event_rows(paths.state_dir() / "events.jsonl")
 
 
 def test_a_succession_journals_the_vacate_and_the_grant(court) -> None:

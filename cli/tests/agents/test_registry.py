@@ -2553,11 +2553,9 @@ def _seed_rows(registry_path: Path, rows: list) -> None:
 
 
 def _removal_events(events_path: Path) -> list[dict]:
-    return [
-        json.loads(line)
-        for line in events_path.read_text(encoding="utf-8").splitlines()
-        if json.loads(line)["type"] == "registry_row_removed"
-    ]
+    from tests._event_rows import event_rows
+
+    return [e for e in event_rows(events_path) if e["type"] == "registry_row_removed"]
 
 
 def test_update_registry_accounts_for_a_removed_row(
@@ -2683,10 +2681,9 @@ def test_update_registry_journals_rows_lost_naming_the_writer(
         lambda es: [e for e in es if e.name != "dropped"], path=registry_path
     )
 
-    lines = [
-        json.loads(line)
-        for line in events_path.read_text(encoding="utf-8").splitlines()
-    ]
+    from tests._event_rows import event_rows
+
+    lines = event_rows(events_path)
     lost = [e for e in lines if e["type"] == "registry_rows_lost"]
     assert len(lost) == 1, f"exactly one grouped loss event: {lines}"
     data = lost[0]["data"]
