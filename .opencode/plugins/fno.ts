@@ -63,18 +63,6 @@ const AGENT_INFERENCE: Record<string, string> = {
   "code-reviewer": "review",
 }
 
-// category -> preferred model as "providerID/modelID". Best-effort: a model is
-// only forced when the provider registry actually has it (see resolveModel);
-// otherwise the child session uses opencode's default. Env-specific model names
-// are intentionally NOT hardcoded blindly — a missing model must degrade, not
-// break delegation (AC5-ERR).
-const CATEGORY_MODEL: Record<string, string> = {
-  // Left empty by default: routing rides each agent's own `model:` field plus
-  // opencode's default. Populate per-environment, e.g.
-  //   ship: "anthropic/claude-haiku-4-5",
-  //   plan: "anthropic/claude-opus-4-6",
-}
-
 const MAX_DEPTH = 3
 const MAX_CONCURRENCY = 5
 const SYNC_TIMEOUT_MS = 120_000
@@ -96,116 +84,137 @@ export function inferCategory(subagentType?: string): string | undefined {
  * (tool arrays, nested skills) is ignored, not parsed. A full YAML dependency
  * would be over-engineering for three fields.
  */
-export function parseFrontmatter(raw: string): { data: Record<string, string>; body: string } {
+export function parseFrontmatter(
+  raw: string,
+): { data: Record<string, string | string[]>; body: string } {
   const m = raw.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?([\s\S]*)$/)
   if (!m) return { data: {}, body: raw }
-  const data: Record<string, string> = {}
+  const data: Record<string, string | string[]> = {}
+  const unquote = (v: string) => v.replace(/^["']/, "").replace(/["']$/, "")
   for (const line of m[1].split(/\r?\n/)) {
     const kv = line.match(/^([A-Za-z0-9_]+):\s*(.*)$/)
     if (!kv) continue // skips list items, nested keys, blanks
-    let value = kv[2].trim()
+    const value = kv[2].trim()
     if (
       (value.startsWith('"') && value.endsWith('"')) ||
       (value.startsWith("'") && value.endsWith("'"))
     ) {
-      value = value.slice(1, -1)
+      data[kv[1]] = value.slice(1, -1)
+      continue
     }
-    if (value === "" || value.startsWith("[") || value.startsWith("{")) continue
+    // Inline list values (`tools: ["Read", "Write"]`) survive as arrays - the
+    // restriction fields die one call before the translator when dropped here.
+    if (value.startsWith("[") && value.endsWith("]")) {
+      const items = value
+        .slice(1, -1)
+        .split(",")
+        .map((x) => unquote(x.trim()))
+        .filter(Boolean)
+      if (items.length) data[kv[1]] = items
+      continue
+    }
+    if (value === "" || value.startsWith("{")) continue
     data[kv[1]] = value
   }
   return { data, body: m[2].trimStart() }
 }
 
-/** opencode AgentConfig-shaped object. `model` is a "provider/model" string. */
+/** opencode AgentConfig-shaped object. `model` is a "provider/model" string;
+ * `tools` is opencode's disable-only record: a key present with false is
+ * withheld from the agent. */
 export type AgentDef = {
   description?: string
   mode: "subagent"
   prompt: string
   model?: string
+  tools?: Record<string, boolean>
 }
+
+/**
+ * The translation of one footnote agent: either an opencode definition or a
+ * named refusal. A refusal means the definition declares a restriction this
+ * vocabulary cannot express; the agent is NOT registered and no unrestricted
+ * fallback is registered in its place.
+ */
+export type AgentTranslation =
+  | { ok: true; def: AgentDef }
+  | { ok: false; agent: string; field: string; value: string }
 
 /**
  * Translate a footnote (Claude Code format) agent markdown into an opencode
  * agent definition. Bare CC short model names (sonnet/haiku/opus) are dropped
  * so the child falls back to opencode's default — forcing an unmapped name
  * would fail agent resolution. A "provider/model" string is passed through.
+ *
+ * Restrictions: `disallowedTools` carries into opencode's disable-only tools
+ * record (`{ name: false }`). An allowlist `tools` CANNOT be expressed there:
+ * the record withholds only what it names false, everything unlisted stays
+ * enabled, so a definition carrying one is refused outright rather than
+ * registered as though it had asked for no restriction at all.
  */
-export function toOpencodeAgent(data: Record<string, string>, body: string): AgentDef {
+export function toOpencodeAgent(
+  data: Record<string, string | string[]>,
+  body: string,
+  name = "agent",
+): AgentTranslation {
   const def: AgentDef = { mode: "subagent", prompt: body }
-  if (data.description) def.description = data.description
-  if (data.model && data.model.includes("/")) def.model = data.model
-  return def
+  if (typeof data.description === "string") def.description = data.description
+  if (typeof data.model === "string" && data.model.includes("/")) def.model = data.model
+  if (Array.isArray(data.tools)) {
+    return { ok: false, agent: name, field: "tools", value: JSON.stringify(data.tools) }
+  }
+  if (Array.isArray(data.disallowedTools)) {
+    const tools: Record<string, boolean> = {}
+    for (const t of data.disallowedTools) {
+      if (typeof t === "string" && t) tools[t.toLowerCase()] = false
+    }
+    def.tools = tools
+  }
+  return { ok: true, def }
 }
 
-/** Extract the assistant's text from a session.prompt response's parts. */
+/** Extract the assistant's COMPLETED text from a message's parts. Reasoning
+ * parts never join a deliverable on any path (AC5-ERR, AC5-EDGE). */
 export function extractAssistantText(parts: Array<{ type?: string; text?: string }> | undefined): string {
   if (!parts) return ""
   return parts
-    .filter((p) => p.type === "text" || p.type === "reasoning")
+    .filter((p) => p.type === "text")
     .map((p) => p.text ?? "")
     .filter(Boolean)
     .join("\n")
     .trim()
 }
 
-/**
- * Resolve a "providerID/modelID" for a category, but only if the model exists
- * in the available set. Returns undefined to let opencode use its default.
- */
-export function resolveModel(
-  category: string | undefined,
-  available: Set<string>,
-): { providerID: string; modelID: string } | undefined {
-  if (!category) return undefined
-  const spec = CATEGORY_MODEL[category]
-  if (!spec) return undefined
-  const slash = spec.indexOf("/")
-  if (slash < 0) return undefined
-  const providerID = spec.slice(0, slash)
-  const modelID = spec.slice(slash + 1)
-  if (!available.has(`${providerID}/${modelID}`)) return undefined
-  return { providerID, modelID }
-}
-
-/**
- * Fold a provider.list() response into the available-model set (in place).
- * The SDK response body nests the providers under `data.all` (alongside
- * `default`/`connected`), NOT directly under `data` - iterating `data` itself
- * would throw on the object and the fire-and-forget .catch would silently
- * swallow it, leaving the set empty.
- */
-export function collectModels(
-  providers: { data?: { all?: Array<{ id: string; models?: Record<string, unknown> }> } } | undefined,
-  into: Set<string>,
-): Set<string> {
-  for (const p of providers?.data?.all ?? []) {
-    if (!p?.id) continue // skip malformed entries (no "undefined/model" pollution)
-    for (const modelID of Object.keys(p.models ?? {})) into.add(`${p.id}/${modelID}`)
-  }
-  return into
-}
-
 // ---------------------------------------------------------------------------
 // Agent loading
 // ---------------------------------------------------------------------------
 
-/** Read + translate every `agents/*.md` under the project into opencode defs. */
-export function loadFootnoteAgents(projectDir: string): Record<string, AgentDef> {
+/** Read + translate every `agents/*.md` under the project. Returns the
+ * registerable defs and, separately, the named refusals the config hook
+ * prints - registration is where a restriction would be lost, so the refusal
+ * is decided before it. */
+export function loadFootnoteAgents(projectDir: string): {
+  agents: Record<string, AgentDef>
+  refusals: AgentTranslation[]
+} {
   const dir = join(projectDir, "agents")
-  const out: Record<string, AgentDef> = {}
-  if (!existsSync(dir)) return out
+  const agents: Record<string, AgentDef> = {}
+  const refusals: AgentTranslation[] = []
+  if (!existsSync(dir)) return { agents, refusals }
   for (const file of readdirSync(dir)) {
     if (!file.endsWith(".md")) continue
     const name = basename(file, ".md")
     try {
       const { data, body } = parseFrontmatter(readFileSync(join(dir, file), "utf8"))
       // footnote agents are addressed as `fno:<name>` in the pipeline.
-      out[`fno:${name}`] = toOpencodeAgent(data, body)
+      const t = toOpencodeAgent(data, body, `fno:${name}`)
+      if (t.ok) agents[`fno:${name}`] = t.def
+      else refusals.push(t)
     } catch {
       // A malformed agent file must not abort registration of the rest.
     }
   }
-  return out
+  return { agents, refusals }
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +224,7 @@ export function loadFootnoteAgents(projectDir: string): Record<string, AgentDef>
 type SessionClient = {
   session: {
     create(o: { body: Record<string, unknown>; query?: { directory?: string } }): Promise<{ data?: { id: string }; error?: unknown }>
+    list(o?: { query?: { directory?: string } }): Promise<{ data?: Array<{ id?: string; parentID?: string }>; error?: unknown }>
     get(o: { path: { id: string } }): Promise<{ data?: { parentID?: string }; error?: unknown }>
     prompt(o: { path: { id: string }; body: Record<string, unknown> }): Promise<{ data?: { parts?: Array<{ type?: string; text?: string }> }; error?: unknown }>
     promptAsync(o: { path: { id: string }; body: Record<string, unknown> }): Promise<{ error?: unknown }>
@@ -243,15 +253,140 @@ async function sessionDepth(client: SessionClient, sessionId: string): Promise<n
   return depth
 }
 
-// module-level guard: only SYNC delegations (which hold this turn) are counted.
-let inFlightSync = 0
+// Per-parent delegation reservations (Change 3). The reservation is inserted
+// synchronously under a nonce BEFORE the depth walk and before session.create,
+// so two concurrent callers can never both read a pre-increment count; it is
+// rekeyed to the child id once create returns. Background children hold a
+// reservation like any other child and release it when task_result reads a
+// terminal state. In-memory only and deliberately not authority: admission
+// reconciles against the live child set on every fire, so a plugin reload
+// cannot leak capacity - and an unreadable count refuses as `capacity
+// unknown`, never as headroom.
+const reservations = new Map<string, Map<string, unknown>>()
+let nonceCounter = 0
+
+function reserve(parentId: string): string {
+  const token = `nonce-${Date.now()}-${nonceCounter++}`
+  let slot = reservations.get(parentId)
+  if (!slot) {
+    slot = new Map()
+    reservations.set(parentId, slot)
+  }
+  slot.set(token, true)
+  return token
+}
+
+function rekeyReservation(parentId: string, token: string, childId: string): void {
+  const slot = reservations.get(parentId)
+  if (!slot || !slot.has(token)) return
+  slot.delete(token)
+  slot.set(childId, true)
+}
+
+function releaseReservation(key: string): void {
+  for (const slot of reservations.values()) slot.delete(key)
+}
+
+/** Live children of one parent, straight from the server: a child is live
+ * while its latest assistant state is pending or running. A finished child
+ * stays a session row forever, so counting rows would fill the cap
+ * permanently. Returns `null` when any reconciliation read fails - an
+ * unreadable count is never read as headroom. */
+async function liveChildren(client: SessionClient, parentId: string): Promise<Set<string> | null> {
+  const res = await client.session
+    .list({})
+    .catch(() => null)
+  const rows = (res as { data?: Array<{ id?: string; parentID?: string }> } | null)?.data
+  if (!Array.isArray(rows)) return null
+  const live = new Set<string>()
+  for (const row of rows) {
+    if (!row?.id || row.parentID !== parentId) continue
+    const id = row.id
+    const m = await client.session
+      .messages({ path: { id } })
+      .catch(() => null)
+    if (m === null || (m as { error?: unknown }).error) return null
+    const state = buildTaskResult(id, (m as { data?: ChildMessage[] }).data).state
+    if (state === "pending" || state === "running") live.add(id)
+  }
+  return live
+}
+
+/** Reservations the live set does not already account for: pending nonces and
+ * children created after the list was read. */
+function pendingReservations(parentId: string, ownToken: string, liveIds: Set<string>): number {
+  let n = 0
+  for (const key of reservations.get(parentId)?.keys() ?? []) {
+    if (key !== ownToken && !liveIds.has(key)) n += 1
+  }
+  return n
+}
 
 type TaskDeps = {
   client: SessionClient
   directory: string
   knownAgents: () => Set<string>
-  availableModels: () => Set<string>
   timeoutMs?: number
+}
+
+// ---------------------------------------------------------------------------
+// Typed delegation results (Change 4)
+// ---------------------------------------------------------------------------
+
+export type TaskResultState = "pending" | "running" | "completed" | "failed" | "aborted" | "blocked"
+
+/** The one delegation envelope both the synchronous and background paths
+ * return. `result` is present only on `completed`; `provider_id`/`model_id`
+ * are the child's own readback when the child message carries them. */
+export type TaskResult = {
+  state: TaskResultState
+  child_session_id: string
+  provider_id?: string
+  model_id?: string
+  result?: string
+}
+
+type AssistantInfo = {
+  role?: string
+  time?: { created?: number; completed?: number }
+  error?: { name?: string }
+  providerID?: string
+  modelID?: string
+}
+
+/** Terminal is `time.completed` present with `error` absent; a present error
+ * maps to failed, or aborted for MessageAbortedError. Never guesses. */
+export function classifyAssistant(
+  info: AssistantInfo | undefined,
+): "completed" | "failed" | "aborted" | "running" {
+  if (info?.error) return info.error.name === "MessageAbortedError" ? "aborted" : "failed"
+  if (typeof info?.time?.completed === "number") return "completed"
+  return "running"
+}
+
+type ChildMessage = { info?: AssistantInfo; parts?: Array<{ type?: string; text?: string }> }
+
+/** Build the delegation envelope from a child session's messages. Reasoning
+ * alone never yields a deliverable (AC5-*). */
+export function buildTaskResult(taskId: string, messages: ChildMessage[] | undefined): TaskResult {
+  const list = Array.isArray(messages) ? messages : []
+  const assistant = list.filter((m) => m?.info?.role === "assistant")
+  if (assistant.length === 0) return { state: "pending", child_session_id: taskId }
+  const last = assistant[assistant.length - 1]
+  const cls = classifyAssistant(last.info)
+  const info = last.info ?? {}
+  if (cls === "running") return { state: "running", child_session_id: taskId }
+  const readback: TaskResult =
+    info.providerID || info.modelID
+      ? {
+          state: cls,
+          child_session_id: taskId,
+          ...(info.providerID ? { provider_id: info.providerID } : {}),
+          ...(info.modelID ? { model_id: info.modelID } : {}),
+        }
+      : { state: cls, child_session_id: taskId }
+  if (cls === "completed") readback.result = extractAssistantText(last.parts)
+  return readback
 }
 
 /** Build the `task` delegation tool. */
@@ -284,17 +419,31 @@ export function createTaskTool(deps: TaskDeps): ToolDefinition {
         return `error: unknown agent "${args.subagent_type}". Available: ${available}`
       }
 
+      // Reserve synchronously, BEFORE any await: two concurrent callers can
+      // never both read a pre-increment count (AC4-HP).
+      const parentKey = context.sessionID
+      const nonce = reserve(parentKey)
+      let resKey = nonce
+      const release = () => releaseReservation(resKey)
+
+      // Reconcile against the live child set before admitting.
+      const live = await liveChildren(deps.client, parentKey)
+      if (live === null) {
+        release()
+        return "error: capacity unknown (cannot read the live child set); no child created."
+      }
+      const total = live.size + pendingReservations(parentKey, nonce, live)
+      if (total >= MAX_CONCURRENCY) {
+        release()
+        return `error: concurrency limit reached (cap ${MAX_CONCURRENCY}, ${total} child delegations in flight). Wait for a slot.`
+      }
+
       const depth = await sessionDepth(deps.client, context.sessionID)
       if (depth >= MAX_DEPTH) {
+        release()
         return `error: delegation depth limit reached (${MAX_DEPTH}). This session is already ${depth} level(s) deep.`
       }
 
-      const background = args.run_in_background === true
-      if (!background && inFlightSync >= MAX_CONCURRENCY) {
-        return `error: concurrency limit reached (${MAX_CONCURRENCY} synchronous delegations in flight). Wait for a slot.`
-      }
-
-      const model = resolveModel(category, deps.availableModels())
       const title = `${args.description ?? agent} (@${agent})`
 
       const created = await deps.client.session
@@ -302,31 +451,37 @@ export function createTaskTool(deps: TaskDeps): ToolDefinition {
           body: {
             parentID: context.sessionID,
             title,
-            ...(model ? { model: { id: model.modelID, providerID: model.providerID } } : {}),
           },
           query: { directory: deps.directory },
         })
         .catch((err) => ({ error: err, data: undefined }))
       const childId = created?.data?.id
       if (created?.error || !childId) {
+        release()
         return `error: failed to create child session: ${String(created?.error ?? "no session id")}`
       }
+      rekeyReservation(parentKey, nonce, childId)
+      resKey = childId
 
       const body = {
         agent,
         parts: [{ type: "text", text: args.prompt }],
-        ...(model ? { model: { providerID: model.providerID, modelID: model.modelID } } : {}),
       }
 
+      const background = args.run_in_background === true
       if (background) {
         const res = await deps.client.session
           .promptAsync({ path: { id: childId }, body })
           .catch((err) => ({ error: err }))
-        if (res?.error) return `error: failed to launch background task: ${String(res.error)}`
+        if (res?.error) {
+          release()
+          return `error: failed to launch background task: ${String(res.error)}`
+        }
+        // The background child keeps its reservation until task_result reads
+        // a terminal state (or the child is gone at the next reconcile).
         return `task_id: ${childId}\nBackground task launched (@${agent}). Fetch the result later with task_result({ task_id: "${childId}" }).`
       }
 
-      inFlightSync += 1
       try {
         const res = await withTimeout(
           deps.client.session.prompt({ path: { id: childId }, body }),
@@ -334,14 +489,26 @@ export function createTaskTool(deps: TaskDeps): ToolDefinition {
           () => deps.client.session.abort({ path: { id: childId } }),
         ).catch((err) => ({ error: err, data: undefined }))
         if (res === TIMEOUT) {
-          return `error: child session timed out after ${timeoutMs}ms and was aborted.`
+          return JSON.stringify({
+            state: "aborted" as TaskResultState,
+            child_session_id: childId,
+          })
         }
-        if (res?.error) return `error: child session failed: ${String(res.error)}`
-        const text = extractAssistantText(res?.data?.parts)
-        if (!text) return "error: child session produced no output."
-        return text
+        if (res?.error) {
+          return JSON.stringify({ state: "failed" as TaskResultState, child_session_id: childId })
+        }
+        const envelope = res?.data?.info
+          ? buildTaskResult(childId, [{ info: res.data.info, parts: res.data.parts }])
+          : extractAssistantText(res?.data?.parts)
+            ? ({
+                state: "completed",
+                child_session_id: childId,
+                result: extractAssistantText(res?.data?.parts),
+              } as TaskResult)
+            : ({ state: "running", child_session_id: childId } as TaskResult)
+        return JSON.stringify(envelope)
       } finally {
-        inFlightSync -= 1
+        release()
       }
     },
   })
@@ -358,15 +525,16 @@ export function createTaskResultTool(deps: Pick<TaskDeps, "client">): ToolDefini
       const res = await deps.client.session
         .messages({ path: { id: args.task_id } })
         .catch((err) => ({ error: err, data: undefined }))
-      if (res?.error) return `error: failed to read task ${args.task_id}: ${String(res.error)}`
-      const messages = res?.data ?? []
-      const assistant = messages.filter((m) => m.info?.role === "assistant")
-      if (assistant.length === 0) return `pending: task ${args.task_id} has not produced output yet.`
-      for (let i = assistant.length - 1; i >= 0; i--) {
-        const text = extractAssistantText(assistant[i].parts)
-        if (text) return text
+      if (res?.error) {
+        return JSON.stringify({ state: "unknown" as TaskResultState, child_session_id: args.task_id })
       }
-      return `pending: task ${args.task_id} is running (no assistant text yet).`
+      const envelope = buildTaskResult(args.task_id, res?.data)
+      // A terminal read releases the background child's reservation (AC4-HP:
+      // release happens on every outcome, incl. a terminal task_result).
+      if (envelope.state !== "pending" && envelope.state !== "running") {
+        releaseReservation(args.task_id)
+      }
+      return JSON.stringify(envelope)
     },
   })
 }
@@ -409,6 +577,133 @@ async function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void):
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Policy outcomes (Change 7): the SAME protection scripts the claude and
+// codex hook manifests wire, driven through OpenCode's pre-tool seam. The
+// scripts read a claude-shaped payload from stdin and answer stdout JSON, so
+// the seam only translates the payload and honors the decision. Fail-open by
+// design: a script that is missing, times out, or exits without a decision is
+// reported once and the tool proceeds - a protection gap never becomes a
+// silent block.
+// ---------------------------------------------------------------------------
+
+/** script filename, the tools it guards (opencode tool names, lowercase),
+ * and its stdin-read bound. Mirrors the matchers in hooks/hooks.json. */
+const PROTECTION_SCRIPTS: Array<{ script: string; tools: string[]; timeoutMs: number }> = [
+  { script: "graph-write-protect.sh", tools: ["edit", "write", "bash"], timeoutMs: 10_000 },
+  { script: "plan-location-guard.sh", tools: ["write"], timeoutMs: 10_000 },
+  { script: "git-protection.py", tools: ["bash"], timeoutMs: 10_000 },
+  { script: "truncation-guard.py", tools: ["bash"], timeoutMs: 10_000 },
+  { script: "recursive-grep-guard.py", tools: ["bash"], timeoutMs: 10_000 },
+]
+
+/** Resolve the installed plugin root the scripts live under. */
+export function resolvePluginRoot(env: Record<string, string | undefined> = process.env): string | null {
+  const fromEnv = env.FNO_PLUGIN_ROOT || env.CLAUDE_PLUGIN_ROOT || env.CODEX_PLUGIN_ROOT
+  if (fromEnv) return fromEnv
+  try {
+    const p = readFileSync(join(env.HOME || "", ".fno", "plugin-root"), "utf8").trim()
+    return p || null
+  } catch {
+    return null
+  }
+}
+
+/** The claude-shaped PreToolUse payload the protection scripts already read. */
+export function buildHookPayload(
+  tool: string,
+  sessionID: string,
+  args: unknown,
+  projectDir: string,
+): Record<string, unknown> {
+  return {
+    hook_event_name: "PreToolUse",
+    tool_name: tool,
+    tool_input: args ?? {},
+    cwd: projectDir,
+    session_id: sessionID,
+  }
+}
+
+/** Which protection scripts guard this tool. */
+export function protectionScriptsFor(tool: string): typeof PROTECTION_SCRIPTS {
+  const name = (tool || "").toLowerCase()
+  return PROTECTION_SCRIPTS.filter((e) => e.tools.includes(name))
+}
+
+/** Read a hook-script decision from its stdout. `{}`/empty = allow. */
+export function parseHookDecision(stdout: string): { deny: boolean; reason: string } {
+  const t = (stdout || "").trim()
+  if (!t || t === "{}") return { deny: false, reason: "" }
+  try {
+    const v = JSON.parse(t) as {
+      decision?: string
+      reason?: string
+      hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string }
+    }
+    const decision = v.hookSpecificOutput?.permissionDecision
+    if (decision === "deny" || (decision === undefined && v.decision === "block")) {
+      return {
+        deny: true,
+        reason: v.hookSpecificOutput?.permissionDecisionReason ?? v.reason ?? "denied by footnote protection",
+      }
+    }
+    return { deny: false, reason: "" }
+  } catch {
+    // Non-JSON stdout is "no decision": the caller reports it once, allows.
+    return { deny: false, reason: "" }
+  }
+}
+
+type ProtectionOutcome = { denied: boolean; reason: string; reported: boolean }
+
+/** Process-wide report-once memory: a silent script is named on the first
+ * guarded tool call, never once per call. */
+const reportedSilent = new Set<string>()
+
+/** Run every protection script guarding `tool`; DENY wins over any allow. */
+export async function runProtections(
+  tool: string,
+  sessionID: string,
+  args: unknown,
+  projectDir: string,
+  runScript: (script: string, payload: string, timeoutMs: number) => Promise<string>,
+): Promise<ProtectionOutcome> {
+  const root = resolvePluginRoot()
+  const payload = JSON.stringify(buildHookPayload(tool, sessionID, args, projectDir))
+  let reported = false
+  const once = (key: string, line: string) => {
+    if (reportedSilent.has(key)) return
+    reportedSilent.add(key)
+    console.error(line)
+    reported = true
+  }
+  for (const entry of protectionScriptsFor(tool)) {
+    if (!root) {
+      once(
+        ":no-root",
+        "[footnote] protection scripts unavailable (no plugin root resolved); tools run unprotected",
+      )
+      continue
+    }
+    let stdout = ""
+    try {
+      stdout = await runScript(join(root, "hooks", entry.script), payload, entry.timeoutMs)
+    } catch {
+      stdout = ""
+    }
+    const d = parseHookDecision(stdout)
+    if (d.deny) return { denied: true, reason: d.reason, reported }
+    if (!stdout.trim()) {
+      // A missing or timed-out script answers silence: reported once per
+      // script process-wide, never a silent block.
+      once(entry.script, `[footnote] protection script ${entry.script} gave no decision; allowing`)
+    }
+  }
+  return { denied: false, reason: "", reported }
+}
+
 // ---------------------------------------------------------------------------
 // Plugin wiring
 // ---------------------------------------------------------------------------
@@ -441,26 +736,7 @@ const plugin: Plugin = async (input: PluginInput) => {
   const projectDir = input.directory
 
   const orchestratorPrompt = loadOrchestratorPrompt(projectDir)
-  const footnoteAgents = loadFootnoteAgents(projectDir)
-
-  // Available models, populated fire-and-forget for best-effort category
-  // routing (AC5-ERR). NEVER await a client.* SDK call in plugin init: plugins
-  // load inside opencode's bootstrap, which serves no request until every
-  // plugin returns, so an awaited provider.list() reenters a server that cannot
-  // answer yet and deadlocks startup. The set fills in place once the response
-  // lands; a task() firing before then degrades to the default model.
-  const available = new Set<string>()
-  try {
-    ;(input.client as unknown as {
-      provider: { list(): Promise<{ data?: { all?: Array<{ id: string; models?: Record<string, unknown> }> } }> }
-    }).provider
-      .list()
-      .then((providers) => collectModels(providers, available))
-      .catch(() => {}) // async rejection: unhandled in plugin scope can crash the host
-  } catch {
-    // synchronous throw (malformed client at init) -> no registry read; the try
-    // wraps only the call issuance, NOT an await, so it never blocks bootstrap.
-  }
+  const { agents: footnoteAgents, refusals } = loadFootnoteAgents(projectDir)
 
   // Registered-agent set: footnote's translated agents plus the native
   // `.opencode/agents/*.md` (explore/oracle/librarian) opencode auto-loads.
@@ -475,12 +751,23 @@ const plugin: Plugin = async (input: PluginInput) => {
     client,
     directory: projectDir,
     knownAgents,
-    availableModels: () => available,
   })
   const taskResultTool = createTaskResultTool({ client })
 
   return {
     async config(config: Record<string, unknown>) {
+      // A refused definition is printed once, by name, and nothing is
+      // registered in its place - an unexpressible restriction never
+      // degrades into an unrestricted agent.
+      for (const r of refusals) {
+        if (!("agent" in r)) continue
+        console.error(
+          `[footnote] agent "${r.agent}" NOT registered: field ${r.field} = ${r.value} ` +
+            `cannot be expressed in opencode's agent vocabulary ` +
+            `(the tools record is disable-only). Convert the allowlist to ` +
+            `disallowedTools, or narrow the definition.`,
+        )
+      }
       const agent = (config.agent ?? {}) as Record<string, unknown>
       for (const [name, def] of Object.entries(footnoteAgents)) {
         if (!(name in agent)) agent[name] = def
@@ -491,11 +778,67 @@ const plugin: Plugin = async (input: PluginInput) => {
       output.system.unshift(orchestratorPrompt)
       await injectAnnouncements(input, output)
     },
+    async "tool.execute.before"(
+      input: { tool: string; sessionID: string; callID: string },
+      output: { args: any },
+    ) {
+      // The abort channel is an exception: the hook signature returns void and
+      // offers no decision field, so a deny throws and the tool never runs.
+      const out = await runProtections(input.tool, input.sessionID, output.args, projectDir, runScript)
+      if (out.denied) throw new Error(out.reason)
+    },
+    async "tool.execute.after"(input: { tool: string; sessionID: string; callID: string; args: any }) {
+      // Claim heartbeat on the same payload the script's stdin reader parses.
+      try {
+        const root = resolvePluginRoot()
+        if (!root) return
+        await runScript(
+          join(root, "hooks", "claim-heartbeat.sh"),
+          JSON.stringify({ cwd: projectDir, session_id: input.sessionID }),
+          5_000,
+        )
+      } catch {
+        // never blocks a completed tool call
+      }
+    },
+    async "experimental.session.compacting"(input: { sessionID: string }, output: { context: string[] }) {
+      // The mechanical canon-doc sections ride the compaction prompt, so
+      // footnote's context survives a compaction without injected prompt text.
+      try {
+        const root = resolvePluginRoot()
+        if (!root) return
+        const pointer = await runScript(
+          join(root, "hooks", "precompact-canon-doc.sh"),
+          JSON.stringify({ cwd: projectDir, session_id: input.sessionID }),
+          5_000,
+        )
+        const text = pointer.trim()
+        if (text) output.context.push(text)
+      } catch {
+        // compaction must never fail at the moment it fires
+      }
+    },
     tool: {
       task: taskTool,
       task_result: taskResultTool,
     },
   }
+}
+
+/** The transport: run one hook script with the payload on stdin, answer its
+ * stdout. A spawn failure or timeout resolves empty (no decision = allow,
+ * reported once by the caller). */
+function runScript(script: string, payload: string, timeoutMs: number): Promise<string> {
+  return new Promise((resolve) => {
+    try {
+      const child = execFile(script, [], { timeout: timeoutMs }, (_err, stdout) => {
+        resolve(String(stdout ?? ""))
+      })
+      child.stdin?.end(payload)
+    } catch {
+      resolve("")
+    }
+  })
 }
 
 export default { id: "fno", server: plugin }
