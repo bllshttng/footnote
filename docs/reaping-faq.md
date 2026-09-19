@@ -90,8 +90,8 @@ These five move or remove state around sessions. None stops or removes a session
 5. open do row on an all-done session: `kept {id} (open do row on done node: {node})`. The settle pass and a `--release` ruling work through this gate
 6. policy `gc_decide`: a confirm hold answers as `kept {id} (sources disagree: {a} vs {b})` or `kept {id} (pr state contradicts: {node} {detail})`
 7. policy `gc_decide`: no provenance: `kept {id} (no provenance: ...)`
-8. policy `gc_decide`, open node: the planning lane first, then the open-PR keep `kept {id} (open pr: {node} {detail})`, then the four releases, then the open-work window
-9. the grace gate: an unresolved transcript keeps, a fresh transcript keeps unless the row is terminal or its pid is gone
+8. policy `gc_decide`, open node: planning lane, then open-PR keep `kept {id} (open pr: {node} {detail})`, then the four releases, then the open-work window
+9. the grace gate: an unresolved transcript keeps, a fresh transcript keeps unless terminal or the pid is gone
 10. live descendant: `kept {id} (live descendant: {child})`, skipped for a terminal row
 11. apply freshness re-check: `kept {id} (active: ...)` or `kept {id} (probe unread: ...)`
 12. the stop gate and receipt stage: `held {id} (needs live stop: {reason})`, `kept {id} (stop refused: {reason})`, `kept {id} (no resumable receipt: {reason})`
@@ -104,7 +104,7 @@ A dry run classifies exactly as a real run does. It subtracts three things:
 
 - It never stops a process. A rehearsal must not kill the worker it rehearses on (`gc_sweep.rs` `run_with_release`).
 - It never prunes. Receipt retention is set to zero, because a rehearsal that prunes is not a rehearsal (`gc_sweep.rs` `run_with_release`).
-- It subtracts the planned settle from the graph read, so the report shows the outcome the real pass produces (`gc.rs` `gc_sweep`).
+- It subtracts the planned settle from the graph read. The report shows the outcome the real pass produces (`gc.rs` `gc_sweep`).
 
 The `held` line is the trap. The line reads `held {id} (needs live stop: {reason})`. The condition is dry-run-only (`gc_sweep.rs` `run_with_release`). It fires on a claude row with no positive death evidence, such as a terminal roster state or a dead pid. So the rehearsal declines to promise a stop it cannot prove, and a real run can still take the row.
 
