@@ -67,20 +67,37 @@ pub fn pi_route_in(
     let mut tokens: Vec<String> = Vec::new();
     let route_source;
     let model = model.trim();
+    let mut damage = String::new();
     if model.is_empty() {
-        let settings = read_route_settings(agent_dir);
-        if settings.0.is_some() && settings.1.is_some() {
-            // pi resolves provider and model from its own settings: naming
-            // either would only override the user's configured default.
-            route_source = "pi-settings";
-        } else {
-            tokens = vec![
-                "--provider".to_string(),
-                pi_provider(),
-                "--model".to_string(),
-                pi_model(),
-            ];
-            route_source = "fno-default";
+        match read_route_settings(agent_dir) {
+            Ok((provider, model_setting)) if provider.is_some() && model_setting.is_some() => {
+                // pi resolves provider and model from its own settings:
+                // naming either would only override the user's configured
+                // default.
+                route_source = "pi-settings";
+            }
+            Ok(_) => {
+                tokens = vec![
+                    "--provider".to_string(),
+                    pi_provider(),
+                    "--model".to_string(),
+                    pi_model(),
+                ];
+                route_source = "fno-default";
+            }
+            Err(reason) => {
+                // The settings file exists but says nothing usable; the
+                // launch still needs a route, so the fno default pair rides
+                // and the damage names itself on the receipt.
+                tokens = vec![
+                    "--provider".to_string(),
+                    pi_provider(),
+                    "--model".to_string(),
+                    pi_model(),
+                ];
+                route_source = "fno-default";
+                damage = format!("; pi settings unreadable: {reason}");
+            }
         }
     } else if model.contains('/') {
         tokens = vec!["--model".to_string(), model.to_string()];
@@ -107,19 +124,24 @@ pub fn pi_route_in(
     PiRoute {
         tokens,
         route_source,
-        note: POSTURE.to_string(),
+        note: format!("{POSTURE}{damage}"),
     }
 }
 
-/// `(defaultProvider, defaultModel)` from the agent dir's settings.json,
-/// `(None, None)` when the file is absent, unreadable, or names neither.
-fn read_route_settings(agent_dir: &Path) -> (Option<String>, Option<String>) {
-    let Ok(text) = std::fs::read_to_string(agent_dir.join("settings.json")) else {
-        return (None, None);
+/// `(defaultProvider, defaultModel)` from the agent dir's settings.json.
+/// `Ok((None, None))` when the file is absent or names neither; `Err`
+/// naming the file when it exists but cannot be read or parsed, so a
+/// damaged settings file is VISIBLE in the route note instead of silently
+/// routing the launch to the fno default pair.
+fn read_route_settings(agent_dir: &Path) -> Result<(Option<String>, Option<String>), String> {
+    let path = agent_dir.join("settings.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((None, None)),
+        Err(e) => return Err(format!("{} is unreadable: {e}", path.display())),
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return (None, None);
-    };
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("{} is not valid JSON: {e}", path.display()))?;
     let get = |key: &str| {
         value
             .get(key)
@@ -127,7 +149,7 @@ fn read_route_settings(agent_dir: &Path) -> (Option<String>, Option<String>) {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
     };
-    (get("defaultProvider"), get("defaultModel"))
+    Ok((get("defaultProvider"), get("defaultModel")))
 }
 
 /// The provider fno passes to pi, `FNO_PI_PROVIDER` winning over the default.
