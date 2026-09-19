@@ -1054,14 +1054,19 @@ def test_triage_health_failure_prone(tmp_graph, tmp_path):
 
 def test_triage_health_shows_evals_line_when_history_exists(tmp_graph, tmp_path, monkeypatch):
     """The evals consumer: triage health surfaces regression rate + flakes when
-    eval history exists (US4). A regression-tier task with a failure flags the
-    alarm; evals is advisory and never changes the health exit code."""
+    eval history exists (US4). A regression-tier task with a failure inside the
+    recent window flags the alarm, which reads only that window; evals is
+    advisory and never changes the health exit code."""
     import fno.paths as _paths
+    from datetime import datetime, timedelta, timezone
     from fno.evals import history as _eh
 
     hist = tmp_path / "evals-history.jsonl"
-    _eh.append_row(hist, {"task_id": "r", "tier": "regression", "pass": True})
-    _eh.append_row(hist, {"task_id": "r", "tier": "regression", "pass": False})
+    now = datetime.now(timezone.utc)
+    _eh.append_row(hist, {"task_id": "r", "tier": "regression", "pass": True,
+                          "ts": (now - timedelta(hours=2)).isoformat().replace("+00:00", "Z")})
+    _eh.append_row(hist, {"task_id": "r", "tier": "regression", "pass": False,
+                          "ts": (now - timedelta(hours=1)).isoformat().replace("+00:00", "Z")})
     monkeypatch.setattr(_paths, "evals_history", lambda: hist)
 
     res = _invoke("backlog", "triage", "health", "--all", "--json")
