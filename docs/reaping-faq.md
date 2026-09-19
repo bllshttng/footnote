@@ -70,14 +70,14 @@ A fourth tool answers to a related name. `fno-agents roster-reap` removes claude
 These five move or remove state around sessions. None stops or removes a session, so do not look for them in the table above.
 
 - Claim reclaim: lazy, on a competing `acquire`; the old lockfile moves to `.expired/` (`claims.rs` `acquire`, `claims.rs` `classify`). No daemon arm reclaims claims.
-- The nudge ladder: keeps the row and sends input instead (`pr_nudge.rs` `run_ladder`). It fires on the daemon arm only; the manual dry run prints its plan as `would nudge {id} ({action})` and takes no effect.
+- The nudge ladder: keeps the row and sends input instead (`pr_nudge.rs` `run_ladder`). It fires on the daemon arm only. The manual dry run prints its plan as `would nudge {id} ({action})` and takes no effect.
 - The state-file sweep: removes expired claims, stale plan locks, agent locks, the pr-status cache, and claim tmp files (`gc.rs` `state_file_sweep`). No row is touched.
-- The liveness sweep: bands the machine and writes status; it removes nothing (`daemon.rs` `liveness_sweep`).
+- The liveness sweep: bands the machine and writes status. It removes nothing (`daemon.rs` `liveness_sweep`).
 - The daily reclaim janitor, with its `cargo_build_dirs` lane: removes disk artifacts such as build dirs, never a session (`reclaim.rs` `maybe_run_daily`, `reclaim.rs` `cargo_build_dirs_lane`).
 
 ## In what order
 
-**Across programs, no arbiter exists.** Each daemon arm runs off-loop behind its own one-in-flight gate, so the tick's issue order, the retire arm, then the worktree task, then the orphan test-binary sweep, then liveness, then terminal-stop (`daemon.rs` select arm), is not a completion order. The first program to act wins and the others find the row gone. The merge reaper and the retire arm share one stage and commit; the merge reaper calls them with no release, so it is the stricter of the two.
+**Across programs, no arbiter exists.** Each daemon arm runs off-loop behind its own one-in-flight gate, so the tick's issue order, the retire arm, then the worktree task, then the orphan test-binary sweep, then liveness, then terminal-stop (`daemon.rs` select arm), is not a completion order. The first program to act wins and the others find the row gone. The merge reaper and the retire arm share one stage and commit. The merge reaper calls them with no release, so it is the stricter of the two.
 
 **Inside the retire arm**, in this order: state-file sweep, registry sweep, nudge ladder, unowned sweeps, roster sweep, mux tab prune (`gc.rs` `maybe_retirement_sweep`). The roster sweep runs after the registry sweep on purpose: a row the registry sweep retires this pass is already gone from the registry the roster sweep loads, and a session the roster sweep removes becomes a corpse for the next registry pass.
 
@@ -87,7 +87,7 @@ These five move or remove state around sessions. None stops or removes a session
 2. crowned row: `kept {id} (crowned)`
 3. not spawn unless a proven corpse: `kept {id} (not a spawn row: {why})`
 4. graph unreadable: `kept {id} (graph unreadable: never a retirement on a failed read)`
-5. open do row on an all-done session: `kept {id} (open do row on done node: {node})`; the settle pass and a `--release` ruling work through this gate
+5. open do row on an all-done session: `kept {id} (open do row on done node: {node})`. The settle pass and a `--release` ruling work through this gate
 6. policy `gc_decide`: a confirm hold answers as `kept {id} (sources disagree: {a} vs {b})` or `kept {id} (pr state contradicts: {node} {detail})`
 7. policy `gc_decide`: no provenance: `kept {id} (no provenance: ...)`
 8. policy `gc_decide`, open node: the planning lane first, then the open-PR keep `kept {id} (open pr: {node} {detail})`, then the four releases, then the open-work window
@@ -110,7 +110,7 @@ The `held` line is the trap. The line reads `held {id} (needs live stop: {reason
 
 The guard exists because of one incident. On 2026-09-08 a dry run promised 9 retirements, and the real run retired 0 (`gc_sweep.rs` `needs_live_stop`).
 
-The rehearsal has a second honest hold: `held {id} (dry-run did not evaluate: {gate}; apply may still refuse)`. A dry-run row whose remaining gate needs a mutation is named where it stands. It is never planted into `retired` or `pruned`, so neither count can read a promise the run did not evaluate (`gc_sweep.rs` `run_with_release`). The apply run may still refuse that gate: the dry-run report says may, never did.
+The rehearsal has a second honest hold: `held {id} (dry-run did not evaluate: {gate}; apply may still refuse)`. A dry-run row whose remaining gate needs a mutation is named where it stands. It is never planted into `retired` or `pruned`, so neither count can read a promise the run did not evaluate (`gc_sweep.rs` `run_with_release`). The apply run can still refuse that gate: the dry-run report says `apply may still refuse`, naming the uncertainty.
 
 If the dry run prints a `held` line, run the real verb and read its verdict.
 
@@ -374,7 +374,7 @@ Every keep and hold reason from the sections above, one row each.
 | `kept {id} (graph unreadable: ...)` | Rerun when the graph reads. | Run the dry run again. |
 | `kept {id} (no resumable receipt: {reason})` | Rerun the sweep. | The line names the reason. |
 | `held {id} (needs live stop: {reason})` | Run the real verb. The row can still retire. | Run `fno agents reap`. |
-| `held {id} (dry-run did not evaluate: {gate}; apply may still refuse)` | Run the real verb. The apply may still refuse the named gate. | Run `fno agents reap`. |
+| `held {id} (dry-run did not evaluate: {gate}; apply may still refuse)` | Run the real verb. The apply can still refuse the named gate. | Run `fno agents reap`. |
 | `kept {id} (stop refused: {reason})` | Read the reason. The sweep retries next pass. | Run the dry run again. |
 | `kept tree {id} (dirty: {path})` | Judge the tree. The row is already gone. | Run `git status` in `{path}`. |
 | `kept tree {id} (clean but the branch never merged: {path})` | Judge the branch. The tree waits. | Run `git log` on the branch. |
