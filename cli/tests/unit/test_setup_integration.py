@@ -393,28 +393,48 @@ def test_opencode_adapter_registered():
     assert "opencode" in clis
 
 
-# --- pi (local-file extension install, x-43bd) ------------------------------
+# --- pi (Rust pi arm of plugin-install; the agent dir pi itself reads) -------
 
-def test_pi_install_copies_extension_and_is_installed(tmp_path, monkeypatch):
-    # Redirect HOME so the extension lands under a temp ~/.pi/agent/extensions/.
-    monkeypatch.setenv("HOME", str(tmp_path))
+@pytest.fixture
+def pi_agent_env(tmp_path, monkeypatch):
+    """A relocated agent dir via PI_CODING_AGENT_DIR, plus a scratch HOME.
 
+    The install must honor the agent dir pi actually reads and write nothing
+    under the ambient HOME's ~/.pi.
+    """
+    from fno.rust_binary import find_dev_binary
+
+    binary = find_dev_binary()
+    if binary is None:
+        pytest.skip("no fno-agents dev build (cargo build -p fno-agents)")
+    # call_binary_json resolves through $FNO_AGENTS_BIN first, so the tests
+    # exercise the dev binary, which carries the pi arm.
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(binary))
+    agent = tmp_path / "agent"
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    return agent
+
+
+def test_pi_install_copies_extension_and_is_installed(tmp_path, pi_agent_env):
     assert I._pi_is_installed() is False
 
     res = I._pi_install()
     assert res.ok and res.cli == "pi"
 
-    dest = I._pi_extension_dest()
+    dest = pi_agent_env / "extensions" / "footnote.ts"
     assert dest.exists()
     assert dest.read_text(encoding="utf-8") == I._pi_extension_src().read_text(
         encoding="utf-8"
     )
+    # Nothing under the scratch HOME's default pi tree: the agent dir is
+    # where pi itself reads, not $HOME/.pi.
+    assert not (tmp_path / "home" / ".pi").exists()
     assert I._pi_is_installed() is True
 
 
-def test_pi_is_installed_false_when_stale(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    dest = I._pi_extension_dest()
+def test_pi_is_installed_false_when_stale(tmp_path, pi_agent_env):
+    dest = pi_agent_env / "extensions" / "footnote.ts"
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text("// stale older footnote extension\n", encoding="utf-8")
     assert I._pi_is_installed() is False
