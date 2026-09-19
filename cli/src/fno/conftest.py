@@ -34,6 +34,26 @@ os.environ.clear()
 os.environ.update(_hermetic_env)
 
 
+@pytest.fixture(autouse=True)
+def _reset_project_resolve_cache():
+    """Clear the project-name resolver's cache before and after every test.
+
+    Mirrors the same fixture in ``cli/tests/conftest.py``: this is a SEPARATE
+    pytest root (see module docstring), so a scrub over there protects
+    nothing here. ``fno.projects.resolve`` caches ``~/.fno/config.toml`` in a
+    module-level dict on first use and never invalidates it; a test in this
+    tree (``fno/projects/test_resolve.py``) that points ``SETTINGS_PATH`` at
+    a tmp fixture and clears the cache only before reading leaves that
+    fixture's project map live for whatever test runs next in the same
+    xdist worker.
+    """
+    from fno.projects import resolve as proj_resolve
+
+    proj_resolve._clear_cache()
+    yield
+    proj_resolve._clear_cache()
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _config_search_ceiling(tmp_path_factory: pytest.TempPathFactory):
     """Widen the config ceiling to include the pytest basetemp.
