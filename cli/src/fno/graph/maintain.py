@@ -2090,7 +2090,7 @@ def run_validity_sweep(
     )
 
 
-AbandonedDoRow = namedtuple("AbandonedDoRow", "node harness session_id verdict reason")
+AbandonedDoRow = namedtuple("AbandonedDoRow", "node harness session_id verdict reason ended_epoch")
 
 
 def do_row_session_gone(harness, session_id, cwd, *, quiet_after_s, now_s):
@@ -2100,19 +2100,19 @@ def do_row_session_gone(harness, session_id, cwd, *, quiet_after_s, now_s):
         from fno.agents.watchdog import finished_with_the_tree, tail_facts
 
         if harness not in FILE_BACKED_HARNESSES:
-            return False, "harness not file-backed"
+            return False, "harness not file-backed", None
 
         facts = tail_facts(session_id, cwd, agent=harness)
         if facts is None:
             if resolve_transcript_path(harness, session_id, cwd) is None:
-                return False, "transcript unresolved"
-            return False, "transcript unreadable"
+                return False, "transcript unresolved", None
+            return False, "transcript unreadable", None
         if not finished_with_the_tree(facts, now_s, quiet_after_s):
-            return False, "transcript active"
+            return False, "transcript active", None
         quiet_m = max(0, int((now_s - facts.last_event_epoch) // 60))
-        return True, f"transcript quiet {quiet_m}m, tail not engaged"
+        return True, f"transcript quiet {quiet_m}m, tail not engaged", facts.last_event_epoch
     except Exception:  # noqa: BLE001 - a proof must never break the sweep
-        return False, "transcript unreadable"
+        return False, "transcript unreadable", None
 
 
 def detect_abandoned_do_rows(
@@ -2134,12 +2134,12 @@ def detect_abandoned_do_rows(
             if nid in live_claimed or live_worked.get(nid):
                 why = ("live claim" if nid in live_claimed
                        else f"live roster worker {', '.join(live_worked[nid])}")
-                out.append(AbandonedDoRow(nid, harness, sid, "held", why))
+                out.append(AbandonedDoRow(nid, harness, sid, "held", why, None))
             else:
-                gone, reason = prover(harness, sid, e.get("cwd"),
-                                      quiet_after_s=quiet_after_s, now_s=now_s)
+                gone, reason, epoch = prover(harness, sid, e.get("cwd"),
+                                             quiet_after_s=quiet_after_s, now_s=now_s)
                 out.append(AbandonedDoRow(nid, harness, sid,
-                                          "gone" if gone else "held", reason))
+                                          "gone" if gone else "held", reason, epoch))
     return out
 
 
@@ -2170,11 +2170,18 @@ def abandoned_leg(entries, claimed, graph_path, apply):
 
         for cand in gone[:AUTO_DEFER_BLAST_CAP]:
             try:
+                ended_at = None
+                if cand.ended_epoch is not None:
+                    ended_at = datetime.fromtimestamp(
+                        cand.ended_epoch, tz=timezone.utc
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
                 rep = reap_open_session_record(
                     graph_path, cand.node, phase="do",
                     harness=cand.harness, session_id=cand.session_id,
+                    ended_at=ended_at,
                 )
                 reaped[cand.node] = {"row_removed": bool(rep.get("row_removed")),
+                                     "row_closed": bool(rep.get("row_closed")),
                                      "status_after": rep.get("status_after")}
                 reaped_rows += 1
             except Exception as exc:  # noqa: BLE001 - one bad row must not abort
@@ -2188,8 +2195,8 @@ def abandoned_leg(entries, claimed, graph_path, apply):
         if rep and "error" in rep:
             lines.append(f"  warning: do-row reap of {r.node} failed: {rep['error']}")
         elif rep:
-            lines.append(f"  reaped do row {r.node} ({tag}): row_removed "
-                         f"{str(rep['row_removed']).lower()}, status_after "
+            lines.append(f"  settled do row {r.node} ({tag}): row_closed "
+                         f"{str(rep.get('row_closed', False)).lower()}, status_after "
                          f"{rep['status_after']} ({r.reason})")
         else:
             verb = "would reap" if r.verdict == "gone" else "held"

@@ -1117,6 +1117,7 @@ pub fn session_end(
     ended_by: &str,
     phase: Option<&str>,
     harness: Option<&str>,
+    ended_at: Option<&str>,
 ) -> Result<Payload<Node>, ApiError> {
     // A session may hold several open rows on one node (one per phase), so a
     // settle that matches on session_id alone would fabricate ended_at on
@@ -1126,6 +1127,13 @@ pub fn session_end(
         phase.map_or(true, |want| rec_phase == Some(want))
             && harness.map_or(true, |want| rec_harness == Some(want))
     };
+    // One resolved instant feeds both fill branches so they cannot drift;
+    // the fallback is the Z form the session rows read, not now_isoformat's
+    // microsecond offset form.
+    let stamp = ended_at.map_or_else(
+        || chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        str::to_string,
+    );
     let mut updated: Option<Node> = None;
     let ok = mutate(store, "session_end", |rows| {
         for row in rows.iter_mut() {
@@ -1144,7 +1152,7 @@ pub fn session_end(
                     session_id,
                     phase,
                     harness,
-                    &crate::graph_store::now_isoformat(),
+                    stamp.as_str(),
                     ended_by,
                 ));
             };
@@ -1157,7 +1165,7 @@ pub fn session_end(
                     && record.ended_at.is_none()
                     && matches_window(Some(&record.phase), Some(&record.harness))
                 {
-                    record.ended_at = Some(crate::graph_store::now_isoformat());
+                    record.ended_at = Some(stamp.clone());
                     record.ended_by = Some(ended_by.to_string());
                     closed = true;
                 }

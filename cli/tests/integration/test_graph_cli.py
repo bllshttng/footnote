@@ -74,7 +74,7 @@ def _read_graph(g: Path) -> list[dict]:
 
 
 def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
-    """AC3: observer reap removes the exact open row and reads it back."""
+    """AC3: observer reap fills the exact open row and reads it back."""
     tmp_graph.write_text(json.dumps({
         "entries": [{
             "id": "x-reap0001",
@@ -96,11 +96,12 @@ def test_session_reap_open_returns_positive_settled_receipt(tmp_graph):
     assert result.exit_code == 0, result.output
     receipt = json.loads(result.output)
     assert receipt["settled"] is True
-    assert receipt["row_removed"] is True
+    assert receipt["row_removed"] is False
+    assert receipt["row_closed"] is True
     assert receipt["status_after"] == "idea"
     assert receipt["remaining_open_do"] == 0
     saved = _read_graph(tmp_graph)[0]
-    assert saved["sessions"] == []
+    assert saved["sessions"][0]["ended_at"], "the settled row is filled, never erased"
     assert saved["status"] == "idea"
 
 
