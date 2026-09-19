@@ -31,8 +31,11 @@
 use crate::graph_store::{self, FieldUpdate, MutateInput, StoreError};
 use crate::identity::{harness_of_session_id, shape_known_harness};
 
+mod seat_lock;
+
 mod splice;
 
+use seat_lock::take_seat;
 use splice::splice_reply;
 
 use serde_json::{json, Map, Value};
@@ -669,52 +672,9 @@ fn run_render_pass() -> Result<(), (i32, String)> {
     Err((code, tail))
 }
 
-/// Seat-ladder pacing, mirroring daemon.rs's LOCK_ACQUIRE_* shape: a probe
-/// holds the seat lock for microseconds, an incumbent for life, and only
-/// duration separates them.
-const SEAT_LOCK_ATTEMPTS: usize = 6;
-const SEAT_LOCK_RETRY: Duration = Duration::from_millis(25);
-
 /// How often an idle keeper re-checks that the socket path still names the
 /// inode it bound.
 const SEAT_CHECK_EVERY: Duration = Duration::from_secs(1);
-
-fn seat_lock_path(sock: &Path) -> PathBuf {
-    let mut s = sock.as_os_str().to_os_string();
-    s.push(".lock");
-    PathBuf::from(s)
-}
-
-/// Take the exclusive seat flock on `<sock>.lock`, held for the process
-/// life (the returned File keeps it). `None` = the seat is owned: the
-/// daemon's bind_supervisor_socket rule, applied to the store.
-fn take_seat(sock: &Path) -> Option<std::fs::File> {
-    let lock_path = seat_lock_path(sock);
-    if let Some(parent) = lock_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .ok()?;
-    for attempt in 0..SEAT_LOCK_ATTEMPTS {
-        match file.try_lock() {
-            Ok(()) => return Some(file),
-            Err(e) => {
-                let io_err: std::io::Error = e.into();
-                if io_err.kind() != std::io::ErrorKind::WouldBlock {
-                    return None;
-                }
-                if attempt + 1 < SEAT_LOCK_ATTEMPTS {
-                    std::thread::sleep(SEAT_LOCK_RETRY * (attempt as u32 + 1));
-                }
-            }
-        }
-    }
-    None
-}
 
 /// One Identify with a short reply bound: true only when something behind
 /// the path answers. An answering incumbent predates the seat lock (it was
