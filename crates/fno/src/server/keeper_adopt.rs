@@ -33,6 +33,24 @@ impl Core {
     /// inline pty and marks the pane unkept. `Err` = the spawn itself is
     /// impossible (admission refused, no child pid). A failed candidate's rc
     /// dir is removed here; only a REGISTERED pane's dir is kept.
+    ///
+    /// Silent when NOT ONE candidate even reaches a real keeper attempt (a
+    /// `SHELL` naming neither zsh nor bash - `keeper_shell_argv`'s known-shell
+    /// gate, integration is bash/zsh-only by design): that pane was never
+    /// going to be hosted, so it is expected non-participation, not a
+    /// failure worth a client-visible notice. A genuine spawn attempt that
+    /// errors (admission, handshake, a keeper binary that dies) still
+    /// notifies - operationally that IS worth surfacing. Getting this
+    /// backwards is user-visible: the notice renders into the client's
+    /// status row and nothing re-draws to clear it once its TTL lapses
+    /// (`client/row_stamp.rs`'s `NOTICE_TTL`), so on a plain `/bin/sh`
+    /// session it would show on every single split, permanently, baked into
+    /// whatever screen a test (or a real client) settles on next - exactly
+    /// the byte-exact-reattach mismatch a `/bin/sh`-shelled session hits on
+    /// every pane spawn, proven via `crates/fno/tests/persistence.rs`'s
+    /// `persistence_multi_pane_reattach_is_screen_exact` (row 1 of the
+    /// settled "before" screen read `keeper spawn failed for pane 2 (no
+    /// shell candidate produce…`, a row no fresh reattach ever reproduces).
     #[cfg(not(test))]
     pub(super) fn spawn_pane_kept(
         &mut self,
@@ -43,11 +61,13 @@ impl Core {
         dir: Option<&std::path::Path>,
     ) -> Result<Option<u64>, String> {
         let mut last = String::from("no shell candidate produced a keeper argv");
+        let mut attempted = false;
         for cand in &self.shells {
             let Some((argv, rc_dir)) = crate::pty::keeper_shell_argv(cand, &self.session_name, id)
             else {
                 continue;
             };
+            attempted = true;
             let permit = match crate::process_admission::admit_fleet() {
                 Ok(permit) => permit,
                 Err(e) => {
@@ -98,9 +118,11 @@ impl Core {
                 }
             }
         }
-        self.notice_all(format!(
-            "keeper spawn failed for pane {id} ({last}); opening an unkept inline shell"
-        ));
+        if attempted {
+            self.notice_all(format!(
+                "keeper spawn failed for pane {id} ({last}); opening an unkept inline shell"
+            ));
+        }
         Ok(None)
     }
 

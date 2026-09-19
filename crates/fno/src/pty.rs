@@ -18,6 +18,22 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// One event on a pane's `out_tx` channel: real bytes to feed the VT, or a
+/// resize that already took effect and must be applied to the VT at this
+/// exact point in the ordered per-pane stream. A keeper-hosted pane's resize
+/// is a round trip (server -> socket -> keeper -> socket -> server), so
+/// applying it to the VT the instant the server ISSUES it would race
+/// trailing output the child produced before the round trip lands: that
+/// output is still ahead of the resize in this same channel, so feeding it
+/// after an eager VT resize corrupts the grid. Routing the resize through
+/// this channel instead - as `Resized`, sent only once the keeper's
+/// `KEEPER_TAG_RESIZE_ACK` confirms it applied - keeps the two in the one
+/// order that already governs everything else on the channel: arrival order.
+pub enum PaneChunk {
+    Output(Vec<u8>),
+    Resized(u16, u16),
+}
+
 /// Serializes every PTY fork in this process.
 ///
 /// `spawn_command` forks, then runs a `pre_exec` hook in the child before
@@ -310,7 +326,7 @@ impl LocalPty {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
     ) -> Result<LocalPty, PtyError> {
         let permit =
@@ -330,7 +346,7 @@ impl LocalPty {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
         permit: crate::process_admission::AdmissionPermit,
     ) -> Result<LocalPty, PtyError> {
@@ -383,7 +399,7 @@ impl LocalPty {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
     ) -> Result<LocalPty, PtyError> {
         let permit =
@@ -402,7 +418,7 @@ impl LocalPty {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
         permit: crate::process_admission::AdmissionPermit,
     ) -> Result<LocalPty, PtyError> {
@@ -533,7 +549,7 @@ impl PtyShell {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
     ) -> Result<PtyShell, PtyError> {
         LocalPty::spawn(
@@ -550,7 +566,7 @@ impl PtyShell {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
         permit: crate::process_admission::AdmissionPermit,
     ) -> Result<PtyShell, PtyError> {
@@ -568,7 +584,7 @@ impl PtyShell {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
     ) -> Result<PtyShell, PtyError> {
         LocalPty::spawn_cmd(argv, rows, cols, cwd, session, pane_id, out_tx, exit_tx)
@@ -583,7 +599,7 @@ impl PtyShell {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
         permit: crate::process_admission::AdmissionPermit,
     ) -> Result<PtyShell, PtyError> {
@@ -611,7 +627,7 @@ impl PtyShell {
         cwd: Option<&std::path::Path>,
         session: &str,
         pane_id: u64,
-        out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
         permit: crate::process_admission::AdmissionPermit,
     ) -> Result<(PtyShell, Vec<u8>), PtyError> {
@@ -776,9 +792,14 @@ const KEEPER_TAG_IDENTIFY: u8 = 4;
 pub(crate) const KEEPER_TAG_IDENTIFY_REPLY: u8 = 5;
 pub(crate) const KEEPER_TAG_OUTPUT: u8 = 6;
 const KEEPER_TAG_EXITED: u8 = 7;
+/// Mirrors `pane_keeper::TAG_RESIZE_ACK`: sent after the keeper's
+/// `master.resize()` applies, carrying the same dims the outgoing Resize
+/// frame asked for. See [`spawn_keeper_reader`] for why the client applies
+/// its VT resize on receipt of this frame instead of when it sends Resize.
+const KEEPER_TAG_RESIZE_ACK: u8 = 8;
 
 /// The keeper protocol version this client speaks.
-pub const KEEPER_PROTOCOL_VERSION: u32 = 1;
+pub const KEEPER_PROTOCOL_VERSION: u32 = 2;
 
 fn keeper_frame_input(bytes: &[u8]) -> Vec<u8> {
     keeper_encode(KEEPER_TAG_INPUT, bytes)
@@ -918,7 +939,7 @@ fn reply_holds_seat(reply: &serde_json::Value) -> bool {
 pub fn adopt_keeper_socket(
     sock: &std::path::Path,
     pane_id: u64,
-    out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
     exit_tx: tokio::sync::mpsc::Sender<u64>,
 ) -> Result<KeeperAdopt, String> {
     let mut held = 0u32;
@@ -1165,7 +1186,7 @@ fn wire_keeper(
     sock_path: PathBuf,
     pane_id: u64,
     seed_buf: Vec<u8>,
-    out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
     exit_tx: tokio::sync::mpsc::Sender<u64>,
 ) -> KeeperPty {
     let exited = Arc::new(AtomicBool::new(false));
@@ -1216,7 +1237,7 @@ fn spawn_keeper_reader(
     mut reader: std::os::unix::net::UnixStream,
     pane_id: u64,
     seed_buf: Vec<u8>,
-    out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
     exit_tx: tokio::sync::mpsc::Sender<u64>,
     exited: Arc<AtomicBool>,
     reader_done: Arc<AtomicBool>,
@@ -1234,7 +1255,25 @@ fn spawn_keeper_reader(
                             buf.drain(..used);
                             match tag {
                                 KEEPER_TAG_OUTPUT => {
-                                    if out_tx.blocking_send((pane_id, payload)).is_err() {
+                                    if out_tx
+                                        .blocking_send((pane_id, PaneChunk::Output(payload)))
+                                        .is_err()
+                                    {
+                                        break 'outer; // consumer gone
+                                    }
+                                }
+                                KEEPER_TAG_RESIZE_ACK if payload.len() == 4 => {
+                                    let rows = u16::from_le_bytes([payload[0], payload[1]]);
+                                    let cols = u16::from_le_bytes([payload[2], payload[3]]);
+                                    // Same channel as Output above, so this
+                                    // lands after any already-sent trailing
+                                    // pre-resize bytes and before whatever
+                                    // the child produces once the resize is
+                                    // visible to it (see `PaneChunk`).
+                                    if out_tx
+                                        .blocking_send((pane_id, PaneChunk::Resized(rows, cols)))
+                                        .is_err()
+                                    {
                                         break 'outer; // consumer gone
                                     }
                                 }
@@ -1910,7 +1949,7 @@ fn wire(
     pair: portable_pty::PtyPair,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     pane_id: u64,
-    out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
     exit_tx: tokio::sync::mpsc::Sender<u64>,
     shell_rc: Option<ShellRc>,
 ) -> Result<LocalPty, PtyError> {
@@ -1971,7 +2010,7 @@ fn spawn_writer(
 fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
     pane_id: u64,
-    out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    out_tx: tokio::sync::mpsc::Sender<(u64, PaneChunk)>,
     exit_tx: tokio::sync::mpsc::Sender<u64>,
     reader_done: Arc<AtomicBool>,
 ) -> Result<(), PtyError> {
@@ -2002,7 +2041,10 @@ fn spawn_reader(
                         }
                         // blocking_send backpressures the reader (and thus the
                         // child) when the core loop lags; never unbounded.
-                        if out_tx.blocking_send((pane_id, buf[..n].to_vec())).is_err() {
+                        if out_tx
+                            .blocking_send((pane_id, PaneChunk::Output(buf[..n].to_vec())))
+                            .is_err()
+                        {
                             break; // consumer gone; nothing to drain for
                         }
                     }
@@ -2554,13 +2596,14 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
             match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await {
-                Ok(Some((pane_id, chunk))) => {
+                Ok(Some((pane_id, PaneChunk::Output(chunk)))) => {
                     assert_eq!(pane_id, 7, "reader must tag output with its pane id");
                     seen.extend_from_slice(&chunk);
                     if String::from_utf8_lossy(&seen).contains("fallback-ok") {
                         return;
                     }
                 }
+                Ok(Some((_, PaneChunk::Resized(..)))) => {}
                 Ok(None) => break,
                 Err(_) => {}
             }
@@ -2631,7 +2674,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
             match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await {
-                Ok(Some((_, chunk))) => {
+                Ok(Some((_, PaneChunk::Output(chunk)))) => {
                     seen.extend_from_slice(&chunk);
                     let text = String::from_utf8_lossy(&seen);
                     if text.contains("mark-envtest-envtest-31-end") && text.contains("-epochend") {
@@ -2642,6 +2685,7 @@ mod tests {
                         return;
                     }
                 }
+                Ok(Some((_, PaneChunk::Resized(..)))) => {}
                 Ok(None) => break,
                 Err(_) => {}
             }
