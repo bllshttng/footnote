@@ -976,6 +976,7 @@ struct PluginInstallArgs {
     adapter: Option<String>,
     crown: Option<String>,
     hooks_file: Option<String>,
+    extension_src: Option<String>,
 }
 
 fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
@@ -993,6 +994,7 @@ fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
         adapter: None,
         crown: None,
         hooks_file: None,
+        extension_src: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -1015,6 +1017,10 @@ fn parse_plugin_install_args(args: &[String]) -> PluginInstallArgs {
             }
             "--hooks-file" => {
                 parsed.hooks_file = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--extension-src" => {
+                parsed.extension_src = args.get(i + 1).cloned();
                 i += 2;
             }
             "--json" | "-J" => {
@@ -1074,6 +1080,7 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
         adapter,
         crown,
         hooks_file,
+        extension_src,
     } = parse_plugin_install_args(args);
     if hooks || hooks_status {
         return run_agy_hooks(
@@ -1176,6 +1183,9 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
                 let receipt = grok_status_receipt();
                 println!("{receipt}");
                 return if receipt.starts_with("unknown") { 1 } else { 0 };
+            }
+            if harness == "pi" {
+                return run_pi_arm(status, json, extension_src.as_deref());
             }
             if uninstall || status || quick {
                 eprintln!(
@@ -1379,6 +1389,128 @@ fn print_status_prose(value: &serde_json::Value) {
                         .unwrap_or_default()
                 );
             }
+        }
+    }
+}
+
+/// The pi arm: install the loop extension into pi's agent dir (honoring
+/// `PI_CODING_AGENT_DIR`), or read the install status. Neither path builds
+/// the plugin stage or needs a repo checkout, so a relocated pi install
+/// works from the binary alone.
+///
+/// - `--extension-src <path>` (install): copy the source to
+///   `<agent dir>/extensions/footnote.ts` through a temp file in the same
+///   directory and a rename, so a half-written extension is never loadable.
+/// - `--status`: answer `{"installed", "dest", "agent_dir_source", "skills"}`;
+///   `installed` means the dest exists and, when a source was named, is
+///   byte-equal to it. `skills` reads the same plugin-root pointer the verb
+///   renderer reads.
+fn run_pi_arm(status: bool, json: bool, extension_src: Option<&str>) -> i32 {
+    let dest = crate::pi::pi_agent_dir()
+        .join("extensions")
+        .join("footnote.ts");
+    let agent_dir_source = match std::env::var("PI_CODING_AGENT_DIR") {
+        Ok(v) if !v.trim().is_empty() => "env",
+        _ => "default",
+    };
+    let skills = match crate::provider::plugin_root() {
+        Some(root) if root.join("skills").is_dir() => format!("{}/skills", root.display()),
+        Some(root) => format!("unresolved: {} names no skills dir", root.display()),
+        None => "unresolved: no plugin-root pointer".to_string(),
+    };
+    if status {
+        let mut installed = dest.is_file();
+        if installed {
+            if let Some(src) = extension_src {
+                installed = files_byte_equal(Path::new(src), &dest).unwrap_or(false);
+            }
+        }
+        print_pi_receipt(
+            installed,
+            &dest,
+            agent_dir_source,
+            &skills,
+            json,
+        );
+        return 0;
+    }
+    let Some(src) = extension_src else {
+        eprintln!("plugin install pi: --extension-src <path> is required (or pass --status)");
+        return 2;
+    };
+    let src_path = Path::new(src);
+    if !src_path.is_file() {
+        eprintln!(
+            "plugin install pi: extension source {} is not a file",
+            src_path.display()
+        );
+        return 1;
+    }
+    let dir = dest.parent().unwrap_or_else(|| Path::new("/"));
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("plugin install pi: cannot create {}: {e}", dir.display());
+        return 1;
+    }
+    // Same-directory temp + rename: a reader (pi loading its extensions)
+    // never sees a partial copy.
+    let tmp = dir.join(format!(".footnote.ts.{}.tmp", std::process::id()));
+    if let Err(e) = std::fs::copy(src_path, &tmp) {
+        eprintln!("plugin install pi: cannot stage the copy: {e}");
+        let _ = std::fs::remove_file(&tmp);
+        return 1;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &dest) {
+        eprintln!("plugin install pi: cannot finalize {}: {e}", dest.display());
+        let _ = std::fs::remove_file(&tmp);
+        return 1;
+    }
+    print_pi_receipt(true, &dest, agent_dir_source, &skills, json);
+    0
+}
+
+fn print_pi_receipt(
+    installed: bool,
+    dest: &Path,
+    agent_dir_source: &str,
+    skills: &str,
+    json: bool,
+) {
+    if json {
+        let answer = serde_json::json!({
+            "installed": installed,
+            "dest": dest.display().to_string(),
+            "agent_dir_source": agent_dir_source,
+            "skills": skills,
+        });
+        println!("{answer}");
+    } else {
+        println!(
+            "pi extension {}: {} (agent dir from {}, skills: {})",
+            if installed { "installed" } else { "absent" },
+            dest.display(),
+            agent_dir_source,
+            skills
+        );
+    }
+}
+
+fn files_byte_equal(a: &Path, b: &Path) -> std::io::Result<bool> {
+    use std::io::Read;
+    if a == b {
+        return Ok(true);
+    }
+    let mut left = std::fs::File::open(a)?;
+    let mut right = std::fs::File::open(b)?;
+    let mut la = [0u8; 8192];
+    let mut rb = [0u8; 8192];
+    loop {
+        let n = left.read(&mut la)?;
+        let m = right.read(&mut rb)?;
+        if n != m || la[..n] != rb[..m] {
+            return Ok(false);
+        }
+        if n == 0 {
+            return Ok(true);
         }
     }
 }
