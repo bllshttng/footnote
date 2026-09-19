@@ -31,11 +31,6 @@ use serde_json::Value;
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-// Production code spawns only through bounded_spawn; bare Command remains in
-// the git-fixtured test modules below.
-#[cfg(test)]
-use std::process::Command;
-
 // ── public types ──────────────────────────────────────────────────────────────
 
 /// Why the loop terminated. Serialized as the exact string enum the spec names.
@@ -1540,8 +1535,6 @@ fn classify_payload_for_floor(
 // rather than growing here. The interdiff-carry arm (law d-608344c1)
 // rode the same move.
 
-#[cfg(test)]
-pub(crate) use crate::review_freshness::raw_diff_line_path;
 pub use crate::review_freshness::{
     freshness_rank, review_freshness, CodeDiffIdentity, Freshness, FreshnessFacts,
     FreshnessResolver,
@@ -2151,6 +2144,18 @@ fn build_findings_block_reason(open: &[OpenFinding], malformed: usize) -> String
     )
 }
 
+/// A `Covered(0)` that rests on a commit the object store could not measure
+/// is not a known zero - it is an unread. Demote it to `Unknown` so the row
+/// publishes pending and the gate recomputes it on its next read (the
+/// recompute fetches the commit through the resolver). A `Covered(n > 0)` is
+/// real reviews counted and is never demoted, which also keeps the
+/// spent-budget discharge (always `n >= 1`) intact.
+fn demote_unmeasured_coverage(coverage: &mut Coverage, resolver: &FreshnessResolver) {
+    if matches!(coverage, Coverage::Covered(0)) && !resolver.unmeasured().is_empty() {
+        *coverage = Coverage::Unknown;
+    }
+}
+
 /// Run done() reads. Returns Ok(PrInfo) or Err((read_name, stderr_tail)) on gh failure.
 #[allow(clippy::too_many_arguments)]
 fn read_pr_info(
@@ -2275,6 +2280,11 @@ fn read_pr_info(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let resolver = FreshnessResolver::new(git_bin, cwd, base_ref, head_sha, carry_interdiff_lines);
+    // Fetch a head the store cannot read before anything judges it: a
+    // server-side rebase publishes the new head on GitHub before the next
+    // local fetch, and an absent head reads `None`, then stale, then a stored
+    // uncovered row that never recomputes. Memoized, so at most one fetch.
+    resolver.ensure_local(head_sha);
     let freshness = |sha: &str| resolver.freshness(sha);
 
     // The range-tiling answer for this PR's attestation chain, computed ONCE
@@ -2443,7 +2453,7 @@ fn read_pr_info(
         // round-budget refresh below re-runs it so every conjunct downstream
         // reads the SAME budget, never a mix.
         let classify_with = |tiling: &RangeTiling| {
-            let coverage = classify_coverage_tiled(
+            let mut coverage = classify_coverage_tiled(
                 &[],
                 &[],
                 &events_text,
@@ -2457,6 +2467,7 @@ fn read_pr_info(
                 pr_author.as_deref(),
                 github_approval_satisfies,
             );
+            demote_unmeasured_coverage(&mut coverage.coverage, &resolver);
             // Locked Decision 1: the pass condition is disposition-complete.
             // Non-terminal blocking findings withhold `reviewed` here exactly as
             // the Python merge gate refuses on them - below the cap only.
@@ -2779,6 +2790,7 @@ fn read_pr_info(
             pr_author.as_deref(),
             github_approval_satisfies,
         );
+        demote_unmeasured_coverage(&mut coverage.coverage, &resolver);
         mark_owed_verdicts(&mut coverage, required_bots);
         let local_recovery = local_recovery_from_refusal(
             &info.reviewer_refused,
@@ -10780,7 +10792,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
             return (
                 2,
                 serde_json::json!({"error": "--cwd is required"}).to_string(),
-            )
+            );
         }
     };
     if let Some(explicit) = head.as_deref() {
@@ -11502,281 +11514,6 @@ mod tests {
         assert_eq!(
             review_freshness("r", "h", &facts(Some("i"), None, None)),
             Freshness::Stale
-        );
-    }
-
-    // ──: the resolver against a REAL rebase ──────────────────────────
-    //
-    // The pure tests above pin the predicate over synthetic facts; this pair
-    // drives the git plumbing (identity computation, base-ref qualification)
-    // through an actual rebase. The Python merge gate's twin pair lives in
-    // cli/tests/unit/test_review_freshness_rebase.py; the two gates must
-    // agree on the same PR shape.
-
-    fn git(repo: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(repo)
-            .output()
-            .expect("git runs");
-        assert!(
-            out.status.success(),
-            "git {:?}: {}",
-            args,
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    }
-
-    fn write(repo: &Path, name: &str, body: &str) {
-        std::fs::write(repo.join(name), body).unwrap();
-    }
-
-    /// One repo whose feature branch rebases onto a moved `origin/main`.
-    /// Returns `(repo, reviewed_sha, head_sha)`. `conflict` selects whether
-    /// the rebase stops on a conflict that the resolution CHANGES.
-    fn rebased_repo(conflict: bool) -> (tempfile::TempDir, String, String) {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path().join("r");
-        std::fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init", "-q", "-b", "main"]);
-        git(&repo, &["config", "user.email", "t@t"]);
-        git(&repo, &["config", "user.name", "t"]);
-        write(&repo, "f.txt", "base\n");
-        git(&repo, &["add", "-A"]);
-        git(&repo, &["commit", "-q", "-m", "base"]);
-
-        git(&repo, &["checkout", "-q", "-b", "feature"]);
-        if conflict {
-            write(&repo, "f.txt", "feature says B\n");
-        } else {
-            write(&repo, "code.txt", "pr change\n");
-        }
-        git(&repo, &["add", "-A"]);
-        git(&repo, &["commit", "-q", "-m", "pr"]);
-        let reviewed = git(&repo, &["rev-parse", "HEAD"]);
-
-        git(&repo, &["checkout", "-q", "main"]);
-        if conflict {
-            write(&repo, "f.txt", "main says C\n");
-        } else {
-            write(&repo, "other.txt", "base moved\n");
-        }
-        git(&repo, &["add", "-A"]);
-        git(&repo, &["commit", "-q", "-m", "base moved"]);
-        let tip = git(&repo, &["rev-parse", "HEAD"]);
-        // The machine's pre-push hook protects even scratch `main`s, so move
-        // the remote-tracking ref directly.
-        git(&repo, &["update-ref", "refs/remotes/origin/main", &tip]);
-
-        git(&repo, &["checkout", "-q", "feature"]);
-        let rebase = Command::new("git")
-            .args(["rebase", "origin/main"])
-            .current_dir(&repo)
-            .output()
-            .unwrap();
-        if conflict {
-            assert!(!rebase.status.success(), "scenario requires a conflict");
-            write(&repo, "f.txt", "resolved differently\n");
-            git(&repo, &["add", "-A"]);
-            let cont = Command::new("git")
-                .args(["-c", "core.editor=true", "rebase", "--continue"])
-                .current_dir(&repo)
-                .output()
-                .unwrap();
-            assert!(
-                cont.status.success(),
-                "{}",
-                String::from_utf8_lossy(&cont.stderr)
-            );
-        } else {
-            assert!(
-                rebase.status.success(),
-                "{}",
-                String::from_utf8_lossy(&rebase.stderr)
-            );
-        }
-        let head = git(&repo, &["rev-parse", "HEAD"]);
-        (tmp, reviewed, head)
-    }
-
-    #[test]
-    fn resolver_carries_an_identical_rebase_and_a_small_conflict() {
-        // The contract on the resolver itself, as amended by the
-        // interdiff arm (law d-608344c1): a rebase that rewrote every commit
-        // but changed no content keeps the attestation (CarriedBaseSync), and
-        // a tiny conflict resolution carries as CarriedInterdiff with the
-        // measured line count. The expiry boundary itself (>= cap stales) is
-        // the pure tests' in review_freshness; a fixture cannot hit it
-        // without a 100-line conflict edit.
-        let (tmp, reviewed, head) = rebased_repo(false);
-        let repo = tmp.path().join("r");
-        let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
-        let verdict = resolver.freshness(&reviewed);
-        assert!(verdict.counts(), "identical rebase must carry: {verdict:?}");
-
-        let (tmp, reviewed, head) = rebased_repo(true);
-        let repo = tmp.path().join("r");
-        let resolver = FreshnessResolver::new("git", &repo, "main", &head, 100);
-        let verdict = resolver.freshness(&reviewed);
-        assert_eq!(
-            verdict,
-            Freshness::CarriedInterdiff { lines: 4, cap: 100 },
-            "a 4-line conflict resolution must carry"
-        );
-    }
-
-    #[test]
-    fn freshness_base_sync_carries() {
-        // PR 829's specimen: a 153-file rebase whose PR code diff is identical.
-        assert_eq!(
-            review_freshness(
-                "3f64bc31",
-                "83d2b4ce",
-                &facts(
-                    Some("ident-a"),
-                    Some("ident-a"),
-                    Some(&["crates/fno/src/lib.rs"])
-                )
-            ),
-            Freshness::CarriedBaseSync
-        );
-    }
-
-    #[test]
-    fn freshness_identical_trees_carry_as_base_sync() {
-        // An empty tree diff must not fall through the "all paths are docs"
-        // branch, which is vacuously true over an empty list.
-        assert_eq!(
-            review_freshness("aaa", "bbb", &facts(Some("i"), Some("i"), Some(&[]))),
-            Freshness::CarriedBaseSync
-        );
-    }
-
-    #[test]
-    fn freshness_docs_only_carries_with_its_reason() {
-        // PR 830's specimen: one documentation file moved the head.
-        assert_eq!(
-            review_freshness(
-                "e2976abc",
-                "1ef60959",
-                &facts(
-                    Some("i"),
-                    Some("i"),
-                    Some(&["docs/architecture/x.md", "README.md"])
-                )
-            ),
-            Freshness::CarriedDocsOnly
-        );
-    }
-
-    #[test]
-    fn freshness_code_change_dies() {
-        // 20 of the 22 measured transitions are this: genuine code change, and
-        // no rule that refuses to guess can absorb them.
-        assert_eq!(
-            review_freshness(
-                "aaa",
-                "bbb",
-                &facts(Some("i-old"), Some("i-new"), Some(&["a.rs"]))
-            ),
-            Freshness::Stale
-        );
-    }
-
-    #[test]
-    fn freshness_missing_identity_dies() {
-        // Git failure on either side: fail closed, re-review.
-        assert_eq!(
-            review_freshness("aaa", "bbb", &facts(None, Some("i"), Some(&[]))),
-            Freshness::Stale
-        );
-        assert_eq!(
-            review_freshness("aaa", "bbb", &facts(Some("i"), None, Some(&[]))),
-            Freshness::Stale
-        );
-    }
-
-    #[test]
-    fn freshness_two_absent_identities_never_match() {
-        // THE regression guard. A first measurement pass reported 63%
-        // carry-forward and was wrong: merged PRs' three-dot diff against
-        // current origin/main is empty, e3b0c442 is the SHA-256 of the empty
-        // string, and twelve transitions matched absence against absence. The
-        // true figure was 2 of 22. `Carried` requires two Some values that are
-        // equal - never two empties, however they arose.
-        assert_eq!(
-            review_freshness("aaa", "bbb", &facts(None, None, Some(&[]))),
-            Freshness::Stale
-        );
-    }
-
-    #[test]
-    fn freshness_absent_reviewed_sha_dies() {
-        // A github_app review object with no `commit.oid`, or an attestation
-        // with no head_sha. An empty sha must never match an empty head.
-        assert_eq!(
-            review_freshness("", "", &facts(Some("i"), Some("i"), Some(&[]))),
-            Freshness::Stale
-        );
-        assert_eq!(
-            review_freshness("", "bbb", &facts(Some("i"), Some("i"), Some(&[]))),
-            Freshness::Stale
-        );
-    }
-
-    #[test]
-    fn freshness_unreadable_tree_diff_dies() {
-        // Matching identities but no way to name the carry reason: a carry that
-        // cannot say why it carried is not auditable.
-        assert_eq!(
-            review_freshness("aaa", "bbb", &facts(Some("i"), Some("i"), None)),
-            Freshness::Stale
-        );
-    }
-
-    #[test]
-    fn freshness_only_stale_stops_counting() {
-        assert!(Freshness::Fresh.counts());
-        assert!(Freshness::CarriedBaseSync.counts());
-        assert!(Freshness::CarriedDocsOnly.counts());
-        assert!(!Freshness::Stale.counts());
-    }
-
-    #[test]
-    fn code_diff_identity_drops_docs_and_is_none_when_only_docs_changed() {
-        // The identity is computed from `git diff --raw` lines, so exercise the
-        // path classifier and the empty-result rule on that exact shape.
-        let code = ":100644 100644 aaa bbb M\tcrates/fno/src/lib.rs";
-        let docs = ":100644 100644 ccc ddd M\tdocs/architecture/review-lanes.md";
-        assert_eq!(raw_diff_line_path(code), "crates/fno/src/lib.rs");
-        assert!(!is_documentation_path(raw_diff_line_path(code)));
-        assert!(is_documentation_path(raw_diff_line_path(docs)));
-    }
-
-    #[test]
-    fn freshness_resolver_qualifies_a_bare_base_ref() {
-        // `gh pr view` returns `main`, not `origin/main`; a bare branch name
-        // resolves to the local ref, which in a stale worktree is not the base.
-        let cwd = std::env::temp_dir();
-        assert_eq!(
-            FreshnessResolver::new("git", &cwd, "main", "abc", 100).base_ref,
-            "origin/main"
-        );
-        assert_eq!(
-            FreshnessResolver::new("git", &cwd, "origin/release", "abc", 100).base_ref,
-            "origin/release"
-        );
-        // A slash in the name is not remote-qualification: `release/2.0` is a
-        // bare branch and must still be qualified, or the identity resolves
-        // against a local ref the worktree may not have.
-        assert_eq!(
-            FreshnessResolver::new("git", &cwd, "release/2.0", "abc", 100).base_ref,
-            "origin/release/2.0"
-        );
-        assert_eq!(
-            FreshnessResolver::new("git", &cwd, "", "abc", 100).base_ref,
-            "origin/main"
         );
     }
 
@@ -13411,8 +13148,7 @@ mod tests {
 
     #[test]
     fn parse_manifest_budget_caps() {
-        let content =
-            "---\nsession_id: s\ncreated_at: 2026-06-05T00:00:00Z\nbudget_wall_clock_cap_minutes: 120\nbudget_cost_cap_usd: 5.0\n---\n";
+        let content = "---\nsession_id: s\ncreated_at: 2026-06-05T00:00:00Z\nbudget_wall_clock_cap_minutes: 120\nbudget_cost_cap_usd: 5.0\n---\n";
         let m = parse_manifest(content).unwrap();
         assert_eq!(m.budget_wall_clock_cap_minutes, Some(Ok(120)));
         assert_eq!(m.budget_cost_cap_usd, Some(Ok(5.0)));
@@ -16753,8 +16489,7 @@ git_bounded();";
     #[test]
     fn parse_manifest_malformed_cost_cap_fail_closed() {
         // Fix 2: a present but unparseable cost cap must be Err (fail-closed)
-        let content =
-            "---\nsession_id: s\ncreated_at: 2026-06-05T00:00:00Z\nbudget_cost_cap_usd: 5.OO\n---\n";
+        let content = "---\nsession_id: s\ncreated_at: 2026-06-05T00:00:00Z\nbudget_cost_cap_usd: 5.OO\n---\n";
         let m = parse_manifest(content).unwrap();
         assert!(
             matches!(m.budget_cost_cap_usd, Some(Err(_))),
@@ -16764,8 +16499,7 @@ git_bounded();";
 
     #[test]
     fn parse_manifest_malformed_wall_cap_fail_closed() {
-        let content =
-            "---\nsession_id: s\ncreated_at: 2026-06-05T00:00:00Z\nbudget_wall_clock_cap_minutes: abc\n---\n";
+        let content = "---\nsession_id: s\ncreated_at: 2026-06-05T00:00:00Z\nbudget_wall_clock_cap_minutes: abc\n---\n";
         let m = parse_manifest(content).unwrap();
         assert!(
             matches!(m.budget_wall_clock_cap_minutes, Some(Err(_))),
@@ -18381,8 +18115,7 @@ git_bounded();";
                 clean_pass_review(&comments, "chatgpt-codex-connector", &fresh_at).is_none(),
                 "counted as a pass: {body}"
             );
-            let (verdict, _, _) =
-                bot_verdict("chatgpt-codex-connector", &[], &comments, &fresh_at);
+            let (verdict, _, _) = bot_verdict("chatgpt-codex-connector", &[], &comments, &fresh_at);
             assert_eq!(verdict, CoverageVerdict::Absent, "verdict for: {body}");
         }
     }
