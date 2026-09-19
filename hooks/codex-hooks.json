@@ -64,6 +64,11 @@
             "type": "command",
             "command": "python3 ${PLUGIN_ROOT}/hooks/recursive-grep-guard.py",
             "statusMessage": "checking recursive grep cache traversal"
+          },
+          {
+            "type": "command",
+            "command": "bash ${PLUGIN_ROOT}/hooks/test-run-guard.sh",
+            "statusMessage": "checking for an unadmitted raw test run"
           }
         ]
       }

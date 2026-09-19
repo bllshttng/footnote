@@ -100,6 +100,7 @@ resolver	crates/fno-agents/src/provider_cap_verbs.rs	322	fn real_deps() -> crate
 resolver	crates/fno-agents/src/reclaim.rs	114	fn plugin_cache_copies() -> Vec<PathBuf> {
 resolver	crates/fno-agents/src/scrape.rs	174	pub fn fno_bin() -> std::ffi::OsString {
 resolver	crates/fno-agents/src/scrape.rs	212	fn fno_py_in_tools_dir(base: &std::path::Path) -> Option<std::path::PathBuf> {
+resolver	crates/fno-agents/src/hook/test_run_guard.rs	252	fn is_footnote_checkout(root: &Path) -> bool {
 resolver	crates/fno/src/bootstrap.rs	1116	fn diagnose_locate_failure() -> Option<String> {
 resolver	crates/fno/src/mux_cli.rs	5102	fn prepare_pane_bytes(
 resolver	crates/fno/src/server.rs	2642	pub(crate) fn fno_bin() -> PathBuf {

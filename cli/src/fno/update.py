@@ -1,12 +1,5 @@
 """fno doctor update: reinstall the fno CLI from its source path.
 
-Discovers the source via (in priority order):
-
-1. ``--source`` flag override
-2. ``FNO_SOURCE`` env var
-3. ``~/.fno/source-path`` cache (written on prior successful install)
-4. Well-known candidate paths (plugin install, common dev locations)
-
 Then execs ``uv tool install --reinstall-package fno --refresh-package fno
 <source>`` (or ``pip install --user --force-reinstall <source>`` if uv is
 unavailable). Only the ``fno`` package is reinstalled: the wide ``--reinstall``

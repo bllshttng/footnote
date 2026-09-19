@@ -2414,6 +2414,12 @@ def _readiness_env(
     monkeypatch.setattr(doctor, "_read_marker", lambda: installed_rev)
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: src)
     monkeypatch.setattr(doctor, "_source_rev", lambda source: source_rev)
+    # The native gate reads the process cwd itself, so pin it to the fake
+    # source: a test run inside a real fno checkout must not leak that
+    # checkout's git state into the wire-bump answer.
+    monkeypatch.setattr(
+        update, "_resolve_source_pin", lambda source: {"path": str(src), "decision": "allow"}
+    )
     monkeypatch.setattr(update.shutil, "which", lambda name: "/usr/bin/fno")
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: None)
     return src
