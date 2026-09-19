@@ -52,7 +52,14 @@ async fn rm_cleans_a_crowned_rows_scope_manifest_best_effort() {
         .unwrap_or_else(|e| e.into_inner());
     let home = short_home("rmcrownstate");
     let project = home.root().join("project");
-    let manifest = project.join(".fno/kings/alpha.md");
+    // The manifest lives where the row's cwd resolves it: the project's
+    // space dir under the pinned FNO_SPACES_DIR, not a repo-relative .fno.
+    let spaces = home.root().join("spaces");
+    std::env::set_var("FNO_SPACES_DIR", &spaces);
+    let manifest = crate::paths::space_dir_opt(&project)
+        .unwrap()
+        .join("kings")
+        .join("alpha.md");
     std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
     std::fs::write(&manifest, "---\nscope: alpha\n---\n").unwrap();
     let mut row = claude_rm_row(
@@ -85,6 +92,7 @@ async fn rm_cleans_a_crowned_rows_scope_manifest_best_effort() {
         !manifest.exists(),
         "successful rm left crown loop state behind"
     );
+    std::env::remove_var("FNO_SPACES_DIR");
     std::fs::remove_dir_all(home.root()).ok();
 }
 
@@ -99,7 +107,12 @@ async fn rm_never_deletes_a_successors_re_armed_manifest() {
     // live successor's stop gate.
     let home = short_home("rmcrownsucc");
     let project = home.root().join("project");
-    let manifest = project.join(".fno/kings/alpha.md");
+    let spaces = home.root().join("spaces");
+    std::env::set_var("FNO_SPACES_DIR", &spaces);
+    let manifest = crate::paths::space_dir_opt(&project)
+        .unwrap()
+        .join("kings")
+        .join("alpha.md");
     std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
     std::fs::write(
         &manifest,
@@ -136,6 +149,7 @@ async fn rm_never_deletes_a_successors_re_armed_manifest() {
         manifest.exists(),
         "rm deleted a manifest naming a different session: the live successor's gate"
     );
+    std::env::remove_var("FNO_SPACES_DIR");
     std::fs::remove_dir_all(home.root()).ok();
 }
 

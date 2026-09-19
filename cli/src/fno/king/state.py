@@ -132,7 +132,6 @@ def arm_king_manifest(
     harness_session_id: str,
     *,
     state_root: Optional[Path] = None,
-    owner_pid: Optional[int] = None,
     owner_cwd: Optional[str] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
@@ -142,7 +141,6 @@ def arm_king_manifest(
 ) -> Optional[Path]:
     """Refresh loop state at the moment a crown becomes authoritative."""
     if row is not None:
-        owner_pid = owner_pid or getattr(row, "pid", None)
         owner_cwd = owner_cwd or getattr(row, "cwd", None)
         crown_level = crown_level if crown_level is not None else getattr(row, "crown_level", None)
         crown_scope = crown_scope if crown_scope is not None else getattr(row, "crown_scope", None)
@@ -174,7 +172,6 @@ def arm_king_manifest(
             scope=scope,
             harness_session_id=harness_session_id,
             force=True,
-            owner_pid=owner_pid,
             owner_cwd=owner_cwd,
             crown_level=crown_level,
             crown_scope=crown_scope,
@@ -243,7 +240,6 @@ def write_manifest(
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     respawn_ceiling: int = DEFAULT_RESPAWN_CEILING,
     force: bool = False,
-    owner_pid: Optional[int] = None,
     owner_cwd: Optional[str] = None,
     shape: str = "pass",
     crown_level: Optional[int] = None,
@@ -270,7 +266,6 @@ def write_manifest(
         "harness": os.environ.get("FNO_HARNESS", "claude"),
         "harness_session_id": harness_session_id,
         "model": (model or "").strip(),
-        "owner_pid": str(owner_pid or os.getpid()),
         "owner_cwd": owner_cwd or str(Path.cwd()),
         "budget_max_iterations": str(max_iterations),
         "respawn_count": "0",
