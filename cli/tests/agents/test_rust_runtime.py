@@ -814,6 +814,10 @@ def test_rust_client_verbs_match_client_rs() -> None:
             # client action list is shrink-only (d-fe66560a), so this arm is
             # never registered and never routed.
             "backlog-update",
+            # The provenance fold: `fno doctor intel` shells the binary
+            # through resolve_binary, never `fno agents intel` routing; the
+            # arm stays unregistered for the same shrink law.
+            "intel",
         }
     )
 

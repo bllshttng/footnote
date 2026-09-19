@@ -34,7 +34,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "backlog-note",
     "backlog-notes",
     "bash-census",
-    "intel",
     "blueprint-feed",
     "board",
     "claim",
@@ -788,7 +787,9 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::bash_census::run_bash_census(&args[1..]);
     }
     // `intel`: the session-provenance fold, daemon-free read, == dispatch
-    // like bash-census. Python surface `fno doctor intel` shells HERE.
+    // like board/reclaim: never registered in ALL_CLIENT_ACTIONS (the action
+    // list is shrink-only, d-fe66560a) and never routed by `fno agents`;
+    // `fno doctor intel` shells HERE through resolve_binary.
     if verb == "intel" {
         return fno_agents::intel::run_intel(&args[1..]);
     }
