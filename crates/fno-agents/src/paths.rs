@@ -137,6 +137,24 @@ impl AgentsHome {
         Some(AgentsHome { root })
     }
 
+    /// Joins the ambient tree onto an already-read `$HOME` value. Split out
+    /// of `home_fallback` so the path-joining is testable without an env
+    /// read.
+    fn home_fallback_from(home: Option<std::ffi::OsString>) -> Self {
+        let base = home
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let root = base.join(".fno").join("agents");
+        fence_declared_root(test_sandbox_claimed(), &root);
+        AgentsHome { root }
+    }
+
+    /// The ambient `$HOME/.fno/agents` fallback. Never reads `HOME_ENV` -
+    /// callers already know it was absent.
+    fn home_fallback() -> Self {
+        Self::home_fallback_from(std::env::var_os("HOME"))
+    }
+
     /// Resolve from the environment: `FNO_AGENTS_HOME` if set, else
     /// `$HOME/.fno/agents`. Falls back to `./.fno/agents` if `$HOME`
     /// is somehow unset (CI containers), so the daemon never panics on a missing
@@ -146,12 +164,7 @@ impl AgentsHome {
             return home;
         }
         refuse_undeclared_home_fallback(test_root_declared(), HOME_ENV);
-        let base = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let root = base.join(".fno").join("agents");
-        fence_declared_root(test_sandbox_claimed(), &root);
-        AgentsHome { root }
+        Self::home_fallback()
     }
 
     /// The resolved root, or `None` when a test process declared none.
@@ -166,9 +179,9 @@ impl AgentsHome {
     /// sandbox it does not have still panics through [`fence_declared_root`];
     /// that refusal is the point, not a hole in this degrade.
     ///
-    /// Reads `HOME_ENV` once and reuses that value: a second independent
-    /// read let a concurrent unset flip the answer between checking and
-    /// building.
+    /// Reads `HOME_ENV` once and reuses that value. Calling `from_env` in
+    /// the declared-ambient branch would read it again, and a sibling
+    /// setting its own temp home in that gap would leak through silently.
     pub fn from_env_opt() -> Option<Self> {
         let declared = std::env::var_os(HOME_ENV);
         if declared.is_some() {
@@ -177,7 +190,8 @@ impl AgentsHome {
         if cfg!(test) && !test_root_declared() {
             return None;
         }
-        Some(Self::from_env())
+        refuse_undeclared_home_fallback(test_root_declared(), HOME_ENV);
+        Some(Self::home_fallback())
     }
 
     /// Construct rooted at an explicit directory (tests).
@@ -960,6 +974,23 @@ mod tests {
     #[test]
     fn from_value_is_none_when_nothing_is_declared() {
         assert!(AgentsHome::from_value(None).is_none());
+    }
+
+    /// `home_fallback_from` is the same seam for the ambient case: given
+    /// `$HOME`'s value up front, it never reads the environment itself.
+    #[test]
+    fn home_fallback_from_joins_the_agents_tree_onto_the_given_home() {
+        let home = AgentsHome::home_fallback_from(Some(std::ffi::OsString::from("/tmp/eg-home")));
+        assert_eq!(
+            home.root(),
+            Path::new("/tmp/eg-home").join(".fno").join("agents")
+        );
+    }
+
+    #[test]
+    fn home_fallback_from_defaults_to_dot_when_home_is_absent() {
+        let home = AgentsHome::home_fallback_from(None);
+        assert_eq!(home.root(), Path::new(".").join(".fno").join("agents"));
     }
 
     // ── is_sandbox ─────────────────────────────────────────────────
