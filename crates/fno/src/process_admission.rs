@@ -424,7 +424,24 @@ pub fn configured_pane_group_max(requested: Option<usize>) -> usize {
 /// fact about the world, the spawn below reports its own limit, and an
 /// operator reading a log can tell a descriptor famine from a full fleet.
 fn write_not_measuring_receipt(reason: &str) {
-    eprintln!("process admission is not measuring: {reason}; admitting, the spawn below reports its own limit");
+    eprintln!("{}", not_measuring_line(reason));
+}
+
+/// The receipt line, split from the write so a test can assert its bytes.
+fn not_measuring_line(reason: &str) -> String {
+    format!("process admission is not measuring: {reason}; admitting, the spawn below reports its own limit")
+}
+
+/// The reason a census that ADMITS still owes the receipt: both terminal
+/// outcomes stop the gate from measuring, and a gate that stops measuring
+/// and says nothing is the failure class this receipt exists to end. A
+/// Complete census measured, and an Unavailable census refuses with its own
+/// evidence, so neither prints here.
+fn census_receipt_reason(census: &Census) -> Option<&str> {
+    match census {
+        Census::NoSource { reason } | Census::DescriptorsExhausted { reason } => Some(reason),
+        Census::Complete { .. } | Census::Unavailable { .. } => None,
+    }
 }
 
 /// Acquire the machine-global admission lock, measure the relevant process
@@ -492,7 +509,7 @@ pub fn admit_fleet() -> Result<AdmissionPermit, AdmissionFailure> {
     let decision = decide_processes(&census, ceiling);
     match decision {
         AdmissionDecision::Admit => {
-            if let Census::NoSource { reason } = &census {
+            if let Some(reason) = census_receipt_reason(&census) {
                 write_not_measuring_receipt(reason);
             }
             Ok(AdmissionPermit {
@@ -645,7 +662,7 @@ pub fn admit_pane(
             detail: fleet.reason().unwrap_or_default().to_string(),
         });
     }
-    if let Census::NoSource { reason } = &fleet {
+    if let Some(reason) = census_receipt_reason(&fleet) {
         write_not_measuring_receipt(reason);
     }
     let tab = decide_panes(PaneCount::new(pane_count), tab_ceiling);
@@ -1794,5 +1811,39 @@ mod tests {
                 "{errno}"
             );
         }
+    }
+
+    /// Both admitting outcomes owe the receipt. A DescriptorsExhausted census
+    /// that admits silently is the CI specimen path: the gate stopped
+    /// measuring and said nothing.
+    #[test]
+    fn both_admitting_outcomes_earn_the_receipt() {
+        let famine = Census::descriptors_exhausted("descriptors-exhausted (cannot read /proc)");
+        assert_eq!(
+            census_receipt_reason(&famine),
+            Some("descriptors-exhausted (cannot read /proc)")
+        );
+        let sourceless = Census::no_source("no /proc directory on this host");
+        assert_eq!(
+            census_receipt_reason(&sourceless),
+            Some("no /proc directory on this host")
+        );
+        assert_eq!(census_receipt_reason(&Census::complete(3)), None);
+        assert_eq!(census_receipt_reason(&Census::unavailable("unread")), None);
+    }
+
+    /// The receipt names the reason and states the admit, so an operator
+    /// reading a log can tell a famine from a full fleet.
+    #[test]
+    fn the_receipt_names_the_reason_and_the_admit() {
+        let line = not_measuring_line("descriptors-exhausted (cannot read /proc)");
+        assert!(
+            line.contains("process admission is not measuring: descriptors-exhausted"),
+            "{line}"
+        );
+        assert!(
+            line.contains("; admitting, the spawn below reports its own limit"),
+            "{line}"
+        );
     }
 }
