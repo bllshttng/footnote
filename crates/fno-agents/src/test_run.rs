@@ -341,7 +341,7 @@ fn run_build_admit(args: &[String]) -> i32 {
         ..Default::default()
     };
     let result = acquire_claim_blocking(&[BUILD_CLAIM_KEY.to_string()], &holder, opts, |rows| {
-        let mut scan = |table: &[crate::census::ProcRow]| -> Option<OnHeld> {
+        let mut scan = |table: &[crate::census::ProcRow], parent: &ParentMap| -> Option<OnHeld> {
             let (h, pid, _) = rows.first()?;
             let holder_pid = (*pid).filter(|p| *p > 0)?;
             // A holder that has stopped compiling keeps the slot for no
@@ -350,7 +350,7 @@ fn run_build_admit(args: &[String]) -> i32 {
             // exact holder string (a holder mismatch is a silent no-op,
             // which is how two waiters racing stay safe) and let the next
             // poll acquire.
-            let compiling = holder_compiling(table, holder_pid as u32)?;
+            let compiling = holder_compiling_map(parent, table, holder_pid as u32)?;
             let idle_for = idle.observe(h, compiling, Instant::now());
             if idle_for >= build_idle_window() && takeover_reason.borrow().is_none() {
                 let waited = idle_for.as_secs();
@@ -477,7 +477,7 @@ impl CargoWait {
         &mut self,
         rows: &[(String, Option<i32>, String)],
         slot_context: Option<(usize, &'static str)>,
-        scan_hook: Option<&mut dyn FnMut(&[crate::census::ProcRow]) -> Option<OnHeld>>,
+        scan_hook: Option<&mut dyn FnMut(&[crate::census::ProcRow], &ParentMap) -> Option<OnHeld>>,
     ) -> OnHeld {
         for (_, pid, _) in rows {
             if pid.is_some_and(|p| p > 0 && is_self_or_ancestor(p as u32, self.cargo_pid)) {
@@ -490,13 +490,16 @@ impl CargoWait {
         {
             self.last_scan = Some(Instant::now());
             let table = crate::census::process_table().0;
+            let parent = parent_map(&table);
             for (_, pid, _) in rows {
-                if pid.is_some_and(|p| p > 0 && runs_nested_cargo(&table, p as u32)) {
+                if pid.is_some_and(|p| {
+                    p > 0 && runs_under_map(&parent, &table, p as u32, is_cargo_row)
+                }) {
                     return OnHeld::Admit;
                 }
             }
             if let Some(hook) = scan_hook {
-                if let Some(verdict) = hook(&table) {
+                if let Some(verdict) = hook(&table, &parent) {
                     return verdict;
                 }
             }
@@ -638,16 +641,23 @@ fn live_waiter_hold(dir: &Path, checkout: &Path) -> Option<String> {
     ))
 }
 
+/// The pid->ppid map over one process-table read, shared by every predicate
+/// that read feeds.
+type ParentMap = std::collections::HashMap<u32, u32>;
+
+fn parent_map(rows: &[crate::census::ProcRow]) -> ParentMap {
+    rows.iter().map(|row| (row.pid, row.ppid)).collect()
+}
+
 /// True when some process other than the holder itself, matching `pred`,
 /// sits anywhere under `holder_pid` in the process table. The walk follows
 /// each matching row's ppid chain, at most 64 hops.
-fn runs_under(
+fn runs_under_map(
+    parent: &ParentMap,
     rows: &[crate::census::ProcRow],
     holder_pid: u32,
     pred: impl Fn(&crate::census::ProcRow) -> bool,
 ) -> bool {
-    let parent: std::collections::HashMap<u32, u32> =
-        rows.iter().map(|row| (row.pid, row.ppid)).collect();
     rows.iter()
         .filter(|row| row.pid != holder_pid)
         .filter(|row| pred(row))
@@ -666,14 +676,25 @@ fn runs_under(
         })
 }
 
+fn runs_under(
+    rows: &[crate::census::ProcRow],
+    holder_pid: u32,
+    pred: impl Fn(&crate::census::ProcRow) -> bool,
+) -> bool {
+    runs_under_map(&parent_map(rows), rows, holder_pid, pred)
+}
+
+/// A row whose program is cargo.
+fn is_cargo_row(row: &crate::census::ProcRow) -> bool {
+    let argv0 = row.command.split_whitespace().next().unwrap_or("");
+    Path::new(argv0)
+        .file_name()
+        .is_some_and(|name| name == "cargo")
+}
+
 /// True when a `cargo` process other than `holder_pid` runs under it.
 fn runs_nested_cargo(rows: &[crate::census::ProcRow], holder_pid: u32) -> bool {
-    runs_under(rows, holder_pid, |row| {
-        let argv0 = row.command.split_whitespace().next().unwrap_or("");
-        Path::new(argv0)
-            .file_name()
-            .is_some_and(|name| name == "cargo")
-    })
+    runs_under(rows, holder_pid, is_cargo_row)
 }
 
 /// A compile process: a token of the argv naming `rustc` (a bare rustc, an
@@ -699,8 +720,16 @@ fn is_compile(row: &crate::census::ProcRow) -> bool {
 /// cannot see the holder at all, so an invisible holder is never read as
 /// idle. `Some(false)` means the holder has no compile under it right now.
 fn holder_compiling(rows: &[crate::census::ProcRow], holder_pid: u32) -> Option<bool> {
+    holder_compiling_map(&parent_map(rows), rows, holder_pid)
+}
+
+fn holder_compiling_map(
+    parent: &ParentMap,
+    rows: &[crate::census::ProcRow],
+    holder_pid: u32,
+) -> Option<bool> {
     let visible = rows.iter().any(|row| row.pid == holder_pid);
-    visible.then(|| runs_under(rows, holder_pid, is_compile))
+    visible.then(|| runs_under_map(parent, rows, holder_pid, is_compile))
 }
 
 /// The idle window for a build-admit waiter. `FNO_TEST_BUILD_IDLE_SECS`
