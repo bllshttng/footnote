@@ -8,7 +8,7 @@
 
 use super::budget::{run_with_timeout, RunFailure};
 use super::queues::NODE_ID_BODY;
-use super::{is_terminal, s_str, Budget, SourceRead, KING_PRIORITIES};
+use super::{s_str, Budget, SourceRead, KING_PRIORITIES};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

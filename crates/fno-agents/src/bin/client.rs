@@ -116,7 +116,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "spawn-gate",
     "spawn-overlay",
     "spawn-axes",
-    "launch-workdir",
     "fallback-chain",
     "state",
     "status",
@@ -161,6 +160,14 @@ fn main() {
         std::process::exit(fno_agents::sync_canonical::run_sync_canonical_verb(
             &args[1..],
         ));
+    }
+    // `launch-workdir`: the spawn door's launch-cwd resolution (see
+    // launch_workdir.rs doc). Transport-only, like sync-canonical: registers
+    // no client action (the shrink law allows none); Python's
+    // ensure_launch_workdir reaches it through verb_call, and a `hold`
+    // answer is a valid exit-0 answer the caller renders.
+    if args.first().map(String::as_str) == Some("launch-workdir") {
+        std::process::exit(fno_agents::launch_workdir::run_launch_workdir(&args[1..]));
     }
     // `worktree-reapable`: the worktree-removal gate, daemon-free, a
     // transport-only arm like surface-check - it registers NO client action
@@ -646,14 +653,6 @@ async fn run(args: Vec<String>) -> i32 {
     // projects the seam's facts and applies the returned plan verbatim.
     if verb == "spawn-axes" {
         return fno_agents::spawn_axes::run_spawn_axes(&args[1..]);
-    }
-
-    // `launch-workdir`: the spawn door's launch-cwd resolution (see
-    // launch_workdir.rs doc). Direct dispatch; no daemon RPC. The Python
-    // node-seed path sends one JSON payload and reads the answer back; a
-    // `hold` answer is a valid exit-0 answer the caller renders.
-    if verb == "launch-workdir" {
-        return fno_agents::launch_workdir::run_launch_workdir(&args[1..]);
     }
 
     // `permission-tokens`: the one permission vocabulary and mappability
