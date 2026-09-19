@@ -3,9 +3,36 @@
 //! plan, open plan). Moved out of `client_tests.rs` with the lane change
 //! they assert - the file is over budget and may only shrink.
 
-use super::tests::{bcard, two_pane_view};
+use crate::vt::frame_text;
+use super::tests::{bcard, blocked_row, two_pane_view, view_with_agents};
 use super::*;
 use crate::backlog_view::card_label;
+
+#[test]
+fn a_pr_row_names_the_session_driving_it() {
+    // The operator's ask: a PR row shows the attach handle with the short
+    // id of its driving session; no session id reads "no session".
+    let mut a = blocked_row("w1", 3, None);
+    a.pr = Some(9);
+    a.harness_session_id = Some("09234474-8893-44d5-9f65-10dd0e2e353a".into());
+    let view = view_with_agents(vec![a]);
+    let frame = view.compose();
+    let text = frame_text(&frame);
+    assert!(
+        text.contains("attach 09234474"),
+        "the row carries the attach handle, got:\n{text}"
+    );
+
+    let mut b = blocked_row("w2", 4, None);
+    b.pr = Some(10);
+    b.harness_session_id = None;
+    let view = view_with_agents(vec![b]);
+    let text = frame_text(&view.compose());
+    assert!(
+        text.contains("no session"),
+        "a PR row with no session says so, got:\n{text}"
+    );
+}
 
 #[test]
 fn card_label_leads_with_the_id() {
@@ -27,10 +54,10 @@ fn card_label_leads_with_the_id() {
         })
     };
     assert_eq!(
-        mk("x-85a0", "agent-native-backlog-view"),
-        "x-85a0 agent-native-backlog-view"
+        mk("n1", "agent-native-backlog-view"),
+        "n1 agent-native-backlog-view"
     );
-    assert_eq!(mk("x-2", ""), "x-2");
+    assert_eq!(mk("n2", ""), "n2");
 }
 
 #[test]

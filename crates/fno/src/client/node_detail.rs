@@ -199,8 +199,11 @@ pub(crate) fn close(view: &mut View) {
 }
 
 /// The fold result channel the run loop hands [`maybe_kick`] and reads in
-/// its node-detail arm.
-pub(crate) type FoldTx = tokio::sync::mpsc::UnboundedSender<(u64, FoldResult)>;
+/// its node-detail arm. The tuple carries the NODE ID beside the generation:
+/// both wrap, so a close-then-reopen inside one fold's budget would reuse
+/// gen 0 and a stale record would land on the wrong node's pane. The id is
+/// the second guard the feed's gen-only tuple lacks.
+pub(crate) type FoldTx = tokio::sync::mpsc::UnboundedSender<(u64, String, FoldResult)>;
 
 /// At most ONE fold in flight, armed by `want` (the feed's discipline).
 pub(crate) fn maybe_kick(view: &mut View, tx: &FoldTx) {
@@ -217,16 +220,17 @@ pub(crate) fn maybe_kick(view: &mut View, tx: &FoldTx) {
     let id = o.node_id.clone();
     tokio::spawn(async move {
         let result = detail_now(&id).await;
-        let _ = tx.send((gen, result));
+        let _ = tx.send((gen, id, result));
     });
 }
 
-/// A fold landed: apply only to the still-open, same-generation overlay.
-pub(crate) fn apply_fold(view: &mut View, gen: u64, outcome: FoldResult) {
+/// A fold landed: apply only to the still-open, same-generation overlay for
+/// the SAME node.
+pub(crate) fn apply_fold(view: &mut View, gen: u64, node_id: &str, outcome: FoldResult) {
     let Some(o) = view.node_detail.as_mut() else {
         return;
     };
-    if gen != o.gen {
+    if gen != o.gen || o.node_id != node_id {
         return;
     }
     o.inflight = false;
@@ -488,6 +492,9 @@ pub(crate) async fn detail_keys(
             ModalKey::Enter | ModalKey::Byte(b'a') | ModalKey::Byte(b'r') => {
                 activate_selected(view, sock_w).await?;
             }
+            // `d` dispatches the NODE (the click path's confirm, armed on
+            // top; the confirm's own Enter sends, its Esc returns here).
+            ModalKey::Byte(b'd') => dispatch_node(view, sock_w).await?,
             _ => {}
         }
     }
@@ -624,6 +631,25 @@ async fn activate_selected(
 /// First 8 chars of a session id - the join key `fno agents top` prints.
 fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
+}
+
+/// Arm the node's dispatch confirm - the same hit the card CLICK takes, so
+/// the confirm's one-keypress safety gates keyboard dispatch exactly as it
+/// gates the mouse. A card no longer in the feed answers with a notice.
+async fn dispatch_node(
+    view: &mut View,
+    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> Result<(), String> {
+    let Some(o) = view.node_detail.as_ref() else {
+        return Ok(());
+    };
+    let id = o.node_id.clone();
+    let Some(card) = view.layout.backlog.iter().find(|c| c.id == id).cloned() else {
+        view.set_notice(format!("{id} is no longer in the backlog"));
+        return Ok(());
+    };
+    let hit = view.card_hit(&card);
+    apply_hit(view, hit, sock_w).await
 }
 
 fn truncate(s: &str, w: usize) -> String {

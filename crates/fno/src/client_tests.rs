@@ -13379,7 +13379,7 @@ fn answerable(idx_labels: &[(&str, &str)], fp: u8) -> AnswerablePrompt {
     }
 }
 
-fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) -> AgentRow {
+pub(super) fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) -> AgentRow {
     AgentRow {
         spawned_by_name: None,
         lineage_reason: None,

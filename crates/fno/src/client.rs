@@ -7807,6 +7807,16 @@ impl View {
                     if let Some(idx) = a.portal {
                         text.push_str(&format!(" ◫{idx}"));
                     }
+                    // A PR row names the session driving it: the attach
+                    // handle with its short id (live or exited alike).
+                    if a.pr.is_some() {
+                        match a.harness_session_id.as_deref() {
+                            Some(sid) => {
+                                text.push_str(&format!(" attach {}", sid.get(..8).unwrap_or(sid)))
+                            }
+                            None => text.push_str(" no session"),
+                        }
+                    }
                     // Indent the row under its lineage parent: one
                     // step per depth, read from the compose-pass depth vec.
                     // Zero steps -> no prefix -> a section with no parent
@@ -10437,9 +10447,9 @@ async fn attach_and_run(
         tokio::sync::mpsc::unbounded_channel::<(u64, crate::feed_overlay::FoldResult)>();
 
     // the node detail fold: the feed leg's shape (off-loop, gen-tagged,
-    // single-flight).
+    // single-flight); the node id rides beside the gen (ids wrap too).
     let (detail_tx, mut detail_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(u64, node_detail::FoldResult)>();
+        tokio::sync::mpsc::unbounded_channel::<(u64, String, node_detail::FoldResult)>();
 
     // task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
     // and reports back here. Single-flight (`mine_acting`), ungated by
@@ -11170,9 +11180,10 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
-            Some((gen, outcome)) = detail_rx.recv() => {
-                // a node-detail fold landed (the feed arm's contract).
-                node_detail::apply_fold(&mut view, gen, outcome);
+            Some((gen, node_id, outcome)) = detail_rx.recv() => {
+                // a node-detail fold landed (the feed arm's contract, plus
+                // the node-id guard: both ids wrap).
+                node_detail::apply_fold(&mut view, gen, &node_id, outcome);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }

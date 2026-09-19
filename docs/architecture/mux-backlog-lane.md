@@ -6,9 +6,11 @@ The `~ backlog` section of the mux sideline: the board cards, their scope, and t
 
 One card per non-done node, derived read-only from `graph.json` through the store keeper (`backlog_view.rs`). The card is a `BacklogCard`: id, slug, priority, state (`Ready`, `Blocked`, `InFlight`), and the route fields (`pane_id`, `attach_id`, `where_hint`).
 
-The card label leads with the id: `x-85a0 agent-native-backlog-view`. The id is the handle every verb takes, so it renders first and the slug follows it. Every paint site (the card row, the mini-kanban, the navigator, the card menu header) folds through one `card_label` helper. The four rows cannot drift apart.
+The card label leads with the id, then the slug: `<id> <slug>`. The id is the handle every verb takes, so it renders first and the slug follows it. Every paint site (the card row, the mini-kanban, the navigator, the card menu header) folds through one `card_label` helper. The four rows cannot drift apart.
 
 A claim flips a card to in-flight without a graph write. The sideline folds the live claim store every tick (`fno-agents claim sweep`). The claim lockfile outranks the graph's status field.
+
+A PR row names the session driving it. An agents-section row carrying a PR shows `attach <short id>` beside its name (its own session id, live or exited alike). A PR row with no session id says `no session`.
 
 ## The scope
 
