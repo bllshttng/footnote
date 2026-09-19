@@ -113,9 +113,14 @@ def _stub_signals(
     monkeypatch.setattr(update, "stale_mux_servers", lambda: [])
     # The rust-stale --fix guard re-resolves the source pin; left unstubbed
     # it shells to the real native authority and refuses from a feature
-    # worktree, so every fix test inherits this machine's checkout.
-    # Default None = "no verdict" (the guard proceeds); pin tests override it.
-    monkeypatch.setattr(update, "_resolve_source_pin", lambda override=None: None)
+    # worktree, so every fix test inherits this machine's checkout. The
+    # guard refuses on an unresolvable pin, so the default is an allow
+    # verdict for the stubbed source; pin tests override it.
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda override=None: {"decision": "allow", "path": str(src)},
+    )
     # Control-plane arm staleness shells out to the real `fno-agents status
     # --json`. A developer machine with genuinely stale arms leaks STALE lines
     # into full-output assertions, so stub it like the other probes.
