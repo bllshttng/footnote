@@ -56,6 +56,7 @@ def run(
     env: Optional[Mapping[str, str]] = None,
     input_text: Optional[str] = None,
     timeout: Optional[float] = None,
+    start_new_session: bool = False,
 ) -> Result:
     """Run ``cmd`` capturing stdout/stderr as text.
 
@@ -78,6 +79,7 @@ def run(
             capture_output=True,
             timeout=timeout,
             check=False,
+            start_new_session=start_new_session,
         )
     except FileNotFoundError as exc:
         # FileNotFoundError fires when argv[0] is not on PATH. (A missing cwd

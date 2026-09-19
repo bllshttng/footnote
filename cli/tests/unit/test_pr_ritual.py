@@ -191,6 +191,26 @@ def test_leg_sync_canonical_calls_real_verb(tmp_path, capsys):
     assert any(c[1:4] == ["do", "pr", "sync-canonical"] for c in runner.calls)
 
 
+def test_leg_sync_canonical_runs_detached(tmp_path, capsys):
+    """The sync leg runs in its own session with its own 900s leg
+    bound, so the watcher's slice timeout killing the ritual cannot kill a
+    mid-build sync with it (the corpse then held post-merge-sync for its
+    whole 30-minute TTL)."""
+    seen = {}
+
+    def runner(cmd, cwd=None, timeout=None, start_new_session=False):
+        seen.update(argv=cmd, timeout=timeout, start_new_session=start_new_session)
+        return _ritual.Result(0, "", "")
+
+    r = _bare(tmp_path, runner)
+    r.ctx.pm = SimpleNamespace(sync_command="git pull", self_reap=False,
+                               parking_lot_path=None)
+    r.leg_sync_canonical()
+    assert seen["argv"][1:4] == ["do", "pr", "sync-canonical"]
+    assert seen["timeout"] == 900.0
+    assert seen["start_new_session"] is True
+
+
 def test_sync_canonical_skipped_when_unconfigured(tmp_path, capsys):
     runner = FakeRunner()
     r = _bare(tmp_path, runner)  # pm.sync_command = None

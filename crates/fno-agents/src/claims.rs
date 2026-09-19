@@ -991,6 +991,17 @@ pub fn classify_with_basis_and_exclusivity(
         }
         return (ClaimState::Stale, basis::TTL_EXPIRED);
     }
+    // A lease whose holder is ONE SHORT-LIVED PROCESS reads its recorded pid
+    // at any age, not only at expiry: the flight gate and the post-merge
+    // sync hold their lease exactly as long as the process lives, so a
+    // provably dead pid frees it inside the TTL window instead of refusing
+    // every retry until expiry. A refused probe is not proof of death and
+    // falls through to the TTL-window arms below.
+    if rec.pid_provenance.as_deref() == Some(HOLDER_PROCESS) {
+        if let Some(verdict) = pid_verdict(rec, probe) {
+            return verdict;
+        }
+    }
     let (live, cause) = liveness_reading(rec, probe);
     if rec.expires_at.is_none() {
         if live {
@@ -4273,6 +4284,43 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A lease whose holder is ONE SHORT-LIVED PROCESS (stamped
+    /// `holder-process`, pid recorded) frees inside its TTL window when that
+    /// pid is provably dead. A sync killed mid-build used to hold
+    /// `post-merge-sync` for its whole 30-minute TTL and refuse every retry.
+    #[test]
+    fn acquire_takes_over_a_dead_holder_process_lease_inside_its_ttl() {
+        let td = TempDir::new().unwrap();
+        let mut o = opts_in(&td);
+        o.pid = Some(reaped_pid());
+        o.ttl_ms = Some(120_000);
+        o.pid_provenance = Some(HOLDER_PROCESS.to_string());
+        assert!(matches!(
+            acquire("post-merge-sync", "sync-canonical:7", o),
+            AcquireOutcome::Acquired(_)
+        ));
+        // The fixture must name a corpse, or this proves nothing.
+        let rec = read_claim_file(&lockfile(&td, "post-merge-sync")).unwrap();
+        assert_ne!(classify(&rec, None), ClaimState::Live);
+        let mut next = opts_in(&td);
+        next.pid = Some(std::process::id());
+        assert!(matches!(
+            acquire("post-merge-sync", "sync-canonical:8", next),
+            AcquireOutcome::Acquired(_)
+        ));
+    }
+
+    /// A pid that ran and was reaped, so it names no live process.
+    fn reaped_pid() -> u32 {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn");
+        let pid = child.id();
+        child.wait().expect("wait");
+        pid
     }
 
     // -- machine identity -------------------------------------
