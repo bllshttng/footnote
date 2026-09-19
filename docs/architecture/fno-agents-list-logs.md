@@ -1,6 +1,6 @@
 # fno agents — list + logs read surface
 
-Two read verbs sit on top of the registry substrate: `fno agents list` (registry roster + live status) and `fno agents logs <name>` (per-agent transcript tail). The `fno-agents` Rust client serves `list`: the daemon's `agent.list` projection builds the row, and `render_list_table` in `crates/fno-agents/src/bin/client.rs` draws the table. The MODEL and PR cells come from `crates/fno-agents/src/list_row.rs`. The Python list lane is deleted, so the sections below that describe `read.py` cover `logs` only. Both are pure-read — they never mutate the registry. This doc covers the design; the how-to lives in the [list/logs user guide](../guides/fno-agents-list-logs.md).
+Two read verbs sit on top of the registry substrate: `fno agents list` (registry roster + live status) and `fno agents logs <name>` (per-agent transcript tail). The `fno-agents` Rust client serves `list`: the daemon's `agent.list` projection builds the row, and `render_list_table` in `crates/fno-agents/src/bin/client.rs` draws the table. The MODEL and PR cells come from `crates/fno-agents/src/list_row.rs`. The Python list lane is deleted, so the sections below that describe `read.py` cover `logs` only. Both are pure-read — they never mutate the registry. This doc covers the design. The how-to lives in the [list/logs user guide](../guides/fno-agents-list-logs.md).
 
 Parent: [fno-agents-registry-and-dispatch.md](fno-agents-registry-and-dispatch.md). Sibling: [fno-agents-followup.md](fno-agents-followup.md).
 
