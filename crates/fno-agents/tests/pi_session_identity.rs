@@ -8,7 +8,7 @@
 //! that opens a different session from the one `fno agents attach` opens.
 
 use fno_agents::pi::{
-    duplicate_resume_refusal, encode_cwd, lookup_sessions, pi_attach_argv, SessionLookup,
+    duplicate_resume_refusal, encode_cwd, pi_attach_argv, SessionLookup,
 };
 use std::path::{Path, PathBuf};
 
@@ -157,7 +157,7 @@ fn a_flat_store_reads_unknown_past_an_unparseable_header() {
 /// env vars, so the cases run serially inside one test.
 #[test]
 fn pi_store_resolution_follows_pis_own_order() {
-    use fno_agents::pi::{lookup_sessions, pi_agent_dir, pi_store, PiStore, StoreLayout};
+    use fno_agents::pi::{lookup_sessions, pi_agent_dir, pi_store, StoreLayout};
 
     let tmp = std::env::temp_dir().join(format!("pi-ident-res-{}", std::process::id()));
     std::fs::create_dir_all(tmp.join("agent")).unwrap();

@@ -984,8 +984,7 @@ def _lane_b_thread_spawn(
     add_dir: Optional[str] = None,
     resume_session_id: Optional[str] = None,
     effort: Optional[str] = None,
-    tools: Optional[str] = None,
-    deny_tools: Optional[str] = None,
+    tools: Optional[str] = None, deny_tools: Optional[str] = None,
     passthrough: Optional[Sequence[str]] = None,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
 ) -> dict:
@@ -1076,9 +1075,7 @@ def _lane_b_thread_spawn(
             yolo=yolo,
             permission_mode=permission_mode,
             add_dir=add_dir,
-            effort=effort,
-            tools=tools,
-            deny_tools=deny_tools,
+            effort=effort, tools=tools, deny_tools=deny_tools,
         )
         if passthrough:
             from fno.agents.mux_spawn import pane_passthrough_tokens
@@ -2422,10 +2419,7 @@ def dispatch_spawn(
     launch_role = role
     resolved_providers: list[str] = []
     if harness == "claude" and (role is not None or route_env):
-        from fno.agents.model_routing import (
-            RouteCompositionError,
-            resolve_spawn_route,
-        )
+        from fno.agents.model_routing import RouteCompositionError, resolve_spawn_route
 
         try:
             route_env = resolve_spawn_route(
@@ -4105,9 +4099,7 @@ def reconcile_agents(
                     continue
 
                 from fno.agents.mux_spawn import (
-                    _codex_session_id_for_pid,
-                    _lookup_child_pid,
-                    _mux_pane_alive,
+                    _codex_session_id_for_pid, _lookup_child_pid, _mux_pane_alive,
                 )
                 from fno.agents.spawn_gate import _pid_alive, _process_start_time
 
