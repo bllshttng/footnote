@@ -799,6 +799,114 @@ def test_spawn_worker_gate_detail_falls_back_to_stderr_head(monkeypatch):
     assert ei.value.detail == "daemon unreachable"
 
 
+def test_spawn_worker_stamps_territory_on_the_dispatch_spawned_row(iso, monkeypatch):
+    """A crowned dispatch stamps territory + kingless:false on the event row
+    and mirrors both into the caller's receipt - the record, not the veto."""
+    monkeypatch.setattr(
+        adv, "_territory_stamp", lambda node_id: {"territory": "x-epic", "kingless": False}
+    )
+    monkeypatch.setattr(
+        adv.subprocess,
+        "run",
+        lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, _RECEIPT)),
+    )
+    receipt: dict = {}
+    sid = adv._spawn_worker(
+        "ab-2222aaaa", None, node=_node_row("ab-2222aaaa"),
+        events_path=iso, receipt=receipt,
+    )
+    assert sid == "abc12345"  # the worker launched
+    spawned = [e for e in _events(iso) if e["type"] == "dispatch_spawned"]
+    assert len(spawned) == 1
+    assert spawned[0]["data"]["territory"] == "x-epic"
+    assert spawned[0]["data"]["kingless"] is False
+    assert receipt["territory"] == "x-epic"
+    assert receipt["kingless"] is False
+
+
+def test_spawn_worker_stamps_kingless_true_and_still_launches(iso, monkeypatch):
+    """A dispatch into a kingless territory stamps kingless:true; the worker
+    still launches. The deliverable is the record, never a refusal."""
+    monkeypatch.setattr(
+        adv, "_territory_stamp", lambda node_id: {"territory": "loose:fno", "kingless": True}
+    )
+    monkeypatch.setattr(
+        adv.subprocess,
+        "run",
+        lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, _RECEIPT)),
+    )
+    sid = adv._spawn_worker(
+        "ab-2222aaaa", None, node=_node_row("ab-2222aaaa"), events_path=iso
+    )
+    assert sid == "abc12345"
+    spawned = [e for e in _events(iso) if e["type"] == "dispatch_spawned"]
+    assert len(spawned) == 1
+    assert spawned[0]["data"]["kingless"] is True
+
+
+def test_territory_stamp_degrades_to_nulls_and_warns_once(monkeypatch, capsys):
+    """A verdict read that raises stamps null/null with ONE stderr warning;
+    a territory_unknown receipt is a readable answer and degrades silently -
+    the nulls are the honesty, not a failure."""
+    def boom(*a, **k):
+        raise RuntimeError("binary missing")
+
+    monkeypatch.setattr("fno.rust_binary.call_binary_json", boom)
+    assert adv._territory_stamp("ab-2222aaaa") == {"territory": None, "kingless": None}
+    assert capsys.readouterr().err.count("territory verdict unreadable") == 1
+
+    def unknown(*a, **k):
+        return None, {"verdict": "territory_unknown", "reason": "territory_unknown"}
+
+    monkeypatch.setattr("fno.rust_binary.call_binary_json", unknown)
+    assert adv._territory_stamp("ab-2222aaaa") == {"territory": None, "kingless": None}
+    assert capsys.readouterr().err == ""
+
+
+def test_auto_continue_tick_marks_a_kingless_dispatch(iso, monkeypatch):
+    """Given a dispatch into a kingless territory, the auto_continue arm row
+    ends with the word kingless - the same mark the drain readout renders."""
+
+    def kingless_spawn(node_id, node_cwd, node_slug=None, **kw):
+        kw["receipt"].update({"territory": "loose:fno", "kingless": True})
+        return "sid1"
+
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_spawn_worker", kingless_spawn)
+    adv.advance(project="fno", events_path=iso)
+    ticks = [
+        json.loads(line)
+        for line in iso.read_text().splitlines()
+        if line.strip() and json.loads(line)["type"] == "control_plane_tick"
+    ]
+    arms = [t for t in ticks
+            if t["data"].get("arm") == "auto_continue" and t["data"].get("acted") == 1]
+    assert len(arms) == 1
+    assert arms[0]["data"]["detail"].endswith(" kingless")
+
+
+def test_auto_continue_tick_crowned_dispatch_is_byte_identical(iso, monkeypatch):
+    """Given a crowned dispatch, the arm row is byte-identical to the
+    pre-stamp shape: no mark, no new field, nothing to re-learn."""
+
+    def crowned_spawn(node_id, node_cwd, node_slug=None, **kw):
+        kw["receipt"].update({"territory": "x-epic", "kingless": False})
+        return "sid1"
+
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_spawn_worker", crowned_spawn)
+    adv.advance(project="fno", events_path=iso)
+    ticks = [
+        json.loads(line)
+        for line in iso.read_text().splitlines()
+        if line.strip() and json.loads(line)["type"] == "control_plane_tick"
+    ]
+    arms = [t for t in ticks
+            if t["data"].get("arm") == "auto_continue" and t["data"].get("acted") == 1]
+    assert len(arms) == 1
+    assert arms[0]["data"]["detail"] == "closed=- node=ab-2222aaaa worker=sid1"
+
+
 def test_capacity_refusal_skips_and_names_the_gate_line(iso, monkeypatch):
     """AC1-HP + AC7-UI: exit 79 -> advance_skipped(capacity-refused) carrying
     exit_code and the gate's own sentence; the auto-continue arm row reads

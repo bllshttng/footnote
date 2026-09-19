@@ -551,19 +551,22 @@ fn slot_refusal_line(
     )
 }
 
-/// The territory (key, member node ids) a node belongs to, or `None` when the
-/// answer cannot be READ (unreadable graph, node absent, uncompilable live
-/// crown). Mirrors the Python `_territory_of_node`: membership is EXCLUSIVE
-/// and most-specific-first - a node under a live crown scope counts for that
-/// crown's territory; an uncrowned node counts for its project's loose
-/// territory (project nodes minus every crowned set), so one worker never
-/// consumes two territories' caps. AC9-HP parity: keep both sides agreeing.
+/// The territory (key, member node ids, kingless) a node belongs to, or
+/// `None` when the answer cannot be READ (unreadable graph, node absent,
+/// uncompilable live crown). Mirrors the Python `_territory_of_node`:
+/// membership is EXCLUSIVE and most-specific-first - a node under a live
+/// crown scope counts for that crown's territory; an uncrowned node counts
+/// for its project's loose territory (project nodes minus every crowned
+/// set), so one worker never consumes two territories' caps. `kingless` is
+/// false for a live crown scope, true for the loose fallback - a workspace
+/// project no live crown rules - the same answer `resolve_territories`
+/// computes for the drain readout. AC9-HP parity: keep both sides agreeing.
 pub(crate) fn territory_of_node(
     config_cwd: &Path,
     registry_path: &Path,
     node: &str,
     warnings: &mut Vec<String>,
-) -> Option<(String, std::collections::HashSet<String>)> {
+) -> Option<(String, std::collections::HashSet<String>, bool)> {
     use crate::king_board::graph_json_path;
     use crate::king_board::project_map;
     use crate::territory::compile_territory;
@@ -631,7 +634,7 @@ pub(crate) fn territory_of_node(
         match compiled {
             Ok((_, ids)) => {
                 if ids.contains(node) {
-                    return Some((scope.clone(), ids));
+                    return Some((scope.clone(), ids, false));
                 }
                 crowned.extend(ids);
             }
@@ -656,7 +659,7 @@ pub(crate) fn territory_of_node(
             }
         }
     }
-    Some((format!("loose:{project}"), loose))
+    Some((format!("loose:{project}"), loose, true))
 }
 
 /// The per-territory team cap. `Err` carries the refusal receipt the
@@ -675,7 +678,7 @@ pub(crate) fn check_territory_cap(
     for w in &warnings {
         eprintln!("{w}");
     }
-    let Some((scope, members)) = state else {
+    let Some((scope, members, _kingless)) = state else {
         return Err(serde_json::json!({
             "status": "refused",
             "reason": "territory_unknown",
@@ -772,7 +775,7 @@ pub(crate) fn check_blueprint_cap(
     for w in &warnings {
         eprintln!("{w}");
     }
-    let Some((scope, members)) = state else {
+    let Some((scope, members, _kingless)) = state else {
         return Err(serde_json::json!({
             "status": "refused",
             "reason": "territory_unknown",
@@ -821,6 +824,63 @@ fn blueprint_refusal(receipt: &str) -> Refusal {
         .ev("axis", serde_json::json!("blueprint"))
 }
 
+/// The verdict receipt for one node, from explicit paths - the counting leg
+/// `run_territory_verdict` serves and the tests pin. `kingless` rides every
+/// readable verdict; `territory_unknown` stays without one, because an
+/// unreadable attribution has no territory and a `kingless` value there
+/// would be a guess wearing a boolean.
+fn territory_verdict_receipt(
+    config_cwd: &Path,
+    registry_path: &Path,
+    node: &str,
+    cap: u32,
+) -> Value {
+    let mut warnings = Vec::new();
+    let state = territory_of_node(config_cwd, registry_path, node, &mut warnings);
+    for w in &warnings {
+        eprintln!("{w}");
+    }
+    match state {
+        None => serde_json::json!({
+            "verdict": "territory_unknown",
+            "reason": "territory_unknown",
+            "node": node,
+            "max_live_per_territory": cap,
+        }),
+        Some((scope, members, kingless)) => {
+            let live = live_rows(registry_path, &mut warnings);
+            let count = live
+                .iter()
+                .filter(|r| {
+                    r.node
+                        .as_deref()
+                        .map(|n| members.contains(n))
+                        .unwrap_or(false)
+                })
+                .count();
+            if count as u32 >= cap {
+                serde_json::json!({
+                    "verdict": "territory_cap",
+                    "reason": "territory_cap",
+                    "territory": scope,
+                    "kingless": kingless,
+                    "count": count,
+                    "current_count": count,
+                    "max_live_per_territory": cap,
+                })
+            } else {
+                serde_json::json!({
+                    "verdict": "ok",
+                    "territory": scope,
+                    "kingless": kingless,
+                    "current_count": count,
+                    "max_live_per_territory": cap,
+                })
+            }
+        }
+    }
+}
+
 /// `fno-agents territory-verdict --node <id>`: the per-territory cap verdict
 /// for one node as JSON on stdout. The single counting leg: the Python gate
 /// passes the node through this door and recomputes nothing. Exit is 0 for
@@ -841,45 +901,7 @@ pub fn run_territory_verdict(args: &[String]) -> i32 {
     let config_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let registry_path = crate::paths::AgentsHome::from_env().registry_json();
     let cap = agents_config::territory_max_live(&config_cwd);
-    let mut warnings = Vec::new();
-    let state = territory_of_node(&config_cwd, &registry_path, &node, &mut warnings);
-    let verdict = match state {
-        None => serde_json::json!({
-            "verdict": "territory_unknown",
-            "reason": "territory_unknown",
-            "node": node,
-            "max_live_per_territory": cap,
-        }),
-        Some((scope, members)) => {
-            let live = live_rows(&registry_path, &mut warnings);
-            let count = live
-                .iter()
-                .filter(|r| {
-                    r.node
-                        .as_deref()
-                        .map(|n| members.contains(n))
-                        .unwrap_or(false)
-                })
-                .count();
-            if count as u32 >= cap {
-                serde_json::json!({
-                    "verdict": "territory_cap",
-                    "reason": "territory_cap",
-                    "territory": scope,
-                    "count": count,
-                    "current_count": count,
-                    "max_live_per_territory": cap,
-                })
-            } else {
-                serde_json::json!({
-                    "verdict": "ok",
-                    "territory": scope,
-                    "current_count": count,
-                    "max_live_per_territory": cap,
-                })
-            }
-        }
-    };
+    let verdict = territory_verdict_receipt(&config_cwd, &registry_path, &node, cap);
     println!(
         "{}",
         serde_json::to_string(&verdict).unwrap_or_else(|_| "{}".to_string())
@@ -3942,7 +3964,7 @@ MemAvailable:    8000000 kB\n";
             let live = live_rows(&reg, &mut warnings);
             let got = match territory_of_node(&dir, &reg, node, &mut warnings) {
                 None => "territory_unknown".to_string(),
-                Some((scope, members)) => {
+                Some((scope, members, _kingless)) => {
                     let count = live
                         .iter()
                         .filter(|r| {
@@ -3970,6 +3992,121 @@ MemAvailable:    8000000 kB\n";
                 sc["name"].as_str().unwrap_or("?")
             );
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// AC9: `kingless` rides every readable verdict receipt. A node inside a
+    /// live crown's compiled scope reads false, a node in a project no crown
+    /// rules reads true, and an unreadable attribution stays the existing
+    /// territory_unknown shape with NO kingless key - a boolean there would
+    /// be a guess wearing a boolean.
+    #[test]
+    fn territory_verdict_receipt_names_kingless_on_readable_verdicts() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let self_pid = std::process::id();
+        let base = std::env::temp_dir().join(format!("fno-verdict-kingless-{self_pid}"));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("s0");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("graph.json"),
+            serde_json::json!({ "entries": [
+                { "id": "x-epic", "type": "epic", "project": "fno" },
+                { "id": "x-1", "parent": "x-epic", "project": "fno" },
+                { "id": "x-out", "project": "other" },
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let reg = dir.join("registry.json");
+        std::fs::write(
+            &reg,
+            format!(
+                r#"{{"schema_version":1,"entries":[{{"name":"fixture-king","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":"x-epic","crown_level":2}}]}}"#
+            ),
+        )
+        .unwrap();
+
+        let crowned = territory_verdict_receipt(&dir, &reg, "x-1", 4);
+        assert_eq!(crowned["verdict"], "ok", "{crowned}");
+        assert_eq!(crowned["kingless"], false, "{crowned}");
+        let loose = territory_verdict_receipt(&dir, &reg, "x-out", 4);
+        assert_eq!(loose["verdict"], "ok", "{loose}");
+        assert_eq!(loose["kingless"], true, "{loose}");
+        let unknown = territory_verdict_receipt(&dir, &reg, "x-ghost", 4);
+        assert_eq!(unknown["verdict"], "territory_unknown", "{unknown}");
+        assert!(
+            unknown.get("kingless").is_none(),
+            "an unreadable attribution must not guess a boolean: {unknown}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// AC9: the two territory attributions on one branch - resolve_territories
+    /// for the drain readout, territory_of_node for the cap - agree on
+    /// kingless for the same node. The fixture carries one epic crown and one
+    /// uncrowned workspace project, so both the crowned and the loose leg are
+    /// pinned: a divergence between the readers ships caught, not silent.
+    #[test]
+    fn territory_of_node_and_resolve_territories_agree_on_kingless() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let self_pid = std::process::id();
+        let base = std::env::temp_dir().join(format!("fno-territory-agree-kingless-{self_pid}"));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("s0");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FNO_CONFIG", dir.join("config.toml"));
+        std::fs::write(
+            dir.join("config.toml"),
+            r#"[[work.workspaces.main.projects]]
+name = "other"
+path = "/repo/other"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("graph.json"),
+            serde_json::json!({ "entries": [
+                { "id": "x-epic", "type": "epic", "project": "fno" },
+                { "id": "x-1", "parent": "x-epic", "project": "fno" },
+                { "id": "x-out", "project": "other" },
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let reg = dir.join("registry.json");
+        std::fs::write(
+            &reg,
+            format!(
+                r#"{{"schema_version":1,"entries":[{{"name":"fixture-king","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":"x-epic","crown_level":2}}]}}"#
+            ),
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        let crowned =
+            territory_of_node(&dir, &reg, "x-1", &mut warnings).expect("crowned node attributes");
+        let loose =
+            territory_of_node(&dir, &reg, "x-out", &mut warnings).expect("loose node attributes");
+        let territories =
+            crate::territory::resolve_territories(&dir, &reg).expect("fixture resolves");
+        let crown_row = territories
+            .iter()
+            .find(|t| t.key == "x-epic")
+            .expect("crown territory resolves");
+        let loose_row = territories
+            .iter()
+            .find(|t| t.key == "other")
+            .expect("uncrowned workspace project resolves as a loose territory");
+        assert!(!crowned.2, "a live crown scope is not kingless");
+        assert!(loose.2, "a project no crown rules is kingless");
+        assert_eq!(crowned.2, crown_row.kingless, "crowned leg diverges");
+        assert_eq!(loose.2, loose_row.kingless, "loose leg diverges");
+        std::env::remove_var("FNO_CONFIG");
         let _ = std::fs::remove_dir_all(&base);
     }
 
