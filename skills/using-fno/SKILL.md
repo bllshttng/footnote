@@ -12,7 +12,7 @@ This workspace has the `footnote` plugin installed. Two surfaces compose: skills
 
 ## Relay compression contract
 
-Agent-authored `fno agents mail send`, `fno agents mail reply`, and `fno mux pane send` are handoffs. Use 80 words or fewer.
+Agent-authored `fno agents mail send`, `fno agents mail reply`, and `fno mux pane send` are handoffs. Use 80 words or fewer. `--raw` runs a command only: the payload starts `/` or `$`. A message goes wrapped so the sender shows.
 
 Think fully. Send outcome, reason, next action. Drop articles only where clear. Cut filler, hedges, repeated context. Fragments work. Keep technical terms, commands, errors, numbers, negation exact. Put findings on node/doc. Send link. Operator text stays exact.
 
