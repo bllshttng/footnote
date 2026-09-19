@@ -1033,7 +1033,8 @@ def _door_binary_from_this_checkout(monkeypatch):
     through $FNO_AGENTS_BIN always wins."""
     import os
 
-    if (os.environ.get("FNO_AGENTS_BIN") or "").strip():
+    pinned = (os.environ.get("FNO_AGENTS_BIN") or "").strip()
+    if pinned and Path(pinned).is_file() and os.access(pinned, os.X_OK):
         return
     root = Path(__file__).resolve().parents[2]
     for profile in ("debug", "release"):

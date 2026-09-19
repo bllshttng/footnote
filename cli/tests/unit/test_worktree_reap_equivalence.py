@@ -139,6 +139,15 @@ CORPUS = [
 ]
 
 
+def _gate_env() -> dict:
+    """The child env with the gate pinned to the binary this module tested.
+
+    The changed lane scrubs target/ mid-job, so a child that re-resolves
+    through $PATH or a stale target path answers nothing; the lib then
+    synthesizes probe-failed and every not-blocked row flips."""
+    return dict(os.environ, FNO_AGENTS_BIN=str(GATE_BIN))
+
+
 def _bash_verdict(path: Path) -> bool:
     """Run the shared bash helper exactly as both bash call sites do."""
     script = (
@@ -150,6 +159,7 @@ def _bash_verdict(path: Path) -> bool:
         capture_output=True,
         text=True,
         cwd=str(REPO_ROOT),
+        env=_gate_env(),
     )
     assert "YES" in r.stdout or "NO" in r.stdout, f"helper emitted nothing: {r.stderr}"
     return "YES" in r.stdout
@@ -169,6 +179,7 @@ def _archive_script_verdict(path: Path) -> bool:
         text=True,
         cwd=str(REPO_ROOT),
         timeout=60,
+        env=_gate_env(),
     )
     # POSITIVE CONTROL. A "not blocked" verdict must mean the script reached and
     # passed the check, never that it bailed earlier for an unrelated reason.
