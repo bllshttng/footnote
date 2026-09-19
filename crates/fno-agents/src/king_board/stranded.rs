@@ -18,20 +18,24 @@ use std::time::{Duration, UNIX_EPOCH};
 /// not a knob: a knob comes when someone needs to tune it.
 pub(crate) const STRANDED_GRACE_MINUTES: i64 = 60;
 
+/// One linked tree: its path and its full branch ref (`None` = detached).
+type TreeEntry = (PathBuf, Option<String>);
+
 /// (tree path, branch) per linked tree, in porcelain order, minus the first
-/// (main) entry and any bare registration. `branch` keeps the full ref
-/// (`refs/heads/feature/x-58e3`); `None` is detached.
-pub(crate) fn parse_worktree_porcelain(text: &str) -> Vec<(PathBuf, Option<String>)> {
-    let mut trees: Vec<(PathBuf, Option<String>)> = Vec::new();
+/// (main) entry. Bare registrations parse but never surface. `branch` keeps
+/// the full ref (`refs/heads/feature/x-eeee`); `None` is detached.
+pub(crate) fn parse_worktree_porcelain(text: &str) -> Vec<TreeEntry> {
+    // One slot per porcelain entry, bare entries included, so the skip(1)
+    // below drops the MAIN entry whatever it is: filtering bare entries out
+    // first would drop the first LINKED tree on a bare-main repo instead.
+    let mut entries: Vec<Option<TreeEntry>> = Vec::new();
     let mut path: Option<PathBuf> = None;
     let mut branch: Option<String> = None;
     let mut bare = false;
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("worktree ") {
             if let Some(p) = path.take() {
-                if !bare {
-                    trees.push((p, branch.take()));
-                }
+                entries.push(if bare { None } else { Some((p, branch.take())) });
             }
             path = Some(PathBuf::from(rest));
             bare = false;
@@ -42,16 +46,14 @@ pub(crate) fn parse_worktree_porcelain(text: &str) -> Vec<(PathBuf, Option<Strin
         }
     }
     if let Some(p) = path.take() {
-        if !bare {
-            trees.push((p, branch.take()));
-        }
+        entries.push(if bare { None } else { Some((p, branch.take())) });
     }
-    trees.into_iter().skip(1).collect()
+    entries.into_iter().skip(1).flatten().collect()
 }
 
 /// The node id a tree belongs to, and whether `worktree ensure --name <id>`
 /// can find it again. Exact basename or `feature/`-stripped branch -> the id
-/// with `resumable = true`; a basename that EXTENDS a node id (`x-291b-prep`)
+/// with `resumable = true`; a basename that EXTENDS a node id (`x-2222-prep`)
 /// still names it, with `resumable = false` - only such a tree can hold the
 /// node's prep commits, and the king resumes it from inside.
 pub(crate) fn tree_node_id(path: &Path, branch: Option<&str>) -> Option<(String, bool)> {
@@ -67,8 +69,8 @@ pub(crate) fn tree_node_id(path: &Path, branch: Option<&str>) -> Option<(String,
             }
         }
     }
-    // Successively shorter prefixes at `-` boundaries: `x-291b-prep` finds
-    // `x-291b`; a name with no node-id prefix (`worker-04`) finds nothing.
+    // Successively shorter prefixes at `-` boundaries: `x-2222-prep` finds
+    // `x-2222`; a name with no node-id prefix (`worker-04`) finds nothing.
     let mut cut = base.len();
     while let Some(idx) = base[..cut].rfind('-') {
         let candidate = &base[..idx];
@@ -88,62 +90,34 @@ fn short_branch(branch: &Option<String>) -> String {
         .to_string()
 }
 
-fn run_git(args: &[&str], cwd: &Path, slice: Duration) -> Result<String, RunFailure> {
-    let cmd: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-    run_with_timeout(&cmd, cwd, slice).map(|out| String::from_utf8_lossy(&out).into_owned())
+fn run_git(args: &[String], cwd: &Path, slice: Duration) -> Result<String, RunFailure> {
+    run_with_timeout(args, cwd, slice).map(|out| String::from_utf8_lossy(&out).into_owned())
 }
 
 /// One tree's work-at-risk read: dirty count, unpushed count, and idle
 /// minutes since the newest write among the index, the reflog, and each
-/// dirty path. Any git failure fails the tree, never the source.
-fn probe_tree(tree: &Path, branch: &Option<String>) -> Result<Value, String> {
-    let unbounded = Duration::from_secs(600);
-    let dirty_text = run_git(
-        &[
-            "git",
-            "-C",
-            &tree.to_string_lossy(),
-            "status",
-            "--porcelain",
-        ],
-        Path::new("."),
-        unbounded,
-    )
-    .map_err(|e| e.message().to_string())?;
+/// dirty path. Every git call rides the caller's slice of the board budget;
+/// any git failure fails the tree, never the source.
+fn probe_tree(tree: &Path, branch: &Option<String>, slice: Duration) -> Result<Value, String> {
+    let mut git = |mut args: Vec<&str>| {
+        let mut cmd: Vec<String> = vec![
+            "git".to_string(),
+            "-C".to_string(),
+            tree.to_string_lossy().into_owned(),
+        ];
+        cmd.extend(args.drain(..).map(str::to_string));
+        run_git(&cmd, Path::new("."), slice)
+    };
+    let dirty_text = git(vec!["status", "--porcelain"]).map_err(|e| e.message().to_string())?;
     let dirty = dirty_text.lines().filter(|l| !l.trim().is_empty()).count() as i64;
-    let unpushed_text = run_git(
-        &[
-            "git",
-            "-C",
-            &tree.to_string_lossy(),
-            "rev-list",
-            "--count",
-            "HEAD",
-            "--not",
-            "--remotes",
-        ],
-        Path::new("."),
-        unbounded,
-    )
-    .map_err(|e| e.message().to_string())?;
+    let unpushed_text = git(vec!["rev-list", "--count", "HEAD", "--not", "--remotes"])
+        .map_err(|e| e.message().to_string())?;
     let unpushed: i64 = unpushed_text.trim().parse().unwrap_or(0);
 
     // Newest write among the git dir's index + reflog and the dirty paths.
     let mut newest: Option<std::time::SystemTime> = None;
-    let git_dir_out = run_git(
-        &[
-            "git",
-            "-C",
-            &tree.to_string_lossy(),
-            "rev-parse",
-            "--git-dir",
-        ],
-        Path::new("."),
-        unbounded,
-    )
-    .map_err(|e| e.message().to_string())?;
-    let git_dir_raw = git_dir_out.trim();
-    let git_dir = tree.join(git_dir_raw);
+    let git_dir_out = git(vec!["rev-parse", "--git-dir"]).map_err(|e| e.message().to_string())?;
+    let git_dir = tree.join(git_dir_out.trim());
     for tail in ["index", "logs/HEAD"] {
         if let Ok(m) = std::fs::metadata(git_dir.join(tail)) {
             if let Ok(mtime) = m.modified() {
@@ -175,13 +149,11 @@ fn probe_tree(tree: &Path, branch: &Option<String>) -> Result<Value, String> {
         .unwrap_or(0);
 
     Ok(json!({
-        "id": tree_node_id(tree, branch.as_deref()).map(|(id, _)| id).unwrap_or_default(),
         "tree": tree.to_string_lossy(),
         "branch": short_branch(branch),
         "dirty": dirty,
         "unpushed": unpushed,
         "idle_minutes": idle_minutes,
-        "resumable": tree_node_id(tree, branch.as_deref()).map(|(_, r)| r).unwrap_or(false),
     }))
 }
 
@@ -218,7 +190,10 @@ pub(crate) fn read_stranded_trees(
             if !candidates.contains(&id) {
                 continue;
             }
-            match probe_tree(&tree, &branch) {
+            let Some(slice) = budget.start("stranded tree probe") else {
+                return SourceRead::over_budget(budget.spent_error());
+            };
+            match probe_tree(&tree, &branch, slice) {
                 Ok(mut row) => {
                     if let Some(obj) = row.as_object_mut() {
                         obj.insert("id".to_string(), json!(id));
@@ -260,9 +235,9 @@ worktree /repo/main
 HEAD abc111
 branch refs/heads/main
 
-worktree /base/repo/x-58e3
+worktree /base/repo/x-eeee
 HEAD abc222
-branch refs/heads/feature/x-58e3
+branch refs/heads/feature/x-eeee
 
 worktree /repo/bare
 bare
@@ -274,28 +249,44 @@ detached
 ";
         let trees = parse_worktree_porcelain(text);
         assert_eq!(trees.len(), 2, "{trees:?}");
-        assert_eq!(trees[0].0, PathBuf::from("/base/repo/x-58e3"));
-        assert_eq!(trees[0].1.as_deref(), Some("refs/heads/feature/x-58e3"));
+        assert_eq!(trees[0].0, PathBuf::from("/base/repo/x-eeee"));
+        assert_eq!(trees[0].1.as_deref(), Some("refs/heads/feature/x-eeee"));
         assert_eq!(trees[1].0, PathBuf::from("/base/repo/x-detached"));
         assert!(trees[1].1.is_none());
     }
 
     #[test]
+    fn a_bare_main_entry_skips_itself_never_the_first_linked_tree() {
+        let text = "\
+worktree /repo/main
+bare
+
+worktree /base/repo/x-eeee
+HEAD abc222
+branch refs/heads/feature/x-eeee
+
+";
+        let trees = parse_worktree_porcelain(text);
+        assert_eq!(trees.len(), 1, "{trees:?}");
+        assert_eq!(trees[0].0, PathBuf::from("/base/repo/x-eeee"));
+    }
+
+    #[test]
     fn node_id_comes_from_the_basename_the_branch_or_a_prefix() {
         assert_eq!(
-            tree_node_id(Path::new("/base/footnote/x-58e3"), None),
-            Some(("x-58e3".to_string(), true))
+            tree_node_id(Path::new("/base/footnote/x-eeee"), None),
+            Some(("x-eeee".to_string(), true))
         );
         assert_eq!(
             tree_node_id(
                 Path::new("/base/footnote/worker-04"),
-                Some("refs/heads/feature/x-7dc2")
+                Some("refs/heads/feature/x-ffff")
             ),
-            Some(("x-7dc2".to_string(), true))
+            Some(("x-ffff".to_string(), true))
         );
         assert_eq!(
-            tree_node_id(Path::new("/repo/.claude/worktrees/x-291b-prep"), None),
-            Some(("x-291b".to_string(), false))
+            tree_node_id(Path::new("/repo/.claude/worktrees/x-2222-prep"), None),
+            Some(("x-2222".to_string(), false))
         );
         assert_eq!(
             tree_node_id(Path::new("/base/footnote/worker-04"), None),
@@ -307,15 +298,15 @@ detached
     #[test]
     fn candidates_take_king_priority_live_nodes_only() {
         let entries = vec![
-            json!({"id": "x-58e3", "priority": "p1", "status": "ready"}),
-            json!({"id": "x-62d8", "priority": "p2", "status": "in_progress"}),
-            json!({"id": "x-done", "priority": "p1", "status": "done"}),
-            json!({"id": "x-def", "priority": "p1", "status": "deferred"}),
+            json!({"id": "x-eeee", "priority": "p1", "status": "ready"}),
+            json!({"id": "x-9999", "priority": "p2", "status": "in_progress"}),
+            json!({"id": "x-dddd", "priority": "p1", "status": "done"}),
+            json!({"id": "x-defer", "priority": "p1", "status": "deferred"}),
         ];
         let candidates = stranded_candidates(&entries);
-        assert!(candidates.contains("x-58e3"));
-        assert!(!candidates.contains("x-62d8"));
-        assert!(!candidates.contains("x-done"));
-        assert!(!candidates.contains("x-def"));
+        assert!(candidates.contains("x-eeee"));
+        assert!(!candidates.contains("x-9999"));
+        assert!(!candidates.contains("x-dddd"));
+        assert!(!candidates.contains("x-defer"));
     }
 }
