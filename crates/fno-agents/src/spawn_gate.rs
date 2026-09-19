@@ -912,43 +912,6 @@ pub fn run_territory_verdict(args: &[String]) -> i32 {
     0
 }
 
-/// The dispatch stamp folded from one verdict receipt: `kingless` rides every
-/// readable attribution, and a `territory_unknown` folds to nulls on BOTH
-/// fields - an unreadable attribution is stamped as an absence, never as a
-/// guessed boolean. The classification lives on this side of the door so the
-/// Python dispatch caller stays transport-only.
-fn territory_stamp_of(verdict: &Value) -> Value {
-    if verdict.get("verdict").and_then(|v| v.as_str()) == Some("territory_unknown") {
-        serde_json::json!({ "territory": null, "kingless": null })
-    } else {
-        serde_json::json!({
-            "territory": verdict.get("territory"),
-            "kingless": verdict.get("kingless"),
-        })
-    }
-}
-
-/// `fno-agents territory-stamp --node <id>`: the two fields a dispatch row
-/// carries, folded from the verdict door. Exit is 0 for every readable or
-/// unknown attribution (the nulls are the answer); only a malformed
-/// invocation exits non-zero.
-pub fn run_territory_stamp(args: &[String]) -> i32 {
-    let Some(node) = parse_node_arg(args) else {
-        eprintln!("territory-stamp: --node is required");
-        return 2;
-    };
-    let config_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let registry_path = crate::paths::AgentsHome::from_env().registry_json();
-    let cap = agents_config::territory_max_live(&config_cwd);
-    let verdict = territory_verdict_receipt(&config_cwd, &registry_path, &node, cap);
-    let stamp = territory_stamp_of(&verdict);
-    println!(
-        "{}",
-        serde_json::to_string(&stamp).unwrap_or_else(|_| "{}".to_string())
-    );
-    0
-}
-
 /// Live `worker:<name>` slot claims under the GLOBAL claims root. Headless
 /// one-shots write no registry row, so their gate acquires one of these for
 /// the call duration; concurrent gates see them here. `Suspect` counts like
@@ -4225,34 +4188,7 @@ MemAvailable:    8000000 kB\n";
         assert!(loose.2, "a project no crown rules is kingless");
         assert_eq!(crowned.2, crown_row.kingless, "crowned leg diverges");
         assert_eq!(loose.2, loose_row.kingless, "loose leg diverges");
-        std::env::remove_var("FNO_HOME");
         let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// AC9: the dispatch stamp folds the verdict door's answer to the two
-    /// fields a dispatch row carries. A readable attribution carries
-    /// `kingless` through; a `territory_unknown` folds to nulls on BOTH
-    /// fields - the classification the Python caller must not re-implement.
-    #[test]
-    fn territory_stamp_folds_unknown_to_nulls_and_carries_kingless() {
-        let crowned = territory_stamp_of(&serde_json::json!({
-            "verdict": "ok", "territory": "x-epic", "kingless": false,
-            "current_count": 0, "max_live_per_territory": 4,
-        }));
-        assert_eq!(crowned["territory"], serde_json::json!("x-epic"));
-        assert_eq!(crowned["kingless"], false);
-        let cap = territory_stamp_of(&serde_json::json!({
-            "verdict": "territory_cap", "territory": "loose:fno", "kingless": true,
-        }));
-        assert_eq!(cap["kingless"], true);
-        let unknown = territory_stamp_of(&serde_json::json!({
-            "verdict": "territory_unknown", "reason": "territory_unknown",
-        }));
-        assert_eq!(
-            unknown,
-            serde_json::json!({ "territory": null, "kingless": null }),
-            "an unreadable attribution must not guess a boolean: {unknown}"
-        );
     }
 
     /// AC6-HP: with five live `bp` rows and default config, a sixth

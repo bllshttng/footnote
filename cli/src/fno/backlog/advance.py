@@ -1296,18 +1296,20 @@ def _launch_harness_axis(launch: str, node_cwd: Optional[str] = None) -> Optiona
 def _territory_stamp(node_id: str) -> dict:
     """The territory stamp: three values, never two. ``kingless`` is False on
     a crowned territory, True on a kingless one, None when nothing could read
-    the attribution. Reads the Rust territory-stamp door; any read failure
-    degrades to nulls with one warning and the dispatch proceeds.
+    the attribution. Reads the territory-verdict door, whose unknown receipt
+    omits both fields, so ``.get`` is the whole fold: an absent field stamps
+    as null, never as a guessed boolean. Any read failure degrades to nulls
+    with one warning and the dispatch proceeds.
     """
     try:
         from fno.rust_binary import call_binary_json
 
-        error, stamp = call_binary_json("territory-stamp", ["--node", node_id])
+        error, verdict = call_binary_json("territory-verdict", ["--node", node_id])
         if error is not None:
             raise RuntimeError(error)
-        return {"territory": stamp["territory"], "kingless": stamp["kingless"]}
+        return {"territory": verdict.get("territory"), "kingless": verdict.get("kingless")}
     except Exception as exc:  # noqa: BLE001
-        print(f"advance: WARNING: territory stamp unreadable for {node_id}: {exc}", file=sys.stderr)
+        print(f"advance: WARNING: territory verdict unreadable for {node_id}: {exc}", file=sys.stderr)
         return {"territory": None, "kingless": None}
 
 
@@ -1375,9 +1377,6 @@ def _spawn_worker(
         "cwd": args.node_cwd or "", "caller": caller,
         "grid": args.grid_reason or "", "decision": "; ".join(args.decision),
     }
-    # The stamp lands before the retask arm so a reused planner's row carries
-    # it too. The record, not the veto: a kingless territory still drains.
-    row.update(_territory_stamp(node_id))
     # A blueprint dispatch reuses the earliest finished planner on the epic first.
     retask_fallthrough = ""
     if not args.is_reconcile and args.verb.lstrip("/") == "blueprint":
@@ -1386,6 +1385,10 @@ def _spawn_worker(
         )
         if reused:
             return reused
+    # The stamp lands on the cold-spawn path only: a reuse dispatch runs no
+    # subprocess at all. The record, not the veto: a kingless territory
+    # still drains.
+    row.update(_territory_stamp(node_id))
     from fno.harness_identity import (
         CODEX_SHORT_ADDRESS_RULE,
         is_unsafe_short_address,

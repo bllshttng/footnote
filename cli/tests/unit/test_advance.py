@@ -846,19 +846,18 @@ def test_spawn_worker_stamps_kingless_true_and_still_launches(iso, monkeypatch):
 
 
 def test_territory_stamp_degrades_to_nulls_and_warns_once(monkeypatch, capsys):
-    """A stamp read that raises stamps null/null with ONE stderr warning;
-    a null stamp from the door (the door's own unknown fold) passes through
-    silently - the nulls are the honesty, not a failure, and no warning
-    fires for an answer the door already classified."""
+    """A verdict read that raises stamps null/null with ONE stderr warning;
+    a territory_unknown receipt is a readable answer whose absent fields
+    stamp as nulls silently - the nulls are the honesty, not a failure."""
     def boom(*a, **k):
         raise RuntimeError("binary missing")
 
     monkeypatch.setattr("fno.rust_binary.call_binary_json", boom)
     assert adv._territory_stamp("ab-2222aaaa") == {"territory": None, "kingless": None}
-    assert capsys.readouterr().err.count("territory stamp unreadable") == 1
+    assert capsys.readouterr().err.count("territory verdict unreadable") == 1
 
     def unknown(*a, **k):
-        return None, {"territory": None, "kingless": None}
+        return None, {"verdict": "territory_unknown", "reason": "territory_unknown"}
 
     monkeypatch.setattr("fno.rust_binary.call_binary_json", unknown)
     assert adv._territory_stamp("ab-2222aaaa") == {"territory": None, "kingless": None}
