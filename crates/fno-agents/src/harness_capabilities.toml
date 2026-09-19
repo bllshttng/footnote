@@ -730,7 +730,9 @@ route_on_pane = false
 # right semantics and a positive marker rather than an absence. So pi's answer is
 # "extension", the same member opencode carries. The extension shipped (
 # a port of opencode's plugin: loop-check stays the sole completion authority
-# and the extension never fabricates a termination), so `loop_extension` names
+# and the extension never fabricates a termination), and it binds the
+# manifest's own session and renders verbs in pi's skill-command form, so a
+# foreign session is refused instead of re-driven. `loop_extension` names
 # the shipped artifact and a looping dispatch at pi resolves.
 loop_participation = "extension"
 loop_extension = "cli/src/fno/setup/assets/pi/footnote.ts"
