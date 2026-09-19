@@ -21,7 +21,7 @@ use std::time::Duration;
 /// pr-push read bound and is generous next to the sub-second these take.
 const GUARD_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The body-only guards, in CI's own order, resolved under the repo root so
+/// The body-only guards in a fixed order, resolved under the repo root so
 /// the run sees the copy CI runs on this branch. Env contract, identical for
 /// every guard: `PR_BODY`, `PR_TITLE`, `PR_HEAD_REF`, `PR_HEAD_SHA=HEAD`,
 /// `PR_BASE_SHA` (merge-base of `origin/<base>` and HEAD). A script missing
@@ -138,7 +138,13 @@ pub fn run(argv: &[String]) -> i32 {
     let git_bin = "git";
     let root = match git(git_bin, &a.cwd, &["rev-parse", "--show-toplevel"]) {
         Ok(r) if !r.is_empty() => PathBuf::from(r),
-        _ => {
+        // A transport failure is not a verdict about the directory: print
+        // what actually happened instead of calling it not-a-repo.
+        Err(msg) => {
+            eprintln!("pr-body-check: git rev-parse --show-toplevel failed: {msg}");
+            return 2;
+        }
+        Ok(_) => {
             eprintln!(
                 "pr-body-check: not a git repository (cwd {}); run it from the checkout the PR opens from",
                 a.cwd.display()
