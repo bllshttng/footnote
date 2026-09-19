@@ -792,6 +792,9 @@ def test_rust_client_verbs_match_client_rs() -> None:
     # verb_call, never auto-route.
     # `canonical-check` (x-a150) is the same shape: the post-merge sync shells
     # it through verb_call with a stdin JSON payload; an argv route would break.
+    # `sync-canonical` (x-85df) is the same shape again: the post-merge sync,
+    # its catch-up sweep and its staleness alarm all shell through verb_call
+    # with a stdin JSON payload, never an argv route.
     routable = arms | (
         specials
         - {
@@ -806,6 +809,7 @@ def test_rust_client_verbs_match_client_rs() -> None:
             "plugin-install",
             "publish-review",
             "canonical-check",
+            "sync-canonical",
             # The patch door (x-665f): resolve_binary-only, like board - the
             # client action list is shrink-only (d-fe66560a), so this arm is
             # never registered and never routed.

@@ -274,6 +274,7 @@ pub mod subprocess_ask;
 pub mod subscribe;
 pub mod supervisor;
 pub mod surface_check;
+pub mod sync_canonical;
 pub mod task_context;
 pub mod terminal_stop;
 pub mod territory;
