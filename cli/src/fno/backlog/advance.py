@@ -1294,33 +1294,20 @@ def _launch_harness_axis(launch: str, node_cwd: Optional[str] = None) -> Optiona
 
 
 def _territory_stamp(node_id: str) -> dict:
-    """The territory stamp for one dispatch row: three values, never two.
-
-    ``kingless`` is False on a crowned territory, True on a kingless one,
-    None when nothing could read the attribution - a territory_unknown
-    receipt, a door that predates the field, or any read failure. An absence
-    is never read as a boolean (the absence-shaped reading produced x-62d8).
-    A read failure degrades to nulls with one stderr warning and the dispatch
-    proceeds: a stamp that can wedge the drain is worse than the silence it
-    replaces.
+    """The territory stamp: three values, never two. ``kingless`` is False on
+    a crowned territory, True on a kingless one, None when nothing could read
+    the attribution. Reads the Rust territory-stamp door; any read failure
+    degrades to nulls with one warning and the dispatch proceeds.
     """
     try:
         from fno.rust_binary import call_binary_json
 
-        error, verdict = call_binary_json("territory-verdict", ["--node", node_id])
+        error, stamp = call_binary_json("territory-stamp", ["--node", node_id])
         if error is not None:
             raise RuntimeError(error)
-        if verdict.get("verdict") == "territory_unknown":
-            return {"territory": None, "kingless": None}
-        kingless = verdict.get("kingless")
-        if not isinstance(kingless, bool):
-            raise RuntimeError("verdict carries no kingless field")
-        return {"territory": verdict.get("territory"), "kingless": kingless}
+        return {"territory": stamp["territory"], "kingless": stamp["kingless"]}
     except Exception as exc:  # noqa: BLE001
-        print(
-            f"advance: WARNING: territory verdict unreadable for {node_id}: {exc}",
-            file=sys.stderr,
-        )
+        print(f"advance: WARNING: territory stamp unreadable for {node_id}: {exc}", file=sys.stderr)
         return {"territory": None, "kingless": None}
 
 
@@ -1388,9 +1375,8 @@ def _spawn_worker(
         "cwd": args.node_cwd or "", "caller": caller,
         "grid": args.grid_reason or "", "decision": "; ".join(args.decision),
     }
-    # The territory stamp, before the retask arm so a reused planner's row
-    # carries it too. The deliverable is the record, not the veto: a kingless
-    # territory still drains (x-e221's ruling), so this never refuses.
+    # The stamp lands before the retask arm so a reused planner's row carries
+    # it too. The record, not the veto: a kingless territory still drains.
     row.update(_territory_stamp(node_id))
     # A blueprint dispatch reuses the earliest finished planner on the epic first.
     retask_fallthrough = ""
