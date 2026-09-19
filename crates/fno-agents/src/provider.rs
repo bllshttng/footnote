@@ -605,7 +605,14 @@ pub fn render_verb_seed(message: &str, harness: &str) -> String {
                 }
                 return format!("/{prefix}{verb}{tail}");
             }
-            if harness == "agy" {
+            // A namespaced token renders through the row's own prefix when it
+            // declares one (pi's `/skill:<verb>`, opencode's `/fno:<verb>`),
+            // falling back to the agy and `fno:` forms. A row with no prefix
+            // has no surface of its own for the namespace, so the `fno:`
+            // spelling stands.
+            if !caps.slash_prefix.is_empty() {
+                format!("/{}{verb}{tail}", caps.slash_prefix.as_str())
+            } else if harness == "agy" {
                 format!("/{verb}{tail}")
             } else {
                 format!("/fno:{verb}{tail}")
@@ -2314,6 +2321,32 @@ mod tests {
         assert_eq!(
             render_verb_seed("do a $fno:blueprint", "claude"),
             "do a $fno:blueprint"
+        );
+    }
+
+    /// pi's skill-command form: a namespaced token AND a bare footnote verb
+    /// render through the row's nonempty `slash_prefix`, while pi's own
+    /// native verb stays literal (AC7-HP, AC7-EDGE).
+    #[test]
+    fn render_verb_seed_pi_renders_the_skill_command_form() {
+        assert_eq!(
+            render_verb_seed("/fno:target resume", "pi"),
+            "/skill:target resume"
+        );
+        assert_eq!(render_verb_seed("/target x", "pi"), "/skill:target x");
+        assert_eq!(render_verb_seed("/name", "pi"), "/name");
+        // The other slash surfaces are unchanged by the prefix arm.
+        assert_eq!(
+            render_verb_seed("/fno:target resume", "opencode"),
+            "/fno:target resume"
+        );
+        assert_eq!(
+            render_verb_seed("/fno:target resume", "claude"),
+            "/fno:target resume"
+        );
+        assert_eq!(
+            render_verb_seed("/fno:target resume", "agy"),
+            "/target resume"
         );
     }
 

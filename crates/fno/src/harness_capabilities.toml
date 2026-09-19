@@ -735,7 +735,9 @@ route_on_pane = false
 loop_participation = "extension"
 loop_extension = "cli/src/fno/setup/assets/pi/footnote.ts"
 command_surface = "slash"
-slash_prefix = ""
+# pi registers every skill as /skill:<name> and has no plugin
+# namespace, so the skill-command form is its only verb surface.
+slash_prefix = "skill:"
 # pi's in-TUI slash surface is composed at runtime from extensions, prompt
 # templates and skills; the vendor docs name /name as the built-in that
 # names a session. Measured 2026-09-04 from the vendor docs.
