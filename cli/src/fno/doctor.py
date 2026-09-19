@@ -4535,6 +4535,19 @@ def doctor_command(
             # Rust-only stale: call the refresh helper directly (no needless
             # Python reinstall). src cannot be None here because rust_stale
             # requires rust_source_rev, which requires a resolved source.
+            # Same gate as update_command: a refused pin means the resolved
+            # source is a worktree whose HEAD is not an ancestor of
+            # origin/main, and refreshing from it installs unmerged code
+            # machine-wide. Name the path so the reader sees the worktree.
+            pin = update._resolve_source_pin(source)
+            if pin is not None and pin.get("decision") == "refuse":
+                typer.echo(
+                    "fno doctor: --fix refused: source "
+                    f"{pin.get('path') or src} failed the source-pin gate: "
+                    f"{pin.get('refusal') or 'source checkout refused'}.",
+                    err=True,
+                )
+                raise typer.Exit(1)
             if update._target_in_progress():
                 typer.echo(
                     "fno doctor: --fix refused: target-state.md shows status: IN_PROGRESS. "

@@ -111,6 +111,11 @@ def _stub_signals(
     from fno import update
 
     monkeypatch.setattr(update, "stale_mux_servers", lambda: [])
+    # The rust-stale --fix guard re-resolves the source pin; left unstubbed
+    # it shells to the real native authority and refuses from a feature
+    # worktree, so every fix test inherits this machine's checkout.
+    # Default None = "no verdict" (the guard proceeds); pin tests override it.
+    monkeypatch.setattr(update, "_resolve_source_pin", lambda override=None: None)
     # Control-plane arm staleness shells out to the real `fno-agents status
     # --json`. A developer machine with genuinely stale arms leaks STALE lines
     # into full-output assertions, so stub it like the other probes.
@@ -1430,6 +1435,57 @@ def test_ac2_edge_rust_only_fix_no_marker_outcome_exits_one(
     result = runner.invoke(app, ["doctor", "--fix"])
     assert result.exit_code == 1
     assert "will not converge" in result.stderr
+
+
+def test_fix_rust_stale_refused_pin_exits_one_without_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused source pin (resolved HEAD not an ancestor of origin/main)
+    must make rust-only --fix exit 1 and never call _refresh_rust_bins -
+    that refresh would install an unmerged feature worktree across the
+    fleet. Sync status reads `unknown` for such a HEAD, so the `behind`
+    guard alone does not catch it."""
+    _stub_signals(
+        monkeypatch,
+        src=Path("/wt/x-20d2"),
+        source_rev="abc",
+        marker="abc",
+        capture_present="present",
+        rust_binary="/cargo/bin/fno-agents",
+        rust_marker="aaa",
+        rust_source_rev="bbb",
+        cargo_bin_present=True,
+        source_checkout_sync={
+            "status": "unknown",
+            "behind": None,
+            "source_head": "deadbeef",
+            "remote_head": "mainhead",
+            "detail": "not an ancestor",
+        },
+    )
+    from fno import update
+
+    monkeypatch.setattr(update, "_target_in_progress", lambda: False)
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda override=None: {
+            "decision": "refuse",
+            "path": "/wt/x-20d2",
+            "refusal": "refusing source /wt/x-20d2: linked worktree HEAD deadbeef "
+            "is not an ancestor of origin/main HEAD mainhead",
+        },
+    )
+
+    def _no_refresh(source, *, force=False, dry_run=False):
+        raise AssertionError("_refresh_rust_bins must not run on a refused pin")
+
+    monkeypatch.setattr(update, "_refresh_rust_bins", _no_refresh)
+
+    result = runner.invoke(app, ["doctor", "--fix"])
+    assert result.exit_code == 1
+    assert "/wt/x-20d2" in result.stderr
+    assert "refused" in result.stderr
 
 
 def test_ac2_edge_python_and_rust_stale_fix_delegates_update_only(
