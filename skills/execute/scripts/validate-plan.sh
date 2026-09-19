@@ -1648,7 +1648,7 @@ check_code_index_file() {
         findings+=("frontmatter carries no code_index: block - run the planner's step 2-index, then record main_sha (the origin/main sha you read) and providers (one entry per index, or [])")
     else
         if ! grep -Eq '^[[:space:]]*main_sha:[[:space:]]*[0-9a-f]{7,40}[[:space:]]*$' <<< "$block"; then
-            findings+=("code_index.main_sha is missing or not a 7-to-40-hex sha - write the origin/main sha the plan read, e.g. main_sha: $(git -C "$repo_root" rev-parse HEAD 2>/dev/null | cut -c1-12 || echo <sha>)")
+            findings+=("code_index.main_sha is missing or not a 7-to-40-hex sha - write the origin/main sha the plan read, e.g. main_sha: 9817805bf5e8")
         fi
         if ! grep -Eq '^[[:space:]]*providers:' <<< "$block"; then
             findings+=("code_index.providers is missing - list one entry per index asked (with status and fresh), or providers: [] when no index is present")

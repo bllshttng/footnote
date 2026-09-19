@@ -161,6 +161,22 @@ check_contains "AC2-EDGE: codegraph reads unavailable:requires codegraph not on 
 rm -rf "$SBX1"
 
 # ---------------------------------------------------------------------------
+# AC2-SHADOW: a same-name override whose index is absent still shadows the
+# bundled provider - presence is checked after the name wins, never before.
+# ---------------------------------------------------------------------------
+SBX2="$(mktemp -d)"
+mkdir -p "$SBX2/home" "$SBX2/repo/.fno/code-index/providers"
+write_manifest "$SBX2/repo/.fno/code-index/providers/codegraph.toml" codegraph '["symbol"]' "missing-index/marker" "codegraph" ""
+OUT5="$(PATH="$SYS_PATH" HOME="$SBX2/home" bash "$DETECT" "$SBX2/repo" 2>"$SBX2/err5")"
+RC5=$?
+check_eq "AC2-SHADOW: exits 0" "0" "$RC5"
+check_true "AC2-SHADOW: no codegraph line prints from the bundled fallback" \
+  test -z "$(printf '%s\n' "$OUT5" | grep $'^codegraph\t' || true)"
+check_true "AC2-SHADOW: the override leaves no error either" test ! -s "$SBX2/err5"
+
+rm -rf "$SBX2"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

@@ -1,0 +1,8 @@
+schema = 1
+name = "graphify"
+roles = ["semantic"]
+detect = "graphify-out/graph.json"
+requires = "graphify"
+ask = ["graphify", "query", "{term}"]
+timeout_secs = 30
+refresh = ["graphify", "update", "."]

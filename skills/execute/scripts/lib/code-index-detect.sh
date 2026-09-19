@@ -11,8 +11,11 @@
 # `fresh` or `refresh`.
 #
 # Search order, later wins by name: the bundled code-index/providers/ next to
-# this script (deployed skill layout first, then repo layout),
-# ~/.fno/code-index/providers/, <repo>/.fno/code-index/providers/.
+# this script (deployed skill layout, then sibling-skill layout, then repo
+# layout), ~/.fno/code-index/providers/, <repo>/.fno/code-index/providers/.
+# A valid name shadows lower-priority manifests before its index presence is
+# checked: an override whose index is absent never falls back to the bundled
+# provider of the same name.
 #
 # Usage: code-index-detect.sh [repo-root]   (default: git toplevel, then $PWD)
 # Bash 3.2 compatible.
@@ -29,18 +32,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 skip() { echo "code-index: skipped $1: $2" >&2; }
 
-emit_provider() {
-    local file="$1"
-    local name detect roles requires status
-    name=$(sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' "$file" | head -1)
-    if [[ -z "$name" ]]; then
-        skip "$file" "no name line"
-        return 0
-    fi
-    if [[ ! "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
-        skip "$file" "bad name '$name'"
-        return 0
-    fi
+manifest_name() {
+    sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' "$1" | head -1
+}
+
+# The name is already validated and shadow-marked by the caller: a present
+# name shadows lower-priority manifests BEFORE presence is checked, so an
+# override whose index is absent never falls back to the bundled one.
+provider_line() {
+    local file="$1" name="$2"
+    local detect roles requires status
     detect=$(sed -n 's/^[[:space:]]*detect[[:space:]]*=[[:space:]]*"\([^"]*\)"[[:space:]]*$/\1/p' "$file" | head -1)
     if [[ -z "$detect" ]]; then
         skip "$file" "no detect line"
@@ -66,6 +67,7 @@ add_dir() {
     done
 }
 add_dir "$SCRIPT_DIR/../../code-index/providers"
+add_dir "$SCRIPT_DIR/../../blueprint/code-index/providers"
 add_dir "$SCRIPT_DIR/../../skills/blueprint/code-index/providers"
 add_dir "${HOME:-}/.fno/code-index/providers"
 add_dir "$REPO_ROOT/.fno/code-index/providers"
@@ -75,13 +77,19 @@ i=${#PROVIDER_FILES[@]}
 while (( i > 0 )); do
     i=$((i-1))
     f="${PROVIDER_FILES[$i]}"
-    line=$(emit_provider "$f")
-    if [[ -n "$line" ]]; then
-        name="${line%%$'\t'*}"
-        if [[ :$seen != *":$name:"* ]]; then
-            printf '%s\n' "$line"
-            seen="$seen:$name:"
-        fi
+    name=$(manifest_name "$f")
+    if [[ -z "$name" ]]; then
+        skip "$f" "no name line"
+        continue
+    fi
+    if [[ ! "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+        skip "$f" "bad name '$name'"
+        continue
+    fi
+    if [[ :$seen != *":$name:"* ]]; then
+        seen="$seen:$name:"
+        line=$(provider_line "$f" "$name")
+        [[ -n "$line" ]] && printf '%s\n' "$line"
     fi
 done
 
