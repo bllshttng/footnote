@@ -98,17 +98,6 @@ const UV_VALUE_FLAGS: &[&str] = &[
     "-p",
 ];
 
-/// Cargo global flags whose NEXT token is a value, never the subcommand.
-const CARGO_VALUE_FLAGS: &[&str] = &[
-    "-C",
-    "--config",
-    "-Z",
-    "--manifest-path",
-    "--target",
-    "-j",
-    "--jobs",
-];
-
 const PYTEST_REASON: &str = "[fno test-run guard] `{cmd}` runs pytest outside the suite admission. A raw suite takes no test:suite slot, waits behind no live cargo build, and imports whichever fno is first on PYTHONPATH - on this machine two raw suites at once are the measured crush behind this guard.\n\nRun `fno doctor test [paths...]` instead: it takes the test:suite claim, holds while another suite or cargo build is live, and pins PYTHONPATH to this worktree.";
 
 const CARGO_REASON: &str = "[fno test-run guard] `{cmd}` runs the crates suite unadmitted. Raw `cargo test` takes no test:suite slot and waits behind no live cargo build.\n\nRun `fno doctor test rust` instead: it admits the crates suite under the same claim and bounds it to one run on this machine.";
