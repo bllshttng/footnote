@@ -56,10 +56,14 @@ def _naming_passthrough(cmd, **kwargs):
     is_fno = bool(parts) and (
         parts[0].endswith("fno-py") or parts[0].endswith("fno") or "fno-agents" in parts[0]
     )
-    if is_fno and not ({"name-mint", "name-codes", "name-parse"} & set(parts)):
+    infra = {"name-mint", "name-codes", "name-parse"}
+    if {"doctor", "event"} <= set(parts):
+        return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
+    if is_fno and not (infra & set(parts)):
         return None
     return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
 
+from tests._event_rows import event_rows
 from fno.claims.core import acquire_claim, claim_status
 from fno.cli import app
 
@@ -193,9 +197,7 @@ def test_advance_writes_one_control_plane_tick_row(iso, monkeypatch):
     adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
 
     rows = [
-        json.loads(line)
-        for line in iso.read_text().splitlines()
-        if json.loads(line)["type"] == "control_plane_tick"
+        event for event in event_rows(iso) if event["type"] == "control_plane_tick"
     ]
     assert len(rows) == 1
     data = rows[0]["data"]
@@ -219,9 +221,7 @@ def test_skip_tick_carries_detail(iso, monkeypatch):
     adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
 
     rows = [
-        json.loads(line)
-        for line in iso.read_text().splitlines()
-        if json.loads(line)["type"] == "control_plane_tick"
+        event for event in event_rows(iso) if event["type"] == "control_plane_tick"
     ]
     assert rows[0]["data"]["skip_reason"] == "next-error"
     assert rows[0]["data"]["detail"] == \
@@ -238,9 +238,7 @@ def test_skip_tick_without_detail_is_byte_identical(iso, monkeypatch):
     adv.advance(closed_node_id="ab-1111aaaa", project="fno", events_path=iso)
 
     rows = [
-        json.loads(line)
-        for line in iso.read_text().splitlines()
-        if json.loads(line)["type"] == "control_plane_tick"
+        event for event in event_rows(iso) if event["type"] == "control_plane_tick"
     ]
     assert rows[0]["data"]["detail"] == "closed=ab-1111aaaa node=- reason=disabled"
 
@@ -649,9 +647,7 @@ def test_spawn_failure_records_the_refusal_not_a_clipped_head(iso, monkeypatch):
     assert "refusing to spawn" in recorded
     assert len(recorded) >= 300
     ticks = [
-        json.loads(line)
-        for line in iso.read_text().splitlines()
-        if line.strip() and json.loads(line)["type"] == "control_plane_tick"
+        event for event in event_rows(iso) if event["type"] == "control_plane_tick"
     ]
     failed_ticks = [t for t in ticks if t["data"].get("skip_reason") == "spawn-failed"]
     assert failed_ticks
@@ -954,9 +950,8 @@ def test_capacity_refusal_skips_and_names_the_gate_line(iso, monkeypatch):
     # the numbers, never the provider-stamp warning.
     ticks = [
         event
-        for line in iso.read_text().splitlines()
-        if line.strip()
-        and (event := json.loads(line))["type"] == "control_plane_tick"
+        for event in event_rows(iso)
+        if event["type"] == "control_plane_tick"
         and event["data"].get("arm") == "auto_continue"
     ]
     assert ticks and ticks[-1]["data"]["skip_reason"] == "capacity-refused"
@@ -2047,7 +2042,7 @@ def test_spawn_worker_fills_receipt_out_param(monkeypatch, tmp_path):
     ev = tmp_path / "events.jsonl"
     receipt: dict = {}
     sid = adv._spawn_worker("ab-2222aaaa", None, events_path=ev, receipt=receipt, node=_node_row("ab-2222aaaa"))
-    row = json.loads(ev.read_text().splitlines()[-1])
+    row = event_rows(ev)[-1]
     assert row["type"] == adv.EVENT_SPAWNED
     payload = row["data"]
     assert receipt["short_id"] == payload["short_id"] == sid
@@ -2251,7 +2246,7 @@ def test_lane_ready_frontier_recovers_observer_miss_and_records_divergence(
     rows = adv._ready_nodes("fno", events_path=event_path)
 
     assert [row["id"] for row in rows] == ["x-p0-missed", "x-p2-normal"]
-    events = [json.loads(line) for line in event_path.read_text().splitlines()]
+    events = event_rows(event_path)
     assert events[0]["type"] == "dispatch_selection_diverged"
     assert events[0]["data"]["node_id"] == "x-p0-missed"
 
@@ -3112,6 +3107,8 @@ def _spawn_argv(monkeypatch, *, provider, perm_config, permission_mode=None, sub
         parts = [str(part) for part in cmd]
         if "name-mint" in parts or "name-codes" in parts or "name-parse" in parts:
             return _REAL_SUBPROCESS_RUN(cmd, **_kw)
+        if {"doctor", "event"} <= set(parts):
+            return _REAL_SUBPROCESS_RUN(cmd, **_kw)
         captured["cmd"] = cmd
         return _FakeProc(returncode=0, stdout=_RECEIPT if substrate == "bg" else "")
 
@@ -3943,11 +3940,7 @@ def test_spawn_worker_lifecycle_matrix_agrees_across_axes(iso, tmp_path, monkeyp
         # the -glm tail is the model tag the mint puts on every pinned spawn.
         expected_name = f"{verb_code}-{nid}-{slug}-glm"
         assert name == expected_name, (i, name)
-        rows = [
-            json.loads(line)
-            for line in events.read_text().splitlines()
-            if line.strip()
-        ]
+        rows = event_rows(events)
         spawned = [r for r in rows if r.get("type") == "dispatch_spawned"]
         assert spawned, (i, rows)
         assert spawned[0]["data"]["verb"] == verb, (i, rows)
