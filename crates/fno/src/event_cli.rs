@@ -108,6 +108,7 @@ fn run_rows(args: &[OsString]) -> i32 {
     let mut journal: Option<PathBuf> = None;
     let mut types: Vec<String> = Vec::new();
     let mut include_rejected = false;
+    let mut legacy_fallback = false;
     let mut it = args.iter();
     while let Some(tok) = it.next() {
         let tok = match tok.to_str() {
@@ -122,6 +123,9 @@ fn run_rows(args: &[OsString]) -> i32 {
                 }
             }
             "--include-rejected" => include_rejected = true,
+            // Pre-store journals have no store to query: answer the raw
+            // bytes so the caller carries no legacy reader of its own.
+            "--legacy-fallback" => legacy_fallback = true,
             _ => {}
         }
     }
@@ -143,6 +147,17 @@ fn run_rows(args: &[OsString]) -> i32 {
     if journal.exists() && !journal.is_file() {
         eprintln!("error: {} is not a regular file", journal.display());
         return 1;
+    }
+    if legacy_fallback && !fno_event_store::store_path(&journal).exists() {
+        // No store: the raw journal is the whole history. Lines go back
+        // unfiltered and unvalidated, exactly the pre-store read.
+        let raw = std::fs::read_to_string(&journal).unwrap_or_default();
+        let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+        println!(
+            "{}",
+            serde_json::to_string(&lines).unwrap_or_else(|_| "[]".into())
+        );
+        return 0;
     }
     let _ = fno_event_store::import_all(&journal);
     let query = fno_event_store::EventQuery {

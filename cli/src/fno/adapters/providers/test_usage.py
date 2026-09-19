@@ -1096,11 +1096,9 @@ class TestRequiredBotHeadroomCheck:
         assert warnings[0]["bot"] == "chatgpt-codex-connector"
         assert warnings[0]["provider"] == "codex-pro"
         # AC3-HP: one decision event emitted naming bot + provider + reset.
-        rows = [
-            _json.loads(ln)
-            for ln in (tmp_path / ".fno" / "events.jsonl").read_text().splitlines()
-            if ln.strip()
-        ]
+        from tests._event_rows import event_rows
+
+        rows = event_rows(tmp_path / ".fno" / "events.jsonl")
         ev = [r for r in rows if r["type"] == "quota_required_bot_exhausted"]
         assert len(ev) == 1
         assert ev[0]["data"]["bot"] == "chatgpt-codex-connector"

@@ -225,12 +225,12 @@ def read_events(
 
     events_path = Path(events_path)
 
-    # SQL authority: committed rows in commit order; a missing store falls
-    # back to the raw journal (a fixture or pre-cutover bytes nothing has
-    # imported yet), and an unreadable store raises rather than reading empty.
-    from fno.events.store_client import native_rows, store_db_path
+    # SQL authority: committed rows in commit order; a journal with no store
+    # answers its raw pre-cutover bytes via the verb's legacy fallback. The
+    # legacy raw-only parse below fires only when no binary is available.
+    from fno.events.store_client import native_rows
 
-    committed = native_rows(events_path)
+    committed = native_rows(events_path, legacy_fallback=True)
     if committed is not None:
         rows = []
         for raw in committed:
@@ -242,18 +242,6 @@ def read_events(
             except json.JSONDecodeError:
                 continue
         return _filter_by_session(rows, session_id)
-    if not store_db_path(events_path).exists():
-        raw_rows: List[Dict[str, Any]] = []
-        if events_path.exists():
-            for raw in events_path.read_text(encoding="utf-8").splitlines():
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    raw_rows.append(json.loads(raw))
-                except json.JSONDecodeError:
-                    continue
-        return _filter_by_session(raw_rows, session_id)
 
     from fno.events.store_client import query_rows
 

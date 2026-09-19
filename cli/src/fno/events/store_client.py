@@ -64,13 +64,15 @@ def native_rows(
     *,
     types: Optional[list[str]] = None,
     include_rejected: bool = False,
+    legacy_fallback: bool = False,
     timeout: float = 30,
 ) -> Optional[list[str]]:
     """One native read pass: import, then committed envelope lines.
 
     The whole reader contract lives in the binary; this is the transport.
-    None means the native side was unavailable and the caller falls back to
-    its legacy raw-journal behavior.
+    ``legacy_fallback`` moves the pre-store raw-journal read behind the verb
+    too: a journal with no store answers its raw lines. None means the native
+    side was unavailable and the caller degrades.
     """
     try:
         bin_path = resolve_native_bin()
@@ -81,6 +83,8 @@ def native_rows(
         cmd += ["--type", ty]
     if include_rejected:
         cmd.append("--include-rejected")
+    if legacy_fallback:
+        cmd.append("--legacy-fallback")
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except (FileNotFoundError, subprocess.TimeoutExpired):
