@@ -1119,6 +1119,20 @@ pub fn notify_min_interval_s(cwd: &Path) -> u64 {
     .unwrap_or(300)
 }
 
+/// `[auto_continue] select_timeout_s` (default 120): the maximum time allowed
+/// for the bounded backlog selection read. Zero, negative, or malformed values
+/// fall back to the hang-safe default.
+pub fn auto_continue_select_timeout_s(cwd: &Path) -> u64 {
+    resolve(cwd, |t| {
+        t.get("auto_continue")?
+            .as_table()?
+            .get("select_timeout_s")
+            .and_then(|v| v.as_integer())
+            .and_then(|v| (v > 0).then_some(v as u64))
+    })
+    .unwrap_or(120)
+}
+
 /// `[notify] arm_failing_after_s` (default 1800): how long an arm stays failing, or stale from a dead scheduler, before the arm_watch daemon arm tells the operator. Also the rate floor between arm notices. `0` or a value that does not parse falls back to 1800.
 pub fn notify_arm_failing_after_s(cwd: &Path) -> u64 {
     resolve(cwd, |t| {
@@ -1385,6 +1399,35 @@ mod tests {
         let cwd =
             write_project_settings("arm-failing-valid", "[notify]\narm_failing_after_s = 600\n");
         assert_eq!(notify_arm_failing_after_s(&cwd), 600);
+        clear_config_env();
+    }
+
+    #[test]
+    fn auto_continue_select_timeout_s_defaults_and_falls_back() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("select-timeout-default", "schema_version = 1\n");
+        assert_eq!(auto_continue_select_timeout_s(&cwd), 120);
+        let cwd = write_project_settings(
+            "select-timeout-valid",
+            "[auto_continue]\nselect_timeout_s = 45\n",
+        );
+        assert_eq!(auto_continue_select_timeout_s(&cwd), 45);
+        let cwd = write_project_settings(
+            "select-timeout-zero",
+            "[auto_continue]\nselect_timeout_s = 0\n",
+        );
+        assert_eq!(auto_continue_select_timeout_s(&cwd), 120);
+        let cwd = write_project_settings(
+            "select-timeout-negative",
+            "[auto_continue]\nselect_timeout_s = -1\n",
+        );
+        assert_eq!(auto_continue_select_timeout_s(&cwd), 120);
+        let cwd = write_project_settings(
+            "select-timeout-string",
+            "[auto_continue]\nselect_timeout_s = \"90\"\n",
+        );
+        assert_eq!(auto_continue_select_timeout_s(&cwd), 120);
         clear_config_env();
     }
 

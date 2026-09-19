@@ -835,6 +835,9 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "active-backlog-receipt" {
         return fno_agents::territory::run_active_backlog_receipt(&args[1..]);
     }
+    if verb == "select-read" {
+        return fno_agents::select_read::run(&args[1..]);
+    }
     if verb == "territory-verdict" {
         return fno_agents::spawn_gate::run_territory_verdict(&args[1..]);
     }
