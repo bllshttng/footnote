@@ -72,6 +72,22 @@ pub(crate) const DEAD_CLAIM_STATES: [&str; 2] = ["stale", "corrupted"];
 pub(crate) const TERMINAL_RUNGS: [&str; 2] = ["done", "superseded"];
 pub(crate) const LEGACY_DEFER_PREFIX: &str = "deferred:";
 
+/// The one terminal test every reader of a row agrees on: a terminal status
+/// stamp, a supersession pointer, or a completed stamp (legacy deferrals
+/// excepted). Gate, board, and PR classification share it so they can never
+/// disagree about what is live.
+pub(crate) fn is_terminal(entry: &Value) -> bool {
+    s_str(entry, "status")
+        .map(|s| TERMINAL_RUNGS.contains(&s))
+        .unwrap_or(false)
+        || entry.get("superseded_by").is_some_and(|v| !v.is_null())
+        || entry
+            .get("completed_at")
+            .and_then(Value::as_str)
+            .map(|c| !c.is_empty() && !c.starts_with(LEGACY_DEFER_PREFIX))
+            .unwrap_or(false)
+}
+
 /// The literal commands a reader can re-run; they ARE the checkability
 /// property, so they sit beside the readers (board.py spelled them identically).
 pub(crate) const SRC_UNDISPATCHED: &str = "fno backlog undispatched --json";

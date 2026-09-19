@@ -3,9 +3,9 @@ use super::classify::{claim_is_dead, holder_token, node_driver, node_has_pr};
 use super::prs::{derived_status, node_pr_refs, nodes_binding_pr};
 use super::scope::operator_lane_path;
 use super::{
-    as_int, s_str, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES, LEGACY_DEFER_PREFIX, SRC_CLAIMS,
-    SRC_DISTRESS, SRC_DRIVERS, SRC_NEEDS, SRC_PRS, SRC_PR_GATE, SRC_PR_NODES, SRC_QUESTIONS,
-    SRC_READY, SRC_UNDISPATCHED, SRC_WORKED, TERMINAL_RUNGS,
+    as_int, is_terminal, s_str, SourceRead, DEAD_CLAIM_STATES, KING_PRIORITIES,
+    LEGACY_DEFER_PREFIX, SRC_CLAIMS, SRC_DISTRESS, SRC_DRIVERS, SRC_NEEDS, SRC_PRS, SRC_PR_GATE,
+    SRC_PR_NODES, SRC_QUESTIONS, SRC_READY, SRC_UNDISPATCHED, SRC_WORKED, TERMINAL_RUNGS,
 };
 use serde_json::{json, Map, Value};
 use std::cell::RefCell;
@@ -1057,16 +1057,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             if s_str(node, "id").is_some_and(|id| contained_ids.contains(id)) {
                 continue;
             }
-            let terminal = s_str(node, "status")
-                .map(|s| TERMINAL_RUNGS.contains(&s))
-                .unwrap_or(false)
-                || node.get("superseded_by").is_some_and(|v| !v.is_null())
-                || node
-                    .get("completed_at")
-                    .and_then(Value::as_str)
-                    .map(|c| !c.is_empty() && !c.starts_with(LEGACY_DEFER_PREFIX))
-                    .unwrap_or(false);
-            if terminal {
+            if is_terminal(node) {
                 continue;
             }
             let status = derived_status(node);

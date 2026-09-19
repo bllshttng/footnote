@@ -12,7 +12,7 @@ use crate::client_verbs::py_repr_str;
 use crate::gc_sweep;
 use crate::graph_store::entry_id;
 use crate::king_board::prs::{node_pr_refs, nodes_binding_pr};
-use crate::king_board::{s_str, LEGACY_DEFER_PREFIX, TERMINAL_RUNGS};
+use crate::king_board::{is_terminal, s_str};
 use crate::paths::AgentsHome;
 
 /// Refusal exit: the session's node or PR now has a different live holder.
@@ -32,24 +32,12 @@ pub(crate) struct OtherHolder {
     pub pr: Option<i64>,
 }
 
-fn terminal(entry: &Value) -> bool {
-    s_str(entry, "status")
-        .map(|s| TERMINAL_RUNGS.contains(&s))
-        .unwrap_or(false)
-        || entry.get("superseded_by").is_some_and(|v| !v.is_null())
-        || entry
-            .get("completed_at")
-            .and_then(Value::as_str)
-            .map(|c| !c.is_empty() && !c.starts_with(LEGACY_DEFER_PREFIX))
-            .unwrap_or(false)
-}
-
 /// Non-terminal entries with a `sessions[]` row of phase `do` for this
 /// session id (case-insensitive).
 fn session_nodes<'a>(entries: &'a [Value], session_id: &str) -> Vec<&'a Value> {
     entries
         .iter()
-        .filter(|e| !terminal(e))
+        .filter(|e| !is_terminal(e))
         .filter(|e| {
             e.get("sessions")
                 .and_then(Value::as_array)
