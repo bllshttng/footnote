@@ -301,6 +301,16 @@ _READ_FLOOR_S = 15.0
 _FIRE_FLOOR_S = 30.0
 
 
+def _admission_refused_rcs() -> tuple[int, ...]:
+    """The admission gate's own refusal codes, imported lazily so the
+    harness layer stays off this module's launchd hot path. A refusal is
+    not a failed attempt: is_error=False carries that upstream so the
+    caller never burns a retry on a fire that never started."""
+    from fno.agents.spawn_gate import EXIT_FLEET_STOP, EXIT_FLEET_STOP_UNAVAILABLE
+
+    return (EXIT_FLEET_STOP, EXIT_FLEET_STOP_UNAVAILABLE)
+
+
 def fire_skill(
     verb: Literal["check"],
     pr_number: int,
@@ -393,6 +403,11 @@ def fire_skill(
         return DispatchResult(ok=False, rc=-1, is_error=True, raw="")
 
     raw = result.stdout or ""
+
+    # The admission gate's own refusal codes: a durable stop answered the
+    # fire, not a failed attempt.
+    if result.returncode in _admission_refused_rcs():
+        return DispatchResult(ok=False, rc=result.returncode, is_error=False, raw=raw)
 
     if result.returncode != 0:
         log.warning(
@@ -1052,6 +1067,7 @@ def _run_tick(
 
             elif decision.kind in ("merge", "review") and _ritual_timeout() >= _FIRE_FLOOR_S:
                 dispatch_ok = False
+                refused = False
                 dispatch_extra: dict[str, Any] = {}
                 if decision.kind == "merge":
                     _finish_queue_merge(cand.repo_dir, pr, emit)
@@ -1115,6 +1131,7 @@ def _run_tick(
                 else:
                     result = fire_skill_fn("check", pr, cand.repo_dir, node_id=cand.node_id)
                     dispatch_ok = result.ok
+                    refused = not result.ok and not result.is_error
 
                 if dispatch_ok:
                     acted += 1
@@ -1128,6 +1145,12 @@ def _run_tick(
                     else:
                         store.set(key, entry)
                     emit("pr_watch_dispatched", {"kind": decision.kind, "pr": pr, **dispatch_extra})
+                elif refused:
+                    # The admission gate refused the fire: not an attempt, so
+                    # no retry is burned and the park ledger stays untouched.
+                    # The next clear tick re-fires.
+                    emit("pr_watch_skipped", {"pr": pr, "reason": "admission-refused"})
+                    skipped += 1
                 else:
                     # Dispatch failed: bump retry counter (safe with None/non-int stored value)
                     try:
