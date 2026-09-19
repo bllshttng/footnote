@@ -51,6 +51,15 @@ pub struct LadderState {
     /// the state file is dropped by `cleanup_state_files`.
     #[serde(default)]
     pub mail_durable: bool,
+    /// The head whose settled red last bought this row a wake. The same
+    /// head never re-arms the ladder.
+    #[serde(default)]
+    pub red_head: Option<String>,
+    /// The resume was refused for a new holder (exit 17): a red wake must
+    /// never put a second writer on the branch. Sticky until the state
+    /// file is dropped by `cleanup_state_files`.
+    #[serde(default)]
+    pub reassigned: bool,
 }
 
 /// What this pass does with one open-PR row.
@@ -83,9 +92,23 @@ impl NudgeAction {
     }
 }
 
-/// The pure ladder decision. Order is the law: reset, wait, pause,
-/// escalate, mail, resume. Returns the (possibly reset) state beside the
-/// action, so the caller persists what the decision saw.
+/// Step 2's predicate, shared by `decide` and the read site in `apply`:
+/// the transcript is quiet past the grace, and the last nudge is at least
+/// the grace old. A row that is not due takes no status read at all.
+pub fn due(input: &NudgeInput) -> bool {
+    let quiet_long_enough = input
+        .transcript_age_s
+        .is_some_and(|age| age > input.grace_secs);
+    let nudged_long_ago = input
+        .state
+        .last_nudge_at
+        .is_none_or(|t| input.now.saturating_sub(t) >= input.grace_secs);
+    quiet_long_enough && nudged_long_ago
+}
+
+/// The pure ladder decision. Order is the law: reset, red head, wait,
+/// pause, escalate, mail, resume. Returns the (possibly reset) state
+/// beside the action, so the caller persists what the decision saw.
 pub fn decide(input: &NudgeInput) -> (NudgeAction, LadderState) {
     let mut input = input.clone();
     // 1. Reset: activity the ladder did not cause - a transcript write
@@ -98,18 +121,26 @@ pub fn decide(input: &NudgeInput) -> (NudgeAction, LadderState) {
             input.state.undelivered = 0;
         }
     }
+    // 1b. Red head: a settled red at a new head buys exactly one wake. The
+    // budget re-arms with one attempt left, a spent or escalated ladder
+    // un-escalates, and the head is stamped so the same red never re-arms.
+    // A row refused for a new holder never resumes over a second writer;
+    // the reset above leaves `reassigned` alone.
+    if !input.state.reassigned {
+        if let Some(h) = input.red_head.clone() {
+            if input.state.red_head.as_deref() != Some(h.as_str()) {
+                input.state.attempts = MAX_ATTEMPTS - 1;
+                input.state.escalated = false;
+                input.state.undelivered = 0;
+                input.state.red_head = Some(h);
+            }
+        }
+    }
     let state = input.state.clone();
     // 2. Wait: the transcript is inside the grace, or the last nudge is
     // younger than the grace. Either way the session has had no fair chance
     // to answer yet.
-    let quiet_long_enough = input
-        .transcript_age_s
-        .is_some_and(|age| age > input.grace_secs);
-    let nudged_long_ago = input
-        .state
-        .last_nudge_at
-        .is_none_or(|t| input.now.saturating_sub(t) >= input.grace_secs);
-    if !quiet_long_enough || !nudged_long_ago {
+    if !due(&input) {
         return (NudgeAction::Wait, state);
     }
     // 3. Pause: a live merge order is the only allowed hold. The row stays
@@ -151,11 +182,40 @@ pub struct NudgeInput {
     pub grace_secs: i64,
     pub now: i64,
     pub live: bool,
+    /// The head of a settled red on an OPEN PR, when this pass read one.
+    /// `None` for every other payload, and for a pass that took no read.
+    pub red_head: Option<String>,
 }
 
 /// The production effect: one bounded subprocess, returning the exit code
 /// and stdout. Tests stage a fake.
 pub type Runner<'a> = &'a mut dyn FnMut(&[String], &str) -> (i32, String);
+
+/// The production runner every arm shares, so the dry run and the daemon
+/// cannot disagree about how a verb runs.
+fn production_run(argv: &[String], cwd: &str) -> (i32, String) {
+    let bin = argv[0].clone();
+    let rest: Vec<String> = argv[1..].to_vec();
+    let refs: Vec<&str> = rest.iter().map(String::as_str).collect();
+    // A global verb (mail, resume, ask) needs no row cwd; the empty
+    // string means "stay here", because chdir("") fails the spawn.
+    let dir: std::path::PathBuf = if cwd.is_empty() {
+        std::path::PathBuf::from(".")
+    } else {
+        std::path::PathBuf::from(cwd)
+    };
+    match crate::loopcheck::bounded_read(bin.as_ref(), &refs, &dir, "pr-nudge", RUN_TIMEOUT) {
+        Ok(out) => (
+            if out.status.success() {
+                0
+            } else {
+                out.status.code().unwrap_or(1)
+            },
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        ),
+        Err(_) => (1, String::new()),
+    }
+}
 
 /// The daemon arm: run the ladder over every open-PR row this sweep kept,
 /// then drop the state files of sessions that no longer carry one.
@@ -167,30 +227,6 @@ pub fn run_ladder(home: &AgentsHome, emitter: &EventEmitter, rows: &[OpenPrRow],
         .collect();
     for (row, held) in rows.iter().zip(holds) {
         let state = load_state(home, &row.session_id);
-        let mut runner = |argv: &[String], cwd: &str| -> (i32, String) {
-            let bin = argv[0].clone();
-            let rest: Vec<String> = argv[1..].to_vec();
-            let refs: Vec<&str> = rest.iter().map(String::as_str).collect();
-            // A global verb (mail, resume, ask) needs no row cwd; the empty
-            // string means "stay here", because chdir("") fails the spawn.
-            let dir: std::path::PathBuf = if cwd.is_empty() {
-                std::path::PathBuf::from(".")
-            } else {
-                std::path::PathBuf::from(cwd)
-            };
-            match crate::loopcheck::bounded_read(bin.as_ref(), &refs, &dir, "pr-nudge", RUN_TIMEOUT)
-            {
-                Ok(out) => (
-                    if out.status.success() {
-                        0
-                    } else {
-                        out.status.code().unwrap_or(1)
-                    },
-                    String::from_utf8_lossy(&out.stdout).into_owned(),
-                ),
-                Err(_) => (1, String::new()),
-            }
-        };
         apply(
             home,
             emitter,
@@ -199,7 +235,7 @@ pub fn run_ladder(home: &AgentsHome, emitter: &EventEmitter, rows: &[OpenPrRow],
             held,
             grace_secs,
             now,
-            &mut runner,
+            &mut production_run,
         );
     }
     cleanup_state_files(home, rows);
@@ -218,17 +254,14 @@ pub fn apply(
     now: i64,
     runner: Runner,
 ) {
-    let last_activity_at = row.transcript_age_s.map(|age| now.saturating_sub(age));
-    let input = NudgeInput {
-        state: state_param.clone(),
-        transcript_age_s: row.transcript_age_s,
-        last_activity_at,
+    let (action, mut state, status) = decide_with_read(
+        row,
+        state_param,
         merge_order_hold,
         grace_secs,
         now,
-        live: row.live,
-    };
-    let (action, mut state) = decide(&input);
+        &mut *runner,
+    );
     match action {
         NudgeAction::Wait => {
             if &state != state_param {
@@ -236,10 +269,15 @@ pub fn apply(
             }
         }
         NudgeAction::Pause => {
-            let due = state
+            // A stamped red head must survive the hold, or the wake after
+            // the lift would count as a second one.
+            if &state != state_param {
+                save_state(home, &row.session_id, &state);
+            }
+            let pause_due = state
                 .last_pause_emit_at
                 .is_none_or(|t| now.saturating_sub(t) >= PAUSE_EMIT_FLOOR_S);
-            if due {
+            if pause_due {
                 let _ = emitter.emit(
                     "pr_nudge_paused",
                     &serde_json::json!({
@@ -280,9 +318,9 @@ pub fn apply(
             );
         }
         NudgeAction::Mail | NudgeAction::Resume => {
-            // One read serves the text; the red-head rung (task 1.2) reads
-            // it once in build_input instead.
-            let status = read_status(row, runner);
+            // Mail and resume are only reachable past `due`, which is where
+            // the one status read happened.
+            let status = status.expect("mail and resume rungs imply a due row");
             let text = nudge_text(row, &status);
             let resume_argv = vec![
                 "fno".to_string(),
@@ -333,8 +371,10 @@ pub fn apply(
                 // The resume refused for a new holder: nudging on would put
                 // a second writer on the branch. Wait for activity, and the
                 // refusal is not a delivery failure - no undelivered, no
-                // operator question.
+                // operator question. `reassigned` keeps the red-head rung
+                // from ever resuming this session over a new holder.
                 state.escalated = true;
+                state.reassigned = true;
             } else if !landed {
                 state.undelivered += 1;
             }
@@ -357,6 +397,11 @@ pub fn apply(
             });
             if fallback {
                 fields["fallback"] = serde_json::json!("resume");
+            }
+            if state.red_head != state_param.red_head {
+                if let Some(h) = &state.red_head {
+                    fields["red_head"] = serde_json::json!(h);
+                }
             }
             let _ = emitter.emit("pr_nudge_sent", &fields);
         }
@@ -695,28 +740,63 @@ fn cleanup_state_files(home: &AgentsHome, rows: &[OpenPrRow]) {
     }
 }
 
-/// The DRY-RUN plan: decisions only, no effect, no state write. The action
-/// strings match [`NudgeAction::as_str`] so a rehearsal reads like the real
-/// arm's events.
-pub fn plan(home: &AgentsHome, rows: &[OpenPrRow], grace_secs: i64) -> Vec<(String, String)> {
+/// Everything one pass needs to decide: the input built the same way for
+/// the daemon arm and the dry run, plus the status read a due row took.
+fn decide_with_read(
+    row: &OpenPrRow,
+    state_param: &LadderState,
+    merge_order_hold: bool,
+    grace_secs: i64,
+    now: i64,
+    runner: Runner,
+) -> (NudgeAction, LadderState, Option<Result<Value, i32>>) {
+    let mut input = NudgeInput {
+        state: state_param.clone(),
+        transcript_age_s: row.transcript_age_s,
+        last_activity_at: row.transcript_age_s.map(|age| now.saturating_sub(age)),
+        merge_order_hold,
+        grace_secs,
+        now,
+        live: row.live,
+        red_head: None,
+    };
+    let mut status = None;
+    // ponytail: one status read per due row per retire pass (300 s), and an
+    // escalated row is due every pass. Read escalated rows once per grace if the
+    // gh budget runs hot.
+    if due(&input) {
+        let s = read_status(row, runner);
+        input.red_head = s.as_ref().ok().and_then(settled_red_head);
+        status = Some(s);
+    }
+    let (action, state) = decide(&input);
+    (action, state, status)
+}
+
+/// The DRY-RUN plan: decisions only, no effect, no state write. Staged
+/// over the caller's runner so the dry run and the daemon arm cannot
+/// disagree. The action strings match [`NudgeAction::as_str`] so a
+/// rehearsal reads like the real arm's events.
+pub fn plan_with(
+    home: &AgentsHome,
+    rows: &[OpenPrRow],
+    grace_secs: i64,
+    runner: Runner,
+) -> Vec<(String, String)> {
     let now = crate::daemon::now_epoch_secs();
     rows.iter()
         .map(|row| {
             let state = load_state(home, &row.session_id);
             let held = merge_order_hold(home, &row.node);
-            let input = NudgeInput {
-                state: state.clone(),
-                transcript_age_s: row.transcript_age_s,
-                last_activity_at: row.transcript_age_s.map(|age| now.saturating_sub(age)),
-                merge_order_hold: held,
-                grace_secs,
-                now,
-                live: row.live,
-            };
-            let (action, _) = decide(&input);
+            let (action, _, _) = decide_with_read(row, &state, held, grace_secs, now, &mut *runner);
             (row.id.clone(), action.as_str().to_string())
         })
         .collect()
+}
+
+/// The dry run with the production runner.
+pub fn plan(home: &AgentsHome, rows: &[OpenPrRow], grace_secs: i64) -> Vec<(String, String)> {
+    plan_with(home, rows, grace_secs, &mut production_run)
 }
 
 #[cfg(test)]
@@ -745,6 +825,7 @@ mod tests {
             grace_secs: 900,
             now: 1900,
             live,
+            red_head: None,
         }
     }
 
@@ -874,6 +955,7 @@ mod tests {
         );
         let state = load_state(&home, &r.session_id);
         assert!(state.escalated, "refusal must stop the ladder");
+        assert!(state.reassigned, "the refusal stamps the reassigned flag");
         assert_eq!(state.undelivered, 0);
         assert_eq!(state.attempts, 1);
         assert_eq!(
@@ -885,6 +967,7 @@ mod tests {
                 grace_secs: 900,
                 now: 1900,
                 live: false,
+                red_head: None,
             })
             .0,
             NudgeAction::Wait
@@ -1355,5 +1438,288 @@ mod tests {
         let text2 = nudge_text(&r, &read_status(&r, &mut runner2));
         assert!(text2.contains("red unsettled @ abcdef123456"), "{text2}");
         assert!(text2.contains(". Failing: `ci`"), "{text2}");
+    }
+
+    #[test]
+    fn a_settled_red_head_wakes_an_escalated_row_once() {
+        // AC1-HP: an escalated, quiet row reads a settled red on an OPEN
+        // PR and gets one wake naming the failing checks. The state and
+        // the event both carry the head.
+        let r = row(true);
+        let out = status_with_failures(
+            "red",
+            true,
+            "abcdef1234567890",
+            r#"[{"check":"ci / test","step":"Run tests","first_error":"expected 200, got 401"}]"#,
+        );
+        let mut mail_text: Option<String> = None;
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            if argv.contains(&"do".to_string()) {
+                (1, out.clone())
+            } else if argv.contains(&"send".to_string()) {
+                mail_text = Some(argv[5].clone());
+                (0, "msg-1 delivered (hosted)\n".into())
+            } else {
+                (0, String::new())
+            }
+        };
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-red-wake"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let st = LadderState {
+            attempts: 3,
+            escalated: true,
+            ..Default::default()
+        };
+        apply(&home, &emitter, &r, &st, false, 900, 1900, &mut runner);
+        let text = mail_text.expect("the red wake mails the live row");
+        assert!(text.contains("settled red at abcdef123456"), "{text}");
+        assert!(
+            text.contains("Failing: `ci / test [Run tests]: expected 200, got 401`"),
+            "{text}"
+        );
+        let saved = load_state(&home, &r.session_id);
+        assert_eq!(saved.red_head.as_deref(), Some("abcdef1234567890"));
+        assert_eq!(saved.attempts, 3);
+        assert!(!saved.escalated);
+        let ev = last_event(&home, "pr_nudge_sent");
+        assert_eq!(
+            ev["data"]["red_head"],
+            serde_json::json!("abcdef1234567890")
+        );
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn the_same_red_head_never_re_arms_the_ladder() {
+        // AC2-EDGE: the wake for head A spent the re-armed budget. Later
+        // due passes on the same head escalate once, then wait. No second
+        // mail or resume.
+        let spent = LadderState {
+            attempts: 3,
+            escalated: false,
+            red_head: Some("abcdef1234567890".into()),
+            last_nudge_at: Some(1900),
+            ..Default::default()
+        };
+        let mut inp = input(spent, true);
+        inp.now = 9000;
+        inp.transcript_age_s = Some(8000);
+        inp.last_activity_at = Some(1000);
+        inp.red_head = Some("abcdef1234567890".into());
+        assert_eq!(decide(&inp).0, NudgeAction::Escalate);
+        let spent2 = LadderState {
+            attempts: 3,
+            escalated: true,
+            red_head: Some("abcdef1234567890".into()),
+            last_nudge_at: Some(1900),
+            ..Default::default()
+        };
+        let mut inp2 = input(spent2, true);
+        inp2.now = 9000;
+        inp2.transcript_age_s = Some(8000);
+        inp2.last_activity_at = Some(1000);
+        inp2.red_head = Some("abcdef1234567890".into());
+        assert_eq!(decide(&inp2).0, NudgeAction::Wait);
+    }
+
+    #[test]
+    fn a_new_red_head_buys_exactly_one_more_wake() {
+        // AC3-HP: a settled red at head B after head A wakes once more and
+        // names the failures at B.
+        let r = row(false);
+        let out = status_with_failures("red", true, "bbbbbbbb12345678", r#"[{"check":"lint"}]"#);
+        let mut saw_resume = false;
+        let mut resume_text: Option<String> = None;
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            if argv.contains(&"do".to_string()) {
+                (1, out.clone())
+            } else if argv.contains(&"resume".to_string()) {
+                saw_resume = true;
+                resume_text = Some(argv[5].clone());
+                (0, String::new())
+            } else {
+                (0, String::new())
+            }
+        };
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-red-head-b"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let st = LadderState {
+            attempts: 3,
+            escalated: true,
+            red_head: Some("aaaaaaaa12345678".into()),
+            ..Default::default()
+        };
+        apply(&home, &emitter, &r, &st, false, 900, 1900, &mut runner);
+        assert!(saw_resume);
+        let text = resume_text.expect("the resume carries the wake text");
+        assert!(text.contains("settled red at bbbbbbbb1234"), "{text}");
+        assert!(text.contains("Failing: `lint`"), "{text}");
+        let saved = load_state(&home, &r.session_id);
+        assert_eq!(saved.red_head.as_deref(), Some("bbbbbbbb12345678"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn an_unsettled_red_and_a_fresh_row_take_no_wake_and_no_read() {
+        // AC5-EDGE: only a settled red on an OPEN PR buys the rung, so an
+        // unsettled red stamps nothing. A row inside the grace takes no
+        // status read at all.
+        let r = row(false);
+        let out = status_with_failures("red", false, "abcdef1234567890", r#"[{"check":"ci"}]"#);
+        let mut calls = 0;
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            calls += 1;
+            if argv.contains(&"do".to_string()) {
+                (1, out.clone())
+            } else {
+                (0, String::new())
+            }
+        };
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-unsettled"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let st = LadderState {
+            attempts: 3,
+            escalated: true,
+            ..Default::default()
+        };
+        apply(&home, &emitter, &r, &st, false, 900, 1900, &mut runner);
+        assert_eq!(calls, 1, "only the status read runs");
+        assert_eq!(
+            load_state(&home, &r.session_id),
+            LadderState::default(),
+            "the Wait arm writes nothing and an unsettled red stamps no head"
+        );
+        let mut fresh = row(true);
+        fresh.transcript_age_s = Some(10);
+        let mut calls2 = 0;
+        let mut runner2 = |_: &[String], _: &str| -> (i32, String) {
+            calls2 += 1;
+            (0, String::new())
+        };
+        apply(&home, &emitter, &fresh, &st, false, 900, 1900, &mut runner2);
+        assert_eq!(calls2, 0, "a row inside the grace takes no status read");
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn the_dry_run_and_the_daemon_arm_agree_on_one_payload() {
+        // AC7-HP: one row, one ladder state, one payload - plan_with and
+        // apply return the same action.
+        let r = row(true);
+        let out = status_payload("pending", false, "0123456789abcdef");
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-dry-run"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        save_state(&home, &r.session_id, &LadderState::default());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let mut plan_calls = 0;
+        let mut plan_runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            plan_calls += 1;
+            if argv.contains(&"do".to_string()) {
+                (2, out.clone())
+            } else {
+                (0, String::new())
+            }
+        };
+        let planned = plan_with(&home, std::slice::from_ref(&r), 900, &mut plan_runner);
+        let mut apply_runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            if argv.contains(&"do".to_string()) {
+                (2, out.clone())
+            } else if argv.contains(&"send".to_string()) {
+                (0, "msg-1 delivered (hosted)\n".into())
+            } else {
+                (0, String::new())
+            }
+        };
+        apply(
+            &home,
+            &emitter,
+            &r,
+            &LadderState::default(),
+            false,
+            900,
+            1900,
+            &mut apply_runner,
+        );
+        let ev = last_event(&home, "pr_nudge_sent");
+        assert_eq!(
+            planned,
+            vec![(
+                "worker-a".to_string(),
+                ev["data"]["action"]
+                    .as_str()
+                    .expect("an action")
+                    .to_string()
+            )]
+        );
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn a_merge_order_holds_the_red_wake_and_stamps_the_head() {
+        // AC8-HP: the pause wins over the red rung, and the stamped head
+        // survives the hold so the wake fires once, after the lift.
+        let r = row(true);
+        let out = status_with_failures("red", true, "abcdef1234567890", r#"[{"check":"ci"}]"#);
+        let mut effects = 0;
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            if argv.contains(&"do".to_string()) {
+                (1, out.clone())
+            } else {
+                effects += 1;
+                (0, String::new())
+            }
+        };
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-red-hold"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let st = LadderState {
+            attempts: 3,
+            escalated: true,
+            ..Default::default()
+        };
+        apply(&home, &emitter, &r, &st, true, 900, 1900, &mut runner);
+        assert_eq!(effects, 0, "a held row mails nothing and resumes nothing");
+        let saved = load_state(&home, &r.session_id);
+        assert_eq!(saved.red_head.as_deref(), Some("abcdef1234567890"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn a_reassigned_row_never_takes_a_red_wake() {
+        // AC10-EDGE: a row the resume gate refused for a new holder never
+        // resumes over a red head. No mail, no resume, no re-arm.
+        let r = row(false);
+        let out = status_with_failures("red", true, "bbbbbbbb12345678", r#"[{"check":"lint"}]"#);
+        let mut effects = 0;
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            if argv.contains(&"do".to_string()) {
+                (1, out.clone())
+            } else {
+                effects += 1;
+                (0, String::new())
+            }
+        };
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-reassigned"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let st = LadderState {
+            attempts: 1,
+            escalated: true,
+            reassigned: true,
+            ..Default::default()
+        };
+        save_state(&home, &r.session_id, &st);
+        apply(&home, &emitter, &r, &st, false, 900, 1900, &mut runner);
+        assert_eq!(effects, 0);
+        let saved = load_state(&home, &r.session_id);
+        assert_eq!(
+            saved.red_head, None,
+            "no head is stamped on a reassigned row"
+        );
+        assert!(saved.reassigned);
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
     }
 }
