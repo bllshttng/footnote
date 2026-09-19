@@ -42,10 +42,11 @@ pub(crate) struct ObservedModel {
     pub model: Option<String>,
 }
 
-/// One progress note (a machine-written comment on the node).
+/// One progress note (a machine-written comment on the node). The canonical
+/// writer stores `{ts, text}`; `body` rides as the alias.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct NodeNote {
-    #[serde(default)]
+    #[serde(rename = "text", alias = "body", default)]
     pub body: String,
 }
 
@@ -144,8 +145,17 @@ pub(crate) async fn detail_now(id: &str) -> FoldResult {
 }
 
 fn parse_detail(stdout: &[u8]) -> FoldResult {
-    serde_json::from_slice::<NodeDetail>(stdout)
-        .map_err(|e| NodeDetailError::Malformed(e.to_string()))
+    let mut doc: serde_json::Value =
+        serde_json::from_slice(stdout).map_err(|e| NodeDetailError::Malformed(e.to_string()))?;
+    // The canonical list deserializers skip non-object rows (obj_list!);
+    // the overlay matches that tolerance instead of failing the whole fold
+    // on one legacy string entry.
+    for key in ["sessions", "progress_notes", "decisions"] {
+        if let Some(rows) = doc.get_mut(key).and_then(|v| v.as_array_mut()) {
+            rows.retain(|r| r.is_object());
+        }
+    }
+    serde_json::from_value(doc).map_err(|e| NodeDetailError::Malformed(e.to_string()))
 }
 
 /// The overlay's open state: the node id it was opened for, the last fold's
@@ -708,6 +718,20 @@ mod tests {
         // Fields the store has not started emitting (encounters) are absent,
         // and absent decodes empty - never a fold failure.
         assert!(d.progress_notes.len() == 1);
+    }
+
+    #[test]
+    fn canonical_note_text_and_legacy_rows_survive() {
+        // The writer stores {ts, text}; the note renders its text. The
+        // legacy string session row is skipped by the parse, never fatal.
+        let d = parse_detail(
+            br#"{"id":"x-1","progress_notes":[{"ts":"2026-09-19T00:00:00Z","text":"shipped"}],
+                "sessions":["legacy-string-id",{"session_id":"cccccccc-9"}]}"#,
+        )
+        .expect("the canonical shapes decode");
+        assert_eq!(d.progress_notes[0].body, "shipped");
+        assert_eq!(d.sessions.len(), 1);
+        assert_eq!(d.sessions[0].session_id, "cccccccc-9");
     }
 
     #[test]
