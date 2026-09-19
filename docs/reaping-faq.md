@@ -1,6 +1,6 @@
 # Reaping FAQ: why is this row still here?
 
-A reaping sweep judged a session row and kept it. This page names the keep reason and tells you what to do. It covers every program that stops or removes a session or one of its parts, the order they run in, and every key of `fno agents reap --json`.
+A reaping sweep judged a session row and kept it. This page names the keep reason and tells you what to do. It covers every program that stops or removes a session or one of its parts. It states the order they run in. It names every key of `fno agents reap --json`.
 
 Run `fno agents reap --dry-run` and find your row handle in the report. The dry run classifies every row, names one reason per row, and writes nothing. It stops no process, prunes no tree, and writes no receipt.
 
@@ -8,7 +8,7 @@ Measured on this machine on 2026-09-10 with the dry run: 1 `would retire` line, 
 
 ## Is this page for you?
 
-A reaping sweep kept a session row and you want to know why, or you want a row gone and reap refuses, or you asked which condition acts first and got told no doc answers. This page owns the keep reasons, every program that stops or removes a session or one of its parts, the order they run in, and every key of the reap JSON report. Misreading it makes you force a delete the machine will re-judge on the next sweep, or kill a worker whose row was telling the truth.
+A reaping sweep kept a session row and you want to know why. You want a row gone and reap refuses. You asked which condition acts first and got told no doc answers. This page owns the keep reasons and every program that stops or removes a session or one of its parts. It owns the order they run in. It owns every key of the reap JSON report. Misreading it makes you force a delete the machine will re-judge on the next sweep, or kill a worker whose row was telling the truth.
 
 Not for: the worktree removal contract (which trees prune on merge and which never do). That is answered at [The row retired and its tree stayed](#the-row-retired-and-its-tree-stayed) and owned by [../.claude/rules/worktrees.md](../.claude/rules/worktrees.md).
 
@@ -73,7 +73,7 @@ These five move or remove state around sessions. None stops or removes a session
 - The nudge ladder: keeps the row and sends input instead (`pr_nudge.rs` `run_ladder`). It fires on the daemon arm only. The manual dry run prints its plan as `would nudge {id} ({action})` and takes no effect.
 - The state-file sweep: removes expired claims, stale plan locks, agent locks, the pr-status cache, and claim tmp files (`gc.rs` `state_file_sweep`). No row is touched.
 - The liveness sweep: bands the machine and writes status. It removes nothing (`daemon.rs` `liveness_sweep`).
-- The daily reclaim janitor, with its `cargo_build_dirs` lane: removes disk artifacts such as build dirs, never a session (`reclaim.rs` `maybe_run_daily`, `reclaim.rs` `cargo_build_dirs_lane`).
+- The daily reclaim janitor, with its `cargo_build_dirs` lane: removes disk artifacts, never a session (`reclaim.rs` `maybe_run_daily`, `reclaim.rs` `cargo_build_dirs_lane`).
 
 ## In what order
 
