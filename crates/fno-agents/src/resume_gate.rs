@@ -7,18 +7,24 @@
 
 use serde_json::Value;
 
-use crate::claims::{self, ClaimState};
+use crate::claims::{self, AcquireOutcome, ClaimState};
 use crate::client_verbs::py_repr_str;
 use crate::gc_sweep;
-use crate::graph_store::entry_id;
+use crate::graph_store::{entry_id, sessions_index};
 use crate::king_board::prs::{node_pr_refs, nodes_binding_pr};
 use crate::king_board::{is_terminal, s_str};
 use crate::paths::AgentsHome;
+use crate::state;
+use crate::truth_probe::{family1_truth_probe_many, TruthProbe};
 
 /// Refusal exit: the session's node or PR now has a different live holder.
 /// 17 is unused in the resume family (16 belongs to resume_wake and
 /// pane_relaunch).
 pub const RESUME_REASSIGNED_EXIT: i32 = 17;
+
+/// The revival window a node reservation holds: long enough to relaunch, and
+/// freed early by pid death (the claim is pid-liveness anchored).
+const RESERVE_TTL_MS: i64 = 900_000;
 
 /// The other holder the gate found.
 pub(crate) struct OtherHolder {
@@ -108,18 +114,73 @@ pub(crate) fn other_holder(
 
 /// The gate `run_resume` consults. `None` means "may launch": either no other
 /// holder, or the graph could not be read (one warning, never a block).
-pub fn refuse_if_reassigned(home: &AgentsHome, session_id: &str, row_name: &str) -> Option<i32> {
-    let Some(entries) = gc_sweep::read_graph_rows(home) else {
-        eprintln!("fno agents resume: warning: graph unreadable, holder check skipped");
-        return None;
-    };
-    let Some(hit) = other_holder(&entries, session_id, &|key| {
-        let (state, rec) = claims::status(key, None);
-        if matches!(state, ClaimState::Live | ClaimState::Suspect) {
-            rec.map(|r| r.holder)
-        } else {
-            None
+/// The claim-store half is a snapshot: a claim can expire while the worker it
+/// held keeps answering. The roster half closes that gap - registry rows
+/// stamped (directly, or through a graph session row) to this node whose
+/// transcript probe answers reachable. The probe is the liveness instrument;
+/// the batch answers for every candidate in ONE process.
+fn roster_holder_with(
+    home: &AgentsHome,
+    entries: &[Value],
+    node_id: &str,
+    probe_many: &dyn Fn(&[String]) -> std::collections::HashMap<String, TruthProbe>,
+) -> Option<String> {
+    let registry = state::load_registry(&home.registry_json()).ok()?;
+    let index = sessions_index(entries);
+    let mut tokens: Vec<String> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    for e in &registry.entries {
+        let stamped = e.node.as_deref() == Some(node_id)
+            || e.harness_session_id.as_deref().is_some_and(|sid| {
+                index
+                    .get(sid.trim())
+                    .is_some_and(|rows| rows.iter().any(|(n, _)| n == node_id))
+            });
+        if !stamped {
+            continue;
         }
+        tokens.push(
+            e.harness_session_id
+                .clone()
+                .unwrap_or_else(|| e.name.clone()),
+        );
+        names.push(e.name.clone());
+    }
+    let probes = probe_many(&tokens);
+    for (token, name) in tokens.iter().zip(&names) {
+        if probes
+            .get(token)
+            .is_some_and(|p| p.reachability.as_deref() == Some("reachable"))
+        {
+            return Some(name.clone());
+        }
+    }
+    None
+}
+
+fn roster_holder(home: &AgentsHome, entries: &[Value], node_id: &str) -> Option<String> {
+    roster_holder_with(home, entries, node_id, &family1_truth_probe_many)
+}
+
+/// The holder predicate the gate hands to `other_holder`: the claim store
+/// first (Live or Suspect), then the roster.
+fn gate_holder_of(home: &AgentsHome, entries: &[Value], key: &str) -> Option<String> {
+    let (claim_state, rec) = claims::status(key, None);
+    if matches!(claim_state, ClaimState::Live | ClaimState::Suspect) {
+        return rec.map(|r| r.holder).filter(|h| !h.is_empty());
+    }
+    let node = key.strip_prefix("node:")?;
+    roster_holder(home, entries, node)
+}
+
+fn refused_line(
+    home: &AgentsHome,
+    entries: &[Value],
+    session_id: &str,
+    row_name: &str,
+) -> Option<i32> {
+    let Some(hit) = other_holder(entries, session_id, &|key| {
+        gate_holder_of(home, entries, key)
     }) else {
         return None;
     };
@@ -137,6 +198,88 @@ read it with fno agents truth {who}.",
         who = who,
     );
     Some(RESUME_REASSIGNED_EXIT)
+}
+
+/// The gate `run_resume` consults. `None` means "may launch": either no other
+/// holder, or the graph could not be read (one warning, never a block).
+pub fn refuse_if_reassigned(home: &AgentsHome, session_id: &str, row_name: &str) -> Option<i32> {
+    let Some(entries) = gc_sweep::read_graph_rows(home) else {
+        eprintln!("fno agents resume: warning: graph unreadable, holder check skipped");
+        return None;
+    };
+    refused_line(home, &entries, session_id, row_name)
+}
+
+/// Gate plus atomic reservation. A dispatch racing this resume is decided by
+/// the claim file itself: the reserve acquires `node:<id>` under the
+/// resuming session's own holder, and same-holder acquire is idempotent, so
+/// the revived session's own claim refreshes the reservation instead of
+/// fighting it. `gate_id` is the holder id part (`claim_uuid` on the
+/// relaunch arm, else the row's session id).
+pub fn gate_and_reserve(
+    home: &AgentsHome,
+    session_id: &str,
+    row_name: &str,
+    gate_id: &str,
+) -> Option<i32> {
+    let Some(entries) = gc_sweep::read_graph_rows(home) else {
+        eprintln!("fno agents resume: warning: graph unreadable, holder check skipped");
+        return None;
+    };
+    if let Some(code) = refused_line(home, &entries, session_id, row_name) {
+        return Some(code);
+    }
+    let holder = format!("target-session:{gate_id}");
+    reserve_nodes(&entries, session_id, row_name, &holder, None)
+}
+
+/// The reserve half: acquire every session node under the resuming session's
+/// holder. A dispatch that wins the race holds the claim file; the resume
+/// refuses naming it. Root is injectable for tests; production passes the
+/// machine claims root.
+fn reserve_nodes(
+    entries: &[Value],
+    session_id: &str,
+    row_name: &str,
+    holder: &str,
+    root: Option<&std::path::Path>,
+) -> Option<i32> {
+    for node in session_nodes(entries, session_id) {
+        let Some(id) = entry_id(node) else {
+            continue;
+        };
+        let opts = claims::AcquireOpts {
+            pid: Some(std::process::id()),
+            ttl_ms: Some(RESERVE_TTL_MS),
+            reason: Some("resume reserve".into()),
+            root: root.map(|p| p.to_path_buf()),
+            ..Default::default()
+        };
+        match claims::acquire(&format!("node:{id}"), holder, opts) {
+            AcquireOutcome::Acquired(_) => {}
+            AcquireOutcome::HeldByOther { holder: other, .. } => {
+                let who = holder_short(&other);
+                eprintln!(
+                    "fno agents resume: refused: node {id} was just claimed by {other}. \
+Resuming {name} would put a second writer on that branch. Stop or hand off that holder first; \
+read it with fno agents truth {who}.",
+                    id = id,
+                    other = other,
+                    name = py_repr_str(row_name),
+                    who = who,
+                );
+                return Some(RESUME_REASSIGNED_EXIT);
+            }
+            AcquireOutcome::Error(e) => {
+                // Same posture as an unreadable graph: the reserve degrades
+                // to the gate alone, it never blocks the revival.
+                eprintln!(
+                    "fno agents resume: warning: reserve on node {id} failed ({e}); continuing"
+                );
+            }
+        }
+    }
+    None
 }
 
 fn holder_short(holder: &str) -> &str {
@@ -316,6 +459,130 @@ mod tests {
         std::fs::write(dir.join("graph.json"), b"{not json").unwrap();
         let home = AgentsHome::at(dir.join("agents"));
         assert_eq!(refuse_if_reassigned(&home, "sid", "row"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn registry_home(tag: &str) -> (AgentsHome, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "fno-resume-gate-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        (AgentsHome::at(dir.join("agents")), dir)
+    }
+
+    fn reachable_probe() -> TruthProbe {
+        TruthProbe {
+            state: "working".to_string(),
+            provider_refusal: None,
+            harness_title: None,
+            reachability: Some("reachable".to_string()),
+            basis: Some("transcript".to_string()),
+            last_activity_age_s: Some(30.0),
+            last_activity_basis: None,
+            last_event_at: None,
+            last_message: None,
+            observed_model: Value::Null,
+        }
+    }
+
+    // P1 (PR 2249 codex review): the claim store is a snapshot. A replacement
+    // worker whose node claim expired but whose transcript still answers
+    // reachable is still the holder; the roster half of the predicate must
+    // find it.
+    #[test]
+    fn roster_answers_when_the_claim_expired() {
+        let (home, dir) = registry_home("roster");
+        crate::state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(
+                serde_json::from_str(
+                    r#"{"name":"t-other","harness":"claude","harness_session_id":"uuid-other",
+                    "node":"x-aaaa","status":"live","cwd":"/tmp/x",
+                    "created_at":"2026-09-01T00:00:00Z"}"#,
+                )
+                .unwrap(),
+            )
+        })
+        .unwrap();
+        let entries = vec![do_entry("x-aaaa", "8c58eaf1-old")];
+        let probes = HashMap::from([("uuid-other".to_string(), reachable_probe())]);
+        let hit = roster_holder_with(&home, &entries, "x-aaaa", &|toks| {
+            toks.iter()
+                .filter_map(|t| probes.get(t).cloned().map(|p| (t.clone(), p)))
+                .collect()
+        });
+        assert_eq!(hit.as_deref(), Some("t-other"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The reserve half: a dispatch that wins the race holds the claim file,
+    // and the resume refuses naming it. A quiet run acquires the seat under
+    // the resuming session's own holder.
+    #[test]
+    fn reserve_refuses_when_a_dispatch_wins_the_race() {
+        let (home, dir) = registry_home("reserve");
+        let entries = vec![do_entry("x-aaaa", "8c58eaf1-old")];
+        let claims_root = dir.join("claims-root");
+        std::fs::create_dir_all(&claims_root).unwrap();
+        let opts = crate::claims::AcquireOpts {
+            ttl_ms: Some(60_000),
+            root: Some(claims_root.clone()),
+            ..Default::default()
+        };
+        match crate::claims::acquire("node:x-aaaa", "target-session:the-dispatch", opts) {
+            crate::claims::AcquireOutcome::Acquired(_) => {}
+            other => panic!("fixture claim failed: {other:?}"),
+        }
+        let refused = reserve_nodes(
+            &entries,
+            "8c58eaf1-old",
+            "t-old-row",
+            "target-session:8c58eaf1-old",
+            Some(&claims_root),
+        );
+        assert_eq!(refused, Some(RESUME_REASSIGNED_EXIT));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reserve_acquires_the_seat_and_a_second_pass_reenters() {
+        let (home, dir) = registry_home("reserve-ok");
+        let entries = vec![do_entry("x-aaaa", "8c58eaf1-old")];
+        let claims_root = dir.join("claims-root");
+        std::fs::create_dir_all(&claims_root).unwrap();
+        let holder = "target-session:8c58eaf1-old";
+        assert_eq!(
+            reserve_nodes(
+                &entries,
+                "8c58eaf1-old",
+                "t-old-row",
+                holder,
+                Some(&claims_root)
+            ),
+            None
+        );
+        let (st, rec) = crate::claims::status("node:x-aaaa", Some(&claims_root));
+        assert!(matches!(
+            st,
+            crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
+        ));
+        assert_eq!(rec.map(|r| r.holder), Some(holder.to_string()));
+        // Same-holder acquire is idempotent: the revived session's own claim
+        // refreshes the reservation instead of fighting it.
+        assert_eq!(
+            reserve_nodes(
+                &entries,
+                "8c58eaf1-old",
+                "t-old-row",
+                holder,
+                Some(&claims_root)
+            ),
+            None
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
