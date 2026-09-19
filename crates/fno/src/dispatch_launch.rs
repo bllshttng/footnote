@@ -60,6 +60,27 @@ pub(crate) fn dispatch_spawn_argv(
     argv
 }
 
+/// The launch argv for a PLAN spawn (the card menu's Plan entry): pure so a
+/// unit test can pin it, the same rule [`dispatch_spawn_argv`] follows. The
+/// door is the ONE launcher; the spawn is pinned to the architect sub-agent
+/// and carries the blueprint message, and every dispatch flag (substrate,
+/// mux session, account, parent tab, `--no-wait`) rides exactly as a
+/// dispatch - so the door's family-2 guard, spawn gate, and placement lease
+/// all answer unchanged.
+pub(crate) fn plan_spawn_argv(
+    fno: &str,
+    node_id: &str,
+    session: &str,
+    account: Option<&str>,
+    parent: Option<&str>,
+) -> Vec<String> {
+    let mut argv = dispatch_spawn_argv(fno, node_id, session, account, parent);
+    argv.push("--agent".to_string());
+    argv.push("fno:architect".to_string());
+    argv.push(format!("/fno:blueprint {node_id}"));
+    argv
+}
+
 /// (id, slug, parent) from a node JSON read (`fno backlog get` / `fno backlog
 /// next`): the LAST parseable JSON object on stdout carrying an id (a hook or
 /// a note may print first). `None` on `null`, empty output, or a record
@@ -570,6 +591,38 @@ mod tests {
                 "--tab",
                 "3",
             ]
+        );
+    }
+
+    #[test]
+    fn plan_spawn_argv_is_pinned() {
+        // The Plan entry: the dispatch argv plus the architect pin and the
+        // blueprint message - the door, gate and placement machinery shared.
+        assert_eq!(
+            plan_spawn_argv("fno", "x-1", "work", None, None),
+            vec![
+                "fno",
+                "agents",
+                "spawn",
+                "--node",
+                "x-1",
+                "--substrate",
+                "pane",
+                "--mux-session",
+                "work",
+                "--no-wait",
+                "--agent",
+                "fno:architect",
+                "/fno:blueprint x-1",
+            ]
+        );
+        // The optional dispatch flags stay in place ahead of the plan pins.
+        assert_eq!(
+            plan_spawn_argv("fno", "x-2", "work", Some("acc"), Some("3"))
+                .iter()
+                .filter(|a| *a == "--account" || *a == "--tab" || *a == "acc" || *a == "3")
+                .count(),
+            4
         );
     }
 

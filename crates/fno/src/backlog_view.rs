@@ -354,6 +354,26 @@ pub fn board_scope_from_spawn_env() -> (BoardScope, String) {
     }
 }
 
+/// The scope reason alone, for paint. The client's spawn latch IS the resolved
+/// `resolve_board_scope` answer (the spawner resolved config and latched the
+/// env), so this is the reason to show on the backlog header. Read per call:
+/// the read is an env lookup, and a cache would freeze a test's env change.
+pub fn board_scope_reason() -> String {
+    board_scope_from_spawn_env().1
+}
+
+/// The one card label: `<id> <slug>`, id FIRST - the id is the handle every
+/// verb takes, so it leads and the slug reads after it. An empty slug renders
+/// the id alone. Every client paint site folds through this so the rows
+/// cannot drift apart.
+pub fn card_label(c: &crate::proto::BacklogCard) -> String {
+    if c.slug.is_empty() {
+        c.id.clone()
+    } else {
+        format!("{} {}", c.id, c.slug)
+    }
+}
+
 /// Resolve the board scope once, at CLIENT spawn time (and for `mux doctor`).
 ///
 /// Ladder, first hit wins:
@@ -748,6 +768,57 @@ fn mark_head(cards: &mut [BacklogCard]) {
 /// `AgentRow.pr: Option<u64>`). Pure; a malformed doc yields an empty map (the
 /// label simply never appears). `pr_number` is NOT unique across entries, but the
 /// map is keyed by node id, so that is irrelevant.
+/// node id -> the driving session's SHORT id (first 8 chars), from the same
+/// graph read `derive_pr_map` consumes: the live claim holder's session when
+/// one holds, else the node's last do/ship session. The operator's PR-row
+/// ask: a row whose driving session has ended names the sessions list, and
+/// an empty list maps to nothing (the row then says "no session"). Pure; a
+/// malformed doc yields an empty map.
+pub fn derive_session_map(raw: &str) -> HashMap<String, String> {
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return HashMap::new();
+    };
+    let Some(entries) = doc
+        .get("entries")
+        .or_else(|| doc.get("nodes"))
+        .and_then(|v| v.as_array())
+    else {
+        return HashMap::new();
+    };
+    let short = |s: &str| s.chars().take(8).collect::<String>();
+    let mut out = HashMap::new();
+    for e in entries {
+        let Some(id) = e.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let driving = e
+            .get("locked_by_harness_session")
+            .and_then(|v| v.as_str())
+            .map(short)
+            .or_else(|| {
+                e.get("sessions")
+                    .and_then(|v| v.as_array())
+                    .and_then(|rows| {
+                        rows.iter()
+                            .rev()
+                            .find(|s| {
+                                matches!(
+                                    s.get("phase").and_then(|p| p.as_str()),
+                                    Some("do") | Some("ship")
+                                )
+                            })
+                            .and_then(|s| s.get("session_id"))
+                            .and_then(|v| v.as_str())
+                            .map(short)
+                    })
+            });
+        if let Some(d) = driving {
+            out.insert(id.to_string(), d);
+        }
+    }
+    out
+}
+
 pub fn derive_pr_map(raw: &str) -> HashMap<String, u64> {
     let Ok(doc) = serde_json::from_str::<serde_json::Value>(raw) else {
         return HashMap::new();
@@ -1052,6 +1123,11 @@ pub struct ReaderState {
     pr: HashMap<String, u64>,
     /// The pr map as of the last publish, so a pr-only change is detected.
     last_pr: Option<HashMap<String, u64>>,
+    /// node id -> driving session short id (the PR-row attach handle),
+    /// recomputed with `pr` on the same fresh read.
+    driver: HashMap<String, String>,
+    /// The driver map as of the last publish (the pr gate's mirror).
+    last_driver: Option<HashMap<String, String>>,
     /// Active missions, recomputed only on a fresh read (mirrors `pr`).
     missions: MissionMap,
     /// The mission map as of the last publish, so a mission-only change is
@@ -1105,7 +1181,12 @@ impl ReaderState {
         stamp: Option<(i64, u64)>,
         read_if_changed: impl FnOnce() -> Option<String>,
         live: Option<&HashMap<String, String>>,
-    ) -> Option<(Queue, HashMap<String, u64>, MissionMap)> {
+    ) -> Option<(
+        Queue,
+        HashMap<String, u64>,
+        HashMap<String, String>,
+        MissionMap,
+    )> {
         // Whether THIS tick pulled fresh bytes off disk. Only a fresh read that
         // also parses clears the failure counter: re-deriving the cached document
         // succeeds every tick by definition, so treating that as success would
@@ -1125,12 +1206,14 @@ impl ReaderState {
                     // only here, not per tick, so we never parse the 4M graph
                     // twice a second.
                     self.pr = derive_pr_map(&raw);
+                    self.driver = derive_session_map(&raw);
                     self.missions = derive_missions(&raw).unwrap_or_default();
                     self.cached_raw = Some(raw);
                 }
                 (None, None) => {
                     self.cached_stamp = stamp;
                     self.pr = HashMap::new();
+                    self.driver = HashMap::new();
                     self.missions = MissionMap::default();
                     self.cached_raw = None; // file vanished: empty the lane
                 }
@@ -1210,13 +1293,24 @@ impl ReaderState {
         // put) must republish too, else the `PR #N` label would lag until an
         // unrelated card/claim flip.
         let pr_changed = self.last_pr.as_ref() != Some(&self.pr);
+        let driver_changed = self.last_driver.as_ref() != Some(&self.driver);
         let missions_changed = self.last_missions.as_ref() != Some(&self.missions);
-        if live_changed || pr_changed || missions_changed || self.last_sent.as_ref() != Some(&queue)
+        if live_changed
+            || pr_changed
+            || driver_changed
+            || missions_changed
+            || self.last_sent.as_ref() != Some(&queue)
         {
             self.last_sent = Some(queue.clone());
             self.last_pr = Some(self.pr.clone());
+            self.last_driver = Some(self.driver.clone());
             self.last_missions = Some(self.missions.clone());
-            Some((queue, self.pr.clone(), self.missions.clone()))
+            Some((
+                queue,
+                self.pr.clone(),
+                self.driver.clone(),
+                self.missions.clone(),
+            ))
         } else {
             None
         }
@@ -1512,6 +1606,28 @@ mod tests {
     }
 
     #[test]
+    fn the_driver_map_prefers_the_claim_then_the_last_do_or_ship_session() {
+        let raw = r#"{"entries":[
+            {"id":"n1","locked_by_harness_session":"aaaaaaaa-1111",
+             "sessions":[{"phase":"do","session_id":"bbbbbbbb-2222"}]},
+            {"id":"n2","sessions":[
+              {"phase":"do","session_id":"cccccccc-3333"},
+              {"phase":"blueprint","session_id":"dddddddd-4444"},
+              {"phase":"ship","session_id":"eeeeeeee-5555"}]},
+            {"id":"n3","sessions":[{"phase":"blueprint","session_id":"ffffffff-6666"}]},
+            {"id":"n4"}
+        ]}"#;
+        let m = derive_session_map(raw);
+        // A live claim holder wins.
+        assert_eq!(m.get("n1").map(String::as_str), Some("aaaaaaaa"));
+        // No claim: the LAST do/ship session wins (the blueprint row loses).
+        assert_eq!(m.get("n2").map(String::as_str), Some("eeeeeeee"));
+        // Sessions exist but none is do/ship: nothing maps (the row says so).
+        assert!(!m.contains_key("n3"));
+        assert!(!m.contains_key("n4"));
+    }
+
+    #[test]
     fn resolve_board_scope_defaults_to_the_repo_project() {
         let _env_lock = lock_board_scope_env();
         let _guard = EnvVarGuard::remove("FNO_BOARD_SCOPE");
@@ -1717,7 +1833,7 @@ mod tests {
             if i < 3 {
                 assert!(out.is_none(), "failures below the threshold never publish");
             } else {
-                let (queue, _, _) = out.expect("the stale crossing publishes");
+                let (queue, _, _, _) = out.expect("the stale crossing publishes");
                 assert!(queue.stale, "the crossing publish carries the stale marker");
                 assert!(
                     !queue.cards.is_empty(),
@@ -1737,7 +1853,7 @@ mod tests {
             },
             None,
         );
-        let (queue, _, _) = recovered.expect("recovery republishes");
+        let (queue, _, _, _) = recovered.expect("recovery republishes");
         assert!(!queue.stale, "a landed read clears the failure run");
     }
 

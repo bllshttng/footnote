@@ -170,7 +170,8 @@ pub(crate) fn spawn(
                 };
                 (stamp, raw)
             };
-            if let Some((queue, prs, missions)) = state.tick(stamp, move || raw, last_live.as_ref())
+            if let Some((queue, prs, drivers, missions)) =
+                state.tick(stamp, move || raw, last_live.as_ref())
             {
                 let holders = last_live.clone().unwrap_or_default();
                 if core_tx
@@ -180,6 +181,7 @@ pub(crate) fn spawn(
                         stale: queue.stale,
                         holders,
                         prs,
+                        drivers,
                         missions,
                     })
                     .await
