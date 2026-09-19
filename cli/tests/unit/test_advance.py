@@ -115,15 +115,14 @@ def _events(events_path: Path) -> list[dict]:
     FNO_REPO_ROOT points, and no decision-count assertion means to count them.
     control_plane_tick rows (the arms readout, one per advance call) are
     bookkeeping, not decisions."""
-    if not events_path.exists():
-        return []
+    from tests._event_rows import event_rows
+
+    skip_prefixes = ("claim_",)
+    skip_types = {"quota_rotation_declined", "dispatch_claim_observed", "control_plane_tick"}
     return [
         event
-        for line in events_path.read_text().splitlines()
-        if line.strip()
-        and not (event := json.loads(line))["type"].startswith("claim_")
-        and event["type"]
-        not in ("quota_rotation_declined", "dispatch_claim_observed", "control_plane_tick")
+        for event in event_rows(events_path)
+        if not event["type"].startswith(skip_prefixes) and event["type"] not in skip_types
     ]
 
 

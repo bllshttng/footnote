@@ -17,10 +17,9 @@ FIXTURE = Path(__file__).parent / "fixtures" / "gate_escape_spawn_cap_parity.jso
 
 
 def _events(p: Path) -> list[dict]:
-    p = Path(p)
-    if not p.exists():
-        return []
-    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+    from tests._event_rows import event_rows
+
+    return event_rows(Path(p))
 
 
 def _escapes(p: Path, reason: str = "spawn-cap") -> list[dict]:
