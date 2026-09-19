@@ -640,6 +640,19 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
         use std::path::PathBuf;
         let cwd = PathBuf::from(ask.get("cwd").and_then(Value::as_str).unwrap_or(""));
         let session_id = ask.get("session_id").and_then(Value::as_str).unwrap_or("");
+        // An unnamed cwd never touches the filesystem: resolving the store
+        // against "" would read the process cwd's own project settings and
+        // answer about a directory nobody asked about.
+        if cwd.as_os_str().is_empty() {
+            let answer = serde_json::json!({
+                "state": "unknown",
+                "files": [],
+                "directory": "",
+                "reason": "cwd is required",
+            });
+            println!("{answer}");
+            return 0;
+        }
         let (lookup, directory) = match crate::pi::pi_store(&cwd) {
             Ok(store) => {
                 let dir = match store.layout {
