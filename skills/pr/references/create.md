@@ -274,10 +274,24 @@ fi
 # file's own trailer, where a "$BODY" variable it cannot expand leaves it
 # guessing from the command text. Write the composed body, then pass the path.
 printf '%s\n' "$BODY" > .fno/pr-body.md
+
+# The body-only CI guards are pure functions of the body, title and branch,
+# so run them here, before the PR exists: a body failure found in CI costs a
+# full workflow round and is indistinguishable from a code failure.
+fno-agents pr-body-check --body-file .fno/pr-body.md --title "$TITLE" --base "${BASE:-main}"; RC=$?
+if [[ $RC -eq 1 ]]; then
+  echo "fail: PR body: a CI guard refuses this PR; follow the guard's own fix text above, then rerun the check" >&2
+  exit 1
+elif [[ $RC -ne 0 ]]; then
+  echo "warn: PR body check could not run (exit $RC); CI still runs every body guard" >&2
+fi
+
 gh pr create \
   --title "$TITLE" \
   --body-file .fno/pr-body.md
 ```
+
+On exit 1, follow the guard's own fix text and rerun the check. Never open the PR: the CI guards read the PR body field, so no commit can fix a body failure. The session-URL guard also scans commit messages, so a commit hit needs a reword, not a body edit.
 
 **Capture PR number** from the output URL (e.g., `/pull/105` → `105`).
 
@@ -358,6 +372,7 @@ Derive from commits:
 # The body must carry the exact `Backlog-Closure:` trailer when the branch names
 # a node, or check-pr-node-closure reds the PR. Compose it into a file (see the
 # step-5 block above) rather than passing a bare --body.
+fno-agents pr-body-check --body-file .fno/pr-body.md --title "title" --base "${BASE:-main}"
 gh pr create --title "title" --body-file .fno/pr-body.md
 ```
 
