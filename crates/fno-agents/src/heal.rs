@@ -1581,6 +1581,8 @@ fn heal_pid_file(a: &Args) -> std::path::PathBuf {
     events_dir(a).join("pr-heal.pid")
 }
 
+// Test-only reader since the guard switched to live_heal_pids.
+#[cfg_attr(not(test), allow(dead_code))]
 fn read_pid_file(path: &std::path::Path) -> Option<u32> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
@@ -1630,16 +1632,17 @@ fn run_detached(
         return EXIT_CLEAN;
     }
     let pid_file = heal_pid_file(a);
-    if let Some(pid) = read_pid_file(&pid_file) {
-        if crate::evals_arm::pid_alive(pid) {
-            emit_arm_row(
-                a,
-                0,
-                Some("in_flight"),
-                &format!("pid {pid} is still running the drive loop"),
-            );
-            return EXIT_CLEAN;
-        }
+    // One live loop holds the tick, whatever file names it: the single
+    // pr-heal.pid, or a stale per-root file a pre-upgrade loop still runs
+    // in (the sweep filters dead pids).
+    if let Some(pid) = live_heal_pids(&events_dir(a)).first() {
+        emit_arm_row(
+            a,
+            0,
+            Some("in_flight"),
+            &format!("pid {pid} is still running the drive loop"),
+        );
+        return EXIT_CLEAN;
     }
     let mut child: Vec<String> = Vec::with_capacity(argv.len() + 2);
     child.push(crate::evals_arm::self_exe());
@@ -1767,8 +1770,14 @@ fn status_line(a: &Args) -> String {
             .collect::<Vec<_>>()
             .join(",")
     };
+    // One row names one root's run: a multi-root tick writes one row per
+    // root, so the line labels whose counts these are.
+    let root = data
+        .get("root")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
     format!(
-        "Heal: armed; last run {ts} ({}); healed {healed}, rebased {rebased}, reran {reran}, escalated {escalated}; {acted_clause}; in-flight {in_flight}",
+        "Heal: armed; last run {ts} ({}, root {root}); healed {healed}, rebased {rebased}, reran {reran}, escalated {escalated}; {acted_clause}; in-flight {in_flight}",
         age_phrase(&ts)
     )
 }
@@ -4718,7 +4727,7 @@ echo '[]'
         .unwrap();
         let line = status_line(&a);
         assert!(line.starts_with("Heal: armed; last run "), "{line}");
-        assert!(line.contains("(12m ago)"), "{line}");
+        assert!(line.contains("(12m ago, root unknown)"), "{line}");
         assert!(
             line.contains("healed 1, rebased 0, reran 0, escalated 3"),
             "{line}"
@@ -4770,7 +4779,11 @@ echo '[]'
             events.to_string_lossy().into_owned(),
         ])
         .unwrap();
-        assert!(status_line(&a).contains("(1d ago)"), "{}", status_line(&a));
+        assert!(
+            status_line(&a).contains("(1d ago, root unknown)"),
+            "{}",
+            status_line(&a)
+        );
     }
 
     #[test]
@@ -4796,6 +4809,61 @@ echo '[]'
             "{}",
             status_line(&a)
         );
+    }
+
+    #[test]
+    fn the_status_line_labels_the_root_its_row_names() {
+        // One row names one root's run: the line labels whose counts these
+        // are instead of letting the last root's row read as the whole tick.
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let ts = chrono::Utc::now().to_rfc3339();
+        std::fs::write(
+            &events,
+            format!(
+                "{{\"ts\":\"{ts}\",\"type\":\"pr_heal_tick\",\"data\":{{\"root\":\"/srv/repo\",\"healed\":2}}}}\n"
+            ),
+        )
+        .unwrap();
+        let a = parse_args(&[
+            "--status".to_string(),
+            "--armed".to_string(),
+            "--events-file".to_string(),
+            events.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let line = status_line(&a);
+        assert!(line.contains("root /srv/repo"), "{line}");
+        assert!(line.contains("healed 2"), "{line}");
+    }
+
+    #[test]
+    fn a_stale_per_root_pid_file_with_a_live_pid_holds_the_tick() {
+        // Migration guard: a pre-upgrade loop still alive in an old
+        // pr-heal.<root>.pid file holds the tick, so a binary swap cannot
+        // double-spawn the healer while the old loop lives.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        let a = parse_args(&detach_args(d)).unwrap();
+        std::fs::write(
+            events_dir(&a).join("pr-heal.some-root.pid"),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+        let spawned = std::cell::RefCell::new(0);
+        let spawn = |_: &[String]| -> std::io::Result<u32> {
+            *spawned.borrow_mut() += 1;
+            Ok(std::process::id())
+        };
+        let code = run_detached(&a, &detach_args(d), &clear_pause, &spawn);
+        assert_eq!(code, EXIT_CLEAN);
+        assert_eq!(
+            *spawned.borrow(),
+            0,
+            "a live stale-file loop holds the tick"
+        );
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("in_flight"), "{events}");
     }
 
     #[test]
