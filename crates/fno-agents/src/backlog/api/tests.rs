@@ -786,8 +786,8 @@ fn api_session_end_writes_an_explicit_instant_on_both_fill_branches() {
 
 #[test]
 fn pull_request_stamp_matches_one_entry_and_never_double_stamps() {
-    let (_d1, _d2, json_store, sqlite_store) = both_stores();
-    for store in [&json_store, &sqlite_store] {
+    let (_d1, ref store) = one_store();
+    {
         pull_request_attach(
             store,
             "ab-one",

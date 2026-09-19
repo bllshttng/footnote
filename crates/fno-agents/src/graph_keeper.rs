@@ -2521,13 +2521,20 @@ fn api_op(
             }))
         }
         "version" => Ok(json!({ "version": api::version(store)? })),
-        "rows" => Ok(json!({
-            "rows": api::rows(store, params
-                .get("include_archived")
-                .and_then(Value::as_bool)
-                .unwrap_or(false))?,
-            "version": api::version(store)?,
-        })),
+        "rows" => {
+            let mut served = api::rows(
+                store,
+                params
+                    .get("include_archived")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )?;
+            crate::node_reading::attach_reading(&mut served);
+            Ok(json!({
+                "rows": served,
+                "version": api::version(store)?,
+            }))
+        }
         "search" => {
             let q = param_str(params, "q")?;
             Ok(json!({
