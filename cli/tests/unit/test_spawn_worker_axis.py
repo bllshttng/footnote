@@ -71,6 +71,9 @@ def _capture(monkeypatch, settings):
         parts = [str(part) for part in cmd]
         if {"name-mint", "name-codes", "name-parse"} & set(parts):
             return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
+        # Native event commits are infrastructure too: ride the real binary.
+        if {"doctor", "event"} <= set(parts):
+            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
         captured["cmd"] = cmd
         # A full session id, not a head-8: a bare 8-hex aimed at codex is a
         # 65.5-second timestamp bucket and the spawn seam refuses it by shape.
@@ -222,16 +225,9 @@ def test_human_and_blueprint_sources_keep_the_ambient_edge(monkeypatch):
 
 
 def _rows(events_path: Path, kind: str) -> list[dict]:
-    if not events_path.exists():
-        return []
-    out = []
-    for line in events_path.read_text().splitlines():
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        if row.get("type") == kind:
-            out.append(row)
-    return out
+    from tests._event_rows import event_rows
+
+    return [row for row in event_rows(events_path) if row.get("type") == kind]
 
 
 def test_spawn_emits_one_dispatch_spawned_row(monkeypatch, tmp_path):
