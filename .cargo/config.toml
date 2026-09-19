@@ -5,3 +5,9 @@ incremental = false
 # CARGO_BUILD_BUILD_DIR (set by fno to <paths.cargo_targets_base>/{workspace-path-hash})
 # overrides this value.
 build-dir = "{cargo-cache-home}/build/{workspace-path-hash}"
+
+# Every test binary and doctest asks for a cargo run slot before it runs,
+# so a fresh-build cargo test counts against the same cap as a compile.
+# Cargo resolves a config path with a slash from the checkout root.
+[target.'cfg(all())']
+runner = ["scripts/lib/cargo-rustc-wrapper.sh", "--run"]

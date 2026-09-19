@@ -134,11 +134,87 @@ t05_signalled_admission_compiles_nothing() {
   rm -rf "$stub_dir"
 }
 
+t06_run_door_admits_then_execs() {
+  local stub_dir out_file err_file rc
+  stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
+  calls="$stub_dir/calls.txt"
+  cat > "$stub_dir/fno-agents" <<STUB
+#!/usr/bin/env bash
+echo "\$*" >> "$calls"
+STUB
+  chmod +x "$stub_dir/fno-agents"
+  out_file="$stub_dir/out.txt"
+  err_file="$stub_dir/err.txt"
+
+  TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" --run /bin/sh -c 'echo ran "$@"; exit 7' x a b >"$out_file" 2>"$err_file"
+  rc=$?
+  [[ "$rc" -eq 7 ]] || { fail "T06: expected rc=7 (the binary's own exit), got $rc"; rm -rf "$stub_dir"; return; }
+  grep -q '^ran a b$' "$out_file" || { fail "T06: the binary did not run with its args: $(cat "$out_file")"; rm -rf "$stub_dir"; return; }
+  grep -q "^test-run run-admit --cargo-pid [0-9][0-9]* --worktree ${REPO_ROOT}\$" "$calls" \
+    || { fail "T06: the run door did not ask admission: $(cat "$calls")"; rm -rf "$stub_dir"; return; }
+  pass "T06 --run asks run admission, then execs the binary with its own args and exit code"
+  rm -rf "$stub_dir"
+}
+
+t07_failed_run_admission_runs_anyway_once_per_cargo() {
+  local stub_dir out_file err_file rc
+  stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
+  printf '#!/usr/bin/env bash\necho called >> "%s/calls.txt"\nexit 2\n' "$stub_dir" > "$stub_dir/fno-agents"
+  chmod +x "$stub_dir/fno-agents"
+  out_file="$stub_dir/out.txt"
+  err_file="$stub_dir/err.txt"
+
+  # The wrapper's parent is this shell, standing in for cargo.
+  TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" --run /bin/echo running >"$out_file" 2>"$err_file"
+  rc=$?
+  [[ "$rc" -eq 0 ]] || { fail "T07: expected rc=0, got $rc"; rm -rf "$stub_dir"; return; }
+  grep -q "running" "$out_file" || { fail "T07: the binary did not run"; rm -rf "$stub_dir"; return; }
+  grep -q "run admission unavailable (exit 2)" "$err_file" \
+    || { fail "T07: stderr does not name the unadmitted run: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
+  TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" --run /bin/echo running >"$out_file" 2>"$err_file"
+  [[ "$(wc -l < "$stub_dir/calls.txt" | tr -d ' ')" == "1" ]] \
+    || { fail "T07: a second run under the same parent asked again"; rm -rf "$stub_dir"; return; }
+  [[ -s "$err_file" ]] && { fail "T07: the second run repeated the warning: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
+  pass "T07 a failing run admission is named once per cargo and every run still executes"
+  rm -rf "$stub_dir"
+}
+
+t08_signalled_run_admission_runs_nothing() {
+  local stub_dir out_file rc
+  stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
+  printf '#!/usr/bin/env bash\nexit 130\n' > "$stub_dir/fno-agents"
+  chmod +x "$stub_dir/fno-agents"
+  out_file="$stub_dir/out.txt"
+
+  TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" --run /bin/echo running >"$out_file" 2>/dev/null
+  rc=$?
+  [[ "$rc" -eq 130 ]] || { fail "T08: expected rc=130, got $rc"; rm -rf "$stub_dir"; return; }
+  grep -q "running" "$out_file" && { fail "T08: a signalled wait still ran the binary"; rm -rf "$stub_dir"; return; }
+  pass "T08 a run wait stopped by a signal exits with it and runs nothing"
+  rm -rf "$stub_dir"
+}
+
+t09_run_without_a_program_refuses() {
+  local err_file rc
+  stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
+  err_file="$stub_dir/err.txt"
+  TMPDIR="$stub_dir" PATH="/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" --run 2>"$err_file"
+  rc=$?
+  [[ "$rc" -eq 2 ]] || { fail "T09: expected rc=2, got $rc"; rm -rf "$stub_dir"; return; }
+  grep -q -e "--run needs a program" "$err_file" || { fail "T09: stderr does not name the refusal: $(cat "$err_file")"; rm -rf "$stub_dir"; return; }
+  pass "T09 --run with no program refuses with exit 2"
+  rm -rf "$stub_dir"
+}
+
 t01_sccache_present_announces_on_probe
 t02_sccache_absent_ordinary_compile_silent
 t03_compile_asks_admission_and_probe_does_not
 t04_admission_failure_builds_anyway
 t05_signalled_admission_compiles_nothing
+t06_run_door_admits_then_execs
+t07_failed_run_admission_runs_anyway_once_per_cargo
+t08_signalled_run_admission_runs_nothing
+t09_run_without_a_program_refuses
 
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
