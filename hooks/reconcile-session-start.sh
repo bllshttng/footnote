@@ -68,8 +68,8 @@ if [[ -f "$RESULT" ]] && command -v jq >/dev/null 2>&1; then
     mv -f "$RESULT" "$RESULT.shown" 2>/dev/null || true
 fi
 
-# 1a. Orphan-plan binder result (x-673d): the sweep that co-fires the binder
-#     also lands .orphan-plans-result.json; surface what it bound and what it
+# 1a. Orphan-plan binder result: the sweep that co-fires the binder also
+#     lands .orphan-plans-result.json; surface what it bound and what it
 #     HELD, before the consume-after-show move hides it. Every jq read keeps
 #     the `// empty` + `|| true` shape the block above documents: a cosmetic
 #     line must never kill the trigger at the bottom of this hook.
