@@ -349,8 +349,11 @@ fi
 # An empty caller PATH must not leak noise into the guard's stderr: a preflight
 # once read a dirname error there as a red push. Plain `env -i` does not
 # reproduce: bash applies a default PATH, so PATH is pinned empty instead.
+# FNO_TEST_HERMETIC survives the wipe on purpose: the smoke runner's state
+# canary plants the checkout's .fno, and without the pin this bare-guard run
+# appends a guard_decision row into it, failing the whole shard.
 EMPTY_PATH_ERR="$TMP_BASE/empty-path-stderr"
-EMPTY_PATH_OUTPUT="$(printf '{}' | env -i PATH= /bin/bash "$GUARD" 2>"$EMPTY_PATH_ERR")"
+EMPTY_PATH_OUTPUT="$(printf '{}' | env -i PATH= FNO_TEST_HERMETIC=1 /bin/bash "$GUARD" 2>"$EMPTY_PATH_ERR")"
 EMPTY_PATH_RC=$?
 if [[ $EMPTY_PATH_RC -eq 0 ]] \
     && [[ ! -s "$EMPTY_PATH_ERR" ]] \
