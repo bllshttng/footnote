@@ -988,6 +988,58 @@ pub fn query_events(journal: &Path, q: &EventQuery) -> Result<Vec<EventRow>, Str
         .map_err(|e| e.to_string())
 }
 
+/// The journal text for `types`, complete across rotation generations.
+///
+/// Rotation ingests a generation into the store before the rename, so the
+/// store holds every row that left the live file. The text is those rows (the
+/// store rows whose line is not in the live file, oldest first) followed by
+/// the live file verbatim. The live generation reads exactly as it always
+/// did: append order, identical rows and an unterminated tail all survive.
+/// The read never syncs, so a reader never writes. Any store failure reads
+/// the live file alone, which never tightens a gate.
+pub fn journal_text(journal: &Path, types: &[&str]) -> String {
+    let live = live_journal(journal);
+    let live_text = std::fs::read_to_string(&live).unwrap_or_default();
+    let store = store_path(&live);
+    if !store.is_file() {
+        return live_text;
+    }
+    let in_live: std::collections::HashSet<Vec<u8>> = live_text
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| Sha256::digest(l.as_bytes()).to_vec())
+        .collect();
+    let history = open_read(&store).ok().and_then(|conn| {
+        let placeholders = (1..=types.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        // Corrupt and typeless rows store with an empty type; parsers count
+        // our own corrupted rows for their notices.
+        let sql = format!(
+            "SELECT row_hash, line FROM events WHERE type IN ({placeholders}, '') ORDER BY seq"
+        );
+        let mut stmt = conn.prepare(&sql).ok()?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(types), |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
+            })
+            .ok()?
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        Some(rows)
+    });
+    let mut text = String::new();
+    for (hash, line) in history.unwrap_or_default() {
+        if !in_live.contains(&hash) {
+            text.push_str(&line);
+            text.push('\n');
+        }
+    }
+    text.push_str(&live_text);
+    text
+}
+
 /// Write every committed row, in commit order, to `out` as JSONL - atomically
 /// (tmp file + rename), labeled by the caller as the snapshot it is. Returns
 /// the row count. The store stays authoritative: a failure anywhere removes

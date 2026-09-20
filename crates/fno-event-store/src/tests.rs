@@ -556,3 +556,59 @@ fn export_round_trips_commit_order() {
     assert_eq!(lines, vec![a.as_str(), b.as_str()]);
     assert_eq!(count_events(&store_path(&live)), 2);
 }
+
+#[test]
+fn journal_text_reads_history_then_live_with_the_type_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    let older = checkin("2026-09-17T12:00:00Z", "x-aaaa", "older");
+    let other = json!({"ts": "2026-09-17T12:00:01Z", "type": "unwanted_kind",
+        "source": "loop", "data": {}});
+    let tail = checkin("2026-09-17T12:00:02Z", "x-aaaa", "tail");
+    // A rotated generation holds the asked row and an unasked one; the live
+    // file holds the tail alone.
+    append(&dir.path().join("events.jsonl.1"), &[older.clone(), other]);
+    append(&live, &[tail.clone()]);
+    sync(&live).unwrap();
+    let text = journal_text(&live, &["reign_checkin"]);
+    assert_eq!(
+        text,
+        format!("{}\n{tail}\n", older.clone()),
+        "rotated history first with the unasked type gone, live tail verbatim"
+    );
+    // The read never syncs: reading twice is stable.
+    assert_eq!(journal_text(&live, &["reign_checkin"]), text);
+}
+
+#[test]
+fn journal_text_preserves_append_order_for_equal_timestamps() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    let a = checkin("2026-09-17T12:00:00Z", "x-aaaa", "first");
+    let b = checkin("2026-09-17T12:00:00Z", "x-aaaa", "second");
+    append(&live, &[a, b]);
+    sync(&live).unwrap();
+    let text = journal_text(&live, &["reign_checkin"]);
+    assert!(
+        text.find("\"first\"").unwrap() < text.find("\"second\"").unwrap(),
+        "same-second rows must retain append order: {text}"
+    );
+}
+
+#[test]
+fn journal_text_falls_back_to_the_live_file_when_the_store_breaks() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    append(&live, &[checkin("2026-09-10T12:00:00Z", "x-aaaa", "live")]);
+    std::fs::create_dir(dir.path().join("events.db")).unwrap();
+    let text = journal_text(&live, &["reign_checkin"]);
+    assert_eq!(text, std::fs::read_to_string(&live).unwrap());
+}
+
+#[test]
+fn journal_text_creates_no_store_for_an_absent_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    assert_eq!(journal_text(&live, &["reign_checkin"]), "");
+    assert!(!store_path(&live).exists());
+}
