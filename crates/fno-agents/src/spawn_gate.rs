@@ -74,6 +74,14 @@ pub const EXIT_STATE_ROOT_UNGRANTED: i32 = 84;
 /// number moved to the next free slot.
 pub const EXIT_GATE_UNAVAILABLE: i32 = 87;
 
+/// The prefix every PASS-path gate line carries. Only a refusal may start
+/// `spawn-gate: ` - the verdict line and the refusal sentences - so the
+/// readers (`cli/src/fno/backlog/advance.py _gate_refusal_detail`,
+/// `crates/fno/src/dispatch_launch.rs refusal_detail`) can pick the refusal
+/// out of a stderr that is full of passing readings. Contract:
+/// docs/architecture/spawn-gate.md (Reading a refusal).
+pub(crate) const NOTE: &str = "spawn-gate note:";
+
 /// A refusal as data: the exit code the caller's arm returns, the stdout
 /// receipt it prints (byte-shape unchanged from when `run_gate` printed it
 /// itself), and the event fields the Python transport emits through `_refuse`
@@ -108,6 +116,57 @@ impl Refusal {
     pub(crate) fn ev(mut self, key: &str, value: serde_json::Value) -> Self {
         self.event.insert(key.to_string(), value);
         self
+    }
+}
+
+/// The one-line verdict every refusal ends with: `spawn-gate: refused on
+/// <axis> (<reason>, exit <code>): <figures>`. The axis prefers the event's
+/// explicit axis, then the receipt's axis/held_on/reason; the figures are
+/// the receipt's scalar fields in key order (serde_json `preserve_order`),
+/// skipping the words already named. Contract:
+/// docs/architecture/spawn-gate.md (Reading a refusal).
+pub(crate) fn verdict_line(r: &Refusal) -> String {
+    let ev_str = |k: &str| r.event.get(k).and_then(serde_json::Value::as_str);
+    let rc = r.receipt.as_ref();
+    let rc_str = |k: &str| {
+        rc.and_then(|v| v.get(k))
+            .and_then(serde_json::Value::as_str)
+    };
+    let axis = ev_str("axis")
+        .or_else(|| rc_str("axis"))
+        .or_else(|| rc_str("held_on"))
+        .or_else(|| rc_str("reason"))
+        .or_else(|| ev_str("reason"))
+        .unwrap_or("unknown");
+    let reason = rc_str("reason")
+        .or_else(|| ev_str("reason"))
+        .unwrap_or("unknown");
+    let mut figures: Vec<String> = Vec::new();
+    if let Some(obj) = rc.and_then(serde_json::Value::as_object) {
+        for (k, v) in obj {
+            if matches!(k.as_str(), "status" | "reason" | "axis" | "held_on") {
+                continue;
+            }
+            match v {
+                serde_json::Value::String(s) => figures.push(format!("{k}={s}")),
+                serde_json::Value::Number(_) | serde_json::Value::Bool(_) => {
+                    figures.push(format!("{k}={v}"));
+                }
+                _ => {}
+            }
+        }
+    }
+    if figures.is_empty() {
+        format!(
+            "spawn-gate: refused on {axis} ({reason}, exit {})",
+            r.exit_code
+        )
+    } else {
+        format!(
+            "spawn-gate: refused on {axis} ({reason}, exit {}): {}",
+            r.exit_code,
+            figures.join(", ")
+        )
     }
 }
 
@@ -452,7 +511,7 @@ pub(crate) fn live_rows(registry_path: &Path, warnings: &mut Vec<String>) -> Vec
                 .collect(),
             Err(e) => {
                 warnings.push(format!(
-                    "spawn-gate: claude roster unreadable ({e}); pid-less bg rows uncounted"
+                    "{NOTE} claude roster unreadable ({e}); pid-less bg rows uncounted"
                 ));
                 Default::default()
             }
@@ -477,7 +536,7 @@ pub(crate) fn live_rows(registry_path: &Path, warnings: &mut Vec<String>) -> Vec
             }
         }
         Err(e) => warnings.push(format!(
-            "spawn-gate: fno registry unreadable ({e}); slot count degraded to 0"
+            "{NOTE} fno registry unreadable ({e}); slot count degraded to 0"
         )),
     }
     rows
@@ -943,7 +1002,7 @@ fn live_worker_slot_claims(warnings: &mut Vec<String>) -> usize {
         match claims::status(&key, Some(&root)) {
             (claims::ClaimState::Live, _) | (claims::ClaimState::Suspect, _) => n += 1,
             (claims::ClaimState::Corrupted, _) => {
-                warnings.push(format!("spawn-gate: corrupted slot claim {key} ignored"));
+                warnings.push(format!("{NOTE} corrupted slot claim {key} ignored"));
             }
             _ => {}
         }
@@ -1173,7 +1232,23 @@ pub type GateKeys = (Option<(String, String)>, Option<(String, String)>);
 /// output goes to stderr (LD10: the stdout receipt is byte-reserved for the
 /// pass path); the receipt itself travels as data in the [`Refusal`] for the
 /// caller's arm to print.
+///
+/// Every refusal ends with one [`verdict_line`] on stderr, so a reader of
+/// the stderr sees the refusing axis and breach as the last line, whatever
+/// notes preceded it.
 pub fn run_gate(
+    config_cwd: &Path,
+    registry_path: &Path,
+    input: GateInput,
+) -> Result<GateGuard, Refusal> {
+    decide_gate(config_cwd, registry_path, input).inspect_err(|r| {
+        eprintln!("{}", verdict_line(r));
+    })
+}
+
+/// The gate's decision body, split from [`run_gate`] so the wrapper can
+/// append the verdict line at ONE site for all three production callers.
+fn decide_gate(
     config_cwd: &Path,
     registry_path: &Path,
     input: GateInput,
@@ -1295,7 +1370,7 @@ pub fn run_gate(
                 return Err(blueprint_refusal(&receipt));
             }
         }
-        eprintln!("spawn-gate: forced past cap, RAM floor, and CPU share ceiling (--force)");
+        eprintln!("{NOTE} forced past cap, RAM floor, and CPU share ceiling (--force)");
         if substrate == "headless" {
             // fail_closed=false: this arm cannot fault, only warn.
             acquire_worker_slot(&mut guard, name, &holder, route_provider, false).ok();
@@ -1315,11 +1390,11 @@ pub fn run_gate(
     // or not yet contended). Reset on every success so a long legitimate queue
     // never accumulates into a spurious fail-open.
     let mut mutex_blocked_since: Option<Instant> = None;
-    // Axes read so far, accumulating across passes exactly like the Python
-    // twin's dict, so the timeout receipt can name what was read (AC13).
-    let mut axes_read = serde_json::Map::new();
 
     loop {
+        // Each pass reads afresh: a refusal names only what IT read, never a
+        // slot count from an earlier pass (x-b6c7 change 2).
+        let mut axes_read = serde_json::Map::new();
         let mut pause = QUEUE_POLL;
         // The footprint probe runs OUTSIDE the gate mutex (it costs seconds
         // and the mutex serializes every spawner), re-taken each pass so a
@@ -1361,7 +1436,7 @@ pub fn run_gate(
                     ));
                 }
                 // Fail open: the mutex is a serializer, not a state owner.
-                eprintln!("spawn-gate: mutex unavailable ({e}); proceeding unserialized");
+                eprintln!("{NOTE} mutex unavailable ({e}); proceeding unserialized");
                 true
             }
         };
@@ -1392,7 +1467,7 @@ pub fn run_gate(
             }
             if now.duration_since(since) >= MUTEX_WAIT_BUDGET && !fail_closed {
                 eprintln!(
-                    "spawn-gate: the gate mutex stayed held for {}s; proceeding unserialized",
+                    "{NOTE} the gate mutex stayed held for {}s; proceeding unserialized",
                     MUTEX_WAIT_BUDGET.as_secs()
                 );
                 acquired_mutex = true;
@@ -1461,7 +1536,7 @@ pub fn run_gate(
                 // Byte-twin with the Python gate: force also bypasses the king
                 // share here; the provider cap above stays enforced.
                 eprintln!(
-                    "spawn-gate: forced past cap, RAM floor, and CPU share ceiling \
+                    "{NOTE} forced past cap, RAM floor, and CPU share ceiling \
                      (--force); provider cap remains enforced"
                 );
                 if substrate == "headless" {
@@ -1560,7 +1635,7 @@ pub fn run_gate(
                             hold_pause = true;
                         } else {
                             eprintln!(
-                                "spawn-gate: fleet share {:.1}% under the ceiling for \
+                                "{NOTE} fleet share {:.1}% under the ceiling for \
                                  {under_streak} consecutive samples; admitting",
                                 admission.share_low * 100.0
                             );
@@ -1877,35 +1952,42 @@ pub(crate) fn ram_floor_term(
 /// unreadable term skips (fail open, as before). Both readings ride every
 /// verdict: a floor that only speaks on refusal cannot be audited, and a
 /// passing gate must not look like a healthy box.
+/// The pass-path RAM readings line, pure so the note prefix is testable:
+/// it starts [`NOTE`], never the `spawn-gate: ` verdict marker, because
+/// these readings ride ADMITTED spawns too.
+pub(crate) fn ram_readings_line(m: &MemoryReading, floor_gb: f64, max_swap_pct: f64) -> String {
+    // A disabled term renders `off`, never `unreadable`: it was not read
+    // because it is disabled, and a broken sensor must not read as a
+    // tuned knob.
+    let off_or = |disabled: bool, value: &Option<f64>, unit: &str| -> String {
+        if disabled {
+            "off".into()
+        } else {
+            value
+                .map(|v| format!("{v:.1}{unit}"))
+                .unwrap_or_else(|| "unreadable".into())
+        }
+    };
+    let swapin_word: String = if max_swap_pct <= 0.0 {
+        "off".into()
+    } else if m.swap.is_none_or(|s| s < max_swap_pct) {
+        "not sampled (under cap)".into()
+    } else {
+        m.swapin_bps
+            .map(|r| format!("{:.1} MiB/s", r / MIB))
+            .unwrap_or_else(|| "unreadable".into())
+    };
+    format!(
+        "{NOTE} ram readings: available {} (floor {floor_gb:.1}GB), swap {} (cap {max_swap_pct:.0}%), swap-in {swapin_word}",
+        off_or(floor_gb <= 0.0, &m.avail, "GB"),
+        off_or(max_swap_pct <= 0.0, &m.swap, "%"),
+    )
+}
+
 fn check_ram_floor(floor_gb: f64, max_swap_pct: f64) -> Result<(), Refusal> {
     let m = read_memory(floor_gb, max_swap_pct);
     if floor_gb > 0.0 || max_swap_pct > 0.0 {
-        // A disabled term renders `off`, never `unreadable`: it was not read
-        // because it is disabled, and a broken sensor must not read as a
-        // tuned knob.
-        let off_or = |disabled: bool, value: &Option<f64>, unit: &str| -> String {
-            if disabled {
-                "off".into()
-            } else {
-                value
-                    .map(|v| format!("{v:.1}{unit}"))
-                    .unwrap_or_else(|| "unreadable".into())
-            }
-        };
-        let swapin_word: String = if max_swap_pct <= 0.0 {
-            "off".into()
-        } else if m.swap.is_none_or(|s| s < max_swap_pct) {
-            "not sampled (under cap)".into()
-        } else {
-            m.swapin_bps
-                .map(|r| format!("{:.1} MiB/s", r / MIB))
-                .unwrap_or_else(|| "unreadable".into())
-        };
-        eprintln!(
-            "spawn-gate: ram readings: available {} (floor {floor_gb:.1}GB), swap {} (cap {max_swap_pct:.0}%), swap-in {swapin_word}",
-            off_or(floor_gb <= 0.0, &m.avail, "GB"),
-            off_or(max_swap_pct <= 0.0, &m.swap, "%"),
-        );
+        eprintln!("{}", ram_readings_line(&m, floor_gb, max_swap_pct));
     }
     match ram_floor_term(m.avail, floor_gb, m.swap, m.swapin_bps, max_swap_pct) {
         Some((reason, term)) => {
@@ -2376,7 +2458,7 @@ fn acquire_worker_slot(
             if fail_closed {
                 Err(fault)
             } else {
-                eprintln!("spawn-gate: worker slot claim {key} unavailable; proceeding uncounted");
+                eprintln!("{NOTE} worker slot claim {key} unavailable; proceeding uncounted");
                 Ok(())
             }
         }
@@ -2385,7 +2467,7 @@ fn acquire_worker_slot(
             if fail_closed {
                 Err(fault)
             } else {
-                eprintln!("spawn-gate: worker slot claim {key} unavailable; proceeding uncounted");
+                eprintln!("{NOTE} worker slot claim {key} unavailable; proceeding uncounted");
                 Ok(())
             }
         }
@@ -2529,7 +2611,7 @@ pub fn qos_demote_pid(config_cwd: &Path, pid: u32) {
     };
     match status {
         Ok(s) if s.success() => {}
-        _ => eprintln!("spawn-gate: QoS demotion of pid {pid} failed (non-fatal)"),
+        _ => eprintln!("{NOTE} QoS demotion of pid {pid} failed (non-fatal)"),
     }
 }
 
@@ -2550,7 +2632,7 @@ pub fn qos_demote_bg_worker(config_cwd: &Path, job_id: &str) {
         }
         if Instant::now() >= deadline {
             eprintln!(
-                "spawn-gate: bg worker {job_id} pid not in roster within 10s; \
+                "{NOTE} bg worker {job_id} pid not in roster within 10s; \
                  QoS demotion skipped (non-fatal)"
             );
             return;
@@ -2562,6 +2644,139 @@ pub fn qos_demote_bg_worker(config_cwd: &Path, job_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The no_wait specimen renders the verdict line the plan pins: axis and
+    /// breach named, figures from the receipt in key order.
+    #[test]
+    fn verdict_line_names_axis_and_breach_for_no_wait() {
+        let refusal = Refusal::with_receipt(
+            EXIT_NO_WAIT,
+            serde_json::json!({
+                "status": "refused",
+                "reason": "no_wait",
+                "axis": "max_live",
+                "axes_read": {"cpu": "admit", "slots": "15/15 queued"},
+                "held_on": "max_live",
+                "max_live": 15,
+                "count": 15,
+                "current_count": 15,
+                "slot_rows": ["w1", "w2"],
+                "waiting_on_operator": [],
+            }),
+        );
+        assert_eq!(
+            verdict_line(&refusal),
+            "spawn-gate: refused on max_live (no_wait, exit 76): max_live=15, count=15, current_count=15"
+        );
+    }
+
+    /// A territory refusal: the event's axis wins over the receipt's, and
+    /// the live_blueprints array never enters the figures.
+    #[test]
+    fn verdict_line_reads_event_axis_and_skips_arrays() {
+        let refusal = Refusal::with_receipt(
+            EXIT_TERRITORY_CAP,
+            serde_json::json!({
+                "status": "refused",
+                "reason": "territory_cap",
+                "territory": "team-x",
+                "count": 3,
+                "current_count": 3,
+                "max_live_per_territory": 3,
+                "live_blueprints": ["bp-a", "bp-b"],
+            }),
+        )
+        .ev("axis", serde_json::json!("territory"));
+        assert_eq!(
+            verdict_line(&refusal),
+            "spawn-gate: refused on territory (territory_cap, exit 86): territory=team-x, count=3, current_count=3, max_live_per_territory=3"
+        );
+    }
+
+    /// No receipt and no event: the line still names the exit.
+    #[test]
+    fn verdict_line_without_receipt_names_the_exit() {
+        let refusal = Refusal::code(82);
+        assert_eq!(
+            verdict_line(&refusal),
+            "spawn-gate: refused on unknown (unknown, exit 82)"
+        );
+    }
+
+    /// The readings of an admitted spawn carry the note prefix, never the
+    /// verdict marker.
+    #[test]
+    fn ram_readings_line_is_a_note() {
+        let m = MemoryReading {
+            avail: Some(35.9),
+            swap: Some(85.5),
+            swapin_bps: None,
+        };
+        let line = ram_readings_line(&m, 2.0, 90.0);
+        assert!(
+            line.starts_with("spawn-gate note: ram readings:"),
+            "got: {line}"
+        );
+        assert!(!line.starts_with("spawn-gate:"), "got: {line}");
+    }
+
+    /// The marker is the refusal wire format (advance.py and
+    /// dispatch_launch.rs both key on it). A pass-path word beside the
+    /// marker breaks the readers, so the source itself is scanned.
+    #[test]
+    fn pass_path_lines_never_carry_the_verdict_marker() {
+        const NEEDLE: &str = concat!("spawn-gate", ": ");
+        const BARRED: [&str; 9] = [
+            "proceeding",
+            "readings",
+            "not refusing",
+            "admitting",
+            "non-fatal",
+            "forced past",
+            "ignored",
+            "uncounted",
+            "degraded",
+        ];
+        for file in [
+            include_str!("spawn_gate.rs"),
+            include_str!("spawn_gate_lanes.rs"),
+        ] {
+            for line in file.lines() {
+                if line.contains(NEEDLE) {
+                    for word in BARRED {
+                        assert!(
+                            !line.contains(word),
+                            "pass-path word {word:?} beside the verdict marker in: {line}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A refusal receipt carries only the readings of the pass that refused
+    /// (x-b6c7 change 2). No fixture can flip the CPU payload between queue
+    /// passes (the test seam is one static env var), so the plan's fallback
+    /// pins it structurally: the binding must sit inside run_gate's queue
+    /// loop, not before it.
+    #[test]
+    fn axes_read_is_per_pass() {
+        let src = include_str!("spawn_gate.rs");
+        let loop_at = src
+            .find("\n    loop {\n")
+            .expect("run_gate's queue loop must be present");
+        let bind_at = src
+            .find("let mut axes_read = serde_json::Map::new();")
+            .expect("axes_read binding must be present");
+        assert!(
+            bind_at > loop_at,
+            "axes_read must reset per pass: it sits before the queue loop"
+        );
+        assert!(
+            !src[loop_at..bind_at].lines().any(|l| l.starts_with('}')),
+            "axes_read binding drifted outside the queue loop"
+        );
+    }
 
     /// The receipt names swap when the ceiling fires beside live swap-ins.
     #[test]
