@@ -356,3 +356,164 @@ fn a_remote_only_commit_refuses_with_exit_3_before_preflight() {
     );
 }
 
+// ── real-git regression: the second push against a moved base ───────────────
+
+/// Real git, severed from the user's global config and hooks: a global
+/// pre-push hook that refuses protected branches must never fire here.
+fn git_in(repo: &Path, args: &[&str]) -> String {
+    let out = Command::new("/usr/bin/git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(repo)
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn commit_file(repo: &Path, name: &str, body: &str, msg: &str) {
+    std::fs::write(repo.join(name), body).unwrap();
+    git_in(repo, &["add", name]);
+    git_in(repo, &["commit", "-m", msg]);
+}
+
+/// Bare remote + two clones. main is seeded from clone A, feature/x carries
+/// one commit, and the stub gh/fno ride in the root. The first verb push is
+/// each test's own act: it is the act under test.
+fn real_repo() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().to_path_buf();
+    let a = root.join("a");
+    let b = root.join("b");
+    stub_gh(&root);
+    stub_fno(&root);
+    git_in(&root, &["init", "--bare", "-b", "main", "remote.git"]);
+    git_in(
+        &root,
+        &["-c", "init.defaultBranch=main", "clone", "remote.git", "a"],
+    );
+    git_in(&a, &["config", "user.email", "a@example.test"]);
+    git_in(&a, &["config", "user.name", "Clone A"]);
+    commit_file(&a, "README.md", "seed\n", "seed");
+    git_in(&a, &["push", "origin", "main"]);
+    git_in(&a, &["checkout", "-b", "feature/x"]);
+    commit_file(&a, "one.txt", "one\n", "one");
+    git_in(
+        &root,
+        &["-c", "init.defaultBranch=main", "clone", "remote.git", "b"],
+    );
+    git_in(&b, &["config", "user.email", "b@example.test"]);
+    git_in(&b, &["config", "user.name", "Clone B"]);
+    (t, root, a, b)
+}
+
+/// The verb against the real repo, global git config severed the same way.
+fn run_verb_real(a: &Path, root: &Path) -> (i32, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+        .envs(fno_agents::test_run::self_owner_env())
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["pr-push"])
+        .arg("--cwd")
+        .arg(a)
+        .arg("--git-bin")
+        .arg("/usr/bin/git")
+        .arg("--gh-bin")
+        .arg(root.join("gh"))
+        .arg("--fno-bin")
+        .arg(root.join("fno"))
+        .arg("--stamps-dir")
+        .arg(root.join("stamps"))
+        .arg("--no-preflight")
+        .output()
+        .expect("run fno-agents");
+    (
+        out.status.code().unwrap_or(1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn a_second_push_after_main_moved_lands() {
+    let (_t, root, a, b) = real_repo();
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 0, "first push: {out}\n{err}");
+    // main moves from clone B, then clone A commits again.
+    commit_file(&b, "main.txt", "m\n", "main moves");
+    git_in(&b, &["push", "origin", "main"]);
+    commit_file(&a, "two.txt", "2\n", "two");
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 0, "the leased second push: {out}\n{err}");
+    assert!(out.contains("pushed=1"), "{out}");
+    let remote = git_in(
+        &root.join("remote.git"),
+        &["rev-parse", "refs/heads/feature/x"],
+    );
+    let head = git_in(&a, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        remote.trim(),
+        head.trim(),
+        "the remote branch equals the rebased HEAD"
+    );
+}
+
+#[test]
+fn a_second_push_with_main_unchanged_still_fast_forwards() {
+    let (_t, root, a, _b) = real_repo();
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 0, "first push: {out}\n{err}");
+    commit_file(&a, "two.txt", "2\n", "two");
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let remote = git_in(
+        &root.join("remote.git"),
+        &["rev-parse", "refs/heads/feature/x"],
+    );
+    let head = git_in(&a, &["rev-parse", "HEAD"]);
+    assert_eq!(remote.trim(), head.trim());
+}
+
+#[test]
+fn a_remote_only_commit_is_refused_and_kept() {
+    let (_t, root, a, b) = real_repo();
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 0, "first push: {out}\n{err}");
+    // Another writer pushes a NEW commit to feature/x, then main moves.
+    git_in(&b, &["fetch", "origin"]);
+    git_in(&b, &["checkout", "feature/x"]);
+    commit_file(&b, "theirs.txt", "t\n", "theirs");
+    git_in(&b, &["push", "origin", "feature/x"]);
+    git_in(&b, &["checkout", "main"]);
+    commit_file(&b, "main.txt", "m\n", "main moves");
+    git_in(&b, &["push", "origin", "main"]);
+    commit_file(&a, "two.txt", "2\n", "two");
+    let theirs = git_in(
+        &root.join("remote.git"),
+        &["rev-parse", "refs/heads/feature/x"],
+    );
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 3, "the remote-only refusal: {out}\n{err}");
+    assert!(
+        err.contains("git pull --rebase origin feature/x"),
+        "the door: {err}"
+    );
+    assert!(
+        !err.contains("not safely rebasable"),
+        "the refusal must not key heal's conflict phrase: {err}"
+    );
+    let after = git_in(
+        &root.join("remote.git"),
+        &["rev-parse", "refs/heads/feature/x"],
+    );
+    assert_eq!(
+        theirs.trim(),
+        after.trim(),
+        "the remote branch still holds the other writer's commit"
+    );
+}
