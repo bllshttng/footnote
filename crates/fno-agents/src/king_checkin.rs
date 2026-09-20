@@ -2315,10 +2315,7 @@ mod tests {
             }),
         )
         .unwrap();
-        assert_eq!(
-            capacity["lanes"],
-            "openai 1/- unmeasured, zai 8/10 closed"
-        );
+        assert_eq!(capacity["lanes"], "openai 1/- unmeasured, zai 8/10 closed");
         let readings = sample_readings(
             json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
             json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
