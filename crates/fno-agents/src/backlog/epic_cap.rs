@@ -295,7 +295,9 @@ mod tests {
         let mut post = pre.clone();
         for row in post.iter_mut() {
             if crate::graph_store::entry_id(row) == Some("c-16") {
-                row.as_object_mut().unwrap().insert("status".into(), json!("ready"));
+                row.as_object_mut()
+                    .unwrap()
+                    .insert("status".into(), json!("ready"));
             }
         }
         enforce(&pre, &post, Some(15)).unwrap();
