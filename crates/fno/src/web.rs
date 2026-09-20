@@ -1961,7 +1961,7 @@ console.log("evictedRowCount: 18 cases ok");
         let mut reply = String::new();
         stream.read_to_string(&mut reply).await.unwrap();
         assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
-        assert!(reply.contains("Cache-Control: no-store"), "{reply}");
+        assert!(reply.contains("cache-control: no-store"), "{reply}");
         assert!(reply.contains("data-current=\"fleet\""), "{reply}");
         assert!(reply.contains("FLEET-MARKER"), "{reply}");
         server.abort();
