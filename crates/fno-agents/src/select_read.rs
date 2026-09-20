@@ -327,6 +327,32 @@ mod tests {
     }
 
     #[test]
+    fn next_get_failure_is_nonfatal() {
+        let dir = stub(
+            "#!/bin/sh\ncase \"$2 $3\" in\n  next*) printf '%s' '{\"id\":\"x-1\",\"cwd\":\"/raw\"}' ;;\n  get*) printf '%s' 'get exploded' >&2; exit 1 ;;\nesac\n",
+        );
+        let args = vec!["--project".to_string(), "fno".to_string()];
+        let fno_py = dir.path().join("fno-py");
+        let receipt = select_read(Kind::Next, &args, fno_py.as_os_str(), 5);
+        let answer = receipt.answer.unwrap();
+        assert_eq!(receipt.status, "ok");
+        assert_eq!(answer["id"], "x-1");
+        assert!(answer.get("_resolved_cwd").is_none());
+    }
+
+    #[test]
+    fn next_skips_get_when_already_resolved() {
+        let dir = stub(
+            "#!/bin/sh\ncase \"$2 $3\" in\n  next*) printf '%s' '{\"id\":\"x-1\",\"cwd\":\"/raw\",\"_resolved_cwd\":\"/already\"}' ;;\n  get*) exit 42 ;;\nesac\n",
+        );
+        let args = vec!["--project".to_string(), "fno".to_string()];
+        let fno_py = dir.path().join("fno-py");
+        let receipt = select_read(Kind::Next, &args, fno_py.as_os_str(), 5);
+        assert_eq!(receipt.status, "ok");
+        assert_eq!(receipt.answer.unwrap()["_resolved_cwd"], "/already");
+    }
+
+    #[test]
     fn stalled_selection_is_unmeasured_at_the_bound() {
         let dir = stub("#!/bin/sh\nexec sleep 3\n");
         let started = Instant::now();
