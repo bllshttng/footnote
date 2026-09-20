@@ -14,7 +14,7 @@ path = "~/c3po/me/inbox/jc-todos.md"
 
 ## Is this page for you?
 
-You are setting up where questions reach the user away from a terminal. You may be changing how they are delivered, answered, or closed. The stakes are the user's attention and the fleet's unblocking: a delivered question the user cannot answer holds work.
+You are setting up where questions reach the user away from a terminal. You can also be changing how they are delivered, answered, or closed. The stakes are the user's attention and the fleet's unblocking: a delivered question the user cannot answer holds work.
 
 Not for: one-way event pushes to phones and webhooks (counts and notices, no answer path). That is the status fanout in [status-fanout](../status-fanout.md). For the mux's own needs overlay, use the mux.
 
@@ -98,7 +98,7 @@ What a file answer can do: close the question, reach the asker, unblock the node
 
 ## The other two sink types, named and not built
 
-`ntfy` (action buttons, needs an answer endpoint reachable from the phone) and `webhook` (the escape-hatch contract) stay specified in the plan and unbuilt until the file sink has been observed. The doc page ships when they do.
+`ntfy` brings action buttons and needs an answer endpoint the phone can reach. `webhook` is the escape-hatch contract. Both stay specified in the plan and unbuilt until the file sink has been observed. When they ship, this page grows their sections.
 
 ## Checks the user's agent runs
 
