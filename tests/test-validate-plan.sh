@@ -324,9 +324,18 @@ surface:
       emits: "exit 0 with the semantic execution contract valid receipt"
   count: 1
   count_after: 1
+code_index:
+  main_sha: 9817805bf5e
+  providers: []
 ---
 
 # Semantic plan
+
+## Existence audit
+
+| Claim | Kind | Verdict | Evidence |
+|---|---|---|---|
+| the semantic validator exists | code | exists at scripts/validate-plan.sh:166 | `_semantic_validate` |
 
 ## Execution Strategy
 

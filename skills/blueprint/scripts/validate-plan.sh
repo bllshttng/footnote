@@ -1487,9 +1487,13 @@ check_surface_file() {
 
     # Same receipt discipline as the consolidation gate: the OK lines print
     # only on a clean block, never beside the errors they would outshout.
+    # ${surface_receipts[@]+...}: bash 3.2 under set -u refuses a bare empty
+    # array expansion, and a clean block with no out-of-scope receipts
+    # reaches this loop empty - the unguarded form killed the validator
+    # before every later section could run.
     if [[ $c_errors -eq 0 ]]; then
         local receipt
-        for receipt in "${surface_receipts[@]}"; do
+        for receipt in ${surface_receipts[@]+"${surface_receipts[@]}"}; do
             ok "$label: surface block (step 2b-bis gate): $receipt"
         done
     fi
