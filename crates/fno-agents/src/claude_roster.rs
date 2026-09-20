@@ -269,6 +269,11 @@ fn all_agents_command(config_dir: Option<&std::path::Path>) -> std::process::Com
         command.env("CLAUDE_CONFIG_DIR", dir);
     }
     command.args(["agents", "--json", "--all"]);
+    // The roster read must not inherit the caller's cwd: a daemon or client
+    // session whose launch worktree was reaped holds a deleted cwd, and claude
+    // refuses to run from one. The read itself needs no cwd, so pin the most
+    // stable dir there is.
+    command.current_dir("/");
     command
 }
 
@@ -741,6 +746,11 @@ mod tests {
                 "--all".to_string()
             ],
             "the roster shellout argv must be exactly [agents, --json, --all]: {argv:?}"
+        );
+        assert_eq!(
+            command.get_current_dir(),
+            Some(std::path::Path::new("/")),
+            "the roster shellout must not inherit a possibly-deleted caller cwd"
         );
     }
 
