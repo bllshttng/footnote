@@ -824,6 +824,9 @@ def test_codex_ambient_pointer_keeps_default_worker_provider_claude(
     def fake_run(cmd, **kw):
         if _is_naming_verb(cmd):
             return _REAL_SUBPROCESS_RUN(cmd, **kw)
+        if {"doctor", "event"} <= {str(part) for part in cmd}:
+            # Event emission rides the same seam; it is not the spawn argv.
+            return _REAL_SUBPROCESS_RUN(cmd, **kw)
         seen["cmd"] = cmd
         return _Proc()
 
