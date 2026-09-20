@@ -2496,8 +2496,8 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // the supervisor; the delegation keeps its anti-recursion pin, which the
     // guard never touches).
     if should_delegate_claude_live_attach(harness, &claim_uuid, &mux_session) {
-        // No claim here: the delegated wake acquires the identical
-        // `resume-attach: {short_id}` key under its own skip check.
+        // No claim here: the delegated wake acquires the identical attach
+        // key (resume_wake::resume_attach_claim_key) under its own skip check.
         // Route via `fno`, never a bare `fno-py`: a cargo-only install has
         // only the mux on PATH (crates/fno/src/bootstrap.rs).
         use std::os::unix::process::CommandExt;
@@ -4650,10 +4650,10 @@ mod tests {
     fn acquire_named_session_claim_guards_resume_attach_keys() {
         // The live-attach delegation itself acquires no claim (Python's
         // `_resume_claude_wake` does, gated on skip-eligibility, once exec'd)
-        // -- but the "resume-attach:{short_id}" key format this exercises is
-        // still the shared contract: Python's own claim uses the identical
-        // key so the two runtimes contend for the same lock on the same row
-        // whichever one ends up acquiring it. Verify that key independently
+        // -- but the attach key this exercises is still the shared
+        // contract: Python's own claim builds the identical key so the two
+        // runtimes contend for the same lock on the same row whichever one
+        // ends up acquiring it. Verify that key independently
         // refuses a second concurrent writer, the same contract
         // acquire_resume_session_claim already has for its own key.
         use crate::claims::{acquire, AcquireOpts, AcquireOutcome};
@@ -4663,7 +4663,7 @@ mod tests {
         // A different live writer already holds the claim (matching this
         // process's own holder string would just re-acquire, not conflict).
         let pre = acquire(
-            &format!("resume-attach:{short_id}"),
+            &crate::resume_wake::resume_attach_claim_key(short_id),
             "other-writer",
             AcquireOpts {
                 root: Some(root.path().to_path_buf()),
@@ -4673,7 +4673,7 @@ mod tests {
         assert!(matches!(pre, AcquireOutcome::Acquired(_)));
 
         let err = acquire_named_session_claim(
-            &format!("resume-attach:{short_id}"),
+            &crate::resume_wake::resume_attach_claim_key(short_id),
             short_id,
             Some(root.path()),
             None,
@@ -4685,7 +4685,7 @@ mod tests {
         // A different short_id: an unrelated row's wake is never blocked by
         // this one's claim.
         let other = acquire_named_session_claim(
-            "resume-attach:other-id",
+            &crate::resume_wake::resume_attach_claim_key("other-id"),
             "other-id",
             Some(root.path()),
             None,

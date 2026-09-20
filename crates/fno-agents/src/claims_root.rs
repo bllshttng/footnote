@@ -87,10 +87,17 @@ pub fn claims_root_for(key: &str) -> Option<PathBuf> {
 }
 
 pub(crate) fn claims_dir(key: &str, root: Option<&Path>) -> Result<PathBuf, String> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| format!("no claims root for key {key:?}: cwd unreadable: {e}"))?;
     let claims_root_env = std::env::var_os("FNO_CLAIMS_ROOT");
-    claims_dir_in(key, root, &cwd, claims_root_env, None)
+    claims_dir_in(
+        key,
+        root,
+        || {
+            std::env::current_dir()
+                .map_err(|e| format!("no claims root for key {key:?}: cwd unreadable: {e}"))
+        },
+        claims_root_env,
+        None,
+    )
 }
 
 /// Testable core of [`claims_dir`]: cwd, the override env, and the spaces
@@ -100,10 +107,16 @@ pub(crate) fn claims_dir(key: &str, root: Option<&Path>) -> Result<PathBuf, Stri
 /// empty-is-unset rule), else the repo's space. The resume-attach
 /// single-writer lock rides this: the Python wake and the Rust resume route
 /// must mint the SAME lockfile or the guard guards nothing.
+///
+/// `cwd` is a PROVIDER, not a path, and only the space branch calls it. An
+/// explicit root and a machine-wide key such as `session:<uuid>` resolved
+/// from the root or `$HOME` alone before this fallback existed, and must
+/// keep doing so: a process sitting in a deleted directory would otherwise
+/// lose every global claim to an unreadable cwd it never needed.
 pub(crate) fn claims_dir_in(
     key: &str,
     root: Option<&Path>,
-    cwd: &Path,
+    cwd: impl FnOnce() -> Result<PathBuf, String>,
     claims_root_env: Option<std::ffi::OsString>,
     spaces_root: Option<&Path>,
 ) -> Result<PathBuf, String> {
@@ -117,6 +130,7 @@ pub(crate) fn claims_dir_in(
     if let Some(override_root) = claims_root_env.and_then(non_empty) {
         return Ok(PathBuf::from(override_root).join(CLAIMS_DIRNAME));
     }
+    let cwd = &cwd()?;
     // The space branch does NOT use CLAIMS_DIRNAME: Python lands repo-space
     // claims at `<space>/claims` directly, no nested .fno segment
     // (`fno.claims.io.claims_dir`'s space return).
@@ -159,16 +173,62 @@ mod tests {
             )))
             .join("claims");
         assert_eq!(
-            claims_dir_in("node", None, repo, None, Some(&spaces)).unwrap(),
+            claims_dir_in("node", None, || Ok(repo.to_path_buf()), None, Some(&spaces)).unwrap(),
             expected
         );
         assert_eq!(
-            claims_dir_in("walker:/repo/root", None, repo, None, Some(&spaces)).unwrap(),
+            claims_dir_in(
+                "walker:/repo/root",
+                None,
+                || Ok(repo.to_path_buf()),
+                None,
+                Some(&spaces)
+            )
+            .unwrap(),
             expected
         );
         // Explicit root always wins.
         let dir = claims_dir("walker:/repo/root", Some(Path::new("/tmp/x"))).unwrap();
         assert_eq!(dir, PathBuf::from("/tmp/x/.fno/claims"));
+    }
+
+    #[test]
+    fn a_root_or_global_key_never_reads_the_cwd() {
+        // A process whose working directory was deleted still holds every
+        // machine-wide claim: those resolve from the explicit root or from
+        // $FNO_CLAIMS_ROOT/$HOME and never needed a cwd. The provider here
+        // fails on call, so reaching it at all is the failure.
+        let boom = || Err("the cwd provider must not run".to_string());
+        assert_eq!(
+            claims_dir_in(
+                "resume-attach:abcd1234",
+                Some(Path::new("/tmp/x")),
+                boom,
+                None,
+                None
+            )
+            .unwrap(),
+            PathBuf::from("/tmp/x").join(CLAIMS_DIRNAME)
+        );
+        let boom = || Err("the cwd provider must not run".to_string());
+        let global = global_claims_root().expect("a global root resolves under test");
+        assert_eq!(
+            claims_dir_in("session:abcd1234", None, boom, None, None).unwrap(),
+            global.join(CLAIMS_DIRNAME)
+        );
+        // The override branch is also cwd-free.
+        let boom = || Err("the cwd provider must not run".to_string());
+        assert_eq!(
+            claims_dir_in(
+                "resume-attach:abcd1234",
+                None,
+                boom,
+                Some(std::ffi::OsString::from("/tmp/override")),
+                None
+            )
+            .unwrap(),
+            PathBuf::from("/tmp/override").join(CLAIMS_DIRNAME)
+        );
     }
 
     #[test]
@@ -194,7 +254,7 @@ mod tests {
         let dir = claims_dir_in(
             "resume-attach:abcd1234",
             None,
-            &repo,
+            || Ok(repo.clone()),
             Some(override_root.clone().into_os_string()),
             None,
         )
@@ -205,7 +265,7 @@ mod tests {
         let dir = claims_dir_in(
             "resume-attach:abcd1234",
             None,
-            &repo,
+            || Ok(repo.clone()),
             Some(std::ffi::OsString::from("")),
             Some(&spaces),
         )

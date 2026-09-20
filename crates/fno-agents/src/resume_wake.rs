@@ -40,12 +40,20 @@ pub(crate) fn acquire_resume_session_claim(
     acquire_named_session_claim(&format!("session:{uuid}"), uuid, root, ttl_ms)
 }
 
+/// The single Rust owner of the attach key. Python builds the same string in
+/// `resume_cli.py`'s `_resume_claude_wake`, so the two runtimes contend for
+/// one lock on one row. Every Rust caller goes through here, which keeps the
+/// twin at one carrier per language.
+pub(crate) fn resume_attach_claim_key(short_id: &str) -> String {
+    format!("resume-attach:{short_id}")
+}
+
 /// Used directly by the dead-row `claude --resume` relaunch (keyed
-/// `session:{uuid}`). The live-row headless wake uses the matching
-/// `resume-attach:{short_id}` key too, but acquires it Python-side
-/// (`resume_cli.py`'s `_resume_claude_wake`, gated on skip-eligibility) --
-/// this Rust arm delegates the wake itself and does not call this function
-/// for that key. Two different key prefixes by design: a live wake and a
+/// `session:{uuid}`). The attach key (see `resume_attach_claim_key`) reaches
+/// here from the parked arm; the live-row headless wake takes the same key
+/// Python-side (`resume_cli.py`'s `_resume_claude_wake`, gated on
+/// skip-eligibility) because this Rust arm delegates that wake whole.
+/// Two different key prefixes by design: a live wake and a
 /// dead relaunch are mutually exclusive outcomes of one truth-state read,
 /// never racing each other for the same row, but two concurrent resumes
 /// both landing on the SAME arm for the same row do race -- each key only
@@ -741,6 +749,16 @@ fn relaunch_command(plan: &crate::reentry::ReentryPlan) -> std::process::Command
     command
 }
 
+/// True when a reentry mechanism returns to the shell, so a delivery can
+/// follow it. `respawn` restarts the saved job. `bg-resume` is what
+/// `resolve_reentry` returns once the daemon reaper has taken
+/// `jobs/<short>/state.json`, and `claude --bg --resume` brings that row back
+/// under the SAME id. `resume` is the mux arm: it opens a FOREGROUND session
+/// on a pane and would hang this command, so it can never precede a delivery.
+fn mechanism_can_revive(mechanism: &str) -> bool {
+    matches!(mechanism, "respawn" | "bg-resume")
+}
+
 /// True when the claude daemon roster still lists a worker for the session.
 fn daemon_roster_has_worker(session_uuid: &str) -> bool {
     crate::claude_roster::ClaudeRoster::load_default()
@@ -751,6 +769,15 @@ fn daemon_roster_has_worker(session_uuid: &str) -> bool {
 /// The lowercased `claude agents` state for one short id, or `None` when the
 /// snapshot does not list the row (a down daemon reads as unlisted, so the
 /// caller keeps today's path instead of guessing).
+///
+/// Ambient by design, not by oversight. A row launched under an isolated
+/// `CLAUDE_CONFIG_DIR` is absent from this read, so it never reaches the
+/// parked arm and keeps the path it had before. The union reader would
+/// classify it, but the revive and the control-socket delivery below it are
+/// ambient too (`mail_inject` and the ask lane share that), so classifying a
+/// row this lane cannot then reach would respawn it in the WRONG account
+/// namespace. Carrying the account through state, worker lookup and
+/// injection is the port that fixes it, and it is the whole lane's work.
 fn parked_roster_state(short_id: &str) -> Option<String> {
     crate::claude_roster::read_all_agents()
         .find(short_id)
@@ -804,11 +831,13 @@ fn revive_parked_claude_session(
             return Err((crate::reentry::REENTRY_REFUSED_EXIT, "reentry".to_string()));
         }
     };
-    if plan.mechanism != "respawn" {
+    if !mechanism_can_revive(&plan.mechanism) {
         eprintln!(
-            "fno agents resume: {name} ({short}) has no saved job to respawn, so the message \
-             was NOT delivered. Run fno agents resume {name} without -m first, then send it again.",
-            short = short_id
+            "fno agents resume: {name} ({short}) comes back on a foreground pane \
+             ({mechanism}), so the message was NOT delivered. Run fno agents resume {name} \
+             without -m first, then send it again.",
+            short = short_id,
+            mechanism = plan.mechanism
         );
         return Err((16, "no-saved-job".to_string()));
     }
@@ -966,7 +995,7 @@ where
     // 5. The same single-writer key the Python wake takes, so two
     // entrypoints cannot type into one session at once.
     if let Err((code, msg)) = acquire_named_session_claim(
-        &format!("resume-attach:{short_id}"),
+        &resume_attach_claim_key(short_id),
         short_id,
         claims_root,
         None,
@@ -1057,6 +1086,19 @@ mod tests {
             None => std::env::remove_var("CODEX_HOME"),
         }
         assert_eq!(code, 16);
+    }
+
+    #[test]
+    fn only_shell_returning_mechanisms_can_precede_a_delivery() {
+        // The parked arm revives before it injects, so the mechanism it runs
+        // must exit. It shipped accepting `respawn` alone, which refused
+        // every row whose saved job the reaper had already taken even though
+        // `claude --bg --resume` revives that row under the same id.
+        assert!(mechanism_can_revive("respawn"));
+        assert!(mechanism_can_revive("bg-resume"));
+        // `resume` opens a foreground session on a pane: it would hang.
+        assert!(!mechanism_can_revive("resume"));
+        assert!(!mechanism_can_revive("attach"));
     }
 
     #[test]
