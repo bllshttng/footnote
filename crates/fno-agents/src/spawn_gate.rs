@@ -1393,7 +1393,7 @@ fn decide_gate(
 
     loop {
         // Each pass reads afresh: a refusal names only what IT read, never a
-        // slot count from an earlier pass (x-b6c7 change 2).
+        // slot count from an earlier pass.
         let mut axes_read = serde_json::Map::new();
         let mut pause = QUEUE_POLL;
         // The footprint probe runs OUTSIDE the gate mutex (it costs seconds
@@ -2754,8 +2754,8 @@ mod tests {
         }
     }
 
-    /// A refusal receipt carries only the readings of the pass that refused
-    /// (x-b6c7 change 2). No fixture can flip the CPU payload between queue
+    /// A refusal receipt carries only the readings of the pass that refused.
+    /// No fixture can flip the CPU payload between queue
     /// passes (the test seam is one static env var), so the plan's fallback
     /// pins it structurally: the binding must sit inside run_gate's queue
     /// loop, not before it.

@@ -577,7 +577,7 @@ mod tests {
         );
     }
 
-    /// The reader picks the verdict line, never a passing note (x-b6c7): a
+    /// The reader picks the verdict line, never a passing note: a
     /// gate refusal whose stderr carries note lines before the verdict still
     /// renders the verdict, and an admitted spawn that failed after the gate
     /// renders the real error, never a note.
