@@ -43,7 +43,7 @@ A question missing a required field is `ready: false`. A sink with `ready_only =
 One item is one task line plus an indented block:
 
 ```markdown
-- [ ] Which reading of the law? Blocks x-3575. Recommended: 1 #jc ⏫ 📅 2026-09-18 ^q-e5e5520b
+- [ ] Which reading of the law? Blocks x-aaaa. Recommended: 1 #jc ⏫ 📅 2026-09-18 ^q-e5e5520b
     - [ ] 1. Narrow. Pro: unblocks today. Con: strict.
     - The user ticks one, or writes words on an indented line under the item.
 ```

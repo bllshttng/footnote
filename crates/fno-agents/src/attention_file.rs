@@ -311,7 +311,7 @@ mod tests {
 
     fn item() -> AttentionItem {
         crate::attention::project(
-            r#"{"ts":"2026-09-18T12:00:00Z","type":"operator_question","source":"t","data":{"question_id":"q-e5e5520b","question":"Rule on the Python-tree law: which reading?","ask":"pick one","session_id":"s1","cwd":"/repo/fno","node":"x-3575","options":["Yes, net zero needs no grant","Stay strict","Push gate is law"]}}"#,
+            r#"{"ts":"2026-09-18T12:00:00Z","type":"operator_question","source":"t","data":{"question_id":"q-e5e5520b","question":"Rule on the Python-tree law: which reading?","ask":"pick one","session_id":"s1","cwd":"/repo/fno","node":"x-aaaa","options":["Yes, net zero needs no grant","Stay strict","Push gate is law"]}}"#,
             &[],
             "",
             0,
