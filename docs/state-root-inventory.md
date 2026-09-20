@@ -24,6 +24,8 @@ One file per install. These belong at the root.
 | `graph.db`, `graph.db-wal`, `graph.db-shm` | `crates/fno-agents/src/backlog/` (schema in `mod.rs`, one owning module per aggregate) | durable row store; WAL sidecars are SQLite-managed |
 | `graph.md` | `graph/_constants.py` | regenerated per write |
 | `graph.html` | `graph/render_html.py` | regenerated |
+| `reign.html` | `crates/fno-agents/src/king_ledger.rs` via `fno agents king ledger` | regenerated every 300 seconds |
+| `fleet.html` | `crates/fno-agents/src/fleet_page.rs` | regenerated every 1800 seconds |
 | `graph-archive.json` | `graph/archive.py` via `paths.graph_archive_json()` | permanent |
 | `relatedness.json` | `paths.relatedness_json()` | regenerated |
 | `ledger.json` | `paths.ledger_json()` | permanent |

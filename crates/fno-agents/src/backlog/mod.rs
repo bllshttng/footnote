@@ -11,6 +11,7 @@ pub mod commands;
 pub mod comments;
 pub mod decisions;
 pub mod encounters;
+pub mod epic_cap;
 pub mod model;
 pub mod node_state;
 pub mod nodes;
@@ -624,6 +625,16 @@ fn mutate_single_row_once(
     write_changed(&transaction, &rows, &working, true)?;
     nodes::recompute_status(&transaction)?;
     let rows_after = export_rows(&transaction)?;
+    // The cap judges what recompute leaves behind, never what the caller
+    // wrote. A rollup can open a container after the write, and a check
+    // placed before it both misses that growth and refuses a write whose
+    // container recompute is about to close. The transaction has not
+    // committed, so the refusal rolls the write back.
+    crate::backlog::epic_cap::enforce(
+        &rows,
+        &rows_after,
+        crate::backlog::epic_cap::configured_cap(graph),
+    )?;
     let version = content_version(&rows_after);
     stamp_version(&transaction, &version)?;
     transaction.commit().map_err(|error| error.to_string())?;
@@ -2218,6 +2229,81 @@ mod tests {
         })
         .unwrap();
         assert!(ok);
+    }
+
+    #[test]
+    fn the_single_row_seam_refuses_a_child_past_the_epic_cap() {
+        // AC2-ERR, single-row side (the live sqlite backend): a 16th-child
+        // mutation through mutate_single_row is refused, the db version is
+        // unchanged, and the same child under a fresh epic lands.
+        let _env_lock = crate::claims::test_env_lock().lock().unwrap();
+        let spaces = tempfile::TempDir::new().unwrap();
+        declare_test_roots(spaces.path());
+        let (dir, graph) = seeded_sqlite_fixture();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[backlog]\nepic_max_open_children = 15\n",
+        )
+        .unwrap();
+        // One epic + 15 open children, written through the single-row door.
+        mutate_single_row(&graph, "node_create", |rows| {
+            rows.push(serde_json::json!({
+                "id": "e-1", "slug": "e-1", "title": "the full epic", "type": "epic",
+                "status": "in_progress", "priority": "p1", "domain": "code"
+            }));
+            for i in 1..=15 {
+                rows.push(serde_json::json!({
+                    "id": format!("c-{i:02}"), "slug": format!("c-{i:02}"),
+                    "title": format!("child {i}"), "type": "feature",
+                    "status": "idea", "priority": "p2", "domain": "code",
+                    "parent": "e-1"
+                }));
+            }
+            Ok(true)
+        })
+        .unwrap();
+        let version_before = {
+            let connection = open(&graph).unwrap();
+            export_rows(&connection).unwrap()
+        };
+        let error = mutate_single_row(&graph, "node_create", |rows| {
+            rows.push(serde_json::json!({
+                "id": "c-16", "slug": "c-16", "title": "child 16", "type": "feature",
+                "status": "idea", "priority": "p2", "domain": "code",
+                "parent": "e-1"
+            }));
+            Ok(true)
+        })
+        .unwrap_err();
+        assert!(error.contains("epic cap: refusing to add"), "{error}");
+        assert!(error.contains("backlog.epic_max_open_children"), "{error}");
+        // Refusal publishes nothing: the db still holds exactly 17 rows.
+        let rows_after = export_rows(&open(&graph).unwrap()).unwrap();
+        assert_eq!(rows_after.len(), version_before.len());
+        assert!(
+            !rows_after.iter().any(|r| entry_id_from(r) == Some("c-16")),
+            "the refused child never landed"
+        );
+        // The same child under a fresh epic lands.
+        let ok = mutate_single_row(&graph, "node_create", |rows| {
+            rows.push(serde_json::json!({
+                "id": "e-2", "slug": "e-2", "title": "the new epic", "type": "epic",
+                "status": "idea", "priority": "p2", "domain": "code"
+            }));
+            rows.push(serde_json::json!({
+                "id": "c-16", "slug": "c-16", "title": "child 16", "type": "feature",
+                "status": "idea", "priority": "p2", "domain": "code",
+                "parent": "e-2"
+            }));
+            Ok(true)
+        })
+        .unwrap();
+        assert!(ok);
+        let rows_after = export_rows(&open(&graph).unwrap()).unwrap();
+        assert!(
+            rows_after.iter().any(|r| entry_id_from(r) == Some("c-16")),
+            "the child landed under the fresh epic"
+        );
     }
 
     fn entry_id_from(row: &Value) -> Option<&str> {

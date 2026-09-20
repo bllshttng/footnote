@@ -140,6 +140,6 @@ def test_internal_variable_and_rust_callers_use_folded_paths() -> None:
     king_loop = (REPO_ROOT / "crates/fno-agents/src/loop_king.rs").read_text()
     eval_sweep = (REPO_ROOT / "scripts/lib/eval-sweep-throttle.sh").read_text()
 
-    assert '"agents",\n            "king",\n            "escalate"' in king_loop
+    assert '"agents",\n                "king",\n                "escalate"' in king_loop
     assert '"$fno_cmd" agents claim acquire' in eval_sweep
     assert '"$fno_cmd" agents claim release' in eval_sweep

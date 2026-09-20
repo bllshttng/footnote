@@ -1676,6 +1676,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let machine_watch = crate::machine_watch::Arm::default();
     let merge_close = crate::merge_close::Arm::default();
     let crown_ledger = crate::king_ledger::Arm::default();
+    let fleet_page = crate::fleet_page::Arm::new(ctx.opts.agents_config_cwd.clone());
     let arm_watch = crate::arm_watch::Arm::new(ctx.opts.agents_config_cwd.clone());
     let provider_cap = crate::provider_cap_verbs::Arm::new(ctx.opts.agents_config_cwd.clone());
     // Retirement-sweep cadence: the throttle stamp beside the gate,
@@ -1852,11 +1853,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     &orphan_sweep_in_flight,
                     ctx.home.events_jsonl(),
                 );
-                // The machine gets an arm: bands the box, escalates, gates nothing.
                 crate::machine_watch::maybe_tick(&machine_watch, ctx.home.clone());
                 crate::merge_close::maybe_tick(&merge_close, ctx.home.clone());
-                // reign.html renders on a beat even with no crown live.
                 crate::king_ledger::maybe_tick(&crown_ledger, ctx.home.clone());
+                crate::fleet_page::maybe_tick(&fleet_page, ctx.home.clone());
                 crate::arm_watch::maybe_tick(&arm_watch, ctx.home.clone());
                 crate::provider_cap_verbs::maybe_tick(&provider_cap, ctx.home.clone());
                 // Serve-only liveness tick: the served pair is the sweep's measurement,

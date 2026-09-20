@@ -113,6 +113,7 @@ struct AppState {
     token: Arc<str>,
     graph_html: PathBuf,
     reign_html: PathBuf,
+    fleet_html: PathBuf,
     /// Fires on Ctrl-C so every ws loop ends and axum's graceful shutdown can
     /// complete: an open browser tab holds a connection that never closes on
     /// its own, so without this arm the bridge hangs past the signal and the
@@ -149,6 +150,22 @@ fn reign_html_path() -> PathBuf {
     {
         let graph = crate::backlog_view::graph_path();
         reign_html_path_from_state_root(graph.parent().unwrap_or_else(|| Path::new(".")))
+    }
+}
+
+fn fleet_html_path_from_state_root(state_root: &Path) -> PathBuf {
+    state_root.join("fleet.html")
+}
+
+fn fleet_html_path() -> PathBuf {
+    #[cfg(not(test))]
+    {
+        fleet_html_path_from_state_root(&crate::proto::mux_sidecar_root())
+    }
+    #[cfg(test)]
+    {
+        let graph = crate::backlog_view::graph_path();
+        fleet_html_path_from_state_root(graph.parent().unwrap_or_else(|| Path::new(".")))
     }
 }
 
@@ -696,14 +713,10 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
         token,
         graph_html: graph_html_path(),
         reign_html: reign_html_path(),
+        fleet_html: fleet_html_path(),
         shutdown: shutdown_rx,
     };
-    let app = Router::new()
-        .route("/", get(page))
-        .route("/backlog", get(backlog))
-        .route("/crown", get(crown))
-        .route("/ws", get(ws_handler))
-        .with_state(state);
+    let app = router(state);
 
     if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -721,6 +734,16 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
         return 1;
     }
     0
+}
+
+fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/", get(page))
+        .route("/backlog", get(backlog))
+        .route("/crown", get(crown))
+        .route("/fleet", get(fleet))
+        .route("/ws", get(ws_handler))
+        .with_state(state)
 }
 
 // ---------------------------------------------------------------------------
@@ -952,6 +975,17 @@ async fn crown(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response
     .await
 }
 
+async fn fleet(Query(q): Query<WsQuery>, State(st): State<AppState>) -> Response {
+    backlog_response(
+        &st.fleet_html,
+        q.t.as_deref(),
+        &st.token,
+        "the fno-agents daemon; its fleet_page arm writes fleet.html every 30 minutes, or run fno-agents intel --fleet --html",
+        NavPage::Fleet,
+    )
+    .await
+}
+
 /// Which page the bridge serves; the shared nav fragment marks the current
 /// one so a reader always knows where they are.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -959,6 +993,7 @@ enum NavPage {
     Live,
     Backlog,
     Crown,
+    Fleet,
 }
 
 fn token_ok(supplied: Option<&str>, expected: &str) -> bool {
@@ -1061,6 +1096,7 @@ fn nav_fragment(current: NavPage) -> String {
         NavPage::Live => "live",
         NavPage::Backlog => "backlog",
         NavPage::Crown => "crown",
+        NavPage::Fleet => "fleet",
     };
     let link = |p: NavPage| {
         if p == current {
@@ -1091,7 +1127,7 @@ fn nav_fragment(current: NavPage) -> String {
          min-height:30px;padding:0 4px;border-bottom:2px solid transparent}}\
          nav.fno-nav a[aria-current=\"page\"]{{color:#fff;border-bottom-color:#c99b45}}\
          nav.fno-nav a:hover{{color:#fff}}{controls}</style>\
-         {}{}{}\
+         {}{}{}{}\
          <script>(function(){{var nav=document.querySelector(\"nav.fno-nav\");if(!nav)return;\
          var p=location.pathname,base;\
          if(nav.dataset.current===\"live\"){{base=p.endsWith(\"/\")?p:p+\"/\";}}\
@@ -1106,6 +1142,7 @@ fn nav_fragment(current: NavPage) -> String {
         link(NavPage::Live),
         link(NavPage::Backlog),
         link(NavPage::Crown),
+        link(NavPage::Fleet),
     )
 }
 
@@ -1694,6 +1731,7 @@ console.log("evictedRowCount: 18 cases ok");
     fn page_serves_the_shared_nav_not_absolute_links() {
         assert!(!PAGE.contains("\"/backlog?t="));
         assert!(!PAGE.contains("\"/crown?t="));
+        assert!(!PAGE.contains("\"/fleet?t="));
         assert!(!PAGE.contains("${location.host}/ws"));
         assert!(PAGE.contains("<!--fno-nav-->"));
         assert!(PAGE.contains("const base = document.querySelector(\"nav.fno-nav\").dataset.base;"));
@@ -1706,6 +1744,7 @@ console.log("evictedRowCount: 18 cases ok");
             (NavPage::Live, "live"),
             (NavPage::Backlog, "backlog"),
             (NavPage::Crown, "crown"),
+            (NavPage::Fleet, "fleet"),
         ] {
             let frag = nav_fragment(page);
             // The CSS selector also names the attribute; count the link tags.
@@ -1737,6 +1776,7 @@ console.log("evictedRowCount: 18 cases ok");
         assert!(nav_fragment(NavPage::Backlog).contains(".controls{top:var(--fno-nav-h)}"));
         assert!(!nav_fragment(NavPage::Live).contains(".controls"));
         assert!(!nav_fragment(NavPage::Crown).contains(".controls"));
+        assert!(!nav_fragment(NavPage::Fleet).contains(".controls"));
     }
 
     #[test]
@@ -1853,6 +1893,79 @@ console.log("evictedRowCount: 18 cases ok");
             reign_html_path_from_state_root(state),
             PathBuf::from("/configured/state/reign.html")
         );
+    }
+
+    #[test]
+    fn fleet_html_follows_state_root_beside_graph_json() {
+        let state = Path::new("/configured/state");
+        assert_eq!(
+            fleet_html_path_from_state_root(state),
+            PathBuf::from("/configured/state/fleet.html")
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_fleet_names_the_daemon_arm() {
+        let dir =
+            std::env::temp_dir().join(format!("fno-web-fleet-{}-missing", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let response = backlog_response(
+            &dir.join("fleet.html"),
+            Some("right"),
+            "right",
+            "the fno-agents daemon; its fleet_page arm writes fleet.html every 30 minutes",
+            NavPage::Fleet,
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("fleet_page"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn router_serves_fleet_with_token_and_shared_nav() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = std::env::temp_dir().join(format!("fno-web-fleet-{}-route", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fleet_path = dir.join("fleet.html");
+        std::fs::write(&fleet_path, "<html><body>FLEET-MARKER</body></html>").unwrap();
+        let (tx, _) = broadcast::channel(4);
+        let (_shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+        let state = AppState {
+            tx,
+            snap: Arc::new(Mutex::new(Snapshot::default())),
+            token: Arc::<str>::from("right"),
+            graph_html: dir.join("graph.html"),
+            reign_html: dir.join("reign.html"),
+            fleet_html: fleet_path,
+            shutdown,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(state)).await.unwrap();
+        });
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(
+                b"GET /fleet?t=right HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(reply.contains("cache-control: no-store"), "{reply}");
+        assert!(reply.contains("data-current=\"fleet\""), "{reply}");
+        assert!(reply.contains("FLEET-MARKER"), "{reply}");
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn tiny_frame() -> proto::Frame {

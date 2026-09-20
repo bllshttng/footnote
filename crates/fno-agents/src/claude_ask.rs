@@ -1459,6 +1459,22 @@ pub fn bg_create(
                 }
             }
         }
+        // The provider stamp floors to "" for the same reason: the serving
+        // session is forked with the supervisor's env, so the front-end env
+        // scrub never reaches it, and an inherited stamp reads as the
+        // session's own route (review_level, review_capability).
+        if let Ok(value) = std::env::var(crate::codex_route::ROUTE_PROVIDER_ENV) {
+            if !value.trim().is_empty()
+                && !floor
+                    .iter()
+                    .any(|(fk, _)| fk == crate::codex_route::ROUTE_PROVIDER_ENV)
+            {
+                floor.push((
+                    crate::codex_route::ROUTE_PROVIDER_ENV.to_string(),
+                    String::new(),
+                ));
+            }
+        }
     }
     if !floor.is_empty() {
         match crate::model_env_scrub::write_scrub_settings(&floor) {
@@ -1494,6 +1510,11 @@ pub fn bg_create(
     } else {
         Stdio::null()
     });
+
+    // This client can lazily birth the claude supervisor; a supervisor born
+    // dirty poisons every session it forks for its whole life, so
+    // make sure a clean one is up first. The client command is never touched.
+    crate::claude_supervisor::guard_birth(extra_env.iter().copied());
 
     let start = std::time::Instant::now();
     let mut child = match cmd.spawn() {
