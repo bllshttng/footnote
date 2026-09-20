@@ -1655,10 +1655,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
 
     // SIGTERM -> graceful shutdown.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    // Accepted-but-unfinished connections (`agent.logs --follow` deliberately
-    // holds one open indefinitely). Quiet retirement waits for this to reach
-    // zero: an in-flight RPC killed mid-stream is truncated work, the same
-    // rule the mux server's conns_alive counter applies.
+    // Accepted-but-unfinished connections (`agent.logs --follow` holds one
+    // open on purpose): quiet retirement waits for zero, like the mux's
+    // conns_alive counter.
     let live_conns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut idle_check = tokio::time::interval(Duration::from_secs(5));
     idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1707,8 +1706,6 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let idle_probe_verdict: Arc<
         std::sync::Mutex<Option<(bool, Instant, Option<std::time::SystemTime>)>>,
     > = Arc::new(std::sync::Mutex::new(None));
-    // Drift retirement: the drifted flag settles off-loop (crate::quiet_retire)
-    // and sticks, so the arm reads a bool without touching the filesystem.
     let mut drift_flag = crate::quiet_retire::DriftFlag::new();
 
     // THE RULE FOR THIS LOOP: nothing that shells out, walks the
