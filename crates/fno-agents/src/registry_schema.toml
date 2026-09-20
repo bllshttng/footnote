@@ -63,7 +63,18 @@
 # request) - so requested, resolved and current-turn stay three
 # distinguishable readings. Same additive-optional writer-protection
 # rationale as v22 through v34: a pre-v35 writer accepts the unknown keys
-# through serde and erases them on its next read-modify-write, so the bump
-# turns a silent erasure into a loud refusal. Rationale lives beside the
-# columns in state.rs / registry.py.
-version = 35
+# through serde and skip-if-none keeps the stamp off rows that carry none,
+# so the bump turns a silent erasure into a loud refusal. Rationale lives
+# beside the columns in state.rs / registry.py.
+#
+# v36: additive `node_reason` - why a mint works no node WHEN THE SPAWN NAMED
+# ONE. The spawn path derives the node from the seed's verb
+# argument and stamps --node at one seam; when the derived id names no
+# readable backlog row, the seam forwards --node-reason and the mint stamps
+# the reason instead of a silent null, so the roster can tell "works a node"
+# from "named one it could not resolve" from "named none". Same
+# additive-optional writer-protection rationale as v22 through v35: a pre-v36
+# writer accepts the unknown key and erases it on its next read-modify-write,
+# so the bump turns a silent erasure into a loud refusal. Rationale lives
+# beside the column in state.rs / registry.py.
+version = 36

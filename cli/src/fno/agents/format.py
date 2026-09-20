@@ -33,7 +33,10 @@ from fno.agents.session_truth import STALE_ATTENTION_S
 # request and the observation disagree family-wise). Both always present; null
 # means unknown, never a clean bill.
 # v6 adds `node`, the registry's spawn-stamped backlog identity.
-JSON_SCHEMA_VERSION = 6
+# v7 adds `node_reason`, the sibling receipt naming why a row works
+# no node when the spawn NAMED one it could not resolve. Always present; null
+# in the two honest states (node resolved, none named).
+JSON_SCHEMA_VERSION = 7
 
 # Basis values that are falsifiers rather than evidence: a positive
 # measurement that the worker is gone, which no other reading outranks.
@@ -227,6 +230,10 @@ def serialize_entry(
         # The node this row works, already stamped in registry storage from
         # resolved spawn provenance. Never infer it from the row name.
         "node": entry.node,
+        # v7: why the row works no node when the spawn NAMED one.
+        # Null in the two honest states (node resolved, none named) and set
+        # only when the named id resolved to no readable row.
+        "node_reason": entry.node_reason,
         # Classified lineage: the succession chain A->B->... and the fork
         # edge of a parallel branch. Empty/None for a worker never re-minted
         # and never forked - the dominant case.

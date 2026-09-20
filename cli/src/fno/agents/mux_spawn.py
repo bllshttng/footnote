@@ -3325,6 +3325,9 @@ def dispatch_spawn_pane(
     crown_scope: Optional[str] = None,
     succession: bool = False,
     provenance: Optional[dict[str, str]] = None,
+    # The seam's receipt for a node the seed NAMED but the seam could
+    # not resolve; stamped on the row beside `node`, never read as a decision.
+    node_reason: Optional[str] = None,
     account_env: Optional[dict[str, str]] = None,
     route_env: Optional[dict[str, str]] = None,
     monitor: Optional[str] = None,
@@ -4568,6 +4571,9 @@ def dispatch_spawn_pane(
                     # provenance map the child env got - never the spawning
                     # session's ambient value.
                     node=(provenance or {}).get("FNO_NODE") or None,
+                    # Beside it, the receipt for a node the seed
+                    # NAMED but that resolved to no readable row.
+                    node_reason=node_reason,
                     fno_id=stored_session_uuid or name,
                     route_provider_id=route_provider_id,
                     model_name=model_name,

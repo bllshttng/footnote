@@ -672,6 +672,13 @@ class AgentEntry:
     # the same discipline as `origin`. Rust's RegistryEntry mirrors it as
     # additive-optional passthrough so a daemon write-back preserves the stamp.
     node: Optional[str] = None
+    # v36: why the row works no node WHEN THE SPAWN NAMED ONE - the
+    # seed's verb argument read as a node id but the seam resolved no readable
+    # row for it, so the spawn proceeded unbound and the reason rides the
+    # `--node-reason` spawn flag to the mint. Absent when the node resolved;
+    # absent when the spawn genuinely named none. Rust's RegistryEntry mirrors
+    # it as additive-optional passthrough so a daemon write-back preserves it.
+    node_reason: Optional[str] = None
     # v23: the spawn REQUEST, verbatim as the flags spelled it (any
     # [1m] suffix included), stamped once at birth beside the observed axes.
     # `model`/`model_basis` flip to a verified observation; these three never

@@ -1337,6 +1337,10 @@ def cmd_spawn(
             "for prompt provenance (--slug/--plan override the graph read)."
         ),
     ),
+    node_reason: str | None = typer.Option(
+        None, "--node-reason", hidden=True,
+        help="Seam receipt: the seed's node resolved to no readable row.",
+    ),
     slug: str | None = typer.Option(
         None, "--slug", help="Provenance FNO_SLUG override (skips the graph read)."
     ),
@@ -2401,6 +2405,7 @@ def cmd_spawn(
                     passthrough=passthrough,
                     launch_account=account or dispatch_account,
                     route_model=route_model,
+                    node_reason=node_reason,
                 )
                 pane_kwargs["workspace"] = squad
                 pane_result = pane_dispatch(**pane_kwargs)
@@ -2664,6 +2669,7 @@ def cmd_spawn(
                 # The route's model token, recorded on the row (the receipt
                 # already names it; the row now matches).
                 route_model=route_model,
+                node_reason=node_reason,
             )
             spawn_succeeded = result.kind == "created" or bool(
                 result.reply and result.reply.strip()

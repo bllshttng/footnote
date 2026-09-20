@@ -838,6 +838,14 @@ pub struct RegistryEntry {
     /// re-serializes must keep the stamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
+    /// v36: why a mint could not bind the node the spawn NAMED -
+    /// the seed's verb argument read as a node id but the seam resolved no
+    /// readable row for it. Set only in that one case; absent when the node
+    /// resolved and absent when the spawn genuinely named none, so the three
+    /// states stay distinguishable. Mirrors Python's `AgentEntry.node_reason`;
+    /// same X3 passthrough duty as `node` itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_reason: Option<String>,
     /// v23: the spawn REQUEST, verbatim as the flags spelled it (any
     /// `[1m]` suffix included), stamped once at birth beside the observed
     /// axes. `model`/`model_basis` flip to a verified observation; these never
