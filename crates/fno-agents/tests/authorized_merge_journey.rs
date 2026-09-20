@@ -12,7 +12,9 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use fno_agents::authorized_merge::{run, Effect, Outcome, PrFacts, ProbeOutcome, Probes, Request};
+use fno_agents::authorized_merge::{
+    run, ChecksRead, Effect, Outcome, PrFacts, ProbeOutcome, Probes, Request,
+};
 
 const HEAD: &str = "c0ffee1234567890";
 
@@ -93,8 +95,11 @@ impl Probes for FakeGitHub {
         Ok(())
     }
     fn release_slot(&self, _cwd: &Path, _base_ref: &str, _pr: u64) {}
-    fn checks_verdict(&self, _cwd: &Path, _pr: u64) -> String {
-        "green".to_string()
+    fn checks_read(&self, _cwd: &Path, _pr: u64) -> ChecksRead {
+        ChecksRead {
+            verdict: "green".to_string(),
+            github_block: None,
+        }
     }
     fn covered_head(&self, _cwd: &Path) -> Option<String> {
         Some(self.head.borrow().clone())
