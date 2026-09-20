@@ -24,7 +24,7 @@ pub(crate) fn build_keys_modal() -> KeysModal {
     };
     // The tail's scroll hint rides the title line: the modal grows one row
     // per binding, and the x7683 pin holds the notes above the 64-row fold,
-    // so every row here is paid for. (The x-9a6f bindings spent this one.)
+    // so every row here is paid for. (The composer bindings spent this one.)
     add(
         PopupRow::Header("keybinds · esc close · wheel/pgup/pgdn scroll · ⏎ runs".into()),
         None,
@@ -40,7 +40,7 @@ pub(crate) fn build_keys_modal() -> KeysModal {
         // The Global header is reclaimed, not moved: the modal grows one row
         // per binding and the x7683 pin holds the notes above the 64-row
         // fold, and the title line already says what this list is. The
-        // x-9a6f bindings spent the budget that removed it.
+        // composer bindings spent the budget that removed it.
         if section != KeySection::Global {
             add(PopupRow::Header(section.title().into()), None);
         }
@@ -83,7 +83,7 @@ pub(crate) fn build_keys_modal() -> KeysModal {
     // here costs the same line a real key does. The header band already
     // separates it. Every new binding spends this budget; the next one that
     // overflows should reclaim a line rather than move the pin.
-    // (The x-9a6f bindings spent it: the rule and the Terminal.app/Ghostty
+    // (The composer bindings spent it: the rule and the Terminal.app/Ghostty
     // lines were reclaimed to keep the pin honest.)
     add(
         PopupRow::Header("right-click works only where the terminal forwards it".into()),

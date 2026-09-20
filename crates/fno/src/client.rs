@@ -4676,8 +4676,10 @@ impl View {
             }
             return None;
         }
-        // Sideline: the panel column minus its divider. Off/narrow => no panel.
-        if panel_w == 0 || col >= panel_w - 1 {
+        // Sideline: the painted width minus its divider (the full terminal
+        // in full-screen mode). Off/narrow => no panel.
+        let paint_w = self.sideline_paint_w();
+        if paint_w == 0 || col as usize >= paint_w - 1 {
             return None;
         }
         // Full-screen sideline paints below the strip; invert the same
@@ -4696,7 +4698,9 @@ impl View {
         // whatever display row is scrolled to it. It is chrome pinned to the
         // first PAINTED row, not a property of that row, so the check is on
         // the painted row and must precede the display-row resolution below.
-        if row == top as u16 {
+        if row == top as u16 && !self.sideline_full {
+            // In full-screen the button is not painted, so a hit there would
+            // cycle a density the screen does not show.
             if let Some(range) = self.density_button_range(panel_w as usize) {
                 if range.contains(&(col as usize)) {
                     return Some(ChromeHit::CycleDensity);
@@ -5070,12 +5074,13 @@ impl View {
     /// sideline geometry exactly so the highlight lands where a click would
     ///.
     fn sideline_row_at(&self, row: u16, col: u16) -> Option<usize> {
-        let panel_w = self.panel_w();
-        // (US1) The sideline now owns row 0 (the strip moved right of the
-        // divider), so the `row < TAB_BAR_ROWS` exclusion is gone and display
-        // row `i` maps directly from `row` (no TAB_BAR_ROWS offset). A cell on
-        // the divider or in the strip's content columns still returns None.
-        if panel_w == 0 || col >= panel_w - 1 {
+        // The sideline owns row 0 in normal mode (the strip moved right of
+        // the divider), so display row `i` maps directly from `row`. A cell
+        // on the divider or in the strip's content columns returns None.
+        // Sideline: the painted width minus its divider (the full terminal
+        // in full-screen mode). Off/narrow => no panel.
+        let paint_w = self.sideline_paint_w();
+        if paint_w == 0 || col as usize >= paint_w - 1 {
             return None;
         }
         // Full-screen sideline paints below the strip; invert the same

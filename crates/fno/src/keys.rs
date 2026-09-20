@@ -1445,8 +1445,8 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
         ),
         // The global sideline chord (Ctrl+Opt+Left, a multi-byte CSI the
         // scanner's ChordEsc branch dispatches, not chord()) has no row here:
-        // its modal row was reclaimed for the x-9a6f binding budget, and this
-        // doc plus the module header still name it.
+        // its modal row was reclaimed for the composer-key binding budget,
+        // and this doc plus the module header still name it.
         // The dead-row removal paths. Bare sideline keys, not chords -
         // listed here so the reference names them; Enter on them BELs.
         (

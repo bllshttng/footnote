@@ -1045,7 +1045,7 @@ impl Launcher {
 
     /// Paint the dock into `buf` (the sideline's Buffer) inside `area`: the
     /// chip row, the wrapped message window with its cursor mark, and the
-    /// outcome footer. Everything renders into the Buffer x-177c introduced;
+    /// outcome footer. Everything renders into the sideline's ratatui Buffer;
     /// the single blit in `draw_sideline` carries it to the frame.
     pub(crate) fn paint(&self, view: &View, buf: &mut RtBuffer, area: RtRect) {
         let rects = self.dock_layout_rects(view, area);
@@ -1067,11 +1067,18 @@ impl Launcher {
             };
             let y = rects.message.y + k as u16;
             buf.set_string(rects.message.x, y, text, RtStyle::new());
-            if self.focus == Focus::Message
-                && cur_row == rects.start_chunk + k
-                && (cur_col as u16) < rects.message.width
-            {
-                buf[(rects.message.x + cur_col as u16, y)].set_char('\u{258f}');
+            if self.focus == Focus::Message && cur_row == rects.start_chunk + k {
+                // The cursor offset is a CHAR index; the mark lands on a
+                // TERMINAL column, so wide glyphs before the cursor shift
+                // it right.
+                let disp_col: usize = text
+                    .chars()
+                    .take(cur_col)
+                    .map(|c| usize::from(UnicodeWidthChar::width(c).unwrap_or(0)))
+                    .sum();
+                if (disp_col as u16) < rects.message.width {
+                    buf[(rects.message.x + disp_col as u16, y)].set_char('\u{258f}');
+                }
             }
         }
         buf.set_string(
@@ -1182,7 +1189,7 @@ fn chip_field(s: &str) -> String {
 
 /// One chip's paint: fill the rect (so REVERSED covers the whole chip, not
 /// just the glyphs), then the label truncated to the rect with an ellipsis.
-fn paint_chip(buf: &mut RtBuffer, r: RtRect, label: &str, style: RtStyle) {
+pub(crate) fn paint_chip(buf: &mut RtBuffer, r: RtRect, label: &str, style: RtStyle) {
     if r.width == 0 {
         return;
     }
@@ -1200,14 +1207,15 @@ fn paint_chip(buf: &mut RtBuffer, r: RtRect, label: &str, style: RtStyle) {
         w += cw;
     }
     if truncated {
-        if w == r.width as usize {
-            // Make room for the ellipsis over the last kept glyph.
-            let last = text.chars().next_back();
-            w -= last.and_then(UnicodeWidthChar::width).unwrap_or(1);
+        // Reserve one column for the ellipsis over the last kept glyph.
+        while w >= r.width as usize {
+            let Some(last) = text.chars().next_back() else {
+                break;
+            };
+            w -= usize::from(UnicodeWidthChar::width(last).unwrap_or(1));
+            text.pop();
         }
-        if w < r.width as usize {
-            text.push('\u{2026}');
-        }
+        text.push('\u{2026}');
     }
     buf.set_string(r.x, r.y, &text, style);
 }
