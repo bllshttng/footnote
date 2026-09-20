@@ -1,38 +1,42 @@
-//! Mux-server build drift: the pure half of quiet retirement.
+//! The executable-drift signal, vendored from
+//! `crates/fno-agents/src/drift.rs` for the mux server's quiet retirement.
 //!
-//! The mux server is a long-lived process. A rebuild of `fno` replaces the
-//! on-disk binary, but the running server keeps executing its old code until
-//! something restarts it, and only `fno agents restart --mux` reaches it, at
-//! the cost of every live pane. This module is the drift *signal*: a
-//! fingerprint of the executable the server is running, compared against the
-//! binary a fresh attach would spawn now. The async half (capture at startup,
-//! check on the 1s core tick, retire through `Flow::Shutdown` only when no
-//! pane, client, or connection is live) lives in [`crate::server`].
+//! Both crates publish separately, and a real dependency stays blocked on
+//! the publish gate (see `crates/fno-agents/Cargo.toml`), so this mirror
+//! holds the fingerprint and classification the server consumes; the
+//! contract parity test in `drift.rs`'s test module makes silent drift
+//! between the two copies impossible, and its deletion is the trigger to
+//! retire this file.
 //!
-//! Mirrors `fno-agents`' `drift.rs` (same fingerprint shape, same fail-safe
-//! posture: an unreadable exe is `Unknown`, never a false alarm) as a small
-//! local copy because the `fno` crate does not depend on `fno-agents`.
+//! The signal is a running-exe fingerprint (canonical path + mtime + size), NOT
+//! `CARGO_PKG_VERSION` (Locked Decision #1): the package version rarely bumps in
+//! development, where many features land at the same `0.1.0`. The fingerprint
+//! catches any reinstall/rebuild, including a same-version dev build.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-/// A running-or-on-disk executable's identity, for drift comparison. Same
-/// shape as `fno-agents`' `ExeFingerprint`: canonical path, mtime nanos, size.
+/// A running-or-on-disk executable's identity, for drift comparison. The path is
+/// canonicalized (so symlink vs target, `~/.cargo/bin` vs `target/debug`, are
+/// compared apples-to-apples); `mtime_nanos`/`size` are compared only for
+/// equality against a fingerprint of the SAME logical binary, so coarse clocks
+/// only ever cost an advisory false verdict, never a crash.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExeFingerprint {
     /// Canonicalized absolute path of the executable.
     pub path: PathBuf,
-    /// File mtime as nanoseconds since the Unix epoch.
+    /// File mtime as nanoseconds since the Unix epoch (i64 holds ~year 2262).
     pub mtime_nanos: i64,
     /// File size in bytes.
     pub size: u64,
 }
 
 impl ExeFingerprint {
-    /// Stat `path` (canonicalizing it) into a fingerprint. Returns `None` on
-    /// any error; the caller treats `None` as `Unknown` (silent, never a
-    /// false alarm).
-    pub fn of(path: &std::path::Path) -> Option<ExeFingerprint> {
+    /// Stat `path` (canonicalizing it) into a fingerprint. Returns `None` on any
+    /// error -- a missing file, a stat failure, or an mtime that does not fit an
+    /// `i64` of nanoseconds. The caller treats `None` as `Unknown` (silent,
+    /// never a false alarm); a drift check must never crash a `status`/`list`.
+    pub fn of(path: &Path) -> Option<ExeFingerprint> {
         let canon = std::fs::canonicalize(path).ok()?;
         let meta = std::fs::metadata(&canon).ok()?;
         let mtime = meta.modified().ok()?;
@@ -45,32 +49,43 @@ impl ExeFingerprint {
         })
     }
 
-    /// Fingerprint this process's own executable. `None` if `current_exe()`
-    /// or the stat fails; the server then classifies every later check
-    /// `Unknown` and never retires on a guess.
+    /// Fingerprint the current process's own executable. The daemon calls this
+    /// once at startup to record what it is running; `None` if `current_exe()`
+    /// or the stat fails (the daemon then reports no fingerprint, and every
+    /// client check fails safe to `Unknown`).
     pub fn current() -> Option<ExeFingerprint> {
         ExeFingerprint::of(&std::env::current_exe().ok()?)
     }
 }
 
-/// The verdict of a build-drift check.
+/// The verdict of a drift check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriftState {
-    /// The running binary matches what a fresh attach would spawn now.
+    /// The running binary matches the binary a client would launch now.
     Fresh,
-    /// The on-disk binary differs (path or content) from the running one.
+    /// The running binary differs (path OR content) from the on-disk launch
+    /// target -- the daemon is stale and should be restarted.
     Drifted {
         running: ExeFingerprint,
         on_disk: ExeFingerprint,
     },
-    /// The check could not be completed (no captured fingerprint, a stat
-    /// failure). Silent by design: never retire on a guess.
+    /// No daemon is running; nothing can be stale. (Decided by the async wrapper
+    /// before [`classify`] is called.)
+    DaemonDown,
+    /// The check could not be completed: a stat/`current_exe` error, or the
+    /// daemon reported no fingerprint. Silent by design -- never a warning, so a
+    /// drift-check failure never cries wolf.
     Unknown,
 }
 
-/// Pure classification: compare the server's startup fingerprint against a
-/// fresh stat of the binary it was launched from. A `None` on either side
-/// yields `Unknown` (fail-safe); any path/mtime/size difference is `Drifted`.
+/// Pure classification: compare the daemon's reported `running` fingerprint to
+/// the client's fresh `on_disk` fingerprint of the binary it would launch now.
+///
+/// A `None` on either side yields [`DriftState::Unknown`] (fail-safe). Otherwise
+/// any difference in canonical path, mtime, or size is [`DriftState::Drifted`].
+/// Path drift and content drift are both "drifted" -- the remedy
+/// (`fno agents restart`) is the same either way. [`DriftState::DaemonDown`] is
+/// never produced here; the async wrapper decides it from the status probe.
 pub fn classify(running: Option<&ExeFingerprint>, on_disk: Option<&ExeFingerprint>) -> DriftState {
     match (running, on_disk) {
         (Some(r), Some(d)) => {
@@ -83,14 +98,79 @@ pub fn classify(running: Option<&ExeFingerprint>, on_disk: Option<&ExeFingerprin
                 DriftState::Fresh
             }
         }
+        // Daemon reported no fingerprint, or the on-disk stat failed: no basis to
+        // prove drift, so stay silent rather than warn on a guess.
         _ => DriftState::Unknown,
     }
 }
 
-/// Self-drift for the running server: startup fingerprint vs its own
-/// executable path stat-ed now.
+/// Self-drift for a long-lived process: compare the fingerprint the process
+/// captured at startup against what its own executable path holds NOW. This
+/// is the census question ("is this running process an older build than the
+/// binary it was launched from?"), answered without a daemon round-trip.
 pub fn self_drift(startup: &ExeFingerprint) -> DriftState {
     classify(Some(startup), ExeFingerprint::of(&startup.path).as_ref())
+}
+
+/// The one-word label every consumer prints. No second rule.
+pub fn drift_label(state: &DriftState) -> &'static str {
+    match state {
+        DriftState::Fresh => "fresh",
+        DriftState::Drifted { .. } => "drifted",
+        DriftState::DaemonDown | DriftState::Unknown => "unknown",
+    }
+}
+
+/// The live store keeper's path note (x-aaaa AC13): name the path the keeper
+/// runs from, and mark it against the installed release path. The keeper's
+/// identity comes from the footprint payload's `top` array - its own argv
+/// string - so no new probe is needed. The note always names the path (a
+/// positive marker), and marks it "not the installed release path" whenever
+/// that equality cannot be proven, not only when drift is proven.
+pub fn keeper_path_note(top_commands: &[String], installed_exe: Option<&Path>) -> Option<String> {
+    let argv0 = top_commands.iter().find_map(|command| {
+        let mut words = command.split_whitespace();
+        let program = words.next()?;
+        if Path::new(program).file_name()?.to_str()? != "fno-agents" {
+            return None;
+        }
+        if !words.any(|word| word == "--store-keeper") {
+            return None;
+        }
+        Some(program)
+    })?;
+    let running = ExeFingerprint::of(Path::new(argv0));
+    let installed = installed_exe.and_then(ExeFingerprint::of);
+    let kind = match (running, installed) {
+        (Some(r), Some(d)) if r.path == d.path => "the installed release path",
+        _ => "not the installed release path",
+    };
+    Some(format!("store keeper: {argv0} ({kind})"))
+}
+
+/// Format the agent-actionable drift warning, or `None` when there is nothing to
+/// warn about (`Fresh`/`DaemonDown`/`Unknown`). The message is advisory and
+/// names the exact remedy verb. The caller routes it to **stderr** only, so a
+/// `--json` stdout consumer is never contaminated (Locked Decision #5).
+///
+/// `pid` is the running daemon's pid when the caller has it (the `status`
+/// surface does); it is woven into the message for a more actionable warning and
+/// omitted otherwise.
+pub fn drift_warning(state: &DriftState, pid: Option<u32>) -> Option<String> {
+    match state {
+        DriftState::Drifted { .. } => {
+            let who = match pid {
+                Some(p) => format!("the running daemon (pid {p})"),
+                None => "the running daemon".to_string(),
+            };
+            Some(format!(
+                "fno agents: {who} is an older build than the installed binary; \
+                 run `fno agents restart` to pick up the new build (it restarts \
+                 the daemon only and keeps PTY workers)."
+            ))
+        }
+        DriftState::Fresh | DriftState::DaemonDown | DriftState::Unknown => None,
+    }
 }
 
 #[cfg(test)]
@@ -101,18 +181,15 @@ mod tests {
 
     fn tmp_path(tag: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!(
-            "fno_build_drift_{tag}_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        p.push(format!("fno_drift_{}_{}_{tag}", std::process::id(), {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static C: AtomicU32 = AtomicU32::new(0);
+            C.fetch_add(1, Ordering::Relaxed)
+        }));
         p
     }
 
-    fn write_file(path: &std::path::Path, bytes: &[u8]) {
+    fn write_file(path: &Path, bytes: &[u8]) {
         let mut f = fs::File::create(path).unwrap();
         f.write_all(bytes).unwrap();
         f.flush().unwrap();
@@ -120,43 +197,80 @@ mod tests {
 
     #[test]
     fn of_missing_path_is_none() {
-        assert!(ExeFingerprint::of(&tmp_path("missing")).is_none());
+        // AC1-ERR: a stat that cannot resolve the file fails safe to None
+        // (mapped to Unknown by classify), never a panic.
+        let p = tmp_path("missing");
+        assert!(ExeFingerprint::of(&p).is_none());
     }
 
     #[test]
-    fn classify_fresh_when_equal_and_drifted_on_size_change() {
+    fn of_roundtrips_and_tracks_size_change() {
+        let p = tmp_path("rt");
+        write_file(&p, b"hello");
+        let a = ExeFingerprint::of(&p).expect("fingerprint");
+        let b = ExeFingerprint::of(&p).expect("fingerprint again");
+        assert_eq!(a, b, "same file fingerprints equal");
+        assert_eq!(a.size, 5);
+
+        // A larger rewrite changes the size -> a distinct fingerprint, even if
+        // the coarse mtime did not advance.
+        write_file(&p, b"hello world!!");
+        let c = ExeFingerprint::of(&p).expect("fingerprint after grow");
+        assert_ne!(a, c, "size change yields a different fingerprint");
+        assert_eq!(c.size, 13);
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn classify_fresh_when_equal() {
+        // AC1-FR: identical running/on-disk fingerprint -> Fresh, no warning.
         let p = tmp_path("fresh");
         write_file(&p, b"bin");
         let fp = ExeFingerprint::of(&p).unwrap();
         assert_eq!(classify(Some(&fp), Some(&fp)), DriftState::Fresh);
-        write_file(&p, b"bin by a newer build");
-        match self_drift(&fp) {
+        assert_eq!(drift_warning(&DriftState::Fresh, Some(1)), None);
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn classify_content_drift_when_size_differs() {
+        // AC1-HP (classification half): same path, different content -> Drifted.
+        let p = tmp_path("content");
+        write_file(&p, b"old");
+        let running = ExeFingerprint::of(&p).unwrap();
+        let on_disk = ExeFingerprint {
+            size: running.size + 7,
+            ..running.clone()
+        };
+        match classify(Some(&running), Some(&on_disk)) {
             DriftState::Drifted { .. } => {}
-            other => panic!("expected Drifted after rewrite, got {other:?}"),
+            other => panic!("expected Drifted, got {other:?}"),
         }
         fs::remove_file(&p).ok();
     }
 
     #[test]
-    fn classify_path_drift_is_drifted() {
+    fn classify_path_drift_when_path_differs() {
+        // AC1-EDGE: running from a different path than we would launch -> Drifted.
         let a = ExeFingerprint {
-            path: PathBuf::from("/opt/a/fno"),
-            mtime_nanos: 1,
-            size: 1,
+            path: PathBuf::from("/opt/a/fno-agents-daemon"),
+            mtime_nanos: 100,
+            size: 10,
         };
         let b = ExeFingerprint {
-            path: PathBuf::from("/opt/b/fno"),
-            mtime_nanos: 1,
-            size: 1,
+            path: PathBuf::from("/home/u/.cargo/bin/fno-agents-daemon"),
+            mtime_nanos: 100,
+            size: 10,
         };
-        assert!(matches!(
-            classify(Some(&a), Some(&b)),
-            DriftState::Drifted { .. }
-        ));
+        match classify(Some(&a), Some(&b)) {
+            DriftState::Drifted { .. } => {}
+            other => panic!("expected Drifted, got {other:?}"),
+        }
     }
 
     #[test]
-    fn classify_unknown_when_either_side_missing() {
+    fn classify_unknown_when_either_missing() {
+        // AC1-ERR: a None on either side is Unknown (silent), never Drifted.
         let fp = ExeFingerprint {
             path: PathBuf::from("/x"),
             mtime_nanos: 1,
@@ -165,5 +279,113 @@ mod tests {
         assert_eq!(classify(None, Some(&fp)), DriftState::Unknown);
         assert_eq!(classify(Some(&fp), None), DriftState::Unknown);
         assert_eq!(classify(None, None), DriftState::Unknown);
+        // And Unknown never warns.
+        assert_eq!(drift_warning(&DriftState::Unknown, None), None);
+        assert_eq!(drift_warning(&DriftState::DaemonDown, None), None);
+    }
+
+    #[test]
+    fn self_drift_reads_fresh_then_drifted_after_a_rewrite() {
+        let p = tmp_path("self");
+        write_file(&p, b"bin");
+        let fp = ExeFingerprint::of(&p).unwrap();
+        assert_eq!(drift_label(&self_drift(&fp)), "fresh");
+        write_file(&p, b"bin by a newer build");
+        assert_eq!(drift_label(&self_drift(&fp)), "drifted");
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn drift_label_maps_every_state() {
+        let fp = ExeFingerprint {
+            path: PathBuf::from("/x"),
+            mtime_nanos: 1,
+            size: 1,
+        };
+        assert_eq!(drift_label(&classify(Some(&fp), Some(&fp))), "fresh");
+        assert_eq!(drift_label(&classify(Some(&fp), None)), "unknown");
+        let drifted = classify(
+            Some(&fp),
+            Some(&ExeFingerprint {
+                size: 2,
+                ..fp.clone()
+            }),
+        );
+        assert_eq!(drift_label(&drifted), "drifted");
+    }
+
+    #[test]
+    fn drift_warning_names_restart_verb() {
+        // AC1-HP (message half): a Drifted state warns, names the restart verb,
+        // and weaves in the pid when present.
+        let msg = drift_warning(&drift_state(), Some(91627)).expect("warns on drift");
+        assert!(msg.contains("fno agents restart"), "names the remedy verb");
+        assert!(msg.contains("build"), "describes a build mismatch");
+        assert!(msg.contains("91627"), "names the pid when known");
+        assert!(
+            !msg.contains("operator"),
+            "the restart is not operator-only"
+        );
+        assert!(!msg.contains("--mux"), "the restart has no mux leg");
+        assert!(!msg.contains('\n'), "stays on one line");
+    }
+
+    fn drift_state() -> DriftState {
+        let fp = ExeFingerprint {
+            path: PathBuf::from("/x"),
+            mtime_nanos: 1,
+            size: 1,
+        };
+        DriftState::Drifted {
+            running: fp.clone(),
+            on_disk: fp,
+        }
+    }
+
+    #[test]
+    fn keeper_note_names_the_path_and_marks_a_worktree_build() {
+        // AC13: the note is a positive marker - it names the path the keeper
+        // runs from, and marks what it is, by its own string.
+        let commands = vec![
+            "Google Chrome Helper (Renderer)".to_string(),
+            "/Users/dev/.fno/worktrees/footnote/x-aaaa/target/debug/fno-agents --store-keeper --sock /tmp/x".to_string(),
+        ];
+        let note = keeper_path_note(&commands, None).expect("note");
+        assert!(
+            note.contains("/Users/dev/.fno/worktrees/footnote"),
+            "{note}"
+        );
+        assert!(note.contains("not the installed release path"), "{note}");
+    }
+
+    #[test]
+    fn keeper_note_says_when_the_keeper_is_the_installed_release() {
+        // The keeper detector matches argv0's basename, so the staged file
+        // must be named like the real binary.
+        let dir = std::env::temp_dir().join(format!(
+            "fno_drift_keeper_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("fno-agents");
+        write_file(&p, b"bin");
+        let commands = vec![format!("{} --store-keeper --sock /tmp/x", p.display())];
+        let note = keeper_path_note(&commands, Some(&p)).expect("note");
+        assert!(note.contains("the installed release path"), "{note}");
+        fs::remove_file(&p).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn keeper_note_is_none_without_a_keeper_row() {
+        let commands = vec![
+            "/usr/bin/rustc --edition=2021".to_string(),
+            "claude bg-spare --bg-spare /tmp/spare".to_string(),
+        ];
+        assert_eq!(keeper_path_note(&commands, None), None);
     }
 }

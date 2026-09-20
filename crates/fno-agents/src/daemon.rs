@@ -1655,6 +1655,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
 
     // SIGTERM -> graceful shutdown.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    // Accepted-but-unfinished connections (`agent.logs --follow` deliberately
+    // holds one open indefinitely). Quiet retirement waits for this to reach
+    // zero: an in-flight RPC killed mid-stream is truncated work, the same
+    // rule the mux server's conns_alive counter applies.
+    let live_conns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut idle_check = tokio::time::interval(Duration::from_secs(5));
     idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_activity = Instant::now();
@@ -1702,13 +1707,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let idle_probe_verdict: Arc<
         std::sync::Mutex<Option<(bool, Instant, Option<std::time::SystemTime>)>>,
     > = Arc::new(std::sync::Mutex::new(None));
-    // Drift retirement: the drifted flag settles off-loop every 6th tick
-    // (30s) and sticks -- a drifted binary stays drifted until the process
-    // ends -- so the arm reads a bool without touching the filesystem.
-    let drift_stat_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let drift_stat_verdict: Arc<std::sync::Mutex<Option<bool>>> =
-        Arc::new(std::sync::Mutex::new(None));
-    let mut drift_tick: u32 = 0;
+    // Drift retirement: the drifted flag settles off-loop (crate::quiet_retire)
+    // and sticks, so the arm reads a bool without touching the filesystem.
+    let mut drift_flag = crate::quiet_retire::DriftFlag::new();
 
     // THE RULE FOR THIS LOOP: nothing that shells out, walks the
     // registry row by row, or otherwise blocks may run INLINE in a select arm.
@@ -1730,8 +1731,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     // clients (Gemini high). Shared state is advisory-lock
                     // protected, so concurrent handling is safe.
                     let ctx = Arc::clone(&ctx);
+                    let live = Arc::clone(&live_conns);
+                    live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     tokio::spawn(async move {
                         serve_connection(ctx, stream).await;
+                        live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                     });
                 }
             }
@@ -1931,35 +1935,18 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // running daemon is a retirement request at the same quiet
                 // boundary idle-exit owns -- same fresh no-worker probe, same
                 // graceful tail, distinct receipt. Both the drift stat and
-                // the no-worker probe run OFF the arm; the arm reads only the
-                // settled flag, refreshed every 6th tick (30s). A daemon with
-                // live work keeps serving the old build until a quiet probe
+                // the no-worker probe run OFF the arm. A daemon with live
+                // work keeps serving the old build until a quiet probe
                 // settles.
-                drift_tick += 1;
-                if drift_tick >= 6 {
-                    drift_tick = 0;
-                    if !drift_stat_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                        let gate = Arc::clone(&drift_stat_in_flight);
-                        let slot = Arc::clone(&drift_stat_verdict);
-                        let fingerprint = ctx.exe_fingerprint.clone();
-                        tokio::task::spawn_blocking(move || {
-                            let _gate = SweepGate(gate);
-                            let drifted = fingerprint
-                                .map(|fp| {
-                                    matches!(
-                                        crate::drift::self_drift(&fp),
-                                        crate::drift::DriftState::Drifted { .. }
-                                    )
-                                })
-                                .unwrap_or(false);
-                            *slot.lock().unwrap() = Some(drifted);
-                        });
-                    }
-                }
-                let drifted = drift_stat_verdict.lock().unwrap().unwrap_or(false);
+                let (drifted, drift_refreshed) = drift_flag.tick(ctx.exe_fingerprint.as_ref());
                 let idle_elapsed = last_activity.elapsed() >= ctx.opts.idle_exit;
-                let retire_reason =
-                    crate::quiet_retire::quiet_retire_reason(drifted, ab_active, idle_elapsed);
+                let no_open_rpc = live_conns.load(std::sync::atomic::Ordering::SeqCst) == 0;
+                let retire_reason = crate::quiet_retire::quiet_retire_reason(
+                    drifted,
+                    ab_active,
+                    idle_elapsed,
+                    no_open_rpc,
+                );
                 if retire_reason.is_some() {
                     // The liveness read (blocking CONNECT probes) runs OFF the
                     // select arm: an in-arm probe against a wedged worker's
@@ -1968,7 +1955,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     // exit fires on its verdict. Idle-driven probes repeat
                     // every tick (the 30-minute window throttles them);
                     // drift-driven probes repeat at the 30s stat cadence.
-                    let drift_probe_due = drifted && drift_tick == 0;
+                    let drift_probe_due = drifted && drift_refreshed;
                     if (idle_elapsed || drift_probe_due)
                         && !idle_probe_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst)
                     {

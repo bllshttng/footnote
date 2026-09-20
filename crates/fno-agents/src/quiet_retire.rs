@@ -8,6 +8,7 @@
 use std::time::Instant;
 
 use serde_json::json;
+use std::sync::Arc;
 
 use crate::paths::AgentsHome;
 
@@ -58,16 +59,19 @@ pub(crate) fn no_live_worker(home: &AgentsHome) -> bool {
 
 /// Which reason, if any, retires the daemon through the shared graceful tail
 /// on this idle tick. Measured build drift outranks plain idle-elapsed when
-/// both fire; both still need the fresh no-worker probe verdict before
-/// anything exits. Fail-safe by construction: the caller maps a missing
-/// fingerprint or an unreadable exe to `drifted = false`, and a live
-/// active-backlog supervisor blocks both reasons.
+/// both fire; both still need the fresh no-worker probe verdict and a
+/// connection-free moment before anything exits. Fail-safe by construction:
+/// the caller maps a missing fingerprint or an unreadable exe to
+/// `drifted = false`, and a live active-backlog supervisor or an unfinished
+/// accepted RPC (a `--follow` log stream holds one open on purpose) blocks
+/// both reasons.
 pub(crate) fn quiet_retire_reason(
     drifted: bool,
     ab_active: bool,
     idle_elapsed: bool,
+    no_open_rpc: bool,
 ) -> Option<&'static str> {
-    if ab_active {
+    if ab_active || !no_open_rpc {
         return None;
     }
     if drifted {
@@ -104,6 +108,70 @@ pub(crate) fn daemon_exited_payload(reason: &str) -> serde_json::Value {
     json!({"clean": reason != "socket-lost", "reason": reason})
 }
 
+/// The daemon's settled drift flag: the stat pair runs off-loop every 6th
+/// tick (30s) behind a one-in-flight gate, and the select arm reads only the
+/// settled bool, never the filesystem. A drifted binary stays drifted until
+/// the process ends, so the flag sticks; a fingerprint that never captured
+/// reads false forever (Unknown is never a retirement).
+pub(crate) struct DriftFlag {
+    slot: Arc<std::sync::Mutex<Option<bool>>>,
+    in_flight: Arc<std::sync::atomic::AtomicBool>,
+    subtick: u32,
+}
+
+impl Default for DriftFlag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DriftFlag {
+    pub(crate) fn new() -> Self {
+        DriftFlag {
+            slot: Arc::new(std::sync::Mutex::new(None)),
+            in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            subtick: 0,
+        }
+    }
+
+    /// One idle-tick step: refresh off-loop at most every 6th tick; always
+    /// return the settled value (false until the first stat lands) and
+    /// whether this tick refreshed it (drift-driven probes repeat at that
+    /// cadence, not every tick).
+    pub(crate) fn tick(
+        &mut self,
+        fingerprint: Option<&crate::drift::ExeFingerprint>,
+    ) -> (bool, bool) {
+        let mut refreshed = false;
+        self.subtick += 1;
+        if self.subtick >= 6 {
+            self.subtick = 0;
+            refreshed = true;
+            if !self
+                .in_flight
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                let gate = Arc::clone(&self.in_flight);
+                let slot = Arc::clone(&self.slot);
+                let fingerprint = fingerprint.cloned();
+                tokio::task::spawn_blocking(move || {
+                    let _gate = crate::daemon::SweepGate(gate);
+                    let drifted = fingerprint
+                        .map(|fp| {
+                            matches!(
+                                crate::drift::self_drift(&fp),
+                                crate::drift::DriftState::Drifted { .. }
+                            )
+                        })
+                        .unwrap_or(false);
+                    *slot.lock().unwrap() = Some(drifted);
+                });
+            }
+        }
+        (self.slot.lock().unwrap().unwrap_or(false), refreshed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,13 +183,19 @@ mod tests {
     /// AC1-HP: measured drift retires without waiting out the idle window.
     #[test]
     fn quiet_retire_reason_drift_fires_without_idle_wait() {
-        assert_eq!(quiet_retire_reason(drifted(), false, false), Some("drift"));
+        assert_eq!(
+            quiet_retire_reason(drifted(), false, false, true),
+            Some("drift")
+        );
     }
 
     /// When both conditions hold, drift is the named reason.
     #[test]
     fn quiet_retire_reason_drift_outranks_idle() {
-        assert_eq!(quiet_retire_reason(drifted(), false, true), Some("drift"));
+        assert_eq!(
+            quiet_retire_reason(drifted(), false, true, true),
+            Some("drift")
+        );
     }
 
     /// AC1-ERR: no drift (fresh, Unknown, missing -- the caller maps all of
@@ -129,15 +203,23 @@ mod tests {
     /// idle path may fire.
     #[test]
     fn quiet_retire_reason_fails_safe_when_not_drifted() {
-        assert_eq!(quiet_retire_reason(false, false, false), None);
-        assert_eq!(quiet_retire_reason(false, false, true), Some("idle"));
+        assert_eq!(quiet_retire_reason(false, false, false, true), None);
+        assert_eq!(quiet_retire_reason(false, false, true, true), Some("idle"));
     }
 
     /// AC1-ERR: a live active-backlog supervisor blocks drift and idle alike.
     #[test]
     fn quiet_retire_reason_ab_active_blocks_both() {
-        assert_eq!(quiet_retire_reason(drifted(), true, false), None);
-        assert_eq!(quiet_retire_reason(false, true, true), None);
+        assert_eq!(quiet_retire_reason(drifted(), true, false, true), None);
+        assert_eq!(quiet_retire_reason(false, true, true, true), None);
+    }
+
+    /// An unfinished accepted RPC (a `--follow` log stream holds one open on
+    /// purpose) blocks drift and idle alike, however quiet the fleet looks.
+    #[test]
+    fn quiet_retire_reason_open_rpc_blocks_both() {
+        assert_eq!(quiet_retire_reason(drifted(), false, false, false), None);
+        assert_eq!(quiet_retire_reason(false, false, true, false), None);
     }
 
     /// The fresh-verdict gate: a retirement fires only when the probe saw no
