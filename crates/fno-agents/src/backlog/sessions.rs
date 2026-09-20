@@ -100,7 +100,7 @@ pub fn delete(connection: &Connection, node_id: &str) -> Result<(), String> {
 /// unparsable value reads as empty.
 pub fn load(connection: &Connection, node_id: &str) -> Result<Vec<SessionRecord>, String> {
     let mut statement = connection
-        .prepare(
+        .prepare_cached(
             "SELECT phase, harness, session_id, started_at, ended_at, ended_by, effort, at,
                     claimed_at, observed_model, merge_grant, extras
              FROM sessions WHERE node_id = ?1 ORDER BY seq",
