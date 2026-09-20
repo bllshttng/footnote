@@ -2518,6 +2518,22 @@ fn gate_fault_refusal(provider: Option<&str>, reason: &str, error: &str) -> Refu
 /// this refuses like the provider cap. Every number comes from
 /// [`spawn_gate_lanes::share_reading`]: the count the gate refuses on and the
 /// count any readout prints are one value.
+/// The held-rows clause of the king-share refusal: the row names the caller
+/// can act on, capped at five with an ellipsis like the unattributed suffix.
+pub(crate) fn held_rows_suffix(held_rows: Option<&Vec<String>>) -> String {
+    match held_rows.filter(|r| !r.is_empty()) {
+        Some(rows) => {
+            let shown: Vec<String> = rows.iter().take(5).cloned().collect();
+            format!(
+                "; the rows charged to you are {}{}",
+                shown.join(", "),
+                if rows.len() > 5 { "..." } else { "" }
+            )
+        }
+        None => String::new(),
+    }
+}
+
 fn check_king_share(
     registry_path: &Path,
     cap: usize,
@@ -2543,6 +2559,9 @@ fn check_king_share(
          (--force to bypass)",
         &caller[..caller.len().min(8)]
     );
+    // The held names read before the unattributed bucket: they are the rows
+    // the caller can stop, where the bucket names nobody.
+    msg.push_str(&held_rows_suffix(reading.held_rows.as_ref()));
     if let Some(rows) = reading.unattributed_rows.filter(|r| !r.is_empty()) {
         let shown: Vec<String> = rows.iter().take(5).cloned().collect();
         msg.push_str(&format!(
@@ -2559,7 +2578,11 @@ fn check_king_share(
         .ev("held", serde_json::json!(held))
         .ev("share", serde_json::json!(share))
         .ev("max_live", serde_json::json!(cap))
-        .ev("kings", serde_json::json!(kings)))
+        .ev("kings", serde_json::json!(kings))
+        .ev(
+            "held_rows",
+            serde_json::json!(reading.held_rows.clone().unwrap_or_default()),
+        ))
 }
 
 // ---------------------------------------------------------------------------
@@ -3955,6 +3978,57 @@ MemAvailable:    8000000 kB\n";
         assert_eq!(refusal.event.get("held"), Some(&serde_json::json!(2)));
         assert_eq!(refusal.event.get("share"), Some(&serde_json::json!(2)));
         assert_eq!(refusal.event.get("kings"), Some(&serde_json::json!(2)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The held-rows clause names the caller's rows (never the bucket),
+    /// caps at five with an ellipsis, and vanishes when there are none.
+    #[test]
+    fn held_rows_suffix_names_rows_and_caps_at_five() {
+        let rows =
+            |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
+        assert_eq!(
+            held_rows_suffix(Some(&rows(&["w1", "w2"]))),
+            "; the rows charged to you are w1, w2"
+        );
+        assert_eq!(
+            held_rows_suffix(Some(&rows(&["w1", "w2", "w3", "w4", "w5", "w6", "w7"]))),
+            "; the rows charged to you are w1, w2, w3, w4, w5..."
+        );
+        assert_eq!(held_rows_suffix(Some(&rows(&[]))), "");
+        assert_eq!(held_rows_suffix(None), "");
+    }
+
+    /// The refusal event carries held_rows beside held, so the rows the
+    /// count came from are readable back from the spawn_gate_refused event.
+    #[test]
+    fn king_share_refusal_event_carries_the_held_rows() {
+        let dir = std::env::temp_dir().join(format!("fno-gate-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = dir.join("registry.json");
+        std::fs::write(
+            &reg,
+            format!(
+                r#"{{"schema_version":{},"entries":[{},{},{}]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION,
+                r#"{"name":"king-a","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"session-aaaaaaaa"}"#,
+                r#"{"name":"w1","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"session-aaaaaaaa"}"#,
+                r#"{"name":"w2","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"session-aaaaaaaa"}"#,
+            ),
+        )
+        .unwrap();
+        // One king -> share = cap = 2; the caller holds both rows, so the
+        // share refuses and the event must name w1 and w2.
+        let err = check_king_share(&reg, 2, Some("session-aaaaaaaa"), &serde_json::Map::new())
+            .err()
+            .expect("the full share must refuse");
+        assert_eq!(err.exit_code, EXIT_KING_SHARE);
+        assert_eq!(err.event.get("held"), Some(&serde_json::json!(2)));
+        assert_eq!(
+            err.event.get("held_rows"),
+            Some(&serde_json::json!(["w1", "w2"]))
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
