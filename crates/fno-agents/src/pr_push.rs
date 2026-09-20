@@ -22,9 +22,12 @@
 //! A rebased branch is pushed with `--force-with-lease` pinned to the exact
 //! remote sha this run fetched, and only after a patch-equivalence check
 //! proves the remote branch holds no commit the branch lacks, so the lease
-//! can never drop a commit another writer pushed. The git pre-push hook is
-//! unaffected: it refuses protected branches by destination, and this verb
-//! refuses them before anything moves.
+//! can never drop a commit another writer pushed. A merge commit on the
+//! remote side counts only when its tree equals the automatic merge of its
+//! parents: a merge carrying hand-resolved content is refused, never
+//! leased over. The git pre-push hook is unaffected: it refuses protected
+//! branches by destination, and this verb refuses them before anything
+//! moves.
 
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -317,6 +320,39 @@ pub(crate) fn dirty(git_bin: &str, cwd: &Path) -> bool {
 }
 
 // ── the guarded push ────────────────────────────────────────────────────────
+
+/// One bounded git read for the remote compare. `ok=false` means git ran
+/// and reported failure, not that the read could not happen.
+fn read_remote(git_bin: &str, cwd: &Path, args: &[&str]) -> (bool, String, String) {
+    run_labeled("pr-push", git_bin, args, cwd, READ_TIMEOUT).unwrap_or((
+        false,
+        String::new(),
+        "compare read failed".to_string(),
+    ))
+}
+
+/// The exit-4 refusal for a remote that cannot be compared; nothing pushed.
+fn compare_fail(remote_ref: &str, err: &str) -> i32 {
+    let err = if err.trim().is_empty() {
+        "compare read failed".to_string()
+    } else {
+        err.to_string()
+    };
+    eprintln!("pr-push: could not compare with {remote_ref} ({err}); nothing pushed");
+    4
+}
+
+/// The exit-3 refusal: the remote branch holds something this push would
+/// drop, and `detail` names it. The text must not contain `not safely
+/// rebasable`, which heal's conflict parser keys on.
+fn remote_only_refusal(remote_ref: &str, branch: &str, detail: &str) -> i32 {
+    eprintln!(
+        "pr-push: {remote_ref} carries commits this branch lacks: {detail}. \
+         Integrate them with git pull --rebase origin {branch}, then re-run \
+         the push. Nothing pushed."
+    );
+    3
+}
 
 /// Everything a push needs. The `bin` seams exist for the same reason heal's
 /// do: push discipline is provable against stub executables instead of a
@@ -809,11 +845,11 @@ pub fn run_push(argv: &[String]) -> i32 {
         // Patch equivalence: the remote branch may only be replaced when
         // every commit on it has a patch-equivalent in the rebased HEAD
         // (--cherry-pick drops those pairs from the right-only listing).
-        // Run after the rebase, so main's commits are already ancestors of
+        // Run before the lease, so main's commits are already ancestors of
         // HEAD and a GitHub "Update branch" merge is handled too.
-        let compared = match run_labeled(
-            "pr-push",
+        let (ok, out, err) = read_remote(
             &git,
+            &cwd,
             &[
                 "log",
                 "--cherry-pick",
@@ -822,40 +858,81 @@ pub fn run_push(argv: &[String]) -> i32 {
                 "--format=%h",
                 &format!("HEAD...{remote_head}"),
             ],
-            &cwd,
-            READ_TIMEOUT,
-        ) {
-            Ok(triple) => triple,
-            // Fail closed, the same as the fetch: an incomparable remote is
-            // never pushed over.
-            Err(err) => (false, String::new(), err),
-        };
-        if compared.0 {
-            let out = compared.1;
-            let remote_only = out
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ");
-            if !remote_only.is_empty() {
-                eprintln!(
-                    "pr-push: {remote_ref} carries commits this branch lacks: \
-                     {remote_only}. Integrate them with git pull --rebase origin \
-                     {branch}, then re-run the push. Nothing pushed."
-                );
-                return 3;
-            }
-            lease = Some(remote_head.clone());
-        } else {
-            let err = if compared.2.trim().is_empty() {
-                "git log failed".to_string()
-            } else {
-                compared.2
-            };
-            eprintln!("pr-push: could not compare with {remote_ref} ({err}); nothing pushed");
-            return 4;
+        );
+        if !ok {
+            return compare_fail(&remote_ref, &err);
         }
+        let remote_only = out
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !remote_only.is_empty() {
+            return remote_only_refusal(&remote_ref, &branch, &remote_only);
+        }
+        // A merge commit has no patch to pair: --no-merges skips it, so a
+        // merge whose tree holds hand-resolved content (a web-UI conflict
+        // resolution, manual edits folded into the merge) reads as empty
+        // and the lease would delete that content. A merge survives only
+        // when its tree equals the automatic merge of its parents, which
+        // proves it introduces nothing of its own.
+        let (ok, out, err) = read_remote(
+            &git,
+            &cwd,
+            &[
+                "log",
+                "--right-only",
+                "--format=%H %P",
+                "--merges",
+                &format!("HEAD...{remote_head}"),
+            ],
+        );
+        if !ok {
+            return compare_fail(&remote_ref, &err);
+        }
+        for row in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let mut fields = row.split_whitespace();
+            let sha = match fields.next() {
+                Some(sha) => sha.to_string(),
+                None => continue,
+            };
+            let parents: Vec<&str> = fields.collect();
+            if parents.len() != 2 {
+                return remote_only_refusal(&remote_ref, &branch, &format!("merge {sha}"));
+            }
+            let (ok, mout, merr) = read_remote(
+                &git,
+                &cwd,
+                &["merge-tree", "--write-tree", parents[0], parents[1]],
+            );
+            let auto = mout.lines().next().unwrap_or("").trim().to_string();
+            if auto.is_empty() {
+                // No tree answer at all (an old git without --write-tree):
+                // the merge cannot be validated, so nothing is pushed.
+                return compare_fail(&remote_ref, &merr);
+            }
+            if !ok {
+                return remote_only_refusal(
+                    &remote_ref,
+                    &branch,
+                    &format!("the hand-resolved merge {sha}"),
+                );
+            }
+            let (ok, tout, terr) =
+                read_remote(&git, &cwd, &["rev-parse", &format!("{sha}^{{tree}}")]);
+            if !ok {
+                return compare_fail(&remote_ref, &terr);
+            }
+            if tout.trim() != auto {
+                return remote_only_refusal(
+                    &remote_ref,
+                    &branch,
+                    &format!("the hand-resolved merge {sha}"),
+                );
+            }
+        }
+        lease = Some(remote_head.clone());
     }
 
     // (7) Preflight.
