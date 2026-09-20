@@ -398,6 +398,15 @@ pub enum Event {
     FocusFeed,
     /// Show/hide the sideline (prefix+b).
     TogglePanel,
+    /// Toggle the new-agent composer at the sideline's bottom (prefix+i).
+    /// Opening a retained draft reveals it untouched; opening with the
+    /// sideline hidden shows the sideline first, so the composer is never
+    /// open and unpainted.
+    ToggleComposer,
+    /// Toggle the full-screen sideline (prefix+F): the agent table takes the
+    /// terminal width with the composer at the bottom and the panes do not
+    /// paint. Client-local paint: no `Resize` travels in either direction.
+    ToggleFullSideline,
     /// Cycle the sideline density slim -> regular -> extended
     /// (prefix+B). Orthogonal to [`Event::TogglePanel`]: this changes how much
     /// each row shows, that changes whether the panel renders at all.
@@ -1146,6 +1155,20 @@ fn default_bindings() -> Vec<KeyBinding> {
             "toggle sideline",
         ),
         b(
+            b'i',
+            "toggle-composer",
+            ToggleComposer,
+            Global,
+            "new-agent composer",
+        ),
+        b(
+            b'F',
+            "full-sideline",
+            ToggleFullSideline,
+            Global,
+            "full-screen sideline",
+        ),
+        b(
             b'B',
             "cycle-density",
             CycleDensity,
@@ -1420,15 +1443,10 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
             format!("literal {p}"),
             KeySection::Global,
         ),
-        // The global sideline chord: a multi-byte CSI, so it lives
-        // HERE with the other display-only rows rather than in the single-byte
-        // key_bindings table the modal executes from - the scanner's ChordEsc
-        // branch dispatches it, not chord().
-        (
-            "Ctrl+Opt+Left".into(),
-            "sideline (global, no prefix)".into(),
-            KeySection::Global,
-        ),
+        // The global sideline chord (Ctrl+Opt+Left, a multi-byte CSI the
+        // scanner's ChordEsc branch dispatches, not chord()) has no row here:
+        // its modal row was reclaimed for the x-9a6f binding budget, and this
+        // doc plus the module header still name it.
         // The dead-row removal paths. Bare sideline keys, not chords -
         // listed here so the reference names them; Enter on them BELs.
         (
@@ -1694,6 +1712,8 @@ mod tests {
         assert_eq!(scan_all(&[b"\x02w"]), vec![Event::OpenSelector]);
         assert_eq!(scan_all(&[b"\x02a"]), vec![Event::OpenAnswers]);
         assert_eq!(scan_all(&[b"\x02b"]), vec![Event::TogglePanel]);
+        assert_eq!(scan_all(&[b"\x02i"]), vec![Event::ToggleComposer]);
+        assert_eq!(scan_all(&[b"\x02F"]), vec![Event::ToggleFullSideline]);
         assert_eq!(scan_all(&[b"\x02s"]), vec![Event::ToggleStatus]);
         assert_eq!(scan_all(&[b"\x02?"]), vec![Event::ShowKeys]);
         assert_eq!(scan_all(&[b"\x02d"]), vec![Event::Detach]);

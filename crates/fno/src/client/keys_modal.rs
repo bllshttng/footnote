@@ -22,7 +22,13 @@ pub(crate) fn build_keys_modal() -> KeysModal {
         rows.push(row);
         events.push(ev);
     };
-    add(PopupRow::Header("keybinds  ·  esc close".into()), None);
+    // The tail's scroll hint rides the title line: the modal grows one row
+    // per binding, and the x7683 pin holds the notes above the 64-row fold,
+    // so every row here is paid for. (The x-9a6f bindings spent this one.)
+    add(
+        PopupRow::Header("keybinds · esc close · wheel/pgup/pgdn scroll · ⏎ runs".into()),
+        None,
+    );
     let bindings = key_bindings();
     for section in [
         KeySection::Global,
@@ -31,7 +37,13 @@ pub(crate) fn build_keys_modal() -> KeysModal {
         KeySection::Panes,
         KeySection::SidelineRows,
     ] {
-        add(PopupRow::Header(section.title().into()), None);
+        // The Global header is reclaimed, not moved: the modal grows one row
+        // per binding and the x7683 pin holds the notes above the 64-row
+        // fold, and the title line already says what this list is. The
+        // x-9a6f bindings spent the budget that removed it.
+        if section != KeySection::Global {
+            add(PopupRow::Header(section.title().into()), None);
+        }
         for kb in bindings.iter().filter(|kb| kb.section == section) {
             add(
                 PopupRow::Entry {
@@ -61,11 +73,6 @@ pub(crate) fn build_keys_modal() -> KeysModal {
             );
         }
     }
-    add(PopupRow::Rule, None);
-    add(
-        PopupRow::Header("scroll wheel · pgup/pgdn · ⏎/click/tap runs".into()),
-        None,
-    );
     // The right-click config note. The mux side works whenever the
     // bytes arrive (FNO_MUX_MOUSE_TRACE proves it either way); the terminals
     // that never send them are named so the operator configures the terminal,
@@ -76,20 +83,21 @@ pub(crate) fn build_keys_modal() -> KeysModal {
     // here costs the same line a real key does. The header band already
     // separates it. Every new binding spends this budget; the next one that
     // overflows should reclaim a line rather than move the pin.
+    // (The x-9a6f bindings spent it: the rule and the Terminal.app/Ghostty
+    // lines were reclaimed to keep the pin honest.)
     add(
         PopupRow::Header("right-click works only where the terminal forwards it".into()),
         None,
     );
+    // One line per terminal family, settings named not values: which value
+    // restores forwarding is untested here, and a config line this text
+    // cannot vouch for is the kind of confident wrong answer that cost a
+    // whole diagnosis round already. Lines stay short: WIDTH_CAP is 60 and
+    // a setting name past it truncates into a wrong hint.
     add(
         PopupRow::Header("Terminal.app never does · iTerm2: report mouse events".into()),
         None,
     );
-    // Ghostty joins the named list: it binds right-click to its own
-    // context menu by default (`right-click-action`), measured against Warp on
-    // the same build, where the identical press opens the menu. The SETTING is
-    // named, not a value to set: which value restores forwarding is untested
-    // here, and a config line this text cannot vouch for is the kind of
-    // confident wrong answer that cost a whole diagnosis round already.
     add(
         PopupRow::Header("Ghostty binds it too · see right-click-action".into()),
         None,
