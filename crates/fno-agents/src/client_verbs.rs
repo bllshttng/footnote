@@ -2484,41 +2484,25 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         }
     }
 
-    // Live claude row (short_id, no mux ref): `claim_uuid` is None only on
-    // this arm (the dead-relaunch arm above sets Some(uuid); the two error
-    // arms already returned). A bare `claude attach` exec here has no pty,
-    // no route-settings restore, and no post-exec verification -- the same
-    // gap the Python fallback (`resume_cli.py::_resume_claude_wake`) closed.
-    // Delegating to it rather than re-deriving that pty/bracketed-paste/
-    // retry recipe natively keeps ONE implementation instead of two: a fix
-    // landed only here would leave `fno agents resume` (this binary) fixed
-    // and `fno-agents resume` still printing "Attaching..." and exiting,
-    // which is the guard-on-one-of-N-paths trap this repo already tracks.
+    // Live claude row (short_id, no mux ref): delegate to the Python wake
+    // (resume_cli.py `_resume_claude_wake`) rather than re-deriving its
+    // pty/bracketed-paste/retry recipe natively - ONE implementation; the
+    // full rationale lives on `claude_supervisor::guard_birth`, which this
+    // arm also calls before the exec (the wake's `claude attach` can birth
+    // the supervisor; the delegation keeps its anti-recursion pin, which the
+    // guard never touches).
     if should_delegate_claude_live_attach(harness, &claim_uuid, &mux_session) {
-        // No claim here: acquiring one before the skip-eligibility read raced
-        // two no-op resumes on a pty-write lock neither was taking. The
-        // delegated wake (resume_cli.py `_resume_claude_wake`) acquires the
-        // identical `resume-attach: {short_id}` key under its own skip check,
-        // so the wake stays guarded through either entrypoint.
-        // Route via `fno`, never a bare `fno-py` (a cargo-only install has
-        // only the mux on PATH; see crates/fno/src/bootstrap.rs), and pin
-        // FNO_AGENTS_RUNTIME=python: `resume` is a RUST_CLIENT_VERBS entry, so
-        // without the pin this exec re-enters this same binary and loops.
-        // exec(), not status(): the process is replaced - the same
-        // exit-127-on-failure convention as bin/client.rs, and no child
-        // process group to propagate signals to.
+        // No claim here: the delegated wake acquires the identical
+        // `resume-attach: {short_id}` key under its own skip check.
+        // Route via `fno`, never a bare `fno-py`: a cargo-only install has
+        // only the mux on PATH (crates/fno/src/bootstrap.rs).
         use std::os::unix::process::CommandExt;
         let mut command = std::process::Command::new("fno");
         command
-            // --cwd carries the EnterWorktree-resolved cwd computed above
-            // (`resolved_cwd`), not the raw registry value: Python has no
-            // equivalent of `resolve_resume_cwd` and would otherwise re-derive
-            // the stale pre-EnterWorktree cwd from the registry entry itself.
+            // --cwd is the EnterWorktree-resolved cwd, not the raw registry
+            // value: Python has no `resolve_resume_cwd` equivalent.
             .args(["agents", "resume", &name, "--cwd", cwd])
             .env("FNO_AGENTS_RUNTIME", "python");
-        // the delegated wake re-resolves the same plan on the Python
-        // side; carrying the env here keeps the two runtimes from disagreeing
-        // if a stale binary lags one side of the rule.
         if let Some(plan) = &reentry_plan {
             for (key, value) in &plan.env {
                 command.env(key, value);
@@ -2530,6 +2514,11 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         if let Some(msg) = &message {
             command.args(["--message", msg]);
         }
+        if let Some(plan) = &reentry_plan {
+            crate::claude_supervisor::guard_birth_for_plan(&plan.env);
+        }
+        // exec(), not status(): the process is replaced (exit-127-on-failure
+        // convention, no child process group to propagate signals to).
         let err = command.exec();
         eprintln!(
             "fno agents resume: delegating {name} to fno-py failed: {err}. \
@@ -2695,6 +2684,14 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     if let Some(plan) = &reentry_plan {
         for (key, value) in &plan.env {
             exec_command.env(key, value);
+        }
+    }
+    // A claude row's argv is a `claude` client, so this exec can birth the
+    // supervisor too.
+    if harness == "claude" {
+        match &reentry_plan {
+            Some(plan) => crate::claude_supervisor::guard_birth_for_plan(&plan.env),
+            None => crate::claude_supervisor::guard_birth([]),
         }
     }
     // the restored route's env rides the in-terminal exec.
@@ -2903,6 +2900,8 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
     for (key, value) in &plan.env {
         exec_command.env(key, value);
     }
+    // recover execs a claude client, so it can birth the supervisor too.
+    crate::claude_supervisor::guard_birth_for_plan(&plan.env);
     let err = exec_command.exec();
     // exec only returns on failure.
     eprintln!("fno agents recover: failed to exec {}: {err}", plan.argv[0]);
