@@ -22,6 +22,7 @@ from fno.pr_watch._king_wake import (
     _ask_wake_ceiling,
     _store_board_hash,
     run_king_wake,
+    wake_detail,
 )
 
 NOW = datetime(2026, 8, 29, 12, 0, 0, tzinfo=timezone.utc)
@@ -760,6 +761,49 @@ def test_a_conflicted_scope_is_skipped(tmp_path):
     assert "conflicting" in (summary["note"] or "")
 
 
+def test_the_receipt_names_refusals_and_dropped_crowns(tmp_path):
+    # A crown the pass cannot see must be named: epic-y has a court entry
+    # and a registered holder but no manifest on disk, and epic-x is live
+    # and refuses as working. Both words belong in the receipt.
+    from fno.king.state import king_manifest_path, king_state_root, write_manifest
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    write_manifest(
+        king_manifest_path("epic-x", state_root=king_state_root(root)),
+        scope="epic-x",
+        harness_session_id="11111111-2222-3333-4444-555555555555",
+        force=True,
+    )
+    rec = _Recorder()
+    crowns = [
+        {"holder": "king-x", "scope": "epic-x", "status": "live"},
+        {"holder": "king-y", "scope": "epic-y", "status": "live"},
+    ]
+
+    summary = run_king_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        court_fn=lambda _rows: {"crowns": crowns, "conflicts": []},
+        rows_fn=lambda: [
+            SimpleNamespace(name="king-x", cwd=str(root), status="live", short_id="aa11bb22"),
+            SimpleNamespace(name="king-y", cwd=str(root), status="live", short_id="cc33dd44"),
+        ],
+        truth_fn=lambda h: {"state": "working"},
+        unread_fn=lambda a: [object()] if a == "king-x" else [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+    )
+
+    assert summary["crowns"] == 1, "epic-y has no manifest, so it cannot be a target"
+    assert summary["refused"] == [{"scope": "epic-x", "refusal": "working"}]
+    assert "manifest missing" in (summary["note"] or ""), summary["note"]
+    detail = wake_detail(summary)
+    assert "refused=epic-x:working" in detail, detail
+    assert "manifest missing" in detail, detail
+
+
 def test_an_unreadable_registry_wakes_nothing(tmp_path):
     rec = _Recorder()
     summary = run_king_wake(
@@ -992,6 +1036,45 @@ def test_a_sidecar_from_before_rows_were_stored_is_a_first_observation(tmp_path)
 
     payload = json_mod.loads(_sidecar(manifest).read_text(encoding="utf-8"))
     assert payload["board_rows"], "the pass records the rows it could not diff"
+
+
+def test_an_empty_board_stores_an_observation_so_its_first_node_is_a_change(tmp_path):
+    # A scope compiling to zero rows stores board_rows: []; the reader must
+    # call that an observation. Reading it as none kept first_observation
+    # True forever, so the scope's first real node was swallowed as a seed
+    # that is not a trigger, on every pass.
+    elsewhere = [
+        {
+            "id": "o-1",
+            "project": "elsewhere",
+            "status": "ready",
+            "_kanban_column": "ready",
+            "priority": "p1",
+        }
+    ]
+    _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: elsewhere, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    quiet_refill = _BOARD_A_QUIET + [
+        {
+            "id": "x-2",
+            "project": "proj",
+            "status": "done",
+            "completed_at": "2026-09-06T00:00:00Z",
+            "_kanban_column": "done",
+            "priority": "p2",
+        }
+    ]
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: quiet_refill, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches and rec.dispatches[0][1] == "board", rec.dispatches
 
 
 def test_the_spawned_walk_argv_carries_the_board_diff(monkeypatch, tmp_path):
@@ -1534,10 +1617,30 @@ def test_five_quiet_crowns_skip_the_truth_read_one_mail_crown_pays_it(tmp_path):
     assert [d[0] for d in rec.dispatches] == ["epic-3"]
 
 
-def test_a_pending_seed_still_reads_truth_but_writes_nothing_for_a_working_holder(tmp_path):
-    # AC1-EDGE: a first observation reads truth, and a holder that is there
-    # but working seeds nothing - the exact write set the truth-first order
-    # produced.
+def test_a_working_holder_seeds_the_sidecar_so_the_next_pass_reads_nothing(tmp_path):
+    # The production case for every live king: truth says working, the seeds
+    # still land, and the next pass costs no truth read. Gating the seeds on
+    # the liveness refusal closed a loop: the read existed to gate the seed,
+    # and the refusal skipped the seed that would have retired the read.
+    _run(tmp_path, truth=lambda h: {"state": "working"}, unread=lambda a: [])
+
+    rec, summary, manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "working"},
+        unread=lambda a: [],
+        fresh_manifest=False,
+    )
+
+    payload = json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert "answered_cursor" in payload, "a live holder seeds"
+    assert summary["truth_reads"] == 0, f"the seeded pass still paid a read: {summary}"
+
+
+def test_a_working_holder_seeds_a_first_observation_and_pays_no_read(tmp_path):
+    # AC1-EDGE, reordered: seeds record what this pass observed, so they do
+    # not depend on the holder. The truth-first order this test used to pin
+    # was the defect: an unwritten seed re-fires next pass, so the read
+    # meant to be conditional ran for every live king on every tick.
     rec, summary, manifest = _run(
         tmp_path,
         truth=lambda h: {"state": "working"},
@@ -1545,9 +1648,10 @@ def test_a_pending_seed_still_reads_truth_but_writes_nothing_for_a_working_holde
         extra={"entries_fn": lambda: _BOARD_A_QUIET, "scope_resolver": _PROJECT_RESOLVER},
     )
 
-    assert summary["truth_reads"] == 1, "a pending seed must still read truth"
-    assert not _sidecar(manifest).exists(), "an absent holder seeds nothing"
-    assert summary["refused"] == [{"scope": "epic-x", "refusal": "working"}]
+    assert summary["truth_reads"] == 0, "a crown that cannot wake is not read"
+    payload = json.loads(_sidecar(manifest).read_text(encoding="utf-8"))
+    assert "answered_cursor" in payload and payload["board_rows"], "a live holder seeds"
+    assert summary["refused"] == [], "a skipped crown is not a refusal"
     assert rec.dispatches == []
 
 
