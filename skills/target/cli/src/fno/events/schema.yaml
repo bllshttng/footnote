@@ -2129,6 +2129,23 @@ event_types:
       required: []
       properties: {}
 
+  - name: daemon_drift_pending_exit
+    description: "Daemon measured its own build drifted and retired at a quiet tick with no live worker, so the next lazy start runs the installed binary."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        running:
+          type: string
+          description: "Path of the executable the daemon was running."
+        running_size:
+          type: integer
+        on_disk:
+          type: string
+          description: "Path of the drifted on-disk binary."
+        on_disk_size:
+          type: integer
+
   - name: daemon_shutting_down
     description: "Daemon received shutdown signal and is winding down."
     sources: [daemon]
