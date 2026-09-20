@@ -146,6 +146,12 @@ fn main() {
     if args.first().map(String::as_str) == Some("backlog-update") {
         std::process::exit(fno_agents::backlog::patch::run_update(&args[1..]));
     }
+    // The SessionStart reconcile sweep execs here; see backlog::orphan_plans.
+    if args.first().map(String::as_str) == Some("backlog-orphan-plans") {
+        std::process::exit(fno_agents::backlog::orphan_plans::run_orphan_plans(
+            &args[1..],
+        ));
+    }
     // scripts/validate-plan.sh shells HERE and reads the E/W/X/O/U line
     // protocol back.
     if args.first().map(String::as_str) == Some("surface-check") {
