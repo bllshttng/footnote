@@ -1260,6 +1260,44 @@ fn no_live_worker(home: &AgentsHome) -> bool {
         .unwrap_or(false)
 }
 
+/// Which reason, if any, retires the daemon through the shared graceful tail
+/// on this idle tick. Measured build drift (x-6648) outranks plain
+/// idle-elapsed when both fire; both still need the fresh no-worker probe
+/// verdict before anything exits. Fail-safe by construction: a missing
+/// fingerprint or an unreadable exe classifies `Unknown`, which is never a
+/// retirement, and a live active-backlog supervisor blocks both reasons.
+fn quiet_retire_reason(
+    drift: Option<&crate::drift::DriftState>,
+    ab_active: bool,
+    idle_elapsed: bool,
+) -> Option<&'static str> {
+    if ab_active {
+        return None;
+    }
+    if matches!(drift, Some(crate::drift::DriftState::Drifted { .. })) {
+        return Some("drift");
+    }
+    if idle_elapsed {
+        return Some("idle");
+    }
+    None
+}
+
+/// The freshness gate a probe verdict must pass before it may retire the
+/// daemon: no worker live, no request served, and no registry write while the
+/// probe ran. Pane-substrate workers spawn by writing the registry directly
+/// with no daemon contact, so the mtime is the one positive marker of that
+/// race (shared verbatim by idle and drift retirement).
+fn probe_verdict_fresh(
+    no_worker: bool,
+    probe_activity: Instant,
+    last_activity: Instant,
+    probe_mtime: Option<std::time::SystemTime>,
+    mtime_now: Option<std::time::SystemTime>,
+) -> bool {
+    no_worker && probe_activity == last_activity && mtime_now == probe_mtime
+}
+
 // ---------------------------------------------------------------------------
 // Socket bind + perms + lazy-start race.
 // ---------------------------------------------------------------------------
@@ -1961,7 +1999,18 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // An enabled active-backlog project keeps the daemon resident
                 // (OQ1 Option A): idle-exit must never kill a live supervisor.
                 let ab_active = ab_live.load(std::sync::atomic::Ordering::SeqCst);
-                if !ab_active && last_activity.elapsed() >= ctx.opts.idle_exit {
+                // Drift retirement (x-6648): the on-disk binary changing under
+                // a running daemon is a retirement request at the same quiet
+                // boundary idle-exit owns -- same fresh no-worker probe, same
+                // graceful tail, distinct receipt. A daemon with live work
+                // keeps serving the old build until a quiet tick settles.
+                let drift = ctx.exe_fingerprint.as_ref().map(crate::drift::self_drift);
+                let retire_reason = quiet_retire_reason(
+                    drift.as_ref(),
+                    ab_active,
+                    last_activity.elapsed() >= ctx.opts.idle_exit,
+                );
+                if retire_reason.is_some() {
                     // The liveness read (blocking CONNECT probes) runs OFF the
                     // select arm: an in-arm probe against a wedged worker's
                     // filling backlog is the unreachable-AND-unstoppable shape
@@ -1985,22 +2034,38 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     }
                     let verdict = idle_probe_verdict.lock().unwrap().take();
                     let fresh = verdict.is_some_and(|(no_worker, probe_activity, probe_mtime)| {
-                        let mtime_now = std::fs::metadata(ctx.home.registry_json())
-                            .ok()
-                            .and_then(|m| m.modified().ok());
-                        no_worker
-                            && probe_activity == last_activity
-                            && mtime_now == probe_mtime
+                        probe_verdict_fresh(
+                            no_worker,
+                            probe_activity,
+                            last_activity,
+                            probe_mtime,
+                            std::fs::metadata(ctx.home.registry_json())
+                                .ok()
+                                .and_then(|m| m.modified().ok()),
+                        )
                     });
                     if fresh {
+                        if let Some(crate::drift::DriftState::Drifted { running, on_disk }) =
+                            &drift
+                        {
+                            let _ = ctx.emitter.emit(
+                                "daemon_drift_pending_exit",
+                                &json!({
+                                    "running": running.path.display().to_string(),
+                                    "running_size": running.size,
+                                    "on_disk": on_disk.path.display().to_string(),
+                                    "on_disk_size": on_disk.size,
+                                }),
+                            );
+                        }
                         emit_state(&ctx.emitter, DaemonState::IdlePendingExit);
                         let _ = ctx.emitter.emit("daemon_idle_pending_exit", &json!({}));
                         emit_state(&ctx.emitter, DaemonState::ShuttingDown);
                         let _ = ctx.emitter.emit(
                             "daemon_shutting_down",
-                            &json!({"reason": "idle"}),
+                            &json!({"reason": retire_reason}),
                         );
-                        break "idle";
+                        break retire_reason.unwrap();
                     }
                 }
             }
