@@ -71,7 +71,11 @@ impl RetireWatch {
                 gate.store(false, Ordering::Release);
             });
         }
-        match self.slot.lock().unwrap().take() {
+        // Bind first: a match-scrutinee temporary (the MutexGuard) lives
+        // until the end of the whole match, so re-locking the slot inside
+        // the busy arm deadlocked the loop thread against itself.
+        let taken = self.slot.lock().unwrap().take();
+        match taken {
             Some(DriftState::Drifted { running, on_disk }) => {
                 if quiet() {
                     Some((running, on_disk))
@@ -112,5 +116,33 @@ mod tests {
         }
         // No assertion beyond "does not panic or wedge the gate": the
         // in-flight flag must always clear, so later ticks keep statting.
+    }
+
+    #[test]
+    fn busy_tick_reparks_a_drifted_verdict_without_self_deadlocking() {
+        let mut watch = RetireWatch::new();
+        // Park the verdict and hold the one-in-flight gate, so the tick
+        // reaches the busy re-park arm without needing a runtime for the
+        // stat task.
+        let fp = ExeFingerprint::current().expect("test exe is readable");
+        *watch.slot.lock().unwrap() = Some(DriftState::Drifted {
+            running: fp.clone(),
+            on_disk: fp,
+        });
+        watch.in_flight.store(true, Ordering::SeqCst);
+        // tick runs on a throwaway thread: pre-fix it deadlocks re-locking
+        // the slot inside the busy arm, and the timeout turns that hang
+        // into a failure instead of a wedged CI run.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for _ in 0..5 {
+                let _ = watch.tick(|| false);
+            }
+            tx.send(()).ok();
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok(),
+            "tick deadlocked: the scrutinee MutexGuard is still held inside the busy re-park arm",
+        );
     }
 }
