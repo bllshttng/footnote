@@ -40,10 +40,11 @@ pub fn enforce(pre: &[Value], post: &[Value], cap: Option<usize>) -> Result<(), 
     let Some(cap) = cap else {
         return Ok(());
     };
-    fn row_for<'a>(rows: &'a [Value], id: &str) -> Option<&'a Value> {
-        rows.iter()
-            .find(|r| crate::graph_store::entry_id(r) == Some(id))
-    }
+    // Borrowed id indexes, not a linear scan per row: every graph write
+    // reaches this seam, and a `find()` inside the row loop is quadratic
+    // over the whole graph.
+    let post_by_id = crate::graph_store::index_by_id(post);
+    let pre_by_id = crate::graph_store::index_by_id(pre);
     // Rows this write newly parents under an epic: open, parent non-empty
     // and not self, parent typed epic, and the edge is new (the row was
     // absent, or its parent before the write differed).
@@ -58,13 +59,13 @@ pub fn enforce(pre: &[Value], post: &[Value], cap: Option<usize>) -> Result<(), 
         let Some(epic) = parent_of(row).filter(|p| *p != id) else {
             continue;
         };
-        let Some(epic_row) = row_for(post, epic) else {
+        let Some(epic_row) = post_by_id.get(epic).copied() else {
             continue;
         };
         if epic_row.get("type").and_then(Value::as_str) != Some("epic") {
             continue;
         }
-        let pre_row = row_for(pre, id);
+        let pre_row = pre_by_id.get(id).copied();
         // The edge is unchanged AND the row was already open, so this write
         // adds no open child. A child coming back from closed (undefer,
         // reopen) does add one, even under an unchanged edge, so it is
@@ -77,9 +78,13 @@ pub fn enforce(pre: &[Value], post: &[Value], cap: Option<usize>) -> Result<(), 
         }
         // Hand-up exemption: the old parent is terminal AFTER the write, so
         // this edge moves existing work (the done/maintain hand-up) and
-        // adds none.
-        if let Some(old) = pre_row.and_then(parent_of) {
-            if row_for(post, old)
+        // adds none. It covers an ALREADY-OPEN row only, for the same
+        // reason the unchanged edge above does: a row coming back from
+        // closed is new open work wherever it lands.
+        if let Some(old) = pre_row.filter(|r| row_is_open(r)).and_then(parent_of) {
+            if post_by_id
+                .get(old)
+                .copied()
                 .map(crate::graph_store::is_terminal_entry)
                 .unwrap_or(false)
             {
@@ -205,6 +210,25 @@ mod tests {
                          "status": "done", "priority": "p2", "domain": "code"}),
         );
         enforce(&pre, &post, Some(15)).unwrap();
+    }
+
+    #[test]
+    fn a_closed_row_handed_up_into_a_full_epic_is_still_refused() {
+        // The hand-up exemption carries EXISTING OPEN work off a closing
+        // parent. A deferred row that lands open under a full epic in the
+        // same write is new open work, so the exemption must not cover it.
+        let mut pre = full_epic_rows();
+        pre.push(json!({"id": "c-16", "slug": "c-16", "title": "c-16",
+                        "type": "feature", "status": "deferred", "priority": "p2",
+                        "domain": "code", "parent": "p-old"}));
+        let mut post = full_epic_rows();
+        post.push(child("c-16", "e-1"));
+        post.push(json!({"id": "p-old", "slug": "p-old", "title": "p-old",
+                         "type": "feature", "status": "done", "priority": "p2",
+                         "domain": "code"}));
+        let error = enforce(&pre, &post, Some(15)).unwrap_err();
+        assert!(error.contains("'c-16'"), "{error}");
+        assert!(error.contains("16 open children"), "{error}");
     }
 
     #[test]
