@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -226,8 +227,6 @@ def gc_ephemeral(
 
 
 def _now_ms() -> int:
-    import time
-
     return int(time.time() * 1000)
 
 
@@ -247,18 +246,29 @@ def emit_envelope(
     cmd = [bin_path, "doctor", "event", "emit-envelope", "--events", str(events_path)]
     if requested_id:
         cmd += ["--id", requested_id]
-    try:
-        proc = subprocess.run(
-            cmd,
-            input=line,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        raise EventStoreUnavailable(f"native event store unavailable: {exc}") from exc
-    if proc.returncode != 0:
+    # The store's 5s busy timeout can expire under fork-heavy contention
+    # (concurrent emitters on a loaded runner); a short retry absorbs that
+    # tail instead of surfacing it as an unavailable store.
+    detail = ""
+    for attempt in range(3):
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=line,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            raise EventStoreUnavailable(f"native event store unavailable: {exc}") from exc
+        if proc.returncode == 0:
+            detail = ""
+            break
         detail = (proc.stderr or f"exit {proc.returncode}").strip()
+        if "database is locked" not in detail or attempt == 2:
+            break
+        time.sleep(0.25 * (attempt + 1))
+    if detail:
         raise EventStoreUnavailable(f"event store refused the write: {detail}")
     try:
         return json.loads(proc.stdout)
