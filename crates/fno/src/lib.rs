@@ -12,6 +12,7 @@ pub mod agents_view;
 pub mod backlog_view;
 pub mod board_reader;
 pub mod bootstrap;
+pub mod build_drift;
 pub mod chrome;
 pub mod cli_args;
 pub mod client;
