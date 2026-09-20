@@ -85,10 +85,15 @@ def _crowned(
             dropped["conflicting scope(s)"] = dropped.get("conflicting scope(s)", 0) + 1
             continue
         holder = entries[0].get("holder") or ""
+        if not holder:
+            dropped["holderless crown(s)"] = dropped.get("holderless crown(s)", 0) + 1
+            continue
+        # A manifest-only crown's holder is a session uuid, so the
+        # by_holder lookup on row.name never matches it.
         row = by_holder.get(holder)
         cwd = getattr(row, "cwd", "") if row is not None else ""
         short_id = (getattr(row, "short_id", "") or "") if row is not None else ""
-        if not holder or not cwd:
+        if not cwd:
             dropped["unregistered holder(s)"] = dropped.get("unregistered holder(s)", 0) + 1
             continue
         root = Path(cwd)

@@ -1258,13 +1258,8 @@ def tick() -> None:
                         seconds_left_fn=phase_seconds_left,
                         on_step=lambda s: set_tick_phase(f"king_wake:{s}"),
                     )
-                    woke = ", ".join(
-                        f"{w['scope']}:{w['reason']}" for w in wake_summary.get("woke", [])
-                    )
-                    typer.echo(
-                        f"king wake: crowns={wake_summary.get('crowns', 0)}"
-                        + (f" woke={woke}" if woke else "")
-                    )
+                    detail = wake_detail(wake_summary)
+                    typer.echo(f"king wake: {detail}")
                     crowns = int(wake_summary.get("crowns", 0) or 0)
                     woke_n = len(wake_summary.get("woke", []) or [])
                     if crowns == 0:
@@ -1277,7 +1272,6 @@ def tick() -> None:
                         skip = "budget_spent"
                     else:
                         skip = "no_trigger"
-                    detail = wake_detail(wake_summary)
                     _emit_tick_row("king_wake", interval_s=kw_i, acted=woke_n,
                                    skip_reason=skip, detail=detail)
                 except Exception as exc:  # noqa: BLE001 - never let a wake break the tick

@@ -779,6 +779,10 @@ def test_the_receipt_names_refusals_and_dropped_crowns(tmp_path):
     crowns = [
         {"holder": "king-x", "scope": "epic-x", "status": "live"},
         {"holder": "king-y", "scope": "epic-y", "status": "live"},
+        # A manifest-only crown: the holder is a session uuid with no
+        # registry row, the production shape the tally must name.
+        {"holder": "88888888-9999-aaaa-bbbb-cccccccccccc", "scope": "epic-z", "status": "live"},
+        {"holder": "", "scope": "epic-w", "status": "live"},
     ]
 
     summary = run_king_wake(
@@ -796,9 +800,12 @@ def test_the_receipt_names_refusals_and_dropped_crowns(tmp_path):
         ask_fn=lambda *a: None,
     )
 
-    assert summary["crowns"] == 1, "epic-y has no manifest, so it cannot be a target"
+    assert summary["crowns"] == 1, "only epic-x has both row and manifest"
     assert summary["refused"] == [{"scope": "epic-x", "refusal": "working"}]
-    assert "manifest missing" in (summary["note"] or ""), summary["note"]
+    note = summary["note"] or ""
+    assert "manifest missing" in note, note
+    assert "unregistered holder(s)" in note, note
+    assert "holderless crown(s)" in note, note
     detail = wake_detail(summary)
     assert "refused=epic-x:working" in detail, detail
     assert "manifest missing" in detail, detail
