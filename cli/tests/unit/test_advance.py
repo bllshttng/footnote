@@ -1490,7 +1490,8 @@ def test_spawn_worker_argv_with_cwd(monkeypatch):
 
     assert sid == "abc12345"
     cmd = captured["cmd"]
-    assert cmd[:5] == ["fno-py", "agents", "spawn", "--harness", "claude"]
+    assert cmd[0] == adv._subprocess_util.fno_py_cmd()[0]
+    assert cmd[1:5] == ["agents", "spawn", "--harness", "claude"]
     assert "--cwd" in cmd and "/work/dir" in cmd
     assert "--fresh" not in cmd
     assert cmd[-2] == "t-2222aaaa-glm"  # the mint tags the node's model pin
