@@ -126,3 +126,22 @@ class StatusSinkConfig(BaseModel):
                     f"one of url / url_env"
                 )
         return self
+
+
+class ReachMeRow(BaseModel):
+    """One ``[[reach_me]]`` row: where questions for the user get written.
+
+    The Rust attention arm reads the same key at run time through
+    ``config_lookup``; this model exists so the setup wizard can ask and
+    ``fno config set`` can write (law d-0a639a74 grants this one field).
+    Unknown keys stay allowed so the Rust side can grow before Python does.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    name: str = ""
+    type: str = "md"
+    path: str
+    tag: str = "#fno"
+    settle_secs: int = 120
+    ready_only: bool = False

@@ -70,6 +70,7 @@ from fno.config._king import KingBlock
 from fno.config._evals import EvalsBlock
 from fno.config.status_sinks import StatusFanoutConfig as StatusFanoutConfig
 from fno.config.status_sinks import StatusSinkConfig as StatusSinkConfig
+from fno.config.status_sinks import ReachMeRow as ReachMeRow
 from fno.config._graph import GraphBlock
 # The keyed settings loader lives in fno.config._loader (this file is
 # shrink-only); re-exported under the names every caller and test imports.
@@ -3917,8 +3918,26 @@ class ConfigBlock(BaseModel):
     loops: dict[str, LoopEntry] = Field(default_factory=dict)
     status_sinks: list[StatusSinkConfig] = Field(default_factory=list)
     status_fanout: StatusFanoutConfig = Field(default_factory=StatusFanoutConfig)
+    reach_me: list[ReachMeRow] = Field(default_factory=list)
     king: KingBlock = Field(default_factory=KingBlock)
     accounts: AccountsBlock = Field(default_factory=AccountsBlock)
+
+    @field_validator("reach_me", mode="before")
+    @classmethod
+    def _coerce_reach_me(cls, v: object) -> object:
+        """Fail-safe like ``status_sinks``: a non-list degrades to [] so a
+        stray scalar never bricks settings load; a present-but-wrong shape is
+        warned, not silently dropped (the same misconfiguration surfacing the
+        status_sinks validator gives)."""
+        if isinstance(v, list):
+            return v
+        if v is not None:
+            _LOG.warning(
+                "config.reach_me is %s, not an array of tables - ignoring it "
+                "(use [[reach_me]], not [reach_me.<name>])",
+                type(v).__name__,
+            )
+        return []
 
     @model_validator(mode="before")
     @classmethod
