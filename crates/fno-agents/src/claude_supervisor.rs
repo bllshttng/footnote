@@ -28,13 +28,46 @@ use std::path::{Path, PathBuf};
 
 use crate::model_env_scrub::MODEL_ENV_KEYS;
 
-/// Every key that must never reach a supervisor's birth env: session/delegation
-/// stamps (`FNO_*`, `CODEX_COMPANION_*`), route and credential carriers, the
-/// model vars, and the birth session's own claude identity. `CLAUDE_CONFIG_DIR`
-/// is deliberately absent: it selects WHICH supervisor and credential store a
+/// The `FNO_*` keys that configure the MACHINE rather than one session: state
+/// roots, config paths and binary pins. A supervisor must keep these. Holding
+/// them back would move every session it forks to the default state root,
+/// where it reads a different registry and backlog than the operator
+/// configured and writes state outside the configured tree - silently, since
+/// a default root is a working root.
+///
+/// The direction is deliberate: an `FNO_*` key not named here is held back.
+/// A new per-session stamp then defaults to the safe side, and a new
+/// machine-wide key that belongs here announces itself as a setting that did
+/// not take effect, which is the failure an operator can see and fix.
+const SUPERVISOR_WIDE_FNO_KEYS: [&str; 15] = [
+    "FNO_AGENTS_BIN",
+    "FNO_AGENTS_HOME",
+    "FNO_BIN",
+    "FNO_CLAIMS_ROOT",
+    "FNO_CONFIG",
+    "FNO_EVENTS_PATH",
+    "FNO_GLOBAL_SETTINGS_PATH",
+    "FNO_HOME",
+    "FNO_LOOPCHECK_FNO_BIN",
+    "FNO_PY",
+    "FNO_ROUTE_SETTINGS_DIR",
+    "FNO_RUNTIME_STATE_PATH",
+    "FNO_SPACES_DIR",
+    "FNO_SPAWN_GATE",
+    "FNO_TRACKER_BACKEND",
+];
+
+/// Every key that must never reach a supervisor's birth env: per-session
+/// identity, route and delegation stamps (`FNO_*` outside the machine-wide
+/// set, `CODEX_COMPANION_*`), route and credential carriers, the model vars,
+/// and the birth session's own claude identity. `CLAUDE_CONFIG_DIR` is
+/// deliberately absent: it selects WHICH supervisor and credential store a
 /// client addresses, and stripping it would move the session to another
 /// account.
 pub fn is_poison(key: &str) -> bool {
+    if SUPERVISOR_WIDE_FNO_KEYS.contains(&key) || key.starts_with("FNO_TEST_") {
+        return false;
+    }
     key.starts_with("FNO_")
         || key.starts_with("CODEX_COMPANION_")
         || matches!(
@@ -234,6 +267,32 @@ mod tests {
         assert!(!is_poison("CLAUDE_CONFIG_DIR"));
         assert!(!is_poison("PATH"));
         assert!(!is_poison("HOME"));
+    }
+
+    #[test]
+    fn machine_wide_fno_config_survives_the_birth() {
+        // A supervisor that lost these would fork every session onto the
+        // DEFAULT state root: a different registry and backlog than the
+        // operator configured, and state written outside the configured tree.
+        // Per-session stamps in the same namespace are still held back.
+        for key in SUPERVISOR_WIDE_FNO_KEYS {
+            assert!(
+                !is_poison(key),
+                "{key} configures the machine, not a session"
+            );
+        }
+        assert!(!is_poison("FNO_TEST_HERMETIC"));
+        for key in [
+            "FNO_AGENTS_RUNTIME",
+            "FNO_SESSION",
+            "FNO_NODE",
+            "FNO_AGENT_SELF",
+            "FNO_HARNESS_SESSION_ID",
+            "FNO_REPO_ROOT",
+            "FNO_WAKE_MSG",
+        ] {
+            assert!(is_poison(key), "{key} names one session, never the machine");
+        }
     }
 
     #[test]
