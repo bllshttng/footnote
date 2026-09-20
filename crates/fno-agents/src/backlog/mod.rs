@@ -828,26 +828,15 @@ pub fn read_entries(graph: &Path) -> Result<Vec<Value>, String> {
     Ok(entries)
 }
 
-/// The rows behind an open connection, in ordinal order.
+/// The rows behind an open connection, in ordinal order. One scan per
+/// table; the batched assembler shares every row mapper with the
+/// single-node load.
 pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
     if meta(connection, "version")?.is_none() {
         return Err("SQLite graph has no version".into());
     }
-    let mut statement = connection
-        .prepare_cached("SELECT id FROM nodes ORDER BY ordinal, id")
-        .map_err(|error| error.to_string())?;
-    let ids = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|error| error.to_string())?;
-    let mut entries = Vec::new();
-    for id in ids {
-        let id = id.map_err(|error| error.to_string())?;
-        let Some(node) = nodes::load(&connection, &id)? else {
-            return Err(format!("node {id} vanished mid-export"));
-        };
-        entries.push(node.to_json());
-    }
-    Ok(entries)
+    let nodes = nodes::export_all(connection)?;
+    Ok(nodes.iter().map(|node| node.to_json()).collect())
 }
 
 pub(crate) fn meta(connection: &Connection, key: &str) -> Result<Option<String>, String> {
@@ -1618,12 +1607,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn read_entries_preserves_every_child_aggregate_of_a_seeded_store() {
-        // AC1-HP: a store whose rows carry every child aggregate exports
-        // the same content the seed wrote, in list order. The cached
-        // statements and the snapshot read must not drop or reorder a row.
-        let dir = TempDir::new().unwrap();
+    fn seeded_rich_graph(dir: &TempDir) -> PathBuf {
         let graph = dir.path().join("graph.json");
         let rich = serde_json::json!({
             "id": "ab-one", "slug": "one", "title": "One", "type": "feature",
@@ -1651,6 +1635,16 @@ mod tests {
         });
         std::fs::write(&graph, b"{\"entries\": []}").unwrap();
         shadow_sync(&graph, &[], &[rich, plain], "sha256:seed").unwrap();
+        graph
+    }
+
+    #[test]
+    fn read_entries_preserves_every_child_aggregate_of_a_seeded_store() {
+        // AC1-HP: a store whose rows carry every child aggregate exports
+        // the same content the seed wrote, in list order. The cached
+        // statements and the snapshot read must not drop or reorder a row.
+        let dir = TempDir::new().unwrap();
+        let graph = seeded_rich_graph(&dir);
 
         let reloaded = read_entries(&graph).unwrap();
         assert_eq!(reloaded.len(), 2);
@@ -1667,6 +1661,31 @@ mod tests {
         assert_eq!(reloaded[0]["blocked_by"][0], "ab-two");
         assert_eq!(reloaded[1]["id"], "ab-two");
         assert_eq!(reloaded[1]["title"], "Two");
+    }
+
+    #[test]
+    fn batched_export_matches_the_per_node_load_row_for_row() {
+        // AC4-HP + AC5-EDGE: the batched export assembles each node through
+        // the same mappers the per-id load uses, so both paths agree row
+        // for row, including a node with no child rows at all.
+        let dir = TempDir::new().unwrap();
+        let graph = seeded_rich_graph(&dir);
+        let connection = open(&graph).unwrap();
+        let mut statement = connection
+            .prepare("SELECT id FROM nodes ORDER BY ordinal, id")
+            .unwrap();
+        let ids: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|id| id.unwrap())
+            .collect();
+        let mut expected = Vec::new();
+        for id in &ids {
+            let node = nodes::load(&connection, id).unwrap().unwrap();
+            expected.push(node.to_json());
+        }
+        let batched = export_rows(&connection).unwrap();
+        assert_eq!(batched, expected);
     }
 
     #[test]
