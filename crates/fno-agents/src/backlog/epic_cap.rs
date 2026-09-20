@@ -65,8 +65,14 @@ pub fn enforce(pre: &[Value], post: &[Value], cap: Option<usize>) -> Result<(), 
             continue;
         }
         let pre_row = row_for(pre, id);
-        let same_edge = pre_row.map(|r| parent_of(r) == Some(epic)).unwrap_or(false);
-        if same_edge {
+        // The edge is unchanged AND the row was already open, so this write
+        // adds no open child. A child coming back from closed (undefer,
+        // reopen) does add one, even under an unchanged edge, so it is
+        // judged like a fresh edge rather than skipped here.
+        let already_counted = pre_row
+            .map(|r| parent_of(r) == Some(epic) && row_is_open(r))
+            .unwrap_or(false);
+        if already_counted {
             continue;
         }
         // Hand-up exemption: the old parent is terminal AFTER the write, so
@@ -227,6 +233,48 @@ mod tests {
                              "domain": "code", "parent": "e-1"}));
             enforce(&pre, &post, Some(15)).unwrap();
         }
+    }
+
+    #[test]
+    fn a_child_coming_back_from_closed_counts_as_growth() {
+        // An undefer or reopen raises the open count under an UNCHANGED
+        // parent edge. Skipping every unchanged edge let that bypass the
+        // cap silently, so a closed-to-open transition is judged too.
+        for closed in ["deferred", "done", "superseded"] {
+            let mut pre = full_epic_rows();
+            pre.push(json!({"id": "c-16", "slug": "c-16", "title": "c-16",
+                            "type": "feature", "status": closed, "priority": "p2",
+                            "domain": "code", "parent": "e-1"}));
+            let mut post = pre.clone();
+            for row in post.iter_mut() {
+                if crate::graph_store::entry_id(row) == Some("c-16") {
+                    let obj = row.as_object_mut().unwrap();
+                    obj.insert("status".into(), json!("ready"));
+                    obj.insert("superseded_by".into(), Value::Null);
+                    obj.insert("completed_at".into(), Value::Null);
+                }
+            }
+            let error = enforce(&pre, &post, Some(15)).unwrap_err();
+            assert!(error.contains("'c-16'"), "{closed}: {error}");
+            assert!(error.contains("16 open children"), "{closed}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_child_coming_back_under_a_draining_epic_passes() {
+        // The control: the same transition lands while the epic has room.
+        let mut pre = full_epic_rows();
+        pre.pop();
+        pre.push(json!({"id": "c-16", "slug": "c-16", "title": "c-16",
+                        "type": "feature", "status": "deferred", "priority": "p2",
+                        "domain": "code", "parent": "e-1"}));
+        let mut post = pre.clone();
+        for row in post.iter_mut() {
+            if crate::graph_store::entry_id(row) == Some("c-16") {
+                row.as_object_mut().unwrap().insert("status".into(), json!("ready"));
+            }
+        }
+        enforce(&pre, &post, Some(15)).unwrap();
     }
 
     #[test]
