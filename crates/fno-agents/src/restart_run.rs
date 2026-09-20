@@ -276,26 +276,7 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
     // --force/--mux gating. Spared keepers fail the verb: a spared keeper
     // was NOT healed.
     let (cycled, stale_panes) = crate::census::cycle_stale_store_keepers().await;
-    for c in &cycled {
-        if c.result == "cycled" {
-            say(&format!(
-                "fno agents restart: store keeper {} pid {:?} shut down (stale build; respawns on next read).",
-                c.graph.as_deref().unwrap_or("unknown graph"),
-                c.old_pid
-            ));
-        } else {
-            eprintln!(
-                "fno agents restart: store keeper {} {}; it was NOT refreshed.",
-                c.graph.as_deref().unwrap_or("unknown graph"),
-                c.result
-            );
-        }
-    }
-    if stale_panes > 0 {
-        say(&format!(
-            "fno agents restart: {stale_panes} pane keeper(s) run an older build; kept with their panes, current when each pane ends."
-        ));
-    }
+    say_keeper_cycle(&cycled, stale_panes, &say);
     // The codex shared-daemon leg: the session-preserving upgrade
     // transaction, riding the SAME restart receipt as every other
     // component. Reused-current, held, refused, upgraded, or failed - and
@@ -367,6 +348,33 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
         eprintln!("fno agents restart: the mux leg failed; its refusal is above.");
     }
 
+    // The post-mux keeper refresh. The pre-kill cycle above cannot
+    // see a keeper the OLD server spawned during the kill window (measured:
+    // one survived under launchd and needed a separate watchdog reap). After
+    // a PROVEN kill, run the stale-keeper cycle again on this binary; a
+    // keeper still busy is reported spared and fails the verb, never a
+    // force-kill.
+    let post_mux = post_mux_kill(&mux_summary);
+    let (post_mux_keepers, post_mux_unproven) = if post_mux {
+        let (cycled2, _stale2) = crate::census::cycle_stale_store_keepers().await;
+        // The stale-pane-keeper note belongs to the pre-kill pass only (pane
+        // keepers are never cycled); the post-kill pass is about store
+        // keepers, so the note would just repeat the pre-kill line.
+        say_keeper_cycle(&cycled2, 0, &say);
+        let unproven = cycled2.iter().any(|c| c.result != "cycled");
+        let keepers = cycled2
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "graph": c.graph, "old_pid": c.old_pid, "result": c.result,
+                })
+            })
+            .collect::<Vec<_>>();
+        (keepers, unproven)
+    } else {
+        (Vec::new(), false)
+    };
+
     // Machine-readable summary; the LAST stdout line, so an orchestrator
     // parses it without guessing. `components` names one row per component
     // (old pid -> new pid, or unchanged); `preserved` folds every session's
@@ -424,11 +432,104 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
         })).collect::<Vec<_>>(),
         "pane_keepers_stale": stale_panes,
         "mux": mux_summary,
-        "ok": verdict(code, mux_failed, cycled.iter().any(|c| c.result != "cycled"), upgrade_failed).0,
-        "verdict": verdict(code, mux_failed, cycled.iter().any(|c| c.result != "cycled"), upgrade_failed).1,
+        "post_mux_store_keepers": post_mux_keepers,
+        "post_mux_keeper_refresh": if !post_mux {
+            "skipped"
+        } else if post_mux_unproven {
+            "unproven"
+        } else {
+            "proved"
+        },
+        "ok": verdict(code, mux_failed, cycled.iter().any(|c| c.result != "cycled") || post_mux_unproven, upgrade_failed).0,
+        "verdict": verdict(code, mux_failed, cycled.iter().any(|c| c.result != "cycled") || post_mux_unproven, upgrade_failed).1,
     });
     println!("fno agents restart: keepers {summary}");
-    u8::from(cycled.iter().any(|c| c.result != "cycled") || mux_failed || upgrade_failed) as i32
+    u8::from(
+        cycled.iter().any(|c| c.result != "cycled")
+            || post_mux_unproven
+            || mux_failed
+            || upgrade_failed,
+    ) as i32
+}
+
+/// The post-mux keeper-refresh gate: a second stale-keeper pass
+/// earns its run only on a PROVEN kill - the kill selector's summary naming a
+/// killed session. Report-only rows, a failed mux leg, and a lost summary all
+/// read as "not proven", so the pass never launches without a kill that could
+/// have orphaned a keeper.
+fn post_mux_kill(mux_summary: &Option<serde_json::Value>) -> bool {
+    mux_summary
+        .as_ref()
+        .and_then(|m| m.get("sessions"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|sessions| {
+            sessions
+                .iter()
+                .any(|s| s.get("killed").and_then(serde_json::Value::as_bool) == Some(true))
+        })
+}
+
+/// The keeper-cycle receipts (shared by the full restart and the
+/// `--keepers-only` leg): one line per cycled keeper, one per spared keeper,
+/// plus the stale-pane-keeper note. `say` routes the human lines (stdout
+/// human mode, stderr in `--json` mode so stdout stays the one machine
+/// line); a spared keeper is loud on stderr either way.
+fn say_keeper_cycle(
+    cycled: &[crate::census::CycledKeeper],
+    stale_panes: usize,
+    say: &dyn Fn(&str),
+) {
+    for c in cycled {
+        if c.result == "cycled" {
+            say(&format!(
+                "fno agents restart: store keeper {} pid {:?} shut down (stale build; respawns on next read).",
+                c.graph.as_deref().unwrap_or("unknown graph"),
+                c.old_pid
+            ));
+        } else {
+            eprintln!(
+                "fno agents restart: store keeper {} {}; it was NOT refreshed.",
+                c.graph.as_deref().unwrap_or("unknown graph"),
+                c.result
+            );
+        }
+    }
+    if stale_panes > 0 {
+        say(&format!(
+            "fno agents restart: {stale_panes} pane keeper(s) run an older build; kept with their panes, current when each pane ends."
+        ));
+    }
+}
+
+/// The `--keepers-only` leg: run ONLY the stale-store-keeper cycle
+/// and print the same `keepers` machine line the full restart prints. Never
+/// restarts the daemon, touches mux servers, upgrades codex, or refreshes
+/// pr-watch. Exit 0 only when every keeper found is proven cycled; a busy or
+/// unresponsive keeper is reported spared and fails the verb (never an
+/// unproven kill). `fno agents restart --mux` drives this after each mux
+/// kill, closing the gap where a keeper spawned by the OLD server outlived
+/// the restart.
+pub async fn run_keepers_only(json: bool) -> i32 {
+    let (cycled, stale_panes) = crate::census::cycle_stale_store_keepers().await;
+    say_keeper_cycle(&cycled, stale_panes, &|line| {
+        if json {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    });
+    let spared = cycled.iter().any(|c| c.result != "cycled");
+    let (ok, label) = verdict(0, false, spared, false);
+    let summary = json!({
+        "store_keepers": cycled.iter().map(|c| serde_json::json!({
+            "graph": c.graph, "old_pid": c.old_pid, "result": c.result,
+        })).collect::<Vec<_>>(),
+        "pane_keepers_stale": stale_panes,
+        "ok": ok,
+        "verdict": label,
+    });
+    println!("fno agents restart: keepers {summary}");
+    i32::from(spared)
 }
 
 #[cfg(test)]
@@ -597,5 +698,49 @@ mod tests {
         assert!(restart_gate(&drifted));
         assert!(!restart_gate(&classify(Some(&fp), Some(&fp))));
         assert!(!restart_gate(&classify(None, Some(&fp))));
+    }
+
+    /// AC3-HP: the shared renderer names every cycled keeper on the say
+    /// channel; AC3-ERR: a spared keeper never claims success there (its
+    /// refusal rides stderr, outside `say`).
+    #[test]
+    fn keeper_cycle_receipts_name_every_cycled_keeper() {
+        let rows = vec![
+            crate::census::CycledKeeper {
+                graph: Some("g1".into()),
+                old_pid: Some(11),
+                result: "cycled".into(),
+            },
+            crate::census::CycledKeeper {
+                graph: Some("g2".into()),
+                old_pid: None,
+                result: "busy".into(),
+            },
+        ];
+        let said: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        super::say_keeper_cycle(&rows, 0, &|line| said.borrow_mut().push(line.to_string()));
+        let said = said.into_inner();
+        assert!(
+            said.iter()
+                .any(|l| l.contains("g1") && l.contains("shut down")),
+            "the cycled keeper is named: {said:?}"
+        );
+        assert!(
+            !said.iter().any(|l| l.contains("g2")),
+            "a spared keeper never claims success on the say channel"
+        );
+    }
+
+    /// AC4: the post-mux keeper pass launches only on a PROVEN kill - the
+    /// selector's summary naming a killed session. Report-only rows, a lost
+    /// summary, and a failed leg read as not-proven.
+    #[test]
+    fn post_mux_pass_needs_a_proven_kill() {
+        let killed = serde_json::json!({ "sessions": [ { "session": "main", "killed": true } ] });
+        let spared = serde_json::json!({ "sessions": [ { "session": "main", "killed": false } ] });
+        assert!(super::post_mux_kill(&Some(killed)));
+        assert!(!super::post_mux_kill(&Some(spared)));
+        assert!(!super::post_mux_kill(&None));
+        assert!(!super::post_mux_kill(&Some(serde_json::json!({}))));
     }
 }
