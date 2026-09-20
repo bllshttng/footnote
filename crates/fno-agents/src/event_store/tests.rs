@@ -612,3 +612,5 @@ fn journal_text_creates_no_store_for_an_absent_journal() {
     assert_eq!(journal_text(&live, &["reign_checkin"]), "");
     assert!(!store_path(&live).exists());
 }
+
+mod drift;

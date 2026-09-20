@@ -103,10 +103,10 @@ fn blocked_distress_already_emitted(project_events: &Path, run: &str, reason: &s
     // Import first: pre-cutover bytes beside the journal are part of the
     // history the dedup must see, and a read on an absent store is an
     // honest no.
-    let _ = fno_event_store::import_all(project_events);
-    let Ok(rows) = fno_event_store::query_events(
+    let _ = crate::event_store::import_all(project_events);
+    let Ok(rows) = crate::event_store::query_events(
         project_events,
-        &fno_event_store::EventQuery {
+        &crate::event_store::EventQuery {
             types: vec!["blocked".to_string()],
             ..Default::default()
         },

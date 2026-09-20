@@ -1045,7 +1045,7 @@ fn moved_members(home: &AgentsHome, lane: &str) -> Vec<String> {
         // Committed rows, not journal bytes: the ladder's own steps are
         // store-committed, so the moved-set reads them back from the store.
         let Ok(rows) =
-            fno_event_store::query_events(&e.path(), &fno_event_store::EventQuery::default())
+            crate::event_store::query_events(&e.path(), &crate::event_store::EventQuery::default())
         else {
             continue;
         };

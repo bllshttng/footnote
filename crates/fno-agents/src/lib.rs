@@ -134,6 +134,7 @@ pub mod eval_attempt;
 pub mod evals_arm;
 pub mod evals_macro;
 pub mod evals_trend;
+pub mod event_store;
 pub mod events;
 pub mod events_limits;
 pub mod events_store;

@@ -34,17 +34,17 @@ use std::path::{Path, PathBuf};
 /// Sibling journal suffix for ephemeral-class rows. The Python
 /// `fno.events` module declares the same string; a parity test
 /// (`cli/tests/events/test_ephemeral_set_parity.py`) holds the two equal so
-/// both languages write the same sibling file. Owned by the
-/// `fno-event-store` crate; re-exported here for the write boundary.
-pub use fno_event_store::{is_ephemeral_event, EPHEMERAL_EVENT_TYPES, EPHEMERAL_SUFFIX};
+/// both languages write the same sibling file. Owned by the `event_store`
+/// module; re-exported here for the write boundary.
+pub use crate::event_store::{is_ephemeral_event, EPHEMERAL_EVENT_TYPES, EPHEMERAL_SUFFIX};
 
 /// Test-only journal text: the committed rows as one line-joined string.
 /// The store cutover stopped journal appends, so tests asserting on emitted
 /// content read here instead of the raw file.
 #[cfg(test)]
 pub(crate) fn committed_journal_text(journal: &std::path::Path) -> String {
-    let _ = fno_event_store::import_all(journal);
-    fno_event_store::query_events(journal, &fno_event_store::EventQuery::default())
+    let _ = crate::event_store::import_all(journal);
+    crate::event_store::query_events(journal, &crate::event_store::EventQuery::default())
         .unwrap_or_default()
         .iter()
         .map(|r| r.line.as_str())
@@ -145,7 +145,7 @@ impl EventEmitter {
         // transaction (WAL, FULL sync, positive readback) replaces the file
         // append, the sibling routing, and the rotation. The retention class
         // is store metadata derived from the type, never a journal route.
-        fno_event_store::append_envelope(&self.path, &line, None).map_err(EmitError::Store)?;
+        crate::event_store::append_envelope(&self.path, &line, None).map_err(EmitError::Store)?;
         Ok(())
     }
 
@@ -202,7 +202,7 @@ pub(crate) fn civil_from_unix(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fno_event_store::{query_events, EventQuery};
+    use crate::event_store::{query_events, EventQuery};
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -318,7 +318,7 @@ mod tests {
             !PathBuf::from(format!(
                 "{}{}",
                 path.display(),
-                fno_event_store::EPHEMERAL_SUFFIX
+                crate::event_store::EPHEMERAL_SUFFIX
             ))
             .exists(),
             "the sibling journal is never created"
@@ -343,7 +343,7 @@ mod tests {
             !PathBuf::from(format!(
                 "{}{}",
                 path.display(),
-                fno_event_store::EPHEMERAL_SUFFIX
+                crate::event_store::EPHEMERAL_SUFFIX
             ))
             .exists(),
             "non-ephemeral emit created no sibling"

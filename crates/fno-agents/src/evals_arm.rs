@@ -163,9 +163,9 @@ fn read_gate() -> GateReading {
 fn last_stale_ts(events: &Path) -> Option<DateTime<Utc>> {
     // Committed rows, newest first: the store commit is the write boundary,
     // so the dedup reads what a reader would see.
-    let rows = fno_event_store::query_events(
+    let rows = crate::event_store::query_events(
         events,
-        &fno_event_store::EventQuery {
+        &crate::event_store::EventQuery {
             types: vec!["evals_stale".to_string()],
             ..Default::default()
         },

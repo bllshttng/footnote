@@ -623,34 +623,24 @@ dependencies = [
  "alacritty_terminal",
  "axum",
  "blake3",
+ "chrono",
  "clap",
  "clap_complete",
  "crossterm",
- "fno-event-store",
  "libc",
  "portable-pty",
  "ratatui-core",
  "ratatui-widgets",
  "regex",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "unicode-width",
-]
-
-[[package]]
-name = "fno-event-store"
-version = "0.1.0"
-dependencies = [
- "chrono",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "unicode-width",
 ]
 
 [[package]]
@@ -1747,6 +1737,19 @@ name = "sync_wrapper"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
+
+[[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom",
+ "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "thiserror"

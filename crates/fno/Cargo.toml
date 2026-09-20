@@ -48,7 +48,6 @@ regex = "1"
 sha2 = "0.10"
 # The shared event store: the native front door routes `fno doctor event`
 # onto this library; the runtime binary links the same types.
-fno-event-store = { version = "0.1.0", path = "../fno-event-store" }
 # Re-verify a picked answer's region fingerprint against the live grid before
 # injecting. Must match the daemon's hash byte-for-byte across
 # processes, so the same content hash both sides use - not a per-process
@@ -71,6 +70,8 @@ clap_complete = "4"
 # glyph is one char and two cells. Already resolved transitively via
 # alacritty_terminal, so this adds no new build artifact.
 unicode-width = "0.2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "alloc", "clock"] }
 thiserror = "2"
 tokio = { version = "1", features = [
     "rt-multi-thread",
@@ -83,3 +84,6 @@ tokio = { version = "1", features = [
     # bounded, fail-open shell-out to `fno-agents digest` on attach.
     "process",
 ] }
+
+[dev-dependencies]
+tempfile = "3"

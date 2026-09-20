@@ -344,10 +344,10 @@ fn canonical_session_id(m: &ManifestFields) -> Option<String> {
 /// first and then ships within the same session still runs its ship
 /// side-effects on the ship fire (the lockout bug, sigma-review HIGH).
 fn prior_finalize_ship(project_events: &Path, session_id: &str) -> Option<bool> {
-    fno_event_store::import_all(project_events).ok()?;
-    let rows = fno_event_store::query_events(
+    crate::event_store::import_all(project_events).ok()?;
+    let rows = crate::event_store::query_events(
         project_events,
-        &fno_event_store::EventQuery {
+        &crate::event_store::EventQuery {
             types: vec!["session_finalized".to_string()],
             ..Default::default()
         },
@@ -3920,7 +3920,7 @@ mod tests {
         )
         .unwrap();
         let line = "{\"ts\":\"2026-01-01T00:00:05Z\",\"type\":\"session_finalized\",\"source\":\"hook\",\"data\":{\"session_id\":\"NEW\",\"ship\":true}}";
-        let receipt = fno_event_store::append_envelope(&log, line, None).unwrap();
+        let receipt = crate::event_store::append_envelope(&log, line, None).unwrap();
         assert!(receipt.inserted);
         assert_eq!(
             prior_finalize_ship(&log, "NEW"),

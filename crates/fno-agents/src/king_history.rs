@@ -150,8 +150,8 @@ pub(crate) fn scan_scopes(events_paths: &[PathBuf], scope: Option<&str>) -> Resu
     let mut seen: HashSet<String> = HashSet::new();
     let mut duplicates: u64 = 0;
     for live in &lives {
-        let receipt = fno_event_store::import_all(live)?;
-        let store = fno_event_store::open_read(&fno_event_store::store_path(live))?;
+        let receipt = crate::event_store::import_all(live)?;
+        let store = crate::event_store::open_read(&crate::event_store::store_path(live))?;
         let rows = reign_rows(&store, scope)?;
         let mut scanned = 0u64;
         let mut matched = 0u64;

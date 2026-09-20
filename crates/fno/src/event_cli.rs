@@ -80,7 +80,7 @@ fn run_emit_envelope(args: &[OsString]) -> i32 {
         return 1;
     }
     let requested = requested_id.as_deref();
-    let result = fno_event_store::append_envelope(&journal, envelope.trim(), requested);
+    let result = crate::event_store::append_envelope(&journal, envelope.trim(), requested);
     match result {
         Ok(r) => {
             let receipt = serde_json::json!({
@@ -140,7 +140,7 @@ fn run_rows(args: &[OsString]) -> i32 {
     // effect of being read: absence is a fact callers distinguish. A
     // non-regular journal (a directory standing in for the index) is a
     // failed read, so the caller's own error path names it.
-    if !journal.exists() && !fno_event_store::store_path(&journal).exists() {
+    if !journal.exists() && !crate::event_store::store_path(&journal).exists() {
         println!("[]");
         return 0;
     }
@@ -148,7 +148,7 @@ fn run_rows(args: &[OsString]) -> i32 {
         eprintln!("error: {} is not a regular file", journal.display());
         return 1;
     }
-    if legacy_fallback && !fno_event_store::store_path(&journal).exists() {
+    if legacy_fallback && !crate::event_store::store_path(&journal).exists() {
         // No store: the raw journal is the whole history. Lines go back
         // unfiltered and unvalidated, exactly the pre-store read.
         let raw = std::fs::read_to_string(&journal).unwrap_or_default();
@@ -159,13 +159,13 @@ fn run_rows(args: &[OsString]) -> i32 {
         );
         return 0;
     }
-    let _ = fno_event_store::import_all(&journal);
-    let query = fno_event_store::EventQuery {
+    let _ = crate::event_store::import_all(&journal);
+    let query = crate::event_store::EventQuery {
         types,
         include_rejected,
         ..Default::default()
     };
-    match fno_event_store::query_events(&journal, &query) {
+    match crate::event_store::query_events(&journal, &query) {
         Ok(rows) => {
             let lines: Vec<&str> = rows.iter().map(|r| r.line.as_str()).collect();
             println!(
@@ -203,7 +203,7 @@ fn run_import(args: &[OsString]) -> i32 {
             return 2;
         }
     };
-    match fno_event_store::import_all(&journal) {
+    match crate::event_store::import_all(&journal) {
         Ok(receipt) => {
             let payload = serde_json::json!({
                 "success": true,
@@ -250,11 +250,11 @@ fn run_export(args: &[OsString]) -> i32 {
             return 2;
         }
     };
-    match fno_event_store::export_jsonl(&journal, &out) {
+    match crate::event_store::export_jsonl(&journal, &out) {
         Ok(n) => {
             let payload = serde_json::json!({
                 "success": true,
-                "store": fno_event_store::store_path(&journal).display().to_string(),
+                "store": crate::event_store::store_path(&journal).display().to_string(),
                 "exported": n,
                 "path": out.display().to_string(),
                 "snapshot": true,

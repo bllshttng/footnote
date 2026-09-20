@@ -134,8 +134,8 @@ fn read_events(home: &AgentsHome) -> Vec<Value> {
     // Committed rows, not journal bytes: the store cutover stopped journal
     // appends, so emitted events live only in the store beside the journal.
     let journal = home.events_jsonl();
-    let _ = fno_event_store::import_all(&journal);
-    fno_event_store::query_events(&journal, &fno_event_store::EventQuery::default())
+    let _ = crate::event_store::import_all(&journal);
+    crate::event_store::query_events(&journal, &crate::event_store::EventQuery::default())
         .unwrap_or_default()
         .iter()
         .filter_map(|r| serde_json::from_str::<Value>(&r.line).ok())

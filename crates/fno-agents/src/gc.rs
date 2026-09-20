@@ -1244,10 +1244,10 @@ mod tests {
     fn count_retire_rows(path: &std::path::Path) -> usize {
         // Committed rows, not journal bytes: the store cutover stopped journal
         // appends, so emitted ticks live only in the store beside the journal.
-        let _ = fno_event_store::import_all(path);
-        fno_event_store::query_events(
+        let _ = crate::event_store::import_all(path);
+        crate::event_store::query_events(
             path,
-            &fno_event_store::EventQuery {
+            &crate::event_store::EventQuery {
                 types: vec!["control_plane_tick".to_string()],
                 ..Default::default()
             },
@@ -2218,7 +2218,7 @@ mod tests {
         // same journal with retention_class ephemeral; the sibling is never
         // created.
         let rows =
-            fno_event_store::query_events(&path, &fno_event_store::EventQuery::default()).unwrap();
+            crate::event_store::query_events(&path, &crate::event_store::EventQuery::default()).unwrap();
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].retention_class, "ephemeral");
         assert!(
@@ -2234,7 +2234,7 @@ mod tests {
         assert!(!PathBuf::from(format!(
             "{}{}",
             path.display(),
-            fno_event_store::EPHEMERAL_SUFFIX
+            crate::event_store::EPHEMERAL_SUFFIX
         ))
         .exists());
     }
@@ -2283,7 +2283,7 @@ mod tests {
         // Same store routing as above: the sweep row is committed with
         // retention_class ephemeral and no sibling journal is ever created.
         let rows =
-            fno_event_store::query_events(&path, &fno_event_store::EventQuery::default()).unwrap();
+            crate::event_store::query_events(&path, &crate::event_store::EventQuery::default()).unwrap();
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].retention_class, "ephemeral");
         assert!(
@@ -2295,7 +2295,7 @@ mod tests {
         assert!(!PathBuf::from(format!(
             "{}{}",
             path.display(),
-            fno_event_store::EPHEMERAL_SUFFIX
+            crate::event_store::EPHEMERAL_SUFFIX
         ))
         .exists());
     }

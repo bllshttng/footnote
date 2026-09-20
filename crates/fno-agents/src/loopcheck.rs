@@ -1982,12 +1982,12 @@ pub struct UnattestedReviewer {
 /// The committed event lines for one journal family: the store's rows in
 /// commit order, pre-cutover bytes imported first (hash-dedupe free).
 pub(crate) fn event_lines(journal: &Path) -> Result<Vec<String>, String> {
-    fno_event_store::import_all(journal)?;
-    let q = fno_event_store::EventQuery {
+    crate::event_store::import_all(journal)?;
+    let q = crate::event_store::EventQuery {
         include_rejected: true,
         ..Default::default()
     };
-    let rows = fno_event_store::query_events(journal, &q)?;
+    let rows = crate::event_store::query_events(journal, &q)?;
     Ok(rows.into_iter().map(|r| r.line).collect())
 }
 

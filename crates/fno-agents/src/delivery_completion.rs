@@ -440,12 +440,12 @@ pub fn selected_receipt(
     // raw, newest first, exactly the pre-store read.
     if events.exists() {
         // Fold any uncommitted raw bytes; a store-only journal skips this.
-        let _ = fno_event_store::import_all(events);
+        let _ = crate::event_store::import_all(events);
     }
-    if fno_event_store::store_path(events).exists() {
-        if let Ok(rows) = fno_event_store::query_events(
+    if crate::event_store::store_path(events).exists() {
+        if let Ok(rows) = crate::event_store::query_events(
             events,
-            &fno_event_store::EventQuery {
+            &crate::event_store::EventQuery {
                 types: vec!["delivery_verdict_evaluated".to_string()],
                 ..Default::default()
             },

@@ -18,12 +18,12 @@ const RUN_SUMMARY_DATA_CAP: usize = 500;
 /// executor (AC2-FR).
 pub(crate) fn count_run_tasks(project_events: &Path, run: &str) -> (u64, u64, u64) {
     let (mut started, mut done, mut failed) = (0u64, 0u64, 0u64);
-    if fno_event_store::import_all(project_events).is_err() {
+    if crate::event_store::import_all(project_events).is_err() {
         return (0, 0, 0);
     }
-    let rows = match fno_event_store::query_events(
+    let rows = match crate::event_store::query_events(
         project_events,
-        &fno_event_store::EventQuery {
+        &crate::event_store::EventQuery {
             types: vec!["task_started".to_string(), "task_done".to_string()],
             ..Default::default()
         },
@@ -60,12 +60,12 @@ pub(crate) fn count_run_tasks(project_events: &Path, run: &str) -> (u64, u64, u6
 /// appends); a missing or unreadable store is a false (emit and push as
 /// before).
 pub(crate) fn run_summary_already_emitted(project_events: &Path, run: &str, reason: &str) -> bool {
-    if fno_event_store::import_all(project_events).is_err() {
+    if crate::event_store::import_all(project_events).is_err() {
         return false;
     }
-    let rows = match fno_event_store::query_events(
+    let rows = match crate::event_store::query_events(
         project_events,
-        &fno_event_store::EventQuery {
+        &crate::event_store::EventQuery {
             types: vec!["run_summary".to_string()],
             ..Default::default()
         },
@@ -225,9 +225,9 @@ mod tests {
             "DonePRGreen",
             None,
         );
-        let rows = fno_event_store::query_events(
+        let rows = crate::event_store::query_events(
             &events,
-            &fno_event_store::EventQuery {
+            &crate::event_store::EventQuery {
                 types: vec!["run_summary".to_string()],
                 ..Default::default()
             },
@@ -250,9 +250,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let events = tmp.path().join("events.jsonl");
         emit_run_summary(&events, &events, "R2", None, false, "NoProgress", None);
-        let rows = fno_event_store::query_events(
+        let rows = crate::event_store::query_events(
             &events,
-            &fno_event_store::EventQuery {
+            &crate::event_store::EventQuery {
                 types: vec!["run_summary".to_string()],
                 ..Default::default()
             },

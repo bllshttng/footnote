@@ -1422,8 +1422,8 @@ mod tests {
     fn journal_count(journal: &Path, needle: &str) -> usize {
         // Committed rows, not journal bytes: the store cutover commits
         // sweep rows in the store beside the journal.
-        let _ = fno_event_store::import_all(journal);
-        fno_event_store::query_events(journal, &fno_event_store::EventQuery::default())
+        let _ = crate::event_store::import_all(journal);
+        crate::event_store::query_events(journal, &crate::event_store::EventQuery::default())
             .unwrap_or_default()
             .iter()
             .filter(|r| r.line.contains(needle))

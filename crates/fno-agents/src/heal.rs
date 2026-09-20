@@ -1673,10 +1673,10 @@ fn run_detached(
 /// Committed store rows are the record (the cutover stopped journal
 /// appends); commit order via `seq` makes the last row the newest.
 fn newest_heal_tick(path: &std::path::Path) -> Option<(String, Value)> {
-    let _ = fno_event_store::import_all(path);
-    fno_event_store::query_events(
+    let _ = crate::event_store::import_all(path);
+    crate::event_store::query_events(
         path,
-        &fno_event_store::EventQuery {
+        &crate::event_store::EventQuery {
             types: vec!["pr_heal_tick".to_string()],
             ..Default::default()
         },
@@ -1815,10 +1815,10 @@ fn status_line(a: &Args) -> String {
 /// the state; a second red verdict on the same pair means the rerun reached a
 /// real result.
 fn journal_has_rerun(path: &std::path::Path, key: &str) -> bool {
-    let _ = fno_event_store::import_all(path);
-    let Ok(rows) = fno_event_store::query_events(
+    let _ = crate::event_store::import_all(path);
+    let Ok(rows) = crate::event_store::query_events(
         path,
-        &fno_event_store::EventQuery {
+        &crate::event_store::EventQuery {
             types: vec!["pr_heal_tick".to_string()],
             ..Default::default()
         },
@@ -1843,10 +1843,10 @@ fn journal_has_rerun(path: &std::path::Path, key: &str) -> bool {
 // reads GitHub several times per PR. A keyed sidecar is the upgrade path if
 // the row count ever gets big enough to measure.
 fn journal_rerun_keys(path: &std::path::Path) -> Vec<String> {
-    let _ = fno_event_store::import_all(path);
-    let Ok(rows) = fno_event_store::query_events(
+    let _ = crate::event_store::import_all(path);
+    let Ok(rows) = crate::event_store::query_events(
         path,
-        &fno_event_store::EventQuery {
+        &crate::event_store::EventQuery {
             types: vec!["pr_heal_tick".to_string()],
             ..Default::default()
         },

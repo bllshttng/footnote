@@ -444,8 +444,8 @@ fn events_text(p: &Path) -> String {
 /// The committed rows as one text blob: events the binary writes land only in
 /// the store, so content assertions on them read here, never the journal.
 fn store_text(p: &Path) -> String {
-    let _ = fno_event_store::import_all(p);
-    fno_event_store::query_events(p, &fno_event_store::EventQuery::default())
+    let _ = fno_agents::event_store::import_all(p);
+    fno_agents::event_store::query_events(p, &fno_agents::event_store::EventQuery::default())
         .unwrap_or_default()
         .iter()
         .map(|r| r.line.as_str())
@@ -455,10 +455,10 @@ fn store_text(p: &Path) -> String {
 fn count_event(p: &Path, kind: &str, session_id: &str) -> usize {
     // Committed rows, not journal bytes: the cutover stopped journal appends,
     // so a session_finalized written by the binary lives only in the store.
-    let _ = fno_event_store::import_all(p);
-    let rows = fno_event_store::query_events(
+    let _ = fno_agents::event_store::import_all(p);
+    let rows = fno_agents::event_store::query_events(
         p,
-        &fno_event_store::EventQuery {
+        &fno_agents::event_store::EventQuery {
             types: vec![kind.to_string()],
             ..Default::default()
         },
@@ -482,10 +482,10 @@ fn handoff_files(env: &Env) -> Vec<PathBuf> {
 /// Count run_summary rows for one run in an events log (envelope-level `run`,
 /// the join `count_run_tasks` and `run_summary_already_emitted` use).
 fn count_run_summary(p: &Path, run: &str) -> usize {
-    let _ = fno_event_store::import_all(p);
-    fno_event_store::query_events(
+    let _ = fno_agents::event_store::import_all(p);
+    fno_agents::event_store::query_events(
         p,
-        &fno_event_store::EventQuery {
+        &fno_agents::event_store::EventQuery {
             types: vec!["run_summary".to_string()],
             ..Default::default()
         },
@@ -1602,10 +1602,10 @@ fn configure_optional_codex(env: &Env) {
 }
 
 fn finalized_event(env: &Env, session_id: &str) -> serde_json::Value {
-    let _ = fno_event_store::import_all(&env.events);
-    fno_event_store::query_events(
+    let _ = fno_agents::event_store::import_all(&env.events);
+    fno_agents::event_store::query_events(
         &env.events,
-        &fno_event_store::EventQuery {
+        &fno_agents::event_store::EventQuery {
             types: vec!["session_finalized".to_string()],
             ..Default::default()
         },

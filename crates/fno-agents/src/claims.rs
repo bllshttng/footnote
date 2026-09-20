@@ -1647,7 +1647,7 @@ pub(crate) fn append_event_line(
     // symlink re-resolve loop, and sibling routing are all retired. The
     // retention class comes from the event type inside the store.
     let line = serde_json::to_string(event).map_err(|e| e.to_string())?;
-    fno_event_store::append_envelope(events_path, &line, None).map(|_| ())
+    crate::event_store::append_envelope(events_path, &line, None).map(|_| ())
 }
 
 fn event_maintenance_dir(events_path: &Path) -> PathBuf {
@@ -2857,8 +2857,8 @@ mod tests {
 
     /// Committed rows in the store beside this journal.
     fn committed_row_count(events: &std::path::Path) -> usize {
-        let _ = fno_event_store::import_all(events);
-        fno_event_store::query_events(events, &fno_event_store::EventQuery::default())
+        let _ = crate::event_store::import_all(events);
+        crate::event_store::query_events(events, &crate::event_store::EventQuery::default())
             .unwrap_or_default()
             .len()
     }

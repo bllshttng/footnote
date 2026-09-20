@@ -641,12 +641,12 @@ pub(crate) fn read_journal_text_at(live: &std::path::Path) -> (String, Option<St
             )),
         )
     };
-    if let Err(e) = fno_event_store::import_all(live) {
+    if let Err(e) = crate::event_store::import_all(live) {
         return unreadable(e);
     }
-    let rows = match fno_event_store::query_events(
+    let rows = match crate::event_store::query_events(
         live,
-        &fno_event_store::EventQuery {
+        &crate::event_store::EventQuery {
             include_rejected: true,
             ..Default::default()
         },

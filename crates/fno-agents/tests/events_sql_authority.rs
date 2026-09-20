@@ -2,7 +2,7 @@
 //! appenders, a lost reply recovered by idempotent retry, legacy source
 //! reconciliation, export stability, and repo-scoped identity.
 
-use fno_event_store::{append_envelope, export_jsonl, import_all, query_events, EventQuery};
+use fno_agents::event_store::{append_envelope, export_jsonl, import_all, query_events, EventQuery};
 use serde_json::json;
 
 fn attestation(repo: &str, head: &str, pr: i64) -> String {
@@ -13,7 +13,7 @@ fn attestation(repo: &str, head: &str, pr: i64) -> String {
 }
 
 fn count(store: &std::path::Path) -> i64 {
-    fno_event_store::open_read(store)
+    fno_agents::event_store::open_read(store)
         .unwrap()
         .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
         .unwrap()
@@ -45,7 +45,7 @@ fn concurrent_appenders_commit_exactly_once_each() {
     seqs.iter()
         .enumerate()
         .for_each(|(i, seq)| assert_eq!(*seq, (i + 1) as i64));
-    assert_eq!(count(&fno_event_store::store_path(&live)), 9);
+    assert_eq!(count(&fno_agents::event_store::store_path(&live)), 9);
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn kill_after_commit_recovers_by_idempotent_retry() {
     assert!(!retry.inserted, "the retry is an idempotent hit");
     assert_eq!(retry.event_id, first.event_id);
     assert_eq!(retry.seq, first.seq);
-    assert_eq!(count(&fno_event_store::store_path(&live)), 1);
+    assert_eq!(count(&fno_agents::event_store::store_path(&live)), 1);
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn legacy_import_reconciles_source_counts_and_retries_clean() {
     assert_eq!(first.ingested, 5, "every complete source line lands once");
     let second = import_all(&live).unwrap();
     assert_eq!(second.ingested, 0, "the retry imports zero duplicates");
-    let rejected: i64 = fno_event_store::open_read(&fno_event_store::store_path(&live))
+    let rejected: i64 = fno_agents::event_store::open_read(&fno_agents::event_store::store_path(&live))
         .unwrap()
         .query_row(
             "SELECT count(*) FROM events WHERE reject_reason IS NOT NULL",
@@ -125,10 +125,10 @@ fn export_is_a_stable_snapshot_never_new_identity() {
     );
     // A downgrade snapshot copied back in imports as nothing new.
     std::fs::copy(&out1, dir.path().join("restored.jsonl")).unwrap();
-    let before = count(&fno_event_store::store_path(&live));
+    let before = count(&fno_agents::event_store::store_path(&live));
     let receipt = import_all(&live).unwrap();
     assert_eq!(receipt.ingested, 0);
-    assert_eq!(count(&fno_event_store::store_path(&live)), before);
+    assert_eq!(count(&fno_agents::event_store::store_path(&live)), before);
 }
 
 #[test]
