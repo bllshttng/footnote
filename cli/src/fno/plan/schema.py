@@ -390,7 +390,7 @@ class PlanFrontmatter(BaseModel):
     blocks_everything: bool = False
     difficulty: str | None = None
     # Who hands out the plan's remaining waves: `manual` waits for a person or
-    # a /king-for-a-day session to run `fno backlog join` (default), or `auto`
+    # a king session to run `fno backlog join` (default), or `auto`
     # fires join at target init. Opt-in - `manual` changes nothing, so every
     # plan written before the key keeps its behavior. Named for the verb it
     # gates: `orchestration` already does four unrelated jobs in this repo, so
