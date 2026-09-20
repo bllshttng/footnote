@@ -449,24 +449,24 @@ pub(crate) fn mint_walk_key(fno_bin: &str, cwd: &Path, scope: &str) -> Result<St
     let discriminator = mint_walk_discriminator();
     // `agents name` is a Python-only verb: an ambient FNO_AGENTS_RUNTIME=rust
     // routes the whole group to this binary, which has no name port.
-    let out = std::process::Command::new(fno_bin)
-        .args([
-            "agents",
-            "name",
-            "--source",
-            "kl",
-            "--verb",
-            "th",
-            scope,
-            "--discriminator",
-            &discriminator,
-        ])
-        .current_dir(cwd)
-        .env("FNO_AGENTS_RUNTIME", "python")
-        .output()
-        .map_err(|error| {
-            LoopError::Queue(format!("walk-name mint failed to spawn fno: {error}"))
-        })?;
+    let out = retry_etxtbsy(|| {
+        std::process::Command::new(fno_bin)
+            .args([
+                "agents",
+                "name",
+                "--source",
+                "kl",
+                "--verb",
+                "th",
+                scope,
+                "--discriminator",
+                &discriminator,
+            ])
+            .current_dir(cwd)
+            .env("FNO_AGENTS_RUNTIME", "python")
+            .output()
+    })
+    .map_err(|error| LoopError::Queue(format!("walk-name mint failed to spawn fno: {error}")))?;
     if !out.status.success() {
         return Err(LoopError::Queue(format!(
             "walk-name mint refused ({}): {}",
