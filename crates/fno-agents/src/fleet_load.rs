@@ -404,10 +404,14 @@ pub(crate) fn analyze(inputs: &Inputs) -> FleetReport {
         if r.ts_ms < floor_ms || r.ts_ms > now_ms {
             continue;
         }
-        loads_per_hour
-            .entry(r.ts[..13].to_string())
-            .or_default()
-            .push(r.load_15m.unwrap_or(0.0));
+        // An unavailable load never invents a zero: the hour's busy median
+        // still records, but the reading is omitted from the load samples.
+        if let Some(load) = r.load_15m {
+            loads_per_hour
+                .entry(r.ts[..13].to_string())
+                .or_default()
+                .push(load);
+        }
         busy_per_hour
             .entry(r.ts[..13].to_string())
             .or_default()
@@ -450,6 +454,15 @@ pub(crate) fn analyze(inputs: &Inputs) -> FleetReport {
     });
     hour_rows.sort_by(|a, b| a.hour.cmp(&b.hour));
 
+    // The windowed readings feed every nearest-reading join: a cache or
+    // journal row older than the floor never leaks into threshold, cap or
+    // the slowdown table.
+    let windowed: Vec<&Reading> = pass
+        .readings
+        .iter()
+        .filter(|r| r.ts_ms >= floor_ms && r.ts_ms <= now_ms)
+        .collect();
+
     let mut report = FleetReport {
         window_days: inputs.window_days,
         threshold_reason: String::new(),
@@ -457,7 +470,7 @@ pub(crate) fn analyze(inputs: &Inputs) -> FleetReport {
         cap_reason: String::new(),
         now: now_line(&pass),
         hours: hour_rows,
-        slowdowns: slowdown_rows(&activity.slowdowns, &pass.readings, floor_ms),
+        slowdowns: slowdown_rows(&activity.slowdowns, &windowed, floor_ms),
         threshold: None,
         curve: None,
         cap: None,
@@ -479,7 +492,13 @@ pub(crate) fn analyze(inputs: &Inputs) -> FleetReport {
         },
         floor,
     };
-    with_threshold_curve_cap(&mut report, &pass, &activity.slowdowns, &now_hour);
+    with_threshold_curve_cap(
+        &mut report,
+        &windowed,
+        &activity.slowdowns,
+        &now_hour,
+        floor_ms,
+    );
     report
 }
 
@@ -489,9 +508,10 @@ pub(crate) fn analyze(inputs: &Inputs) -> FleetReport {
 /// reasons say which gate fired.
 fn with_threshold_curve_cap(
     report: &mut FleetReport,
-    pass: &EventPass,
+    readings: &[&Reading],
     slowdowns: &[Slowdown],
     now_hour: &str,
+    floor_ms: i64,
 ) {
     let pending = report.coverage.fold.pending_bytes;
     // Snapshot the curve inputs first: the hours borrow report immutably
@@ -519,14 +539,18 @@ fn with_threshold_curve_cap(
         return;
     }
     // Threshold: the 25th percentile, nearest rank, of the load_15m at the
-    // slowdown turns that have a reading. Needs at least 2.
+    // slowdown turns of THIS window that have a reading in it. Needs at
+    // least 2. A cache from a wider window must not leak turns in.
     let mut at_slowdowns: Vec<f64> = Vec::new();
     for s in slowdowns {
         let Ok(ts) = DateTime::parse_from_rfc3339(&s.ts) else {
             continue;
         };
         let ms = ts.timestamp_millis();
-        if let Some(Some((Some(load), _, _))) = nearest_reading(&pass.readings, ms) {
+        if ms < floor_ms {
+            continue;
+        }
+        if let Some(Some((Some(load), _, _))) = nearest_reading(readings, ms) {
             at_slowdowns.push(load);
         }
     }
@@ -634,7 +658,7 @@ struct HourSnap {
 }
 
 /// The reading nearest in time to `ms`, when it sits within 60 minutes.
-fn nearest_reading(readings: &[Reading], ms: i64) -> Option<Option<(Option<f64>, f64, i64)>> {
+fn nearest_reading(readings: &[&Reading], ms: i64) -> Option<Option<(Option<f64>, f64, i64)>> {
     let mut best: Option<&Reading> = None;
     for r in readings {
         let d = (r.ts_ms - ms).abs();
@@ -654,7 +678,7 @@ fn now_line(pass: &EventPass) -> NowLine {
     }
 }
 
-fn slowdown_rows(all: &[Slowdown], readings: &[Reading], floor_ms: i64) -> Vec<SlowdownRow> {
+fn slowdown_rows(all: &[Slowdown], readings: &[&Reading], floor_ms: i64) -> Vec<SlowdownRow> {
     let mut rows: Vec<SlowdownRow> = Vec::new();
     for s in all {
         let Ok(ts) = DateTime::parse_from_rfc3339(&s.ts) else {
@@ -716,6 +740,12 @@ pub fn run_fleet_cli(args: &[String]) -> i32 {
             "--days" => {
                 i += 1;
                 match args.get(i).and_then(|v| v.parse::<u64>().ok()) {
+                    Some(0) => {
+                        eprintln!(
+                            "fno-agents intel --fleet: --days 0 is not supported here; the window must be at least 1 day"
+                        );
+                        return 2;
+                    }
                     Some(v) => days = v,
                     None => {
                         eprintln!("fno-agents intel: --days needs a non-negative integer");
@@ -1151,6 +1181,12 @@ mod tests {
         assert_eq!(report.coverage.unrecognized, 0);
         let h0 = &report.hours.iter().find(|h| h.hour == hour_n(0)).unwrap();
         assert_eq!(h0.refusals, 2);
+        // The unavailable reading never invents a zero in the hour's median.
+        let h0_load = h0.load_15m_median.unwrap_or(0.0);
+        assert!(
+            (h0_load - 98.15).abs() < 0.01,
+            "median of 75.9 and 120.4, got {h0_load}"
+        );
         assert_eq!(h0.live_workers_last, Some(7.0));
         assert_eq!(h0.compressor_gb_median, Some(2.5));
         assert_eq!(h0.swap_gb_median, Some(9.1));
@@ -1205,6 +1241,11 @@ mod tests {
         assert_eq!(
             run_fleet_cli(&["--fleet".into(), "--days".into(), "x".into()]),
             2
+        );
+        assert_eq!(
+            run_fleet_cli(&["--fleet".into(), "--days".into(), "0".into()]),
+            2,
+            "--days 0 has no consistent fleet meaning; it is rejected"
         );
         assert_eq!(run_fleet_cli(&["--nonsense".into()]), 2);
         assert_eq!(run_fleet_cli(&["--help".into()]), 0);
