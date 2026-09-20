@@ -75,7 +75,7 @@ alive() { kill -0 "$1" 2>/dev/null; }
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 # 1. An isolated server.
-"$MUX_BIN" mux server --session "$SESSION" >"$TMP_DIR/server.log" 2>&1 &
+"$MUX_BIN" mux server --server "$SESSION" >"$TMP_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 for _ in {1..100}; do
     if "$MUX_BIN" mux ls --json | python3 -c 'import json,os,sys; rows=json.load(sys.stdin); sys.exit(0 if any(r.get("session")==os.environ["SESSION"] and r.get("state")=="live" for r in rows) else 1)'; then
@@ -87,10 +87,10 @@ alive "$SERVER_PID" || fail "the isolated mux server never came up"
 echo "[1] isolated server $SESSION is live under $MUX_DIR"
 
 # 2. A keeper-hosted worker pane.
-"$MUX_BIN" mux pane run --session "$SESSION" --worker convert-proof --json -- \
+"$MUX_BIN" mux pane run --server "$SESSION" --worker convert-proof --json -- \
     grok --resume "$WORKER_SESSION" >"$TMP_DIR/worker.json"
 PANE_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pane_id"])' "$TMP_DIR/worker.json")"
-CHILD_PID="$("$MUX_BIN" mux pane ls --session "$SESSION" --json | python3 -c '
+CHILD_PID="$("$MUX_BIN" mux pane ls --server "$SESSION" --json | python3 -c '
 import json,sys
 rows=json.load(sys.stdin)
 pids=[r.get("child_pid") for r in rows if r.get("pane_id")==int(sys.argv[1])]
@@ -115,7 +115,7 @@ echo "[3] keeper $KEEPER_PID answers at $OLD_SOCKET"
 # 4. The hand-off: the socket moves into the thread tree, the pane is
 #    released. This is the verb the conversion's keeper-rebind arm drives.
 NEW_SOCKET="$MUX_DIR/threads/convert-proof.sock"
-"$MUX_BIN" mux pane kill --session "$SESSION" "$PANE_ID" --hand-off-to "$NEW_SOCKET"
+"$MUX_BIN" mux pane kill --server "$SESSION" "$PANE_ID" --hand-off-to "$NEW_SOCKET"
 sleep 1
 
 # 5. The child never stopped. This is the whole point of the strategy: the
@@ -144,7 +144,7 @@ echo "[7] keeper at the thread socket answers with the same child $CHILD_PID"
 
 # 8. The server let the pane go without killing it. The pane is out of the
 #    listing and the server is still serving.
-"$MUX_BIN" mux pane ls --session "$SESSION" --json | python3 -c '
+"$MUX_BIN" mux pane ls --server "$SESSION" --json | python3 -c '
 import json,sys
 rows=json.load(sys.stdin)
 gone=[r for r in rows if r.get("pane_id")==int(sys.argv[1])]

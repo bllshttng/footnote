@@ -15,19 +15,27 @@ use super::*;
 /// receipt-can-lie shape. Read-only: this verb never unlinks anything (the
 /// server's readopt sweep owns that).
 pub(crate) fn pane_keeper_list(json: bool, stale_after: Option<std::time::Duration>) -> i32 {
-    let dir = crate::pty::keeper_dir();
     let mut rows: Vec<serde_json::Value> = Vec::new();
-    let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().map(|x| x == "sock").unwrap_or(false))
-                .collect()
-        })
-        .unwrap_or_default();
+    // Both lanes. A converted keeper lives under threads/ with the same pid
+    // and the same child, so a listing that read only panes/ would answer
+    // "gone" about a keeper that is running.
+    let mut names: Vec<(std::path::PathBuf, &str)> = Vec::new();
+    for (dir, lane) in [
+        (crate::pty::keeper_dir(), "pane"),
+        (crate::pty::thread_keeper_dir(), "thread"),
+    ] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|x| x == "sock").unwrap_or(false) {
+                names.push((path, lane));
+            }
+        }
+    }
     names.sort();
-    for path in names {
+    for (path, lane) in names {
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let (session, pane_key) = match stem.rsplit_once('-') {
             Some((s, key)) if key.chars().all(|c| c.is_ascii_digit()) => {
@@ -39,6 +47,7 @@ pub(crate) fn pane_keeper_list(json: bool, stale_after: Option<std::time::Durati
             "socket": path.display().to_string(),
             "session": session,
             "pane_key": pane_key,
+            "lane": lane,
         });
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
