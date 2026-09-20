@@ -951,19 +951,24 @@ mod tests {
             r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
         );
         let crowned = r#"{"name":"king-a","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"session-aaaaaaaa"}"#;
-        let worker = |name: &str| {
+        let worker = |name: &str, status: &str| {
             format!(
-                r#"{{"name":"{name}","harness":"claude","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"session-aaaaaaaa"}}"#
+                r#"{{"name":"{name}","harness":"claude","provider":"zai","cwd":"/tmp","status":"{status}","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"session-aaaaaaaa"}}"#
             )
         };
         std::fs::write(
             home.join("registry.json"),
             format!(
-                r#"{{"schema_version":{},"entries":[{},{},{}]}}"#,
+                r#"{{"schema_version":{},"entries":[{},{},{},{}]}}"#,
                 crate::state::REGISTRY_SCHEMA_VERSION,
                 crowned,
-                worker("w1"),
-                worker("w2")
+                worker("w1", "live"),
+                worker("w2", "live"),
+                // The stopped shape: a row the stop wrote terminal while the
+                // process survived. The share does not charge it, so the
+                // naming must not either - the sweep that re-marks it live
+                // is the one that puts it back in the count.
+                worker("w3", "orphaned")
             ),
         )
         .unwrap();
