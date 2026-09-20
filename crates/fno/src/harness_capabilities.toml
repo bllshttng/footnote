@@ -3,7 +3,7 @@
 # (Python package data) and crates/fno/src/harness_capabilities.toml (include_str!ed by
 # the fno mux). Edit the canonical and rebuild; the rust-ci generated-copies dirty-tree
 # step fails on a hand-edited copy.
-map_version = 19
+map_version = 20
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -1281,3 +1281,65 @@ resume_refusal = "is not supported on the grok thread lane yet; the keeper row r
 bypass_flag = "--always-approve"
 takes_model = true
 takes_effort = true
+
+# PANE-TO-THREAD CONVERSION (`fno agents resume <name> --substrate thread`).
+# One stanza per harness naming HOW a live pane becomes a persistent thread.
+# Code branches on `strategy` only, never on a harness name; a harness with
+# no stanza reads `unsupported` (the accessor supplies that default). Every
+# supported row's basis is measured, named beside it, and the same matrix is
+# mirrored in docs/architecture/thread-lanes.md. A harness may not KEEP a
+# supported strategy without a live receipt: a `FNO_CONVERT_LIVE` run that
+# cannot complete demotes the row in the same commit that records the
+# failure.
+#
+#   keeper-rebind  the child process NEVER stops. The keeper's socket moves
+#                  from mux/panes/ to mux/threads/, the mux server drops its
+#                  subscriber seat, and the daemon's keeper sweep already
+#                  rebinds rows by socket path. Same pid, same session id.
+#                  Basis: the pane and thread keepers are the same binary
+#                  (fno-agents-worker --keeper | --pane) and the daemon sweep
+#                  keys on the socket path alone (daemon.rs keeper_registry_sweep).
+#   server-resume  the pane TUI owns its rollout in-process and must EXIT
+#                  before the daemon resumes the SAME rollout id through the
+#                  shared app-server (ensure_codex_thread_handle). Basis: the
+#                  workspace-restore proof - a Codex SIGKILLed mid-session
+#                  resumed under its own id (docs/architecture/workspace-restore.md).
+#   client-resume  the pane process stops, then the client re-launches the
+#                  session detached (`claude --bg --resume <id>`). The id is
+#                  preserved per measurement on claude 2.1.272 (reentry.rs
+#                  records the measurement) and is READ BACK from the roster
+#                  at runtime, never promised blind.
+#   unsupported    no conversion. `refusal` carries the operator-facing why.
+[harness.claude.conversion]
+strategy = "client-resume"
+preserves_id = true
+
+[harness.codex.conversion]
+strategy = "server-resume"
+preserves_id = true
+
+[harness.gemini.conversion]
+strategy = "unsupported"
+preserves_id = false
+refusal = "gemini is deprecated in favor of agy; there is nothing to convert"
+
+[harness.agy.conversion]
+strategy = "keeper-rebind"
+preserves_id = true
+
+[harness.opencode.conversion]
+strategy = "unsupported"
+preserves_id = false
+refusal = "the opencode serve lane carries model only and its thread-lane honesty is an open question (docs/architecture/thread-lanes.md); refusing rather than forking a new session"
+
+[harness.pi.conversion]
+strategy = "keeper-rebind"
+preserves_id = true
+
+[harness.cursor-agent.conversion]
+strategy = "keeper-rebind"
+preserves_id = true
+
+[harness.grok.conversion]
+strategy = "keeper-rebind"
+preserves_id = true
