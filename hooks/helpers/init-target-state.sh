@@ -1883,7 +1883,7 @@ PYEOF
     # `join: auto` in the plan frontmatter hands the plan's remaining waves
     # to `fno backlog join` here, at init: this session is the holder (one
     # worker) and join spawns the remainder into this worktree. The key is
-    # opt-in - absent or `manual` waits for a person or a /king-for-a-day
+    # opt-in - absent or `manual` waits for a person or a king
     # session to run the verb and does nothing here, so plans written before
     # the key keep their behavior. Both facts come from the canonical probes
     # in fno.backlog.join_trigger: bash re-implementing the auto-continue

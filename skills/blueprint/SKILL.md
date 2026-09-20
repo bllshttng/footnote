@@ -228,7 +228,7 @@ fi
 
    **Then ask the join posture.** The trigger is every plan that carries an `## Execution Strategy`. One question, one key: `join: manual | auto   # default manual`.
 
-   `manual` waits for a person or a `/king-for-a-day` session to hand the remaining waves out with `fno backlog join <node>`. That is today's behavior for every plan. `auto` fires join at `fno do target init`.
+   `manual` waits for a person or a crowned `/fno:reign` king to hand the remaining waves out with `fno backlog join <node>`. That is today's behavior for every plan. `auto` fires join at `fno do target init`.
 
    Print the plan's measured width beside the question. Run `python3 -m fno.backlog.join_trigger width "$PLAN_PATH"`, the same probe `init-target-state.sh` uses. Branch on its exit code, never on empty output. When the width is 1, record `manual` without asking. When the probe exits 1, record `manual` and name the width as unmeasured.
 

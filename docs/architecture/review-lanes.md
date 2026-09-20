@@ -246,7 +246,7 @@ the reliable fallback, and king-mail as the asynchronous one - not a
 closed either/or.
 The king-mediated path, the per-harness verbs, and the never-substitute-
 silently contract have a deeper treatment in
-[king-for-a-day/references/review.md](../../skills/king-for-a-day/references/review.md).
+[reign/references/review.md](../../skills/reign/references/review.md).
 
 ## Counting invocations
 
@@ -265,7 +265,7 @@ A correct count unions a `<command-name>` probe with a `tool_use` probe
 for the skill name, and uses the counting session's own id as a
 positive control (it must find at least itself).
 This shape is general to any programmatic skill invocation, not just
-review: counting king-for-a-day reigns by the `<command-name>` marker
+review: counting one-wave reigns by the `<command-name>` marker
 undercounts the same way, since a reign fired through the Skill tool is a
 `tool_use`, not a typed command.
 
