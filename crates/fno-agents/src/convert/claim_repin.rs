@@ -28,6 +28,14 @@ pub struct HeldClaim {
 /// about to stop. A claim pinned to some other pid belongs to another
 /// session and is never touched, and a claim with no pid has nothing to
 /// re-pin.
+///
+/// Sound for the FIRST hop only. The pane child pid belongs to exactly one
+/// session, so filtering by it selects that session's claims and no others.
+/// The daemon pid does not: a codex thread parks its claims there for the
+/// life of the session, and a concurrent conversion parks its own there
+/// mid-move. So the second hop never calls this. It moves the exact set the
+/// first hop returned, which is why [`repin_all`] takes a list rather than
+/// a pid to search by.
 pub fn claims_to_carry(rows: &Value, writer_pid: u32) -> Vec<HeldClaim> {
     let Some(rows) = rows.get("rows").and_then(Value::as_array) else {
         return Vec::new();
@@ -92,6 +100,24 @@ pub fn repin(key: &str, holder: &str, pid: u32) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shared_pid_selects_every_session_on_it_which_is_why_hop_two_never_searches() {
+        // Two sessions parked on one daemon pid. Searching by that pid
+        // returns BOTH, so a second hop derived this way would pin another
+        // session's claim to this session's new writer.
+        let rows = serde_json::json!({"rows": [
+            {"key": "session:aaa", "holder": "pty:aaa", "pid": 900},
+            {"key": "session:bbb", "holder": "pty:bbb", "pid": 900},
+            {"key": "session:ccc", "holder": "pty:ccc", "pid": 901},
+        ]});
+        let carried = claims_to_carry(&rows, 900);
+        assert_eq!(carried.len(), 2, "the filter is pid-only: {carried:?}");
+        // The caller's defence is to carry the first hop's own list forward,
+        // never to re-derive from a pid it shares.
+        let mine = vec![carried[0].clone()];
+        assert_eq!(mine.len(), 1);
+    }
 
     fn rows() -> Value {
         serde_json::json!({"rows": [

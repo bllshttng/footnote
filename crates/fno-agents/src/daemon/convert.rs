@@ -123,23 +123,49 @@ pub(super) async fn handle_convert(ctx: &Arc<Ctx>, req: &Request) -> Response {
     }
 }
 
-/// Read this session's claims and re-pin them to `pid`. Returns the failure
-/// sentence when one or more could not move, so the caller can refuse while
-/// naming the key rather than reporting a clean conversion over a claim the
-/// session no longer holds.
-fn repin_session_claims(writer_pid: u32, to_pid: u32) -> Option<String> {
+/// The first hop: find this session's claims by the writer pid about to
+/// stop, and park them on the daemon. Returns what it carried, so the
+/// second hop moves that exact set.
+///
+/// The pane child pid belongs to one session, so searching by it is exact
+/// here. The daemon pid is shared, so the second hop must NOT search by it:
+/// a codex thread parks its claims on the daemon for good, and a concurrent
+/// conversion parks its own there mid-move. Searching would sweep up both.
+fn park_session_claims(
+    writer_pid: u32,
+    daemon_pid: u32,
+) -> Result<Vec<crate::convert::claim_repin::HeldClaim>, String> {
     let rows = match crate::claim_store::list_db(None, false, None) {
         Ok(rows) => rows,
         // A claim store that cannot be read is not a claim that moved. Say
         // so rather than proceed as though there were none to carry.
-        Err(error) => return Some(format!("the claim store could not be read: {error}")),
+        Err(error) => return Err(format!("the claim store could not be read: {error}")),
     };
     let carried = crate::convert::claim_repin::claims_to_carry(&rows, writer_pid);
-    let failures = crate::convert::claim_repin::repin_all(
-        &carried,
-        to_pid,
-        &crate::convert::claim_repin::repin,
-    );
+    match repin_failures(&carried, daemon_pid) {
+        None => Ok(carried),
+        Some(failure) => Err(failure),
+    }
+}
+
+/// Move an already-known set of claims to `pid`. The set comes from the
+/// first hop, never from a fresh search.
+fn repin_session_claims(
+    claims: &[crate::convert::claim_repin::HeldClaim],
+    to_pid: u32,
+) -> Option<String> {
+    repin_failures(claims, to_pid)
+}
+
+/// The failure sentence when one or more claims could not move, so the
+/// caller refuses while naming the key rather than reporting a clean
+/// conversion over a claim the session no longer holds.
+fn repin_failures(
+    claims: &[crate::convert::claim_repin::HeldClaim],
+    to_pid: u32,
+) -> Option<String> {
+    let failures =
+        crate::convert::claim_repin::repin_all(claims, to_pid, &crate::convert::claim_repin::repin);
     if failures.is_empty() {
         return None;
     }
@@ -150,6 +176,20 @@ fn repin_session_claims(writer_pid: u32, to_pid: u32) -> Option<String> {
             .collect::<Vec<_>>()
             .join(", "),
     )
+}
+
+/// Run one blocking step on the blocking pool. The codex arm must await the
+/// app-server handle, so it cannot sit on `spawn_blocking` wholesale the way
+/// the claude arm does; every registry flock and sqlite call it makes hops
+/// out individually instead of stalling the runtime thread.
+async fn off_runtime<T, F>(what: &str, work: F) -> Result<T, String>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| format!("the {what} was dropped before it ran"))
 }
 
 /// The Codex transaction: re-pin, stop the TUI, flip the row, resume the
@@ -164,12 +204,20 @@ async fn run_server_resume(ctx: &Arc<Ctx>, req: &Request, plan: &ConvertPlan) ->
     let child_pid = plan.host.child_pid();
     let refuse = |detail: String| Response::err(req.id, ErrorCode::Internal, detail);
 
-    if let Some(failure) = repin_session_claims(child_pid, daemon_pid) {
-        return refuse(format!(
-            "convert {}: claims could not be re-pinned to the daemon, so the conversion never \
-             started and the pane is untouched: {failure}",
-            plan.name
-        ));
+    let parked = off_runtime("claim park", move || {
+        park_session_claims(child_pid, daemon_pid)
+    })
+    .await;
+    match parked {
+        Ok(Ok(_)) => {}
+        Ok(Err(failure)) => {
+            return refuse(format!(
+                "convert {}: claims could not be re-pinned to the daemon, so the conversion \
+                 never started and the pane is untouched: {failure}",
+                plan.name
+            ))
+        }
+        Err(dropped) => return refuse(format!("convert {}: {dropped}", plan.name)),
     }
     let _ = ctx.emitter.emit(
         "agent_convert_phase",
@@ -177,7 +225,12 @@ async fn run_server_resume(ctx: &Arc<Ctx>, req: &Request, plan: &ConvertPlan) ->
     );
 
     let registry_path = ctx.home.registry_json();
-    let Some(entry) = read_row(&registry_path, &plan.name) else {
+    let read = {
+        let registry_path = registry_path.clone();
+        let name = plan.name.clone();
+        off_runtime("row read", move || read_row(&registry_path, &name)).await
+    };
+    let Ok(Some(entry)) = read else {
         return refuse(format!(
             "convert {}: the row vanished between classification and the stop; nothing was moved",
             plan.name
@@ -211,19 +264,35 @@ async fn run_server_resume(ctx: &Arc<Ctx>, req: &Request, plan: &ConvertPlan) ->
     );
 
     let name = plan.name.clone();
-    if let Err(error) = state::update_registry(&registry_path, move |registry| {
-        if let Some(row) = registry.find_mut(&name) {
-            crate::convert::server_resume::to_codex_thread(row);
+    let flip = {
+        let registry_path = registry_path.clone();
+        off_runtime("row flip", move || {
+            state::update_registry(&registry_path, move |registry| {
+                if let Some(row) = registry.find_mut(&name) {
+                    crate::convert::server_resume::to_codex_thread(row);
+                }
+            })
+        })
+        .await
+    };
+    match flip {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            return refuse(format!(
+                "convert {}: the pane stopped but the row flip failed: {error}. Re-run the same \
+                 command; it reclassifies from what is true.",
+                plan.name
+            ))
         }
-    }) {
-        return refuse(format!(
-            "convert {}: the pane stopped but the row flip failed: {error}. Re-run the same \
-             command; it reclassifies from what is true.",
-            plan.name
-        ));
+        Err(dropped) => return refuse(format!("convert {}: {dropped}", plan.name)),
     }
 
-    let Some(flipped) = read_row(&registry_path, &plan.name) else {
+    let reread = {
+        let registry_path = registry_path.clone();
+        let name = plan.name.clone();
+        off_runtime("row re-read", move || read_row(&registry_path, &name)).await
+    };
+    let Ok(Some(flipped)) = reread else {
         return refuse(format!(
             "convert {}: the row vanished after the flip; the session is stopped",
             plan.name
@@ -246,14 +315,19 @@ async fn run_server_resume(ctx: &Arc<Ctx>, req: &Request, plan: &ConvertPlan) ->
             // `fno agents resume` knows how to repair.
             let name = plan.name.clone();
             let restore = snapshot.clone();
-            let restore_error = state::update_registry(&registry_path, move |registry| {
-                if let Some(row) = registry.find_mut(&name) {
-                    restore.restore(row);
-                    row.status = crate::AgentStatus::Exited;
-                }
+            let registry_path = registry_path.clone();
+            let restore_error = off_runtime("rollback", move || {
+                state::update_registry(&registry_path, move |registry| {
+                    if let Some(row) = registry.find_mut(&name) {
+                        restore.restore(row);
+                        row.status = crate::AgentStatus::Exited;
+                    }
+                })
+                .err()
+                .map(|error| error.to_string())
             })
-            .err()
-            .map(|error| error.to_string());
+            .await
+            .unwrap_or_else(|dropped| Some(dropped));
             let _ = ctx.emitter.emit(
                 "agent_convert_phase",
                 &json!({
@@ -295,6 +369,9 @@ fn allow_new_id(req: &Request) -> bool {
 /// `claude --bg` returns as soon as it has forked, and the row lands a beat
 /// later, so a single read would report a roster that has not caught up.
 const ROSTER_SETTLE: Duration = Duration::from_secs(20);
+/// How long the relaunch itself may take to return. `claude --bg` forks and
+/// exits, so this bounds a hang, not the session.
+const LAUNCH_TIMEOUT: Duration = Duration::from_secs(120);
 const ROSTER_POLL: Duration = Duration::from_millis(500);
 
 /// The claude transaction: re-pin to the daemon, stop the pane, relaunch the
@@ -341,13 +418,16 @@ fn run_client_resume(ctx: &Ctx, req: &Request, plan: &ConvertPlan, allow_new_id:
         &crate::census::process_argv(child_pid).unwrap_or_default(),
     );
 
-    if let Some(failure) = repin_session_claims(child_pid, daemon_pid) {
-        return refuse(format!(
-            "convert {}: claims could not be re-pinned to the daemon, so the conversion never \
-             started and the pane is untouched: {failure}",
-            plan.name
-        ));
-    }
+    let parked = match park_session_claims(child_pid, daemon_pid) {
+        Ok(parked) => parked,
+        Err(failure) => {
+            return refuse(format!(
+                "convert {}: claims could not be re-pinned to the daemon, so the conversion \
+                 never started and the pane is untouched: {failure}",
+                plan.name
+            ))
+        }
+    };
     let _ = ctx.emitter.emit(
         "agent_convert_phase",
         &json!({"name": plan.name, "strategy": plan.strategy, "phase": "claims-held"}),
@@ -370,12 +450,29 @@ fn run_client_resume(ctx: &Ctx, req: &Request, plan: &ConvertPlan, allow_new_id:
     );
 
     let argv = crate::convert::client_resume::resume_argv(&session_id, &carried);
-    let config_dir = crate::claude_roster::removal_config_dir(
+    // A misconfigured account root is NOT "the ambient root". Relaunching
+    // there runs the session on the wrong account, bills the wrong lane,
+    // and then reports "never appeared on the roster" - which names the
+    // symptom and hides the cause.
+    let config_dir = match crate::claude_roster::removal_config_dir(
         &crate::claude_roster::read_all_agents_union(),
         &snapshot.short_id,
         entry.launch_account.as_deref(),
-    )
-    .unwrap_or(None);
+    ) {
+        Ok(dir) => dir,
+        Err(error) => {
+            return refuse(rolled_back(
+                ctx,
+                &registry_path,
+                plan,
+                &snapshot,
+                &format!(
+                    "the claude account root for this session could not be resolved ({error}), \
+                     so the relaunch never ran rather than landing on the wrong account"
+                ),
+            ))
+        }
+    };
     if let Err(error) = launch_background_claude(&entry.cwd, &argv, config_dir.as_deref()) {
         return refuse(rolled_back(
             ctx,
@@ -431,7 +528,7 @@ fn run_client_resume(ctx: &Ctx, req: &Request, plan: &ConvertPlan, allow_new_id:
     // still on the daemon, which is live, so nothing reads stale (AC5-ERR).
     let claim_failure = row
         .pid
-        .and_then(|writer_pid| repin_session_claims(daemon_pid, writer_pid));
+        .and_then(|writer_pid| repin_session_claims(&parked, writer_pid));
 
     let name = plan.name.clone();
     let short_id = row.short_id.clone();
@@ -554,7 +651,12 @@ fn settle_roster(
             crate::claude_roster::ClaudeAgentsSnapshot::Known { rows, .. }
             | crate::claude_roster::ClaudeAgentsSnapshot::Unknown { rows, .. } => rows.as_slice(),
         };
-        if let Some(row) = crate::convert::client_resume::relaunched_row(before, rows, session_id) {
+        // A row whose session id has not landed yet is not an answer. Taking
+        // it would hand `id_verdict` a None and roll back a conversion that
+        // in fact kept its id, stopping a session that was fine.
+        if let Some(row) = crate::convert::client_resume::relaunched_row(before, rows, session_id)
+            .filter(|row| row.session_id.as_deref().is_some_and(|id| !id.is_empty()))
+        {
             return Some(row.clone());
         }
         if std::time::Instant::now() >= deadline {
@@ -573,22 +675,49 @@ fn launch_background_claude(
     config_dir: Option<&std::path::Path>,
 ) -> Result<(), String> {
     let mut command = std::process::Command::new("claude");
-    command.args(argv).current_dir(cwd);
+    command
+        .args(argv)
+        .current_dir(cwd)
+        // The daemon's stdin is not this launch's stdin. Inheriting it lets
+        // a prompt block forever while the agent lock is held and the pane
+        // child is already dead.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     if let Some(dir) = config_dir {
         command.env("CLAUDE_CONFIG_DIR", dir);
     }
-    let output = command
-        .output()
+    let mut child = command
+        .spawn()
         .map_err(|error| format!("claude --bg failed to start: {error}"))?;
-    if output.status.success() {
-        return Ok(());
+    // Bounded like every other wait on this path. `--bg` returns as soon as
+    // it has forked, so this deadline is slack, not a race.
+    let deadline = std::time::Instant::now() + LAUNCH_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                let stderr = child
+                    .wait_with_output()
+                    .ok()
+                    .map(|output| String::from_utf8_lossy(&output.stderr).trim().to_string())
+                    .unwrap_or_default();
+                return Err(format!("claude --bg exited {status}: {stderr}"));
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "claude --bg did not return within {}s and was stopped",
+                    LAUNCH_TIMEOUT.as_secs()
+                ));
+            }
+            Err(error) => return Err(format!("claude --bg could not be waited on: {error}")),
+        }
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(format!(
-        "claude --bg exited {}: {}",
-        output.status,
-        stderr.trim()
-    ))
 }
 
 /// Stop the background session a rollback is undoing, through the ONE
@@ -735,7 +864,15 @@ fn run_keeper_rebind(ctx: &Ctx, req: &Request, plan: &ConvertPlan) -> Response {
         .parent()
         .unwrap_or_else(|| ctx.home.root())
         .to_path_buf();
-    let target = crate::convert::keeper_rebind::thread_socket_path(&state_root, &plan.name);
+    let target = match &plan.host {
+        // Already handed off: the keeper's own socket is the truth, and
+        // re-deriving one would probe a path nothing answers if the naming
+        // rule ever changes.
+        crate::convert::ConvertHost::HandedOffKeeper { keeper_socket, .. } => {
+            std::path::PathBuf::from(keeper_socket)
+        }
+        _ => crate::convert::keeper_rebind::thread_socket_path(&state_root, &plan.name),
+    };
 
     let _ = ctx.emitter.emit(
         "agent_convert_phase",
@@ -786,7 +923,11 @@ fn run_keeper_rebind(ctx: &Ctx, req: &Request, plan: &ConvertPlan) -> Response {
             )
         }
     };
-    let mut outcome = match crate::convert::keeper_rebind::verify_moved(plan, &identify) {
+    let outcome = match crate::convert::keeper_rebind::verify_moved(
+        plan,
+        &identify,
+        &target.to_string_lossy(),
+    ) {
         Ok(outcome) => outcome,
         Err(error) => {
             return Response::err(
@@ -796,7 +937,6 @@ fn run_keeper_rebind(ctx: &Ctx, req: &Request, plan: &ConvertPlan) -> Response {
             )
         }
     };
-    outcome.socket = target.to_string_lossy().into_owned();
 
     let name = plan.name.clone();
     let flip = outcome.clone();
@@ -849,7 +989,7 @@ fn refusal_response(id: u64, refusal: ConvertRefusal) -> Response {
 }
 
 fn plan_json(plan: &ConvertPlan, dry_run: bool) -> Value {
-    let (pane_session, pane_id) = plan.host.pane();
+    let pane = plan.host.pane();
     json!({
         "outcome": if dry_run { "dry-run" } else { "converted" },
         "name": plan.name,
@@ -857,7 +997,7 @@ fn plan_json(plan: &ConvertPlan, dry_run: bool) -> Value {
         "strategy": plan.strategy,
         "preserves_id": plan.preserves_id,
         "session_id": plan.session_id,
-        "pane": {"session": pane_session, "pane_id": pane_id},
+        "pane": pane.map(|(session, pane_id)| json!({"session": session, "pane_id": pane_id})),
         "child_pid": plan.host.child_pid(),
         "steps": plan.steps,
         "receipt": plan.receipt(),

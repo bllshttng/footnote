@@ -48,7 +48,12 @@ pub fn hand_off(
             plan.name
         ));
     };
-    let (session, pane_id) = plan.host.pane();
+    // A hand-off that already landed has no pane left to release. Asking
+    // the server to release one again is a refusal on a pane it no longer
+    // seats, so the resumed conversion skips straight to the verify.
+    let Some((session, pane_id)) = plan.host.pane() else {
+        return Ok(());
+    };
     run(session, pane_id, &target.to_string_lossy())
 }
 
@@ -81,9 +86,14 @@ pub fn run_mux_hand_off(session: &str, pane_id: u64, target: &str) -> Result<(),
 /// SAME child on the SAME session. A hand-off that answered success but
 /// moved something else is exactly what this re-read exists to catch: the
 /// row is about to be pointed at whatever is behind this path.
+/// `socket` is the path the reply was read FROM, taken as an argument
+/// rather than left blank for the caller to patch in. An outcome that
+/// leaves it empty reaches `flipped_row` as `Some("")`, and the keeper
+/// sweep can bind that row by neither socket nor session id.
 pub fn verify_moved(
     plan: &ConvertPlan,
     identify: &serde_json::Value,
+    socket: &str,
 ) -> Result<RebindOutcome, String> {
     let expected_child = plan.host.child_pid();
     let child_pid = identify
@@ -122,8 +132,11 @@ pub fn verify_moved(
         .and_then(serde_json::Value::as_u64)
         .and_then(|pid| u32::try_from(pid).ok())
         .ok_or_else(|| "the moved keeper answered no keeper pid".to_string())?;
+    if socket.is_empty() {
+        return Err("the moved keeper was read from no socket path".to_string());
+    }
     Ok(RebindOutcome {
-        socket: String::new(),
+        socket: socket.to_string(),
         keeper_pid,
         child_pid,
         session_id,
@@ -216,6 +229,7 @@ mod tests {
         let outcome = verify_moved(
             &plan(),
             &identify(4242, "11111111-2222-3333-4444-555555555555", 900),
+            "/state/mux/threads/worker.sock",
         )
         .expect("the same keeper verifies");
         assert_eq!(outcome.child_pid, 4242);
@@ -228,24 +242,35 @@ mod tests {
         let wrong_child = verify_moved(
             &plan(),
             &identify(9999, "11111111-2222-3333-4444-555555555555", 900),
+            "/state/mux/threads/worker.sock",
         )
         .expect_err("another child refuses");
         assert!(wrong_child.contains("9999"), "{wrong_child}");
         assert!(wrong_child.contains("4242"), "{wrong_child}");
 
-        let wrong_session =
-            verify_moved(&plan(), &identify(4242, "another-session", 900)).expect_err("refuses");
+        let wrong_session = verify_moved(
+            &plan(),
+            &identify(4242, "another-session", 900),
+            "/state/mux/threads/worker.sock",
+        )
+        .expect_err("refuses");
         assert!(wrong_session.contains("another-session"), "{wrong_session}");
     }
 
     #[test]
     fn a_moved_keeper_answering_nothing_refuses_rather_than_guessing() {
-        let silent = verify_moved(&plan(), &serde_json::json!({})).expect_err("refuses");
+        let silent = verify_moved(
+            &plan(),
+            &serde_json::json!({}),
+            "/state/mux/threads/worker.sock",
+        )
+        .expect_err("refuses");
         assert!(silent.contains("child pid"), "{silent}");
 
         let no_session = verify_moved(
             &plan(),
             &serde_json::json!({"keeper_pid": 900, "child_pid": 4242, "argv": ["pi"]}),
+            "/state/mux/threads/worker.sock",
         )
         .expect_err("refuses");
         assert!(no_session.contains("session id"), "{no_session}");

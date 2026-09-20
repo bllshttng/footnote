@@ -896,7 +896,14 @@ async fn run(args: Vec<String>) -> i32 {
     // daemon's agent.convert. The daemon owns it because the agent lock
     // serializes it and a mid-move claim must be pinned to a process that
     // outlives the client.
-    if verb == "resume" && !args[1..].iter().any(|a| a.starts_with("--substrate")) {
+    // The FLAG, in either spelling - never a value that merely starts with
+    // the same letters. `-m "--substrate thread"` is a message, not a
+    // conversion, and routing it to agent.convert would try to move a live
+    // pane the caller never asked about.
+    let asks_for_a_substrate = args[1..]
+        .iter()
+        .any(|a| a == "--substrate" || a.starts_with("--substrate="));
+    if verb == "resume" && !asks_for_a_substrate {
         // resume_wake's wake arms build their own runtimes and block_on them;
         // on this thread that panics inside the ambient runtime. A fresh
         // thread is legal in both contexts (gc_sweep::stop_row_process is
@@ -4140,6 +4147,16 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 "resume --substrate thread takes one NAME, plus --dry-run and --allow-new-id"
                     .to_string()
             })?;
+            // The PARSER decides, not the intercept. Reaching the convert
+            // door on anything but `--substrate thread` would convert a
+            // session whose caller asked for a plain resume.
+            if parsed.substrate.as_deref() != Some("thread") {
+                return Err(
+                    "resume reached the convert door without --substrate thread; this is a \
+                     re-entry, not a lifecycle conversion"
+                        .to_string(),
+                );
+            }
             params.insert("name".into(), Value::String(parsed.name));
             params.insert("dry_run".into(), Value::Bool(parsed.dry_run));
             params.insert("allow_new_id".into(), Value::Bool(parsed.allow_new_id));

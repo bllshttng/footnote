@@ -111,6 +111,8 @@ Ordering is the safety argument on every strategy. Every refusal is raised befor
 
 A hand-off can land while its row flip fails. Re-run the same command. It reclassifies from what is true, finds the keeper already at the thread path, and finishes. Nothing writes a journal, because the world is the journal.
 
+The fingerprint is the keeper's LANE. A landed hand-off leaves no pane, so the pane listing stops naming the child. `fno mux pane keeper list` still names it, on the thread lane. That pair, no pane and a live thread-lane keeper on this row's child, is the half-converted shape. The classifier answers it with a plan whose only step is the row flip. Without that reading the re-run refuses for want of a pane. The refusal then points at `fno agents resume`. That starts a second writer over a child that never stopped.
+
 Conversion is not a portal. A portal moves the VIEWER and leaves the mux server hosting the process. `fno mux thread reseat` is that operation. Here the server stops hosting anything. Open a view on the converted thread with `fno mux thread <name>`.
 
 Thread-to-pane is not built. `--substrate` takes only `thread`, and any other value refuses by name.
