@@ -5,6 +5,7 @@ use super::*;
 use crate::daemon::codex_thread_resume::codex_thread_recovery_candidate;
 
 use crate::gc_sweep::{self, GcSummary, GraphRead};
+use crate::quiet_retire::{daemon_exited_payload, no_live_worker};
 
 // ── x-c672: the retirement sweep, keyed by the reverse join ─────────────
 

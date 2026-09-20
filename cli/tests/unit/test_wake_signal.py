@@ -46,7 +46,10 @@ def test_drop_signal_creates_parent_dir(tmp_path):
 
 
 def test_concurrent_drops_no_collision(tmp_path):
-    with multiprocessing.Pool(3) as pool:
+    # A spawn-context pool: a plain fork can deadlock when the parent already
+    # runs threads (the CI shard's pytest-timeout fired on exactly that).
+    ctx = multiprocessing.get_context("spawn")
+    with ctx.Pool(3) as pool:
         pool.map(_drop_one, [(tmp_path, i) for i in range(3)])
     files = list(signals_dir(tmp_path).glob("wake-*.json"))
     assert len(files) == 3

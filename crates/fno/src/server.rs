@@ -65,6 +65,7 @@ use crate::vt::{self, frame_text, Modes};
 mod agent_actions;
 mod agent_launch;
 mod agent_rows_join;
+mod drift_retire;
 mod keeper_adopt;
 pub(crate) mod lifecycle_target;
 mod pane_close;
@@ -76,10 +77,12 @@ mod restore_route_gate;
 mod resume_argv;
 mod retire_session;
 mod row_set;
+mod session_guard;
 mod shutdown_capture;
 mod squad_persistence;
 mod squad_sync;
 mod truth_probe;
+use self::session_guard::{ConnAlive, SocketGuard};
 
 use self::agent_actions::{run_mail_send, run_reap, run_reentry_plan};
 use self::keeper_adopt::{keeper_worker_bin, AdoptedKeeper};
@@ -1395,40 +1398,6 @@ fn parse_loc_sel(s: &str) -> Result<LocSel, String> {
 enum Flow {
     Continue,
     Shutdown,
-}
-
-/// Unlink the socket AND both its sidecars (`.ver`, `.pid`) on
-/// every exit path out of `run` (a SIGKILL leaves them behind by design; the
-/// stale-socket path in `bind_or_probe` covers that, and a lingering `.ver`
-/// is inert - `ls` only reads it for a LIVE server, and a dead one probes
-/// `Stale`).
-struct SocketGuard(PathBuf);
-
-impl Drop for SocketGuard {
-    fn drop(&mut self) {
-        let _ = crate::proto::remove_session_files(&self.0);
-        crate::proto::remove_startup_guard(&self.0);
-    }
-}
-
-/// RAII count of in-flight connections, read by the FNO_E2E idle reaper. A
-/// control one-shot (`pane run`, kill-server, a probe) is NOT an attached
-/// client, so without this the reaper can fire mid-verb on a young server
-/// whose test grace is shorter than a loaded machine's verb latency, killing
-/// the server out from under a live peer.
-struct ConnAlive(std::sync::Arc<std::sync::atomic::AtomicUsize>);
-
-impl ConnAlive {
-    fn new(count: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
-        count.fetch_add(1, std::sync::atomic::Ordering::Release);
-        ConnAlive(count.clone())
-    }
-}
-
-impl Drop for ConnAlive {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::Release);
-    }
 }
 
 /// Run the server on `socket`. Returns the process exit code.
@@ -13845,6 +13814,12 @@ async fn serve(
     // after one interval instead of duplicating startup's known-live state.
     pane_reap_tick.tick().await;
 
+    // Build-drift retirement: the watch stats its own executable
+    // off-loop every 5th tick and retires through Flow::Shutdown only on a
+    // drifted verdict at a fully quiet tick. The machinery lives in
+    // server/drift_retire.rs.
+    let mut drift_watch = drift_retire::RetireWatch::new();
+
     // diagnostics: which panes' output the CORE LOOP has seen. Pairs
     // with the pty reader thread's own first-chunk line to split "shell never
     // spoke" from "core loop never drained it".
@@ -13908,6 +13883,24 @@ async fn serve(
                 }
                 if core.reap_dead_children(dead) == Flow::Shutdown {
                     e2e_log(format_args!("last dead pane reaped; shutting down"));
+                    break Flow::Shutdown;
+                }
+                // Drift retirement: a drifted verdict at a fully
+                // quiet tick (no panes, clients, or connections) retires the
+                // server so the next attach spawns the installed build. The
+                // stat runs off-loop in server/drift_retire.rs.
+                if let Some((running, on_disk)) = drift_watch.tick(|| {
+                    core.panes.is_empty()
+                        && *core.client_count.borrow() == 0
+                        && conns_alive.load(Ordering::Acquire) == 0
+                }) {
+                    eprintln!(
+                        "fno mux: stale-build retire: on-disk binary changed ({} -> {}); \
+                         no panes, clients, or connections; retiring so the next \
+                         attach spawns the installed build",
+                        running.path.display(),
+                        on_disk.path.display()
+                    );
                     break Flow::Shutdown;
                 }
             }

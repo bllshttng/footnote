@@ -83,6 +83,7 @@ pub mod claude_drive;
 pub mod claude_roster;
 pub mod claude_sessions;
 pub mod claude_stream_entry;
+pub mod claude_supervisor;
 pub mod cli_args;
 pub mod client;
 pub mod client_verbs;
@@ -131,6 +132,7 @@ pub mod fallback_chain;
 pub mod feed;
 pub mod finalize;
 pub mod fleet_incident;
+pub mod fleet_load;
 pub mod flight_gate;
 pub mod gc;
 pub mod gc_claude_stop;
@@ -166,6 +168,7 @@ pub mod king_term;
 pub mod king_termination;
 pub mod king_verdict_inputs;
 pub mod lane_heal;
+pub mod launch_workdir;
 pub mod law_match;
 mod lifecycle_child;
 pub mod liveness_sweep;
@@ -226,6 +229,7 @@ pub mod provider_cap;
 pub mod provider_cap_verbs;
 pub mod publish_review;
 pub mod question_sweep;
+pub mod quiet_retire;
 pub mod readiness;
 pub mod reap_release;
 pub mod reap_render;
@@ -289,6 +293,7 @@ pub mod terminal_stop;
 pub mod territory;
 pub mod test_run;
 pub mod tick_ledger;
+pub mod transcript_activity;
 pub mod truth_probe;
 pub mod usage;
 pub mod verify_evidence;
@@ -1145,6 +1150,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "daemon_started",
     "daemon_exited",
     "daemon_idle_pending_exit",
+    // Drift retirement (daemon-emitted): the daemon measured its own
+    // build drifted and, at a quiet tick with no live worker, retired through
+    // the graceful tail so the next lazy start runs the installed binary.
+    "daemon_drift_pending_exit",
     "daemon_shutting_down",
     // The socket path stopped resolving to the inode this daemon bound, so
     // something else now owns it and this process is unreachable.

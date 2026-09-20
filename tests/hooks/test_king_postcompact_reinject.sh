@@ -37,6 +37,13 @@ mkdir -p "$TMP/bin"
 cat > "$TMP/bin/fno" <<'STUB'
 #!/usr/bin/env bash
 if [ "$1" = "agents" ] && [ "$2" = "registry-json" ]; then
+  # Mirror the real Rust client: the verb refuses while the anti-recursion
+  # pin is set (a leaked FNO_AGENTS_RUNTIME=python). The hook must
+  # strip the pin before the read.
+  if [ -n "${FNO_AGENTS_RUNTIME:-}" ]; then
+    echo "no Python implementation -- this verb runs only on the 'fno-agents' Rust runtime" >&2
+    exit 127
+  fi
   cat "$KING_REG_FIXTURE"
 elif [ "$1" = "agents" ] && [ "$2" = "king" ] && [ "$3" = "faq" ] && [ "$4" = "list" ]; then
   cat "$KING_FAQ_FIXTURE" 2>/dev/null || true
@@ -89,8 +96,7 @@ RC=$?
     | contains("level 1 over fno") and contains("Encode, then abdicate")
       and contains("--substrate thread") and contains("glm-5.3-flash[1m]")
       and contains("status=retasked") and contains("spawn_required")
-      and (contains("retier: ") | not)
-      and (contains("king-for-a-day") | not)' >/dev/null 2>&1 \
+      and (contains("retier: ") | not)' >/dev/null 2>&1 \
   && pass "crowned claude: additionalContext carries crown + first rule + retask receipts" \
   || fail "crowned claude rc=$RC payload=$OUT"
 
@@ -132,9 +138,23 @@ OUT="$(printf '%s' "{\"source\":\"compact\",\"session_id\":\"$SID\"}" \
 [[ $RC -eq 0 && -z "$OUT" ]] && pass "no fno on PATH: empty stdout, exit 0" \
   || fail "no-fno rc=$RC out=$OUT"
 
-# 7b. A crowned king with matching FAQ entries gets them after the static
-#     brief; an empty FAQ fixture (the default, case 1 above) adds nothing.
+# 6b. AC5-HP: a leaked FNO_AGENTS_RUNTIME=python pin must not blind
+#     the crown read. The stub refuses registry-json under the pin (mirroring
+#     the real Rust client); the hook strips the pin before the read, so the
+#     crowned reinjection still arrives and no failing-read line fires.
 registry_fixture "$CROWNED_ROW"
+FNO_PLATFORM=claude
+PIN_ERR="$TMP/pin-err.txt"
+OUT="$(printf '%s' "{\"source\":\"compact\",\"session_id\":\"$SID\"}" \
+  | env FNO_PLATFORM=claude FNO_AGENTS_RUNTIME=python bash "$KING" 2>"$PIN_ERR")"; RC=$?
+[[ $RC -eq 0 ]] && echo "$OUT" | jq -e '.hookSpecificOutput.additionalContext
+    | contains("level 1 over fno")' >/dev/null 2>&1 \
+  && ! grep -q "registry-json exited" "$PIN_ERR" \
+  && pass "pinned env: crown read survives the strip, reinjection arrives (AC5-HP)" \
+  || fail "pinned env rc=$RC payload=$OUT err=$(cat "$PIN_ERR" 2>/dev/null)"
+
+# 7b. A crowned king with matching FAQ entries gets them after the static
+#     brief; an empty FAQ fixture (the default, case 1 above) adds nothing.registry_fixture "$CROWNED_ROW"
 printf 'Q: what do I do?\nA: reign on.\n---\n' > "$KING_FAQ_FIXTURE"
 OUT="$(run_king "{\"source\":\"compact\",\"session_id\":\"$SID\"}")"
 RC=$?

@@ -201,7 +201,7 @@ After `next()` returns the unit and `close()` is called, subsequent `next()` cal
 
 A target driver asks whether its one deliverable shipped. A king has no PR, so pointing the target driver at one can never reach a clean terminal state. `done_probes` are additive only. A plan can add conjuncts and can never silence the PR, CI, and review conjuncts underneath. The run burns to `NoProgress` or `Budget` while looking like it is working. The king driver asks the king's question instead, which is whether the board is clean.
 
-`fno inbox board --json` reads thirteen queues through verbs that already exist and computes nothing they already answer. Every queue carries the literal shell command that produced it, so board emptiness is reproducible by a third party rather than asserted. `undispatched` is planned work awaiting a worker. `unplanned` is unplanned work awaiting a blueprint. They use different verbs and are disjoint on `plan_path`. The `undispatched` queue has an independent source. `fno backlog undispatched --json` scans graph entries and the complete node-claim snapshot. It does not reuse the ranked dispatch selector, so a selector omission is nameable rather than an empty queue.
+`fno inbox board --json` reads fourteen queues through verbs that already exist and computes nothing they already answer. Every queue carries the literal shell command that produced it, so board emptiness is reproducible by a third party rather than asserted. `undispatched` is planned work awaiting a worker. `unplanned` is unplanned work awaiting a blueprint. They use different verbs and are disjoint on `plan_path`. The `undispatched` queue has an independent source. `fno backlog undispatched --json` scans graph entries and the complete node-claim snapshot. It does not reuse the ranked dispatch selector, so a selector omission is nameable rather than an empty queue.
 
 | Queue | Read | King can shrink it |
 |---|---|---|
@@ -211,6 +211,7 @@ A target driver asks whether its one deliverable shipped. A king has no PR, so p
 | `stalled_holder` | `fno agents claim list -J` + `fno backlog get <id>` + `fno agents peek <holder>` | yes, by one wake per node |
 | `unheld_progress` | graph entries + `fno agents claim list -J` | yes, by redispatching the node or closing it |
 | `undriven_pr` | `gh pr list --state open` + the graph | yes, by dispatching one target worker on the node, or, when the worker runs on another node, binding the PR there first (`fno backlog update <node> --add-pr <n>`); the resume gate reads that same binding and refuses a relaunch over the new holder |
+| `stranded_tree` | `git worktree list --porcelain` + `git status --porcelain` + `git rev-list --count HEAD --not --remotes` | no, the remedy is dispatch, which `undispatched` and `unheld_progress` already drive and which now resumes in the tree |
 | `mergeable_pr` | `gh pr list` + `fno do pr status` (ready verdict; a not-ready row renders its `ready_blockers` and is not actionable) | only when gate-ready and under `config.king.autonomous_merge` |
 | `stale_claim` | `fno agents claim list -J --include-stale` | yes, by `fno agents claim reap` |
 | `operator_question` | `fno inbox outstanding --json` | no, a human answers it |

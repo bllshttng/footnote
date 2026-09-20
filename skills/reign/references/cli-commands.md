@@ -167,7 +167,7 @@ Draft to a file and run `fno doctor lint style --stdin < file` before sending. T
 |---|---|
 | `fno do pr status <n>` | `ready` means green AND `optional_reviews_unresolved == 0`. Advisory, never the exit code. Costs GraphQL quota through its `reviewThreads` read. |
 | `fno do pr merge <n>` | Gates on the `review_coverage` event read from local `events.jsonl`. Never reads threads. |
-| `gh api repos/<owner>/<repo>/commits/<sha>/check-runs` and `/commits/<sha>/status` | CI state over REST: check runs plus legacy commit statuses, which `check-runs` alone cannot see. Free of the GraphQL budget. |
+| `gh api repos/<owner>/<repo>/commits/<sha>/check-runs`, `/commits/<sha>/status`, and `actions/runs?head_sha=<sha>` | CI state over REST: check runs plus legacy commit statuses, which `check-runs` alone cannot see, plus the Actions runs listing: a run that failed before minting a job (a workflow file GitHub cannot parse) owns no check run and reads red by its workflow path. Free of the GraphQL budget. |
 | `fno-agents review-coverage` | The standalone coverage producer. Exit 4 carries `graphql_exhausted` on stdout. |
 
 ## Backlog

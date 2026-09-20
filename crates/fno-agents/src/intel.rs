@@ -223,7 +223,7 @@ fn session_join(fno_dir: &Path) -> HashMap<String, (Vec<String>, Option<String>,
 /// (FNO_BUS_DIR, then FNO_INBOX_ROOT, else `<fno>/bus/messages.jsonl`). The
 /// config.paths.bus_dir template override is the gap king_board.rs already
 /// documents.
-fn bus_log_path(fno_dir: &Path) -> PathBuf {
+pub(crate) fn bus_log_path(fno_dir: &Path) -> PathBuf {
     if let Some(dir) = std::env::var("FNO_BUS_DIR").ok().filter(|v| !v.is_empty()) {
         return PathBuf::from(dir).join("messages.jsonl");
     }
@@ -528,6 +528,9 @@ fn harness_total(s: &SessionRow) -> u64 {
 
 /// CLI entry: the flag parse, the env-resolved inputs, the fold, one output.
 pub fn run_intel(args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--fleet") {
+        return crate::fleet_load::run_fleet_cli(args);
+    }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print!(
             "fno-agents intel [--days N] [--node <id>] [--session <id>] [--json] [--all-projects]\n\n\

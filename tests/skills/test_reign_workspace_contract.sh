@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# tests/skills/test_king_for_a_day_workspace_contract.sh
+# tests/skills/test_reign_workspace_contract.sh
 #
-# Documentation contract for king-for-a-day pane placement.
+# Documentation contract for reign pane placement.
 #
 # `fno agents spawn` exposes `--workspace`/`-s` as canonical and keeps
 # `--squad` only as a hidden deprecated alias (cli/src/fno/agents/cli.py).
@@ -21,9 +21,10 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT" || exit 1
 
 KING_SURFACES=(
-    skills/king-for-a-day/SKILL.md
-    skills/king-for-a-day/references/court-operations.md
-    skills/king-for-a-day/references/minion-clause.md
+    skills/reign/SKILL.md
+    skills/reign/references/once.md
+    skills/reign/references/court-operations.md
+    skills/reign/references/minion-clause.md
 )
 SPAWN_GUIDE=docs/guides/fno-agents-spawn.md
 ALL_SURFACES=("${KING_SURFACES[@]}" "$SPAWN_GUIDE")
@@ -65,9 +66,9 @@ else
 fi
 
 # --- 3. Canonical spelling is actually taught --------------------------------
-for f in skills/king-for-a-day/SKILL.md \
-         skills/king-for-a-day/references/court-operations.md \
-         skills/king-for-a-day/references/minion-clause.md \
+for f in skills/reign/references/once.md \
+         skills/reign/references/court-operations.md \
+         skills/reign/references/minion-clause.md \
          "$SPAWN_GUIDE"; do
     grep -q -- '--workspace' "$f" ||
         note "$f teaches no --workspace placement example"
@@ -123,8 +124,8 @@ done
 # corrected in SKILL.md while court-operations.md kept teaching the old one.
 # The split is deliberate (contract vs hands) and nothing mechanically ties the
 # two, so pin the load-bearing wait invariants in both.
-COURT_OPS=skills/king-for-a-day/references/court-operations.md
-for f in skills/king-for-a-day/SKILL.md "$COURT_OPS"; do
+COURT_OPS=skills/reign/references/court-operations.md
+for f in skills/reign/references/once.md "$COURT_OPS"; do
     grep -q 'fno-agents wait' "$f" ||
         note "$f does not name the lifecycle wait primitive"
     # `idle` is wait.rs's DEFAULT verdict (lapsed hook / unknown / absent
@@ -136,7 +137,7 @@ for f in skills/king-for-a-day/SKILL.md "$COURT_OPS"; do
 done
 
 if [[ $fail -eq 0 ]]; then
-    echo "PASS: king-for-a-day workspace contract"
+    echo "PASS: reign workspace contract"
     exit 0
 fi
 exit 1

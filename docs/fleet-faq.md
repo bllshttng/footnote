@@ -2,7 +2,7 @@
 
 Questions a king or an orchestrating agent hits while running workers, and the answer that survived contact. Every entry here cost a real session something. For run-level failures (a run that will not converge, a run that will not stop) see [troubleshooting.md](troubleshooting.md). For the coordination model see [architecture/coordination.md](architecture/coordination.md). For why a reaping sweep kept a session row, see [reaping-faq.md](reaping-faq.md).
 
-This is a FAQ, not a command reference. The full verb surface is `fno agents --help` and [../skills/king-for-a-day/references/cli-commands.md](../skills/king-for-a-day/references/cli-commands.md).
+This is a FAQ, not a command reference. The full verb surface is `fno agents --help` and [../skills/reign/references/cli-commands.md](../skills/reign/references/cli-commands.md).
 
 ## Is this page for you?
 
@@ -467,4 +467,4 @@ Closed gaps, newest first. Each line names the PR that closed it, so a reader ca
 - [troubleshooting.md](troubleshooting.md) for run-level failures
 - [architecture/coordination.md](architecture/coordination.md) for claims and the work-claim primitive
 - [architecture/fleet-watchdog.md](architecture/fleet-watchdog.md) for automated wake, reroute and reap
-- [../skills/king-for-a-day/references/court-operations.md](../skills/king-for-a-day/references/court-operations.md) for the court primitives
+- [../skills/reign/references/court-operations.md](../skills/reign/references/court-operations.md) for the court primitives

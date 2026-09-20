@@ -42,3 +42,6 @@ fno dispatch|fno agents spawn --node <id>|d-496680aa
 # answer rides fno-agents list --json --harness codex as the codex_loaded
 # block; a caller-facing string may never teach the bare verb.
 codex-loaded-threads|fno-agents list --json --no-discovered --harness codex (the codex_loaded block)|d-fe66560a
+
+# The one king skill: the one-wave pass is reign --once.
+king-for-a-day|/fno:reign --once <scope>|the one-king-skill fold

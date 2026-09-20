@@ -176,32 +176,34 @@ def test_account_stamps_fno_account_for_claude_panes(monkeypatch, runner):
 
 
 def test_node_seeded_spawn_launches_in_the_ensured_worktree(monkeypatch, runner, tmp_path):
-    """AC1-HP: no typed message and no explicit cwd source -> the ensure runs
-    once with the node's recorded cwd, the resolved --name and the resolved
+    """AC1-HP: no typed message and no explicit cwd source -> the ensure seam
+    runs once with the node's recorded cwd, the NODE id and the resolved
     harness, and the worker launches in the path it printed."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED, cwd="/repo"))
     seen: dict = {}
 
-    def fake_ensure(recorded_cwd, agent_name, harness):
-        seen["args"] = (str(recorded_cwd), agent_name, harness)
-        return str(tmp_path / "wt")
+    def fake_verb_call(verb, payload, unavailable_cls, **kw):
+        seen["verb"] = verb
+        seen["payload"] = dict(payload)
+        return {"workdir": str(tmp_path / "wt")}
 
-    monkeypatch.setattr(
-        "fno.agents.node_dispatch._worktree_ensure_for_launch", fake_ensure
-    )
+    import fno.rust_binary as rb
+
+    monkeypatch.setattr(rb, "verb_call", fake_verb_call)
     result = _invoke(runner, "--node", "x-1", "--substrate", "pane")
     assert result.exit_code == 0, result.output
-    assert seen["args"] == ("/repo", "w1", "claude")
+    assert seen["verb"] == "launch-workdir"
+    assert seen["payload"] == {"recorded_cwd": "/repo", "node": "x-1", "harness": "claude"}
     assert received["cwd"] == (tmp_path / "wt").resolve()
 
 
 def test_ensure_refusal_holds_the_node(monkeypatch, runner):
-    """AC1-ERR: a None ensure answer exits 2 naming the node and the hold;
-    no peer is created."""
+    """AC1-ERR: a hold answer exits 2 naming the node and the hold; no peer
+    is created."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
-    monkeypatch.setattr(
-        "fno.agents.node_dispatch._worktree_ensure_for_launch", lambda *a: None
-    )
+    import fno.rust_binary as rb
+
+    monkeypatch.setattr(rb, "verb_call", lambda *a, **k: {"hold": "refused"})
     result = _invoke(runner, "--node", "x-1", "--substrate", "pane")
     assert result.exit_code == 2
     assert "worktree ensure refused or misconfigured for x-1" in result.output
@@ -212,12 +214,14 @@ def test_typed_here_skips_the_ensure(monkeypatch, runner):
     """AC1-EDGE (--here): the caller opted in; the ensure is never consulted."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
 
-    def boom(*a):
-        raise AssertionError("ensure must not run")
+    def boom(verb, payload, unavailable_cls, **kw):
+        if verb == "launch-workdir":
+            raise AssertionError("ensure must not run")
+        return {"action": "pass"}
 
-    monkeypatch.setattr(
-        "fno.agents.node_dispatch._worktree_ensure_for_launch", boom
-    )
+    import fno.rust_binary as rb
+
+    monkeypatch.setattr(rb, "verb_call", boom)
     result = _invoke(runner, "--node", "x-1", "--here", "--substrate", "pane")
     assert result.exit_code == 0, result.output
 
@@ -226,12 +230,14 @@ def test_typed_cwd_skips_the_ensure(monkeypatch, runner, tmp_path):
     """AC1-EDGE (--cwd): the caller's explicit dir wins, unchanged."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
 
-    def boom(*a):
-        raise AssertionError("ensure must not run")
+    def boom(verb, payload, unavailable_cls, **kw):
+        if verb == "launch-workdir":
+            raise AssertionError("ensure must not run")
+        return {"action": "pass"}
 
-    monkeypatch.setattr(
-        "fno.agents.node_dispatch._worktree_ensure_for_launch", boom
-    )
+    import fno.rust_binary as rb
+
+    monkeypatch.setattr(rb, "verb_call", boom)
     result = _invoke(
         runner,
         "--node", "x-1", "--substrate", "pane",

@@ -161,6 +161,14 @@ fn main() {
             &args[1..],
         ));
     }
+    // `launch-workdir`: the spawn door's launch-cwd resolution (see
+    // launch_workdir.rs doc). Transport-only, like sync-canonical: registers
+    // no client action (the shrink law allows none); Python's
+    // ensure_launch_workdir reaches it through verb_call, and a `hold`
+    // answer is a valid exit-0 answer the caller renders.
+    if args.first().map(String::as_str) == Some("launch-workdir") {
+        std::process::exit(fno_agents::launch_workdir::run_launch_workdir(&args[1..]));
+    }
     // `worktree-reapable`: the worktree-removal gate, daemon-free, a
     // transport-only arm like surface-check - it registers NO client action
     // (the shrink law allows none), because its callers exec the binary
@@ -1067,6 +1075,9 @@ async fn run(args: Vec<String>) -> i32 {
                 return 2;
             }
         };
+        if parsed.keepers_only {
+            return fno_agents::restart_run::run_keepers_only(parsed.json.json).await;
+        }
         return fno_agents::restart_run::run_restart(
             parsed.force,
             parsed.json.json,

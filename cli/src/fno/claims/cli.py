@@ -1478,10 +1478,9 @@ def _mux_pane_absent_for(worker: str, node_id: str = "", runner=None) -> Optiona
     disaster): the pane's ``fno_id`` is the SESSION uuid, not the worker
     name (mux_spawn stamps ``fno_id=stored_session_uuid or name``), the OSC
     ``title`` is whatever the pane's shell set, and the load-bearing join is
-    the worktree: dispatch names the worker's worktree after the worker
-    (``workspace worktree ensure --name <agent_name>``), so
-    ``basename(pane.cwd) == worker`` is the normal live-launch marker, with
-    the node id covering the ``target start`` naming. Follows
+    the worktree: dispatch names the worker's worktree after the NODE id, so
+    ``basename(pane.cwd) == node_id`` is the normal live-launch marker, with
+    a worker-named tree still possible from older spawns. Follows
     ``_pane_absent_from_listing``'s empty-is-ambiguous rule: ``pane ls``
     prints ``[]`` both for a session with no panes and for an unreachable
     socket, so only a NON-EMPTY listing somewhere proves the instrument ran

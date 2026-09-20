@@ -1,7 +1,7 @@
 {
  "meta": {
   "reign_date": "2026-08-05",
-  "skill": "fno:king-for-a-day"
+  "skill": "fno:reign"
  },
  "entries": [
   {
@@ -30,7 +30,7 @@
   },
   {
    "tool": "Skill",
-   "target": "skill:fno:king-for-a-day",
+   "target": "skill:fno:reign",
    "index": 4,
    "kind": "tool_use"
   },
@@ -919,7 +919,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .; rg -n \"context_probe|used_pct\" hooks/arm-handoff-precompact.sh skills/king-for-a-day/references/minion-clause.md 2>/dev/null | head -15",
+   "target": "cd .; rg -n \"context_probe|used_pct\" hooks/arm-handoff-precompact.sh skills/reign/references/minion-clause.md 2>/dev/null | head -15",
    "index": 160,
    "kind": "tool_use"
   },
@@ -947,7 +947,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno mail send <handle> \"SECOND DOCTRINE for the same docs commit - same files you are already editing (skills/king-for-a-day/SKILL.md, references/minion-clause.md, AGENTS.md), so fold it in rather than filing separately. Operator-directed.\n\nPART A - A KING MUST WATCH ITS OWN CONTEXT, AND THE PROBE MUST BE NAMED.\n\nToday the skill tells a king to read a TEAMMATE's 'context: NN% used' and decide handoff, but says nothing about the king's own. I hit this live: asked my usage, I had no introspection, and had to reverse-engineer the probe out of hooks/arm-handoff-precompact.sh:59. That is the behavior-lives-only-in-prose trap - a capability that exists but is not discoverable from the skill that needs it.\n\nWrite the probe into the skill EXPLICITLY, by path a",
+   "target": "cd .\nfno mail send <handle> \"SECOND DOCTRINE for the same docs commit - same files you are already editing (skills/reign/SKILL.md, references/minion-clause.md, AGENTS.md), so fold it in rather than filing separately. Operator-directed.\n\nPART A - A KING MUST WATCH ITS OWN CONTEXT, AND THE PROBE MUST BE NAMED.\n\nToday the skill tells a king to read a TEAMMATE's 'context: NN% used' and decide handoff, but says nothing about the king's own. I hit this live: asked my usage, I had no introspection, and had to reverse-engineer the probe out of hooks/arm-handoff-precompact.sh:59. That is the behavior-lives-only-in-prose trap - a capability that exists but is not discoverable from the skill that needs it.\n\nWrite the probe into the skill EXPLICITLY, by path a",
    "index": 165,
    "kind": "tool_use"
   },
@@ -1034,7 +1034,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno agents spawn --name think-x-7685 \"/think x-7685\n\nREAD THE NODE FIRST. Its details were rewritten 2026-08-05 with a live specimen, a placement finding, and a king-specific requirement. Everything below is context the node already carries or the operator decided in conversation - do not re-derive it.\n\nOPERATOR HAS ALREADY DECIDED THE SURFACE. Do not re-open it, do not run a comparison of alternatives on it: context usage goes on 'fno whoami'. No new verb. Rationale, so you can defend it rather than relitigate it: whoami is already the prescribed orientation verb (skills/king-for-a-day/SKILL.md tells a king to run it after compaction; skills/using-fno/SKILL.md lists it for 'what state am I in after compaction'), it already prints project/run/mail/harn",
+   "target": "cd .\nfno agents spawn --name think-x-7685 \"/think x-7685\n\nREAD THE NODE FIRST. Its details were rewritten 2026-08-05 with a live specimen, a placement finding, and a king-specific requirement. Everything below is context the node already carries or the operator decided in conversation - do not re-derive it.\n\nOPERATOR HAS ALREADY DECIDED THE SURFACE. Do not re-open it, do not run a comparison of alternatives on it: context usage goes on 'fno whoami'. No new verb. Rationale, so you can defend it rather than relitigate it: whoami is already the prescribed orientation verb (skills/reign/SKILL.md tells a king to run it after compaction; skills/using-fno/SKILL.md lists it for 'what state am I in after compaction'), it already prints project/run/mail/harn",
    "index": 180,
    "kind": "tool_use"
   },
@@ -1166,7 +1166,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\npython3 - <<'PYEOF'\nimport json,subprocess\ncur=json.loads(subprocess.run([\"fno\",\"backlog\",\"get\",\"x-7685\"],capture_output=True,text=True).stdout)\nd=cur.get(\"details\",\"\")\nadd = \"\"\"\n\n=== FOLDED IN FROM x-f605 (operator decision 2026-08-05): PART B, THE REIGN-SHAPE HALF ===\n\nPart A of x-f605 (a king watches its own context, hands off at 40%, probe named explicitly in the skill) is the king-scoped application of AXIS 1 above and is already covered by this node's recommended fix. Part B is a distinct deliverable that travels with it and must not be dropped in the fold.\n\nTHE PASS SHAPE AND KING-MEDIATED REVIEW ARE INCOMPATIBLE. Specimen: the operator's own session 2026-08-05 ran a pass over epic x-d7e4, abdicated at kickoff exactly as skills/king-for-a-day/SK",
+   "target": "cd .\npython3 - <<'PYEOF'\nimport json,subprocess\ncur=json.loads(subprocess.run([\"fno\",\"backlog\",\"get\",\"x-7685\"],capture_output=True,text=True).stdout)\nd=cur.get(\"details\",\"\")\nadd = \"\"\"\n\n=== FOLDED IN FROM x-f605 (operator decision 2026-08-05): PART B, THE REIGN-SHAPE HALF ===\n\nPart A of x-f605 (a king watches its own context, hands off at 40%, probe named explicitly in the skill) is the king-scoped application of AXIS 1 above and is already covered by this node's recommended fix. Part B is a distinct deliverable that travels with it and must not be dropped in the fold.\n\nTHE PASS SHAPE AND KING-MEDIATED REVIEW ARE INCOMPATIBLE. Specimen: the operator's own session 2026-08-05 ran a pass over epic x-d7e4, abdicated at kickoff exactly as skills/reign/SK",
    "index": 203,
    "kind": "tool_use"
   },
@@ -1182,7 +1182,7 @@
    "kind": "user_text"
   },
   {
-   "text": "ALSO: your Part A asked for the probe named in the skill by path + output shape. Design DECLINES that specific instruction and says why: naming skills/target/scripts/context-probe.sh in king-for-a-day re-encodes the exact bundle-local claude-shaped coupling the placement fix removes. Skill names 'fn",
+   "text": "ALSO: your Part A asked for the probe named in the skill by path + output shape. Design DECLINES that specific instruction and says why: naming skills/target/scripts/context-probe.sh in reign re-encodes the exact bundle-local claude-shaped coupling the placement fix removes. Skill names 'fn",
    "index": 206,
    "kind": "user_text"
   },
@@ -1322,7 +1322,7 @@
    "kind": "tool_use"
   },
   {
-   "text": "**No registry crown exists at all** \u2014 mine was conversational only. You said \"you are /fno:king-for-a-day x-d7e4\" and I declared level 0 in my opening line, but nothing was ever stamped via the verb.",
+   "text": "**No registry crown exists at all** \u2014 mine was conversational only. You said \"you are /fno:reign x-d7e4\" and I declared level 0 in my opening line, but nothing was ever stamped via the verb.",
    "index": 231,
    "kind": "assistant_text"
   },
@@ -1376,7 +1376,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\npython3 - <<'PYEOF'\np='~/c3po/internal/fno/plans/20260805-session-handoff-king-x-d7e4.md'\ns=open(p).read()\nanchor=\"I asserted the opposite earlier today\"\nadd = \"\"\"### Two further crown findings, measured at abdication\n\n**The outgoing king never held a stamped crown at all.**\n`fno whoami` printed no crown line and `fno agents list` showed zero crowned rows for the entire reign.\nThe crown was conversational - the operator said \"you are /fno:king-for-a-day x-d7e4\" and the session declared level 0 in its opening line - but nothing was ever written by the verb.\nThe skill is explicit that \"a crown is stamped by a grantor, never self-declared\", so the whole reign ran outside its own provenance discipline and nothing detected it.\nThe practical upside",
+   "target": "cd .\npython3 - <<'PYEOF'\np='~/c3po/internal/fno/plans/20260805-session-handoff-king-x-d7e4.md'\ns=open(p).read()\nanchor=\"I asserted the opposite earlier today\"\nadd = \"\"\"### Two further crown findings, measured at abdication\n\n**The outgoing king never held a stamped crown at all.**\n`fno whoami` printed no crown line and `fno agents list` showed zero crowned rows for the entire reign.\nThe crown was conversational - the operator said \"you are /fno:reign x-d7e4\" and the session declared level 0 in its opening line - but nothing was ever written by the verb.\nThe skill is explicit that \"a crown is stamped by a grantor, never self-declared\", so the whole reign ran outside its own provenance discipline and nothing detected it.\nThe practical upside",
    "index": 241,
    "kind": "tool_use"
   },
@@ -1422,7 +1422,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\npython3 - <<'PYEOF'\nimport json,subprocess\ncur=json.loads(subprocess.run([\"fno\",\"backlog\",\"get\",\"x-7685\"],capture_output=True,text=True).stdout)\nd=cur.get(\"details\",\"\")\nadd = \"\"\"\n\n=== CROWN-PLUMBING FINDINGS, measured 2026-08-05 at an actual abdication ===\n\nFolded here rather than filed beside because this node's design already adds a crown verb (`fno agents crown --succeed`, the succession transfer). Same verb family, same design doc, same PR. Do not file these separately.\n\n1. `fno agents spawn --crown` IS DOCUMENTED AND NOT IMPLEMENTED. skills/king-for-a-day/SKILL.md instructs bestow-at-spawn via `fno agents spawn ... --crown level=N,scope=<scope>`. The fno-agents binary rejects it outright: `fno-agents: unknown flag: --crown`. The working path is sp",
+   "target": "cd .\npython3 - <<'PYEOF'\nimport json,subprocess\ncur=json.loads(subprocess.run([\"fno\",\"backlog\",\"get\",\"x-7685\"],capture_output=True,text=True).stdout)\nd=cur.get(\"details\",\"\")\nadd = \"\"\"\n\n=== CROWN-PLUMBING FINDINGS, measured 2026-08-05 at an actual abdication ===\n\nFolded here rather than filed beside because this node's design already adds a crown verb (`fno agents crown --succeed`, the succession transfer). Same verb family, same design doc, same PR. Do not file these separately.\n\n1. `fno agents spawn --crown` IS DOCUMENTED AND NOT IMPLEMENTED. skills/reign/SKILL.md instructs bestow-at-spawn via `fno agents spawn ... --crown level=N,scope=<scope>`. The fno-agents binary rejects it outright: `fno-agents: unknown flag: --crown`. The working path is sp",
    "index": 250,
    "kind": "tool_use"
   },
@@ -1630,7 +1630,7 @@
   },
   {
    "tool": "Bash",
-   "target": "cd .\nfno backlog find \"eval skill coverage observer\" 2>&1 | head -4\necho \"---\"\nfno backlog idea \"king-for-a-day has no evals, and the eval system that would catch its failures has one user out of ~20 skills\" --details \"TWO FINDINGS, filed together because the second explains the first.\n\nFINDING 1 - THE INFRASTRUCTURE EXISTS AND IS BARELY USED. Measured 2026-08-05: three eval surfaces ship today - 'fno doctor evals' (golden-task bank: run/report/graduate/grade), 'fno doctor observer' (skill eval over a RECORDED CORPUS, sweep/replay - i.e. exactly session analysis), and 'fno do delivery' (generic delivery evidence). The bank at evals/bank/ holds FOUR tasks total (capability-add-hello-verb, regression-cli-help-smoke, regression-context-pitfalls-reachable, regression-loop-check",
+   "target": "cd .\nfno backlog find \"eval skill coverage observer\" 2>&1 | head -4\necho \"---\"\nfno backlog idea \"reign has no evals, and the eval system that would catch its failures has one user out of ~20 skills\" --details \"TWO FINDINGS, filed together because the second explains the first.\n\nFINDING 1 - THE INFRASTRUCTURE EXISTS AND IS BARELY USED. Measured 2026-08-05: three eval surfaces ship today - 'fno doctor evals' (golden-task bank: run/report/graduate/grade), 'fno doctor observer' (skill eval over a RECORDED CORPUS, sweep/replay - i.e. exactly session analysis), and 'fno do delivery' (generic delivery evidence). The bank at evals/bank/ holds FOUR tasks total (capability-add-hello-verb, regression-cli-help-smoke, regression-context-pitfalls-reachable, regression-loop-check",
    "index": 287,
    "kind": "tool_use"
   },

@@ -300,3 +300,10 @@ rooted-writers.sh
 # points. Pure library + standalone CLI of its own; no fno verb wraps it.
 skill_discovery.py
 cargo-build-dir.sh
+
+# The code-index provider detector. Invoked via `bash <path>` by
+# scripts/validate-plan.sh's Code Index Audit (the validator and its bundled
+# copies are the entry points) and by tests/test-code-index-detect.sh; an fno
+# verb would be a second path around the same detection. Standalone tool; no
+# CLI of its own.
+code-index-detect.sh

@@ -19,6 +19,9 @@ impl GhProbe for FakeGh {
         if args.contains(&"reviewDecision".to_string()) {
             return Ok((self.ok, self.review_decision.clone(), String::new()));
         }
+        if args.iter().any(|a| a.contains("jobs?per_page=1")) {
+            return Ok((self.ok, r#"{"total_count":0}"#.to_string(), String::new()));
+        }
         Ok((self.ok, self.output.clone(), String::new()))
     }
 }
@@ -406,4 +409,174 @@ fn the_steps_array_derives_the_failed_step_window() {
 fn unknown_ops_are_refused_by_name() {
     let out = run_op("status-nonsense", &json!({}));
     assert!(out.contains("unknown op status-nonsense"));
+}
+
+// --- zero-job runs: a run that failed before minting a job ---------------
+
+/// The 504b255 specimen: two failed cli-ci runs with 0 jobs (one newest),
+/// one successful rust-ci run a check run links to.
+fn specimen_runs() -> Vec<Value> {
+    json!([
+        {"id": 35344487208u64, "path": ".github/workflows/cli-ci.yml", "status": "completed",
+         "conclusion": "failure", "created_at": "2026-09-19T06:00:00Z",
+         "html_url": "https://github.com/o/r/actions/runs/35344487208"},
+        {"id": 35366958901u64, "path": ".github/workflows/cli-ci.yml", "status": "completed",
+         "conclusion": "failure", "created_at": "2026-09-19T07:00:00Z",
+         "html_url": "https://github.com/o/r/actions/runs/35366958901"},
+        {"id": 35344488345u64, "path": ".github/workflows/rust-ci.yml", "status": "completed",
+         "conclusion": "success", "created_at": "2026-09-19T06:00:00Z",
+         "html_url": "https://github.com/o/r/actions/runs/35344488345"},
+    ])
+    .as_array()
+    .unwrap()
+    .clone()
+}
+
+fn specimen_check_runs() -> Vec<Value> {
+    json!([
+        {"name": "rust-ci", "status": "completed", "conclusion": "success",
+         "details_url": "https://github.com/o/r/actions/runs/35344488345/job/99"},
+    ])
+    .as_array()
+    .unwrap()
+    .clone()
+}
+
+#[test]
+fn ac1_hp_the_newest_unlinked_failed_run_is_named_by_path() {
+    let zero = 0u64;
+    let found = zero_job_failures(&specimen_runs(), &specimen_check_runs(), &|_| Ok(zero)).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].path, ".github/workflows/cli-ci.yml");
+    assert_eq!(
+        found[0].url,
+        "https://github.com/o/r/actions/runs/35366958901"
+    );
+    assert_eq!(found[0].conclusion, "failure");
+}
+
+#[test]
+fn ac1_err_a_failed_jobs_read_is_err_and_a_missing_runs_key_is_an_error() {
+    assert!(zero_job_failures(
+        &[json!({"id": 7u64, "path": "w.yml", "status": "completed", "conclusion": "failure"})],
+        &[],
+        &|_| Err("jobs read failed".to_string()),
+    )
+    .is_err());
+    // The op answers an error for a malformed payload, never empty rows.
+    let out = run_op(
+        "status-zero-job-runs",
+        &json!({"slug": "o/r", "check_runs": []}),
+    );
+    assert!(out.contains("\"error\""), "got {out}");
+    assert!(!out.contains("\"rows\""));
+}
+
+#[test]
+fn ac1_edge_a_linked_run_never_calls_jobs_total() {
+    let runs = json!([
+        {"id": 9u64, "path": "w.yml", "status": "completed", "conclusion": "failure",
+         "html_url": "https://github.com/o/r/actions/runs/9"},
+    ])
+    .as_array()
+    .unwrap()
+    .clone();
+    let checks = json!([
+        {"name": "w", "details_url": "https://github.com/o/r/actions/runs/9/job/3"},
+    ])
+    .as_array()
+    .unwrap()
+    .clone();
+    let found = zero_job_failures(&runs, &checks, &|_| panic!("jobs_total must not run")).unwrap();
+    assert!(found.is_empty());
+}
+
+#[test]
+fn ac1_edge_a_newer_success_supersedes_an_older_zero_job_failure() {
+    let runs = json!([
+        {"id": 5u64, "path": "w.yml", "status": "completed", "conclusion": "failure",
+         "html_url": "https://github.com/o/r/actions/runs/5"},
+        {"id": 6u64, "path": "w.yml", "status": "completed", "conclusion": "success",
+         "html_url": "https://github.com/o/r/actions/runs/6"},
+    ])
+    .as_array()
+    .unwrap()
+    .clone();
+    let found = zero_job_failures(&runs, &[], &|_| panic!("jobs_total must not run")).unwrap();
+    assert!(found.is_empty());
+}
+
+#[test]
+fn ac1_edge_a_failed_run_with_jobs_is_not_reported() {
+    let runs = json!([
+        {"id": 7u64, "path": "w.yml", "status": "completed", "conclusion": "failure",
+         "html_url": "https://github.com/o/r/actions/runs/7"},
+    ])
+    .as_array()
+    .unwrap()
+    .clone();
+    let found = zero_job_failures(&runs, &[], &|_| Ok(3)).unwrap();
+    assert!(found.is_empty());
+}
+
+#[test]
+fn the_op_paginates_the_runs_listing_when_the_payload_names_a_sha() {
+    let probes = FakeGh {
+        ok: true,
+        // `--paginate --slurp` output: a JSON array of pages. The zero-job
+        // failure lives on page 2.
+        output: r#"[{"workflow_runs":[{"id":1,"path":"w.yml","status":"completed","conclusion":"success","html_url":"https://github.com/o/r/actions/runs/1"}]},{"workflow_runs":[{"id":2,"path":"w.yml","status":"completed","conclusion":"failure","created_at":"2026-09-19T07:00:00Z","html_url":"https://github.com/o/r/actions/runs/2"}]}]"#
+            .to_string(),
+        review_decision: String::new(),
+        calls: RefCell::new(Vec::new()),
+    };
+    let payload = json!({"slug": "o/r", "cwd": "/repo", "sha": "abc123", "check_runs": []});
+    let out: Value = serde_json::from_str(&zero_job_runs_op(&probes, &payload).to_string())
+        .unwrap_or(Value::Null);
+    let rows = out["rows"].as_array().expect("rows array");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["name"], "w.yml");
+    // The listing rides the answer for the caller's workflow-name mapping.
+    assert_eq!(out["listing"].as_array().map(|a| a.len()), Some(2));
+    let calls = probes.calls.borrow();
+    assert!(calls[0]
+        .iter()
+        .any(|a| a.contains("actions/runs?head_sha=abc123")));
+    assert!(calls[0].iter().any(|a| a == "--paginate"));
+}
+
+#[test]
+fn the_op_answers_rows_in_the_python_rollup_shape() {
+    let probes = FakeGh {
+        ok: true,
+        // `--paginate --slurp` output: one page holding the specimen runs.
+        output: format!(
+            r#"[{{"workflow_runs":{}}}] "#,
+            serde_json::to_string(&specimen_runs()).unwrap()
+        ),
+        review_decision: String::new(),
+        calls: RefCell::new(Vec::new()),
+    };
+    let payload = json!({
+        "slug": "o/r",
+        "cwd": "/repo",
+        "sha": "abc123",
+        "check_runs": specimen_check_runs(),
+    });
+    let out: Value = serde_json::from_str(&zero_job_runs_op(&probes, &payload).to_string())
+        .unwrap_or(Value::Null);
+    let rows = out["rows"].as_array().expect("rows array");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["name"], ".github/workflows/cli-ci.yml");
+    assert_eq!(rows[0]["status"], "completed");
+    assert_eq!(rows[0]["conclusion"], "failure");
+    assert_eq!(rows[0]["workflow"], ".github/workflows/cli-ci.yml");
+    assert_eq!(
+        rows[0]["detailsUrl"],
+        "https://github.com/o/r/actions/runs/35366958901"
+    );
+    let calls = probes.calls.borrow();
+    assert!(calls.iter().any(|argv| argv
+        .iter()
+        .any(|a| a.contains("repos/o/r/actions/runs/35366958901/jobs"))));
 }
