@@ -997,6 +997,21 @@ pub fn query_events(journal: &Path, q: &EventQuery) -> Result<Vec<EventRow>, Str
 /// did: append order, identical rows and an unterminated tail all survive.
 /// The read never syncs, so a reader never writes. Any store failure reads
 /// the live file alone, which never tightens a gate.
+/// Every review-evidence row type a loopcheck parser reads from journal text.
+/// One list, so a call site picks a source, never a vocabulary.
+pub(crate) const REVIEW_EVENT_TYPES: &[&str] = &[
+    "review_attestation",
+    "review_coverage",
+    "review_finding",
+    "review_finding_resolved",
+    "review_invocation",
+];
+
+/// [`journal_text`] for the review-evidence rows every review reader parses.
+pub(crate) fn review_text(journal: &Path) -> String {
+    journal_text(journal, REVIEW_EVENT_TYPES)
+}
+
 pub fn journal_text(journal: &Path, types: &[&str]) -> String {
     let live = live_journal(journal);
     let live_text = std::fs::read_to_string(&live).unwrap_or_default();

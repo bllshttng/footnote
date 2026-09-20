@@ -2,4 +2,4 @@
 //! `live_journal` still serves king_history; the module disappears
 //! once that caller ports onto the library.
 
-pub(crate) use crate::event_store::{journal_text, live_journal};
+pub(crate) use crate::event_store::{journal_text, live_journal, review_text};
