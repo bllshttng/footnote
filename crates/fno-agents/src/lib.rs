@@ -108,6 +108,7 @@ pub mod context_run;
 pub mod court_fold;
 pub mod crown_settle;
 pub mod crown_split;
+pub mod crown_widen;
 pub mod cursor_agent;
 pub mod daemon;
 pub mod decision_index;

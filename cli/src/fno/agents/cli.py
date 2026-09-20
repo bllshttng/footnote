@@ -955,8 +955,9 @@ def cmd_crown(
         ),
     ),
 ) -> None:
-    """Crown an existing session from an attended shell, or from an agent whose
-    own crown strictly contains the requested scope.
+    """Crown an existing session from an attended shell, from an agent whose
+    own crown strictly contains the requested scope, or add to your own
+    epic-set crown an epic your session created.
 
     Run `fno agents register` inside the target session, then run this command
     with its printed handle. Same-scope succession stays on the spawn-time

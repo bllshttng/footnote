@@ -18,6 +18,8 @@
 //! - kind `crown-settle`: whether a crowned spawn is granted, transfers, or
 //!   refuses (`crown_settle::resolve`), a port of Python's
 //!   `settle_spawn_crown` with a new human-succession branch.
+//! - kind `crown-widen`: whether an agent can add an epic its own session
+//!   created to its own epic-set crown (`crown_widen::resolve`).
 
 use crate::provider::{known_providers_csv, KNOWN_PROVIDERS};
 use serde_json::{json, Map, Value};
@@ -155,8 +157,9 @@ pub fn resolve(payload: Value) -> Result<Value, String> {
         Some("fallback") => resolve_fallback(&payload),
         Some("codex-route") => resolve_codex_route_kind(&payload),
         Some("crown-settle") => crate::crown_settle::resolve(&payload),
+        Some("crown-widen") => crate::crown_widen::resolve(&payload),
         other => Err(format!(
-            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route|crown-settle"
+            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route|crown-settle|crown-widen"
         )),
     }
 }
@@ -1175,5 +1178,26 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(out["verdict"], "refuse");
+    }
+
+    #[test]
+    fn crown_widen_routes_to_the_widen_module() {
+        // Routing: kind crown-widen reaches crown_widen::resolve and the
+        // unknown-kind refusal names it.
+        let out = resolve(json!({
+            "kind": "crown-widen",
+            "requested": "e-1,e-2",
+            "caller": {"name": "lead-a", "status": "idle", "crown_scope": "e-1",
+                       "harness_session_id": "aaaaaaaa-1111-4aaa-8aaa-aaaaaaaaaaaa",
+                       "cc_session_id": null},
+            "members": [{"id": "e-1", "type": "epic", "source_session_id": "human"},
+                        {"id": "e-2", "type": "epic",
+                         "source_session_id": "aaaaaaaa-1111-4aaa-8aaa-aaaaaaaaaaaa"}],
+        }))
+        .unwrap();
+        assert_eq!(out["widen"], true);
+        assert_eq!(out["added"], json!(["e-2"]));
+        let error = resolve(json!({"kind": "crown-alias", "rows": []})).unwrap_err();
+        assert!(error.contains("crown-widen"), "{error}");
     }
 }
