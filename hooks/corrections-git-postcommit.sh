@@ -14,7 +14,7 @@
 set -euo pipefail
 
 # Survive a caller env with no usable PATH (see worktree-write-protect.sh).
-PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 
 # Resolve our shared helpers. The hook is normally invoked from ~/.claude/.git/hooks/post-commit

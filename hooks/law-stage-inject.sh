@@ -4,7 +4,7 @@
 set -uo pipefail
 
 # Survive a caller env with no usable PATH (see worktree-write-protect.sh).
-PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 command -v fno-agents >/dev/null 2>&1 || exit 0
 command -v jq >/dev/null 2>&1 || exit 0

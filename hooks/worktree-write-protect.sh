@@ -3,8 +3,9 @@
 set -uo pipefail
 
 # Guards must survive a caller env with no usable PATH: a push preflight once
-# went red on "dirname: command not found". System dirs first; caller dirs stay.
-PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+# went red on "dirname: command not found". Caller dirs keep precedence;
+# system dirs supply the fallback.
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 
 # shellcheck source=lib/guard-mark.sh
