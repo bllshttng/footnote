@@ -36,8 +36,6 @@ pub struct ProcRow {
     pub command: String,
 }
 
-/// A synthetic row for tests that walk a table without a live census.
-
 /// The shared Codex app-server's census row: health and installed-version
 /// readiness are DIFFERENT axes, so the row carries both. A healthy daemon
 /// running a version older than the installed CLI reads healthy + stale,
