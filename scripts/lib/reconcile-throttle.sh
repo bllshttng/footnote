@@ -118,6 +118,18 @@ reconcile_maybe_fire() {
         "$2" backlog capture tidy >/dev/null 2>&1 || true
         "$2" retro drain-postmortems >/dev/null 2>&1 || true
         "$2" agents prove-it-verdicts --route >/dev/null 2>&1 || true
+        # Orphan-plan binder (x-673d), best-effort like every co-fired verb:
+        # a plan whose `claims:` bind write never landed keeps its node
+        # unplanned forever, so retry the bind inside the same window.
+        obin="$(command -v fno-agents 2>/dev/null || true)"
+        if [[ -z "$obin" ]]; then obin="${FNO_AGENTS_BIN:-}"; fi
+        odir="$(dirname "$("$2" do plan path --slug orphan-plans-probe 2>/dev/null)" 2>/dev/null || true)"
+        if [[ -n "$obin" && -n "$odir" && "$odir" != "." && -d "$odir" ]]; then
+            "$obin" backlog-orphan-plans --plans-dir "$odir" --apply --json \
+                > "$1/.fno/.orphan-plans-result.json.tmp" 2>/dev/null \
+                && mv -f "$1/.fno/.orphan-plans-result.json.tmp" \
+                    "$1/.fno/.orphan-plans-result.json" 2>/dev/null || true
+        fi
     ' _ "$repo_root" "$fno_cmd" "$result" >/dev/null 2>&1 &
     disown 2>/dev/null || true
 
