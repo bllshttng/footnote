@@ -1920,7 +1920,6 @@ mod tests {
 
     #[test]
     fn a_missing_conversion_stanza_reads_unsupported_with_the_named_refusal() {
-        let contract = HarnessContract::packaged().unwrap();
         // Every packaged row carries a stanza, so drop one to read the
         // absent default.
         let stripped = CAPABILITY_TOML.replacen(
