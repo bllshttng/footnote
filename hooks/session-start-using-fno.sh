@@ -23,6 +23,10 @@
 
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+export PATH
+
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 if [[ -z "${PLUGIN_ROOT}" ]]; then
     # Fall back to discovering the plugin root relative to this script

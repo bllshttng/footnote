@@ -11,6 +11,10 @@
 # Hook contract: stdout is appended to the session prompt; exit 0 always.
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+export PATH
+
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WT_LIB="$HOOK_DIR/../scripts/lib/with-timeout.sh"
 

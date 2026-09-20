@@ -38,6 +38,10 @@
 # Usage: review-hold.sh acquire   (hook JSON on stdin)
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+export PATH
+
 action="${1:-}"
 [[ "$action" == "acquire" ]] || exit 0
 # FNO overrides the binary, matching emit-attestation.sh: tests point it at a

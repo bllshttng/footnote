@@ -5,6 +5,10 @@
 
 set -euo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+export PATH
+
 CONTEXT_HOOK_INPUT="$(mktemp "${TMPDIR:-/tmp}/fno-context-input.XXXXXX" 2>/dev/null || true)"
 if [[ -n "$CONTEXT_HOOK_INPUT" ]]; then
     if [[ ! -t 0 ]]; then

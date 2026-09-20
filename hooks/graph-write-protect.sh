@@ -28,6 +28,10 @@
 # Exit 0 always (hook result is communicated via stdout JSON).
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+export PATH
+
 _HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _REPO_ROOT="$(cd "${_HOOK_DIR}/.." && pwd)"
 # shellcheck source=../scripts/lib/drive-authority.sh

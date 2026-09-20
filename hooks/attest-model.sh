@@ -20,6 +20,10 @@
 # model and Layer 2 compares against the running model.
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+export PATH
+
 # session_id from stdin (SessionStart payload). Skip the read when stdin is a
 # TTY (manual invocation) so the hook never blocks. Fail open on any trouble.
 SESSION_ID=""
