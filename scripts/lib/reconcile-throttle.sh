@@ -126,7 +126,22 @@ reconcile_maybe_fire() {
         # SessionStart hook surfaces.
         obin="$(command -v fno-agents 2>/dev/null || true)"
         if [[ -z "$obin" ]]; then obin="${FNO_AGENTS_BIN:-}"; fi
+        if [[ -z "$obin" ]]; then
+            fself="$(command -v -- "$2" 2>/dev/null || true)"
+            if [[ -z "$fself" ]] && [[ -x "$2" ]]; then fself="$2"; fi
+            if [[ -n "$fself" ]]; then
+                cand="$(dirname "$fself")/fno-agents"
+                if [[ -x "$cand" ]]; then obin="$cand"; fi
+            fi
+        fi
+        # A project that relocates the graph store (paths.graph_json) makes
+        # the default-store write the WRONG store; the Python-owned resolver
+        # decides, the binder never parses config. Skip when a config file
+        # sets the key (the verb prints `source: default` only when unset).
+        oconf="$("$2" config get paths.graph_json 2>/dev/null || true)"
         odir="$(dirname "$("$2" do plan path --slug orphan-plans-probe 2>/dev/null)" 2>/dev/null || true)"
+        if [[ -n "$obin" && -n "$odir" && "$odir" != "." && -d "$odir" ]] \
+            && [[ "$oconf" == *"source: default"* ]]; then
         if [[ -n "$obin" && -n "$odir" && "$odir" != "." && -d "$odir" ]]; then
             "$obin" backlog-orphan-plans --plans-dir "$odir" --apply --json \
                 > "$1/.fno/.orphan-plans-result.json.tmp" 2>/dev/null || true
