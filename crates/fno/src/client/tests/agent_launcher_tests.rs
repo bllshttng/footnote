@@ -677,3 +677,19 @@ fn esc_leaves_full_screen_and_retains_the_draft() {
         "draft retained"
     );
 }
+
+#[test]
+fn chip_paint_truncates_with_an_ellipsis_inside_its_rect() {
+    let area = RtRect::new(0, 0, 6, 1);
+    let mut buf = RtBuffer::empty(area);
+    let style = RtStyle::new();
+    super::agent_launcher::paint_chip(&mut buf, area, "abcdefgh", style);
+    let painted: String = (0..area.width)
+        .map(|x| buf[(x, 0)].symbol().to_string())
+        .collect();
+    assert_eq!(painted.chars().count(), 6, "paint stays inside the rect");
+    assert!(
+        painted.ends_with('\u{2026}'),
+        "truncated chip elides: {painted}"
+    );
+}

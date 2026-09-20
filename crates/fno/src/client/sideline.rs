@@ -1,8 +1,8 @@
 //! The sideline column's paint: the agent Table, the per-row overlays, the
 //! docked new-agent composer, the court block and the divider. One Buffer,
-//! one blit (the x-177c shape). Draw_sideline and its two exclusive helpers
-//! live here; the file-budget gate names this module the answer to "how does
-//! the sideline column paint".
+//! one blit. Draw_sideline and its two exclusive helpers live here; the
+//! file-budget gate names this module the answer to "how does the sideline
+//! column paint".
 
 use super::*;
 
@@ -14,6 +14,18 @@ impl View {
             TAB_BAR_ROWS as usize
         } else {
             0
+        }
+    }
+
+    /// The width the sideline paints at: the full terminal in full-screen
+    /// mode, the saved panel width otherwise. The click mappers bound
+    /// columns to THIS, not to `panel_w`, or the painted table's right half
+    /// goes dead and clamped clicks misresolve their column.
+    pub(super) fn sideline_paint_w(&self) -> usize {
+        if self.sideline_full {
+            self.term.1 as usize
+        } else {
+            self.panel_w() as usize
         }
     }
 
@@ -580,7 +592,7 @@ pub(super) async fn route_mouse(
             if rep.row < top {
                 return Ok(());
             }
-            let pw = view.panel_w().max(1);
+            let pw = view.sideline_paint_w().max(1) as u16;
             let col = rep.col.min(pw.saturating_sub(2));
             if let Some(hit) = view.chrome_hit(rep.row, col) {
                 apply_hit(view, hit, sock_w).await?;
