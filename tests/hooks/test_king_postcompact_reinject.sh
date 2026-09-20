@@ -89,8 +89,7 @@ RC=$?
     | contains("level 1 over fno") and contains("Encode, then abdicate")
       and contains("--substrate thread") and contains("glm-5.3-flash[1m]")
       and contains("status=retasked") and contains("spawn_required")
-      and (contains("retier: ") | not)
-      and (contains("king-for-a-day") | not)' >/dev/null 2>&1 \
+      and (contains("retier: ") | not)' >/dev/null 2>&1 \
   && pass "crowned claude: additionalContext carries crown + first rule + retask receipts" \
   || fail "crowned claude rc=$RC payload=$OUT"
 

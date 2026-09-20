@@ -1,4 +1,4 @@
-# Grades a recorded king-for-a-day reign against the skill's own ordering rules.
+# Grades a recorded one-wave reign against the skill's own ordering rules.
 # Grade-only (no prompt): fno doctor evals run skips the worker spawn and grades the
 # checked-in fixture directly. The fixture is a distilled, redacted event slice
 # of one real reign; the checks are ordering properties over it.
@@ -49,4 +49,4 @@ grade:
     command: "cd cli && uv run pytest tests/unit/test_king_reign_hygiene.py -q"
     expect: 0
 timeout_minutes: 5
-tags: [king-for-a-day, hygiene, transcript]
+tags: [reign, hygiene, transcript]

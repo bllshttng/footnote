@@ -253,6 +253,16 @@ pub struct PrFacts {
     pub armed: bool,
 }
 
+/// One `fno do pr status` read, both facts. `verdict` is the CI word the
+/// checks arm has always matched on. `github_block` is GitHub's own hold on
+/// the merge, named with the context it is missing, from the same payload:
+/// the door used to parse this JSON and keep one key of twenty-six.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChecksRead {
+    pub verdict: String,
+    pub github_block: Option<String>,
+}
+
 /// The outside world, injectable so the decision is testable without a network.
 pub trait Probes {
     fn pr_facts(&self, cwd: &Path, pr: Option<u64>) -> Result<PrFacts, String>;
@@ -275,8 +285,9 @@ pub trait Probes {
     /// Release the merge slot if `pr` still holds it. Errors are ignored:
     /// release is best-effort, and the TTL is the backstop.
     fn release_slot(&self, cwd: &Path, base_ref: &str, pr: u64);
-    /// `green` | `red` | `pending` | `unknown`.
-    fn checks_verdict(&self, cwd: &Path, pr: u64) -> String;
+    /// The four verdict words `green` | `red` | `pending` | `unknown`, plus
+    /// GitHub's own ruleset hold when the same payload names one.
+    fn checks_read(&self, cwd: &Path, pr: u64) -> ChecksRead;
     fn covered_head(&self, cwd: &Path) -> Option<String>;
     fn auto_merge_enabled(&self, cwd: &Path) -> bool;
     fn posture_floor_block(&self, cwd: &Path) -> Option<String>;
@@ -379,12 +390,31 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
         });
     }
 
+    // The GitHub hold rides the same status read the checks arm already paid
+    // for, and outranks the require_checks flag: a ruleset hold is not a
+    // question about CI greenness, and gating it on that flag repeats the
+    // category error this arm exists to close. Held, not Failed - a required
+    // check that is merely pending still arrives, and the reason names the
+    // missing context so a human can narrow the ruleset when it never can.
+    // Merge only: Arm hands the PR to GitHub's own queue, which is designed
+    // to wait out a missing requirement, so arming on a ruleset hold is the
+    // right move and this hold must not stand in its way.
+    let checks = probes.checks_read(cwd, facts.number);
+    if request.effect == Effect::Merge {
+        if let Some(missing) = &checks.github_block {
+            return Err(Outcome::Held {
+                reason: format!(
+                    "GitHub holds this merge: required checks missing at the head ({missing})"
+                ),
+            });
+        }
+    }
     if request.require_checks {
         // Only a POSITIVE red fails. Every other non-green answer holds, so a
         // read that could not run - `fno do pr status` says `error` when the
         // fetch is rate-limited or the network is down - retries instead of
         // stamping the node's merge status failed.
-        match probes.checks_verdict(cwd, facts.number).as_str() {
+        match checks.verdict.as_str() {
             "green" => {
                 if request.effect == Effect::Merge && probes.require_fresh_ci(cwd) {
                     let stale = probes.ci_base(cwd, &facts).fail_open();
@@ -413,7 +443,7 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                                         || match probes.pr_facts(cwd, Some(m)) {
                                             Ok(holder_facts) => {
                                                 is_terminal_state(&holder_facts.state)
-                                                    || probes.checks_verdict(cwd, m) == "red"
+                                                    || probes.checks_read(cwd, m).verdict == "red"
                                             }
                                             // Unreadable holder PR keeps the
                                             // slot; the TTL bounds it.
@@ -947,13 +977,13 @@ impl Probes for RealProbes {
         );
     }
 
-    fn checks_verdict(&self, cwd: &Path, pr: u64) -> String {
+    fn checks_read(&self, cwd: &Path, pr: u64) -> ChecksRead {
         match Self::fno(cwd, &["do", "pr", "status", &pr.to_string()]) {
-            Ok((_code, stdout, _stderr)) => serde_json::from_slice::<Value>(&stdout)
-                .ok()
-                .and_then(|v| v.get("verdict").and_then(Value::as_str).map(str::to_owned))
-                .unwrap_or_else(|| "unknown".to_string()),
-            Err(_) => "unknown".to_string(),
+            Ok((_code, stdout, _stderr)) => parse_checks_read(&stdout),
+            Err(_) => ChecksRead {
+                verdict: "unknown".to_string(),
+                github_block: None,
+            },
         }
     }
 
@@ -982,6 +1012,61 @@ impl Probes for RealProbes {
         let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
         combined.push_str(&String::from_utf8_lossy(&out.stderr));
         Ok((out.status.success(), combined))
+    }
+}
+
+/// Parse one `fno do pr status` stdout into both facts the door needs. An
+/// unreadable read claims neither: `unknown` holds under `require_checks`
+/// exactly as before, and no GitHub hold is asserted from output that never
+/// named one.
+fn parse_checks_read(stdout: &[u8]) -> ChecksRead {
+    let unknown = ChecksRead {
+        verdict: "unknown".to_string(),
+        github_block: None,
+    };
+    let Ok(v) = serde_json::from_slice::<Value>(stdout) else {
+        return unknown;
+    };
+    let verdict = v
+        .get("verdict")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| "unknown".to_string());
+    let state = v.get("github_merge_state");
+    let source = || {
+        state
+            .and_then(|s| s.get("source"))
+            .and_then(Value::as_str)
+            .unwrap_or("github_blocked")
+            .to_string()
+    };
+    let github_block = v
+        .get("ready_blockers")
+        .and_then(Value::as_array)
+        .filter(|b| b.iter().any(|b| b.as_str() == Some("github_blocked")))
+        .map(|_| {
+            match state
+                .and_then(|s| s.get("missing_required_checks"))
+                .and_then(Value::as_array)
+            {
+                Some(names) if !names.is_empty() => {
+                    let joined = names
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if joined.is_empty() {
+                        source()
+                    } else {
+                        joined
+                    }
+                }
+                _ => source(),
+            }
+        });
+    ChecksRead {
+        verdict,
+        github_block,
     }
 }
 
@@ -1449,6 +1534,9 @@ mod tests {
         fresh_ci: Option<bool>,
         ci_base_calls: RefCell<u32>,
         checks: Option<String>,
+        /// GitHub's ruleset hold for the PR under decision; `None` (the
+        /// default) reads no hold, so every pre-existing test keeps its behavior.
+        github_block: Option<String>,
         covered_head: Option<String>,
         enabled: bool,
         floor: Option<String>,
@@ -1558,15 +1646,25 @@ mod tests {
                 *held = None;
             }
         }
-        fn checks_verdict(&self, _cwd: &Path, pr: u64) -> String {
-            if self.facts.as_ref().map(|f| f.number) == Some(pr) {
-                return self.checks.clone().unwrap_or_else(|| "green".to_string());
+        fn checks_read(&self, _cwd: &Path, pr: u64) -> ChecksRead {
+            let mine = self.facts.as_ref().map(|f| f.number) == Some(pr);
+            let verdict = if mine {
+                self.checks.clone().unwrap_or_else(|| "green".to_string())
+            } else {
+                self.other_checks
+                    .borrow()
+                    .get(&pr)
+                    .cloned()
+                    .unwrap_or_else(|| "green".to_string())
+            };
+            ChecksRead {
+                verdict,
+                github_block: if mine {
+                    self.github_block.clone()
+                } else {
+                    None
+                },
             }
-            self.other_checks
-                .borrow()
-                .get(&pr)
-                .cloned()
-                .unwrap_or_else(|| "green".to_string())
         }
         fn covered_head(&self, _cwd: &Path) -> Option<String> {
             self.covered_head.clone()
@@ -2473,6 +2571,100 @@ mod tests {
         let mut req = request(Effect::Merge);
         req.require_checks = true;
         assert_eq!(run(&red, &req).word(), "failed");
+    }
+
+    #[test]
+    fn a_ruleset_hold_holds_and_names_the_missing_context() {
+        // The door fetched the hold's own name moments before `gh pr merge`
+        // and used to spend a failure on it. Held, not Failed: a required
+        // check that is merely pending still arrives.
+        let fake = Fake {
+            checks: Some("green".to_string()),
+            github_block: Some("smoke".to_string()),
+            ..clean()
+        };
+        let mut req = request(Effect::Merge);
+        req.require_checks = true;
+        let outcome = run(&fake, &req);
+        assert_eq!(outcome.word(), "held");
+        assert!(outcome.detail().contains("smoke"));
+        assert!(fake.gh_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_ruleset_hold_outranks_the_require_checks_flag() {
+        // A ruleset hold is not a question about CI greenness. A door gated on
+        // the flag would attempt the bypass its own reader just refused.
+        let fake = Fake {
+            github_block: Some("stacked-base-guard".to_string()),
+            ..clean()
+        };
+        let req = request(Effect::Merge);
+        assert_eq!(req.require_checks, false);
+        let outcome = run(&fake, &req);
+        assert_eq!(outcome.word(), "held");
+        assert!(outcome.detail().contains("stacked-base-guard"));
+    }
+
+    #[test]
+    fn an_arm_effect_proceeds_past_a_ruleset_hold_to_the_queue() {
+        // Arm hands the PR to GitHub's own queue, which waits out a missing
+        // requirement by design; the hold must not stand in its way.
+        let fake = Fake {
+            github_block: Some("smoke".to_string()),
+            ..clean()
+        };
+        let mut req = request(Effect::Arm);
+        req.decide_only = true;
+        assert_eq!(
+            run(&fake, &req),
+            Outcome::Authorized {
+                head: "abc123".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_green_read_without_a_github_block_authorizes_as_before() {
+        let fake = clean();
+        let mut req = request(Effect::Merge);
+        req.require_checks = true;
+        req.decide_only = true;
+        assert_eq!(
+            run(&fake, &req),
+            Outcome::Authorized {
+                head: "abc123".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn an_unparseable_status_read_claims_no_github_block() {
+        let read = parse_checks_read(b"error: rate limited");
+        assert_eq!(read.verdict, "unknown");
+        assert_eq!(read.github_block, None);
+    }
+
+    #[test]
+    fn a_github_block_with_null_missing_falls_back_to_the_source() {
+        // merge_blocker answers `missing_required_checks: null` with a source
+        // line saying the block stands, so the reason must carry that line.
+        let payload = r#"{"verdict": "green", "ready_blockers": ["github_blocked"], "github_merge_state": {"state": "blocked", "blockers": ["github_blocked"], "missing_required_checks": null, "source": "the rules read failed or names no unsatisfied rule; the block stands"}}"#;
+        let read = parse_checks_read(payload.as_bytes());
+        assert_eq!(read.verdict, "green");
+        assert_eq!(
+            read.github_block.as_deref(),
+            Some("the rules read failed or names no unsatisfied rule; the block stands")
+        );
+    }
+
+    #[test]
+    fn the_parser_consumes_a_real_status_payload_verbatim() {
+        // Captured verbatim from a live `fno do pr status` read, 2026-09-19.
+        let payload = r#"{"pr": "2251", "head": "d38a744c36b97c65df67df7f4245f6704adfa494", "verdict": "green", "settled": true, "green": true, "pr_state": "MERGED", "mergeable": "UNKNOWN", "github_merge_state": null, "checks": {"total": 37, "check_runs": 36, "statuses": 1, "fail_check_runs": 0, "fail_statuses": 0, "pass": 37, "fail": 0, "pending": 0, "unsettled": 0, "unsettled_fail": 0}, "optional_reviews": [], "optional_reviews_unresolved": 0, "optional_reviews_resolved_unchanged": 0, "review_coverage": {"coverage": "not_asked", "reviewed_count": 0, "self_attested_count": 0, "head_sha": null, "stale_verdicts": [], "note": "not asked: PR is terminal (merged or closed); this says nothing about coverage at merge time"}, "review_posture": null, "merge_authority": {"auto_merge_enabled": true, "grant": "dispatch", "mergeable_autonomously": true}, "merge_execution": null, "rounds_used": null, "max_rounds": null, "rounds_exhausted": null, "rounds_note": "no review_coverage row at this head; run fno-agents review-coverage", "review_activity": {"blocker": "", "detail": "", "hold": null, "worktree": {"probed": false, "path": null, "dirty": null, "head": null, "note": "not asked: PR is terminal"}}, "dispatch_hold": null, "ready": true, "ready_blockers": []}"#;
+        let read = parse_checks_read(payload.as_bytes());
+        assert_eq!(read.verdict, "green");
+        assert_eq!(read.github_block, None);
     }
 
     #[test]

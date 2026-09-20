@@ -12,7 +12,7 @@ A row covers the skill's default lane. `execute` runs flat, `review` runs inline
 
 ## Loop participation: which harnesses can close the loop
 
-A verb that declares `loop` (target, reign, king-for-a-day) runs only where the stop-hook loop can STOP. That answer lives in one machine-readable field, `loop_participation` in `harness_capabilities.toml`, and `docs/harness-command-matrix.md` carries the per-harness evidence. `hooks/target-stop-hook.sh` shims `fno-agents loop-check`, which decides stop or allow from external truth. No lifecycle boundary means no `loop-check` invocation and no loop, however well the harness spawns, resumes, and receives mail.
+A verb that declares `loop` (target, reign) runs only where the stop-hook loop can STOP. That answer lives in one machine-readable field, `loop_participation` in `harness_capabilities.toml`, and `docs/harness-command-matrix.md` carries the per-harness evidence. `hooks/target-stop-hook.sh` shims `fno-agents loop-check`, which decides stop or allow from external truth. No lifecycle boundary means no `loop-check` invocation and no loop, however well the harness spawns, resumes, and receives mail.
 
 | Value | What a caller gets | Cell |
 |---|---|---|
