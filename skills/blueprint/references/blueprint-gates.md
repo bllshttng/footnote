@@ -147,6 +147,36 @@ Any other action, such as `Modify` or `Create`, plans new Python. Move that chan
 
 `scripts/validate-plan.sh` refuses a plan that breaks this rule. A plan created before the gate shipped gets a warning. `scripts/ci/check-file-budget.sh` stays as the push-time backstop. It refuses a change that adds more Python lines than the budget allows, and deletions do not offset the count. The budget is a backstop, not a budget to plan against. Never state a net delta under it as the reason a Python row is fine.
 
+## Code Index Audit (every plan - step 2-index)
+
+A plan built on node text can send a worker after work that already shipped. The gate checks that the planner asked the code indexes a repo holds. It never checks what an index answered. Detection is the validator's bundled sibling `lib/code-index-detect.sh`. A repo with no provider prints nothing, and a plan with `providers: []` plus the audit section is clean. No index is not a refusal.
+
+The plan must carry:
+
+- a `code_index:` frontmatter block with `main_sha:` (the 7-to-40-hex sha the plan read) and `providers:` (a list, or `[]`)
+- one `- name: <name>` entry per provider detection prints for the plan's repo, whatever its status
+- `status:` (`answered` | `unavailable` | `error`) and `fresh:` (`yes` | `no` | `unknown`) on every entry
+- `## Existence audit` as the plan's first `##` heading, with at least one table row
+- a verdict cell starting `exists`, `absent`, `partial` or `unanswered` on every row
+- an `absent` row's evidence stating the confirming search (`after <exact command>`)
+
+The refusals, verbatim:
+
+```
+frontmatter carries no code_index: block - run the planner's step 2-index, then record main_sha (the origin/main sha you read) and providers (one entry per index, or [])
+code_index.main_sha is missing or not a 7-to-40-hex sha - write the origin/main sha the plan read, e.g. main_sha: 9817805bf5e8
+code_index.providers is missing - list one entry per index asked (with status and fresh), or providers: [] when no index is present
+code index <name> is present (<manifest path>) and the plan does not record asking it. Ask it by role and record it under code_index.providers, with status unavailable or error if the ask failed
+provider <name> in code_index.providers is not a valid provider name - write the name exactly as the manifest declares it, lowercase letters, digits and dashes
+provider <name> has no readable status: - set status: answered, unavailable or error
+provider <name> has no readable fresh: - set fresh: yes, no or unknown (unknown when the manifest has no fresh probe)
+the first ## heading is '<heading>' - the audit is the plan's first section: ## Existence audit, one row per claim, each with a verdict cell
+Existence audit row <n> has no verdict cell - start one cell with exists, absent, partial or unanswered
+Existence audit row <n> reads absent but its evidence names no confirming search - an index never makes a zero trustworthy, so the evidence cell states 'after <exact command>'
+```
+
+Graduated like the No New Python gate. A plan created after 2026-09-17 errors. An older plan, or one with no readable date, warns. Quick plans are not exempt: the node asked for a gate, not advice. Why the confirmation rule exists: [graph-search.md](../../../docs/graph-search.md). The provider manifests a user can add: [code-index-providers.md](../../../docs/code-index-providers.md).
+
 ## Answerer Enumeration Gate (graduated, every plan that changes a read, write, or feed)
 
 A plan that fixes one site of a question asked at several sites ships the symptom again as PR two. This gate makes the plan count the answerers before the PRs do. The protocol that fills the block lives in [answerer-enumeration.md](answerer-enumeration.md): the four steps, the sweep rules, the quote-the-expression rule, and the worked example. This section is the gate contract, modeled on the Schema Citation Gate above.
