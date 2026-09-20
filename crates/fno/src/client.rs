@@ -113,9 +113,6 @@ const MIN_CONTENT_COLS: u16 = 40;
 const COL_STATUS: u16 = 4;
 const COL_PR: u16 = 7;
 const COL_TIME: u16 = 6;
-const COL_MIN_NAME: u16 = 12;
-const COL_MAX_NAME: u16 = 24;
-const COL_MIN_TAIL: u16 = 8;
 
 /// The full extended-table panel width (every column plus the divider),
 /// what entering `Extended` widens to before any clamp.
@@ -7828,7 +7825,7 @@ impl View {
             drow,
             DisplayRow::Agent(a) if a.pane_id == Some(self.layout.focus) && a.exited
         );
-        let (mut row_cells, band): (Vec<RtCell>, u8) = match drow {
+        let (row_cells, band): (Vec<RtCell>, u8) = match drow {
             // The full-width rows - squad and section bands, sublines, the
             // idle fold, the footer, the empty state - paint in the overlay
             // pass (`paint_legacy_row`): a band is edge-to-edge at EVERY
@@ -8133,11 +8130,6 @@ fn rt_cell(text: String, fg: Color, flags: u8, right: bool) -> RtCell<'static> {
         line = line.alignment(Alignment::Right);
     }
     RtCell::from(line)
-}
-
-/// A row with five empty cells (a skipped squad, a spacer).
-fn empty_sideline_row() -> RtRow<'static> {
-    RtRow::new(vec![RtCell::from(""); 5])
 }
 
 /// One full-width text row painted straight into the compositor's cells -

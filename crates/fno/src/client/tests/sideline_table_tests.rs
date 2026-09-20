@@ -130,7 +130,6 @@ fn status_sort_arrow_fits_inside_the_status_header_span() {
     set_density(&mut v, Density::Extended);
     v.agent_sort = AgentSort::Attention;
     let frame = v.compose();
-    let cols = frame.cols as usize;
     let rects = sideline_column_rects((v.panel_w() - 1) as u16);
     let status: String = frame.cells[rects[0].x as usize..(rects[0].x + rects[0].width) as usize]
         .iter()

@@ -2769,7 +2769,7 @@ fn chrome_hit_adds_offset_when_scrolled() {
     // not the unscrolled row at the same terminal cell.
     // Rows (x-cd67 US1 owns row 0; US3 Blank spacer at 1): [squad1(0),
     // Blank(1), squad2(2), footer(3)]. display index == terminal row.
-    let mut v = two_pane_view();
+    let v = two_pane_view();
     // Unscrolled: terminal row 2 -> display index 2 -> squad2.
     assert_eq!(cmds(v.chrome_hit(2, 4)), vec![Command::SelectSquad(2)]);
     // Scrolled by 1: terminal row 1 -> display index 2 -> squad2 (without the
@@ -16564,7 +16564,7 @@ fn row_drag_source_at_skips_the_density_button_over_an_agent_row() {
     // (x-d6a8, codex P2) The row-0 density button overlays a scrolled agent
     // row; a press on the button must cycle density (chrome_hit), not start a
     // row drag on the agent underneath.
-    let mut view = view_with_agents(vec![focus_agent(10)]);
+    let view = view_with_agents(vec![focus_agent(10)]);
     view.set_sideline_offset(1); // scroll so an agent row paints at row 0
     let pw = view.panel_w() as usize;
     let Some(range) = view.density_button_range(pw) else {
