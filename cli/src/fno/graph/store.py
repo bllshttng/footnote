@@ -1518,29 +1518,6 @@ def _resolve_node_id(
     return node.get("id") if node else None
 
 
-def append_progress_note(
-    path: Path, node_id: str, note: dict, *, entries_out: "list | None" = None
-) -> "tuple[bool, str | None]":
-    """Append a ``{ts, text}`` progress note to a node's ``progress_notes``
-    (append-only), returning ``(found, plan_path)``. Shared by ``fno backlog
-    note`` and the status-fanout backlog-progress adapter.
-
-    ``entries_out`` is filled with the begin snapshot this call already read, so
-    a caller that needs the graph next (the note verb, to resolve who to tell)
-    reuses it instead of paying a second full read.
-    """
-    resolved = _resolve_node_id(Path(path), node_id, entries_out=entries_out)
-    if resolved is None:
-        return False, None
-    result = _run_op(Path(path), "append_progress_note", {"node_id": resolved, "note": note})
-    if not result.get("found"):
-        return False, result.get("plan_path")
-    # Same world-read gate as the wave append: found=true from the op
-    # alone is the op's word, not the published file's.
-    landed, _ = _confirm_note_landed(Path(path), resolved, note)
-    return landed, result.get("plan_path")
-
-
 def append_encounter(
     path: Path, node_id: str, record: dict
 ) -> "tuple[bool, str | None, str | None]":

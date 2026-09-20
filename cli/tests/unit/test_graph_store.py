@@ -943,8 +943,9 @@ def test_run_op_derives_the_rung_map_from_the_light_plan_refs_read(tmp_path, mon
     monkeypatch.setattr(store_mod._ExecClient, "request", fake_request)
     monkeypatch.setattr(store_mod, "_finish_mutation", lambda path, outcome: None)
     result = store_mod._run_op(
-        tmp_path / "graph.json", "append_progress_note",
-        {"node_id": "ab-1", "note": {"ts": "t", "text": "x"}},
+        tmp_path / "graph.json", "append_encounter",
+        {"node_id": "ab-1",
+         "record": {"ts": "t", "session_id": "s", "harness": "claude", "evidence": "x"}},
     )
     assert result == {"found": True, "plan_path": "p.md"}
     assert methods == ["plan_refs", "op"], "a full begin never fires"
@@ -973,8 +974,9 @@ def test_run_op_falls_back_to_begin_when_the_keeper_predates_the_verb(tmp_path, 
     monkeypatch.setattr(store_mod._ExecClient, "request", stale_request)
     monkeypatch.setattr(store_mod, "_finish_mutation", lambda path, outcome: None)
     result = store_mod._run_op(
-        tmp_path / "graph.json", "append_progress_note",
-        {"node_id": "ab-1", "note": {"ts": "t", "text": "x"}},
+        tmp_path / "graph.json", "append_encounter",
+        {"node_id": "ab-1",
+         "record": {"ts": "t", "session_id": "s", "harness": "claude", "evidence": "x"}},
     )
     assert result == {"found": True, "plan_path": None}
     assert methods == ["plan_refs", "begin", "op"]

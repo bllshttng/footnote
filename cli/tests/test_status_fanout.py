@@ -854,27 +854,6 @@ def _seed(graph_path, entry):
     graph_path.write_text(_json.dumps({"entries": [entry]}) + "\n")
 
 
-def test_backlog_note_appends_timestamped_and_returns_plan_path(tmp_graph):
-    from fno.graph.store import append_progress_note
-
-    _seed(tmp_graph, {"id": "x-9", "title": "t", "plan_path": "/tmp/plan.md"})
-    found, plan_path = append_progress_note(tmp_graph, "x-9", {"ts": "T1", "text": "hi"})
-    assert found is True and plan_path == "/tmp/plan.md"
-    # Second note accumulates (append-only, never replaces).
-    append_progress_note(tmp_graph, "x-9", {"ts": "T2", "text": "again"})
-    import json as _json
-    entry = _json.loads(tmp_graph.read_text())["entries"][0]
-    assert [n["text"] for n in entry["progress_notes"]] == ["hi", "again"]
-
-
-def test_backlog_note_missing_node_returns_not_found(tmp_graph):
-    from fno.graph.store import append_progress_note
-
-    _seed(tmp_graph, {"id": "x-9", "title": "t"})
-    found, _ = append_progress_note(tmp_graph, "x-nope", {"ts": "T", "text": "x"})
-    assert found is False
-
-
 def test_backlog_note_cli_verb(tmp_graph, monkeypatch):
     from typer.testing import CliRunner
     from fno.cli import app
@@ -978,11 +957,9 @@ def test_backlog_progress_adapter_nodeless_is_noop(tmp_path):
     assert status == sf.DELIVERED
 
 
-def test_backlog_progress_adapter_node_not_found_drops(tmp_path, monkeypatch):
+def test_backlog_progress_adapter_node_not_found_drops(tmp_path):
     from fno import status_fanout as sf
-    import fno.graph.store as gs
 
-    monkeypatch.setattr(gs, "append_progress_note", lambda *a: (False, None))
     ev = _ev("t", "run_summary", **{"node": "x-gone"})
     status, detail = sf._dispatch_backlog_progress(
         StatusSinkConfig(name="b", type="backlog-progress"), ev, tmp_path)
