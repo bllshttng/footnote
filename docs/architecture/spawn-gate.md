@@ -32,6 +32,12 @@ One table is shared by both trees. It lives in `cli/src/fno/agents/spawn_gate.py
 - 86 the per-territory team cap. The one permanent, non-queueable machine refusal with its own number, so a caller never retries it as capacity; the territory attribution being unreadable refuses with this number too.
 - 87 gate unavailable. The gate verb is missing, failed, or timed out. Fail closed: never admit on an unreadable gate.
 
+## Reading a refusal
+
+The last `spawn-gate: refused on <axis> (<reason>, exit <code>): <figures>` line on stderr is the verdict. It names the axis that refused and its breach. The figures are the receipt's scalar fields. Every other gate line starts `spawn-gate note:` and passed. The Python reader `cli/src/fno/backlog/advance.py` (`_gate_refusal_detail`) keys on the `spawn-gate: ` prefix and reads the last such line, so it gets the verdict, never a passing reading.
+
+A stderr with no `spawn-gate:` line means the gate admitted and something after it failed. The real error is the first non-note line there, never a `spawn-gate note:` line.
+
 ## Refusal events: Python via the seam, routing from Rust
 
 Some spawns ENTER Python: pane, routed, and account. For them the verb returns the event fields, and the Python transport emits `spawn_gate_refused` through `_refuse`. The journal vocabulary is unchanged. The native unrouted arms now emit too. The route-slot verb appends one `spawn_gate_refused` row, `gate: "routing"`, at the verb entry, so a refused native spawn leaves a trace beside the Python rows. The Rust side has no config-resolved state-dir parity yet, so the row lands in the space journal rather than the global one. The verb read is the answer: `fno doctor event find spawn_gate_refused --field gate=routing` scans every journal and rotation. The emit and its guard test live in `crates/fno-agents/src/route_slot.rs` (`journal_routing_refusal` and the `journal_rows` tests). See `scripts/ci/check-gate-refusals-emit.sh` for the Python seam guard.
