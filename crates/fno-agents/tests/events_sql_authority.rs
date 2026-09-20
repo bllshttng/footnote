@@ -2,7 +2,9 @@
 //! appenders, a lost reply recovered by idempotent retry, legacy source
 //! reconciliation, export stability, and repo-scoped identity.
 
-use fno_agents::event_store::{append_envelope, export_jsonl, import_all, query_events, EventQuery};
+use fno_agents::event_store::{
+    append_envelope, export_jsonl, import_all, query_events, EventQuery,
+};
 use serde_json::json;
 
 fn attestation(repo: &str, head: &str, pr: i64) -> String {
@@ -92,14 +94,15 @@ fn legacy_import_reconciles_source_counts_and_retries_clean() {
     assert_eq!(first.ingested, 5, "every complete source line lands once");
     let second = import_all(&live).unwrap();
     assert_eq!(second.ingested, 0, "the retry imports zero duplicates");
-    let rejected: i64 = fno_agents::event_store::open_read(&fno_agents::event_store::store_path(&live))
-        .unwrap()
-        .query_row(
-            "SELECT count(*) FROM events WHERE reject_reason IS NOT NULL",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let rejected: i64 =
+        fno_agents::event_store::open_read(&fno_agents::event_store::store_path(&live))
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM events WHERE reject_reason IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
     assert_eq!(
         rejected, 2,
         "corrupt and bad-scope rows survive as evidence"

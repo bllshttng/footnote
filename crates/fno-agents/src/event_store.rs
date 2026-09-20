@@ -509,7 +509,7 @@ pub fn extract_identity(line: &str) -> EventIdentity {
 /// source works here - rotated, live, ephemeral sibling, an agents lifecycle
 /// journal, or shell-writer fragments - because the `row_hash` key dedupes
 /// overlap and the class comes from the event type, never the file.
-pub(crate) fn import_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, String> {
+fn import_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, String> {
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(FileTally::default()),

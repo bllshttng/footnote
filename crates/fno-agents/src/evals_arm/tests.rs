@@ -87,8 +87,9 @@ fn wait_for_row(events: &Path, kind: &str, timeout: Duration) -> Option<Value> {
     // the store beside the journal.
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        let rows = crate::event_store::query_events(events, &crate::event_store::EventQuery::default())
-            .unwrap_or_default();
+        let rows =
+            crate::event_store::query_events(events, &crate::event_store::EventQuery::default())
+                .unwrap_or_default();
         for r in rows.iter().rev() {
             if let Ok(v) = serde_json::from_str::<Value>(&r.line) {
                 if v.get("type").and_then(Value::as_str) == Some(kind) {

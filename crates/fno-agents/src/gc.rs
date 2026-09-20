@@ -2218,7 +2218,8 @@ mod tests {
         // same journal with retention_class ephemeral; the sibling is never
         // created.
         let rows =
-            crate::event_store::query_events(&path, &crate::event_store::EventQuery::default()).unwrap();
+            crate::event_store::query_events(&path, &crate::event_store::EventQuery::default())
+                .unwrap();
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].retention_class, "ephemeral");
         assert!(
@@ -2283,7 +2284,8 @@ mod tests {
         // Same store routing as above: the sweep row is committed with
         // retention_class ephemeral and no sibling journal is ever created.
         let rows =
-            crate::event_store::query_events(&path, &crate::event_store::EventQuery::default()).unwrap();
+            crate::event_store::query_events(&path, &crate::event_store::EventQuery::default())
+                .unwrap();
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].retention_class, "ephemeral");
         assert!(

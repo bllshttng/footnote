@@ -269,7 +269,7 @@ fn prune_keeps_durable_and_gate_deletes_only_expired_ephemeral() {
 fn v1_store_migrates_in_place_oldest_first() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("events.db");
-    let mut conn = Connection::open(&store).unwrap();
+    let conn = Connection::open(&store).unwrap();
     conn.execute_batch(
         "CREATE TABLE events (
              row_hash BLOB PRIMARY KEY NOT NULL,
