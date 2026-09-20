@@ -1,6 +1,6 @@
 # The retro-interview prompt (canonical)
 
-The template an epic king runs as a **standard post-epic court step** - epic complete (every wave merged), before final abdication. Load it from [Post-epic: interview the court](../SKILL.md#post-epic-interview-the-court).
+The template an epic king runs as a **standard post-epic court step** - epic complete (every wave merged), before final abdication. Load it from [Post-epic: interview the court](once.md#post-epic-interview-the-court).
 
 This is the ceremony the synthesis marked `ADD`: the retro interviews were the best-performing ritual of that evening, yet they were not a ceremony at all - the maintainer hand-asked the Director to interview each builder and had to prod with follow-ups carrying the dogfooding lens. The lens is now baked in, so the interview fires without human prodding. The output turns one epic's chaos into filed, mechanism-bearing graph items instead of folklore.
 

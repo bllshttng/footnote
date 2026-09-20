@@ -100,6 +100,7 @@ def _worker_emit(args: tuple) -> None:
     )
 
 
+@pytest.mark.timeout(60)
 def test_ac2_hp_emit_concurrency_safe(tmp_path: Path) -> None:
     """AC2-HP: concurrent emits produce non-interleaved lines."""
     _make_state_file(tmp_path, "ses-concurrent")
