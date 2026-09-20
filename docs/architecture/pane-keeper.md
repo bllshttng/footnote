@@ -63,3 +63,9 @@ Re-adoption is not respawn. The proof below pins the SAME child pid across the s
 
 A pane keeper cannot be refreshed on demand. It holds a live child process and its pty master. Surviving a restart is the keeper's whole purpose, so cycling it can only destroy the thing it exists to keep. Until then the running-process census reports the keeper stale and kept, and no restart surface promises otherwise. The census row names the split in three words: `stale`, `kept`, `current only when its pane ends`.
 
+## A hand-off moves the socket, not the process
+
+A pane keeper becomes a THREAD keeper by moving its socket. `fno mux pane kill --hand-off-to <path>` renames the socket from `mux/panes/` to `mux/threads/`, drops the pane from the layout and the persisted squad, and closes the server's connection without sending a Kill frame. A Kill makes the keeper kill its child and exit; a bare hangup is what the keeper is built to survive, so the child keeps running and keeps its pid. The daemon's keeper sweep then finds it at the new path and rebinds the row.
+
+The rename is safe because a renamed unix socket path still reaches the same listener, and the old path stops answering. That was measured on macOS 25.3 with a positive control on the old path rather than assumed from the man page. An INLINE pane has no keeper, so the server itself holds the master and the hand-off refuses it by name: releasing that entry would kill the child with the pty. The remedy the refusal names is to stop and resume the session, which relaunches it keeper-hosted.
+
