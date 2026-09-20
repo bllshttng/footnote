@@ -49,18 +49,21 @@ const DEFAULT_STALENESS_DAYS: i64 = 21;
 /// (advance._MAX_ANCESTOR_WALK).
 const MAX_ANCESTOR_WALK: usize = 64;
 
+/// One `[backlog]` integer read from the `config.toml` in `config_dir`
+/// (the graph's own `.fno` directory). `None` on a missing file, a missing
+/// key, or a non-integer value.
+pub fn backlog_config_int(config_dir: &std::path::Path, key: &str) -> Option<i64> {
+    let raw = std::fs::read_to_string(config_dir.join("config.toml")).ok()?;
+    let table = raw.parse::<toml::Table>().ok()?;
+    table.get("backlog")?.as_table()?.get(key)?.as_integer()
+}
+
 /// `config.backlog.staleness_days`, read from the `config.toml` in
 /// `config_dir` (the graph's own `.fno` directory). `None` on a missing,
 /// malformed, or non-positive value, so every caller degrades to
 /// [`DEFAULT_STALENESS_DAYS`] exactly as `_guard_staleness_days` did.
 pub fn configured_staleness_days(config_dir: &std::path::Path) -> Option<i64> {
-    let raw = std::fs::read_to_string(config_dir.join("config.toml")).ok()?;
-    let table = raw.parse::<toml::Table>().ok()?;
-    let days = table
-        .get("backlog")?
-        .as_table()?
-        .get("staleness_days")?
-        .as_integer()?;
+    let days = backlog_config_int(config_dir, "staleness_days")?;
     (days > 0).then_some(days)
 }
 
