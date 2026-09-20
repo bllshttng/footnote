@@ -35,7 +35,7 @@ crossing	crates/fno-agents/src/loopcheck.rs	9465	&loopcheck_fno_bin(),
 crossing	crates/fno-agents/src/loopcheck.rs	10750	let fno_bin = loopcheck_fno_bin();
 crossing	crates/fno-agents/src/pane_relaunch.rs	338	let mut command = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/pane_relaunch.rs	560	std::process::Command::new("fno")
-crossing	crates/fno-agents/src/pane_stop.rs	464	let Ok(output) = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/pane_stop.rs	469	let output = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/pane_stop.rs	535	let mut child = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/prove_it_verdicts.rs	445	let mut cmd = Command::new("fno");
 crossing	crates/fno-agents/src/provider.rs	723	let out = match std::process::Command::new("fno")

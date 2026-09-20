@@ -883,16 +883,13 @@ fn read_panes(entry: &RegistryEntry) -> Vec<PaneRead> {
 /// refuse with its relaunch remedy rather than proceed as though the child
 /// had no keeper and stop a process that did not need stopping.
 fn read_keepers() -> Vec<KeeperSighting> {
-    let Ok(output) = std::process::Command::new("fno")
-        .args(["mux", "pane", "keeper", "list", "--json"])
-        .output()
-    else {
+    let Ok(run) = crate::pane_stop::run_fno(&["mux", "pane", "keeper", "list", "--json"]) else {
         return Vec::new();
     };
-    if !output.status.success() {
+    if !run.ok {
         return Vec::new();
     }
-    let Ok(rows) = serde_json::from_slice::<Value>(&output.stdout) else {
+    let Ok(rows) = serde_json::from_slice::<Value>(&run.stdout) else {
         return Vec::new();
     };
     KeeperSighting::from_json(&rows)
