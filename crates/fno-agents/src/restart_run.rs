@@ -348,6 +348,30 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
         eprintln!("fno agents restart: the mux leg failed; its refusal is above.");
     }
 
+    // x-6648: the post-mux keeper refresh. The pre-kill cycle above cannot
+    // see a keeper the OLD server spawned during the kill window (measured:
+    // one survived under launchd and needed a separate watchdog reap). After
+    // a PROVEN kill, run the stale-keeper cycle again on this binary; a
+    // keeper still busy is reported spared and fails the verb, never a
+    // force-kill.
+    let post_mux = post_mux_kill(&mux_summary);
+    let (post_mux_keepers, post_mux_unproven) = if post_mux {
+        let (cycled2, stale2) = crate::census::cycle_stale_store_keepers().await;
+        say_keeper_cycle(&cycled2, stale2, json, &say);
+        let unproven = cycled2.iter().any(|c| c.result != "cycled");
+        let keepers = cycled2
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "graph": c.graph, "old_pid": c.old_pid, "result": c.result,
+                })
+            })
+            .collect::<Vec<_>>();
+        (keepers, unproven)
+    } else {
+        (Vec::new(), false)
+    };
+
     // Machine-readable summary; the LAST stdout line, so an orchestrator
     // parses it without guessing. `components` names one row per component
     // (old pid -> new pid, or unchanged); `preserved` folds every session's
@@ -405,11 +429,41 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
         })).collect::<Vec<_>>(),
         "pane_keepers_stale": stale_panes,
         "mux": mux_summary,
-        "ok": verdict(code, mux_failed, cycled.iter().any(|c| c.result != "cycled"), upgrade_failed).0,
-        "verdict": verdict(code, mux_failed, cycled.iter().any(|c| c.result != "cycled"), upgrade_failed).1,
+        "post_mux_store_keepers": post_mux_keepers,
+        "post_mux_keeper_refresh": if !post_mux {
+            "skipped"
+        } else if post_mux_unproven {
+            "unproven"
+        } else {
+            "proved"
+        },
+        "ok": verdict(code, mux_failed, cycled.iter().any(|c| c.result != "cycled") || post_mux_unproven, upgrade_failed).0,
+        "verdict": verdict(code, mux_failed, cycled.iter().any(|c| c.result != "cycled") || post_mux_unproven, upgrade_failed).1,
     });
     println!("fno agents restart: keepers {summary}");
-    u8::from(cycled.iter().any(|c| c.result != "cycled") || mux_failed || upgrade_failed) as i32
+    u8::from(
+        cycled.iter().any(|c| c.result != "cycled")
+            || post_mux_unproven
+            || mux_failed
+            || upgrade_failed,
+    ) as i32
+}
+
+/// The post-mux keeper-refresh gate (x-6648): a second stale-keeper pass
+/// earns its run only on a PROVEN kill - the kill selector's summary naming a
+/// killed session. Report-only rows, a failed mux leg, and a lost summary all
+/// read as "not proven", so the pass never launches without a kill that could
+/// have orphaned a keeper.
+fn post_mux_kill(mux_summary: &Option<serde_json::Value>) -> bool {
+    mux_summary
+        .as_ref()
+        .and_then(|m| m.get("sessions"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|sessions| {
+            sessions
+                .iter()
+                .any(|s| s.get("killed").and_then(serde_json::Value::as_bool) == Some(true))
+        })
 }
 
 /// The keeper-cycle receipts (shared by the full restart and the
@@ -672,5 +726,18 @@ mod tests {
             !said.iter().any(|l| l.contains("g2")),
             "a spared keeper never claims success on the say channel"
         );
+    }
+
+    /// AC4: the post-mux keeper pass launches only on a PROVEN kill - the
+    /// selector's summary naming a killed session. Report-only rows, a lost
+    /// summary, and a failed leg read as not-proven.
+    #[test]
+    fn post_mux_pass_needs_a_proven_kill() {
+        let killed = serde_json::json!({ "sessions": [ { "session": "main", "killed": true } ] });
+        let spared = serde_json::json!({ "sessions": [ { "session": "main", "killed": false } ] });
+        assert!(super::post_mux_kill(&Some(killed)));
+        assert!(!super::post_mux_kill(&Some(spared)));
+        assert!(!super::post_mux_kill(&None));
+        assert!(!super::post_mux_kill(&Some(serde_json::json!({}))));
     }
 }

@@ -1215,88 +1215,9 @@ pub fn pid_is_ours(pid: u32, recorded: Option<u64>) -> bool {
     }
 }
 
-/// The idle-exit predicate: is any WORKER live on this home? A registry row is
-/// not a reason to stay resident -- rows outlive their workers by design (the
-/// GC reaps them a grace window later), so the registry-emptiness test this
-/// replaced made idle-exit unsatisfiable on any machine that had ever spawned
-/// a worker (: 78 daemons at once, all idle, all orphaned). The question
-/// is whether a worker is LIVE, answered by the same pair `gc_sweep_impl`
-/// uses: a live worker socket, or a pid that is still ours.
-///
-/// A MISSING registry answers `true`: a fresh machine has never tracked a
-/// worker, and lazy-exit must hold there (the documented contract covers the
-/// very first daemon). An EXISTING but unreadable registry answers `false`
-/// (stay resident): that is an absence with two explanations, and exiting on a
-/// transient read failure would trade a moment of caution for a fleet of dead
-/// workers' supervisors.
-///
-/// A worker socket counts as live only if something ANSWERS on it, not if the
-/// file exists: a worker killed by anything that did not reap its socket (the
-/// confirmed-stop path is the only reaper) leaves a stale file behind, and on a
-/// pid-less live row the GC cannot settle it - file-existence liveness would
-/// then pin the daemon forever, one stale socket per home reinstating the
-/// never-exits defect this function exists to close. `worker_socket_reachable`
-/// is the same connect probe the stop path treats as the authoritative
-/// PID-reuse-immune signal.
-fn no_live_worker(home: &AgentsHome) -> bool {
-    let path = home.registry_json();
-    if !path.exists() {
-        return true;
-    }
-    let socket_candidates = home.scan_worker_sockets();
-    let socket_is_live = |short_id: &str| {
-        socket_candidates.iter().any(|s| s == short_id)
-            && std::os::unix::net::UnixStream::connect(home.worker_sock(short_id)).is_ok()
-    };
-    state::load_registry(&path)
-        .map(|r| {
-            !r.entries.iter().any(|e| {
-                socket_is_live(&e.short_id)
-                    || e.pid
-                        .map(|p| pid_is_ours(p, e.pid_start_time))
-                        .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-}
-
-/// Which reason, if any, retires the daemon through the shared graceful tail
-/// on this idle tick. Measured build drift (x-6648) outranks plain
-/// idle-elapsed when both fire; both still need the fresh no-worker probe
-/// verdict before anything exits. Fail-safe by construction: a missing
-/// fingerprint or an unreadable exe classifies `Unknown`, which is never a
-/// retirement, and a live active-backlog supervisor blocks both reasons.
-fn quiet_retire_reason(
-    drift: Option<&crate::drift::DriftState>,
-    ab_active: bool,
-    idle_elapsed: bool,
-) -> Option<&'static str> {
-    if ab_active {
-        return None;
-    }
-    if matches!(drift, Some(crate::drift::DriftState::Drifted { .. })) {
-        return Some("drift");
-    }
-    if idle_elapsed {
-        return Some("idle");
-    }
-    None
-}
-
-/// The freshness gate a probe verdict must pass before it may retire the
-/// daemon: no worker live, no request served, and no registry write while the
-/// probe ran. Pane-substrate workers spawn by writing the registry directly
-/// with no daemon contact, so the mtime is the one positive marker of that
-/// race (shared verbatim by idle and drift retirement).
-fn probe_verdict_fresh(
-    no_worker: bool,
-    probe_activity: Instant,
-    last_activity: Instant,
-    probe_mtime: Option<std::time::SystemTime>,
-    mtime_now: Option<std::time::SystemTime>,
-) -> bool {
-    no_worker && probe_activity == last_activity && mtime_now == probe_mtime
-}
+// The idle-exit predicate and its drift sibling live in crate::quiet_retire
+// (x-6648): the daemon file is over its line budget, so the predicates moved
+// beside their tests instead of growing here.
 
 // ---------------------------------------------------------------------------
 // Socket bind + perms + lazy-start race.
@@ -2005,7 +1926,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // graceful tail, distinct receipt. A daemon with live work
                 // keeps serving the old build until a quiet tick settles.
                 let drift = ctx.exe_fingerprint.as_ref().map(crate::drift::self_drift);
-                let retire_reason = quiet_retire_reason(
+                let retire_reason = crate::quiet_retire::quiet_retire_reason(
                     drift.as_ref(),
                     ab_active,
                     last_activity.elapsed() >= ctx.opts.idle_exit,
@@ -2023,7 +1944,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         let probe_activity = last_activity;
                         tokio::task::spawn_blocking(move || {
                             let _gate = SweepGate(flag);
-                            let no_worker = no_live_worker(&home);
+                            let no_worker = crate::quiet_retire::no_live_worker(&home);
                             // mtime AFTER the reads: a registry write that
                             // raced the probe is caught by the change.
                             let mtime = std::fs::metadata(home.registry_json())
@@ -2034,7 +1955,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     }
                     let verdict = idle_probe_verdict.lock().unwrap().take();
                     let fresh = verdict.is_some_and(|(no_worker, probe_activity, probe_mtime)| {
-                        probe_verdict_fresh(
+                        crate::quiet_retire::probe_verdict_fresh(
                             no_worker,
                             probe_activity,
                             last_activity,
@@ -2092,9 +2013,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         let _ = std::fs::remove_file(&sock_path);
     }
     emit_state(&ctx.emitter, DaemonState::Exited);
-    let _ = ctx
-        .emitter
-        .emit("daemon_exited", &daemon_exited_payload(exit_reason));
+    let _ = ctx.emitter.emit(
+        "daemon_exited",
+        &crate::quiet_retire::daemon_exited_payload(exit_reason),
+    );
     Ok(())
 }
 
@@ -2160,16 +2082,6 @@ use thread_row_status::{
 fn emit_state(emitter: &EventEmitter, state: DaemonState) {
     let _ = emitter.emit("daemon_state", &json!({"state": state.as_str()}));
 }
-/// The final `daemon_exited` payload. Every exit path flows through
-/// one tail, and before this it emitted `clean: true` unconditionally, so the
-/// socket-lost retirement - where something unlinked and rebound our socket
-/// path - logged identically to a graceful SIGTERM shutdown. A watchdog
-/// reading `daemon_exited` alone could not tell them apart; `clean` is false
-/// only for that abnormal ending, and `reason` names which path fired.
-fn daemon_exited_payload(reason: &str) -> Value {
-    json!({"clean": reason != "socket-lost", "reason": reason})
-}
-
 /// Idle cap for the first read on a connection: a client that connects but
 /// never sends a frame self-terminates rather than holding the task forever.
 const CONN_READ_TIMEOUT: Duration = Duration::from_secs(30);
