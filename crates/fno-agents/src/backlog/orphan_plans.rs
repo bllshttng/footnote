@@ -29,6 +29,10 @@ use std::time::Duration;
 /// A plan younger than this may still be being written; never bind it.
 const SETTLING_SECS: u64 = 600;
 
+/// One claimed id's files, with their already-parsed frontmatter: the
+/// sweep reads every plan once.
+type ClaimFiles = Vec<(PathBuf, serde_json::Map<String, Value>)>;
+
 /// One claimed id's verdict. Exactly one per id, checked in this order.
 #[derive(Debug, PartialEq, Eq)]
 enum Verdict {
@@ -175,9 +179,8 @@ fn run(cfg: &Config) -> i32 {
     };
 
     // plans_dir/*.md with a `claims` scalar, grouped by claimed id.
-    let mut by_id: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
-    let entries = match std::fs::read_dir(&cfg.plans_dir) {
-        Ok(entries) => entries,
+    let by_id = match read_claims(&cfg.plans_dir) {
+        Ok(by_id) => by_id,
         Err(err) => {
             eprintln!(
                 "fno-agents backlog-orphan-plans: cannot read {}: {err}",
@@ -186,27 +189,12 @@ fn run(cfg: &Config) -> i32 {
             return 1;
         }
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().map(|e| e != "md").unwrap_or(true) {
-            continue;
-        }
-        let Some(fm) = crate::backlog_ready::read_frontmatter(&path) else {
-            continue;
-        };
-        let Some(claimed) = fm.get("claims").and_then(scalar) else {
-            continue;
-        };
-        if claimed.is_empty() {
-            continue;
-        }
-        by_id.entry(claimed).or_default().push(path);
-    }
 
     // plan_path -> owner id, for the one-plan-one-node guard. Both sides key
     // on the canonical form: the store legally carries tilde- and
     // relative-spelled paths (resolve_plan_probe expands them), and a
     // byte-exact compare would let one file bind to a second node.
+    let home = std::env::var("HOME").ok();
     let mut path_owner: BTreeMap<PathBuf, String> = BTreeMap::new();
     for row in &rows {
         if let (Some(id), Some(p)) = (
@@ -214,102 +202,15 @@ fn run(cfg: &Config) -> i32 {
             row.get("plan_path").and_then(Value::as_str),
         ) {
             if !p.is_empty() {
-                path_owner.insert(canon(Path::new(p)), id.to_string());
+                let expanded = expand_tilde(Path::new(p), home.as_deref());
+                path_owner.insert(canon(&expanded), id.to_string());
             }
         }
     }
 
     let now = std::time::SystemTime::now();
-    let mut out_rows: Vec<(String, PathBuf, Verdict)> = Vec::new();
-    let mut adoptable: Vec<(String, PathBuf, String)> = Vec::new();
-    for (node_id, mut paths) in by_id {
-        paths.sort();
-        let Some(row) = rows
-            .iter()
-            .find(|row| row.get("id").and_then(Value::as_str) == Some(node_id.as_str()))
-            .cloned()
-        else {
-            for path in &paths {
-                out_rows.push((node_id.clone(), path.clone(), Verdict::Missing));
-            }
-            continue;
-        };
-        let status = row.get("status").and_then(Value::as_str).unwrap_or("");
-        if is_terminal(status)
-            || row
-                .get("deferred_at")
-                .map(|v| !v.is_null())
-                .unwrap_or(false)
-        {
-            for path in &paths {
-                out_rows.push((node_id.clone(), path.clone(), Verdict::Terminal));
-            }
-            continue;
-        }
-        let bound = row
-            .get("plan_path")
-            .and_then(Value::as_str)
-            .map(|p| !p.is_empty())
-            .unwrap_or(false);
-        if bound {
-            continue; // healthy; dropped silently
-        }
-        if paths.len() > 1 {
-            for path in &paths {
-                out_rows.push((node_id.clone(), path.clone(), Verdict::Ambiguous));
-            }
-            continue;
-        }
-        let path = paths.remove(0);
-        let Some(fm) = crate::backlog_ready::read_frontmatter(&path) else {
-            continue; // unreadable plan: it carries no claims scalar either way
-        };
-        let plan_status = fm.get("status").and_then(scalar).unwrap_or_default();
-        let rung = plan_rung_from_status(&plan_status);
-        if !matches!(rung, "ready" | "in_progress" | "in_review") {
-            out_rows.push((node_id.clone(), path.clone(), Verdict::Unfinalized));
-            continue;
-        }
-        if let Some(owner) = path_owner.get(&canon(&path)) {
-            if owner != &node_id {
-                out_rows.push((
-                    node_id.clone(),
-                    path.clone(),
-                    Verdict::OwnedBy(owner.clone()),
-                ));
-                continue;
-            }
-        }
-        if let Some(rec) = claims_planning(&node_id, cfg.claims_root.as_deref()) {
-            out_rows.push((node_id.clone(), path, rec));
-            continue;
-        }
-        if file_age_secs(&path, now)
-            .map(|age| age < SETTLING_SECS)
-            .unwrap_or(false)
-        {
-            out_rows.push((node_id.clone(), path, Verdict::Settling));
-            continue;
-        }
-        let plan_created = fm.get("created").and_then(scalar).unwrap_or_default();
-        let node_created = row
-            .get("created_at")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .chars()
-            .take(10)
-            .collect::<String>();
-        if plan_created.len() >= 10
-            && node_created.len() >= 10
-            && plan_created.as_str() < node_created.as_str()
-        {
-            out_rows.push((node_id.clone(), path, Verdict::IdReuse));
-            continue;
-        }
-        adoptable.push((node_id.clone(), path.clone(), rung.to_string()));
-        out_rows.push((node_id, path, Verdict::Adoptable));
-    }
-
+    let (mut out_rows, adoptable) =
+        classify_claims(&rows, &by_id, &path_owner, cfg.claims_root.as_deref(), now);
     let mut exit = 0;
     if cfg.apply && !adoptable.is_empty() {
         let rungs: BTreeMap<String, String> = adoptable
@@ -427,6 +328,150 @@ fn run(cfg: &Config) -> i32 {
         }
     }
     exit
+}
+
+/// Read `*.md` directly under `dir`, keep files whose frontmatter carries a
+/// `claims` scalar, and group them by claimed id, frontmatter already parsed.
+fn read_claims(dir: &Path) -> std::io::Result<BTreeMap<String, ClaimFiles>> {
+    let mut by_id: BTreeMap<String, ClaimFiles> = BTreeMap::new();
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let path = entry.path();
+        if path.extension().map(|e| e != "md").unwrap_or(true) {
+            continue;
+        }
+        let Some(fm) = crate::backlog_ready::read_frontmatter(&path) else {
+            continue;
+        };
+        let Some(claimed) = fm.get("claims").and_then(scalar) else {
+            continue;
+        };
+        if claimed.is_empty() {
+            continue;
+        }
+        by_id.entry(claimed).or_default().push((path, fm));
+    }
+    Ok(by_id)
+}
+
+/// Classify every claimed id into exactly one verdict. Pure: no writes, no
+/// output - `run` applies and prints; tests call this directly.
+fn classify_claims(
+    rows: &[Value],
+    by_id: &BTreeMap<String, ClaimFiles>,
+    path_owner: &BTreeMap<PathBuf, String>,
+    claims_root: Option<&Path>,
+    now: std::time::SystemTime,
+) -> (
+    Vec<(String, PathBuf, Verdict)>,
+    Vec<(String, PathBuf, String)>,
+) {
+    let mut out_rows: Vec<(String, PathBuf, Verdict)> = Vec::new();
+    let mut adoptable: Vec<(String, PathBuf, String)> = Vec::new();
+    for (node_id, paths) in by_id {
+        let mut paths = paths.clone();
+        paths.sort_by(|a, b| a.0.cmp(&b.0));
+        let Some(row) = rows
+            .iter()
+            .find(|row| row.get("id").and_then(Value::as_str) == Some(node_id.as_str()))
+            .cloned()
+        else {
+            for (path, _) in paths {
+                out_rows.push((node_id.clone(), path, Verdict::Missing));
+            }
+            continue;
+        };
+        // Guard order is the plan's: bound drops silently even when the node
+        // is closed -- a healthy node is not report noise.
+        let bound = row
+            .get("plan_path")
+            .and_then(Value::as_str)
+            .map(|p| !p.is_empty())
+            .unwrap_or(false);
+        if bound {
+            continue;
+        }
+        let status = row.get("status").and_then(Value::as_str).unwrap_or("");
+        if is_terminal(status)
+            || row
+                .get("deferred_at")
+                .map(|v| !v.is_null())
+                .unwrap_or(false)
+        {
+            for (path, _) in paths {
+                out_rows.push((node_id.clone(), path, Verdict::Terminal));
+            }
+            continue;
+        }
+        if paths.len() > 1 {
+            for (path, _) in paths {
+                out_rows.push((node_id.clone(), path, Verdict::Ambiguous));
+            }
+            continue;
+        }
+        let (path, fm) = paths.remove(0);
+        let plan_status = fm.get("status").and_then(scalar).unwrap_or_default();
+        let rung = plan_rung_from_status(&plan_status);
+        if !matches!(rung, "ready" | "in_progress" | "in_review") {
+            out_rows.push((node_id.clone(), path.clone(), Verdict::Unfinalized));
+            continue;
+        }
+        if let Some(owner) = path_owner.get(&canon(&path)) {
+            if owner != node_id {
+                out_rows.push((
+                    node_id.clone(),
+                    path.clone(),
+                    Verdict::OwnedBy(owner.clone()),
+                ));
+                continue;
+            }
+        }
+        if let Some(rec) = claims_planning(node_id, claims_root) {
+            out_rows.push((node_id.clone(), path, rec));
+            continue;
+        }
+        // An unreadable or future mtime (clock skew) reads as "may still be
+        // writing": refuse to bind rather than guess the file is old.
+        if file_age_secs(&path, now)
+            .map(|age| age < SETTLING_SECS)
+            .unwrap_or(true)
+        {
+            out_rows.push((node_id.clone(), path, Verdict::Settling));
+            continue;
+        }
+        let plan_created = fm.get("created").and_then(scalar).unwrap_or_default();
+        let node_created = row
+            .get("created_at")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .chars()
+            .take(10)
+            .collect::<String>();
+        if plan_created.len() >= 10
+            && node_created.len() >= 10
+            && plan_created.as_str() < node_created.as_str()
+        {
+            out_rows.push((node_id.clone(), path, Verdict::IdReuse));
+            continue;
+        }
+        adoptable.push((node_id.clone(), path.clone(), rung.to_string()));
+        out_rows.push((node_id.clone(), path, Verdict::Adoptable));
+    }
+    (out_rows, adoptable)
+}
+
+/// `~/` at the front becomes the home dir, so a tilde-spelled `plan_path`
+/// in the store compares equal to the same file found under --plans-dir.
+fn expand_tilde(path: &Path, home: Option<&str>) -> PathBuf {
+    let Some(s) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let Some(rest) = s.strip_prefix("~/") else {
+        return path.to_path_buf();
+    };
+    match home {
+        Some(home) if !home.is_empty() => Path::new(home).join(rest),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// The node's claim read, answered as a verdict: Live or Suspect under a
@@ -713,6 +758,89 @@ mod tests {
                 .unwrap_or(true),
             "a closed node's history is not rewritten"
         );
+    }
+
+    #[test]
+    fn bound_node_drops_silently_even_when_closed() {
+        let fx = fixture(&[node(
+            "x-doneb",
+            json!({"status": "done", "plan_path": "/elsewhere/p.md"}),
+        )]);
+        let plan = plan_file(&fx.plans, "d.md", "x-doneb", "ready", "2026-09-02");
+        age_file(&plan, 3600);
+        let rows = graph_store::read_rows(&fx.graph).unwrap();
+        let by_id = read_claims(&fx.plans).unwrap();
+        let (out, adoptable) = classify_claims(
+            &rows,
+            &by_id,
+            &BTreeMap::new(),
+            None,
+            std::time::SystemTime::now(),
+        );
+        assert!(
+            out.is_empty() && adoptable.is_empty(),
+            "a bound node is the healthy case, closed or not"
+        );
+    }
+
+    #[test]
+    fn future_mtime_reports_settling() {
+        let fx = fixture(&[node("x-skw", json!({}))]);
+        let plan = plan_file(&fx.plans, "s.md", "x-skw", "ready", "2026-09-02");
+        let future = std::time::SystemTime::now() + Duration::from_secs(3600);
+        std::fs::File::options()
+            .append(true)
+            .open(&plan)
+            .unwrap()
+            .set_modified(future)
+            .unwrap();
+        let rows = graph_store::read_rows(&fx.graph).unwrap();
+        let by_id = read_claims(&fx.plans).unwrap();
+        let (out, adoptable) = classify_claims(
+            &rows,
+            &by_id,
+            &BTreeMap::new(),
+            None,
+            std::time::SystemTime::now(),
+        );
+        assert!(
+            adoptable.is_empty(),
+            "a future mtime is still being written"
+        );
+        assert!(
+            out.iter()
+                .any(|(id, _, v)| id == "x-skw" && *v == Verdict::Settling),
+            "the settling guard must refuse on an unreadable age"
+        );
+    }
+
+    #[test]
+    fn tilde_spelled_owner_still_guards() {
+        let fx = fixture(&[node("x-own", json!({})), node("x-free", json!({}))]);
+        let plan = plan_file(&fx.plans, "p1.md", "x-free", "ready", "2026-09-02");
+        age_file(&plan, 3600);
+        // HOME is the fixture root, so the store's tilde-spelled plan_path
+        // resolves to the very file the x-free plan claims.
+        let home = fx._dir.path().to_string_lossy().to_string();
+        let mut path_owner = BTreeMap::new();
+        path_owner.insert(
+            canon(&expand_tilde(Path::new("~/plans/p1.md"), Some(&home))),
+            "x-own".to_string(),
+        );
+        let rows = graph_store::read_rows(&fx.graph).unwrap();
+        let by_id = read_claims(&fx.plans).unwrap();
+        let (out, adoptable) = classify_claims(
+            &rows,
+            &by_id,
+            &path_owner,
+            None,
+            std::time::SystemTime::now(),
+        );
+        assert!(adoptable.is_empty(), "an owned plan file never re-binds");
+        assert!(out
+            .iter()
+            .any(|(id, _, v)| id == "x-free"
+                && matches!(v, Verdict::OwnedBy(owner) if owner == "x-own")));
     }
 
     #[test]
