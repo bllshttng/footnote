@@ -2473,6 +2473,16 @@ pub fn locked_mutate_with_hook(
     // through here, so every writer obeys the combined details+current_state
     // budget, and a migrated row's progress_notes can never grow again.
     enforce_node_state_policy(&raw, &entries)?;
+    // The epic child cap holds at this seam too: every whole-graph writer
+    // (update --parent, idea --parent, contain, decompose, the rollup
+    // auto-link) meets the same refusal. The single-row seam answers for
+    // api node_create under sqlite.
+    crate::backlog::epic_cap::enforce(
+        &raw,
+        &entries,
+        crate::backlog::epic_cap::configured_cap(path),
+    )
+    .map_err(StoreError::Invalid)?;
     if let Some(hook) = before_publish {
         hook(&raw)?;
     }
@@ -3462,6 +3472,87 @@ mod tests {
         .unwrap();
         assert!(landed.is_none(), "no publish on a domain refusal");
         assert_eq!(file_content_version(&graph), before, "digest unchanged");
+    }
+
+    #[test]
+    fn the_whole_graph_seam_refuses_a_child_past_the_epic_cap() {
+        // AC2-ERR, whole-graph side: a 16th-child write through
+        // locked_mutate is refused, the digest is unchanged, and the same
+        // child aimed at a fresh epic lands.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        let mut body = String::from("{\n  \"entries\": [\n");
+        body.push_str(&format!(
+            "{{\"id\": \"e-1\", \"slug\": \"e-1\", \"title\": \"the full epic\", \
+             \"type\": \"epic\", \"status\": \"in_progress\", \"priority\": \"p1\", \
+             \"domain\": \"code\"}},\n"
+        ));
+        for i in 1..=15 {
+            body.push_str(&format!(
+                "{{\"id\": \"c-{i:02}\", \"slug\": \"c-{i:02}\", \"title\": \"child {i}\", \
+                 \"type\": \"feature\", \"status\": \"idea\", \"priority\": \"p2\", \
+                 \"domain\": \"code\", \"parent\": \"e-1\"}},\n"
+            ));
+        }
+        body.push_str("  ]\n}\n");
+        std::fs::write(&graph, body).unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[backlog]\nepic_max_open_children = 15\n",
+        )
+        .unwrap();
+        let before = file_content_version(&graph);
+        let pre = read_rows(&graph).unwrap();
+        let mut entries = pre.clone();
+        entries.push(json!({"id": "c-16", "slug": "c-16", "title": "child 16",
+                            "type": "feature", "status": "idea", "priority": "p2",
+                            "domain": "code", "parent": "e-1"}));
+        let error = locked_mutate(
+            &graph,
+            MutateInput {
+                entries,
+                canonical_path: None,
+                base_version: base_version(&graph).unwrap(),
+                plan_rungs: None,
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        let StoreError::Invalid(message) = error else {
+            panic!("want Invalid, got {error:?}");
+        };
+        assert!(message.contains("epic cap: refusing to add"), "{message}");
+        assert!(
+            message.contains("backlog.epic_max_open_children"),
+            "{message}"
+        );
+        assert_eq!(file_content_version(&graph), before, "digest unchanged");
+        // The same child under a fresh epic lands.
+        let pre = read_rows(&graph).unwrap();
+        let mut entries = pre.clone();
+        entries.push(json!({"id": "e-2", "slug": "e-2", "title": "the new epic",
+                            "type": "epic", "status": "idea", "priority": "p2",
+                            "domain": "code"}));
+        entries.push(json!({"id": "c-16", "slug": "c-16", "title": "child 16",
+                            "type": "feature", "status": "idea", "priority": "p2",
+                            "domain": "code", "parent": "e-2"}));
+        locked_mutate(
+            &graph,
+            MutateInput {
+                entries,
+                canonical_path: None,
+                base_version: base_version(&graph).unwrap(),
+                plan_rungs: None,
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let rows = read_rows(&graph).unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| crate::graph_store::entry_id(r) == Some("c-16")),
+            "the child landed under the fresh epic"
+        );
     }
 
     #[test]
