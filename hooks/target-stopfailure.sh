@@ -4,6 +4,10 @@
 # Output and exit code are ignored by CC - this is informational only.
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+export PATH
+
 STATE_FILE=".fno/target-state.md"
 
 # Only act if target is active

@@ -21,6 +21,10 @@
 
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+export PATH
+
 # fno shells can wedge on a stalled daemon / graph lock; bound every call with
 # the shared wall-clock helper rather than the harness's 30s hook timeout
 #. Fails closed like the other injection hooks: a missing helper exits 0.

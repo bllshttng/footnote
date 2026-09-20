@@ -16,6 +16,10 @@
 # hooks/king-postcompact-reinject.sh.
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+export PATH
+
 STATE_FILE=".fno/target-state.md"
 FNO_DIR=".fno"
 

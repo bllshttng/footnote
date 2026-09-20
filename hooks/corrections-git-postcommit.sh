@@ -13,6 +13,10 @@
 
 set -euo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+export PATH
+
 # Resolve our shared helpers. The hook is normally invoked from ~/.claude/.git/hooks/post-commit
 # which is a symlink to this file in the fno repo; resolve through the symlink.
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || stat -f %Y "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"

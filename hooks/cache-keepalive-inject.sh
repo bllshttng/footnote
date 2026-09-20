@@ -5,6 +5,10 @@
 
 set -euo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+export PATH
+
 # Skip if a live target run owns this project (target manages its own lifecycle).
 # The guard rejects stale state from prior sessions so we still inject keepalive
 # when only a ghost state file is present.

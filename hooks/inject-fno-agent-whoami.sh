@@ -9,6 +9,10 @@
 
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+export PATH
+
 # Skip if fno is not installed - degrade silently rather than spam every
 # session with errors in projects that don't have the plugin.
 command -v fno >/dev/null 2>&1 || exit 0
