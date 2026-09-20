@@ -206,10 +206,7 @@ pub fn count_events(home: &fno_agents::paths::AgentsHome, needle: &str) -> usize
     // store, so the count reads committed rows, never raw journal bytes.
     let journal = home.events_jsonl();
     match fno_agents::event_store::query_events(&journal, &Default::default()) {
-        Ok(rows) => rows
-            .iter()
-            .filter(|row| row.line.contains(needle))
-            .count(),
+        Ok(rows) => rows.iter().filter(|row| row.line.contains(needle)).count(),
         Err(_) => 0,
     }
 }
