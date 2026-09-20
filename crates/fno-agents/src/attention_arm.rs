@@ -19,6 +19,10 @@ pub const ATTENTION_INTERVAL_S: u64 = 30;
 /// a half-settled edit.
 pub const DEFAULT_SETTLE_SECS: u64 = 120;
 
+/// How many times one recorded answer retries its failed clear before the
+/// arm gives up and leaves the durable row for a human to finish.
+pub const CLEAR_RETRY_CAP: u32 = 5;
+
 /// One `[[reach_me]]` sink row. Unknown types and bad rows arrive as
 /// errors, never silently dropped (AC6-ERR).
 #[derive(Debug, Clone, PartialEq)]
@@ -312,14 +316,33 @@ fn settle_block(
                     recorded: false,
                     answer: String::new(),
                     tt: false,
+                    retries: 0,
                 },
             );
         }
         Some(bs) if bs.hash == hash && bs.recorded => {
             // The row is durable; the clear failed. Retry the clear only
-            // (AC5-ERR: no second row).
+            // (AC5-ERR: no second row), with a bounded number of attempts:
+            // an answer the door refuses forever must not shell out on
+            // every beat for the life of the block. The durable row stays
+            // either way; a human or a terminal close can finish the job.
+            if bs.retries >= CLEAR_RETRY_CAP {
+                return;
+            }
             if let Err(e) = io.clear(&block.id, &bs.answer) {
                 eprintln!("fno-agents attention: clear retry failed: {e}");
+                if let Some(s) = state.get_mut(&block.id) {
+                    s.retries += 1;
+                    if s.retries == CLEAR_RETRY_CAP {
+                        io.notify(
+                            "Answer could not be recorded",
+                            &format!(
+                                "{}: the clear kept failing; the answer row is durable, close it from a terminal.",
+                                item.title
+                            ),
+                        );
+                    }
+                }
             }
         }
         Some(bs) if bs.hash == hash && now.saturating_sub(bs.since) < sink.settle_secs => {
@@ -382,6 +405,7 @@ fn settle_block(
                     recorded: bs.recorded,
                     answer: bs.answer,
                     tt: false,
+                    retries: bs.retries,
                 },
             );
         }
@@ -397,6 +421,8 @@ pub struct BlockState {
     recorded: bool,
     answer: String,
     tt: bool,
+    #[serde(default)]
+    retries: u32,
 }
 
 fn hash_text(text: &str) -> u64 {

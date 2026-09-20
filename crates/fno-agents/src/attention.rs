@@ -332,9 +332,9 @@ fn item_from_question_row(row: &Value, ts: &str) -> Option<AttentionItem> {
             .to_string(),
         priority: String::new(),
         created_at: ts.to_string(),
-        deadline: None,
-        on_silence: None,
-        class: None,
+        deadline: ctx_str("deadline"),
+        on_silence: ctx_str("on_silence"),
+        class: ctx_str("class"),
         blocks,
         subject: str_field(row, "subject").map(str::to_string),
         asker,
@@ -351,7 +351,7 @@ fn item_from_question_row(row: &Value, ts: &str) -> Option<AttentionItem> {
         missing: vec![],
         state: "open".to_string(),
     };
-    item.priority = if item.blocks.is_empty() {
+    item.priority = if item.blocks.is_empty() && item.class.is_none() {
         "normal"
     } else {
         "high"
