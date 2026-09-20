@@ -3925,10 +3925,7 @@ class ConfigBlock(BaseModel):
     @field_validator("reach_me", mode="before")
     @classmethod
     def _coerce_reach_me(cls, v: object) -> object:
-        """Fail-safe like ``status_sinks``: a non-list degrades to [] so a
-        stray scalar never bricks settings load; a present-but-wrong shape is
-        warned, not silently dropped (the same misconfiguration surfacing the
-        status_sinks validator gives)."""
+        """Fail-safe like ``status_sinks``: wrong shape degrades to [] with a warning."""
         if isinstance(v, list):
             return v
         if v is not None:
