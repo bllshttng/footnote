@@ -12,6 +12,12 @@ path = "~/c3po/me/inbox/jc-todos.md"
 
 `path` is the only required key. `type` defaults to `md`.
 
+## Is this page for you?
+
+You are setting up where questions reach the user away from a terminal. You may be changing how they are delivered, answered, or closed. The stakes are the user's attention and the fleet's unblocking: a delivered question the user cannot answer holds work.
+
+Not for: one-way event pushes to phones and webhooks (counts and notices, no answer path). That is the status fanout in [status-fanout](../status-fanout.md). For the mux's own needs overlay, use the mux.
+
 ## The model
 
 | Kind | Meaning | Closed when |
