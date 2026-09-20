@@ -93,9 +93,9 @@ Seat and honesty are different answers. `thread_seatable` measured True on 2026-
 
 ## Converting a pane
 
-A session that STARTED on a pane reaches the thread lane with one verb: `fno agents resume <name> --substrate thread`. It keeps its session id, its transcript, its node, its claims and its crown. `--dry-run` prints the plan and changes nothing. `--allow-new-id` is the disclosed, authorized path for a harness that mints a new id anyway, and it is refused on a crowned row, because moving a crown to a new id is succession rather than conversion.
+A session that STARTED on a pane reaches the thread lane with one verb: `fno agents resume <name> --substrate thread`. It keeps its session id, its transcript, its node, its claims and its crown. `--dry-run` prints the plan and changes nothing. `--allow-new-id` is the disclosed, authorized path for a harness that mints a new id anyway. A crowned row refuses that flag. Moving a crown to a new id is succession, not conversion.
 
-Which mechanism a harness uses is declared, not derived. It lives in `[harness.<name>.conversion]` in `crates/fno-agents/src/harness_capabilities.toml`, and the classifier branches on the strategy alone. Deriving it would be wrong in a way that is easy to miss: `thread_lane` answers `attach` for opencode, so a derivation sends opencode down claude's path and forks the session the operator asked to keep.
+Which mechanism a harness uses is declared, not derived. It lives in `[harness.<name>.conversion]` in `crates/fno-agents/src/harness_capabilities.toml`, and the classifier branches on the strategy alone. A derivation gets opencode wrong: `thread_lane` answers `attach` for it, so opencode goes down claude's path and forks the session the operator asked to keep.
 
 | Harness | Strategy | Keeps the id | What actually happens |
 |---|---|---|---|
@@ -105,11 +105,13 @@ Which mechanism a harness uses is declared, not derived. It lives in `[harness.<
 | opencode | `unsupported` | n/a | The serve lane carries `model` only and the lane's honesty is the open question above. Refused rather than forked. |
 | gemini | `unsupported` | n/a | Deprecated in favor of agy. There is nothing to convert. |
 
-The rebind rests on one measured fact, not an assumption: a renamed unix socket path still reaches the same listener, and the old path stops answering. Measured on macOS 25.3 with a positive control on the old path. That is what lets the daemon find the same keeper at the thread socket afterward.
+The rebind rests on one measured fact. A renamed unix socket path still reaches the same listener, and the old path stops answering. Measured on macOS 25.3 with a positive control on the old path. That fact is what lets the daemon find the same keeper at the thread socket afterward.
 
-Ordering is the safety argument on every strategy. Every refusal is raised before the first mutation. On a rebind, a failed rename leaves the pane seated and served, and a failed detach renames the socket back. On a handoff, the claims re-pin to the daemon before the old writer stops and to the new writer after it is live, so the session never has two writers and never has none. A hand-off that lands with a flip that fails is recoverable by re-running the same command: it reclassifies from what is actually true, finds the keeper already at the thread path, and finishes. Nothing writes a journal, because the world is the journal.
+Ordering is the safety argument on every strategy. Every refusal is raised before the first mutation. On a rebind, a failed rename leaves the pane seated and served. A failed detach renames the socket back. On a handoff, the claims re-pin to the daemon before the old writer stops, and to the new writer after it is live. So the session never has two writers and never has none.
 
-Conversion is not a portal. A portal moves the VIEWER and leaves the mux server hosting the process; `fno mux thread reseat` is that operation. Here the server stops hosting anything. Opening a view on the converted thread afterward is `fno mux thread <name>`.
+A hand-off can land while its row flip fails. Re-run the same command. It reclassifies from what is true, finds the keeper already at the thread path, and finishes. Nothing writes a journal, because the world is the journal.
+
+Conversion is not a portal. A portal moves the VIEWER and leaves the mux server hosting the process. `fno mux thread reseat` is that operation. Here the server stops hosting anything. Open a view on the converted thread with `fno mux thread <name>`.
 
 Thread-to-pane is not built. `--substrate` takes only `thread`, and any other value refuses by name.
 
