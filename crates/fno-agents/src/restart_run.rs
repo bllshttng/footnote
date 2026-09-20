@@ -276,7 +276,7 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
     // --force/--mux gating. Spared keepers fail the verb: a spared keeper
     // was NOT healed.
     let (cycled, stale_panes) = crate::census::cycle_stale_store_keepers().await;
-    say_keeper_cycle(&cycled, stale_panes, json, &say);
+    say_keeper_cycle(&cycled, stale_panes, &say);
     // The codex shared-daemon leg: the session-preserving upgrade
     // transaction, riding the SAME restart receipt as every other
     // component. Reused-current, held, refused, upgraded, or failed - and
@@ -348,7 +348,7 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
         eprintln!("fno agents restart: the mux leg failed; its refusal is above.");
     }
 
-    // x-6648: the post-mux keeper refresh. The pre-kill cycle above cannot
+    // The post-mux keeper refresh. The pre-kill cycle above cannot
     // see a keeper the OLD server spawned during the kill window (measured:
     // one survived under launchd and needed a separate watchdog reap). After
     // a PROVEN kill, run the stale-keeper cycle again on this binary; a
@@ -357,7 +357,7 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
     let post_mux = post_mux_kill(&mux_summary);
     let (post_mux_keepers, post_mux_unproven) = if post_mux {
         let (cycled2, stale2) = crate::census::cycle_stale_store_keepers().await;
-        say_keeper_cycle(&cycled2, stale2, json, &say);
+        say_keeper_cycle(&cycled2, stale2, &say);
         let unproven = cycled2.iter().any(|c| c.result != "cycled");
         let keepers = cycled2
             .iter()
@@ -449,7 +449,7 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
     ) as i32
 }
 
-/// The post-mux keeper-refresh gate (x-6648): a second stale-keeper pass
+/// The post-mux keeper-refresh gate: a second stale-keeper pass
 /// earns its run only on a PROVEN kill - the kill selector's summary naming a
 /// killed session. Report-only rows, a failed mux leg, and a lost summary all
 /// read as "not proven", so the pass never launches without a kill that could
@@ -468,13 +468,12 @@ fn post_mux_kill(mux_summary: &Option<serde_json::Value>) -> bool {
 
 /// The keeper-cycle receipts (shared by the full restart and the
 /// `--keepers-only` leg): one line per cycled keeper, one per spared keeper,
-/// plus the stale-pane-keeper note. `json` routes the human lines to stderr
-/// so stdout stays the one machine line; a spared keeper is loud on stderr
-/// either way.
+/// plus the stale-pane-keeper note. `say` routes the human lines (stdout
+/// human mode, stderr in `--json` mode so stdout stays the one machine
+/// line); a spared keeper is loud on stderr either way.
 fn say_keeper_cycle(
     cycled: &[crate::census::CycledKeeper],
     stale_panes: usize,
-    json: bool,
     say: &dyn Fn(&str),
 ) {
     for c in cycled {
@@ -499,7 +498,7 @@ fn say_keeper_cycle(
     }
 }
 
-/// The `--keepers-only` leg (x-6648): run ONLY the stale-store-keeper cycle
+/// The `--keepers-only` leg: run ONLY the stale-store-keeper cycle
 /// and print the same `keepers` machine line the full restart prints. Never
 /// restarts the daemon, touches mux servers, upgrades codex, or refreshes
 /// pr-watch. Exit 0 only when every keeper found is proven cycled; a busy or
@@ -509,7 +508,7 @@ fn say_keeper_cycle(
 /// the restart.
 pub async fn run_keepers_only(json: bool) -> i32 {
     let (cycled, stale_panes) = crate::census::cycle_stale_store_keepers().await;
-    say_keeper_cycle(&cycled, stale_panes, json, &|line| {
+    say_keeper_cycle(&cycled, stale_panes, &|line| {
         if json {
             eprintln!("{line}");
         } else {
@@ -716,7 +715,7 @@ mod tests {
             },
         ];
         let mut said = Vec::new();
-        super::say_keeper_cycle(&rows, 0, false, &|line| said.push(line.to_string()));
+        super::say_keeper_cycle(&rows, 0, &|line| said.push(line.to_string()));
         assert!(
             said.iter()
                 .any(|l| l.contains("g1") && l.contains("shut down")),

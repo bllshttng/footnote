@@ -1148,7 +1148,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "daemon_started",
     "daemon_exited",
     "daemon_idle_pending_exit",
-    // Drift retirement (daemon-emitted, x-6648): the daemon measured its own
+    // Drift retirement (daemon-emitted): the daemon measured its own
     // build drifted and, at a quiet tick with no live worker, retired through
     // the graceful tail so the next lazy start runs the installed binary.
     "daemon_drift_pending_exit",

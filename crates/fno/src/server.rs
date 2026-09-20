@@ -13814,7 +13814,7 @@ async fn serve(
     // after one interval instead of duplicating startup's known-live state.
     pane_reap_tick.tick().await;
 
-    // Build-drift retirement (x-6648): the watch stats its own executable
+    // Build-drift retirement: the watch stats its own executable
     // off-loop every 5th tick and retires through Flow::Shutdown only on a
     // drifted verdict at a fully quiet tick. The machinery lives in
     // server/drift_retire.rs.
@@ -13885,7 +13885,7 @@ async fn serve(
                     e2e_log(format_args!("last dead pane reaped; shutting down"));
                     break Flow::Shutdown;
                 }
-                // Drift retirement (x-6648): a drifted verdict at a fully
+                // Drift retirement: a drifted verdict at a fully
                 // quiet tick (no panes, clients, or connections) retires the
                 // server so the next attach spawns the installed build. The
                 // stat runs off-loop in server/drift_retire.rs.

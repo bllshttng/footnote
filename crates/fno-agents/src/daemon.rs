@@ -1216,7 +1216,7 @@ pub fn pid_is_ours(pid: u32, recorded: Option<u64>) -> bool {
 }
 
 // The idle-exit predicate and its drift sibling live in crate::quiet_retire
-// (x-6648): the daemon file is over its line budget, so the predicates moved
+// (budget law): the daemon file is over its line budget, so the predicates moved
 // beside their tests instead of growing here.
 
 // ---------------------------------------------------------------------------
@@ -1920,7 +1920,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // An enabled active-backlog project keeps the daemon resident
                 // (OQ1 Option A): idle-exit must never kill a live supervisor.
                 let ab_active = ab_live.load(std::sync::atomic::Ordering::SeqCst);
-                // Drift retirement (x-6648): the on-disk binary changing under
+                // Drift retirement: the on-disk binary changing under
                 // a running daemon is a retirement request at the same quiet
                 // boundary idle-exit owns -- same fresh no-worker probe, same
                 // graceful tail, distinct receipt. A daemon with live work

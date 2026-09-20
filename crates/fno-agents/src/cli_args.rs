@@ -34,7 +34,7 @@ pub struct RestartArgs {
     /// Chain-only: swap only when the running daemon measures drifted; quiet exit 0 on fresh, down, or unknown
     #[arg(long)]
     pub if_drifted: bool,
-    /// Internal (x-6648): run ONLY the stale-store-keeper cycle and print the keepers summary; never restarts the daemon or mux servers. The post-mux pass `fno agents restart --mux` drives after each kill.
+    /// Internal: run ONLY the stale-store-keeper cycle and print the keepers summary; never restarts the daemon or mux servers. The post-mux pass `fno agents restart --mux` drives after each kill.
     #[arg(long)]
     pub keepers_only: bool,
     #[command(flatten)]

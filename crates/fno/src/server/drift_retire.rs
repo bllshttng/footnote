@@ -1,4 +1,4 @@
-//! The mux server's build-drift retirement (x-6648): when the on-disk binary
+//! The mux server's build-drift retirement: when the on-disk binary
 //! changed under a running server and the server is fully quiet - no panes,
 //! attached clients, or in-flight connections - it retires through
 //! `Flow::Shutdown` so the next attach spawns the installed build. The stat

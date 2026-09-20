@@ -1,6 +1,6 @@
 //! Quiet daemon retirement: which reason, if any, retires the daemon on an
 //! idle tick, and what evidence a verdict must carry before anything exits.
-//! Two reasons share one gate (x-6648): plain idle-elapsed, and measured
+//! Two reasons share one gate: plain idle-elapsed, and measured
 //! build drift -- the on-disk binary changed under the running daemon. The
 //! async serve loop in [`crate::daemon`] spawns the blocking liveness probe
 //! and consumes the verdict these predicates grade.
@@ -58,7 +58,7 @@ pub(crate) fn no_live_worker(home: &AgentsHome) -> bool {
 }
 
 /// Which reason, if any, retires the daemon through the shared graceful tail
-/// on this idle tick. Measured build drift (x-6648) outranks plain
+/// on this idle tick. Measured build drift outranks plain
 /// idle-elapsed when both fire; both still need the fresh no-worker probe
 /// verdict before anything exits. Fail-safe by construction: a missing
 /// fingerprint or an unreadable exe classifies `Unknown`, which is never a

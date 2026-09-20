@@ -1,6 +1,6 @@
 //! Session-lifetime guards for the mux server: what must hold while the
 //! session lives, and what the server must clean up when it retires -
-//! whether by SIGTERM, idle exit, or drift retirement (x-6648). Moved out of
+//! whether by SIGTERM, idle exit, or drift retirement. Moved out of
 //! `server.rs` (over budget, shrink-only) with no behavior change.
 
 use std::path::PathBuf;
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 /// stale-socket path in `bind_or_probe` covers that, and a lingering `.ver`
 /// is inert - `ls` only reads it for a LIVE server, and a dead one probes
 /// `Stale`).
-pub(crate) struct SocketGuard(PathBuf);
+pub(crate) struct SocketGuard(pub(crate) PathBuf);
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
@@ -27,7 +27,7 @@ impl Drop for SocketGuard {
 pub(crate) struct ConnAlive(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
 impl ConnAlive {
-    fn new(count: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+    pub(crate) fn new(count: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
         count.fetch_add(1, std::sync::atomic::Ordering::Release);
         ConnAlive(count.clone())
     }
