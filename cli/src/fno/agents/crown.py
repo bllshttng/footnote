@@ -752,10 +752,7 @@ def plan_spawn_crown(
 
 
 def _widen_answer(scope: str, caller) -> dict:
-    """Rust's crown-widen answer: can this agent add epics its session
-    created to its own crown? Decides nothing here: rows in, one JSON
-    answer out, and a missing or old binary answers ``{}`` so today's
-    refusal stands (fails closed)."""
+    """Rust's crown-widen answer; a missing/old binary answers ``{}`` (fails closed)."""
     from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
 
     by_id = _graph_index() or {}
@@ -1091,8 +1088,6 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     # an EQUAL scope, so narrowing to a strict SUBSET would sail past it -
     # identity, not territory, is the test.
     if widen.get("widen") is True and target_name != grantor:
-        # A widen answer belongs to this session's own row only; a
-        # widen-shaped grant to another row meets the ordinary refusal.
         raise CrownPromotionError(denial)
     if caller is not None and target_name == grantor and widen.get("widen") is not True:
         raise CrownPromotionError(
