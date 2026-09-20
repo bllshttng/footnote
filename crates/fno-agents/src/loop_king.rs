@@ -905,11 +905,39 @@ mod tests {
         p
     }
 
+    /// Exec the stub, retrying a CI-only ETXTBSY.
+    ///
+    /// `write_fno_stub` publishes atomically, so the exec'd path is never
+    /// itself write-open. What is left is a sibling test thread forking
+    /// while this thread still holds the TEMP file's write fd: the child
+    /// inherits it, the rename makes that inherited fd the exec'd path, and
+    /// the exec fails with "Text file busy" until the child reaches its own
+    /// exec and CLOEXEC fires. Microseconds, and not closable from here, so
+    /// the call is retried rather than the test ignored.
+    fn escalate_retrying(
+        fno: &str,
+        dir: &Path,
+        targets: &[String],
+        reason: &str,
+        scope: &str,
+    ) -> String {
+        for _ in 0..50 {
+            let out = escalate_stalled(fno, dir, targets, reason, scope);
+            if !out.contains("Text file busy") {
+                return out;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // Out of retries: return the real output so the assertion names the
+        // busy-file failure rather than a timeout of this helper's own.
+        escalate_stalled(fno, dir, targets, reason, scope)
+    }
+
     #[test]
     fn escalate_stalled_names_the_presiding_king_from_a_king_prefixed_target() {
         let dir = tempfile::tempdir().unwrap();
         let fno = write_fno_stub(dir.path(), "king:l1-king");
-        let out = escalate_stalled(
+        let out = escalate_retrying(
             fno.to_str().unwrap(),
             dir.path(),
             &["undispatched:x-aaaa".to_string()],
@@ -923,7 +951,7 @@ mod tests {
     fn escalate_stalled_names_the_operator_from_an_operator_prefixed_target() {
         let dir = tempfile::tempdir().unwrap();
         let fno = write_fno_stub(dir.path(), "operator:q-abcd1234");
-        let out = escalate_stalled(
+        let out = escalate_retrying(
             fno.to_str().unwrap(),
             dir.path(),
             &["undispatched:x-aaaa".to_string()],
@@ -939,7 +967,7 @@ mod tests {
         // as a blank presiding-king name.
         let dir = tempfile::tempdir().unwrap();
         let fno = write_fno_stub(dir.path(), "q-legacy");
-        let out = escalate_stalled(
+        let out = escalate_retrying(
             fno.to_str().unwrap(),
             dir.path(),
             &["undispatched:x-aaaa".to_string()],
@@ -961,7 +989,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let out = escalate_stalled(
+        let out = escalate_retrying(
             stub_path.to_str().unwrap(),
             dir.path(),
             &[crate::king_escalation::reading_undelivered("x-bbbb")],
