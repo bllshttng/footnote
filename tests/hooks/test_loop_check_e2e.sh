@@ -327,8 +327,10 @@ assert_delivery_artifacts() {
     local dir="$1" session_id="$2" events rows
     events="$(cd "$dir" && HOME="$dir/home" env -u FNO_EVENTS_PATH "$REAL_BIN" state path events)"
     # The store commit is the write boundary: grep the committed rows, never
-    # the raw file (the same contract Case A reads through).
-    rows="$("$CLI_BIN" doctor event rows --events "$events" 2>&1 || true)"
+    # the raw file (the same contract Case A reads through). The verb returns
+    # envelope lines as escaped JSON strings; jq -r unwraps them so the
+    # needles below match the rows the way every other reader sees them.
+    rows="$("$CLI_BIN" doctor event rows --events "$events" 2>/dev/null | jq -r '.[]' 2>/dev/null || true)"
     # Each miss names itself on stderr: one red line that says WHICH artifact
     # is absent beats a bare rc=1 when the case has five conjuncts.
     grep -q '^status: done$' "$dir/plan.md" \
