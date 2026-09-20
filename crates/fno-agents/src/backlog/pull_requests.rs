@@ -89,6 +89,37 @@ pub fn delete(connection: &Connection, node_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+type RowParts = (
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+);
+
+fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RowParts> {
+    Ok((
+        row.get::<_, Option<i64>>(0)?,
+        row.get::<_, Option<String>>(1)?,
+        row.get::<_, Option<String>>(2)?,
+        row.get::<_, Option<String>>(3)?,
+        row.get::<_, String>(4)?,
+    ))
+}
+
+fn build(parts: RowParts) -> PullRequest {
+    let (number, url, merge_status, note, extras_raw) = parts;
+    let extras: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&extras_raw).unwrap_or_default();
+    PullRequest {
+        number,
+        url,
+        merge_status,
+        note,
+        extras,
+    }
+}
+
 /// One node's pull requests in list order (seq). Schema 3: the extras
 /// column round-trips the item keys the typed model keeps as `extras`; an
 /// unparsable value reads as empty.
@@ -100,29 +131,34 @@ pub fn load(connection: &Connection, node_id: &str) -> Result<Vec<PullRequest>, 
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map(params![node_id], |row| {
-            Ok((
-                row.get::<_, Option<i64>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })
+        .query_map(params![node_id], map_row)
         .map_err(|error| error.to_string())?;
     let mut out = Vec::new();
     for row in rows {
-        let (number, url, merge_status, note, extras_raw) =
-            row.map_err(|error| error.to_string())?;
-        let extras: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(&extras_raw).unwrap_or_default();
-        out.push(PullRequest {
-            number,
-            url,
-            merge_status,
-            note,
-            extras,
-        });
+        out.push(build(row.map_err(|error| error.to_string())?));
+    }
+    Ok(out)
+}
+
+/// Every node's pull requests, grouped by node id, in list order within
+/// each node. One full scan instead of one query per node.
+pub(crate) fn load_all(
+    connection: &Connection,
+) -> Result<std::collections::HashMap<String, Vec<PullRequest>>, String> {
+    let mut statement = connection
+        .prepare_cached(
+            "SELECT number, url, merge_status, note, extras, node_id
+             FROM pull_requests ORDER BY node_id, seq",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, String>(5)?, map_row(row)?)))
+        .map_err(|error| error.to_string())?;
+    let mut out: std::collections::HashMap<String, Vec<PullRequest>> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let (node_id, parts) = row.map_err(|error| error.to_string())?;
+        out.entry(node_id).or_default().push(build(parts));
     }
     Ok(out)
 }
