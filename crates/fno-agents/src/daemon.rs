@@ -1702,6 +1702,13 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let idle_probe_verdict: Arc<
         std::sync::Mutex<Option<(bool, Instant, Option<std::time::SystemTime>)>>,
     > = Arc::new(std::sync::Mutex::new(None));
+    // Drift retirement: the drifted flag settles off-loop every 6th tick
+    // (30s) and sticks -- a drifted binary stays drifted until the process
+    // ends -- so the arm reads a bool without touching the filesystem.
+    let drift_stat_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let drift_stat_verdict: Arc<std::sync::Mutex<Option<bool>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let mut drift_tick: u32 = 0;
 
     // THE RULE FOR THIS LOOP: nothing that shells out, walks the
     // registry row by row, or otherwise blocks may run INLINE in a select arm.
@@ -1920,24 +1927,51 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // An enabled active-backlog project keeps the daemon resident
                 // (OQ1 Option A): idle-exit must never kill a live supervisor.
                 let ab_active = ab_live.load(std::sync::atomic::Ordering::SeqCst);
-                // Drift retirement: the on-disk binary changing under
-                // a running daemon is a retirement request at the same quiet
+                // Drift retirement: the on-disk binary changing under a
+                // running daemon is a retirement request at the same quiet
                 // boundary idle-exit owns -- same fresh no-worker probe, same
-                // graceful tail, distinct receipt. A daemon with live work
-                // keeps serving the old build until a quiet tick settles.
-                let drift = ctx.exe_fingerprint.as_ref().map(crate::drift::self_drift);
-                let retire_reason = crate::quiet_retire::quiet_retire_reason(
-                    drift.as_ref(),
-                    ab_active,
-                    last_activity.elapsed() >= ctx.opts.idle_exit,
-                );
+                // graceful tail, distinct receipt. Both the drift stat and
+                // the no-worker probe run OFF the arm; the arm reads only the
+                // settled flag, refreshed every 6th tick (30s). A daemon with
+                // live work keeps serving the old build until a quiet probe
+                // settles.
+                drift_tick += 1;
+                if drift_tick >= 6 {
+                    drift_tick = 0;
+                    if !drift_stat_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        let gate = Arc::clone(&drift_stat_in_flight);
+                        let slot = Arc::clone(&drift_stat_verdict);
+                        let fingerprint = ctx.exe_fingerprint.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let _gate = SweepGate(gate);
+                            let drifted = fingerprint
+                                .map(|fp| {
+                                    matches!(
+                                        crate::drift::self_drift(&fp),
+                                        crate::drift::DriftState::Drifted { .. }
+                                    )
+                                })
+                                .unwrap_or(false);
+                            *slot.lock().unwrap() = Some(drifted);
+                        });
+                    }
+                }
+                let drifted = drift_stat_verdict.lock().unwrap().unwrap_or(false);
+                let idle_elapsed = last_activity.elapsed() >= ctx.opts.idle_exit;
+                let retire_reason =
+                    crate::quiet_retire::quiet_retire_reason(drifted, ab_active, idle_elapsed);
                 if retire_reason.is_some() {
                     // The liveness read (blocking CONNECT probes) runs OFF the
                     // select arm: an in-arm probe against a wedged worker's
                     // filling backlog is the unreachable-AND-unstoppable shape
                     // this loop's rule exists to prevent. One probe in flight;
-                    // exit fires on its verdict: worst case one extra 5s tick.
-                    if !idle_probe_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    // exit fires on its verdict. Idle-driven probes repeat
+                    // every tick (the 30-minute window throttles them);
+                    // drift-driven probes repeat at the 30s stat cadence.
+                    let drift_probe_due = drifted && drift_tick == 0;
+                    if (idle_elapsed || drift_probe_due)
+                        && !idle_probe_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst)
+                    {
                         let flag = Arc::clone(&idle_probe_in_flight);
                         let home = ctx.home.clone();
                         let verdict = Arc::clone(&idle_probe_verdict);
@@ -1966,18 +2000,22 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         )
                     });
                     if fresh {
-                        if let Some(crate::drift::DriftState::Drifted { running, on_disk }) =
-                            &drift
-                        {
-                            let _ = ctx.emitter.emit(
-                                "daemon_drift_pending_exit",
-                                &json!({
-                                    "running": running.path.display().to_string(),
-                                    "running_size": running.size,
-                                    "on_disk": on_disk.path.display().to_string(),
-                                    "on_disk_size": on_disk.size,
-                                }),
-                            );
+                        // The receipt names both builds; the stat here runs
+                        // once, on the one-way retirement path only.
+                        if drifted {
+                            if let Some(crate::drift::DriftState::Drifted { running, on_disk }) =
+                                ctx.exe_fingerprint.as_ref().map(crate::drift::self_drift)
+                            {
+                                let _ = ctx.emitter.emit(
+                                    "daemon_drift_pending_exit",
+                                    &json!({
+                                        "running": running.path.display().to_string(),
+                                        "running_size": running.size,
+                                        "on_disk": on_disk.path.display().to_string(),
+                                        "on_disk_size": on_disk.size,
+                                    }),
+                                );
+                            }
                         }
                         emit_state(&ctx.emitter, DaemonState::IdlePendingExit);
                         let _ = ctx.emitter.emit("daemon_idle_pending_exit", &json!({}));

@@ -54,6 +54,11 @@ impl RetireWatch {
             return None;
         }
         self.subtick = 0;
+        if self.startup.is_none() {
+            // Unknown by construction: the watch can never prove drift, so
+            // it never spawns a stat task at all (no dead-end work).
+            return None;
+        }
         if !self.in_flight.swap(true, Ordering::SeqCst) {
             let gate = Arc::clone(&self.in_flight);
             let slot = Arc::clone(&self.slot);

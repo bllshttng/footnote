@@ -356,8 +356,11 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
     // force-kill.
     let post_mux = post_mux_kill(&mux_summary);
     let (post_mux_keepers, post_mux_unproven) = if post_mux {
-        let (cycled2, stale2) = crate::census::cycle_stale_store_keepers().await;
-        say_keeper_cycle(&cycled2, stale2, &say);
+        let (cycled2, _stale2) = crate::census::cycle_stale_store_keepers().await;
+        // The stale-pane-keeper note belongs to the pre-kill pass only (pane
+        // keepers are never cycled); the post-kill pass is about store
+        // keepers, so the note would just repeat the pre-kill line.
+        say_keeper_cycle(&cycled2, 0, &say);
         let unproven = cycled2.iter().any(|c| c.result != "cycled");
         let keepers = cycled2
             .iter()
@@ -714,8 +717,9 @@ mod tests {
                 result: "busy".into(),
             },
         ];
-        let mut said = Vec::new();
-        super::say_keeper_cycle(&rows, 0, &|line| said.push(line.to_string()));
+        let said: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        super::say_keeper_cycle(&rows, 0, &|line| said.borrow_mut().push(line.to_string()));
+        let said = said.into_inner();
         assert!(
             said.iter()
                 .any(|l| l.contains("g1") && l.contains("shut down")),

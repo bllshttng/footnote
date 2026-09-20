@@ -9,7 +9,6 @@ use std::time::Instant;
 
 use serde_json::json;
 
-use crate::drift::DriftState;
 use crate::paths::AgentsHome;
 
 /// The idle-exit predicate: is any WORKER live on this home? A registry row is
@@ -58,20 +57,20 @@ pub(crate) fn no_live_worker(home: &AgentsHome) -> bool {
 }
 
 /// Which reason, if any, retires the daemon through the shared graceful tail
-/// on this idle tick. Measured build drift outranks plain
-/// idle-elapsed when both fire; both still need the fresh no-worker probe
-/// verdict before anything exits. Fail-safe by construction: a missing
-/// fingerprint or an unreadable exe classifies `Unknown`, which is never a
-/// retirement, and a live active-backlog supervisor blocks both reasons.
+/// on this idle tick. Measured build drift outranks plain idle-elapsed when
+/// both fire; both still need the fresh no-worker probe verdict before
+/// anything exits. Fail-safe by construction: the caller maps a missing
+/// fingerprint or an unreadable exe to `drifted = false`, and a live
+/// active-backlog supervisor blocks both reasons.
 pub(crate) fn quiet_retire_reason(
-    drift: Option<&DriftState>,
+    drifted: bool,
     ab_active: bool,
     idle_elapsed: bool,
 ) -> Option<&'static str> {
     if ab_active {
         return None;
     }
-    if matches!(drift, Some(DriftState::Drifted { .. })) {
+    if drifted {
         return Some("drift");
     }
     if idle_elapsed {
@@ -109,81 +108,36 @@ pub(crate) fn daemon_exited_payload(reason: &str) -> serde_json::Value {
 mod tests {
     use super::*;
 
-    fn fake_fp(tag: &str, size: u64) -> crate::drift::ExeFingerprint {
-        crate::drift::ExeFingerprint {
-            path: std::path::PathBuf::from(format!("/bin/fno-agents-{tag}")),
-            mtime_nanos: 1,
-            size,
-        }
-    }
-
-    fn drifted() -> DriftState {
-        DriftState::Drifted {
-            running: fake_fp("running", 10),
-            on_disk: fake_fp("running", 12),
-        }
+    fn drifted() -> bool {
+        true
     }
 
     /// AC1-HP: measured drift retires without waiting out the idle window.
     #[test]
     fn quiet_retire_reason_drift_fires_without_idle_wait() {
-        assert_eq!(
-            quiet_retire_reason(Some(&drifted()), false, false),
-            Some("drift")
-        );
+        assert_eq!(quiet_retire_reason(drifted(), false, false), Some("drift"));
     }
 
     /// When both conditions hold, drift is the named reason.
     #[test]
     fn quiet_retire_reason_drift_outranks_idle() {
-        assert_eq!(
-            quiet_retire_reason(Some(&drifted()), false, true),
-            Some("drift")
-        );
+        assert_eq!(quiet_retire_reason(drifted(), false, true), Some("drift"));
     }
 
-    /// AC1-ERR: a missing fingerprint and an Unknown classification are never
-    /// a retirement; only the ordinary idle path may fire.
+    /// AC1-ERR: no drift (fresh, Unknown, missing -- the caller maps all of
+    /// them to false) is never a retirement by itself; only the ordinary
+    /// idle path may fire.
     #[test]
-    fn quiet_retire_reason_fails_safe_on_unknown_and_missing() {
-        assert_eq!(quiet_retire_reason(None, false, false), None);
-        assert_eq!(
-            quiet_retire_reason(Some(&DriftState::Unknown), false, false),
-            None
-        );
-        assert_eq!(
-            quiet_retire_reason(Some(&DriftState::Unknown), false, true),
-            Some("idle")
-        );
-    }
-
-    /// A fresh build only ever retires through idle-elapsed.
-    #[test]
-    fn quiet_retire_reason_idle_when_fresh() {
-        let fp = fake_fp("fresh", 10);
-        assert_eq!(
-            quiet_retire_reason(
-                Some(&crate::drift::classify(Some(&fp), Some(&fp))),
-                false,
-                true
-            ),
-            Some("idle")
-        );
-        assert_eq!(
-            quiet_retire_reason(
-                Some(&crate::drift::classify(Some(&fp), Some(&fp))),
-                false,
-                false
-            ),
-            None
-        );
+    fn quiet_retire_reason_fails_safe_when_not_drifted() {
+        assert_eq!(quiet_retire_reason(false, false, false), None);
+        assert_eq!(quiet_retire_reason(false, false, true), Some("idle"));
     }
 
     /// AC1-ERR: a live active-backlog supervisor blocks drift and idle alike.
     #[test]
     fn quiet_retire_reason_ab_active_blocks_both() {
-        assert_eq!(quiet_retire_reason(Some(&drifted()), true, false), None);
-        assert_eq!(quiet_retire_reason(None, true, true), None);
+        assert_eq!(quiet_retire_reason(drifted(), true, false), None);
+        assert_eq!(quiet_retire_reason(false, true, true), None);
     }
 
     /// The fresh-verdict gate: a retirement fires only when the probe saw no
