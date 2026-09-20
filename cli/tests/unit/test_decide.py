@@ -3768,8 +3768,8 @@ def test_a_subject_query_reads_the_graph_once(
 def test_note_receipt_says_recorded_never_appended() -> None:
     """The note verb REPLACES current_state; no runtime string may say appended.
 
-    The false word made two kings stack-write one node believing notes
-    appended (x-b524, 2026-09-20); the help already says REPLACING.
+    Measured 2026-09-20: the false word made two kings stack-write one
+    node believing notes appended; the help already says REPLACING.
     """
     import io
 
