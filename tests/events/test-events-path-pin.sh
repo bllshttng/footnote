@@ -51,6 +51,11 @@ assert_eq "explicit EVENTS_FILE outranks the pin" "$tmp/explicit.jsonl" "$got"
 #    journal is a symlink to the canonical file, which live sessions and daemons
 #    append to while this runs, so a byte comparison goes red on somebody else's
 #    write. Only this emit can move the marker count.
+#
+#    The positive control reads COMMITTED ROWS: the store commit is the write
+#    boundary and an emitted event leaves no byte trace in the journal file.
+#    The untouched-checkout half stays a raw read - it must see nothing, and
+#    importing the live checkout store from a test would be its own rudeness.
 MARKER=test_events_path_pin
 checkout_journal="$REPO_ROOT/.fno/events.jsonl"
 count_marker() {
@@ -62,13 +67,29 @@ count_marker() {
     [[ -f "$1" ]] || { echo 0; return; }
     grep -c "$MARKER" "$1" 2>/dev/null || true
 }
+# Same resolution order as scripts/lib/events.sh: checkout build first, PATH
+# second, so the test never reads through a stale installed binary.
+ROWS_BIN="${FNO_BIN:-}"
+if [[ -z "$ROWS_BIN" ]]; then
+    for profile in debug release; do
+        if [[ -x "$REPO_ROOT/crates/fno/target/$profile/fno" ]]; then
+            ROWS_BIN="$REPO_ROOT/crates/fno/target/$profile/fno"
+            break
+        fi
+    done
+fi
+[[ -n "$ROWS_BIN" ]] || ROWS_BIN=$(command -v fno 2>/dev/null)
+committed_marks() {
+    [[ -n "$ROWS_BIN" ]] || { echo 0; return; }
+    "$ROWS_BIN" doctor event rows --events "$1" 2>/dev/null | grep -c "$MARKER" || true
+}
 before_marks=$(count_marker "$checkout_journal")
 
 env -u EVENTS_FILE FNO_EVENTS_PATH="$tmp/emit.jsonl" bash -c \
     'cd "$2" || exit 1; source "$1" >/dev/null 2>&1; emit_event target test_events_path_pin "{}"' \
     _ "$EVENTS_LIB" "$REPO_ROOT" >/dev/null 2>&1
 
-assert_eq "the emit reached the pinned journal" "1" "$(count_marker "$tmp/emit.jsonl")"
+assert_eq "the emit reached the pinned journal" "1" "$(committed_marks "$tmp/emit.jsonl")"
 
 after_marks=$(count_marker "$checkout_journal")
 assert_eq "the checkout journal gained no row from this emit" "$before_marks" "$after_marks"

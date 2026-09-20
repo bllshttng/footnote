@@ -324,14 +324,25 @@ PY
 }
 
 assert_delivery_artifacts() {
-    local dir="$1" session_id="$2" events
+    local dir="$1" session_id="$2" events rows
     events="$(cd "$dir" && HOME="$dir/home" env -u FNO_EVENTS_PATH "$REAL_BIN" state path events)"
-    grep -q '^status: done$' "$dir/plan.md" || return 1
-    grep -q '"type":"delivery_verdict_evaluated"' "$events" || return 1
-    grep -q 'DoneDelivery' "$events" || return 1
-    grep -q '"type":"session_finalized"' "$events" || return 1
-    grep -R -q "session: \`${session_id}\`" "$dir/handoffs" || return 1
-    grep -R -q 'fno-delivery://x-delivery-e2e/attempt-e2e/' "$dir/handoffs" || return 1
+    # The store commit is the write boundary: grep the committed rows, never
+    # the raw file (the same contract Case A reads through).
+    rows="$("$CLI_BIN" doctor event rows --events "$events" 2>&1 || true)"
+    # Each miss names itself on stderr: one red line that says WHICH artifact
+    # is absent beats a bare rc=1 when the case has five conjuncts.
+    grep -q '^status: done$' "$dir/plan.md" \
+        || { echo "assert_delivery_artifacts: plan.md is not stamped done" >&2; return 1; }
+    printf '%s' "$rows" | grep -q '"type":"delivery_verdict_evaluated"' \
+        || { echo "assert_delivery_artifacts: delivery_verdict_evaluated row missing" >&2; return 1; }
+    printf '%s' "$rows" | grep -q 'DoneDelivery' \
+        || { echo "assert_delivery_artifacts: DoneDelivery terminal missing" >&2; return 1; }
+    printf '%s' "$rows" | grep -q '"type":"session_finalized"' \
+        || { echo "assert_delivery_artifacts: session_finalized row missing" >&2; return 1; }
+    grep -R -q "session: \`${session_id}\`" "$dir/handoffs" \
+        || { echo "assert_delivery_artifacts: handoff session line missing" >&2; return 1; }
+    grep -R -q 'fno-delivery://x-delivery-e2e/attempt-e2e/' "$dir/handoffs" \
+        || { echo "assert_delivery_artifacts: handoff receipt missing" >&2; return 1; }
     PROJECT_DIR="$dir" uv run --project "${REPO_ROOT}/cli" python - <<'PY'
 import os
 import sqlite3

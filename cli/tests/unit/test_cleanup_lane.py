@@ -44,16 +44,16 @@ def _scratch_repo(tmp_path: Path) -> Path:
 
 
 def _attestations(repo: Path) -> list[dict]:
+    from fno.events.store_client import native_rows
     from fno.paths import project_log
 
     path = project_log("events.jsonl", project_root=repo)
-    if not path.exists():
+    # The store commit is the write boundary: the emit's row lives in the
+    # store, and the rows verb folds any pre-store raw lines in on the way.
+    committed = native_rows(path, types=["review_attestation"])
+    if committed is None:
         return []
-    return [
-        json.loads(ln)
-        for ln in path.read_text().splitlines()
-        if ln.strip() and json.loads(ln).get("type") == "review_attestation"
-    ]
+    return [json.loads(ln) for ln in committed if ln.strip()]
 
 
 def test_cleanup_writes_zero_attestations_with_a_proven_instrument(tmp_path):
