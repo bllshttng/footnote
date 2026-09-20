@@ -268,17 +268,41 @@ fn spawn_receipt(stdout: &str) -> Option<serde_json::Value> {
     found
 }
 
-/// The door's own error line: first non-empty stderr line, else stdout, cut
-/// at 160 chars. Shared by the notice mapping and the launcher decoder.
+/// The verdict line's wire marker. Emitted by the spawn gate
+/// (`spawn_gate.rs run_gate`) as the LAST stderr line of a refusal; the
+/// reading contract is docs/architecture/spawn-gate.md#reading-a-refusal.
+const VERDICT_MARKER: &str = "spawn-gate: refused on ";
+
+/// The pass-path note prefix from the same contract: never a refusal.
+const GATE_NOTE_PREFIX: &str = "spawn-gate note:";
+
+/// The door's own error line: the gate's verdict line when one is present,
+/// else the first non-empty stderr line that is not a passing note, else the
+/// first stdout line, cut at 160 chars. Shared by the notice mapping and the
+/// launcher decoder.
 pub(crate) fn refusal_detail(stderr: &str, stdout: &str) -> String {
-    let mut detail = crate::server::first_line_or(stderr, "");
-    if detail.is_empty() {
-        detail = crate::server::first_line_or(stdout, "");
+    if let Some(verdict) = stderr
+        .lines()
+        .filter(|l| l.starts_with(VERDICT_MARKER))
+        .last()
+    {
+        return cut_160(verdict);
     }
-    if detail.chars().count() > 160 {
-        detail.chars().take(160).collect()
+    let detail = stderr
+        .lines()
+        .filter(|l| !l.trim_start().starts_with(GATE_NOTE_PREFIX))
+        .map(|l| l.chars().filter(|c| !c.is_control()).collect::<String>())
+        .map(|l| l.trim().to_string())
+        .find(|l| !l.is_empty())
+        .unwrap_or_else(|| crate::server::first_line_or(stdout, ""));
+    cut_160(&detail)
+}
+
+fn cut_160(s: &str) -> String {
+    if s.chars().count() > 160 {
+        s.chars().take(160).collect()
     } else {
-        detail
+        s.to_string()
     }
 }
 
@@ -550,6 +574,39 @@ mod tests {
         assert_eq!(
             dispatch_notice(true, "", "", "x-1", "feat"),
             "grab work failed: fno agents spawn exited 0 with no pane receipt"
+        );
+    }
+
+    /// The reader picks the verdict line, never a passing note (x-b6c7): a
+    /// gate refusal whose stderr carries note lines before the verdict still
+    /// renders the verdict, and an admitted spawn that failed after the gate
+    /// renders the real error, never a note.
+    #[test]
+    fn refusal_detail_takes_the_verdict_line_and_skips_notes() {
+        // Verdict line wins over every note and every refusal sentence.
+        let gate_stderr = "spawn-gate note: ram readings: available 35.9GB (floor 2.0GB), \
+             swap 85.5% (cap 90%), swap-in not sampled (under cap)\n\
+             spawn-gate: provider zai, cap 10, current count 10; refusing\n\
+             spawn-gate: refused on provider_cap (provider_cap, exit 78): provider=zai, cap=10, count=10";
+        assert_eq!(
+            refusal_detail(gate_stderr, ""),
+            "spawn-gate: refused on provider_cap (provider_cap, exit 78): provider=zai, cap=10, count=10"
+        );
+        assert_eq!(
+            dispatch_notice(false, "", gate_stderr, "x-1", "feat"),
+            "grab work failed: spawn-gate: refused on provider_cap (provider_cap, exit 78): provider=zai, cap=10, count=10"
+        );
+        // The gate admitted; the real error line follows the note.
+        assert_eq!(
+            dispatch_notice(
+                false,
+                "",
+                "spawn-gate note: ram readings: available 35.9GB (floor 2.0GB), \
+                 swap 85.5% (cap 90%), swap-in not sampled (under cap)\nError: pane launch failed",
+                "x-1",
+                "feat"
+            ),
+            "grab work failed: Error: pane launch failed"
         );
     }
 
