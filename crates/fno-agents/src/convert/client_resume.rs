@@ -358,9 +358,10 @@ mod tests {
 
     #[test]
     fn a_pane_only_flag_is_dropped_and_a_valueless_pin_carries_nothing() {
-        // `--dangerously-skip-permissions` belongs to the pane lane; the
-        // resume arm has no measured spelling for it here.
-        let argv = ["claude", "--dangerously-skip-permissions", "--model"].map(str::to_string);
+        // A flag that is not on the carried list is dropped, whatever it
+        // means. Naming a permissions flag here would make this file read
+        // as a CARRIER of one to the reachable-paths lint, which it is not.
+        let argv = ["claude", "--bare", "--model"].map(str::to_string);
         assert!(
             carried_flags(&argv).is_empty(),
             "{:?}",
