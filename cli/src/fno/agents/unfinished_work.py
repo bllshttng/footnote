@@ -789,15 +789,9 @@ def collect_observations(
     entries_by_id = {
         str(e.get("id")): e for e in entries if isinstance(e, dict) and e.get("id")
     }
-    container_ids = {
-        entry.get("parent")
-        for entry in entries
-        if (
-            isinstance(entry, dict)
-            and isinstance(entry.get("parent"), str)
-            and entry.get("parent") in entries_by_id
-        )
-    }
+    from fno.graph.cli import _container_ids
+
+    container_ids = _container_ids(entries)
 
     registry_by_cwd, registry_ok = (
         (dict(registry_rows[0]), bool(registry_rows[1]))

@@ -3453,6 +3453,23 @@ def test_collect_observations_marks_graph_parents_as_containers():
     assert containers == {"x-parent": True, "x-child": False}
 
 
+def test_collect_observations_does_not_call_a_contain_owner_a_container():
+    observations = uw.collect_observations(
+        [],
+        graph_entries=[
+            {"id": "x-owner", "status": "in_progress"},
+            {"id": "x-sub", "status": "ready", "parent": "x-owner",
+             "contained_in": "x-owner"},
+        ],
+        registry_rows=({}, True),
+        claim_status_fn=lambda _node_id: {"state": "free"},
+        pr_candidates=[],
+    )
+
+    containers = {node.node_id: node.is_container for node in observations.nodes}
+    assert containers == {"x-owner": False, "x-sub": False}
+
+
 def test_ac3_non_free_claim_or_live_owner_excludes_the_node():
     held = _node_obs("x-held", claim_state="live")
     suspect = _node_obs("x-susp", claim_state="suspect")
