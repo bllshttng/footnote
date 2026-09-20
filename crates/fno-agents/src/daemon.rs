@@ -2093,6 +2093,7 @@ use crate::codex_thread::InterruptOutcome;
 
 mod codex_thread_lane;
 mod codex_thread_resume;
+mod convert;
 mod thread_row_status;
 use codex_thread_lane::spawn_codex_thread_lane;
 use codex_thread_resume::{ensure_codex_thread_handle, schedule_codex_thread_recovery};
@@ -2298,7 +2299,9 @@ async fn dispatch_agent(ctx: &Arc<Ctx>, req: &Request) -> Response {
         Some("status") => handle_status(ctx, req).await,
         Some("reconcile") => run_blocking(ctx, req, handle_reconcile).await,
         // Label rename: the registry transaction under the flock, off-loop.
-        Some("rename") => run_blocking(ctx, req, handle_rename).await,
+        Some("rename") => run_blocking(ctx, req, convert::handle_rename).await,
+        // Pane-to-thread conversion: the agent lock plus a registry flip.
+        Some("convert") => run_blocking(ctx, req, convert::handle_convert).await,
         // Inside-leg state push (E3.2): a per-turn hook stores the latest
         // {working|blocked|done} on the matching claude row. Pure flock + CPU.
         Some("report") => run_blocking(ctx, req, handle_report).await,
@@ -7142,10 +7145,6 @@ fn handle_watch(ctx: &Ctx, req: &Request) -> Response {
             format!("watch: registry serialize failed: {e}"),
         ),
     }
-}
-
-fn handle_rename(ctx: &Ctx, req: &Request) -> Response {
-    state::rename_response(&ctx.home.registry_json(), req)
 }
 
 fn handle_reconcile(ctx: &Ctx, req: &Request) -> Response {
