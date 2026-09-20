@@ -43,25 +43,45 @@ pub enum ConvertHost {
         pane_id: u64,
         child_pid: u32,
     },
+    /// No pane, and a live keeper already on the THREAD lane holding this
+    /// row's child. A previous conversion handed the socket off and did not
+    /// finish the flip. The child never stopped, so the only step left is
+    /// the row.
+    HandedOffKeeper {
+        keeper_socket: String,
+        keeper_pid: u32,
+        child_pid: u32,
+    },
 }
 
 impl ConvertHost {
     pub fn child_pid(&self) -> u32 {
         match self {
-            ConvertHost::KeeperPane { child_pid, .. } | ConvertHost::BarePane { child_pid, .. } => {
-                *child_pid
-            }
+            ConvertHost::KeeperPane { child_pid, .. }
+            | ConvertHost::BarePane { child_pid, .. }
+            | ConvertHost::HandedOffKeeper { child_pid, .. } => *child_pid,
         }
     }
 
-    pub fn pane(&self) -> (&str, u64) {
+    /// True when the hand-off already landed, so the strategy must not run
+    /// it again. Re-running would ask the server to release a pane it no
+    /// longer seats.
+    pub fn hand_off_landed(&self) -> bool {
+        matches!(self, ConvertHost::HandedOffKeeper { .. })
+    }
+
+    /// The pane this host sits in, or `None` when it sits in none. A
+    /// handed-off keeper has already left the layout, so there is no pane
+    /// to name and a sentinel would read as pane 0 of session "".
+    pub fn pane(&self) -> Option<(&str, u64)> {
         match self {
             ConvertHost::KeeperPane {
                 session, pane_id, ..
             }
             | ConvertHost::BarePane {
                 session, pane_id, ..
-            } => (session.as_str(), *pane_id),
+            } => Some((session.as_str(), *pane_id)),
+            ConvertHost::HandedOffKeeper { .. } => None,
         }
     }
 
@@ -81,6 +101,13 @@ impl ConvertHost {
                 pane_id,
                 child_pid,
             } => format!("server-hosted pane {session}:{pane_id} (child {child_pid})"),
+            ConvertHost::HandedOffKeeper {
+                keeper_socket,
+                keeper_pid,
+                child_pid,
+            } => format!(
+                "handed-off keeper {keeper_pid} at {keeper_socket} (child {child_pid}); no pane"
+            ),
         }
     }
 }
@@ -163,6 +190,11 @@ pub struct KeeperSighting {
     pub child_pid: u32,
     pub cwd: String,
     pub argv: Vec<String>,
+    /// `pane` or `thread`, as `fno mux pane keeper list` reports it. A
+    /// keeper already on the THREAD lane is the fingerprint of a hand-off
+    /// that landed, which is what makes an interrupted conversion
+    /// recoverable instead of a refusal.
+    pub lane: String,
     /// The listing's own reason this keeper is not usable (no listener, a
     /// dead child). Present means the keeper answers for nothing.
     pub stale: Option<String>,
@@ -205,6 +237,14 @@ impl KeeperSighting {
                         .get("stale")
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_string),
+                    // An older listing names no lane. Absent reads `pane`,
+                    // which is the shape every keeper had before the thread
+                    // lane existed.
+                    lane: row
+                        .get("lane")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("pane")
+                        .to_string(),
                 })
             })
             .collect()
@@ -281,13 +321,53 @@ pub fn classify(
              run `fno agents reconcile` and retry"
         ))
     })?;
+    // A hand-off that landed releases the pane, so the pane listing stops
+    // naming this child. That is NOT "no running session": the keeper is
+    // live on the thread lane and the child never stopped. Recognise it and
+    // finish the flip, because the alternative refusal points the operator
+    // at `fno agents resume`, which starts a SECOND writer over that child.
+    // Only the keeper lane hands a socket off, so only it can leave this
+    // shape behind. A handoff strategy that finds no pane genuinely has no
+    // session to convert, and must not be handed a host that seats none.
+    let resumable = (requires_keeper(&contract.strategy)
+        && panes.iter().all(|pane| pane.child_pid != Some(child_pid)))
+    .then(|| {
+        keepers.iter().find(|keeper| {
+            keeper.child_pid == child_pid && keeper.stale.is_none() && keeper.lane == "thread"
+        })
+    })
+    .flatten();
+    if let Some(keeper) = resumable {
+        return Ok(ConvertPlan {
+            name,
+            harness,
+            strategy: contract.strategy.clone(),
+            preserves_id: contract.preserves_id,
+            session_id,
+            host: ConvertHost::HandedOffKeeper {
+                keeper_socket: keeper.socket.clone(),
+                keeper_pid: keeper.keeper_pid,
+                child_pid,
+            },
+            steps: vec![
+                format!(
+                    "the keeper for child {child_pid} is already on the thread lane at {}; the \
+                     hand-off landed and only the row was left behind",
+                    keeper.socket
+                ),
+                "re-read the keeper and flip the row to the thread shape".to_string(),
+            ],
+        });
+    }
+
     let pane = panes
         .iter()
         .find(|pane| pane.child_pid == Some(child_pid))
         .ok_or_else(|| {
             ConvertRefusal::Refused(format!(
-                "no live pane hosts {name}'s child pid {child_pid}; there is no running session \
-                 to convert. Resume it first: fno agents resume {name}"
+                "no live pane hosts {name}'s child pid {child_pid}, and no keeper holds it on \
+                 the thread lane; there is no running session to convert. Resume it first: \
+                 fno agents resume {name}"
             ))
         })?;
 
@@ -451,6 +531,7 @@ mod tests {
                 session_id.to_string(),
             ],
             stale: None,
+            lane: "pane".to_string(),
         }
     }
 
@@ -486,6 +567,61 @@ mod tests {
             plan.steps
         );
         assert!(plan.receipt().contains("keeper-rebind"));
+    }
+
+    #[test]
+    fn a_landed_handoff_with_an_unflipped_row_resumes_instead_of_refusing() {
+        // The hand-off releases the pane, so the pane listing stops naming
+        // the child. The keeper is still live on the thread lane. Refusing
+        // here points the operator at `fno agents resume`, which starts a
+        // SECOND writer over a child that never stopped.
+        let entry = pane_row("pi", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 77);
+        let mut moved = keeper(77, entry.harness_session_id.as_deref().unwrap(), &entry.cwd);
+        moved.lane = "thread".to_string();
+        moved.socket = "/state/mux/threads/worker.sock".to_string();
+
+        let plan = classify(
+            &entry,
+            &contract("keeper-rebind", true, ""),
+            // No pane hosts the child any more.
+            &[],
+            &[moved.clone()],
+        )
+        .expect("a landed hand-off is recoverable, not a refusal");
+        assert!(plan.host.hand_off_landed());
+        assert_eq!(plan.host.child_pid(), 77);
+        assert_eq!(plan.host.pane(), None, "it seats no pane");
+        assert!(
+            plan.receipt().contains("/state/mux/threads/worker.sock"),
+            "the receipt names where the keeper already is: {}",
+            plan.receipt()
+        );
+
+        // The control: the same keeper on the PANE lane with no pane is a
+        // genuine "nothing to convert", because no hand-off ever landed.
+        let mut unmoved = moved.clone();
+        unmoved.lane = "pane".to_string();
+        let Err(refusal) = classify(
+            &entry,
+            &contract("keeper-rebind", true, ""),
+            &[],
+            &[unmoved],
+        ) else {
+            panic!("a pane-lane keeper with no pane is not a landed hand-off");
+        };
+        assert!(matches!(refusal, ConvertRefusal::Refused(_)));
+
+        // The second control: only the keeper lane hands a socket off. A
+        // handoff strategy that finds no pane has no session to convert,
+        // and must never be handed a host that seats no pane.
+        for strategy in ["server-resume", "client-resume"] {
+            let Err(refusal) =
+                classify(&entry, &contract(strategy, true, ""), &[], &[moved.clone()])
+            else {
+                panic!("{strategy} cannot resume a hand-off it never performs");
+            };
+            assert!(matches!(refusal, ConvertRefusal::Refused(_)));
+        }
     }
 
     #[test]

@@ -150,6 +150,7 @@ fn a_keeper_lane_harness_refuses_when_no_keeper_holds_its_pane() {
                 .expect("the row carries a session id"),
         ],
         stale: None,
+        lane: "pane".to_string(),
     }];
     let plan = classify(&entry, &resolved, &panes, &keepers)
         .expect("a keeper in view is what the strategy needs");
