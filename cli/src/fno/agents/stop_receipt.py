@@ -25,7 +25,8 @@ def emit_shellout_stop(*, name: str, claude_exit: Optional[int], short_id: str) 
 
 
 def wake_set_refusal(name: str, short_id: str, existing: AgentEntry) -> Optional[str]:
-    """Refusal text when the stopped row still reads live, else None.
+    """Refusal text when the stopped row still reads live or the recorded
+    process provably survived the ask, else None.
 
     Compared against the session that WAS stopped: a successor that took the
     row over during the shellout (a restamp, a duplicate) is not a stop
@@ -45,15 +46,32 @@ def wake_set_refusal(name: str, short_id: str, existing: AgentEntry) -> Optional
     except Exception:  # noqa: BLE001 - an unreadable registry answers nothing
         return None
     if (
-        reread is None
-        or reread.status not in _OWNERSHIP_LIVE_STATUSES
-        or (reread.harness_session_id, reread.short_id or "")
-        != (existing.harness_session_id, short_id or "")
+        reread is not None
+        and reread.status in _OWNERSHIP_LIVE_STATUSES
+        and (reread.harness_session_id, reread.short_id or "")
+        == (existing.harness_session_id, short_id or "")
     ):
+        return (
+            f"claude stop reported success but {name} ({short_id}) still reads live "
+            f"in the registry. Citizen and teammate rows tear down differently: "
+            f"an fno-spawned citizen pane/thread stops through this verb, an "
+            f"Agent-tool teammate needs `fno agents rm {name}`."
+        )
+    if reread is None or (
+        reread.harness_session_id, reread.short_id or ""
+    ) != (existing.harness_session_id, short_id or ""):
         return None
-    return (
-        f"claude stop reported success but {name} ({short_id}) still reads live "
-        f"in the registry. Citizen and teammate rows tear down differently: "
-        f"an fno-spawned citizen pane/thread stops through this verb, an "
-        f"Agent-tool teammate needs `fno agents rm {name}`."
-    )
+    # The row reads terminal because the stop itself just wrote it, so the
+    # receipt must also prove the PROCESS died: the keeper sweep and
+    # reconcile honestly re-mark a surviving process's row, and the spawn
+    # share counts it again. Only a positive liveness proof blocks.
+    from fno.agents.spawn_gate import _pid_alive
+
+    if _pid_alive(existing.pid, existing.pid_start_time) is True:
+        return (
+            f"claude stop reported success but pid {existing.pid} for {name} "
+            f"is still alive; the row would be re-marked live and counted "
+            f"against the spawn share again. Remedy: `fno agents rm {name}` "
+            f"ends the process and clears the row."
+        )
+    return None

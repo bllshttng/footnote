@@ -139,6 +139,77 @@ def test_stop_claude_happy_path(tmp_path: Path, monkeypatch, capsys) -> None:
     assert stop_events[0]["short_id"] == "7c5dcf5d"
 
 
+def test_stop_claude_exit_zero_over_recorded_dead_pid_prints_stopped(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """x-ca08: a recorded pid that reads dead does not block the shellout
+    receipt; the word `stopped` prints as before."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-claude",
+            provider="claude",
+            short_id="7c5dcf5d",
+            pid=4242,
+            pid_start_time=1111,
+        ),
+    )
+    _force_claude_on_path(monkeypatch, tmp_path)
+
+    from fno.agents import dispatch
+    from fno.agents import spawn_gate
+    from fno.agents.harnesses import claude as claude_mod
+
+    monkeypatch.setattr(
+        claude_mod, "claude_stop", lambda short_id, *, timeout=30.0: (0, "")
+    )
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, start: False)
+
+    result = dispatch.stop_agent("worker-claude")
+
+    assert result.claude_exit == 0
+    out = capsys.readouterr().out
+    assert "stopped: worker-claude (7c5dcf5d)" in out
+
+
+def test_stop_claude_exit_zero_alive_pid_refuses(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """x-ca08: claude stop exit 0 over a provably-alive pid refuses instead
+    of printing a stop the share would count against; the refusal names the
+    pid and the remedy."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-claude",
+            provider="claude",
+            short_id="7c5dcf5d",
+            pid=4242,
+            pid_start_time=1111,
+        ),
+    )
+    _force_claude_on_path(monkeypatch, tmp_path)
+
+    from fno.agents import dispatch
+    from fno.agents import spawn_gate
+    from fno.agents.harnesses import claude as claude_mod
+
+    monkeypatch.setattr(
+        claude_mod, "claude_stop", lambda short_id, *, timeout=30.0: (0, "")
+    )
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, start: True)
+
+    with pytest.raises(dispatch.DispatchAskError) as exc_info:
+        dispatch.stop_agent("worker-claude")
+
+    assert exc_info.value.exit_code == 1
+    assert "pid 4242" in str(exc_info.value)
+    assert "still alive" in str(exc_info.value)
+    assert "fno agents rm worker-claude" in str(exc_info.value)
+    out = capsys.readouterr().out
+    assert "stopped: worker-claude" not in out
+
+
 def test_stop_claude_nonzero_exit_propagates(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
