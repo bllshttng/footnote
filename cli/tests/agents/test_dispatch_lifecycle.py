@@ -844,7 +844,9 @@ def test_ac4_edge_an_unprovable_pid_refuses_and_signals_nothing(
 def test_ac4_neg_a_healthy_stop_sends_no_signal(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A cooperative stop that exits zero takes the same path it always did."""
+    """A cooperative stop that exits zero over a live pid refuses the
+    receipt (x-ca08) and still sends no signal: the word `stopped` must not
+    print while the process survives."""
     use_tmpdir(monkeypatch, tmp_path)
     proc, start_token = _spawn_sleeper()
     try:
@@ -866,9 +868,10 @@ def test_ac4_neg_a_healthy_stop_sends_no_signal(
             claude_mod, "claude_stop", lambda short_id, *, timeout=30.0: (0, ""),
         )
 
-        result = dispatch.stop_agent("healthy")
-        assert result.claude_exit == 0
-        assert proc.poll() is None, "a cooperative stop signals nothing"
+        with pytest.raises(dispatch.DispatchAskError) as exc_info:
+            dispatch.stop_agent("healthy")
+        assert f"pid {proc.pid}" in str(exc_info.value)
+        assert proc.poll() is None, "the receipt refusal signals nothing"
         stop_events = [
             e for e in _read_events(tmp_path) if e.get("kind") == "agent_stopped"
         ]
