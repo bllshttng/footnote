@@ -310,12 +310,7 @@ const ROSTER_POLL: Duration = Duration::from_millis(500);
 /// so a claim pinned to it would read stale in the window before the new
 /// writer exists. They go to the DAEMON pid first, which outlives every
 /// outcome here, and only reach the new writer once the roster proves it.
-fn run_client_resume(
-    ctx: &Ctx,
-    req: &Request,
-    plan: &ConvertPlan,
-    allow_new_id: bool,
-) -> Response {
+fn run_client_resume(ctx: &Ctx, req: &Request, plan: &ConvertPlan, allow_new_id: bool) -> Response {
     let daemon_pid = std::process::id();
     let child_pid = plan.host.child_pid();
     let refuse = |detail: String| Response::err(req.id, ErrorCode::Internal, detail);
@@ -444,9 +439,7 @@ fn run_client_resume(
     let flip_id = new_id.clone();
     if let Err(error) = state::update_registry(&registry_path, move |registry| {
         if let Some(row) = registry.find_mut(&name) {
-            crate::convert::client_resume::to_claude_thread(
-                row, &short_id, writer_pid, &flip_id,
-            );
+            crate::convert::client_resume::to_claude_thread(row, &short_id, writer_pid, &flip_id);
         }
     }) {
         return refuse(format!(
@@ -561,9 +554,7 @@ fn settle_roster(
             crate::claude_roster::ClaudeAgentsSnapshot::Known { rows, .. }
             | crate::claude_roster::ClaudeAgentsSnapshot::Unknown { rows, .. } => rows.as_slice(),
         };
-        if let Some(row) =
-            crate::convert::client_resume::relaunched_row(before, rows, session_id)
-        {
+        if let Some(row) = crate::convert::client_resume::relaunched_row(before, rows, session_id) {
             return Some(row.clone());
         }
         if std::time::Instant::now() >= deadline {

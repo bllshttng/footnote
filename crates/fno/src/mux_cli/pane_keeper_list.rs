@@ -162,4 +162,3 @@ pub(crate) fn pane_keeper_list(json: bool, stale_after: Option<std::time::Durati
     }
     EXIT_OK
 }
-
