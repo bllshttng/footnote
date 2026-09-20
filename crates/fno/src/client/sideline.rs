@@ -29,6 +29,18 @@ impl View {
         }
     }
 
+    /// The row list the sideline PAINTS: the Extended table in full-screen
+    /// mode, the stored density's rows otherwise. The click mappers, row
+    /// actions and the scroll clamp index THIS, or a click resolves a
+    /// different row than the one drawn.
+    pub(super) fn painted_rows(&self) -> Vec<DisplayRow<'_>> {
+        if self.sideline_full {
+            self.table_rows_with_depths().0
+        } else {
+            self.display_rows()
+        }
+    }
+
     pub(super) fn draw_sideline(
         &self,
         cells: &mut [Cell],

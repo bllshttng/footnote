@@ -975,7 +975,12 @@ impl Launcher {
     /// lands on the chip that was drawn.
     pub(crate) fn dock_layout_rects(&self, view: &View, area: RtRect) -> DockRects {
         let text_w = area.width.max(1) as usize;
-        let (_, editor_rows) = self.dock_layout(area.height as usize, text_w);
+        // `area` IS the reserved dock (the caller ran dock_layout against the
+        // panel), so the editor window is what remains after the chip rows
+        // and the footer - re-running dock_layout here would re-cap against
+        // the dock's own height and blank most of the reserved rows.
+        let chip_rows = 1 + usize::from(self.draft.expanded);
+        let editor_rows = (area.height as usize).saturating_sub(chip_rows + 1).max(1);
         let expanded_row = u16::from(self.draft.expanded);
         // Primary chip row: the field chips absorb the slack (Min), the
         // expand chip and the phase controls are fixed, Launch pinned right.
@@ -1260,9 +1265,10 @@ pub(crate) async fn launcher_mouse(
         return Ok(false);
     }
     let text_w = pw - 1;
-    // The SAME usable height the painter computes with (chrome row
-    // subtracted), so a click maps onto the dock that was drawn.
-    let chrome = view.bottom_row_is_chrome() as usize;
+    // The SAME usable height the painter computes with (the tab strip in
+    // full-screen mode, the bottom chrome row always), so a click maps onto
+    // the dock that was drawn.
+    let chrome = view.sideline_top() + view.bottom_row_is_chrome() as usize;
     let body_rows = (view.term.0 as usize).saturating_sub(chrome);
     let (total, _) = l.dock_layout(body_rows, text_w);
     let top = body_rows.saturating_sub(total) as u16;
