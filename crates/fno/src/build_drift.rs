@@ -1,20 +1,17 @@
-//! Daemon binary-version drift detection.
+//! The executable-drift signal, vendored from
+//! `crates/fno-agents/src/drift.rs` for the mux server's quiet retirement.
 //!
-//! The `fno-agents` daemon is a long-lived process. A `cargo install` (or any
-//! rebuild) replaces the on-disk binary, but the *running* daemon keeps
-//! executing its old code until it idle-exits or is killed, silently stranding
-//! new features. This module is the drift *signal*: a fingerprint of the
-//! executable a process is running, compared against the binary a client would
-//! launch right now.
+//! Both crates publish separately, and a real dependency stays blocked on
+//! the publish gate (see `crates/fno-agents/Cargo.toml`), so this mirror
+//! holds the fingerprint and classification the server consumes; the
+//! contract parity test in `drift.rs`'s test module makes silent drift
+//! between the two copies impossible, and its deletion is the trigger to
+//! retire this file.
 //!
 //! The signal is a running-exe fingerprint (canonical path + mtime + size), NOT
 //! `CARGO_PKG_VERSION` (Locked Decision #1): the package version rarely bumps in
 //! development, where many features land at the same `0.1.0`. The fingerprint
 //! catches any reinstall/rebuild, including a same-version dev build.
-//!
-//! This file holds only the *pure* pieces (fingerprint + classification) so the
-//! `DriftState` matrix is unit-testable without a live daemon. The async
-//! daemon-status probe that feeds it lives in [`crate::client::check_daemon_drift`].
 
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -296,59 +293,6 @@ mod tests {
         write_file(&p, b"bin by a newer build");
         assert_eq!(drift_label(&self_drift(&fp)), "drifted");
         fs::remove_file(&p).ok();
-    }
-
-    #[test]
-    fn the_vendored_fno_copy_matches_by_contract() {
-        // The parity guard for crates/fno/src/build_drift.rs (vendored for
-        // the mux server's quiet retirement): both copies must return the
-        // same verdict for the same inputs, so the daemon and the mux server
-        // can never disagree about whether the same installed build is
-        // stale. The types are distinct across the two crates, so the guard
-        // compares the one-word labels for identical field values. Dev-only
-        // link (see Cargo.toml); when the publish gate allows the real
-        // dependency, delete the vendored copy and read the signal from fno
-        // directly.
-        let cases = [
-            ("/opt/a/fno", 1u64, "/opt/a/fno", 1u64),
-            ("/opt/a/fno", 1, "/opt/a/fno", 2),
-            ("/opt/a/fno", 1, "/opt/b/fno", 1),
-        ];
-        for (rpath, rsize, dpath, dsize) in cases {
-            let running = ExeFingerprint {
-                path: PathBuf::from(rpath),
-                mtime_nanos: 1,
-                size: rsize,
-            };
-            let on_disk = ExeFingerprint {
-                path: PathBuf::from(dpath),
-                mtime_nanos: 1,
-                size: dsize,
-            };
-            let theirs_running = fno::build_drift::ExeFingerprint {
-                path: PathBuf::from(rpath),
-                mtime_nanos: 1,
-                size: rsize,
-            };
-            let theirs_disk = fno::build_drift::ExeFingerprint {
-                path: PathBuf::from(dpath),
-                mtime_nanos: 1,
-                size: dsize,
-            };
-            assert_eq!(
-                drift_label(&classify(Some(&running), Some(&on_disk))),
-                fno::build_drift::drift_label(&fno::build_drift::classify(
-                    Some(&theirs_running),
-                    Some(&theirs_disk)
-                )),
-                "verdict disagrees at {rpath}/{rsize} vs {dpath}/{dsize}"
-            );
-        }
-        // Unknown parity: no basis to prove drift on either side.
-        assert_eq!(
-            drift_label(&classify(None, None)),
-            fno::build_drift::drift_label(&fno::build_drift::classify(None, None)),
-        );
     }
 
     #[test]

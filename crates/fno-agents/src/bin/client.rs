@@ -1075,6 +1075,9 @@ async fn run(args: Vec<String>) -> i32 {
                 return 2;
             }
         };
+        if parsed.keepers_only {
+            return fno_agents::restart_run::run_keepers_only(parsed.json.json).await;
+        }
         return fno_agents::restart_run::run_restart(
             parsed.force,
             parsed.json.json,

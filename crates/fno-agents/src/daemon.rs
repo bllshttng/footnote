@@ -1215,50 +1215,9 @@ pub fn pid_is_ours(pid: u32, recorded: Option<u64>) -> bool {
     }
 }
 
-/// The idle-exit predicate: is any WORKER live on this home? A registry row is
-/// not a reason to stay resident -- rows outlive their workers by design (the
-/// GC reaps them a grace window later), so the registry-emptiness test this
-/// replaced made idle-exit unsatisfiable on any machine that had ever spawned
-/// a worker (: 78 daemons at once, all idle, all orphaned). The question
-/// is whether a worker is LIVE, answered by the same pair `gc_sweep_impl`
-/// uses: a live worker socket, or a pid that is still ours.
-///
-/// A MISSING registry answers `true`: a fresh machine has never tracked a
-/// worker, and lazy-exit must hold there (the documented contract covers the
-/// very first daemon). An EXISTING but unreadable registry answers `false`
-/// (stay resident): that is an absence with two explanations, and exiting on a
-/// transient read failure would trade a moment of caution for a fleet of dead
-/// workers' supervisors.
-///
-/// A worker socket counts as live only if something ANSWERS on it, not if the
-/// file exists: a worker killed by anything that did not reap its socket (the
-/// confirmed-stop path is the only reaper) leaves a stale file behind, and on a
-/// pid-less live row the GC cannot settle it - file-existence liveness would
-/// then pin the daemon forever, one stale socket per home reinstating the
-/// never-exits defect this function exists to close. `worker_socket_reachable`
-/// is the same connect probe the stop path treats as the authoritative
-/// PID-reuse-immune signal.
-fn no_live_worker(home: &AgentsHome) -> bool {
-    let path = home.registry_json();
-    if !path.exists() {
-        return true;
-    }
-    let socket_candidates = home.scan_worker_sockets();
-    let socket_is_live = |short_id: &str| {
-        socket_candidates.iter().any(|s| s == short_id)
-            && std::os::unix::net::UnixStream::connect(home.worker_sock(short_id)).is_ok()
-    };
-    state::load_registry(&path)
-        .map(|r| {
-            !r.entries.iter().any(|e| {
-                socket_is_live(&e.short_id)
-                    || e.pid
-                        .map(|p| pid_is_ours(p, e.pid_start_time))
-                        .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-}
+// The idle-exit predicate and its drift sibling live in crate::quiet_retire
+// (budget law): the daemon file is over its line budget, so the predicates moved
+// beside their tests instead of growing here.
 
 // ---------------------------------------------------------------------------
 // Socket bind + perms + lazy-start race.
@@ -1696,6 +1655,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
 
     // SIGTERM -> graceful shutdown.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    // Accepted-but-unfinished connections (`agent.logs --follow` holds one
+    // open on purpose): quiet retirement waits for zero, like the mux's
+    // conns_alive counter.
+    let live_conns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut idle_check = tokio::time::interval(Duration::from_secs(5));
     idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_activity = Instant::now();
@@ -1744,6 +1707,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let idle_probe_verdict: Arc<
         std::sync::Mutex<Option<(bool, Instant, Option<std::time::SystemTime>)>>,
     > = Arc::new(std::sync::Mutex::new(None));
+    let mut drift_flag = crate::quiet_retire::DriftFlag::new();
 
     // THE RULE FOR THIS LOOP: nothing that shells out, walks the
     // registry row by row, or otherwise blocks may run INLINE in a select arm.
@@ -1765,8 +1729,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     // clients (Gemini high). Shared state is advisory-lock
                     // protected, so concurrent handling is safe.
                     let ctx = Arc::clone(&ctx);
+                    let live = Arc::clone(&live_conns);
+                    live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     tokio::spawn(async move {
                         serve_connection(ctx, stream).await;
+                        live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                     });
                 }
             }
@@ -1961,20 +1928,41 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 // An enabled active-backlog project keeps the daemon resident
                 // (OQ1 Option A): idle-exit must never kill a live supervisor.
                 let ab_active = ab_live.load(std::sync::atomic::Ordering::SeqCst);
-                if !ab_active && last_activity.elapsed() >= ctx.opts.idle_exit {
+                // Drift retirement: the on-disk binary changing under a
+                // running daemon is a retirement request at the same quiet
+                // boundary idle-exit owns -- same fresh no-worker probe, same
+                // graceful tail, distinct receipt. Both the drift stat and
+                // the no-worker probe run OFF the arm. A daemon with live
+                // work keeps serving the old build until a quiet probe
+                // settles.
+                let (drifted, drift_refreshed) = drift_flag.tick(ctx.exe_fingerprint.as_ref());
+                let idle_elapsed = last_activity.elapsed() >= ctx.opts.idle_exit;
+                let no_open_rpc = live_conns.load(std::sync::atomic::Ordering::SeqCst) == 0;
+                let retire_reason = crate::quiet_retire::quiet_retire_reason(
+                    drifted,
+                    ab_active,
+                    idle_elapsed,
+                    no_open_rpc,
+                );
+                if retire_reason.is_some() {
                     // The liveness read (blocking CONNECT probes) runs OFF the
                     // select arm: an in-arm probe against a wedged worker's
                     // filling backlog is the unreachable-AND-unstoppable shape
                     // this loop's rule exists to prevent. One probe in flight;
-                    // exit fires on its verdict: worst case one extra 5s tick.
-                    if !idle_probe_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    // exit fires on its verdict. Idle-driven probes repeat
+                    // every tick (the 30-minute window throttles them);
+                    // drift-driven probes repeat at the 30s stat cadence.
+                    let drift_probe_due = drifted && drift_refreshed;
+                    if (idle_elapsed || drift_probe_due)
+                        && !idle_probe_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst)
+                    {
                         let flag = Arc::clone(&idle_probe_in_flight);
                         let home = ctx.home.clone();
                         let verdict = Arc::clone(&idle_probe_verdict);
                         let probe_activity = last_activity;
                         tokio::task::spawn_blocking(move || {
                             let _gate = SweepGate(flag);
-                            let no_worker = no_live_worker(&home);
+                            let no_worker = crate::quiet_retire::no_live_worker(&home);
                             // mtime AFTER the reads: a registry write that
                             // raced the probe is caught by the change.
                             let mtime = std::fs::metadata(home.registry_json())
@@ -1985,22 +1973,42 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     }
                     let verdict = idle_probe_verdict.lock().unwrap().take();
                     let fresh = verdict.is_some_and(|(no_worker, probe_activity, probe_mtime)| {
-                        let mtime_now = std::fs::metadata(ctx.home.registry_json())
-                            .ok()
-                            .and_then(|m| m.modified().ok());
-                        no_worker
-                            && probe_activity == last_activity
-                            && mtime_now == probe_mtime
+                        crate::quiet_retire::probe_verdict_fresh(
+                            no_worker,
+                            probe_activity,
+                            last_activity,
+                            probe_mtime,
+                            std::fs::metadata(ctx.home.registry_json())
+                                .ok()
+                                .and_then(|m| m.modified().ok()),
+                        )
                     });
                     if fresh {
+                        // The receipt names both builds; the stat here runs
+                        // once, on the one-way retirement path only.
+                        if drifted {
+                            if let Some(crate::drift::DriftState::Drifted { running, on_disk }) =
+                                ctx.exe_fingerprint.as_ref().map(crate::drift::self_drift)
+                            {
+                                let _ = ctx.emitter.emit(
+                                    "daemon_drift_pending_exit",
+                                    &json!({
+                                        "running": running.path.display().to_string(),
+                                        "running_size": running.size,
+                                        "on_disk": on_disk.path.display().to_string(),
+                                        "on_disk_size": on_disk.size,
+                                    }),
+                                );
+                            }
+                        }
                         emit_state(&ctx.emitter, DaemonState::IdlePendingExit);
                         let _ = ctx.emitter.emit("daemon_idle_pending_exit", &json!({}));
                         emit_state(&ctx.emitter, DaemonState::ShuttingDown);
                         let _ = ctx.emitter.emit(
                             "daemon_shutting_down",
-                            &json!({"reason": "idle"}),
+                            &json!({"reason": retire_reason}),
                         );
-                        break "idle";
+                        break retire_reason.unwrap();
                     }
                 }
             }
@@ -2027,9 +2035,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         let _ = std::fs::remove_file(&sock_path);
     }
     emit_state(&ctx.emitter, DaemonState::Exited);
-    let _ = ctx
-        .emitter
-        .emit("daemon_exited", &daemon_exited_payload(exit_reason));
+    let _ = ctx.emitter.emit(
+        "daemon_exited",
+        &crate::quiet_retire::daemon_exited_payload(exit_reason),
+    );
     Ok(())
 }
 
@@ -2095,16 +2104,6 @@ use thread_row_status::{
 fn emit_state(emitter: &EventEmitter, state: DaemonState) {
     let _ = emitter.emit("daemon_state", &json!({"state": state.as_str()}));
 }
-/// The final `daemon_exited` payload. Every exit path flows through
-/// one tail, and before this it emitted `clean: true` unconditionally, so the
-/// socket-lost retirement - where something unlinked and rebound our socket
-/// path - logged identically to a graceful SIGTERM shutdown. A watchdog
-/// reading `daemon_exited` alone could not tell them apart; `clean` is false
-/// only for that abnormal ending, and `reason` names which path fired.
-fn daemon_exited_payload(reason: &str) -> Value {
-    json!({"clean": reason != "socket-lost", "reason": reason})
-}
-
 /// Idle cap for the first read on a connection: a client that connects but
 /// never sends a frame self-terminates rather than holding the task forever.
 const CONN_READ_TIMEOUT: Duration = Duration::from_secs(30);

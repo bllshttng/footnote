@@ -228,6 +228,7 @@ pub mod provider_cap;
 pub mod provider_cap_verbs;
 pub mod publish_review;
 pub mod question_sweep;
+pub mod quiet_retire;
 pub mod readiness;
 pub mod reap_release;
 pub mod reap_render;
@@ -1148,6 +1149,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "daemon_started",
     "daemon_exited",
     "daemon_idle_pending_exit",
+    // Drift retirement (daemon-emitted): the daemon measured its own
+    // build drifted and, at a quiet tick with no live worker, retired through
+    // the graceful tail so the next lazy start runs the installed binary.
+    "daemon_drift_pending_exit",
     "daemon_shutting_down",
     // The socket path stopped resolving to the inode this daemon bound, so
     // something else now owns it and this process is unreachable.
