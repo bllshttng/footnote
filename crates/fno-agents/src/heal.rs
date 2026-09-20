@@ -2650,6 +2650,8 @@ fn run_one(a: &Args, pr: &str) -> (i32, Vec<String>) {
         cwd: a.cwd.clone(),
         stamps_dir: crate::pr_push::default_stamps_dir(),
         force: false,
+        // heal never rebases, so its push is always a plain fast-forward.
+        lease: None,
     };
     match crate::pr_push::guarded_push(&ctx, &head) {
         crate::pr_push::PushOutcome::Pushed { .. } => {
