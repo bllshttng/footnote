@@ -710,16 +710,7 @@ pub fn read_persisted_snapshot(home: &AgentsHome) -> Option<CapSnapshot> {
     })
 }
 
-pub fn provider_quota_states(
-    home: &AgentsHome,
-    now_epoch: i64,
-    max_age_s: i64,
-) -> Option<BTreeMap<String, String>> {
-    let snapshot = read_persisted_snapshot(home)?;
-    let age = now_epoch.saturating_sub(snapshot.measured_at_epoch);
-    if max_age_s < 0 || age > max_age_s {
-        return None;
-    }
+pub fn quota_states_from_snapshot(snapshot: &CapSnapshot) -> BTreeMap<String, String> {
     fn rank(state: &str) -> u8 {
         match state {
             "open" => 4,
@@ -730,16 +721,29 @@ pub fn provider_quota_states(
         }
     }
     let mut states = BTreeMap::new();
-    for lane in snapshot.lanes {
+    for lane in &snapshot.lanes {
         let replace = states
             .get(&lane.provider)
             .map(|state: &String| rank(&lane.state) > rank(state))
             .unwrap_or(true);
         if replace {
-            states.insert(lane.provider, lane.state);
+            states.insert(lane.provider.clone(), lane.state.clone());
         }
     }
-    Some(states)
+    states
+}
+
+pub fn provider_quota_states(
+    home: &AgentsHome,
+    now_epoch: i64,
+    max_age_s: i64,
+) -> Option<BTreeMap<String, String>> {
+    let snapshot = read_persisted_snapshot(home)?;
+    let age = now_epoch.saturating_sub(snapshot.measured_at_epoch);
+    if max_age_s < 0 || age > max_age_s {
+        return None;
+    }
+    Some(quota_states_from_snapshot(&snapshot))
 }
 
 /// Append one line to `questions.jsonl` (the feed's question store).
@@ -2222,6 +2226,12 @@ mod tests {
     }
     #[test]
     fn ac2_arm_config_defaults_off_and_reads_overrides() {
+        // FNO_CONFIG, when set, is the ONLY config candidate; hold the env
+        // lock so a sibling fixture (probe tests set it) cannot own the
+        // window while this test reads config discovery.
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let root = std::env::temp_dir().join(format!("pc-cfg-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".fno")).unwrap();
