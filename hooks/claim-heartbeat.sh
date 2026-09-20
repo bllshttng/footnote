@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Survive a caller env with no usable PATH (see worktree-write-protect.sh).
-PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 # hooks/claim-heartbeat.sh - PostToolUse: renew this session's node:<id> claim
 # TTL while the owning session is actively working (Facet A).

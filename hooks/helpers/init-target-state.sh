@@ -23,7 +23,7 @@
 set -euo pipefail
 
 # Survive a caller env with no usable PATH (see worktree-write-protect.sh).
-PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)

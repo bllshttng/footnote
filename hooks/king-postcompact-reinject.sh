@@ -20,7 +20,7 @@
 set -uo pipefail
 
 # Survive a caller env with no usable PATH (see worktree-write-protect.sh).
-PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 
 # BASH_SOURCE-relative, never `git rev-parse`: cwd is the session's repo, not
