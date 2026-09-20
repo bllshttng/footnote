@@ -633,6 +633,76 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
         println!("{}", crate::resume_pin::decide(pin));
         return 0;
     }
+    // A `pi_session_lookup` field asks the pi store owner what a
+    // (cwd, session id) pair resolves to right now (same field-on-a-verb
+    // shape as node_seed).
+    if let Some(ask) = parsed.get("pi_session_lookup") {
+        use std::path::PathBuf;
+        let cwd = PathBuf::from(ask.get("cwd").and_then(Value::as_str).unwrap_or(""));
+        let session_id = ask.get("session_id").and_then(Value::as_str).unwrap_or("");
+        // An unnamed cwd never touches the filesystem: resolving the store
+        // against "" would read the process cwd's own project settings and
+        // answer about a directory nobody asked about.
+        if cwd.as_os_str().is_empty() {
+            let answer = serde_json::json!({
+                "state": "unknown",
+                "files": [],
+                "directory": "",
+                "reason": "cwd is required",
+            });
+            println!("{answer}");
+            return 0;
+        }
+        let (lookup, directory) = match crate::pi::pi_store(&cwd) {
+            Ok(store) => {
+                let dir = match store.layout {
+                    crate::pi::StoreLayout::CwdScoped => {
+                        store.root.join(crate::pi::encode_cwd(&cwd))
+                    }
+                    crate::pi::StoreLayout::Flat => store.root.clone(),
+                };
+                (crate::pi::lookup_sessions_in(&store, &cwd, session_id), dir)
+            }
+            Err(reason) => (
+                crate::pi::SessionLookup::Unknown {
+                    dir: PathBuf::new(),
+                    reason,
+                },
+                PathBuf::new(),
+            ),
+        };
+        let (state, files, reason) = match &lookup {
+            crate::pi::SessionLookup::Unknown { reason, .. } => {
+                ("unknown", Vec::new(), reason.clone())
+            }
+            crate::pi::SessionLookup::None => ("none", Vec::new(), String::new()),
+            crate::pi::SessionLookup::One { file } => ("one", vec![file.clone()], String::new()),
+            crate::pi::SessionLookup::Duplicate { files } => {
+                ("duplicate", files.clone(), String::new())
+            }
+        };
+        let answer = serde_json::json!({
+            "state": state,
+            "files": files,
+            "directory": directory,
+            "reason": reason,
+        });
+        println!("{answer}");
+        return 0;
+    }
+    // A `pi_route` field asks the pi route owner which provider, model and
+    // effort tokens a launch carries (same field-on-a-verb shape).
+    if let Some(ask) = parsed.get("pi_route") {
+        let s = |k: &str| ask.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let route = crate::pi::pi_route(&s("model"), &s("effort"), &s("tools"), &s("deny_tools"));
+        let answer = serde_json::json!({
+            "tokens": route.tokens,
+            "route_source": route.route_source,
+            "note": route.note,
+        });
+        println!("{answer}");
+        return 0;
+    }
     println!("{}", decide(&parsed));
     0
 }

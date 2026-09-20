@@ -268,39 +268,28 @@ def _pi_extension_src() -> Path:
     return Path(__file__).parent / "assets" / "pi" / "footnote.ts"
 
 
-def _pi_extensions_dir() -> Path:
-    return Path.home() / ".pi" / "agent" / "extensions"
-
-
-def _pi_extension_dest() -> Path:
-    return _pi_extensions_dir() / "footnote.ts"
-
-
 def _pi_is_installed() -> bool:
-    # Installed == the dest file exists AND matches the shipped source, so a
-    # stale copy (older footnote) reports not-installed and gets refreshed.
-    dest = _pi_extension_dest()
-    if not dest.exists():
-        return False
-    try:
-        return dest.read_text(encoding="utf-8") == _pi_extension_src().read_text(
-            encoding="utf-8"
-        )
-    except OSError:
-        return False
+    from fno.rust_binary import call_binary_json
+
+    _err, payload = call_binary_json(
+        "plugin-install",
+        ["pi", "--status", "--extension-src", str(_pi_extension_src()), "--json"],
+    )
+    return bool(payload and payload.get("installed"))
 
 
 def _pi_install() -> IntegrationResult:
-    label = "pi"
-    src = _pi_extension_src()
-    dest = _pi_extension_dest()
-    try:
-        src_text = src.read_text(encoding="utf-8")
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(src_text, encoding="utf-8")
-    except OSError as exc:
-        return IntegrationResult("pi", label, "failed", note=str(exc))
-    return IntegrationResult("pi", label, "installed", note=f"extension -> {dest}")
+    from fno.rust_binary import call_binary_json
+
+    _err, payload = call_binary_json(
+        "plugin-install", ["pi", "--extension-src", str(_pi_extension_src()), "--json"]
+    )
+    if payload and payload.get("status"):
+        return IntegrationResult(
+            payload["cli"], payload["label"], payload["status"], note=payload["note"]
+        )
+    note = _err or "the fno-agents binary is missing or failed; run fno doctor update --rust"
+    return IntegrationResult("pi", "pi", "failed", note=note)
 
 
 # --- agy (Antigravity CLI) --------------------------------------------------
