@@ -1127,7 +1127,7 @@ fn nav_fragment(current: NavPage) -> String {
          min-height:30px;padding:0 4px;border-bottom:2px solid transparent}}\
          nav.fno-nav a[aria-current=\"page\"]{{color:#fff;border-bottom-color:#c99b45}}\
          nav.fno-nav a:hover{{color:#fff}}{controls}</style>\
-         {}{}{}\
+         {}{}{}{}\
          <script>(function(){{var nav=document.querySelector(\"nav.fno-nav\");if(!nav)return;\
          var p=location.pathname,base;\
          if(nav.dataset.current===\"live\"){{base=p.endsWith(\"/\")?p:p+\"/\";}}\
