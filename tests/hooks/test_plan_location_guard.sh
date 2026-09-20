@@ -416,5 +416,19 @@ STUBEOF
     write_fake_fno "$PLANS"
 fi
 
+# An empty caller PATH must not leak noise into the guard's stderr: a preflight
+# once read a dirname error there as a red push. Plain `env -i` does not
+# reproduce: bash applies a default PATH, so PATH is pinned empty instead.
+EMPTY_PATH_ERR="$TMP/empty-path-stderr"
+EMPTY_PATH_OUT="$(printf '{}' | env -i PATH= /bin/bash "$GUARD" 2>"$EMPTY_PATH_ERR")"
+EMPTY_PATH_RC=$?
+if [[ $EMPTY_PATH_RC -eq 0 ]] \
+    && [[ ! -s "$EMPTY_PATH_ERR" ]] \
+    && [[ "$EMPTY_PATH_OUT" == "{}" ]]; then
+    pass "empty PATH allows with clean stderr"
+else
+    fail "empty PATH run broke: rc=$EMPTY_PATH_RC stderr=$(cat "$EMPTY_PATH_ERR") out=$EMPTY_PATH_OUT"
+fi
+
 printf '\n[plg] %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

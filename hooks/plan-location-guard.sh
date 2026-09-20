@@ -38,6 +38,11 @@
 
 set -uo pipefail
 
+# Guards must survive a caller env with no usable PATH: a push preflight once
+# went red on "dirname: command not found". System dirs first; caller dirs stay.
+PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
+export PATH
+
 _HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/guard-mark.sh
 source "${_HOOK_DIR}/lib/guard-mark.sh" 2>/dev/null || true
