@@ -1250,7 +1250,7 @@ def tick() -> None:
             arm_interval["king_wake"] = kw_i
             if getattr(getattr(settings, "king", None), "wake_enabled", False):
                 try:
-                    from fno.pr_watch._king_wake import run_king_wake, wake_detail
+                    from fno.pr_watch._king_wake import run_king_wake
 
                     wake_summary = run_king_wake(
                         settings,
@@ -1258,10 +1258,20 @@ def tick() -> None:
                         seconds_left_fn=phase_seconds_left,
                         on_step=lambda s: set_tick_phase(f"king_wake:{s}"),
                     )
-                    detail = wake_detail(wake_summary)
-                    typer.echo(f"king wake: {detail}")
+                    woke = ", ".join(
+                        f"{w['scope']}:{w['reason']}" for w in wake_summary.get("woke", [])
+                    )
+                    typer.echo(
+                        f"king wake: crowns={wake_summary.get('crowns', 0)}"
+                        + (f" woke={woke}" if woke else "")
+                    )
                     crowns = int(wake_summary.get("crowns", 0) or 0)
                     woke_n = len(wake_summary.get("woke", []) or [])
+                    evaluated = int(wake_summary.get("evaluated", 0) or 0)
+                    truth_reads = int(wake_summary.get("truth_reads", 0) or 0)
+                    refused = ",".join(
+                        f"{r['scope']}:{r['refusal']}" for r in wake_summary.get("refused") or []
+                    )
                     if crowns == 0:
                         skip = "no_crowned_target"
                     elif woke_n:
@@ -1272,6 +1282,14 @@ def tick() -> None:
                         skip = "budget_spent"
                     else:
                         skip = "no_trigger"
+                    note = wake_summary.get("note")
+                    detail = (
+                        f"crowns={crowns} evaluated={evaluated}/{crowns}"
+                        f" truth_reads={truth_reads}"
+                        + (f" woke={woke}" if woke else "")
+                        + (f" refused={refused}" if refused else "")
+                        + (f" note={note}" if note else "")
+                    )
                     _emit_tick_row("king_wake", interval_s=kw_i, acted=woke_n,
                                    skip_reason=skip, detail=detail)
                 except Exception as exc:  # noqa: BLE001 - never let a wake break the tick

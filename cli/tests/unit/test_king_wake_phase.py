@@ -22,7 +22,6 @@ from fno.pr_watch._king_wake import (
     _ask_wake_ceiling,
     _store_board_hash,
     run_king_wake,
-    wake_detail,
 )
 
 NOW = datetime(2026, 8, 29, 12, 0, 0, tzinfo=timezone.utc)
@@ -806,9 +805,6 @@ def test_the_receipt_names_refusals_and_dropped_crowns(tmp_path):
     assert "manifest missing" in note, note
     assert "unregistered holder(s)" in note, note
     assert "holderless crown(s)" in note, note
-    detail = wake_detail(summary)
-    assert "refused=epic-x:working" in detail, detail
-    assert "manifest missing" in detail, detail
 
 
 def test_an_unreadable_registry_wakes_nothing(tmp_path):
