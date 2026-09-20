@@ -2669,7 +2669,6 @@ def cmd_spawn(
                 # The route's model token, recorded on the row (the receipt
                 # already names it; the row now matches).
                 route_model=route_model,
-                node_reason=node_reason,
             )
             spawn_succeeded = result.kind == "created" or bool(
                 result.reply and result.reply.strip()

@@ -432,6 +432,15 @@ def test_seam_real_binary_refuses_a_disagreeing_verb(monkeypatch):
 # ---- x-8d88: the seed names the node; the seam binds it ---------------------
 
 
+@pytest.fixture
+def _target_row(tmp_path):
+    """A node whose lifecycle answers /target: a readable plan (no status
+    scalar reads READY) beside a declared /target verb."""
+    (tmp_path / "p.md").write_text("---\n---\n", encoding="utf-8")
+    row = _row(dispatch_verb="/target", plan_path=str(tmp_path / "p.md"), cwd=str(tmp_path))
+    return row
+
+
 def _stub_verb_seq(monkeypatch, answers):
     """Like _stub_verb but each call pops the next canned answer; later calls
     answer pass, which is what an agreeing /target derivation meets."""
@@ -482,11 +491,11 @@ def test_seam_derive_names_an_unresolvable_node_as_a_receipt(monkeypatch):
 
 
 @requires_rust
-def test_seam_real_binary_binds_the_seed_node_without_the_flag(monkeypatch):
+def test_seam_real_binary_binds_the_seed_node_without_the_flag(monkeypatch, _target_row):
     """x-8d88 on the real transport: only the graph row is stubbed; the
     compiled node-seed answer derives x-1 from the seed and the seam inserts
     the flag. Fails against a binary built before the derivation."""
-    _stub_row(monkeypatch, _row(dispatch_verb="/target"))
+    _stub_row(monkeypatch, _target_row)
     from fno.agents.rust_runtime import _node_seed_at_seam
 
     args, node_verb = _node_seed_at_seam(_seed_args("/fno:target x-1"))
@@ -496,10 +505,10 @@ def test_seam_real_binary_binds_the_seed_node_without_the_flag(monkeypatch):
 
 
 @requires_rust
-def test_seam_real_binary_trims_sentence_punctuation(monkeypatch):
+def test_seam_real_binary_trims_sentence_punctuation(monkeypatch, _target_row):
     """x-8d88 Task 1 follow-up: the operator template spells
     `/fno:target x-5d17. Plan: ...`; the trailing period is prose, not id."""
-    _stub_row(monkeypatch, _row(dispatch_verb="/target"))
+    _stub_row(monkeypatch, _target_row)
     from fno.agents.rust_runtime import _node_seed_at_seam
 
     args, _ = _node_seed_at_seam(_seed_args("/fno:target x-1. Plan: /plans/x.md. Rebase first."))
@@ -507,13 +516,13 @@ def test_seam_real_binary_trims_sentence_punctuation(monkeypatch):
 
 
 @requires_rust
-def test_seed_only_pane_spawn_mints_the_nodes_row_binding(monkeypatch, runner):
+def test_seed_only_pane_spawn_mints_the_nodes_row_binding(monkeypatch, runner, _target_row):
     """x-8d88 Task 2: a /fno:target x-1 seed and no --node reaches the pane
     mint with the node resolved: provenance carries FNO_NODE and the seed
     passes through unchanged (agreement, so no compose rewrite)."""
     from fno.agents import mux_spawn, spawn_gate
 
-    monkeypatch.setattr("fno.graph.load.load_graph", lambda: [_row(dispatch_verb="/target")])
+    monkeypatch.setattr("fno.graph.load.load_graph", lambda: [_target_row])
 
     class _Gate:
         def release(self) -> None:
