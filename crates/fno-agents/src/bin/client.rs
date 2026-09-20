@@ -3214,6 +3214,7 @@ fn run_reap(rest: &[String]) -> i32 {
         )
     };
     summary.mark_escalated(fno_agents::agents_config::hold_escalate_after(&cwd));
+    fno_agents::crown_reap::fill_reap_crowns(&mut summary, &home, &cwd, !dry_run);
 
     // The dry-run JSON read also carries the census (task 4): the
     // complete per-session identity, observed surfaces and source coverage,

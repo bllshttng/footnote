@@ -250,6 +250,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "release_refused": summary.release_refused,
                 "open_pr_rows": summary.open_pr_rows,
                 "open_pr_nudge": nudge_json,
+                "crowns": summary.crowns,
                 "schema_skew": match summary.schema_skew {
                     Some((on_disk, understood)) => json!({
                         "on_disk": on_disk,
@@ -460,6 +461,26 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
     for (id, action) in &summary.open_pr_nudge {
         out.push_str(&format!("  would nudge {id} ({action})\n"));
     }
+    // The dead-crown sweep's lines: one per vacated or would-vacate crown,
+    // one per kept crown, and the unread naming when the sweep refused.
+    if let Some(crowns) = &summary.crowns {
+        let vacate_verb = if dry_run { "would vacate" } else { "vacated" };
+        for v in &crowns.vacated {
+            out.push_str(&format!(
+                "  {vacate_verb} crown {} (holder {} dead: {}; inherits: {})\n",
+                v.scope,
+                v.holder_session.as_deref().unwrap_or("unknown"),
+                v.evidence,
+                v.inheritor
+            ));
+        }
+        for k in &crowns.kept {
+            out.push_str(&format!("  kept crown {} ({})\n", k.scope, k.reason));
+        }
+        if let Some(unread) = &crowns.unread {
+            out.push_str(&format!("  crowns unreadable ({unread})\n"));
+        }
+    }
     if dry_run {
         out.push_str("(dry-run: no changes made)\n");
     }
@@ -658,6 +679,67 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn crowns_render_in_text_and_json() {
+        let mut s = summary(&[]);
+        s.crowns = Some(crate::crown_reap::CrownReap {
+            vacated: vec![crate::crown_reap::VacatedCrown {
+                scope: "x-dead".to_string(),
+                level: Some(2),
+                manifest_path: "/tmp/x-dead.md".to_string(),
+                holder_session: Some("sess-1".to_string()),
+                evidence: "absent from the roster; transcript quiet 90000s > window 43200s"
+                    .to_string(),
+                inheritor: "operator".to_string(),
+                cleared_rows: vec!["stale-row".to_string()],
+            }],
+            kept: vec![crate::crown_reap::KeptCrown {
+                scope: "x-live".to_string(),
+                reason: "roster blocked".to_string(),
+            }],
+            unread: None,
+        });
+        let text = render_reap(&s, false, false);
+        assert!(
+            text.contains(
+                "vacated crown x-dead (holder sess-1 dead: absent from the roster; transcript quiet 90000s > window 43200s; inherits: operator)",
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("kept crown x-live (roster blocked)"),
+            "{text}"
+        );
+        let json = render_reap(&s, true, false);
+        let v: Value = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(v["crowns"]["vacated"][0]["scope"], "x-dead");
+        assert_eq!(v["crowns"]["kept"][0]["reason"], "roster blocked");
+        // A pass that ran no crown sweep renders null, never a missing key.
+        let json = render_reap(&summary(&[]), true, false);
+        let v: Value = serde_json::from_str(json.trim()).unwrap();
+        assert!(v["crowns"].is_null());
+    }
+
+    #[test]
+    fn a_dry_run_renders_would_vacate() {
+        let mut s = summary(&[]);
+        s.crowns = Some(crate::crown_reap::CrownReap {
+            vacated: vec![crate::crown_reap::VacatedCrown {
+                scope: "x-dead".to_string(),
+                level: None,
+                manifest_path: "/tmp/x-dead.md".to_string(),
+                holder_session: None,
+                evidence: "evidence".to_string(),
+                inheritor: "operator".to_string(),
+                cleared_rows: vec![],
+            }],
+            kept: vec![],
+            unread: None,
+        });
+        let text = render_reap(&s, false, true);
+        assert!(text.contains("would vacate crown x-dead"), "{text}");
     }
 
     /// The doc's key list: every backticked snake_case token in the first
