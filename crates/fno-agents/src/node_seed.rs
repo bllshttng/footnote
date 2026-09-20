@@ -32,6 +32,70 @@ fn seed_text(payload: &Value) -> Option<String> {
     }
 }
 
+/// Liberal pre-check mirroring Python's `has_node_id_prefix`: a prefix-like
+/// head, one dash, and a non-strict suffix, so the short test/legacy ids that
+/// resolve by exact graph lookup stay derivable. A FORMAT check, not an
+/// identity check; resolution stays a graph lookup on the Python side.
+fn looks_like_node_id(s: &str) -> bool {
+    let Some((prefix, suffix)) = s.split_once('-') else {
+        return false;
+    };
+    prefix.len() >= 1
+        && prefix.len() <= 8
+        && prefix.starts_with(|c: char| c.is_ascii_lowercase())
+        && prefix
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && !suffix.is_empty()
+        && suffix
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+/// Sentence punctuation the spawn template leaves on the argument token
+/// (`/fno:target x-cccc. Plan: ...`): prose, not part of the id.
+fn trim_sentence_punct(s: &str) -> &str {
+    s.trim_end_matches(['.', ',', ';', ':', '!', '?'])
+}
+
+/// The nodeless arm: read the seed's verb argument as the node the
+/// spawn is FOR. Answers `derive` with the id, or `pass` with a
+/// `derive_reason` naming why it read none. Pure over the payload.
+fn derive_from_seed(payload: &Value, seed: Option<String>) -> Value {
+    let pass = |reason: String| json!({"action": "pass", "derive_reason": reason});
+    let Some(text) = seed.filter(|t| !t.trim().is_empty()) else {
+        return pass("no seed".into());
+    };
+    let toks: Vec<&str> = text.split_whitespace().collect();
+    if toks.iter().any(|tok| *tok == "--reconcile") {
+        return pass("reconcile seed names its own command".into());
+    }
+    let Some((first, _)) = toks.first().and_then(|t| parse_verb_token(t)) else {
+        return pass("prose seed names no verb".into());
+    };
+    let family: Vec<String> = payload
+        .get("family")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !family.iter().any(|f| f == &format!("/{first}")) {
+        return pass(format!("verb /{first} is outside the target family"));
+    }
+    let arg = toks.get(1).map(|t| trim_sentence_punct(t));
+    match arg.filter(|a| looks_like_node_id(a)) {
+        Some(id) => json!({"action": "derive", "node": id}),
+        None => pass(format!(
+            "seed names no node argument (read {})",
+            arg.unwrap_or("nothing")
+        )),
+    }
+}
+
 fn argv_of(payload: &Value) -> Vec<String> {
     payload
         .get("argv")
@@ -60,6 +124,13 @@ pub fn decide(payload: &Value) -> Value {
     }
 
     let seed = seed_text(payload);
+
+    // 1b. The nodeless arm: the seed names the node, so derive it.
+    //     Answered as derive/pass; the Python seam applies the answer by
+    //     inserting --node, so both lanes see an explicit node afterwards.
+    if node.is_empty() {
+        return derive_from_seed(payload, seed);
+    }
 
     // 2. The de-stub pass spells its own command; its seed carries the token.
     if let Some(text) = &seed {
@@ -340,5 +411,129 @@ mod tests {
         let out = decide_map(p);
         assert_eq!(out["action"], "compose");
         assert_eq!(out["argv"][2], "--message=/fno:blueprint x-1\n\nport it");
+    }
+
+    // --- the nodeless derive arm --------------------------------------- //
+
+    /// The shared nodeless shape: no `node` key, seed facts only.
+    fn base_derive(seed: &str, index: usize) -> Value {
+        json!({
+            "argv": ["spawn", seed],
+            "seed_index": index,
+            "seed_form": "positional",
+            "family": ["/target", "/blueprint"],
+            "crown": false, "resume": false,
+        })
+    }
+
+    #[test]
+    fn nodeless_family_seed_derives_the_argument() {
+        let out = decide_map(base_derive("/fno:target x-aaaa", 1));
+        assert_eq!(out["action"], "derive");
+        assert_eq!(out["node"], "x-aaaa");
+    }
+
+    #[test]
+    fn nodeless_dollar_seed_derives_too() {
+        let out = decide_map(base_derive("$fno:target x-bbbb", 1));
+        assert_eq!(out["action"], "derive");
+        assert_eq!(out["node"], "x-bbbb");
+    }
+
+    #[test]
+    fn nodeless_bare_slash_verb_derives() {
+        let out = decide_map(base_derive("/target x-1", 1));
+        assert_eq!(out["action"], "derive");
+        assert_eq!(out["node"], "x-1");
+    }
+
+    #[test]
+    fn trailing_sentence_punctuation_is_trimmed() {
+        let out = decide_map(base_derive(
+            "/fno:target x-cccc. Plan: /plans/x.md. Rebase first.",
+            1,
+        ));
+        assert_eq!(out["action"], "derive");
+        assert_eq!(out["node"], "x-cccc");
+    }
+
+    #[test]
+    fn prose_seed_passes_with_a_derive_reason() {
+        let out = decide_map(base_derive("port it", 1));
+        assert_eq!(out["action"], "pass");
+        assert!(out["derive_reason"].as_str().unwrap().contains("no verb"));
+    }
+
+    #[test]
+    fn out_of_family_seed_passes_with_a_reason() {
+        let out = decide_map(base_derive("/fno:review x-1", 1));
+        assert_eq!(out["action"], "pass");
+        assert!(out["derive_reason"]
+            .as_str()
+            .unwrap()
+            .contains("outside the target family"));
+    }
+
+    #[test]
+    fn verb_without_argument_passes_with_a_reason() {
+        let out = decide_map(base_derive("/fno:target", 1));
+        assert_eq!(out["action"], "pass");
+        assert!(out["derive_reason"]
+            .as_str()
+            .unwrap()
+            .contains("no node argument"));
+    }
+
+    #[test]
+    fn non_id_argument_passes_with_a_reason() {
+        let out = decide_map(base_derive("/fno:target port the auth flow", 1));
+        assert_eq!(out["action"], "pass");
+        assert!(out["derive_reason"]
+            .as_str()
+            .unwrap()
+            .contains("no node argument"));
+    }
+
+    #[test]
+    fn reconcile_seed_passes_on_the_derive_arm() {
+        let out = decide_map(base_derive("$fno:target --reconcile x-1", 1));
+        assert_eq!(out["action"], "pass");
+        assert!(out["derive_reason"].as_str().unwrap().contains("reconcile"));
+    }
+
+    #[test]
+    fn crown_and_resume_never_derive() {
+        let mut p = base_derive("/fno:target x-1", 1);
+        p["crown"] = json!(true);
+        assert_eq!(decide_map(p.clone())["action"], "pass");
+        p["crown"] = json!(false);
+        p["resume"] = json!(true);
+        assert_eq!(decide_map(p)["action"], "pass");
+    }
+
+    #[test]
+    fn empty_seed_passes_with_a_reason() {
+        let mut p = base_derive("", 1);
+        p["argv"] = json!(["spawn", "--node", "x-9"]);
+        p["seed_index"] = Value::Null;
+        p["seed_form"] = Value::Null;
+        let out = decide_map(p);
+        assert_eq!(out["action"], "pass");
+        assert!(out["derive_reason"].as_str().unwrap().contains("no seed"));
+    }
+
+    #[test]
+    fn message_eq_seed_derives_the_argument() {
+        let mut p = base_derive("--message=/fno:target x-3", 1);
+        p["seed_form"] = json!("message_eq");
+        let out = decide_map(p);
+        assert_eq!(out["action"], "derive");
+        assert_eq!(out["node"], "x-3");
+    }
+
+    #[test]
+    fn slug_argument_is_not_a_node_id() {
+        let out = decide_map(base_derive("/fno:target x-marks-the-spot", 1));
+        assert_eq!(out["action"], "pass");
     }
 }

@@ -3704,6 +3704,12 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "--node" => {
                 params.insert("node".into(), str_arg(&mut it, "--node")?);
             }
+            // The seam's node-reason receipt, set only when the seed
+            // named a node the seam could not resolve. Forwarded so the mint
+            // stamps why the row works no node; never read as a decision.
+            "--node-reason" => {
+                params.insert("node_reason".into(), str_arg(&mut it, "--node-reason")?);
+            }
             "--session-id" => {
                 params.insert("session_id".into(), str_arg(&mut it, "--session-id")?);
             }

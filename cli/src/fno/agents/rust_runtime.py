@@ -752,10 +752,23 @@ def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
         raise SystemExit(2)
 
 
+def _insert_spawn_flag(args: "Sequence[str]", flag: str, value: str) -> "list[str]":
+    """Insert ``flag value`` before the ``--`` fence when one is present, else
+    append. A fence's right side belongs to the harness, so a client-side flag
+    must land before it."""
+    toks = list(args)
+    fence = toks.index("--") if "--" in toks else -1
+    at = fence if fence > 0 else len(toks)
+    toks[at:at] = [flag, value]
+    return toks
+
+
 def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]]":
     """Project the seam's facts to ``fno-agents node-seed`` and apply the
-    answer before any lane is chosen. Only an explicit ``--node`` triggers
-    the call; a refusal exits 2 before ``inject_spawn_defaults`` runs.
+    answer before any lane is chosen. With no explicit ``--node``, the verb
+    derives the node from the seed's verb argument: a derive answer
+    inserts the flag, so both lanes see an explicit node and no downstream
+    code changes. A refusal exits 2 before ``inject_spawn_defaults`` runs.
     Returns ``(args, node_verb)``: the verb word on a ``profile`` answer.
     """
     from fno.agents.harness_map import DispatchResolveError, _TARGET_FAMILY_VERBS
@@ -763,8 +776,56 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]
     from fno.agents.spawn_defaults import _seed_slot
 
     node = (_spawn_flag_value(args, "--node") or "").strip()
+    slot = _seed_slot(list(args[1:]))
+
+    def _payload() -> dict:
+        return {
+            "family": list(_TARGET_FAMILY_VERBS),
+            "crown": _is_crown_bearing_spawn("spawn", args),
+            "resume": _is_resume_bearing_spawn("spawn", args),
+            "argv": list(args),
+            "seed_index": (slot[0] + 1) if slot else None,
+            "seed_form": slot[1] if slot else None,
+        }
+
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    def _ask(payload: dict) -> "Optional[dict]":
+        try:
+            return verb_call("spawn-axes", {"node_seed": payload}, VerbUnavailable)
+        except VerbUnavailable as exc:
+            if node:
+                print(f"fno agents spawn: spawn-axes unavailable: {exc}", file=sys.stderr)
+                raise SystemExit(2) from exc
+            # No binary, no derivation: the spawn proceeds exactly as before
+            # an explicit node ever reached this seam.
+            print(f"fno agents spawn: spawn-axes unavailable, seed-node derivation skipped: {exc}",
+                  file=sys.stderr)
+            return None
+
     if not node:
-        return list(args), None
+        answer = _ask(_payload())
+        if answer is None:
+            return list(args), None
+        action = answer.get("action")
+        if action == "refuse":
+            # A current binary never refuses a derivation (it answers derive
+            # or pass); this refuse names the row gate judging a nodeless
+            # payload, so the installed binary predates this gate. Degrade to
+            # the pre-derivation spawn instead of failing every seeded spawn
+            # until the binary updates.
+            print("fno agents spawn: installed fno-agents predates seed-node "
+                  "derivation; spawning without the derived node", file=sys.stderr)
+            return list(args), None
+        derived = (answer.get("node") or "").strip() if action == "derive" else ""
+        if not derived:
+            return list(args), None
+        if find_node_row(derived) is None:
+            reason = f"{derived} names no readable backlog row (derived from the seed)"
+            return _insert_spawn_flag(args, "--node-reason", reason), None
+        args = _insert_spawn_flag(args, "--node", derived)
+        node = derived
+        slot = _seed_slot(list(args[1:]))
 
     row = find_node_row(node)
     derive_error: Optional[str] = None
@@ -782,27 +843,19 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]
 
         stored = canonical_verb_key(stored)
 
-    slot = _seed_slot(list(args[1:]))
-    payload = {
+    payload = _payload()
+    payload.update({
         "node": node,
         "row_found": row is not None,
         "effective_verb": effective_verb,
         "stored_verb": stored or None,
         "derive_error": derive_error,
-        "family": list(_TARGET_FAMILY_VERBS),
-        "crown": _is_crown_bearing_spawn("spawn", args),
-        "resume": _is_resume_bearing_spawn("spawn", args),
-        "argv": list(args),
-        "seed_index": (slot[0] + 1) if slot else None,
-        "seed_form": slot[1] if slot else None,
-    }
-    from fno.rust_binary import VerbUnavailable, verb_call
-
-    try:
-        answer = verb_call("spawn-axes", {"node_seed": payload}, VerbUnavailable)
-    except VerbUnavailable as exc:
-        print(f"fno agents spawn: spawn-axes unavailable: {exc}", file=sys.stderr)
-        raise SystemExit(2) from exc
+    })
+    answer = _ask(payload)
+    if answer is None:
+        # Unreachable with an explicit or derived node (VerbUnavailable exits
+        # 2 above); typed so the flow below stays total.
+        return list(args), None
     action = answer.get("action")
     if action == "refuse":
         print(f"fno agents spawn: {answer.get('message', 'refused')}", file=sys.stderr)
