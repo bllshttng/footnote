@@ -65,13 +65,13 @@ mod block_args;
 pub mod kill_policy;
 mod pane_args;
 mod pane_keeper_list;
-pub(crate) use pane_keeper_list::pane_keeper_list;
 use block_args::{parse_block_annotate, parse_block_args};
 use clap::Parser as _;
 pub use pane_args::{
     parse_pane_args, ParsedPane, PANE_LS_IDENTITY_HELP, PANE_REFERENCE_USAGE, PANE_RUN_WORKER_HELP,
     PANE_SEND_RAW_HELP,
 };
+pub(crate) use pane_keeper_list::pane_keeper_list;
 pub use server_axis::{
     env_server, note_server_flag, resolve_session, LEGACY_SERVER_ENV, SERVER_ENV,
 };
@@ -5578,21 +5578,39 @@ mod tests {
         // parser must accept its own instrument's remedy.
         let parsed = pane_args(&["kill", "main:76"]).expect("selector must parse");
         assert_eq!(parsed.session.as_deref(), Some("main"));
-        assert_eq!(parsed.cmd, PaneCmd::Kill { pane: 76, hand_off_to: None });
+        assert_eq!(
+            parsed.cmd,
+            PaneCmd::Kill {
+                pane: 76,
+                hand_off_to: None
+            }
+        );
     }
 
     #[test]
     fn pane_explicit_session_flag_beats_the_selector_session() {
         let parsed = pane_args(&["kill", "--session", "other", "main:76"]).expect("must parse");
         assert_eq!(parsed.session.as_deref(), Some("other"));
-        assert_eq!(parsed.cmd, PaneCmd::Kill { pane: 76, hand_off_to: None });
+        assert_eq!(
+            parsed.cmd,
+            PaneCmd::Kill {
+                pane: 76,
+                hand_off_to: None
+            }
+        );
     }
 
     #[test]
     fn pane_bare_id_still_parses_with_no_session() {
         let parsed = pane_args(&["kill", "76"]).expect("bare id must parse");
         assert_eq!(parsed.session, None);
-        assert_eq!(parsed.cmd, PaneCmd::Kill { pane: 76, hand_off_to: None });
+        assert_eq!(
+            parsed.cmd,
+            PaneCmd::Kill {
+                pane: 76,
+                hand_off_to: None
+            }
+        );
     }
 
     #[test]
@@ -6362,7 +6380,10 @@ mod tests {
             ParsedPane {
                 session: Some("work".into()),
                 json: false,
-                cmd: PaneCmd::Kill { pane: 3, hand_off_to: None }
+                cmd: PaneCmd::Kill {
+                    pane: 3,
+                    hand_off_to: None
+                }
             }
         );
     }

@@ -52,7 +52,10 @@ fn proto_v4_control_verbs_roundtrip() {
             timeout_ms: 5000,
             command_done: true,
         },
-        ControlVerb::PaneKill { pane: 5, hand_off_to: None },
+        ControlVerb::PaneKill {
+            pane: 5,
+            hand_off_to: None,
+        },
         ControlVerb::RetireSession {
             harness: "codex".into(),
             session_id: "01a03a85-1111-7222-8333-444455556666".into(),
