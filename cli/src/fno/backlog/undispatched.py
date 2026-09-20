@@ -87,11 +87,10 @@ def classify_planned_unclaimed(
         if key.startswith("node:"):
             claimed[key.removeprefix("node:")] = str(claim.get("state") or "unknown")
 
-    child_ids = {
-        entry.get("parent")
-        for entry in entries
-        if isinstance(entry.get("parent"), str)
-    }
+    # A parent pointer that is the child's containment mark leaves the owner work.
+    from fno.graph.cli import _container_ids
+
+    container_ids = _container_ids(entries)
     rows: list[dict] = []
     for entry in entries:
         node_id = entry.get("id")
@@ -110,7 +109,7 @@ def classify_planned_unclaimed(
             "status_ready": entry.get("status") == "ready",
             "plan_finalized": isinstance(entry.get("plan_path"), str)
             and bool(entry["plan_path"].strip()),
-            "leaf": entry.get("type") != "epic" and node_id not in child_ids,
+            "leaf": entry.get("type") != "epic" and node_id not in container_ids,
             "completed": bool(entry.get("completed_at")),
             "has_pr": _has_pr(entry),
             "batch_owner": bool(entry.get("batch")),
