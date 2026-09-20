@@ -276,26 +276,7 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
     // --force/--mux gating. Spared keepers fail the verb: a spared keeper
     // was NOT healed.
     let (cycled, stale_panes) = crate::census::cycle_stale_store_keepers().await;
-    for c in &cycled {
-        if c.result == "cycled" {
-            say(&format!(
-                "fno agents restart: store keeper {} pid {:?} shut down (stale build; respawns on next read).",
-                c.graph.as_deref().unwrap_or("unknown graph"),
-                c.old_pid
-            ));
-        } else {
-            eprintln!(
-                "fno agents restart: store keeper {} {}; it was NOT refreshed.",
-                c.graph.as_deref().unwrap_or("unknown graph"),
-                c.result
-            );
-        }
-    }
-    if stale_panes > 0 {
-        say(&format!(
-            "fno agents restart: {stale_panes} pane keeper(s) run an older build; kept with their panes, current when each pane ends."
-        ));
-    }
+    say_keeper_cycle(&cycled, stale_panes, json, &say);
     // The codex shared-daemon leg: the session-preserving upgrade
     // transaction, riding the SAME restart receipt as every other
     // component. Reused-current, held, refused, upgraded, or failed - and
@@ -429,6 +410,70 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool, mux: bool) -
     });
     println!("fno agents restart: keepers {summary}");
     u8::from(cycled.iter().any(|c| c.result != "cycled") || mux_failed || upgrade_failed) as i32
+}
+
+/// The keeper-cycle receipts (shared by the full restart and the
+/// `--keepers-only` leg): one line per cycled keeper, one per spared keeper,
+/// plus the stale-pane-keeper note. `json` routes the human lines to stderr
+/// so stdout stays the one machine line; a spared keeper is loud on stderr
+/// either way.
+fn say_keeper_cycle(
+    cycled: &[crate::census::CycledKeeper],
+    stale_panes: usize,
+    json: bool,
+    say: &dyn Fn(&str),
+) {
+    for c in cycled {
+        if c.result == "cycled" {
+            say(&format!(
+                "fno agents restart: store keeper {} pid {:?} shut down (stale build; respawns on next read).",
+                c.graph.as_deref().unwrap_or("unknown graph"),
+                c.old_pid
+            ));
+        } else {
+            eprintln!(
+                "fno agents restart: store keeper {} {}; it was NOT refreshed.",
+                c.graph.as_deref().unwrap_or("unknown graph"),
+                c.result
+            );
+        }
+    }
+    if stale_panes > 0 {
+        say(&format!(
+            "fno agents restart: {stale_panes} pane keeper(s) run an older build; kept with their panes, current when each pane ends."
+        ));
+    }
+}
+
+/// The `--keepers-only` leg (x-6648): run ONLY the stale-store-keeper cycle
+/// and print the same `keepers` machine line the full restart prints. Never
+/// restarts the daemon, touches mux servers, upgrades codex, or refreshes
+/// pr-watch. Exit 0 only when every keeper found is proven cycled; a busy or
+/// unresponsive keeper is reported spared and fails the verb (never an
+/// unproven kill). `fno agents restart --mux` drives this after each mux
+/// kill, closing the gap where a keeper spawned by the OLD server outlived
+/// the restart.
+pub async fn run_keepers_only(json: bool) -> i32 {
+    let (cycled, stale_panes) = crate::census::cycle_stale_store_keepers().await;
+    say_keeper_cycle(&cycled, stale_panes, json, &|line| {
+        if json {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    });
+    let spared = cycled.iter().any(|c| c.result != "cycled");
+    let (ok, label) = verdict(0, false, spared, false);
+    let summary = json!({
+        "store_keepers": cycled.iter().map(|c| serde_json::json!({
+            "graph": c.graph, "old_pid": c.old_pid, "result": c.result,
+        })).collect::<Vec<_>>(),
+        "pane_keepers_stale": stale_panes,
+        "ok": ok,
+        "verdict": label,
+    });
+    println!("fno agents restart: keepers {summary}");
+    i32::from(spared)
 }
 
 #[cfg(test)]
@@ -597,5 +642,35 @@ mod tests {
         assert!(restart_gate(&drifted));
         assert!(!restart_gate(&classify(Some(&fp), Some(&fp))));
         assert!(!restart_gate(&classify(None, Some(&fp))));
+    }
+
+    /// AC3-HP: the shared renderer names every cycled keeper on the say
+    /// channel; AC3-ERR: a spared keeper never claims success there (its
+    /// refusal rides stderr, outside `say`).
+    #[test]
+    fn keeper_cycle_receipts_name_every_cycled_keeper() {
+        let rows = vec![
+            crate::census::CycledKeeper {
+                graph: Some("g1".into()),
+                old_pid: Some(11),
+                result: "cycled".into(),
+            },
+            crate::census::CycledKeeper {
+                graph: Some("g2".into()),
+                old_pid: None,
+                result: "busy".into(),
+            },
+        ];
+        let mut said = Vec::new();
+        super::say_keeper_cycle(&rows, 0, false, &|line| said.push(line.to_string()));
+        assert!(
+            said.iter()
+                .any(|l| l.contains("g1") && l.contains("shut down")),
+            "the cycled keeper is named: {said:?}"
+        );
+        assert!(
+            !said.iter().any(|l| l.contains("g2")),
+            "a spared keeper never claims success on the say channel"
+        );
     }
 }
