@@ -4815,6 +4815,17 @@ fn render_reply(
             }
             EXIT_OK
         }
+        // A one-line receipt. `pane kill --hand-off-to` answers this way:
+        // the pane is released, the keeper is at its new socket, and the
+        // child is still running, which no structured reply describes.
+        ServerMsg::Notice { text } => {
+            if json {
+                println!("{}", serde_json::json!({"notice": text}));
+            } else {
+                println!("{text}");
+            }
+            EXIT_OK
+        }
         // The server only ever answers a control connection with the replies
         // above; anything else is a protocol violation.
         other => {

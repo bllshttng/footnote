@@ -925,6 +925,14 @@ pub fn keeper_dir() -> PathBuf {
     crate::proto::mux_dir().join("panes")
 }
 
+/// `<state-root>/mux/threads/`: keeper sockets that a pane-to-thread
+/// conversion moved out of the pane tree. Same keeper, same child, new
+/// address. A reader that walks only [`keeper_dir`] goes blind to every
+/// converted session.
+pub fn thread_keeper_dir() -> PathBuf {
+    crate::proto::mux_dir().join("threads")
+}
+
 /// The pane key a keeper socket stem carries, when the stem belongs to
 /// `session`. The birth pane id: the one identity that outlives the server.
 /// Free function so the prefix-collision rule is unit-testable without a mux

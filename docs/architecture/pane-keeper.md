@@ -69,5 +69,7 @@ A pane keeper becomes a THREAD keeper by moving its socket. `fno mux pane kill -
 
 The rename is safe because a renamed unix socket path still reaches the same listener, and the old path stops answering. That was measured on macOS 25.3 with a positive control on the old path, not assumed from the man page.
 
+`fno mux pane keeper list` walks both lanes. Each row carries a `lane` field of `pane` or `thread`. The listing read only `mux/panes/` at first. `tests/convert-pane-to-thread-journey.sh` caught that gap. A conversion moved its own keeper out of the one directory the listing read. So the verb said the keeper was gone while it was running.
+
 An INLINE pane has no keeper. The server itself holds the master, so releasing that entry kills the child with the pty. The hand-off refuses such a pane by name. The remedy it names is to stop and resume the session, which relaunches it keeper-hosted.
 
