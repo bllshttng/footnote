@@ -329,7 +329,7 @@ pub fn delete(connection: &Connection, node_id: &str) -> Result<(), String> {
 /// unknown.
 pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
     let mut statement = connection
-        .prepare(
+        .prepare_cached(
             "SELECT id, ordinal, slug, title, kind, status, priority, rank, project, cwd,
                     domain, estimate, difficulty, description, plan_path, parent_id,
                     contained_in, superseded_by, caused_by, fixes_pr, ownership_defect,
@@ -519,7 +519,7 @@ pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
     node.apply_residual(residual)
         .map_err(|error| error.to_string())?;
     let mut claim_statement = connection
-        .prepare(
+        .prepare_cached(
             "SELECT locked_by, harness, harness_session, locked_at
              FROM node_claims WHERE node_id = ?1",
         )
@@ -537,7 +537,7 @@ pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
         .map_err(|error| error.to_string())?
         .unwrap_or_default();
     let mut dispatch_statement = connection
-        .prepare("SELECT verb, brief, model FROM node_dispatch WHERE node_id = ?1")
+        .prepare_cached("SELECT verb, brief, model FROM node_dispatch WHERE node_id = ?1")
         .map_err(|error| error.to_string())?;
     node.dispatch = dispatch_statement
         .query_row(params![id], |row| {
@@ -553,7 +553,7 @@ pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
     // The 14 columns overlay what apply_residual parsed; the two provenance
     // fields with no columns (origin_evidence, request_origin) survive from it.
     let mut provenance_statement = connection
-        .prepare(
+        .prepare_cached(
             "SELECT source, source_kind, source_project, source_session_id, source_harness,
                     source_cwd, source_node_id, source_plan_path, source_inbox_msg,
                     spawned_by_session, spawned_by_harness, spawned_by_cwd, think_session_id,
@@ -621,7 +621,7 @@ pub fn load(connection: &Connection, id: &str) -> Result<Option<Node>, String> {
         };
     }
     let mut supersession_statement = connection
-        .prepare(
+        .prepare_cached(
             "SELECT successor_id, cause, reason, verified_at, evidence_pr, surfaces,
                     matched_surfaces
              FROM supersessions WHERE node_id = ?1",

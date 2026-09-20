@@ -95,7 +95,7 @@ pub fn delete(connection: &Connection, node_id: &str) -> Result<(), String> {
 /// key was absent), not as an empty array.
 pub fn load_grouped(connection: &Connection, node_id: &str) -> Result<Relations, String> {
     let mut statement = connection
-        .prepare(
+        .prepare_cached(
             "SELECT node_id, related_node_id, type, listed_on, seq
              FROM relations WHERE listed_on = ?1 ORDER BY seq",
         )
