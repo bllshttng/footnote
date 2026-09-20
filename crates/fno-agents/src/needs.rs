@@ -18,6 +18,7 @@
 
 use crate::paths::AgentsHome;
 use serde::Serialize;
+use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -521,6 +522,7 @@ struct NeedsArgs {
     since_epoch: Option<u64>,
     fires_floor: u64,
     json: bool,
+    items: bool,
     events_override: Vec<PathBuf>,
     ledger_override: Option<PathBuf>,
 }
@@ -529,6 +531,7 @@ fn parse_args(rest: &[String]) -> Result<NeedsArgs, String> {
     let mut since_epoch: Option<u64> = None;
     let mut fires_floor = DEFAULT_FIRES_FLOOR;
     let mut json = false;
+    let mut items = false;
     let mut events_override: Vec<PathBuf> = Vec::new();
     let mut ledger_override: Option<PathBuf> = None;
 
@@ -549,6 +552,7 @@ fn parse_args(rest: &[String]) -> Result<NeedsArgs, String> {
                     .ok_or("--fires-floor needs a non-negative integer")?
             }
             "--json" | "-J" => json = true,
+            "--items" => items = true,
             "--events" => {
                 events_override.push(PathBuf::from(it.next().ok_or("--events needs a path")?))
             }
@@ -562,6 +566,7 @@ fn parse_args(rest: &[String]) -> Result<NeedsArgs, String> {
         since_epoch,
         fires_floor,
         json,
+        items,
         events_override,
         ledger_override,
     })
@@ -606,6 +611,160 @@ fn default_sources(home: &AgentsHome, cwd: &Path) -> (Vec<PathBuf>, PathBuf) {
     let events = question_journals(&fno_dir, cwd);
     let ledger = fno_dir.join("ledger.json");
     (events, ledger)
+}
+
+/// One store's read outcome for the `--items` sources readout. A store that
+/// exists and fails to read is `readable: false`; the output never shows an
+/// empty `items` as a clean read.
+#[derive(Serialize)]
+struct SourceRead {
+    store: String,
+    readable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// The `--items` leg: the attention projection with named sources. Every
+/// surface that delivers or answers an item reads this one projection, so a
+/// store an operator cannot read is a named source, never a silent empty list.
+fn run_items(home: &AgentsHome, cwd: &Path) -> i32 {
+    let fno_dir = home
+        .root()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(".fno"));
+    let mut sources: Vec<SourceRead> = Vec::new();
+    let mut journals_raw = String::new();
+    for path in question_journals(&fno_dir, cwd) {
+        let store = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("journal")
+            .to_string();
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                sources.push(SourceRead {
+                    store,
+                    readable: true,
+                    error: None,
+                });
+                journals_raw.push_str(&content);
+                if !content.ends_with('\n') {
+                    journals_raw.push('\n');
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // A store that does not exist yet is not a failed read.
+                sources.push(SourceRead {
+                    store,
+                    readable: true,
+                    error: None,
+                });
+            }
+            Err(e) => sources.push(SourceRead {
+                store,
+                readable: false,
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+    // Escalation notes: the (slug, text) pairs the projection folds.
+    let notes_dir = crate::escalation::dir(cwd);
+    let mut notes: Vec<(String, String)> = Vec::new();
+    match std::fs::read_dir(&notes_dir) {
+        Ok(entries) => {
+            let mut paths: Vec<PathBuf> = entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
+                .collect();
+            paths.sort();
+            for path in paths {
+                let slug = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("note")
+                    .to_string();
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => notes.push((slug, text)),
+                    Err(e) => sources.push(SourceRead {
+                        store: format!("escalations/{slug}"),
+                        readable: false,
+                        error: Some(e.to_string()),
+                    }),
+                }
+            }
+            sources.push(SourceRead {
+                store: "escalations".to_string(),
+                readable: true,
+                error: None,
+            });
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            sources.push(SourceRead {
+                store: "escalations".to_string(),
+                readable: true,
+                error: None,
+            });
+        }
+        Err(e) => sources.push(SourceRead {
+            store: "escalations".to_string(),
+            readable: false,
+            error: Some(e.to_string()),
+        }),
+    }
+    // The user lane file.
+    let lane_path = crate::king_board::scope::operator_lane_path(cwd);
+    let lane_text = match std::fs::read_to_string(&lane_path) {
+        Ok(text) => {
+            sources.push(SourceRead {
+                store: "lane".to_string(),
+                readable: true,
+                error: None,
+            });
+            text
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            sources.push(SourceRead {
+                store: "lane".to_string(),
+                readable: true,
+                error: None,
+            });
+            String::new()
+        }
+        Err(e) => {
+            sources.push(SourceRead {
+                store: "lane".to_string(),
+                readable: false,
+                error: Some(e.to_string()),
+            });
+            String::new()
+        }
+    };
+    let items = crate::attention::project(
+        &journals_raw,
+        &notes,
+        &lane_text,
+        crate::claims::now_ms() as u64 / 1000,
+    );
+    let as_of = now_secs();
+    let payload = json!({
+        "as_of": as_of,
+        "sources": sources,
+        "items": items,
+    });
+    println!(
+        "{}",
+        serde_json::to_string(&payload).expect("serializing an owned value never fails")
+    );
+    let any_unreadable = payload["sources"]
+        .as_array()
+        .map(|a| a.iter().any(|s| s.get("readable") == Some(&json!(false))))
+        .unwrap_or(false);
+    if any_unreadable {
+        return 1;
+    }
+    0
 }
 
 /// One held node: the node an open question blocks, that question, and when
@@ -1158,8 +1317,12 @@ pub async fn run_needs(rest: &[String], home: &AgentsHome) -> i32 {
             return 2;
         }
     };
-
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // The --items leg reads the attention projection; everything else is the
+    // session-needs fold (never touches the ledger).
+    if args.items {
+        return run_items(home, &cwd);
+    }
     let (default_events, default_ledger) = default_sources(home, &cwd);
     let explicit_events = !args.events_override.is_empty();
     let mut event_paths = if explicit_events {
