@@ -270,7 +270,8 @@ fn recover_with_policy(
         ..RecoveryReport::default()
     };
     let registry = load_registry_asserted(&home.registry_json())?;
-    report.interrupted_write_temps = crate::quarantine::quarantine_interrupted_write_temps(home, emitter);
+    report.interrupted_write_temps =
+        crate::quarantine::quarantine_interrupted_write_temps(home, emitter);
 
     let registered: std::collections::BTreeSet<String> = registry
         .entries
@@ -470,7 +471,6 @@ fn recover_with_policy(
 
     Ok(report)
 }
-
 
 /// A live process's start time, used to distinguish "our worker" from a recycled
 /// PID. `None` if the process is gone or the lookup is
