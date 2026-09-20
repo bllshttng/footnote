@@ -11055,8 +11055,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
             if pr_num > 0 {
                 // A failed gh read must not erase a pass the journal already
                 // holds at this exact head: classify the local axis. No base
-                // ref is known here, so freshness is exact-head equality,
-                // which fails closed.
+                // ref is known here, so freshness is exact-head equality (fails closed).
                 let journal = review_journal_text(
                     &inputs.project_events,
                     &inputs.global_events,
@@ -11094,9 +11093,8 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     data.clone(),
                 );
                 // The failed read must stay visible: publish the rescued row
-                // (unknown, or covered when the journal held the pass) as a
-                // status so the ruleset refuses on unknown rather than
-                // silently waiting. Only when the
+                // (unknown, or covered when the journal held the pass) so the
+                // ruleset refuses on unknown rather than silently waiting. Only when the
                 // caller PASSED --head (the merge recompute always does): an
                 // explicit head is the PR head a caller that knows; a derived
                 // local HEAD can be the canonical checkout's default-branch
