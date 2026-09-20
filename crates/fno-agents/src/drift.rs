@@ -299,6 +299,59 @@ mod tests {
     }
 
     #[test]
+    fn the_vendored_fno_copy_matches_by_contract() {
+        // The parity guard for crates/fno/src/build_drift.rs (vendored for
+        // the mux server's quiet retirement): both copies must return the
+        // same verdict for the same inputs, so the daemon and the mux server
+        // can never disagree about whether the same installed build is
+        // stale. The types are distinct across the two crates, so the guard
+        // compares the one-word labels for identical field values. Dev-only
+        // link (see Cargo.toml); when the publish gate allows the real
+        // dependency, delete the vendored copy and read the signal from fno
+        // directly.
+        let cases = [
+            ("/opt/a/fno", 1u64, "/opt/a/fno", 1u64),
+            ("/opt/a/fno", 1, "/opt/a/fno", 2),
+            ("/opt/a/fno", 1, "/opt/b/fno", 1),
+        ];
+        for (rpath, rsize, dpath, dsize) in cases {
+            let running = ExeFingerprint {
+                path: PathBuf::from(rpath),
+                mtime_nanos: 1,
+                size: rsize,
+            };
+            let on_disk = ExeFingerprint {
+                path: PathBuf::from(dpath),
+                mtime_nanos: 1,
+                size: dsize,
+            };
+            let theirs_running = fno::build_drift::ExeFingerprint {
+                path: PathBuf::from(rpath),
+                mtime_nanos: 1,
+                size: rsize,
+            };
+            let theirs_disk = fno::build_drift::ExeFingerprint {
+                path: PathBuf::from(dpath),
+                mtime_nanos: 1,
+                size: dsize,
+            };
+            assert_eq!(
+                drift_label(&classify(Some(&running), Some(&on_disk))),
+                fno::build_drift::drift_label(&fno::build_drift::classify(
+                    Some(&theirs_running),
+                    Some(&theirs_disk)
+                )),
+                "verdict disagrees at {rpath}/{rsize} vs {dpath}/{dsize}"
+            );
+        }
+        // Unknown parity: no basis to prove drift on either side.
+        assert_eq!(
+            drift_label(&classify(None, None)),
+            fno::build_drift::drift_label(&fno::build_drift::classify(None, None)),
+        );
+    }
+
+    #[test]
     fn drift_label_maps_every_state() {
         let fp = ExeFingerprint {
             path: PathBuf::from("/x"),

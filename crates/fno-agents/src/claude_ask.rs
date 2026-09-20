@@ -610,7 +610,7 @@ fn match_short_id(line: &str) -> Option<String> {
 /// control bytes are all single-byte ASCII, so iterating by `char` keeps
 /// multi-byte scalars (e.g. the `·` separator) intact. The common case (no
 /// `ESC` at all) borrows the input without allocating.
-fn strip_ansi_csi(s: &str) -> Cow<'_, str> {
+pub(crate) fn strip_ansi_csi(s: &str) -> Cow<'_, str> {
     if !s.contains('\u{1b}') {
         return Cow::Borrowed(s);
     }

@@ -644,7 +644,7 @@ def _default_resolver(short_id: str) -> Optional[str]:
 # Keep the old spelling on the canonical profile key for one release.
 _VERB_ALIASES = {"do": "execute"}
 # King work walks the crown slot whichever verb opens its seed.
-_CROWN_VERBS = frozenset({"reign", "king-for-a-day", "fno-me"})
+_CROWN_VERBS = frozenset({"reign", "fno-me"})
 
 # The one built-in answer to "what permission mode does an unattended worker
 # get". Formerly config.agents.spawn_permission_mode's default; a constant now,
@@ -781,7 +781,7 @@ def _profile_key(seed: Optional[str], known: Optional[Set[str]] = None) -> Optio
     """Classify a seed into its profile key. THREE outcomes : a
     verb-shaped token that resolves (either sigil, anywhere, via
     ``_VERB_ALIASES``) returns the canonical key, except a king verb
-    (``reign``, ``king-for-a-day``, ``fno-me``), which returns ``crown``
+    (``reign``, ``fno-me``), which returns ``crown``
     like a verbless seed; NO verb-shaped token - every king seed, seedless
     spawn, path, plain prose - returns ``crown``,
     so ``[agents.profiles.crown]`` reaches crown spawns like every other

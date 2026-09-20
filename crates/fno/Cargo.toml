@@ -31,6 +31,14 @@ axum = { version = "0.8", features = ["ws"] }
 # Same major versions as crates/fno-agents, which already builds this stack.
 alacritty_terminal = "0.26"
 crossterm = { version = "0.29", features = ["event-stream"] }
+# The sideline's widget layer: `draw_sideline` renders a `Table` into a
+# standalone `Buffer` and `ratatui_blit` copies it into the compositor's
+# cells. No backend, no terminal: default features stay off so neither
+# crate pulls a second crossterm beside the one pinned above. The plan
+# wrote "0.30"; the split crates version independently (the 0.30 umbrella
+# builds on exactly these), so the real lines are 0.1.x / 0.3.x.
+ratatui-core = { version = "0.1", default-features = false, features = ["std"] }
+ratatui-widgets = { version = "0.3", default-features = false, features = ["std"] }
 libc = "0.2"
 portable-pty = "0.9"
 # `pane wait --pattern RE`: regex over a pane's visible grid (script API).

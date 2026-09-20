@@ -1,7 +1,7 @@
 <!-- style-exception: canonical court prose predates the style rules; bundled into skills/reign verbatim -->
 # Court operations
 
-The operations manual for [court mode](../SKILL.md#court-mode-reign-over-the-wave).
+The operations manual for [court mode](once.md#court-mode-reign-over-the-wave).
 The skill carries the *contract* (what a court king owes its wave); this reference carries the *hands* (which verb does each job, what each lifecycle state means, and the copy-paste recipes).
 
 Court needs five worker primitives: **spawn** a teammate, **inject** a next-phase prompt into a live session, **sweep** at a boundary, **wait** on lifecycle, and **read** recent output.

@@ -1844,7 +1844,7 @@ def test_ready_exempts_a_merged_pr_from_the_coverage_conjunct(monkeypatch, capsy
     assert out["ready_blockers"] == []
     # And it says WHY it has no coverage number, in a word that is not the
     # instrument-failed sentinel. `unknown` here read as "the probe died" on
-    # every merged PR - including the path king-for-a-day now prescribes - and
+    # every merged PR - including the path the reign pass now prescribes - and
     # carries its own `review_coverage_unknown` blocker. A deliberate skip and
     # a broken probe must never share a spelling.
     assert out["review_coverage"]["coverage"] == "not_asked"
