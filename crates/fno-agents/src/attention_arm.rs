@@ -73,9 +73,16 @@ pub fn reach_me(cwd: &Path) -> Vec<SinkOrErr> {
             "reach_me is not an array of tables".to_string(),
         )];
     };
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     rows.iter()
         .enumerate()
-        .map(|(i, row)| parse_sink(row, i))
+        .map(|(i, row)| match parse_sink(row, i) {
+            SinkOrErr::Ok(cfg) if !seen.insert(cfg.name.clone()) => SinkOrErr::Err(format!(
+                "reach_me[{i}]: duplicate sink name {:?}; each row needs its own",
+                cfg.name
+            )),
+            other => other,
+        })
         .collect()
 }
 
@@ -244,7 +251,18 @@ pub fn tick_sink(
         let Some(item) = open_by_id.get(block.id.as_str()) else {
             // Not routed: flip only when the item truly closed (absent from
             // the whole open set), never when it was merely filtered away.
-            if !all_open.contains(block.id.as_str()) && block_was_ours(block, &sink.tag) {
+            // An already-flipped block is left alone, or every beat would
+            // append another `Recorded:` receipt to it forever.
+            let already_closed = block
+                .text
+                .lines()
+                .next()
+                .map(|l| l.trim_start().starts_with("- [x]"))
+                .unwrap_or(false);
+            if !already_closed
+                && !all_open.contains(block.id.as_str())
+                && block_was_ours(block, &sink.tag)
+            {
                 close_ids.push((
                     block.id.clone(),
                     "Recorded: the item closed away from the file".to_string(),
@@ -324,6 +342,11 @@ fn settle_block(
                 }
             }
             other => {
+                // A ticked top line means "done" only for a pin; on a
+                // question it would close the ask without naming the option.
+                if matches!(other, FileAnswer::Done) && item.kind != "pin" {
+                    return;
+                }
                 let answer_text = answer_text_of(item, &other);
                 match io.record(item, &sink.name, &other) {
                     Ok(receipt) => {

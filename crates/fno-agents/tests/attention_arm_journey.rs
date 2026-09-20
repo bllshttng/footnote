@@ -226,3 +226,29 @@ fn conflict_markers_refuse_the_beat() {
     let t = tick_sink(&items(), &sink(&file), &mut st, 1000, &mut io);
     assert_eq!(t.skip.as_deref(), Some("conflict_markers"));
 }
+
+#[test]
+fn an_already_flipped_block_gains_no_second_receipt() {
+    let dir = workdir("closed");
+    let file = dir.join("board.md");
+    let mut st = state();
+    let mut io = JourneyIo {
+        records: 0,
+        clears: vec![],
+    };
+    let _ = tick_sink(&items(), &sink(&file), &mut st, 1000, &mut io);
+    // The item closes away from the file: the projection no longer holds it
+    // (empty items), so the arm's close-elsewhere flip fires.
+    let t1 = tick_sink(&[], &sink(&file), &mut st, 1300, &mut io);
+    assert_eq!(t1.flips, 1, "the closed item's block flips once");
+    let once = std::fs::read_to_string(&file).unwrap();
+    // Two more beats with the item still gone: no additional receipts.
+    let _ = tick_sink(&[], &sink(&file), &mut st, 1400, &mut io);
+    let _ = tick_sink(&[], &sink(&file), &mut st, 1500, &mut io);
+    let twice = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        once.matches("Recorded:").count(),
+        twice.matches("Recorded:").count(),
+        "a closed block must not gain receipts on later beats"
+    );
+}
