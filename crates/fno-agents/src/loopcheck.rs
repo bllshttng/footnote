@@ -10733,8 +10733,8 @@ fn exit4_quota(gh_bin: &str, cwd: &Path, read: &str, tail: &str) -> (bool, Optio
     (secondary, quota)
 }
 
-/// The exit-4 reason for a secondary (burst) limit refusal. Shared by BOTH
-/// exit-4 arms so the stdout contract does not fork on whether `--pr` was
+/// The exit-4 reason for a secondary (burst) limit refusal. Shared by every
+/// exit-4 arm so the stdout contract does not fork on whether `--pr` was
 /// passed: the verdict came from the ONE exempt `gh api rate_limit` probe
 /// (`refusal_is_secondary` - the endpoint answers during a refusal and counts
 /// against no bucket), and `graphql_*` read null because the secondary

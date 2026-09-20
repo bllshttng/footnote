@@ -385,8 +385,8 @@ exit 1"#,
 }
 
 /// A pass attested at the exact head survives a failed gh read: the failed
-/// read classifies the local axis instead of reporting unknown on sight
-/// (x-0302). Exit stays 4 - the gh read did fail - but the emitted row
+/// read classifies the local axis instead of reporting unknown on sight.
+/// Exit stays 4 - the gh read did fail - but the emitted row
 /// carries the pass.
 #[test]
 fn failed_gh_read_rescues_a_pass_attested_at_this_head() {
@@ -463,7 +463,7 @@ exit 1"#,
 
 /// The failed read with an explicit head and no local pass answers exactly
 /// today's row: unknown, no verdicts. The rescue adds nothing when the
-/// journal holds no pass at this head (x-0302).
+/// journal holds no pass at this head.
 #[test]
 fn failed_gh_read_with_head_and_no_local_pass_stays_unknown() {
     let parent = TempDir::new().unwrap();
@@ -506,7 +506,74 @@ exit 1"#,
 
 /// A pass attested at an OLDER head stays unknown on a failed read: with no
 /// base ref the rescue cannot prove a carry across the head move, so it
-/// fails closed (x-0302).
+/// fails closed.
+
+/// A refused invocation at the exact head surfaces on a failed-read row the
+/// same way a healthy read emits it: coverage stays unknown (a refusal
+/// never counts toward coverage), and the verdict names the attempt rather
+/// than dropping it.
+#[test]
+fn failed_gh_read_surfaces_a_refused_invocation_at_this_head() {
+    let parent = TempDir::new().unwrap();
+    let (cwd, project, global) = fixture(parent.path(), "rescue-refused");
+    fs::write(
+        &project,
+        serde_json::json!({
+            "type": "review_invocation",
+            "data": {"stage": "refused", "head_sha": HEAD,
+                     "reason": "empty_diff", "reviewer": "code-review"}
+        })
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+    let bins = TempDir::new().unwrap();
+    let gh = make_script(
+        bins.path(),
+        "gh",
+        r#"if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+echo 'gh: network unreachable' >&2
+exit 1"#,
+    );
+    let git = make_script(bins.path(), "git", &format!("echo {HEAD}"));
+    let (code, json) = run_review_coverage_capture(&vec![
+        "review-coverage".to_string(),
+        "--cwd".to_string(),
+        cwd.display().to_string(),
+        "--pr".to_string(),
+        "842".to_string(),
+        "--head".to_string(),
+        HEAD.to_string(),
+        "--events".to_string(),
+        project.display().to_string(),
+        "--global-events".to_string(),
+        global.display().to_string(),
+        format!("--gh-bin={}", gh.display()),
+        format!("--git-bin={}", git.display()),
+        "--global-settings".to_string(),
+        "/nonexistent/global-settings.yaml".to_string(),
+        "--author-harness".to_string(),
+        "none".to_string(),
+    ]);
+    assert_eq!(code, 4, "a failed read is exit 4: {json}");
+    let data: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(data["coverage"], serde_json::json!("unknown"));
+    let verdicts = data["verdicts"].as_array().expect("verdicts present");
+    let refused = verdicts
+        .iter()
+        .find(|v| v["verdict"] == serde_json::json!("refused"))
+        .expect("the refused invocation is a verdict");
+    assert_eq!(refused["reviewed_sha"], serde_json::json!(HEAD));
+    assert_eq!(refused["refusal_reason"], serde_json::json!("empty_diff"));
+    let mut row = data.clone();
+    if let Some(obj) = row.as_object_mut() {
+        obj.remove("graphql_remaining");
+        obj.remove("graphql_exhausted");
+        obj.remove("reason");
+    }
+    assert_eq!(last_coverage(&project).as_ref(), Some(&row));
+    assert_eq!(last_coverage(&global).as_ref(), Some(&row));
+}
 #[test]
 fn failed_gh_read_pass_at_older_head_stays_unknown() {
     let parent = TempDir::new().unwrap();
