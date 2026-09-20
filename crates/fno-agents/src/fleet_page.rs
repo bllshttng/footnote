@@ -194,7 +194,7 @@ mod tests {
             Ok("fleet.html rendered: 1 readings".into())
         });
         assert_eq!(success.acted, 1);
-        let success_log = std::fs::read_to_string(success_home.events_jsonl()).unwrap();
+        let success_log = crate::events::committed_journal_text(&success_home.events_jsonl());
         assert!(success_log.contains("\"arm\":\"fleet_page\""));
         assert!(success_log.contains("\"interval_s\":1800"));
 

@@ -134,10 +134,10 @@ pub fn absence_verdict(
 }
 
 fn absence_evidence(journal: &Path, stderr: &Path) -> String {
-    let journal_lines = fs::read_to_string(journal)
-        .unwrap_or_default()
-        .lines()
-        .count();
+    let journal_lines = match fno_agents::event_store::query_events(journal, &Default::default()) {
+        Ok(rows) => rows.len(),
+        Err(_) => 0,
+    };
     let mut out = format!(
         "journal read: {} ({journal_lines} lines)\n",
         journal.display()
@@ -202,11 +202,16 @@ pub fn start_daemon(home: &fno_agents::paths::AgentsHome) -> DaemonChild {
 
 /// How many lines of the daemon's event log carry `needle`.
 pub fn count_events(home: &fno_agents::paths::AgentsHome, needle: &str) -> usize {
-    fs::read_to_string(home.events_jsonl())
-        .unwrap_or_default()
-        .lines()
-        .filter(|line| line.contains(needle))
-        .count()
+    // The store commit is the write boundary: the daemon's rows live in the
+    // store, so the count reads committed rows, never raw journal bytes.
+    let journal = home.events_jsonl();
+    match fno_agents::event_store::query_events(&journal, &Default::default()) {
+        Ok(rows) => rows
+            .iter()
+            .filter(|row| row.line.contains(needle))
+            .count(),
+        Err(_) => 0,
+    }
 }
 
 /// Wait until `needle` has been written at least `at_least` times.

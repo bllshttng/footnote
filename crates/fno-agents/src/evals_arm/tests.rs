@@ -213,7 +213,7 @@ fn incident_outranks_the_capacity_gate() {
     assert_eq!(code, 0);
     // The skip token rides the stdout receipt; the journal row carries the
     // pause detail.
-    let text = fs::read_to_string(&events).unwrap_or_default();
+    let text = crate::events::committed_journal_text(&events);
     assert!(
         text.contains("fleet incident stopped at generation 9"),
         "{text}"
