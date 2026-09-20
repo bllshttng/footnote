@@ -891,7 +891,12 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "ping" {
         return fno_agents::client_verbs::run_ping(&args[1..]);
     }
-    if verb == "resume" {
+    // `resume --substrate thread` is the pane-to-thread LIFECYCLE move, not a
+    // re-entry: it falls through to build_request, which routes it to the
+    // daemon's agent.convert. The daemon owns it because the agent lock
+    // serializes it and a mid-move claim must be pinned to a process that
+    // outlives the client.
+    if verb == "resume" && !fno_agents::resume_args::requests_conversion(&args[1..]) {
         // resume_wake's wake arms build their own runtimes and block_on them;
         // on this thread that panics inside the ambient runtime. A fresh
         // thread is legal in both contexts (gc_sweep::stop_row_process is
@@ -4125,6 +4130,17 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "rename" => {
             fno_agents::rename::request(&mut params, &positional)?;
             "agent.rename"
+        }
+        // Only a `--substrate` resume reaches here; a bare resume is the
+        // client-side re-entry, intercepted before build_request. The argv
+        // is re-parsed through the resume parser rather than read off
+        // `params`, so the one refusal vocabulary answers both doors.
+        "resume" => {
+            let parsed = fno_agents::resume_args::parse_conversion_args(rest)?;
+            params.insert("name".into(), Value::String(parsed.name));
+            params.insert("dry_run".into(), Value::Bool(parsed.dry_run));
+            params.insert("allow_new_id".into(), Value::Bool(parsed.allow_new_id));
+            "agent.convert"
         }
         "reconcile" => "agent.reconcile",
         other => {

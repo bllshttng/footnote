@@ -2140,27 +2140,23 @@ fn should_delegate_claude_live_attach(
 /// extracted so the flag grammar is unit-testable without a registry fixture;
 /// `--message` must be ACCEPTED here or a `--message` resume dies at argv
 /// before the claude live-attach delegation that consumes it is ever reached.
-use crate::resume_args::parse_resume_args;
 use crate::resume_wake::{
     acquire_resume_session_claim, is_uuid_shaped, run_and_confirm_respawn, MUX_RESUME_CLAIM_TTL_MS,
 };
 
 pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
-    let (name, print_command, message, cross_project, cwd_override, account) =
-        match parse_resume_args(rest) {
-            Ok(v) => v,
-            Err(code) => return code,
-        };
-
-    if let Some(path) = cwd_override.as_deref() {
-        if !Path::new(path).is_dir() {
-            eprintln!(
-                "fno agents resume: replacement cwd {} is not an existing directory.",
-                py_repr_str(path)
-            );
-            return 13;
-        }
-    }
+    let crate::resume_args::ResumeArgs {
+        name,
+        print_command,
+        message,
+        cross_project,
+        cwd: cwd_override,
+        account,
+        ..
+    } = match crate::resume_args::parse_and_validate(rest) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
     let scope_cwd = cwd_override.as_deref().map(Path::new);
 
     let entries = match read_registry_entries(&home.registry_json()) {

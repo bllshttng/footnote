@@ -389,4 +389,107 @@ impl Core {
             text: format!("reseat -> {key} (portal {slot}, pane {pane})"),
         }
     }
+
+    /// Hand a keeper-hosted pane off to the thread lane: rename its keeper
+    /// socket to `target`, drop the pane from the layout and the persisted
+    /// squad, and release the server's connection WITHOUT a Kill frame.
+    ///
+    /// The child never stops. A renamed unix socket still reaches the same
+    /// listener (measured on macOS 25.3: the new path answers, the old path
+    /// refuses with ENOENT), so the daemon's keeper sweep finds the same
+    /// keeper at the thread socket and rebinds the row to it.
+    ///
+    /// This is a different operation from a reseat, which moves the VIEWER
+    /// and leaves the server hosting the process. Here the server stops
+    /// hosting anything.
+    ///
+    /// Ordering is the whole safety argument. Every refusal happens before
+    /// the first mutation, the rename is undone if the detach fails, and the
+    /// release runs last - so no failure leaves a pane whose keeper the
+    /// server can no longer name.
+    pub(super) fn hand_off_pane(&mut self, pane: u64, target: &str) -> ServerMsg {
+        let target = std::path::PathBuf::from(target);
+        let source = match self.panes.get(&pane) {
+            None => {
+                return ServerMsg::Err {
+                    code: err_code::NOT_FOUND,
+                    msg: format!("no such pane: {pane}"),
+                }
+            }
+            Some(entry) if !entry.pty.is_child_alive() => {
+                return ServerMsg::Err {
+                    code: err_code::DEAD_PANE,
+                    msg: format!("pane {pane} is no longer live; there is nothing to hand off"),
+                }
+            }
+            // An inline pane has no keeper: the server itself holds the
+            // master, so releasing the entry would orphan the pty and kill
+            // the child with it. Refusing names the relaunch that fixes it.
+            Some(entry) => match entry.pty.keeper_socket_path() {
+                Some(path) => path.to_path_buf(),
+                None => {
+                    return ServerMsg::Err {
+                        code: err_code::BAD_REQUEST,
+                        msg: format!(
+                            "pane {pane} is hosted inline, not by a keeper, so its process cannot \
+                             outlive this server; stop and resume the session to relaunch it \
+                             keeper-hosted, then convert"
+                        ),
+                    }
+                }
+            },
+        };
+        if let Some(parent) = target.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                return ServerMsg::Err {
+                    code: err_code::BAD_REQUEST,
+                    msg: format!(
+                        "hand-off target dir {} is unusable: {error}",
+                        parent.display()
+                    ),
+                };
+            }
+        }
+        // The first mutation, and the one that can fail for ordinary reasons
+        // (a target on another filesystem, an unwritable dir). Nothing has
+        // been touched yet, so a failure here leaves the pane exactly as it
+        // was.
+        if let Err(error) = std::fs::rename(&source, &target) {
+            return ServerMsg::Err {
+                code: err_code::BAD_REQUEST,
+                msg: format!(
+                    "hand-off refused: {} could not be renamed to {}: {error}",
+                    source.display(),
+                    target.display()
+                ),
+            };
+        }
+        if let Err(error) = self.detach_worker_pane(pane) {
+            // Put the socket back. The pane is still seated and still
+            // served, so leaving it under the thread name would hand the
+            // daemon's sweep a socket whose pane the server still owns.
+            let _ = std::fs::rename(&target, &source);
+            return ServerMsg::Err {
+                code: err_code::BAD_REQUEST,
+                msg: format!("hand-off refused: pane {pane} could not leave the layout: {error}"),
+            };
+        }
+        // The pane left the layout, so the squad must forget it outright.
+        // `detach_worker_pane` persists it as DETACHED, which is the portal
+        // story: restore would rebuild a pane for a session that now lives
+        // on the thread lane, and two writers would be pointed at one child.
+        if let Some(detached) = self.detached_panes.get(&pane).cloned() {
+            self.reconcile_worker_member_close(&detached, false);
+        }
+        // Last: drop the entry without a Kill frame. The keeper reads the
+        // closed socket as a hangup, which it survives with its child.
+        self.release_pane(pane);
+        self.push_layout(true);
+        ServerMsg::Notice {
+            text: format!(
+                "handed off: pane {pane} keeper socket -> {} (child still running)",
+                target.display()
+            ),
+        }
+    }
 }

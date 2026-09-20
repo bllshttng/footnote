@@ -40,15 +40,29 @@ pub(crate) async fn bounded_claude_stop(
     short: &str,
     timeout: Duration,
 ) -> Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed> {
-    let stop = tokio::process::Command::new("claude")
+    bounded_claude_stop_in(short, timeout, None).await
+}
+
+/// The same stop, pinned to one claude account root. A session born under an
+/// isolated account is invisible to the ambient root, so a stop sent there
+/// exits nonzero and leaves the session running.
+pub(crate) async fn bounded_claude_stop_in(
+    short: &str,
+    timeout: Duration,
+    config_dir: Option<&Path>,
+) -> Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed> {
+    let mut command = tokio::process::Command::new("claude");
+    command
         .arg("stop")
         .arg(short)
         .current_dir(lifecycle_child_cwd(
             crate::paths::AgentsHome::from_env().root(),
         ))
-        .kill_on_drop(true)
-        .output();
-    tokio::time::timeout(timeout, stop).await
+        .kill_on_drop(true);
+    if let Some(dir) = config_dir {
+        command.env("CLAUDE_CONFIG_DIR", dir);
+    }
+    tokio::time::timeout(timeout, command.output()).await
 }
 
 fn helper_registry_path(registry_path: &Path) -> std::io::Result<PathBuf> {
