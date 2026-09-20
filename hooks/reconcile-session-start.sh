@@ -9,6 +9,10 @@
 # the point: session start stays instant.
 set -euo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 REPO_ROOT="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -62,6 +66,29 @@ if [[ -f "$RESULT" ]] && command -v jq >/dev/null 2>&1; then
         echo "reconcile: last sweep could not read the ship count for ${unknown_n} node(s) (${nodes}); they stay open. The read failed retryably, so a later sweep clears them by itself. Do not force these closed - the count is unconfirmed, not short."
     fi
     mv -f "$RESULT" "$RESULT.shown" 2>/dev/null || true
+fi
+
+# 1a. Orphan-plan binder result: the sweep that co-fires the binder also
+#     lands .orphan-plans-result.json; surface what it bound and what it
+#     HELD, before the consume-after-show move hides it. Every jq read keeps
+#     the `// empty` + `|| true` shape the block above documents: a cosmetic
+#     line must never kill the trigger at the bottom of this hook.
+ORPHAN_RESULT="$REPO_ROOT/.fno/.orphan-plans-result.json"
+if [[ -f "$ORPHAN_RESULT" ]] && command -v jq >/dev/null 2>&1; then
+    o_b=$(jq -r '[(.rows // [])[] | select(.verdict? == "bound_now")] | length' "$ORPHAN_RESULT" 2>/dev/null || echo 0)
+    [[ "$o_b" =~ ^[0-9]+$ ]] || o_b=0
+    if (( o_b > 0 )); then
+        o_ids=$(jq -r '[(.rows // [])[] | select(.verdict? == "bound_now") | .node_id] | join(",")' "$ORPHAN_RESULT" 2>/dev/null || true)
+        echo "reconcile: bound ${o_b} orphan plan(s) to their nodes (${o_ids})."
+    fi
+    o_held=$(jq -r '[(.rows // [])[] | select(.verdict? == "unfinalized" or .verdict? == "ambiguous" or .verdict? == "id_reuse" or .verdict? == "bind_failed")] | length' "$ORPHAN_RESULT" 2>/dev/null || echo 0)
+    [[ "$o_held" =~ ^[0-9]+$ ]] || o_held=0
+    if (( o_held > 0 )); then
+        o_list=$(jq -r '[(.rows // [])[] | select(.verdict? == "unfinalized" or .verdict? == "ambiguous" or .verdict? == "id_reuse" or .verdict? == "bind_failed")] | map("\(.node_id):\(.verdict)") | join(", ")' "$ORPHAN_RESULT" 2>/dev/null || true)
+        o_dir=$(jq -r '.plans_dir // empty' "$ORPHAN_RESULT" 2>/dev/null || true)
+        echo "reconcile: ${o_held} plan(s) claim a node that is still unbound (${o_list}). Run fno-agents backlog-orphan-plans --plans-dir ${o_dir} for the per-plan reason."
+    fi
+    mv -f "$ORPHAN_RESULT" "$ORPHAN_RESULT.shown" 2>/dev/null || true
 fi
 
 # 1b. Advisory: surface retro-pending sentinels still awaiting harvest. This is

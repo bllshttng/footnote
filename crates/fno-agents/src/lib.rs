@@ -75,6 +75,7 @@ pub mod check_supersession;
 pub mod claim_store;
 pub mod claim_verbs;
 pub mod claims;
+pub mod claims_root;
 pub mod claude_adopt;
 pub mod claude_ask;
 pub mod claude_attach;
@@ -82,6 +83,7 @@ pub mod claude_drive;
 pub mod claude_roster;
 pub mod claude_sessions;
 pub mod claude_stream_entry;
+pub mod claude_supervisor;
 pub mod cli_args;
 pub mod client;
 pub mod client_verbs;
@@ -105,9 +107,11 @@ pub mod compaction;
 mod completion_output;
 pub mod component_update;
 pub mod context_run;
+pub mod convert;
 pub mod court_fold;
 pub mod crown_settle;
 pub mod crown_split;
+pub mod crown_widen;
 pub mod cursor_agent;
 pub mod daemon;
 pub mod decision_index;
@@ -131,6 +135,7 @@ pub mod feed;
 pub mod finalize;
 pub mod fleet_incident;
 pub mod fleet_load;
+pub mod fleet_page;
 pub mod flight_gate;
 pub mod gc;
 pub mod gc_claude_stop;
@@ -227,6 +232,7 @@ pub mod provider_cap;
 pub mod provider_cap_verbs;
 pub mod publish_review;
 pub mod question_sweep;
+pub mod quiet_retire;
 pub mod readiness;
 pub mod reap_release;
 pub mod reap_render;
@@ -1002,6 +1008,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // The keeper's render trigger failed a pass (waves 8-9 store cutover);
     // carries the version and a stderr tail, and the backoff retries it.
     "graph_render_failed",
+    // Pane-to-thread conversion: one per phase of the agent.convert
+    // transaction (classified, claims-held, pane-stopped, hand-off,
+    // resumed, flipped, rolled-back), carrying the name and strategy.
+    "agent_convert_phase",
     "agent_stopped",
     // Stop/rm claims release: the receipt event for the claims a
     // stopped or removed worker held; one emit per stop/rm that ran one.
@@ -1147,6 +1157,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "daemon_started",
     "daemon_exited",
     "daemon_idle_pending_exit",
+    // Drift retirement (daemon-emitted): the daemon measured its own
+    // build drifted and, at a quiet tick with no live worker, retired through
+    // the graceful tail so the next lazy start runs the installed binary.
+    "daemon_drift_pending_exit",
     "daemon_shutting_down",
     // The socket path stopped resolving to the inode this daemon bound, so
     // something else now owns it and this process is unreachable.

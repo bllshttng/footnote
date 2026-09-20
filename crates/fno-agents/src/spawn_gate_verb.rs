@@ -349,17 +349,22 @@ mod probe {
             reading.held,
         ) {
             if !caller.is_empty() && held >= share {
+                let mut message = format!(
+                    "this reign holds {held} of max_live {cap} across {kings} kings (share {share})"
+                );
+                message.push_str(&crate::spawn_gate::held_rows_suffix(
+                    reading.held_rows.as_ref(),
+                ));
                 return refuse_with(
                     "king_share",
-                    format!(
-                        "this reign holds {held} of max_live {cap} across {kings} kings (share {share})"
-                    ),
+                    message,
                     json!({
                         "king": caller,
                         "held": held,
                         "share": share,
                         "max_live": cap,
                         "kings": kings,
+                        "held_rows": reading.held_rows.clone().unwrap_or_default(),
                     }),
                     &make_rows(None, slots, cap, ram_row, cpu_rows),
                     out,
@@ -911,6 +916,86 @@ mod tests {
             Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
             None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The probe's king_share refusal names the rows it charged to the
+    /// caller, in `message` and as a `held_rows` key, from the same reading
+    /// `share_json` reports in status mode.
+    #[test]
+    fn probe_king_share_refusal_names_the_held_rows() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-kingshare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            // max_live 2 with one king divides to share 2; the fixture rows
+            // carry no pid, so the fleet slot count stays 0 and the refusal
+            // the probe answers with is the king share, not max_live.
+            "[agents]\nmax_live = 2\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
+        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+        std::env::set_var(
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
+        );
+        let crowned = r#"{"name":"king-a","harness":"claude","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"harness_session_id":"session-aaaaaaaa"}"#;
+        let worker = |name: &str, status: &str| {
+            format!(
+                r#"{{"name":"{name}","harness":"claude","provider":"zai","cwd":"/tmp","status":"{status}","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"session-aaaaaaaa"}}"#
+            )
+        };
+        std::fs::write(
+            home.join("registry.json"),
+            format!(
+                r#"{{"schema_version":{},"entries":[{},{},{},{}]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION,
+                crowned,
+                worker("w1", "live"),
+                worker("w2", "live"),
+                // The stopped shape: a row the stop wrote terminal while the
+                // process survived. The share does not charge it, so the
+                // naming must not either - the sweep that re-marks it live
+                // is the one that puts it back in the count.
+                worker("w3", "orphaned")
+            ),
+        )
+        .unwrap();
+
+        let answer = probe::answer(&json!({
+            "name": "probe-kingshare",
+            "substrate": "bg",
+            "caller_session": "session-aaaaaaaa"
+        }));
+
+        std::env::remove_var(crate::paths::HOME_ENV);
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        match prior_payload {
+            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+        }
+        assert_eq!(answer["verdict"], "refused");
+        assert_eq!(answer["reason"], "king_share");
+        assert_eq!(
+            answer["message"],
+            "this reign holds 2 of max_live 2 across 1 kings (share 2); the rows charged to you are w1, w2"
+        );
+        assert_eq!(answer["held_rows"], json!(["w1", "w2"]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

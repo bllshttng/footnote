@@ -150,6 +150,12 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         scheduler: SCHED_DAEMON,
         upstream: None,
     },
+    ArmSpec {
+        arm: "fleet_page",
+        default_interval_s: crate::fleet_page::FLEET_PAGE_INTERVAL_S,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+    },
 ];
 
 /// Build the `data` object of one tick row. `skip_reason` is a single token
@@ -1119,7 +1125,7 @@ mod tests {
     /// `KNOWN_ARMS` row, daemon scheduler, the 900s beat for merge_close.
     #[test]
     fn arm_watch_is_the_eleventh_known_arm_merge_close_the_thirteenth() {
-        assert_eq!(KNOWN_ARMS.len(), 15);
+        assert_eq!(KNOWN_ARMS.len(), 16);
         let spec = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "arm_watch")
@@ -1143,6 +1149,15 @@ mod tests {
             mc.default_interval_s,
             crate::merge_close::MERGE_CLOSE_INTERVAL_S
         );
+        let fleet = KNOWN_ARMS
+            .iter()
+            .find(|s| s.arm == "fleet_page")
+            .expect("fleet_page row");
+        assert_eq!(
+            fleet.default_interval_s,
+            crate::fleet_page::FLEET_PAGE_INTERVAL_S
+        );
+        assert_eq!(fleet.scheduler, SCHED_DAEMON);
         assert_eq!(mc.scheduler, SCHED_DAEMON);
         let cl = KNOWN_ARMS
             .iter()

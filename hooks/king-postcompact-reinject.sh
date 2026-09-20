@@ -19,6 +19,10 @@
 # reads is missing: no lib, no fno, no registry row, no crown, no brief.
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 # BASH_SOURCE-relative, never `git rev-parse`: cwd is the session's repo, not
 # the plugin (the fix banked from 502af79f2).
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -69,7 +73,14 @@ SID="$(postcompact_resolve_sid "$SID" "$TRANSCRIPT")"
 # a short id in one field and the full harness id in the other.
 command -v fno >/dev/null 2>&1 || exit 0
 command -v jq  >/dev/null 2>&1 || exit 0
-AGENTS_JSON="$(fno agents registry-json 2>/dev/null || true)"
+# A hook is never a delegated one-verb child, so a FNO_AGENTS_RUNTIME pin here
+# has leaked off a spawned worker: strip it for this read and keep the exit
+# code, so a broken read never reads silently as "no row" (the crown
+# was unreadable for a whole reign under the leaked pin).
+AGENTS_JSON="$(env -u FNO_AGENTS_RUNTIME fno agents registry-json 2>/dev/null)"
+REG_RC=$?
+[[ "$REG_RC" -ne 0 ]] \
+  && echo "king-postcompact-reinject.sh: fno agents registry-json exited $REG_RC; crown treated as unknown (the FNO_AGENTS_RUNTIME pin was stripped before the read)" >&2
 MY_ROW="$(printf '%s' "$AGENTS_JSON" | jq -c --arg sid "$SID" \
     '.agents[] | select(.session_id == $sid or .harness_session_id == $sid)' 2>/dev/null | head -1)"
 [[ -n "$MY_ROW" ]] || exit 0

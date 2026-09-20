@@ -238,7 +238,7 @@ fn accepted_turn_after_painted_draft_confirms_exactly_once() {
     let handle = spawn_keeper(&rig, ENVELOPE, script);
     let outcome = deliver_via_keeper_socket_in(
         &rig.home,
-        &rig.pi_root,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
         &rig.grok_root,
         "sess-acc",
         ENVELOPE,
@@ -266,7 +266,7 @@ fn painted_draft_without_acceptance_stays_unconfirmed() {
     let handle = spawn_keeper(&rig, ENVELOPE, script);
     let outcome = deliver_via_keeper_socket_in(
         &rig.home,
-        &rig.pi_root,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
         &rig.grok_root,
         "sess-draft",
         ENVELOPE,
@@ -295,7 +295,7 @@ fn fragmented_paint_stays_unconfirmed() {
     let handle = spawn_keeper(&rig, ENVELOPE, script);
     let outcome = deliver_via_keeper_socket_in(
         &rig.home,
-        &rig.pi_root,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
         &rig.grok_root,
         "sess-frag",
         ENVELOPE,
@@ -327,7 +327,7 @@ fn same_prefix_paint_stays_unconfirmed() {
     let handle = spawn_keeper(&rig, ENVELOPE, script);
     let outcome = deliver_via_keeper_socket_in(
         &rig.home,
-        &rig.pi_root,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
         &rig.grok_root,
         "sess-prefix",
         ENVELOPE,
@@ -351,7 +351,7 @@ fn stale_accepted_record_before_the_send_stays_unconfirmed() {
     let handle = spawn_keeper(&rig, ENVELOPE, Script::default());
     let outcome = deliver_via_keeper_socket_in(
         &rig.home,
-        &rig.pi_root,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
         &rig.grok_root,
         "sess-stale",
         ENVELOPE,
@@ -381,7 +381,7 @@ fn newly_accepted_record_confirms_past_an_existing_baseline() {
     let handle = spawn_keeper(&rig, ENVELOPE, script);
     let outcome = deliver_via_keeper_socket_in(
         &rig.home,
-        &rig.pi_root,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
         &rig.grok_root,
         "sess-fresh",
         ENVELOPE,
@@ -409,7 +409,7 @@ fn wrong_session_record_stays_unconfirmed() {
     let handle = spawn_keeper(&rig, ENVELOPE, script);
     let outcome = deliver_via_keeper_socket_in(
         &rig.home,
-        &rig.pi_root,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
         &rig.grok_root,
         "sess-mine",
         ENVELOPE,
@@ -435,7 +435,7 @@ fn unavailable_reader_refuses_before_typing() {
     let handle = spawn_keeper(&rig, ENVELOPE, Script::default());
     let outcome = deliver_via_keeper_socket_in(
         &rig.home,
-        &rig.pi_root,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
         &rig.grok_root,
         "sess-dup",
         ENVELOPE,
@@ -467,7 +467,7 @@ fn unconfirmable_lane_keeps_draining_keeper_output() {
     let handle = spawn_keeper(&rig, ENVELOPE, script);
     let outcome = deliver_via_keeper_socket_in(
         &rig.home,
-        &rig.pi_root,
+        Some(&fno_agents::pi::PiStore::cwd_scoped(rig.pi_root.clone())),
         &rig.grok_root,
         "sess-drain",
         ENVELOPE,

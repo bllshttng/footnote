@@ -65,10 +65,12 @@ use crate::vt::{self, frame_text, Modes};
 mod agent_actions;
 mod agent_launch;
 mod agent_rows_join;
+mod drift_retire;
 mod keeper_adopt;
 pub(crate) mod lifecycle_target;
 mod pane_close;
 mod pane_identity;
+mod pane_release;
 mod pane_reseat;
 pub(crate) mod placement_fit;
 mod portal_reach;
@@ -76,10 +78,12 @@ mod restore_route_gate;
 mod resume_argv;
 mod retire_session;
 mod row_set;
+mod session_guard;
 mod shutdown_capture;
 mod squad_persistence;
 mod squad_sync;
 mod truth_probe;
+use self::session_guard::{ConnAlive, SocketGuard};
 
 use self::agent_actions::{run_mail_send, run_reap, run_reentry_plan};
 use self::keeper_adopt::{keeper_worker_bin, AdoptedKeeper};
@@ -821,6 +825,7 @@ pub(crate) enum CoreMsg {
     },
     PaneKill {
         pane: u64,
+        hand_off_to: Option<String>,
         reply: ControlReply,
     },
     /// Acquire/release the per-pane writer claim (4a-G3, brief Locked 5).
@@ -1395,40 +1400,6 @@ fn parse_loc_sel(s: &str) -> Result<LocSel, String> {
 enum Flow {
     Continue,
     Shutdown,
-}
-
-/// Unlink the socket AND both its sidecars (`.ver`, `.pid`) on
-/// every exit path out of `run` (a SIGKILL leaves them behind by design; the
-/// stale-socket path in `bind_or_probe` covers that, and a lingering `.ver`
-/// is inert - `ls` only reads it for a LIVE server, and a dead one probes
-/// `Stale`).
-struct SocketGuard(PathBuf);
-
-impl Drop for SocketGuard {
-    fn drop(&mut self) {
-        let _ = crate::proto::remove_session_files(&self.0);
-        crate::proto::remove_startup_guard(&self.0);
-    }
-}
-
-/// RAII count of in-flight connections, read by the FNO_E2E idle reaper. A
-/// control one-shot (`pane run`, kill-server, a probe) is NOT an attached
-/// client, so without this the reaper can fire mid-verb on a young server
-/// whose test grace is shorter than a loaded machine's verb latency, killing
-/// the server out from under a live peer.
-struct ConnAlive(std::sync::Arc<std::sync::atomic::AtomicUsize>);
-
-impl ConnAlive {
-    fn new(count: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
-        count.fetch_add(1, std::sync::atomic::Ordering::Release);
-        ConnAlive(count.clone())
-    }
-}
-
-impl Drop for ConnAlive {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::Release);
-    }
 }
 
 /// Run the server on `socket`. Returns the process exit code.
@@ -3062,55 +3033,6 @@ impl Core {
     /// Kill+reap a pane's PTY and retire its watch (flipping `exited` so any
     /// subscribed `PaneWait` returns `PaneExited`). The single place panes
     /// leave `panes`/`pane_watch`, so the two maps never drift. Idempotent.
-    fn reap_pane(&mut self, pid: u64) {
-        if let Some(entry) = self.panes.remove(&pid) {
-            if let Ok(mut children) = self.pane_children.lock() {
-                if let Some(child_pid) = entry.pty.child_pid() {
-                    let child = PaneChild {
-                        pid: child_pid,
-                        keeper_hosted: entry.pty.is_keeper_hosted(),
-                    };
-                    children.remove(&child);
-                }
-                entry.pty.kill();
-            } else {
-                entry.pty.kill();
-            }
-        }
-        // A keeper shell's rc dir is this server's to clean: the pane is
-        // closing, so the dir its shell still references goes with it. (An
-        // inline pane's dir dies with its own `ShellRc`.)
-        if let Some(dir) = self.shell_rc_dirs.remove(&pid) {
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-        // Pane exit releases the writer claim UNCONDITIONALLY (Locked 5): a
-        // held claim never blocks the close cascade.
-        self.claims.remove(&pid);
-        self.claim_eligible.remove(&pid);
-        self.touch_last_emit.remove(&pid);
-        self.wheel_gate.remove(&pid);
-        self.pane_stats.write().unwrap().remove(&pid);
-        // Drop any attach mapping onto the dead pane so a re-attach
-        // spawns fresh rather than focusing a corpse (the lazy `panes` check in
-        // `agent_rows()` is the belt to this eager suspenders - Discretion 3).
-        self.attached.retain(|_, p| *p != pid);
-        // Same for the worker resume map: the pane died, so the row
-        // returns to idle and resumable - never a mapping at a corpse.
-        self.worker_pane.retain(|_, panes| {
-            panes.retain(|candidate| *candidate != pid);
-            !panes.is_empty()
-        });
-        self.worker_session_pane.retain(|_, p| *p != pid);
-        self.held_workers.remove(&pid);
-        self.detached_panes.remove(&pid);
-        if let Some(tx) = self.pane_watch.remove(&pid) {
-            // Last observable tick before the sender drops: a watcher that
-            // reads it sees `exited`; one blocked in `changed()` sees the
-            // sender-dropped error and treats it identically.
-            tx.send_modify(|t| t.exited = true);
-        }
-    }
-
     /// Snapshot panes whose children and PTY readers have both finished.
     /// Every candidate's final output is already enqueued, so the caller can
     /// drain the shared output channel before closing this exact set.
@@ -12748,9 +12670,20 @@ impl Core {
                 ));
                 Flow::Continue
             }
-            CoreMsg::PaneKill { pane, reply } => {
+            CoreMsg::PaneKill {
+                pane,
+                hand_off_to,
+                reply,
+            } => {
                 if !self.panes.contains_key(&pane) {
                     let _ = reply.send(dead_pane(pane));
+                    return Flow::Continue;
+                }
+                // A hand-off is the opposite of a kill: it RELEASES the pane
+                // so its keeper keeps the child. It refuses before touching
+                // the layout, so a failed rename leaves the pane as it was.
+                if let Some(target) = hand_off_to {
+                    let _ = reply.send(self.hand_off_pane(pane, &target));
                     return Flow::Continue;
                 }
                 // Reply Ok BEFORE propagating a possible session-ending
@@ -13845,6 +13778,12 @@ async fn serve(
     // after one interval instead of duplicating startup's known-live state.
     pane_reap_tick.tick().await;
 
+    // Build-drift retirement: the watch stats its own executable
+    // off-loop every 5th tick and retires through Flow::Shutdown only on a
+    // drifted verdict at a fully quiet tick. The machinery lives in
+    // server/drift_retire.rs.
+    let mut drift_watch = drift_retire::RetireWatch::new();
+
     // diagnostics: which panes' output the CORE LOOP has seen. Pairs
     // with the pty reader thread's own first-chunk line to split "shell never
     // spoke" from "core loop never drained it".
@@ -13908,6 +13847,24 @@ async fn serve(
                 }
                 if core.reap_dead_children(dead) == Flow::Shutdown {
                     e2e_log(format_args!("last dead pane reaped; shutting down"));
+                    break Flow::Shutdown;
+                }
+                // Drift retirement: a drifted verdict at a fully
+                // quiet tick (no panes, clients, or connections) retires the
+                // server so the next attach spawns the installed build. The
+                // stat runs off-loop in server/drift_retire.rs.
+                if let Some((running, on_disk)) = drift_watch.tick(|| {
+                    core.panes.is_empty()
+                        && *core.client_count.borrow() == 0
+                        && conns_alive.load(Ordering::Acquire) == 0
+                }) {
+                    eprintln!(
+                        "fno mux: stale-build retire: on-disk binary changed ({} -> {}); \
+                         no panes, clients, or connections; retiring so the next \
+                         attach spawns the installed build",
+                        running.path.display(),
+                        on_disk.path.display()
+                    );
                     break Flow::Shutdown;
                 }
             }
@@ -14355,10 +14312,11 @@ async fn handle_control(
                 })
                 .await
         }
-        ControlVerb::PaneKill { pane } => {
+        ControlVerb::PaneKill { pane, hand_off_to } => {
             core_tx
                 .send(CoreMsg::PaneKill {
                     pane,
+                    hand_off_to,
                     reply: reply_tx,
                 })
                 .await

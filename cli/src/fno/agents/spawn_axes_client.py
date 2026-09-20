@@ -54,7 +54,6 @@ def keeper_posture(
     note = answer.get("note") or ""
     if note:
         import sys
-
         head = f"agy posture: {answer.get('effective')} ({answer.get('source')})"
         print(f"{head} - {note}", file=sys.stderr)
     return [str(t) for t in tokens]
@@ -75,3 +74,6 @@ def agy_mint_argv(
     }
     argv = _answer_or_raise(spawn_axes_call({"agy_mint": ask}), "argv")
     return [str(t) for t in argv]
+
+
+

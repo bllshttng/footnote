@@ -146,6 +146,12 @@ fn main() {
     if args.first().map(String::as_str) == Some("backlog-update") {
         std::process::exit(fno_agents::backlog::patch::run_update(&args[1..]));
     }
+    // The SessionStart reconcile sweep execs here; see backlog::orphan_plans.
+    if args.first().map(String::as_str) == Some("backlog-orphan-plans") {
+        std::process::exit(fno_agents::backlog::orphan_plans::run_orphan_plans(
+            &args[1..],
+        ));
+    }
     // scripts/validate-plan.sh shells HERE and reads the E/W/X/O/U line
     // protocol back.
     if args.first().map(String::as_str) == Some("surface-check") {
@@ -891,7 +897,12 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "ping" {
         return fno_agents::client_verbs::run_ping(&args[1..]);
     }
-    if verb == "resume" {
+    // `resume --substrate thread` is the pane-to-thread LIFECYCLE move, not a
+    // re-entry: it falls through to build_request, which routes it to the
+    // daemon's agent.convert. The daemon owns it because the agent lock
+    // serializes it and a mid-move claim must be pinned to a process that
+    // outlives the client.
+    if verb == "resume" && !fno_agents::resume_args::requests_conversion(&args[1..]) {
         // resume_wake's wake arms build their own runtimes and block_on them;
         // on this thread that panics inside the ambient runtime. A fresh
         // thread is legal in both contexts (gc_sweep::stop_row_process is
@@ -1075,6 +1086,9 @@ async fn run(args: Vec<String>) -> i32 {
                 return 2;
             }
         };
+        if parsed.keepers_only {
+            return fno_agents::restart_run::run_keepers_only(parsed.json.json).await;
+        }
         return fno_agents::restart_run::run_restart(
             parsed.force,
             parsed.json.json,
@@ -4122,6 +4136,17 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         "rename" => {
             fno_agents::rename::request(&mut params, &positional)?;
             "agent.rename"
+        }
+        // Only a `--substrate` resume reaches here; a bare resume is the
+        // client-side re-entry, intercepted before build_request. The argv
+        // is re-parsed through the resume parser rather than read off
+        // `params`, so the one refusal vocabulary answers both doors.
+        "resume" => {
+            let parsed = fno_agents::resume_args::parse_conversion_args(rest)?;
+            params.insert("name".into(), Value::String(parsed.name));
+            params.insert("dry_run".into(), Value::Bool(parsed.dry_run));
+            params.insert("allow_new_id".into(), Value::Bool(parsed.allow_new_id));
+            "agent.convert"
         }
         "reconcile" => "agent.reconcile",
         other => {

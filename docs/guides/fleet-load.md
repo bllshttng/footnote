@@ -8,9 +8,13 @@
 fno-agents intel --fleet
 fno-agents intel --fleet --days 14
 fno-agents intel --fleet --backfill
+fno-agents intel --fleet --html
+fno-agents intel --fleet --html --out /path/to/fleet.html
 ```
 
-`--days` sets the window (30 days default). `--backfill` lifts the per-run read budget, so the first run reads every transcript in the window instead of spreading the scan over several runs. `--json` prints the report object instead of text. A budgeted run reports the files and bytes still unread, and computes no curve, threshold or cap until the backfill completes.
+`--days` sets the window (30 days default). `--backfill` lifts the per-run read budget, so the first run reads every transcript in the window instead of spreading the scan over several runs. `--json` prints the report object instead of text. `--html` writes the private `fleet.html` page. `--out` redirects that page. A budgeted run reports the files and bytes still unread, and computes no curve, threshold or cap until the backfill completes.
+
+The daemon's `fleet_page` arm rewrites `fleet.html` every 1800 seconds. The web bridge serves the same file at `/fleet` behind its existing token. If the daemon has not completed its first page tick, `/fleet` returns 404. Run `fno-agents intel --fleet --html` for an on-demand render.
 
 ## What each section means
 

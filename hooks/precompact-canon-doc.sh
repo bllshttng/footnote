@@ -19,6 +19,10 @@
 # failure) when fno / gh / the registry is unreadable or absent.
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "${FNO_PLATFORM:-}" == "codex" ]]; then
   PLUGIN_ROOT="${CODEX_PLUGIN_ROOT:-${PLUGIN_ROOT:-$SOURCE_ROOT}}"
@@ -100,8 +104,18 @@ SHORT="${SID: -8}"
 # whole heredoc is wrapped in `|| true`).
 # ---------------------------------------------------------------------------
 REG_ROWS=""
+REG_RC=0
 if command -v fno >/dev/null 2>&1; then
-  REG_ROWS="$(fno agents registry-json 2>/dev/null || true)"
+  # A hook is never a delegated one-verb child, so a FNO_AGENTS_RUNTIME pin
+  # here has leaked off a spawned worker: strip it for this read, keep the
+  # exit code, and let a failed read read as `unknown`, never as uncrowned
+  # (under the pin the silent `|| true` took the failure for "no
+  # registry row" and a crowned king got a plain session doc).
+  REG_ROWS="$(env -u FNO_AGENTS_RUNTIME fno agents registry-json 2>/dev/null)"
+  REG_RC=$?
+  if [[ "$REG_RC" -ne 0 ]]; then
+    echo "precompact-canon-doc.sh: fno agents registry-json exited $REG_RC; the doc's crown line reads unknown (the FNO_AGENTS_RUNTIME pin was stripped before the read)" >&2
+  fi
 fi
 
 CROWN_INFO="$(SID="$SID" REG_ROWS="$REG_ROWS" python3 -c '
@@ -201,7 +215,7 @@ fi
 # with an EOF error that names an unrelated later line.
 # ---------------------------------------------------------------------------
 AUTO_BLOCK="$(SID="$SID" SHORT="$SHORT" NODE="$NODE" PLAN="$PLAN" \
-             REG_ROWS="$REG_ROWS" PR_RAW="$PR_RAW" IS_CROWNED="$IS_CROWNED" python3 <<'PY' 2>/dev/null || true
+             REG_ROWS="$REG_ROWS" REG_RC="$REG_RC" PR_RAW="$PR_RAW" IS_CROWNED="$IS_CROWNED" python3 <<'PY' 2>/dev/null || true
 import json
 import os
 import subprocess
@@ -228,7 +242,10 @@ r = mine[0] if mine else {}
 lvl = r.get("crown_level")
 scp = r.get("crown_scope")
 crowned = os.environ.get("IS_CROWNED") == "1"
-if not mine:
+reg_rc = os.environ.get("REG_RC", "")
+if reg_rc not in ("", "0"):
+    crown = "unknown (registry-json exit %s)" % reg_rc
+elif not mine:
     crown = "none (no registry row for this session)"
 elif not crowned:
     crown = "none (uncrowned)"

@@ -1,4 +1,4 @@
-"""king-for-a-day reign hygiene checks, graded by a bank task over a fixture.
+"""One-wave reign hygiene checks, graded by a bank task over a fixture.
 
 The bank task ``capability-king-reign-hygiene`` shells here. The fixture is a
 distilled event slice of one recorded reign (2026-08-05), not the raw

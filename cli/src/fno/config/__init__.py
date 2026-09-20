@@ -418,6 +418,7 @@ class BacklogBlock(BaseModel):
     # maintain.staleness_days (30, for idea-stage rows) - ready work goes stale
     # faster than an untriaged idea, so it defaults tighter (21).
     staleness_days: int = 21
+    epic_max_open_children: Optional[int] = Field(default=None, ge=1)
     render_targets: list[RenderTargetConfig] = Field(default_factory=list)
     # Seconds an open local board or reign.html tab waits, visible and
     # untouched, before it reloads itself (0 is off).

@@ -1,4 +1,4 @@
-<!-- style-exception: verbatim moves of court wake-arm, lookup-ladder and retask doctrine from the style-exception'd king-for-a-day/SKILL.md root; specimens and measured numbers travel intact per the compaction contract -->
+<!-- style-exception: verbatim moves of court wake-arm, lookup-ladder and retask doctrine from the style-exception'd reign references/once.md; specimens and measured numbers travel intact per the compaction contract -->
 
 # Workflow routes (court-mode operations)
 

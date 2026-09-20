@@ -1,7 +1,7 @@
 <!-- style-exception: canonical court prose predates the style rules; bundled into skills/reign verbatim -->
 # Court operations
 
-The operations manual for [court mode](../SKILL.md#court-mode-reign-over-the-wave).
+The operations manual for [court mode](once.md#court-mode-reign-over-the-wave).
 The skill carries the *contract* (what a court king owes its wave); this reference carries the *hands* (which verb does each job, what each lifecycle state means, and the copy-paste recipes).
 
 Court needs five worker primitives: **spawn** a teammate, **inject** a next-phase prompt into a live session, **sweep** at a boundary, **wait** on lifecycle, and **read** recent output.
@@ -49,7 +49,7 @@ fno agents spawn --name <node-name> "$payload" --harness claude --substrate thre
 | Move a running pane into another workspace | `fno mux layout apply` rebinds a bound live pane into a target tab, PTY intact, but needs a full template (or a spec file) plus its whole slot set - see mux-layout-templates. No `fno mux pane` verb does it (`break` only detaches to a new tab in place). A coronation-time move, not a mid-wave shuffle |
 | Arm a wake before you stop | ONE unreconciled teammate: `fno-agents wait --agent <name> --state done --timeout-ms <n>` · a fleet: `fno-agents subscribe` unfiltered, armed once (harness-tracked either way; never `idle`, never `&`) |
 | Anoint a sub-king at spawn | `fno agents spawn --name <n> "<payload>" --substrate thread --crown <scope>` (a king running a court belongs in its own mission workspace). Repeat `--crown`/`-k` for a portfolio; the rung is derived from what you name |
-| Crown an existing session in place | The target runs `fno agents register`; from another attended terminal run `fno agents crown <printed-handle> --scope <scope>`. A live king may run it too, but only over a scope its own crown strictly contains. It preserves the target's transcript and placement |
+| Crown an existing session in place | The target runs `fno agents register`; from another attended terminal run `fno agents crown <printed-handle> --scope <scope>`. A live king may run it too, but only over a scope its own crown strictly contains. It preserves the target's transcript and placement. A king can also add an epic its own session created to its own crown: `fno agents crown <own handle> --scope <each held epic> --scope <new epic>` |
 | Hand your crown to a successor | Spawn the heir over your OWN scope with `--succeed`: without the explicit transfer flag the spawn is refused and you keep the crown. The vacate and stamp are one registry write. Return it with `fno agents crown --reclaim`; that uses `crown_grantor` and creates no session. The attended in-place verb is a re-scope, not succession: it moves a crown between two live rows (re-scope the incumbent first, then crown the heir) but never creates an heir at spawn |
 | Read your own crown | `fno whoami` (prints a `crown:` line when your row holds one) |
 | Message a live teammate | `fno agents mail send <handle> "<msg>" --from-self` |

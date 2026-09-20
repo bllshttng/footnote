@@ -529,3 +529,31 @@ jobs:
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: bash tests/ci/test_uv_install_verify_wait.sh
+
+  extension-suites:
+    # The pi bridge extension (TypeScript, node-stripped) and the OpenCode
+    # bridge plugin have no Python or Rust test runner; their behavioral
+    # suites run here. The pi suite runs on node 24 (type stripping); the
+    # OpenCode suite imports bun:test, so it runs under bun.
+    name: Harness extension suites (pi node24, opencode bun)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: pi extension suite (node --test)
+        run: node --test cli/tests/pi/footnote.extension.test.mjs
+
+      - name: OpenCode plugin suite (bun test)
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: OpenCode plugin suite
+        run: bun test cli/tests/opencode/footnote.plugin.test.js

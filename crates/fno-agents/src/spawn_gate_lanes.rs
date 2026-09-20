@@ -1348,6 +1348,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A terminal row (exited / orphaned) is already uncounted by the share:
+    /// `status_is_liveish` skips it, so a stop that lands a terminal status
+    /// frees the slot without any reconcile.
+    #[test]
+    fn share_reading_skips_terminal_rows() {
+        let _guard = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-lanes-terminal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = dir.join("registry.json");
+        write_registry(
+            &reg,
+            &[
+                format!(
+                    r#"{{"name":"live-one","harness":"claude","cwd":"/tmp","status":"idle","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"caller-uuid"}}"#
+                ),
+                format!(
+                    r#"{{"name":"exited-one","harness":"claude","cwd":"/tmp","status":"exited","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"caller-uuid"}}"#
+                ),
+                format!(
+                    r#"{{"name":"orphaned-one","harness":"claude","cwd":"/tmp","status":"orphaned","created_at":"2026-01-01T00:00:00Z","spawned_by_session":"caller-uuid"}}"#
+                ),
+            ],
+        );
+        let reading = share_reading(&reg, 6, Some("caller-uuid"));
+        assert_eq!(reading.held, Some(1));
+        assert_eq!(reading.held_rows, Some(vec!["live-one".to_string()]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A schema_version ahead of this binary refuses exit 81 with both
     /// integers; a file this binary understands passes.
     #[test]

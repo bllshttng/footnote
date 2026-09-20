@@ -1,11 +1,12 @@
 ---
 name: reign
-description: "The tenured king: stay active over a territory for days. Crowned once, check in on a schedule, drive with levers, park rather than die. Composes king-for-a-day (the one-wave pass) with a self-injected beat. Use when: 'reign over <scope>', 'stay king over <epic>', 'keep driving this territory'."
+description: "The tenured king: stay active over a territory for days. Crowned once, check in on a schedule, drive with levers, park rather than die. With --once, rule one wave: encode it into the graph, kick off, abdicate. Use when: 'reign over <scope>', 'stay king over <epic>', 'keep driving this territory', 'crown me on <epic>', 'plan the next wave'."
 argument-hint: "<scope> [--once]"
 metadata:
   requires:
     harness:
       - loop
+      - spawn
 ---
 
 <!-- style-exception: monitor cadences and verb spellings are load-bearing literals -->
@@ -15,7 +16,7 @@ metadata:
 When `$CODEX_THREAD_ID` is nonblank, before anything else, Print exactly once:
 `codex posture: reign has no /goal, /loop or Monitor on codex; the wake arm's backstop is this king's only beat.`
 
-You are the tenured king over `<scope>`. A pass encodes a wave and abdicates; you stay. Your job is not to build. It is to keep the territory moving: read indicators on a beat, pull levers, escalate what a lever cannot fix, and park when parked is the honest state.
+You are the tenured king over `<scope>`. With `--once` you rule one wave and abdicate. Without it you stay. Your job is not to build. It is to keep the territory moving. Read indicators on a beat, pull levers, escalate what a lever cannot fix, and park when parked is the honest state.
 
 An operator turn that tells the reign to stand down blocks the stop gate until it is acked. Answer it as a verdict on this reign, not as a general question.
 
@@ -29,6 +30,8 @@ The crown is bestowed, never inferred. Verify it before anything else:
 4. A split, a conflict, or an unknown STOPS the skill and prints both session ids. For a conflict, print the two holders the entry names. A `conflicts` of null means the reader could not answer. That is an unknown and it stops the skill, because an absent answer is not the same as no rival. A king cannot reign through a crown two readers disagree about, it cannot reign beside a rival, and it cannot re-crown itself.
 5. Otherwise print `not crowned over <scope>; from an attended shell: fno agents crown <handle> --scope <scope>` and stop.
 
+How a crown is bestowed, the ladder and succession: [the crown model](references/once.md#who-runs-this-the-crown-is-bestowed).
+
 ## On crowning
 
 - `fno agents king init --scope <scope>`. Print level, scope, mail handle. When the output carries a settled-findings section, those titles are what this epic already established: read them before the first check-in and never re-derive them.
@@ -37,13 +40,17 @@ The crown is bestowed, never inferred. Verify it before anything else:
 - Declare the shape now: `fno agents king shape pass` for a one-wave pass, and `fno agents king shape court` THE MOMENT the reign spawns its first worker. This is the field the Stop nudge reads; an undeclared court is nagged at every stop.
 - Declare the term now: `fno agents king term <span:Nh|compactions:N>` (e.g. `fno agents king term span:96h`). An undeclared term still reads a 96h default, so this is optional but name it in the opening check-in line either way. When the Stop hook reports the term reached, hand off with `fno agents spawn --crown <scope> --succeed`, or extend it with a written reason: `fno agents king term <spec> --reason "..."`. A bare re-declaration without `--reason` is refused - the extension IS the receipt.
 
+## One wave: --once
+
+With `--once` the crown rules one wave and expires. Run Who runs this and On crowning, declare `fno agents king shape pass`, and skip the term. Skip Arm the beat: no monitor, no `/loop`, no `/goal`. Then run [the one-wave pass](references/once.md#run-it-in-this-order) in order and abdicate with `fno agents king done`. A kickoff that dispatches through `fno backlog advance` stays a pass. The wave is a court only when its workers are court teammates that mail you back: declare `fno agents king shape court` and run [court mode](references/once.md#court-mode-reign-over-the-wave) until the wave completes. The levers, Recording a ruling and the three halts apply to both shapes.
+
 ## Arm the beat
 
 Branch once on what the harness supports, before arming anything. Claude supports harness-tracked Monitors and self-injected native commands: run the full arm below. Codex supports none of them - no `/goal`, no `/loop`, no Monitor tool - and the codex posture line above is that branch: arm nothing native, inject neither command, and never read `CronList` or `/hooks` as a gate. The codex beat is the externally owned wake arm: verify the daemon waker row exists in `fno agents status`, and if it does not, report that honestly and stop - it is never a reason to attempt a native command. Every codex wake runs the check-in body below; that cadence is the reign.
 
 On Claude, arm ONE monitor, not six. The 2026-09-10 measurement over one 12-hour reign is the arming contract: the stop hook drove all four real dispatches and the six monitor arms surfaced nothing the king acted on, and this skill charges court costs per wake, not per hour. The monitor is a harness-tracked Monitor running a shell until-loop that costs no tokens while waiting and wakes the session only when its condition changes. Then two self-injected native commands. The deleted arms are demand reads, not beats: mail arrives as a conversation turn and cannot be missed; the board, crown liveness and main CI are read when a decision needs them (the check-in body names each read); capacity is the spawn gate's job, which refused twice in that reign, correctly, while the band's five readings changed no decision.
 
-1. **Fleet settled-PR wake, 600s.** The stop hook only fires when an agent stops, so a session that stopped while its PR was pending and whose CI went settled an hour later has nothing watching for it. This one arm is the fleet's query for exactly that. The until-loop exits when a roster row that has gone quiet, parked or unknown carries a node whose `pr_number` reads settled: `fno agents list --json` rows carry `node` and a status word (`quiet`, `parked`, `unknown` when no probe answered, which is probe failure, not health), and the PR is read with `fno do pr status <n>`, one `green|red|pending|unknown` verdict where `green` is settled; never hand-rolled jq. Green alone is not settled work, and two skips gate the exit before any poke: the `fno do pr status` payload the loop already fetched carries `pr_state`, so a row whose `pr_state` reads `MERGED` or `CLOSED` is skipped, because a merged PR still reports `verdict: green` and `settled: true`; a row that passes that skip reads its node with `fno backlog get <node>` and is skipped when the node `status` reads `done` or `superseded`. Without them, every crown merge whose worker has parked wakes the crown to resume a finished worker: observed 2026-09-15, the wake fired `SETTLED pr=2037 node=` minutes after the crown merged 2037 and closed done at 13:39:35Z. On wake, poke the stopped session with `fno agents resume <id>`, which confirms the wake by content in the transcript; never a fresh dispatch. Measured by hand on 2026-09-10 over PRs 1650, 1694 and 1649: three pokes, three resumed sessions, zero slot cost. One query run centrally beats six timers run per king.
+1. **Fleet settled-PR wake, 600s.** The stop hook only fires when an agent stops, so a session that stopped while its PR was pending and whose CI went settled an hour later has nothing watching for it. This one arm is the fleet's query for exactly that. The until-loop exits when a roster row that has gone quiet, parked or unknown carries a node whose `pr_number` reads settled. The join takes two reads. `fno agents list --json` rows carry the status word (`quiet`, `parked`, `unknown` - probe failure, not health). `fno agents court --nodes` folds the crown's scope nodes in from the claims dir, carrying worker, PR and session ids. Roster rows rarely carry `node` on their own (measured 2026-09-19: 1 of 23). A monitor joined on that field alone never fires. Read the PR with `fno do pr status <n>`, one `green|red|pending|unknown` verdict where `green` is settled; never hand-rolled jq. Green alone is not settled work, and two skips gate the exit before any poke: the `fno do pr status` payload the loop already fetched carries `pr_state`, so a row whose `pr_state` reads `MERGED` or `CLOSED` is skipped, because a merged PR still reports `verdict: green` and `settled: true`; a row that passes that skip reads its node with `fno backlog get <node>` and is skipped when the node `status` reads `done` or `superseded`. Without them, every crown merge whose worker has parked wakes the crown to resume a finished worker: observed 2026-09-15, the wake fired `SETTLED pr=2037 node=` minutes after the crown merged 2037 and closed done at 13:39:35Z. On wake, poke the stopped session with `fno agents resume <id>`, which confirms the wake by content in the transcript; never a fresh dispatch. Measured by hand on 2026-09-10 over PRs 1650, 1694 and 1649: three pokes, three resumed sessions, zero slot cost. One query run centrally beats six timers run per king.
 
 A red settle does not belong to this arm. The daemon nudge ladder wakes a quiet worker once per red head and names the failing checks (docs/reaping-faq.md).
 
@@ -107,7 +114,11 @@ A failed reader prints `READER FAILED <name>: <reason>` on its own line and the 
 
 Before the levers, the finish line: when `fno do pr status <n>` reads `ready` with no blockers, run `fno do pr merge <n>` yourself - standing law: the team merges green, covered PRs and the operator does not, and this crown is the team. Two guards keep the lever honest: resolve the row's project cwd and run both verbs from there, because a PR number is repository-local and both verbs derive their repo from the ambient cwd, so a portfolio crown can inspect and merge an unrelated same-numbered PR; and require the status payload's `merge_authority.mergeable_autonomously` to be true before merging, because `ready` covers CI and review while the durable grant travels separately, and a child dispatched `--no-merge` stays ready to read while its recorded grant says refused. The open-PR count and the free-claim rows printed above are that read's inputs, not report-only indicators.
 
-Then the levers, in this order, stopping at the first that applies per row: mail the stalled worker; `fno backlog encounter <node> --evidence "what it cost"` to vote the node up, and `fno backlog update <node> --priority p1` when the evidence contradicts the priority it was filed at (p0 needs `--blocks-everything` and means the fleet is down), then put the node inside an active mission scope, because neither a vote nor a priority dispatches, and a crown over an epic arms that epic's mission by itself, so this lever is for rows no crown covers; `fno backlog undefer` or `supersede` when the row is the problem; `fno inbox outstanding ask` when a lever needs the operator.
+Then the levers, in this order, stopping at the first that applies per row: mail the stalled worker; `fno backlog encounter <node> --evidence "what it cost"` to vote the node up, and `fno backlog update <node> --priority p1` when the evidence contradicts the priority it was filed at (p0 needs `--blocks-everything` and means the fleet is down), then, for a row no crown covers, start a new small epic rather than growing a running one, because neither a vote nor a priority dispatches (see [A finding starts a new epic](#a-finding-starts-a-new-epic)); `fno backlog undefer` or `supersede` when the row is the problem; `fno inbox outstanding ask` when a lever needs the operator.
+
+### A finding starts a new epic
+
+An epic stays small enough to finish. Its finish line is set at the start. So never parent new work into a running epic. A finding goes one of two ways. It starts a new small epic: `fno backlog idea "EPIC: <theme>" --type epic --difficulty <low|medium|high>`, then `fno backlog update <node> --parent <new-epic-id>`. The king that leads the old epic takes the new one with `fno agents crown <handle> --scope <old-epic-id> --scope <new-epic-id>`. A king runs that for an epic its own session created, naming every epic it holds. Any other epic needs an attended shell or a crown that contains both. Or the finding waits unparented for the lead's next epic. A crowned `fno backlog idea` with no `--parent` is linked into your epic, and its `rollup: crown-linked` receipt prints the undo. When the finding is new work, run it: `fno backlog update <node> --parent null`.
 
 Rank is not yours. It is the operator's pin, and `fno backlog rank` refuses an agent session. A king who wants a row run next says so with `--priority p0`, which is bounded, receipted, and visible to the operator as a split vote on `fno backlog demand`.
 
@@ -134,9 +145,11 @@ A crowned king is not an operator: the `operator` authority is refused on an age
 - `fno inbox law set <subject> <decision> --rationale "<why>"` for a durable rule the OPERATOR asked for. It records a chat-attested row and can never supersede the operator's own law.
 - `fno agents king faq add --question "..." --answer "..." --specimen "<node or PR>, <date>" --exit "<the change that retires this>"` for a durable answer a successor king will ask for. It refuses without `--exit`, the change that stops the answer being needed. The three channels divide this way: a FAQ entry answers a question a successor will ask, a note records a finding against one row, and a law records an operator ruling.
 
+Read a ruling back with `fno backlog decisions <subject>` or `fno inbox decisions <subject> --lane law`, newest first. A subject matches exactly, so never mint a near-synonym. Every ruling is machine-local project policy. A rule that a stranger cloning the repository must obey does not reach them from here. Land it in the code, a doc or a gate, in a PR. See [decision-record](../../docs/architecture/decision-record.md).
+
 ## The one dispatch exception
 
-This skill does not dispatch. The single exception: `fno agents status` shows the dispatching arm red, and the spawn is journaled `reign_dispatch_exception` naming the arm and the node BEFORE the spawn fires. A spawn without that row is a defect. Journal it with:
+The tenured reign does not dispatch. A `--once` pass dispatches only through its kickoff and its court, as [the one-wave pass](references/once.md) says. The single exception: `fno agents status` shows the dispatching arm red, and the spawn is journaled `reign_dispatch_exception` naming the arm and the node BEFORE the spawn fires. A spawn without that row is a defect. Journal it with:
 
 `fno doctor event emit -t reign_dispatch_exception -s loop -d '{"scope":"<scope>","arm":"<arm>","node":"<id>"}'`
 
@@ -153,10 +166,10 @@ Three halts, three scopes. `fno agents incident stop --reason "<why>"` arms the 
 
 ## Abdicate
 
-`fno agents king done` on operator order. With `--once`: until the one-wave fold lands, print `for a one-wave pass run /fno:king-for-a-day <scope>` and stop.
+`fno agents king done` on operator order. With `--once`, `fno agents king done` is the last act of pass step 5 or of the court's wave boundary.
 
-The minion contract, court operations, and the CLI command map are in [references/](references/): [minion-clause.md](references/minion-clause.md), [court-operations.md](references/court-operations.md), [cli-commands.md](references/cli-commands.md).
+The one-wave pass, the crown model, and the minion contract are in [references/](references/): [once.md](references/once.md), [minion-clause.md](references/minion-clause.md), [court-operations.md](references/court-operations.md), [cli-commands.md](references/cli-commands.md), [review.md](references/review.md), [retro-interview.md](references/retro-interview.md), [workflow-routes.md](references/workflow-routes.md), [postcompact-brief.md](references/postcompact-brief.md).
 
 ## Known Limitations and Deferred Work
 
-- A codex reign has no scheduled beat, `--once` defers to king-for-a-day, and the court crown-source field is not landed yet. See [LIMITATIONS.md](LIMITATIONS.md).
+- A codex reign has no scheduled beat. A `--once` pass does not supervise the workers it spawns. The court crown-source field is not landed yet. See [LIMITATIONS.md](LIMITATIONS.md).

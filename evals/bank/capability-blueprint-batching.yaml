@@ -1,5 +1,5 @@
 # Capability tier: does a fresh worker apply the batching rule from x-c1c7
-# (skills/king-for-a-day/SKILL.md 3d) with no operator guidance?
+# (skills/reign/references/once.md 3d) with no operator guidance?
 #
 # Five nodes, inline as text, no hint that any pair is related. Two of the
 # five - modeled on the real x-76d1/x-97eb pair, both faces of `fno agents rm`
@@ -48,4 +48,4 @@ grade:
     command: "test -f dispatch-plan.md && cd cli && uv run pytest tests/unit/test_blueprint_batching_rule.py -q -k behavioral"
     expect: 0
 timeout_minutes: 15
-tags: [king-for-a-day, blueprint, batching]
+tags: [reign, blueprint, batching]

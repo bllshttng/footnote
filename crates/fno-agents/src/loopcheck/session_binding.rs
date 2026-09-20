@@ -138,8 +138,16 @@ pub(super) fn gate(parsed: &LoopCheckArgs) -> Gate {
         return Gate::Owner;
     }
     // No owner row for this target: fall back to the asking session's own
-    // row. An absent row is a refusal, never headroom.
+    // row. An absent row is a refusal, never headroom - unless the manifest
+    // itself binds the asking session, which is the pi shape: the extension
+    // gates with its own session id against a manifest whose
+    // `harness_session_id` names that same session, and the registry never
+    // grows a row for it (the worker keeps no registry row keyed by its pi
+    // session id).
     let Some(row) = registry.find_by_session(harness, &asked) else {
+        if let Some(gate) = manifest_owner(parsed, harness, &asked) {
+            return gate;
+        }
         return refuse(
             format!("no registry row bound to {harness}/{asked}"),
             String::new(),
@@ -172,6 +180,35 @@ pub(super) fn gate(parsed: &LoopCheckArgs) -> Gate {
     Gate::Owner
 }
 
+/// A bound ask gets the continuation in the asking harness's own command
+/// form. pi registers skills as `/skill:<name>` and has no `/target` of its
+/// own, and the word the target skill resumes with is `resume`, never
+/// `--resume`, so pi's continuation renders through the capability row from
+/// the skill-correct base. Every other harness keeps the legacy literal
+/// byte-for-byte: the opencode bridge sends the gate's string verbatim and
+/// its contract is pinned.
+pub(super) fn render_continuation_for_harness(
+    args: &[String],
+    result: (i32, String),
+) -> (i32, String) {
+    let Ok(parsed) = super::parse_args(args) else {
+        return result;
+    };
+    if parsed.harness.as_deref() != Some("pi") {
+        return result;
+    }
+    let (code, out) = result;
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&out) else {
+        return (code, out);
+    };
+    if value.get("continuation").and_then(Value::as_str) == Some("/target --resume") {
+        value["continuation"] =
+            serde_json::Value::String(crate::provider::render_verb_seed("/target resume", "pi"));
+        return (code, value.to_string());
+    }
+    (code, out)
+}
+
 fn cwd_matches(row_cwd: &str, asked: &Path) -> bool {
     let row = Path::new(row_cwd);
     if row == asked {
@@ -183,6 +220,70 @@ fn cwd_matches(row_cwd: &str, asked: &Path) -> bool {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
+}
+
+/// The harness-agnostic owner arm beside the registry row: the manifest at
+/// `--state` may bind the asking session itself. This is the pi shape - the
+/// extension gates with its own session id against a manifest whose
+/// `harness_session_id` names that same session, and no registry row is
+/// ever keyed by a pi session id. All three facts must agree: the row's
+/// harness, the session id (under the same comparison a registry row's id
+/// gets), and the checkout the manifest lives in versus `--cwd`. Anything
+/// else keeps the typed refusal, enriched with the manifest's own bound
+/// pair so the refusal names both sides.
+fn manifest_owner(parsed: &LoopCheckArgs, harness: &str, asked: &str) -> Option<Gate> {
+    let content = std::fs::read_to_string(&parsed.state_path).ok()?;
+    let m_harness = scan_manifest_field(&content, "harness")?;
+    let m_session = scan_manifest_field(&content, "harness_session_id")?;
+    // The checkout the manifest records is authoritative: a space-resolved
+    // manifest lives under the state root, never inside the checkout it
+    // binds. A legacy manifest that names no owner_cwd falls back to its own
+    // directory (the in-repo layout, where the manifest sat in the checkout).
+    let checkout = scan_manifest_field(&content, "owner_cwd").or_else(|| {
+        parsed
+            .state_path
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+    });
+    let Some(checkout) = checkout else {
+        return None;
+    };
+    if m_harness != harness
+        || !crate::claims::same_session_id(&m_session, asked)
+        || !cwd_matches(&checkout, &parsed.cwd)
+    {
+        let reason = format!(
+            "wrong session: manifest bound to {m_harness}/{m_session}, asked {harness}/{asked}"
+        );
+        return Some(Gate::Refuse(Refusal {
+            bound: m_session,
+            asked: asked.to_string(),
+            reason,
+        }));
+    }
+    // The manifest-owner disposition is observable the same way a refusal
+    // is: one loop_check row, so an audit can tell a manifest-bound owner
+    // from a registry-row owner.
+    let project_events = parsed
+        .events_path
+        .clone()
+        .unwrap_or_else(|| crate::paths::events_path(&parsed.cwd));
+    let global_events = parsed
+        .global_events_path
+        .clone()
+        .unwrap_or_else(|| project_events.clone());
+    super::emit_to_both(
+        &project_events,
+        &global_events,
+        "loop_check",
+        serde_json::json!({
+            "decision": "owner",
+            "source": "manifest",
+            "harness": harness,
+            "asked_session": asked,
+        }),
+    );
+    Some(Gate::Owner)
 }
 
 /// The node the manifest binds: an explicit `node:` line, else `input:` when

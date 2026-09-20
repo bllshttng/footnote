@@ -91,32 +91,25 @@ pub fn delete(connection: &Connection, node_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// One node's relation lists. A list with no rows reads as None (the JSON
-/// key was absent), not as an empty array.
-pub fn load_grouped(connection: &Connection, node_id: &str) -> Result<Relations, String> {
-    let mut statement = connection
-        .prepare(
-            "SELECT node_id, related_node_id, type, listed_on, seq
-             FROM relations WHERE listed_on = ?1 ORDER BY seq",
-        )
-        .map_err(|error| error.to_string())?;
-    let rows = statement
-        .query_map(params![node_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
-            ))
-        })
-        .map_err(|error| error.to_string())?;
+type RowParts = (String, String, String, String, i64);
+
+fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RowParts> {
+    Ok((
+        row.get::<_, String>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, String>(2)?,
+        row.get::<_, String>(3)?,
+        row.get::<_, i64>(4)?,
+    ))
+}
+
+/// The list split for one node's rows, in seq order. A list with no rows
+/// reads as None (the JSON key was absent), not as an empty array.
+fn classify(rows: Vec<RowParts>, node_id: &str) -> Relations {
     let mut blocked_by: Vec<String> = Vec::new();
     let mut related: Vec<String> = Vec::new();
     let mut supersedes: Vec<String> = Vec::new();
-    for row in rows {
-        let (row_node_id, related_node_id, relation_type, _listed_on, _seq) =
-            row.map_err(|error| error.to_string())?;
+    for (row_node_id, related_node_id, relation_type, _listed_on, _seq) in rows {
         if relation_type == "blocks" && related_node_id == node_id {
             blocked_by.push(row_node_id);
         } else if relation_type == "related" && row_node_id == node_id {
@@ -125,9 +118,56 @@ pub fn load_grouped(connection: &Connection, node_id: &str) -> Result<Relations,
             supersedes.push(related_node_id);
         }
     }
-    Ok(Relations {
+    Relations {
         blocked_by: (!blocked_by.is_empty()).then_some(blocked_by),
         related: (!related.is_empty()).then_some(related),
         supersedes: (!supersedes.is_empty()).then_some(supersedes),
-    })
+    }
+}
+
+/// One node's relation lists. A list with no rows reads as None (the JSON
+/// key was absent), not as an empty array.
+pub fn load_grouped(connection: &Connection, node_id: &str) -> Result<Relations, String> {
+    let mut statement = connection
+        .prepare_cached(
+            "SELECT node_id, related_node_id, type, listed_on, seq
+             FROM relations WHERE listed_on = ?1 ORDER BY seq",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![node_id], map_row)
+        .map_err(|error| error.to_string())?;
+    let mut parts = Vec::new();
+    for row in rows {
+        parts.push(row.map_err(|error| error.to_string())?);
+    }
+    Ok(classify(parts, node_id))
+}
+
+/// Every node's relation lists, grouped by the node each list is listed
+/// on. One full scan instead of one query per node.
+pub(crate) fn load_all(
+    connection: &Connection,
+) -> Result<std::collections::HashMap<String, Relations>, String> {
+    let mut statement = connection
+        .prepare_cached(
+            "SELECT node_id, related_node_id, type, listed_on, seq
+             FROM relations ORDER BY listed_on, seq",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], map_row)
+        .map_err(|error| error.to_string())?;
+    let mut parts_by_node: std::collections::HashMap<String, Vec<RowParts>> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let parts = row.map_err(|error| error.to_string())?;
+        let key = parts.3.clone();
+        parts_by_node.entry(key).or_default().push(parts);
+    }
+    let mut out = std::collections::HashMap::new();
+    for (listed_on, parts) in parts_by_node {
+        out.insert(listed_on.clone(), classify(parts, &listed_on));
+    }
+    Ok(out)
 }

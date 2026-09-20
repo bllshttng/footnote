@@ -669,7 +669,18 @@ pub enum ControlVerb {
         command_done: bool,
     },
     /// Close a pane by id (the `ClosePane` cascade) -> [`ServerMsg::Ok`].
-    PaneKill { pane: u64 },
+    ///
+    /// With `hand_off_to` set, the pane is RELEASED rather than killed: its
+    /// keeper socket is renamed to that path, the pane leaves the layout
+    /// and the persisted squad, and the server drops its connection without
+    /// a Kill frame - a hangup the keeper survives with its child. The
+    /// field is additive, so the compatibility floor is unchanged and an
+    /// older client's PaneKill still means kill.
+    PaneKill {
+        pane: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hand_off_to: Option<String>,
+    },
     /// Acquire the writer claim on a claim-eligible pane (v5) ->
     /// [`ServerMsg::Ok`] / [`ServerMsg::Err`]. While held, human `Input` to
     /// the pane bounces with BEL + a `busy: relay` notice; `PaneSend` (the

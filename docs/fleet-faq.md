@@ -2,7 +2,7 @@
 
 Questions a king or an orchestrating agent hits while running workers, and the answer that survived contact. Every entry here cost a real session something. For run-level failures (a run that will not converge, a run that will not stop) see [troubleshooting.md](troubleshooting.md). For the coordination model see [architecture/coordination.md](architecture/coordination.md). For why a reaping sweep kept a session row, see [reaping-faq.md](reaping-faq.md).
 
-This is a FAQ, not a command reference. The full verb surface is `fno agents --help` and [../skills/king-for-a-day/references/cli-commands.md](../skills/king-for-a-day/references/cli-commands.md).
+This is a FAQ, not a command reference. The full verb surface is `fno agents --help` and [../skills/reign/references/cli-commands.md](../skills/reign/references/cli-commands.md).
 
 ## Is this page for you?
 
@@ -76,7 +76,7 @@ Three verbs, and they are not interchangeable.
 
 When the old worker holds context you must otherwise pay to rebuild, prefer resume over spawn. A worker five hours into a port is worth more than a fresh one, even a stronger fresh one.
 
-**Resume delivers the message, and the exit code says so.** Resume takes `-m/--message` to hand the session an instruction. On a claude session it wakes the worker headlessly, and exit 0 means the message is in the transcript. On a codex thread it hands the text to the codex daemon, and exit 0 means the daemon accepted it. Exit 16 means the message did not land, and the refusal names what is missing. A session already in a terminal state is never injected into. An explicit message on one refuses instead of reporting `Done -> Done` with the payload dropped.
+**Resume delivers the message, and the exit code says so.** Resume takes `-m/--message` to hand the session an instruction. On a claude session it wakes the worker headlessly, and exit 0 means the message is in the transcript. On a codex thread it hands the text to the codex daemon, and exit 0 means the daemon accepted it. Exit 16 means the message did not land, and the refusal names what is missing. A claude session that `claude agents` lists as `blocked`, `done`, `stopped` or `failed` takes the message. When its process has exited, resume revives it in place. It then injects the text in a container that names the sender. Exit 0 means the transcript shows it. A `working` session still refuses.
 
 ## A provider cap stranded my sessions: who brings them back?
 
@@ -467,4 +467,4 @@ Closed gaps, newest first. Each line names the PR that closed it, so a reader ca
 - [troubleshooting.md](troubleshooting.md) for run-level failures
 - [architecture/coordination.md](architecture/coordination.md) for claims and the work-claim primitive
 - [architecture/fleet-watchdog.md](architecture/fleet-watchdog.md) for automated wake, reroute and reap
-- [../skills/king-for-a-day/references/court-operations.md](../skills/king-for-a-day/references/court-operations.md) for the court primitives
+- [../skills/reign/references/court-operations.md](../skills/reign/references/court-operations.md) for the court primitives

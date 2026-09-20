@@ -9,6 +9,10 @@
 
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 # The Rust front door answers a mux-only verb; the Python `fno-py` has no `mux`
 # subcommand and fails "No such command". This is the same probe `fno doctor`'s
 # `_probe_is_mux` uses. `fno mux ls --json` is read-only, returns `[]` with no

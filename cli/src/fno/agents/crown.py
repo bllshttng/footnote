@@ -751,6 +751,23 @@ def plan_spawn_crown(
     return answer.get("refusal"), answer
 
 
+def _widen_answer(scope: str, caller) -> dict:
+    """Rust's crown-widen answer; a missing/old binary answers ``{}`` (fails closed)."""
+    from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
+
+    by_id = _graph_index() or {}
+    fields = ("name", "status", "crown_scope", "harness_session_id", "cc_session_id")
+    try:
+        return spawn_overlay_call({
+            "kind": "crown-widen",
+            "requested": scope,
+            "caller": {f: getattr(caller, f, None) for f in fields},
+            "members": [by_id.get(m) for m in split_scope(scope)],
+        })
+    except SpawnOverlayUnavailable:
+        return {}
+
+
 def arm_crowned_missions(scope: Optional[str]) -> Optional[list[str]]:
     """Set mission_active on every open epic in a crowned scope. Operator rule:
     an epic with an owner is a mission, or no drain loop can see its children.
@@ -1025,8 +1042,9 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     # registry itself, and the closure runs under its lock.
     caller = calling_agent_row()
     denial = grant_error(scope, caller, allow_succession=True)
-    if denial is not None:
-        raise CrownPromotionError(denial)
+    widen = _widen_answer(scope, caller) if denial is not None else {}
+    if denial is not None and widen.get("widen") is not True:
+        raise CrownPromotionError(" ".join(filter(None, (denial, widen.get("hint")))))
     grantor = "human" if caller is None else caller.name
     # `grant_error` blesses an equal scope because SPAWN succession vacates the
     # caller and stamps the heir in one write; this path only stamps the target,
@@ -1069,7 +1087,9 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     # row could be the row itself. The succession refusal above fires only on
     # an EQUAL scope, so narrowing to a strict SUBSET would sail past it -
     # identity, not territory, is the test.
-    if caller is not None and target_name == grantor:
+    if widen.get("widen") is True and target_name != grantor:
+        raise CrownPromotionError(denial)
+    if caller is not None and target_name == grantor and widen.get("widen") is not True:
         raise CrownPromotionError(
             f"refusing to crown {target_name!r}: that is this session, and a "
             "crown is stamped by a grantor, never self-declared. The row would "
