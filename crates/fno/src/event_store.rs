@@ -999,6 +999,7 @@ pub fn query_events(journal: &Path, q: &EventQuery) -> Result<Vec<EventRow>, Str
 /// the live file alone, which never tightens a gate.
 /// Every review-evidence row type a loopcheck parser reads from journal text.
 /// One list, so a call site picks a source, never a vocabulary.
+#[allow(dead_code)] // used by fno-agents; the fno copy stays byte-identical
 pub(crate) const REVIEW_EVENT_TYPES: &[&str] = &[
     "review_attestation",
     "review_coverage",
@@ -1008,6 +1009,7 @@ pub(crate) const REVIEW_EVENT_TYPES: &[&str] = &[
 ];
 
 /// [`journal_text`] for the review-evidence rows every review reader parses.
+#[allow(dead_code)] // used by fno-agents; the fno copy stays byte-identical
 pub(crate) fn review_text(journal: &Path) -> String {
     journal_text(journal, REVIEW_EVENT_TYPES)
 }
