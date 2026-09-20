@@ -13845,6 +13845,15 @@ async fn serve(
     // after one interval instead of duplicating startup's known-live state.
     pane_reap_tick.tick().await;
 
+    // Build-drift retirement (x-6648): the stat pair (startup fingerprint vs
+    // own exe now) runs off-loop every 5s; a drifted verdict parks in the
+    // slot, and the quiet test below consumes it. Unknown never retires.
+    let startup_fingerprint = crate::build_drift::ExeFingerprint::current();
+    let drift_verdict: Arc<std::sync::Mutex<Option<crate::build_drift::DriftState>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let drift_check_in_flight = Arc::new(AtomicBool::new(false));
+    let mut drift_subtick: u32 = 0;
+
     // diagnostics: which panes' output the CORE LOOP has seen. Pairs
     // with the pty reader thread's own first-chunk line to split "shell never
     // spoke" from "core loop never drained it".
@@ -13909,6 +13918,53 @@ async fn serve(
                 if core.reap_dead_children(dead) == Flow::Shutdown {
                     e2e_log(format_args!("last dead pane reaped; shutting down"));
                     break Flow::Shutdown;
+                }
+                // Build-drift quiet retirement (x-6648): the stat runs
+                // off-loop behind a one-in-flight gate; a drifted verdict is
+                // consumed only on a fully quiet tick - no panes, no
+                // attached clients, no in-flight connections - so live work
+                // keeps the old build serving until a quiet moment. Break
+                // through Flow::Shutdown so topology capture, pane cleanup,
+                // the Bye flush, and the socket sidecars keep their current
+                // ownership rules. Unknown (unreadable exe) never retires.
+                drift_subtick += 1;
+                if drift_subtick >= 5 {
+                    drift_subtick = 0;
+                    if !drift_check_in_flight.swap(true, Ordering::SeqCst) {
+                        let gate = drift_check_in_flight.clone();
+                        let slot = drift_verdict.clone();
+                        let startup = startup_fingerprint.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let verdict = startup
+                                .map(|fp| crate::build_drift::self_drift(&fp))
+                                .unwrap_or(crate::build_drift::DriftState::Unknown);
+                            *slot.lock().unwrap() = Some(verdict);
+                            gate.store(false, Ordering::Release);
+                            // slot handed off via the mutex; no other cleanup
+                        });
+                    }
+                    let verdict = drift_verdict.lock().unwrap().take();
+                    if let Some(crate::build_drift::DriftState::Drifted { running, on_disk }) =
+                        verdict
+                    {
+                        let quiet = core.panes.is_empty()
+                            && *core.client_count.borrow() == 0
+                            && conns_alive.load(Ordering::Acquire) == 0;
+                        if quiet {
+                            eprintln!(
+                                "fno mux: stale-build retire: on-disk binary changed \
+                                 ({} -> {}); no panes, clients, or connections; \
+                                 retiring so the next attach spawns the installed build",
+                                running.path.display(),
+                                on_disk.path.display()
+                            );
+                            break Flow::Shutdown;
+                        }
+                        // Quiet only at the NEXT quiet tick: re-park the
+                        // drifted verdict instead of re-statting early.
+                        *drift_verdict.lock().unwrap() =
+                            Some(crate::build_drift::DriftState::Drifted { running, on_disk });
+                    }
                 }
             }
             msg = core_rx.recv() => {
