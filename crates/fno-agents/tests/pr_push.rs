@@ -25,7 +25,10 @@ fn log_of(dir: &Path, name: &str) -> String {
 /// fail with two conflicting paths, drop `no-upstream` to make `@{u}` fail,
 /// drop `no-remote-branch` to make the same-name remote branch absent (a
 /// first push), write `remote-only` to make the cherry-pick log report one
-/// remote-only commit. `rev-list --count` answers 3 on the first call and 0
+/// remote-only commit, write `remote-only-merge` to make the merges log
+/// report one merge with two parents, and write `dirty-merge` to make that
+/// merge conflicted under `merge-tree` with a tree that differs from the
+/// parent auto-merge. `rev-list --count` answers 3 on the first call and 0
 /// after (the rebase happened), so the receipt reads behind-before=3
 /// behind-after=0.
 fn stub_git(dir: &Path) {
@@ -50,6 +53,9 @@ case "$1" in
         echo deadbeef0000000; exit 0 ;;
       --short) echo abc1234; exit 0 ;;
       --show-toplevel) echo "$D"; exit 0 ;;
+      *"^{tree}"*)
+        if [ -f "$D/dirty-merge" ]; then echo handtree0000000; else echo autotree000000; fi
+        exit 0 ;;
     esac
     exit 0 ;;
   status) if [ -f "$D/dirty" ]; then echo " M src/x.rs"; fi; exit 0 ;;
@@ -65,8 +71,16 @@ case "$1" in
     exit 0 ;;
   diff) if [ -f "$D/conflict" ]; then printf "src/a.rs\nsrc/b.rs\n"; fi; exit 0 ;;
   log)
+    case "$*" in
+      *--merges*)
+        if [ -f "$D/remote-only-merge" ]; then echo "m1234567 b0000000 m0000000"; fi
+        exit 0 ;;
+    esac
     if [ -f "$D/remote-only" ]; then echo abc1234; fi
     exit 0 ;;
+  merge-tree)
+    if [ -f "$D/dirty-merge" ]; then echo conflicttree0000; exit 1; fi
+    echo autotree000000; exit 0 ;;
 esac
 exit 0
 "#,
@@ -356,6 +370,42 @@ fn a_remote_only_commit_refuses_with_exit_3_before_preflight() {
     );
 }
 
+#[test]
+fn a_remote_hand_resolved_merge_refuses_with_exit_3() {
+    let (_t, d) = tmpdir();
+    std::fs::write(d.join("remote-only-merge"), "").unwrap();
+    std::fs::write(d.join("dirty-merge"), "").unwrap();
+    let (code, out, err) = run_verb(&d, &[]);
+    assert_eq!(code, 3, "{out}\n{err}");
+    assert!(err.contains("m1234567"), "the merge sha: {err}");
+    assert!(
+        err.contains("git pull --rebase origin feature/x"),
+        "the door: {err}"
+    );
+    assert!(
+        !err.contains("not safely rebasable"),
+        "the refusal must not key heal's conflict phrase: {err}"
+    );
+    assert!(
+        !log_of(&d, "git.log").contains("git push"),
+        "nothing pushed"
+    );
+}
+
+#[test]
+fn a_clean_remote_merge_still_leases_and_pushes() {
+    let (_t, d) = tmpdir();
+    std::fs::write(d.join("remote-only-merge"), "").unwrap();
+    let (code, out, err) = run_verb(&d, &[]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("pushed=1"), "{out}");
+    assert!(
+        log_of(&d, "git.log").contains("--force-with-lease=refs/heads/feature/x:deadbeef0000000"),
+        "the validated merge leaves the lease on: {:?}",
+        log_of(&d, "git.log")
+    );
+}
+
 // ── real-git regression: the second push against a moved base ───────────────
 
 /// Real git, severed from the user's global config and hooks: a global
@@ -515,5 +565,75 @@ fn a_remote_only_commit_is_refused_and_kept() {
         theirs.trim(),
         after.trim(),
         "the remote branch still holds the other writer's commit"
+    );
+}
+
+#[test]
+fn a_remote_merge_with_manual_resolution_is_refused() {
+    let (_t, root, a, b) = real_repo();
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 0, "first push: {out}\n{err}");
+    // Clone B folds content into a merge commit itself: no non-merge
+    // commit carries the hand.txt content, only the merge's tree does.
+    git_in(&b, &["fetch", "origin"]);
+    git_in(&b, &["checkout", "main"]);
+    commit_file(&b, "main.txt", "m\n", "main moves");
+    git_in(&b, &["push", "origin", "main"]);
+    git_in(&b, &["checkout", "feature/x"]);
+    git_in(&b, &["merge", "--no-commit", "origin/main"]);
+    std::fs::write(b.join("hand.txt"), "hand\n").unwrap();
+    git_in(&b, &["add", "hand.txt"]);
+    git_in(&b, &["commit", "-m", "merge with a hand edit"]);
+    git_in(&b, &["push", "origin", "feature/x"]);
+    commit_file(&a, "two.txt", "2\n", "two");
+    let merged = git_in(
+        &root.join("remote.git"),
+        &["rev-parse", "refs/heads/feature/x"],
+    );
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 3, "the hand-resolved merge refusal: {out}\n{err}");
+    assert!(
+        err.contains("the hand-resolved merge"),
+        "the refusal names the merge: {err}"
+    );
+    assert!(
+        err.contains("git pull --rebase origin feature/x"),
+        "the door: {err}"
+    );
+    let after = git_in(
+        &root.join("remote.git"),
+        &["rev-parse", "refs/heads/feature/x"],
+    );
+    assert_eq!(
+        merged.trim(),
+        after.trim(),
+        "the remote branch still holds the merge and its hand content"
+    );
+}
+
+#[test]
+fn a_clean_remote_merge_still_lands() {
+    let (_t, root, a, b) = real_repo();
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 0, "first push: {out}\n{err}");
+    // Clone B merges the moved main into feature/x cleanly (GitHub's
+    // "Update branch" shape): the merge adds nothing, so the lease lands.
+    git_in(&b, &["fetch", "origin"]);
+    git_in(&b, &["checkout", "feature/x"]);
+    git_in(&b, &["merge", "origin/main"]);
+    git_in(&b, &["push", "origin", "feature/x"]);
+    commit_file(&a, "two.txt", "2\n", "two");
+    let (code, out, err) = run_verb_real(&a, &root);
+    assert_eq!(code, 0, "the leased second push: {out}\n{err}");
+    assert!(out.contains("pushed=1"), "{out}");
+    let remote = git_in(
+        &root.join("remote.git"),
+        &["rev-parse", "refs/heads/feature/x"],
+    );
+    let head = git_in(&a, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        remote.trim(),
+        head.trim(),
+        "the remote branch equals the rebased HEAD"
     );
 }
