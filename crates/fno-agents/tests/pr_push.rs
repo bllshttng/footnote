@@ -22,9 +22,12 @@ fn log_of(dir: &Path, name: &str) -> String {
 
 /// Stub git. Behavior is file-flag driven: write `dirty` to make
 /// `status --porcelain` report a change, write `conflict` to make the rebase
-/// fail with two conflicting paths, drop `no-upstream` to make `@{u}` fail.
-/// `rev-list --count` answers 3 on the first call and 0 after (the rebase
-/// happened), so the receipt reads behind-before=3 behind-after=0.
+/// fail with two conflicting paths, drop `no-upstream` to make `@{u}` fail,
+/// drop `no-remote-branch` to make the same-name remote branch absent (a
+/// first push), write `remote-only` to make the cherry-pick log report one
+/// remote-only commit. `rev-list --count` answers 3 on the first call and 0
+/// after (the rebase happened), so the receipt reads behind-before=3
+/// behind-after=0.
 fn stub_git(dir: &Path) {
     write_exec(
         dir,
@@ -42,7 +45,9 @@ case "$1" in
         fi
         echo "feature/x"; exit 0 ;;
       "@{u}") echo deadbeef0000000; exit 0 ;;
-      --verify) echo deadbeef0000000; exit 0 ;;
+      --verify)
+        if [ -f "$D/no-remote-branch" ]; then exit 1; fi
+        echo deadbeef0000000; exit 0 ;;
       --short) echo abc1234; exit 0 ;;
       --show-toplevel) echo "$D"; exit 0 ;;
     esac
@@ -59,6 +64,9 @@ case "$1" in
     fi
     exit 0 ;;
   diff) if [ -f "$D/conflict" ]; then printf "src/a.rs\nsrc/b.rs\n"; fi; exit 0 ;;
+  log)
+    if [ -f "$D/remote-only" ]; then echo abc1234; fi
+    exit 0 ;;
 esac
 exit 0
 "#,
@@ -154,6 +162,11 @@ fn pushes_once_with_the_behind_receipt() {
     assert!(out.contains("sha=abc1234"), "{out}");
     assert!(out.contains("pushed=1"), "{out}");
     assert_eq!(log_of(&d, "git.log").matches("git push").count(), 1);
+    assert!(
+        log_of(&d, "git.log").contains("--force-with-lease=refs/heads/feature/x:deadbeef0000000"),
+        "the push is leased to the fetched remote sha: {:?}",
+        log_of(&d, "git.log")
+    );
     assert!(
         log_of(&d, "gh.log").contains("check-runs"),
         "the in-flight read ran"
@@ -252,12 +265,17 @@ fn a_red_preflight_refuses_the_push() {
 fn a_first_push_sets_the_upstream() {
     let (_t, d) = tmpdir();
     std::fs::write(d.join("no-upstream"), "").unwrap();
+    std::fs::write(d.join("no-remote-branch"), "").unwrap();
     let (code, out, err) = run_verb(&d, &[]);
     assert_eq!(code, 0, "{out}\n{err}");
+    let log = log_of(&d, "git.log");
     assert!(
-        log_of(&d, "git.log").contains("git push --set-upstream origin HEAD:feature/x"),
-        "{:?}",
-        log_of(&d, "git.log")
+        log.contains("git push --set-upstream origin HEAD:feature/x\n"),
+        "the push args keep their prefix: {log:?}"
+    );
+    assert!(
+        !log.contains("--force-with-lease"),
+        "a first push carries no lease: {log:?}"
     );
 }
 
@@ -303,3 +321,38 @@ fn force_ci_cancel_pushes_through_the_registration_window() {
     assert!(log_of(&d, "fno.log").contains("push_debounce_bypass"));
     assert_eq!(log_of(&d, "git.log").matches("git push").count(), 2);
 }
+
+#[test]
+fn a_remote_only_commit_refuses_with_exit_3_before_preflight() {
+    let (_t, d) = tmpdir();
+    std::fs::write(d.join("remote-only"), "").unwrap();
+    // A passing preflight runner must never run: the refusal fires before
+    // the rehearsal, not after it.
+    std::fs::create_dir_all(d.join("scripts/ci")).unwrap();
+    write_exec(
+        &d.join("scripts/ci"),
+        "preflight.sh",
+        "#!/bin/sh\necho ran > \"$(dirname \"$0\")/../../preflight.log\"\nexit 0\n",
+    );
+    let (code, out, err) = run_verb(&d, &[]);
+    assert_eq!(code, 3, "{out}\n{err}");
+    assert!(err.contains("abc1234"), "the remote-only sha: {err}");
+    assert!(
+        err.contains("git pull --rebase origin feature/x"),
+        "the door: {err}"
+    );
+    assert!(err.contains("Nothing pushed"), "{err}");
+    assert!(
+        !err.contains("not safely rebasable"),
+        "the refusal must not key heal's conflict phrase: {err}"
+    );
+    assert!(
+        !d.join("preflight.log").exists(),
+        "the refusal fired before preflight"
+    );
+    assert!(
+        !log_of(&d, "git.log").contains("git push"),
+        "nothing pushed"
+    );
+}
+
