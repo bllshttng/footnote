@@ -38,7 +38,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -59,7 +58,13 @@ pub const MAX_ENCODED_FILENAME_BYTES: usize = 240;
 pub const MIN_TTL_MS: i64 = 60_000;
 pub const MAX_TTL_MS: i64 = 86_400_000;
 
-const CLAIMS_DIRNAME: &str = ".fno/claims";
+// Root resolution lives in `claims_root.rs` (this file is over the 5,000-line
+// budget and shrink-only); the public names keep their `claims::` paths.
+pub(crate) use crate::claims_root::{claims_dir, CLAIMS_DIRNAME};
+pub use crate::claims_root::{
+    claims_root_for, global_claims_dir, global_claims_root, global_claims_root_from,
+};
+
 /// Where the single-flight latch keeps the answers its claims protect. Beside
 /// the claims dir, under the same root, so one resolver owns both.
 const FLIGHT_DIRNAME: &str = ".fno/flight";
@@ -249,37 +254,6 @@ pub fn encode_key(key: &str) -> String {
     out
 }
 
-/// Claim prefixes whose identifier is globally unique (mirrors
-/// `io._GLOBAL_ID_PREFIXES`): these coordinate across worktrees/repos via the
-/// global root, never a cwd-local dir.
-///
-/// `flight:` is here because the fan-out it latches is machine-wide: the seven
-/// concurrent `agents truth` children that motivated it came from five parents
-/// in different worktrees. A cwd-local root would give each of them its own
-/// lock and dedupe nothing.
-const GLOBAL_ID_PREFIXES: &[&str] = &[
-    "node",
-    "dispatch",
-    "reconcile",
-    "session",
-    "groom",
-    "update",
-    "config-optout",
-    "flight",
-    "gate",
-    // `worker:<name>`, the spawn gate's provider-lane reservation: the gate
-    // mints it under global_claims_root() (gate_claims_root), so a root-less
-    // reader resolves the same file the gate wrote.
-    "worker",
-    // `test:suite` (test_run.rs): a caller with no explicit `--claims-root`
-    // and no FNO_CLAIMS_ROOT/HOME in its environment must not hard-fail the
-    // claim lookup - it degrades to the machine-wide root like every other
-    // global key, never to a refusal that no root can be found.
-    "test",
-    // `build:cargo` (test_run.rs build-admit): one cargo build per machine.
-    "build",
-];
-
 /// Dotted configuration keys whose opt-out values are backed by global claims.
 /// Python owns the value membership and tests the source-level parity; Rust
 /// owns the claim routing and the readers that need the live verdict.
@@ -288,62 +262,6 @@ pub const MERGE_GATING_OPTOUT_KEYS: &[&str] = &[
     "review.optional_apps",
     "auto_merge.require_checks_pass",
 ];
-
-/// The global claims ROOT: `$FNO_CLAIMS_ROOT`, else `$HOME`. A set-but-EMPTY
-/// env value is UNSET (falls to `$HOME`) — Python's `os.environ.get` returns
-/// the empty string, which is falsy there; resolving it here as a real path
-/// would silently fork the claims dir (the drive.rs empty-is-unset lesson).
-pub fn global_claims_root() -> Option<PathBuf> {
-    let claims_root = std::env::var_os("FNO_CLAIMS_ROOT").filter(|v| !v.is_empty());
-    crate::paths::refuse_undeclared_home_fallback(
-        claims_root.is_some() || crate::paths::test_root_declared(),
-        "FNO_CLAIMS_ROOT",
-    );
-    global_claims_root_from(claims_root, std::env::var_os("HOME"))
-}
-
-/// Testable core of [`global_claims_root`]: env values are explicit so the
-/// empty-is-unset contract is exercised without mutating process-global env.
-pub fn global_claims_root_from(
-    claims_root: Option<OsString>,
-    home: Option<OsString>,
-) -> Option<PathBuf> {
-    let non_empty = |v: OsString| (!v.is_empty()).then_some(v);
-    claims_root
-        .and_then(non_empty)
-        .or_else(|| home.and_then(non_empty))
-        .map(PathBuf::from)
-}
-
-/// The global claims DIRECTORY (the resolver callers should hold, not a
-/// hand-built `<root>/.fno/claims`).
-pub fn global_claims_dir() -> Option<PathBuf> {
-    global_claims_root().map(|root| root.join(CLAIMS_DIRNAME))
-}
-
-/// Resolve the claims ROOT for `key` by prefix (mirrors `io.claims_root_for`):
-/// `<prefix>:<id>` with a global-id prefix routes to the global root; a
-/// colon-less key or unrecognized prefix returns `None` (caller must pass an
-/// explicit root — the Python canonical-repo-root fallback is deliberately
-/// not ported; no Rust caller needs it).
-pub fn claims_root_for(key: &str) -> Option<PathBuf> {
-    match key.split_once(':') {
-        Some((prefix, _)) if GLOBAL_ID_PREFIXES.contains(&prefix) => global_claims_root(),
-        _ => None,
-    }
-}
-
-fn claims_dir(key: &str, root: Option<&Path>) -> Result<PathBuf, String> {
-    if let Some(r) = root {
-        return Ok(r.join(CLAIMS_DIRNAME));
-    }
-    match claims_root_for(key) {
-        Some(r) => Ok(r.join(CLAIMS_DIRNAME)),
-        None => Err(format!(
-            "no claims root for key {key:?}: not a global-id prefix and no explicit root given"
-        )),
-    }
-}
 
 /// The canonical lockfile path for a claim key.
 pub fn claim_path(key: &str, root: Option<&Path>) -> Result<PathBuf, String> {
@@ -3553,29 +3471,6 @@ mod tests {
         // Non-ASCII percent-encodes per UTF-8 byte.
         assert_eq!(encode_key("é"), "%C3%A9");
         assert_eq!(encode_key("走"), "%E8%B5%B0");
-    }
-
-    #[test]
-    fn set_but_empty_claims_root_is_unset() {
-        let root = global_claims_root_from(Some(OsString::new()), Some(OsString::from("/home/x")));
-        assert_eq!(root, Some(PathBuf::from("/home/x")));
-        let root = global_claims_root_from(
-            Some(OsString::from("/custom")),
-            Some(OsString::from("/home/x")),
-        );
-        assert_eq!(root, Some(PathBuf::from("/custom")));
-        assert_eq!(global_claims_root_from(None, None), None);
-    }
-
-    #[test]
-    fn root_routing_requires_colon_and_known_prefix() {
-        // A bare token equal to a prefix must NOT route globally (partition
-        // semantics: a global-id key is always "<prefix>:<id>").
-        assert!(claims_dir("node", None).is_err());
-        assert!(claims_dir("walker:/repo/root", None).is_err());
-        // Explicit root always wins.
-        let dir = claims_dir("walker:/repo/root", Some(Path::new("/tmp/x"))).unwrap();
-        assert_eq!(dir, PathBuf::from("/tmp/x/.fno/claims"));
     }
 
     #[test]

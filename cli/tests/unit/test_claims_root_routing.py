@@ -1,8 +1,9 @@
 """The global-id prefix lists must not diverge between Python and Rust.
 
 `claims_root_for` is implemented twice: `fno.claims.io` owns the canonical
-list, and `crates/fno-agents/src/claims.rs` hand-copies it under a comment
-saying it mirrors the Python. Nothing held the two equal, so a prefix added
+list, and `crates/fno-agents/src/claims_root.rs` hand-copies it under a
+comment saying it mirrors the Python. Nothing held the two equal, so a prefix
+added
 to one and not the other routes the same claim key to two different roots:
 the writer and the reader coordinate on different files and both believe
 they won.
@@ -18,7 +19,11 @@ from pathlib import Path
 from fno.claims.io import _GLOBAL_ID_PREFIXES
 
 RUST_CLAIMS = (
-    Path(__file__).resolve().parents[3] / "crates" / "fno-agents" / "src" / "claims.rs"
+    Path(__file__).resolve().parents[3]
+    / "crates"
+    / "fno-agents"
+    / "src"
+    / "claims_root.rs"
 )
 
 
