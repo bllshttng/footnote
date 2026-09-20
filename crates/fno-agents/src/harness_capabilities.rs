@@ -70,6 +70,17 @@ const FEATURE_KEYS: [&str; 11] = [
 /// routing boolean and name tuple this dimension replaced could not say
 /// that.
 const FEATURE_STATES: [&str; 4] = ["native", "capable", "absent", "unmeasured"];
+/// How a live pane session becomes a persistent thread, one value per
+/// `[harness.<name>.conversion]` stanza. Closed so the classifier can branch
+/// on the strategy alone - never on a harness name - and a typo is a parse
+/// error rather than a silent new dimension. Documented beside the stanzas
+/// at the tail of harness_capabilities.toml.
+const CONVERSION_STRATEGIES: [&str; 4] = [
+    "keeper-rebind",
+    "server-resume",
+    "client-resume",
+    "unsupported",
+];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error("harness capability contract: {0}")]
@@ -171,6 +182,40 @@ pub struct HarnessCapabilities {
     /// [`HarnessContract::validate`].
     #[serde(default)]
     pub features: BTreeMap<String, FeatureClaim>,
+    /// The pane-to-thread lifecycle move (`fno agents resume <name>
+    /// --substrate thread`), one stanza per harness. ABSENT reads
+    /// `unsupported` at the accessor with a named refusal - absence is the
+    /// default-off, never a guess - so only rows that measured a conversion
+    /// carry one.
+    #[serde(default)]
+    pub conversion: Option<ConversionRow>,
+}
+
+/// One harness's `[harness.<name>.conversion]` stanza: HOW a live pane of
+/// this harness becomes a persistent thread under its own session id, and
+/// whether that id survives. `refusal` is required on an `unsupported` row
+/// and refused on a supported one (checked in `validate_row`), so an
+/// unsupported row always answers the operator's why.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversionRow {
+    /// One of [`CONVERSION_STRATEGIES`].
+    pub strategy: String,
+    pub preserves_id: bool,
+    /// Why conversion is refused. Required on `unsupported`, empty
+    /// elsewhere - a supported row's refusal would contradict its strategy.
+    #[serde(default)]
+    pub refusal: String,
+}
+
+/// The conversion contract RESOLVED for the caller: what the row declared,
+/// or the absent-stanza default (`unsupported` + named refusal).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedConversion {
+    /// One of [`CONVERSION_STRATEGIES`].
+    pub strategy: String,
+    pub preserves_id: bool,
+    pub refusal: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -573,6 +618,29 @@ impl HarnessContract {
             .get("interactive_attach")
             .map(|form| !form.pre_exec.is_empty())
             .unwrap_or(false))
+    }
+
+    /// This harness's pane-to-thread conversion contract, resolved for the
+    /// classifier: the strategy, whether the session id survives, and the
+    /// operator-facing refusal. A row with NO stanza reads `unsupported`
+    /// with the named refusal - absence is the declared default-off, so a
+    /// new harness refuses conversion until it measures a strategy instead
+    /// of inheriting claude's path or falling through a derivation. The
+    /// classifier branches on `strategy` alone; it never names a harness.
+    pub fn conversion(&self, harness: &str) -> Result<ResolvedConversion, ContractError> {
+        let caps = self.capabilities(harness)?;
+        Ok(match caps.conversion.as_ref() {
+            Some(row) => ResolvedConversion {
+                strategy: row.strategy.clone(),
+                preserves_id: row.preserves_id,
+                refusal: row.refusal.clone(),
+            },
+            None => ResolvedConversion {
+                strategy: "unsupported".to_string(),
+                preserves_id: false,
+                refusal: format!("no conversion declared for {harness}"),
+            },
+        })
     }
 
     pub fn permission_response_keys(
@@ -1048,6 +1116,41 @@ fn validate_row(harness: &str, caps: &HarnessCapabilities) -> Result<(), Contrac
         || (caps.session_binding.required && caps.session_binding.timeout_ms == 0)
     {
         return Err(field_error(harness, "session_binding", "invalid strategy"));
+    }
+    if let Some(conversion) = &caps.conversion {
+        if !CONVERSION_STRATEGIES.contains(&conversion.strategy.as_str()) {
+            return Err(field_error(
+                harness,
+                "conversion.strategy",
+                "unknown strategy",
+            ));
+        }
+        // An unsupported row must say WHY in operator-facing text, and a
+        // supported row must not carry a refusal that contradicts its own
+        // strategy. preserves_id rides the same coherence: only an
+        // unsupported row may declare the id does not survive.
+        if conversion.strategy == "unsupported" {
+            if conversion.refusal.is_empty() {
+                return Err(field_error(
+                    harness,
+                    "conversion.refusal",
+                    "an unsupported conversion must name its refusal",
+                ));
+            }
+            if conversion.preserves_id {
+                return Err(field_error(
+                    harness,
+                    "conversion.preserves_id",
+                    "an unsupported conversion cannot preserve the id",
+                ));
+            }
+        } else if !conversion.refusal.is_empty() || !conversion.preserves_id {
+            return Err(field_error(
+                harness,
+                "conversion",
+                "a supported conversion preserves the id and carries no refusal",
+            ));
+        }
     }
     Ok(())
 }
@@ -1777,5 +1880,94 @@ mod tests {
         let stripped = CAPABILITY_TOML.replacen(stanza, "", 1);
         let contract = HarnessContract::parse(&stripped).unwrap();
         assert!(contract.capabilities("agy").unwrap().features.is_empty());
+    }
+
+    #[test]
+    fn every_harness_declares_a_conversion_strategy_and_the_supported_ones_match_the_plan_matrix() {
+        let contract = HarnessContract::packaged().unwrap();
+        let want = [
+            ("claude", "client-resume", true),
+            ("codex", "server-resume", true),
+            ("gemini", "unsupported", false),
+            ("agy", "keeper-rebind", true),
+            ("opencode", "unsupported", false),
+            ("pi", "keeper-rebind", true),
+            ("cursor-agent", "keeper-rebind", true),
+            ("grok", "keeper-rebind", true),
+        ];
+        for (harness, strategy, preserves_id) in want {
+            let got = contract.conversion(harness).unwrap();
+            assert_eq!(
+                got.strategy, strategy,
+                "harness {harness} strategy mismatch"
+            );
+            assert_eq!(
+                got.preserves_id, preserves_id,
+                "harness {harness} preserves_id mismatch"
+            );
+        }
+        // The unsupported rows must carry operator-facing why; the supported
+        // rows must not carry a refusal at all.
+        for harness in ["gemini", "opencode"] {
+            let refusal = contract.conversion(harness).unwrap().refusal;
+            assert!(!refusal.is_empty(), "{harness} needs a refusal");
+        }
+        for harness in ["claude", "codex", "agy", "pi", "cursor-agent", "grok"] {
+            let got = contract.conversion(harness).unwrap();
+            assert!(got.refusal.is_empty(), "{harness} carries no refusal");
+        }
+    }
+
+    #[test]
+    fn a_missing_conversion_stanza_reads_unsupported_with_the_named_refusal() {
+        let contract = HarnessContract::packaged().unwrap();
+        // Every packaged row carries a stanza, so drop one to read the
+        // absent default.
+        let stripped = CAPABILITY_TOML.replacen(
+            "[harness.grok.conversion]\nstrategy = \"keeper-rebind\"\npreserves_id = true\n",
+            "",
+            1,
+        );
+        let contract = HarnessContract::parse(&stripped).unwrap();
+        let got = contract.conversion("grok").unwrap();
+        assert_eq!(got.strategy, "unsupported");
+        assert!(!got.preserves_id);
+        assert_eq!(got.refusal, "no conversion declared for grok");
+    }
+
+    #[test]
+    fn an_unsupported_conversion_without_a_refusal_is_a_parse_refusal() {
+        let bad = CAPABILITY_TOML.replacen(
+            "refusal = \"gemini is deprecated in favor of agy; there is nothing to convert\"",
+            "",
+            1,
+        );
+        let err = HarnessContract::parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("gemini"), "{err}");
+        assert!(err.contains("refusal"), "{err}");
+    }
+
+    #[test]
+    fn a_supported_conversion_cannot_carry_a_refusal() {
+        let bad = CAPABILITY_TOML.replacen(
+            "[harness.agy.conversion]\nstrategy = \"keeper-rebind\"\npreserves_id = true",
+            "[harness.agy.conversion]\nstrategy = \"keeper-rebind\"\npreserves_id = true\nrefusal = \"never\"",
+            1,
+        );
+        let err = HarnessContract::parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("agy"), "{err}");
+        assert!(err.contains("conversion"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_conversion_strategy_is_a_parse_refusal() {
+        let bad = CAPABILITY_TOML.replacen(
+            "[harness.pi.conversion]\nstrategy = \"keeper-rebind\"",
+            "[harness.pi.conversion]\nstrategy = \"keeper-re-bind\"",
+            1,
+        );
+        let err = HarnessContract::parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("pi"), "{err}");
+        assert!(err.contains("strategy"), "{err}");
     }
 }
