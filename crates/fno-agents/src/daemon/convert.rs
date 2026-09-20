@@ -423,7 +423,7 @@ fn run_client_resume(
                 Ok(()) => reason.clone(),
                 Err(error) => format!(
                     "{reason}. The session it started ({}) could not be stopped ({error}); stop \
-                     it with: claude stop {}",
+                     it with: fno agents stop {}",
                     row.short_id, row.short_id
                 ),
             };
@@ -600,28 +600,40 @@ fn launch_background_claude(
     ))
 }
 
-/// Stop a background session the rollback is undoing.
+/// Stop the background session a rollback is undoing, through the ONE
+/// bounded stop every lane uses. A rollback that left it running would put
+/// two readers on one conversation.
+///
+/// It runs on its own thread with its own runtime: this arm is already on
+/// the blocking pool, where awaiting the ambient runtime panics.
 fn stop_background_claude(
     short_id: &str,
     config_dir: Option<&std::path::Path>,
 ) -> Result<(), String> {
-    let mut command = std::process::Command::new("claude");
-    command.args(["stop", short_id]);
-    if let Some(dir) = config_dir {
-        command.env("CLAUDE_CONFIG_DIR", dir);
-    }
-    command.current_dir("/");
-    let output = command
-        .output()
-        .map_err(|error| format!("claude stop failed to start: {error}"))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(format!(
-        "claude stop exited {}: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    ))
+    let short = short_id.to_string();
+    let dir = config_dir.map(std::path::Path::to_path_buf);
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("the stop could not build a runtime: {error}"))?;
+        match runtime.block_on(crate::lifecycle_child::bounded_claude_stop_in(
+            &short,
+            Duration::from_secs(15),
+            dir.as_deref(),
+        )) {
+            Ok(Ok(output)) if output.status.success() => Ok(()),
+            Ok(Ok(output)) => Err(format!(
+                "the stop exited {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Ok(Err(error)) => Err(format!("the stop could not start: {error}")),
+            Err(_) => Err("the stop did not answer within 15s".to_string()),
+        }
+    })
+    .join()
+    .unwrap_or_else(|_| Err("the stop thread panicked".to_string()))
 }
 
 fn read_row(registry_path: &std::path::Path, name: &str) -> Option<RegistryEntry> {
