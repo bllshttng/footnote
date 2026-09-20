@@ -40,7 +40,11 @@ pub const CLIENT_VERB_USAGE: &[&str] = &[
     "trace [options]",
     "registry-json",
     "ping",
-    "resume <name> [--print-command] [--message/-m <text>] [--cross-project] [--cwd <existing-checkout>] [--account <id>]",
+    // The `--substrate thread` arm is a LIFECYCLE move, not a re-entry: it
+    // converts a live pane into a persistent thread under the same session
+    // id. The three flags that belong to it are spelled out here because
+    // this line is what `resume --help` prints.
+    "resume <name> [--print-command] [--message/-m <text>] [--cross-project] [--cwd <existing-checkout>] [--account <id>] [--substrate thread] [--dry-run] [--allow-new-id]   # --substrate thread converts a live pane into a persistent thread, keeping the session id, node, claims and crown; --dry-run prints the plan and moves nothing; --allow-new-id accepts a relaunch that minted a different session id (refused on a crowned row). Both need --substrate thread",
     "adopt <session-id> [--cross-project]",
     "attach <name>",
     "logs <name> [--follow] [options]",

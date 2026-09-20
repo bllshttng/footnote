@@ -101,9 +101,184 @@ pub fn carried_flags(argv: &[String]) -> Vec<String> {
     out
 }
 
+/// The relaunch argv, after the program name. `claude --bg --resume <id>`
+/// continues the session under the same id when nothing else holds it, and
+/// STARTS A COPY when the session is still running. That second sentence is
+/// the whole reason the pane must be proven gone before this runs, and the
+/// reason the id is read back afterwards rather than assumed.
+///
+/// The carried flags come last so a pin the operator set on the live writer
+/// beats any default the resume would otherwise take.
+pub fn resume_argv(session_id: &str, carried: &[String]) -> Vec<String> {
+    let mut argv = vec![
+        "--bg".to_string(),
+        "--resume".to_string(),
+        session_id.to_string(),
+    ];
+    argv.extend_from_slice(carried);
+    argv
+}
+
+/// Which roster row is the relaunched session.
+///
+/// A row still carrying the ORIGINAL session id is the answer whatever else
+/// appeared, because that is the id the resume addressed. Otherwise the row
+/// is identified by difference: one short id present now that was absent
+/// before the launch. Two new rows prove nothing about which is ours, so
+/// this answers `None` and the caller rolls back rather than adopting a row
+/// that may belong to another spawn.
+pub fn relaunched_row<'a>(
+    before: &[String],
+    after: &'a [crate::claude_roster::ClaudeAgentRow],
+    original: &str,
+) -> Option<&'a crate::claude_roster::ClaudeAgentRow> {
+    if let Some(row) = after
+        .iter()
+        .find(|row| row.session_id.as_deref() == Some(original))
+    {
+        return Some(row);
+    }
+    let mut fresh = after
+        .iter()
+        .filter(|row| !before.iter().any(|seen| seen == &row.short_id));
+    let first = fresh.next()?;
+    match fresh.next() {
+        Some(_) => None,
+        None => Some(first),
+    }
+}
+
+/// Flip a row onto the claude thread shape: a background session the
+/// operator reaches with `claude attach <short_id>`.
+///
+/// Unlike the codex flip this KEEPS a short id and a pid, because a claude
+/// thread is a real process claude hosts itself, and both the attach verb
+/// and the liveness ladder address it through those two fields. The row's
+/// name, node and every other birth fact are left alone.
+pub fn to_claude_thread(
+    entry: &mut crate::state::RegistryEntry,
+    short_id: &str,
+    writer_pid: Option<u32>,
+    session_id: &str,
+) {
+    entry.substrate = Some("thread".to_string());
+    entry.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
+    entry.short_id = short_id.to_string();
+    entry.mux = None;
+    entry.pid = writer_pid;
+    entry.pid_start_time = None;
+    entry.harness_session_id = Some(session_id.to_string());
+    entry.claude_session_uuid = Some(session_id.to_string());
+}
+
+/// Whether this row holds a crown. Read ONCE before the conversion mutates
+/// anything, because a crown granted mid-move must not decide the fate of a
+/// session that was already relaunched.
+///
+/// Crown liveness is the ROW's liveness, so the level alone answers it: an
+/// exited row carries no live crown whatever it records.
+pub fn row_is_crowned(entry: &crate::state::RegistryEntry) -> bool {
+    entry.crown_level.is_some_and(|level| level > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::claude_roster::ClaudeAgentRow;
+
+    fn roster_row(short_id: &str, session_id: Option<&str>) -> ClaudeAgentRow {
+        let mut row = ClaudeAgentRow::new(short_id, Some("running"));
+        row.session_id = session_id.map(str::to_string);
+        row
+    }
+
+    #[test]
+    fn the_resume_argv_asks_for_the_background_lane_and_carries_the_pins_last() {
+        let carried = ["--model".to_string(), "glm-5.3-flash[1m]".to_string()];
+        assert_eq!(
+            resume_argv("sid-1", &carried),
+            vec!["--bg", "--resume", "sid-1", "--model", "glm-5.3-flash[1m]"]
+        );
+        assert_eq!(resume_argv("sid-1", &[]), vec!["--bg", "--resume", "sid-1"]);
+    }
+
+    #[test]
+    fn the_original_id_wins_over_every_other_new_row() {
+        let after = [
+            roster_row("aaaa", Some("other")),
+            roster_row("bbbb", Some("sid-1")),
+        ];
+        let found = relaunched_row(&[], &after, "sid-1").expect("the original id is decisive");
+        assert_eq!(found.short_id, "bbbb");
+    }
+
+    #[test]
+    fn a_single_new_short_id_identifies_the_relaunch_by_difference() {
+        let before = ["aaaa".to_string()];
+        let after = [
+            roster_row("aaaa", Some("other")),
+            roster_row("cccc", Some("minted")),
+        ];
+        let found = relaunched_row(&before, &after, "sid-1").expect("one new row is identifiable");
+        assert_eq!(found.session_id.as_deref(), Some("minted"));
+    }
+
+    #[test]
+    fn two_new_rows_identify_nothing_and_no_row_is_adopted() {
+        let before = ["aaaa".to_string()];
+        let after = [
+            roster_row("aaaa", Some("other")),
+            roster_row("cccc", Some("minted")),
+            roster_row("dddd", Some("someone-elses")),
+        ];
+        assert!(relaunched_row(&before, &after, "sid-1").is_none());
+        // And a roster that grew no row at all answers the same way.
+        assert!(relaunched_row(&before, &after[..1], "sid-1").is_none());
+    }
+
+    #[test]
+    fn the_thread_flip_keeps_the_short_id_and_pid_the_attach_verb_needs() {
+        let mut entry = crate::state::RegistryEntry {
+            name: "worker-one".to_string(),
+            cwd: "/repo".to_string(),
+            ..Default::default()
+        };
+        entry.harness = Some("claude".to_string());
+        entry.substrate = Some("pane".to_string());
+        entry.short_id = "oldshort".to_string();
+        entry.mux = Some(crate::state::MuxRef {
+            session: "fno".to_string(),
+            pane_id: 7,
+        });
+        entry.pid = Some(4242);
+        entry.pid_start_time = Some(99);
+        entry.node = Some("x-node".to_string());
+
+        to_claude_thread(&mut entry, "newshort", Some(5150), "sid-1");
+
+        assert_eq!(entry.substrate.as_deref(), Some("thread"));
+        // A claude thread IS a process, unlike a codex thread: the attach
+        // verb takes the short id and the liveness ladder takes the pid.
+        assert_eq!(entry.short_id, "newshort");
+        assert_eq!(entry.pid, Some(5150));
+        assert!(entry.mux.is_none());
+        assert_eq!(entry.harness_session_id.as_deref(), Some("sid-1"));
+        assert_eq!(entry.claude_session_uuid.as_deref(), Some("sid-1"));
+        // Birth facts the conversion observed nothing about stay put.
+        assert_eq!(entry.name, "worker-one");
+        assert_eq!(entry.node.as_deref(), Some("x-node"));
+    }
+
+    #[test]
+    fn only_a_recorded_crown_level_reads_as_crowned() {
+        let mut entry = crate::state::RegistryEntry::default();
+        assert!(!row_is_crowned(&entry), "an uncrowned row holds no crown");
+        entry.crown_level = Some(0);
+        assert!(!row_is_crowned(&entry), "level zero is not a crown");
+        entry.crown_level = Some(1);
+        assert!(row_is_crowned(&entry));
+    }
 
     #[test]
     fn the_same_id_is_kept() {
