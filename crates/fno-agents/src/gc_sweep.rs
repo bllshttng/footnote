@@ -209,6 +209,10 @@ pub struct GcSummary {
     /// One entry per kept open-PR row (Locked Decision 7): the nudge
     /// ladder's input. A projection the `kept_total` does not count.
     pub open_pr_rows: Vec<OpenPrRow>,
+    /// The dead-crown sweep's report when it ran beside this pass; `None`
+    /// when it did not run. The daemon arm reports crowns through its detail
+    /// line, the manual verb fills this field.
+    pub crowns: Option<crate::crown_reap::CrownReap>,
 }
 
 /// One open-PR row the nudge ladder reads (Locked Decision 7): the row, the

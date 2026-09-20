@@ -579,6 +579,13 @@ fn durable_spaces_root() -> PathBuf {
     root
 }
 
+/// The spaces ROOT (the directory holding one space dir per repository):
+/// the same resolution `space_dir`'s parent logic uses. Public for the
+/// `fno-agents` bin client, whose dead-crown sweep walks it.
+pub fn spaces_root() -> PathBuf {
+    spaces_root_dir()
+}
+
 /// The nearest ancestor of `path` that is a checkout root, or None. A pure
 /// walk: no env, no cwd, no subprocess, so the answer about `old` cannot be
 /// bent by whoever is resolving state in this call.
