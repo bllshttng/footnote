@@ -692,18 +692,15 @@ fn stop_refusal_names_a_pane_kill_the_mux_parser_accepts() {
         .expect("refusal names the kill command")
         .split('`')
         .next()
-        .expect("the printed command is backtick-closed");
-    let selector = selector
+        .expect("the printed command is backtick-closed")
         .strip_prefix("fno mux pane kill ")
         .expect("the printed command is the pane kill verb");
     let op = fno::cli_args::PaneOp::Kill(fno::cli_args::MuxTail { tail: Vec::new() });
     let parsed = fno::mux_cli::parse_pane_args(&op, &[selector.into()])
         .expect("the refusal's own command must parse");
+    let cmd = parsed.cmd;
     assert_eq!(parsed.session.as_deref(), Some("main"));
-    assert!(matches!(
-        parsed.cmd,
-        fno::mux_cli::PaneCmd::Kill { pane: 76, .. }
-    ));
+    assert!(matches!(cmd, fno::mux_cli::PaneCmd::Kill { pane: 76, .. }));
 }
 
 #[test]
