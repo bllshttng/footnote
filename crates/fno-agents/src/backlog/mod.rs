@@ -18,6 +18,7 @@ pub mod note_cli;
 pub mod note_history;
 pub mod note_migrate;
 pub mod note_stale;
+pub mod orphan_plans;
 pub mod patch;
 pub mod pull_requests;
 pub mod receipt;
