@@ -142,8 +142,7 @@ pub(crate) fn verdict_line(r: &Refusal) -> String {
         .or_else(|| ev_str("reason"))
         .unwrap_or("unknown");
     let mut figures: Vec<String> = Vec::new();
-    let mut collect = |map: &serde_json::Map<String, serde_json::Value>,
-                       figures: &mut Vec<String>| {
+    let collect = |map: &serde_json::Map<String, serde_json::Value>, figures: &mut Vec<String>| {
         for (k, v) in map {
             if matches!(k.as_str(), "status" | "reason" | "axis" | "held_on") {
                 continue;
