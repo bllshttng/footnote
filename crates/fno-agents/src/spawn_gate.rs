@@ -142,8 +142,9 @@ pub(crate) fn verdict_line(r: &Refusal) -> String {
         .or_else(|| ev_str("reason"))
         .unwrap_or("unknown");
     let mut figures: Vec<String> = Vec::new();
-    if let Some(obj) = rc.and_then(serde_json::Value::as_object) {
-        for (k, v) in obj {
+    let mut collect = |map: &serde_json::Map<String, serde_json::Value>,
+                       figures: &mut Vec<String>| {
+        for (k, v) in map {
             if matches!(k.as_str(), "status" | "reason" | "axis" | "held_on") {
                 continue;
             }
@@ -155,6 +156,15 @@ pub(crate) fn verdict_line(r: &Refusal) -> String {
                 _ => {}
             }
         }
+    };
+    if let Some(obj) = rc.and_then(serde_json::Value::as_object) {
+        collect(obj, &mut figures);
+    }
+    if figures.is_empty() {
+        // A receipt-less refusal (king share, fleet incident) keeps its
+        // measurements in the event; the verdict names them, or it names
+        // no breach at all.
+        collect(&r.event, &mut figures);
     }
     if figures.is_empty() {
         format!(
@@ -1164,7 +1174,21 @@ fn maybe_emit_spawn_cap_escape() {
 ///
 /// Fails open on exactly one case: `roots` is empty. There is then no root to
 /// grant and nothing to refuse.
+/// The state-root grant gate. Sits BEFORE `run_gate` in the spawn path
+/// (bin/client.rs), so it carries the same wrapper duty: its refusal ends
+/// with one [`verdict_line`], or the reader sees the remedy prose with no
+/// verdict.
 pub fn state_root_grant_gate(
+    harness: &str,
+    substrate: &str,
+    roots: &[String],
+) -> Result<(), Refusal> {
+    state_root_grant_gate_decide(harness, substrate, roots).inspect_err(|r| {
+        eprintln!("{}", verdict_line(r));
+    })
+}
+
+fn state_root_grant_gate_decide(
     harness: &str,
     substrate: &str,
     roots: &[String],
@@ -2700,6 +2724,23 @@ mod tests {
         assert_eq!(
             verdict_line(&refusal),
             "spawn-gate: refused on unknown (unknown, exit 82)"
+        );
+    }
+
+    /// A receipt-less refusal keeps its measurements in the event; the
+    /// verdict falls back to the event's scalars so the breach is named.
+    #[test]
+    fn verdict_line_falls_back_to_event_scalars() {
+        let refusal = Refusal::code(EXIT_KING_SHARE)
+            .ev("reason", serde_json::json!("king_share"))
+            .ev("king", serde_json::json!("abc12345"))
+            .ev("held", serde_json::json!(5))
+            .ev("share", serde_json::json!(3))
+            .ev("max_live", serde_json::json!(15))
+            .ev("kings", serde_json::json!(2));
+        assert_eq!(
+            verdict_line(&refusal),
+            "spawn-gate: refused on king_share (king_share, exit 80): king=abc12345, held=5, share=3, max_live=15, kings=2"
         );
     }
 
