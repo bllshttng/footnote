@@ -3149,7 +3149,7 @@ fn recovery_does_not_quarantine_a_temp_held_by_an_active_writer() {
         .unwrap();
     lock.lock().unwrap();
 
-    let found = quarantine_interrupted_write_temps(&home, &emitter);
+    let found = crate::quarantine::quarantine_interrupted_write_temps(&home, &emitter);
 
     assert!(found.is_empty());
     assert!(temp.exists(), "active writer temp must remain in place");

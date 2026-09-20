@@ -270,7 +270,7 @@ fn recover_with_policy(
         ..RecoveryReport::default()
     };
     let registry = load_registry_asserted(&home.registry_json())?;
-    report.interrupted_write_temps = quarantine_interrupted_write_temps(home, emitter);
+    report.interrupted_write_temps = crate::quarantine::quarantine_interrupted_write_temps(home, emitter);
 
     let registered: std::collections::BTreeSet<String> = registry
         .entries
@@ -471,58 +471,6 @@ fn recover_with_policy(
     Ok(report)
 }
 
-fn quarantine_interrupted_write_temps(home: &AgentsHome, emitter: &EventEmitter) -> Vec<String> {
-    let mut found = Vec::new();
-    let state_root = home.root().parent().unwrap_or(home.root());
-    let quarantine = state_root.join(".interrupted-writes");
-    for dir in [home.root(), state_root] {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            if !kind.is_file() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !(name.starts_with('.') && (name.contains(".tmp.") || name.ends_with(".part"))) {
-                continue;
-            }
-            let target_name = name
-                .strip_prefix('.')
-                .and_then(|name| name.split_once(".tmp.").map(|(target, _)| target))
-                .or_else(|| {
-                    name.strip_prefix('.')
-                        .and_then(|name| name.strip_suffix(".part"))
-                });
-            let Some(target_name) = target_name else {
-                continue;
-            };
-            let target = dir.join(target_name);
-            let Ok(Some(_lock)) = state::try_lock_path_exclusive(&target) else {
-                continue;
-            };
-            if !entry.path().exists() {
-                continue;
-            }
-            let _ = std::fs::create_dir_all(&quarantine);
-            let dest = quarantine.join(format!("{}-{}", now_compact(), name));
-            let outcome = if std::fs::rename(entry.path(), &dest).is_ok() {
-                "quarantined"
-            } else {
-                "detected"
-            };
-            let _ = emitter.emit(
-                "daemon_recovery_interrupted_temp",
-                &json!({"name": name, "outcome": outcome, "quarantined_to": dest}),
-            );
-            found.push(name);
-        }
-    }
-    found
-}
 
 /// A live process's start time, used to distinguish "our worker" from a recycled
 /// PID. `None` if the process is gone or the lookup is
@@ -7836,7 +7784,7 @@ fn json_obj(pairs: &[(&str, Value)]) -> Map<String, Value> {
 }
 
 /// Compact UTC timestamp for filesystem names (`20260524T023300Z`).
-fn now_compact() -> String {
+pub(crate) fn now_compact() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
