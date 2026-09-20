@@ -123,7 +123,10 @@ const EXTENDED_PANEL_W: u16 = COL_STATUS + COL_PR + COL_TIME + 54 + 1;
 /// The narrowest useful extended panel: fixed status/PR/age cells, a readable
 /// agent cell, and the divider. The message cell is omitted only below its
 /// eight-column floor; age is never dropped from an admitted table.
-const MIN_EXTENDED_PANEL_W: u16 = COL_STATUS + COL_MIN_NAME + COL_PR + COL_TIME + 1;
+/// The narrowest useful table panel: the four non-message columns of
+/// [`SIDELINE_COLUMNS`] (11 status + 12 name + 6 PR + 6 age), the four
+/// one-column gaps between them, and the divider.
+const MIN_EXTENDED_PANEL_W: u16 = 40;
 
 /// Columns the top-right density button reserves on the sideline's
 /// first row: the state glyph plus a trailing pad so it does not sit
@@ -945,7 +948,7 @@ struct View {
     /// Table's own scroll state - `offset` is the same first-visible index,
     /// `selected` mirrors the selector so the widget keeps the cursor's row
     /// visible at render time.
-    sideline_state: TableState,
+    sideline_state: std::cell::Cell<TableState>,
     /// Answer-overlay cursor into [`View::blocked_queue`], when open;
     /// the index of the selected blocked pane in `Layout.agents` order.
     answers: Option<usize>,
@@ -2335,7 +2338,7 @@ impl View {
             selector: None,
             sel_esc: Vec::new(),
             sel_hover_armed: false,
-            sideline_state: TableState::new(),
+            sideline_state: std::cell::Cell::new(TableState::new()),
             answers: None,
             ans_esc: Vec::new(),
             feed: None,
@@ -4693,7 +4696,7 @@ impl View {
         // Display row i is painted at `i - offset` (draw_sideline, since
         // the sideline owns row 0), so invert with the offset - else a click on a
         // scrolled row activates the wrong row. Mirrors sideline_row_at.
-        let i = row as usize + self.sideline_state.offset();
+        let i = row as usize + self.sideline_offset();
         if let Some(hit) = self.table_header_hit(i, col) {
             return Some(hit);
         }
@@ -5067,7 +5070,7 @@ impl View {
         if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
             return None;
         }
-        let i = row as usize + self.sideline_state.offset();
+        let i = row as usize + self.sideline_offset();
         (i < self.display_rows().len()).then_some(i)
     }
 
@@ -5779,6 +5782,20 @@ impl View {
             .saturating_sub(self.court_block_rows())
     }
 
+    /// The sideline TableState's offset, read and written through the Cell
+    /// so the render pass can persist the widget-adjusted value through
+    /// `&self` - the stored offset stays authoritative for hit tests even
+    /// when the widget moved it at render time.
+    fn sideline_offset(&self) -> usize {
+        self.sideline_state.get().offset()
+    }
+
+    fn set_sideline_offset(&self, v: usize) {
+        let mut st = self.sideline_state.get();
+        *st.offset_mut() = v;
+        self.sideline_state.set(st);
+    }
+
     /// Follow-the-cursor sideline scroll: move the TableState's offset the
     /// least it takes to keep the selector (or hover) row on screen, then
     /// clamp into `[0, rows - visible]` so a shrunk catalog never scrolls past the
@@ -5787,20 +5804,20 @@ impl View {
     fn clamp_sideline_scroll(&mut self) {
         let total = self.display_rows().len();
         let visible = self.sideline_visible_rows();
-        let off = self.sideline_state.offset();
+        let off = self.sideline_offset();
         if total <= visible || visible == 0 {
-            *self.sideline_state.offset_mut() = 0;
+            self.set_sideline_offset(0);
             return;
         }
         if let Some(cur) = self.selector.or(self.hover_row) {
             if cur < off {
-                *self.sideline_state.offset_mut() = cur;
+                self.set_sideline_offset(cur);
             } else if cur >= off + visible {
-                *self.sideline_state.offset_mut() = cur + 1 - visible;
+                self.set_sideline_offset(cur + 1 - visible);
             }
         }
-        let off = self.sideline_state.offset();
-        *self.sideline_state.offset_mut() = off.min(total - visible);
+        let off = self.sideline_offset();
+        self.set_sideline_offset(off.min(total - visible));
     }
 
     /// Scroll the focused pane's sideline row into the visible window,
@@ -5828,14 +5845,14 @@ impl View {
         let Some(idx) = self.agent_row_index_for_pane(focus) else {
             return;
         };
-        let off = self.sideline_state.offset();
+        let off = self.sideline_offset();
         if idx < off {
-            *self.sideline_state.offset_mut() = idx;
+            self.set_sideline_offset(idx);
         } else if idx >= off + visible {
-            *self.sideline_state.offset_mut() = idx + 1 - visible;
+            self.set_sideline_offset(idx + 1 - visible);
         }
-        let off = self.sideline_state.offset();
-        *self.sideline_state.offset_mut() = off.min(total - visible);
+        let off = self.sideline_offset();
+        self.set_sideline_offset(off.min(total - visible));
     }
 
     /// Wheel-scroll the sideline list by one row. With an EXPLICIT selector open
@@ -5869,12 +5886,12 @@ impl View {
                     self.selector = None;
                     self.sel_hover_armed = false;
                 }
-                let off = self.sideline_state.offset();
-                *self.sideline_state.offset_mut() = if down {
+                let off = self.sideline_offset();
+                self.set_sideline_offset(if down {
                     (off + 1).min(total - visible)
                 } else {
                     off.saturating_sub(1)
-                };
+                });
             }
         }
     }
@@ -6715,7 +6732,7 @@ impl View {
         let bottom = rows.saturating_sub(1);
         match self.confirm_target_index(action) {
             Some(i) => {
-                let off = self.sideline_state.offset();
+                let off = self.sideline_offset();
                 if i >= off && (i - off) < bottom {
                     i - off
                 } else {
@@ -7595,7 +7612,7 @@ impl View {
         let mut buf = RtBuffer::empty(area);
         // The selector rides the TableState's `selected`, which is what the
         // widget's render-time scroll keeps visible.
-        let mut st = self.sideline_state.with_selected(self.selector);
+        let mut st = self.sideline_state.get().with_selected(self.selector);
         let mut off = st.offset();
         let rects = sideline_column_rects(text_w as u16);
         if self.density != Density::Slim {
@@ -7614,6 +7631,9 @@ impl View {
             use ratatui_core::widgets::StatefulWidget;
             StatefulWidget::render(&table, area, &mut buf, &mut st);
             off = st.offset();
+            // The render-adjusted state IS the truth: persist it so the hit
+            // tests and the confirm anchor read the offset that painted.
+            self.sideline_state.set(st);
         }
         crate::ratatui_blit::blit(&buf, cells, cols);
         // Per-row overlays the widget cannot express: the full-width rows
@@ -12450,7 +12470,7 @@ async fn dispatch_event(
                 // not hide row 0. Then re-follow the SEEDED cursor -
                 // offset 0 can leave it scrolled off-screen, and Enter must
                 // act on a visible row.
-                *view.sideline_state.offset_mut() = 0;
+                view.set_sideline_offset(0);
                 view.clamp_sideline_scroll();
             }
         }
@@ -15049,7 +15069,7 @@ async fn selector_keys(
                     // Screen row = index - the TableState offset (: the sideline
                     // owns row 0; there is no TAB_BAR_ROWS offset on this side
                     // of the divider).
-                    let arow = (cur.saturating_sub(view.sideline_state.offset())) as u16;
+                    let arow = (cur.saturating_sub(view.sideline_offset())) as u16;
                     // A row that refuses with its own notice (an all-live band)
                     // keeps it; one that refuses SILENTLY (the Backlog band has
                     // no menu by design and says nothing on the right-press

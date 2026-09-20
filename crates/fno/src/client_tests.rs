@@ -1214,7 +1214,7 @@ fn xf331_wheel_scrolls_not_walks_a_hover_armed_selector() {
     view.selector = Some(1);
     view.sel_hover_armed = true;
     view.hover_row = Some(1);
-    let before = view.sideline_state.offset();
+    let before = view.sideline_offset();
     view.scroll_sideline(true);
     assert!(!view.sel_hover_armed, "the wheel disarms the hover-arm");
     assert_eq!(
@@ -1222,7 +1222,7 @@ fn xf331_wheel_scrolls_not_walks_a_hover_armed_selector() {
         "the wheel does not walk a hover-armed selector"
     );
     assert_eq!(
-        view.sideline_state.offset(),
+        view.sideline_offset(),
         before + 1,
         "the wheel scrolls the list instead of moving the cursor"
     );
@@ -2774,7 +2774,7 @@ fn chrome_hit_adds_offset_when_scrolled() {
     assert_eq!(cmds(v.chrome_hit(2, 4)), vec![Command::SelectSquad(2)]);
     // Scrolled by 1: terminal row 1 -> display index 2 -> squad2 (without the
     // offset it would resolve to index 1, the Blank spacer).
-    *v.sideline_state.offset_mut() = 1;
+    v.set_sideline_offset(1);
     assert_eq!(
         cmds(v.chrome_hit(1, 4)),
         vec![Command::SelectSquad(2)],
@@ -8148,7 +8148,7 @@ fn footer_menu_region_routes_a_click_to_the_sideline_menu() {
         .footer_menu_range(panel_w)
         .expect("a wide panel shows the menu button");
     // (x-cd67 US1) The sideline owns row 0, so outer row == display index - offset.
-    let trow = (footer - v.sideline_state.offset()) as u16;
+    let trow = (footer - v.sideline_offset()) as u16;
     assert!(matches!(
         v.chrome_hit(trow, range.start as u16),
         Some(ChromeHit::OpenSidelineMenu { .. })
@@ -9406,11 +9406,7 @@ fn focus_change_scrolls_the_band_into_view() {
     };
     // Focus on the top agent row's pane: it already fits, so no scroll.
     view.set_layout(layout(100, agents.clone()));
-    assert_eq!(
-        view.sideline_state.offset(),
-        0,
-        "a top focus needs no scroll"
-    );
+    assert_eq!(view.sideline_offset(), 0, "a top focus needs no scroll");
     // Focus jumps to the last agent (pane 107), well below the fold.
     view.set_layout(layout(107, agents.clone()));
     let visible = view.sideline_visible_rows();
@@ -9420,13 +9416,13 @@ fn focus_change_scrolls_the_band_into_view() {
         .position(|r| matches!(r, DisplayRow::Agent(a) if a.pane_id == Some(107)))
         .unwrap();
     assert!(
-        idx >= view.sideline_state.offset() && idx < view.sideline_state.offset() + visible,
+        idx >= view.sideline_offset() && idx < view.sideline_offset() + visible,
         "focused row {idx} is inside the window [{}, {})",
-        view.sideline_state.offset(),
-        view.sideline_state.offset() + visible
+        view.sideline_offset(),
+        view.sideline_offset() + visible
     );
     assert!(
-        view.sideline_state.offset() > 0,
+        view.sideline_offset() > 0,
         "the sideline scrolled to reveal the off-screen focus"
     );
 }
@@ -9472,10 +9468,10 @@ fn focus_reveal_never_scrolls_an_open_selector_off_screen() {
     view.set_layout(layout(107, agents.clone()));
     let sel = view.selector.expect("selector still open");
     assert!(
-        sel >= view.sideline_state.offset() && sel < view.sideline_state.offset() + visible,
+        sel >= view.sideline_offset() && sel < view.sideline_offset() + visible,
         "the selector {sel} stays visible in [{}, {})",
-        view.sideline_state.offset(),
-        view.sideline_state.offset() + visible
+        view.sideline_offset(),
+        view.sideline_offset() + visible
     );
 }
 
@@ -9493,7 +9489,7 @@ fn footer_buttons_rest_bold_and_invert_on_hover() {
     let at = |v: &View| {
         let mut cells = vec![Cell::default(); rows * cols];
         v.draw_sideline(&mut cells, rows, cols, panel_w);
-        cells[(footer - v.sideline_state.offset()) * cols].flags
+        cells[(footer - v.sideline_offset()) * cols].flags
     };
 
     let rest = at(&view);
@@ -13077,19 +13073,18 @@ fn sideline_scroll_follows_cursor_and_maps_hit() {
     v.selector = Some(total - 1);
     v.clamp_sideline_scroll();
     assert_eq!(
-        v.sideline_state.offset(),
+        v.sideline_offset(),
         total - visible,
         "offset follows the cursor"
     );
     assert!(
-        (total - 1) >= v.sideline_state.offset()
-            && (total - 1) < v.sideline_state.offset() + visible,
+        (total - 1) >= v.sideline_offset() && (total - 1) < v.sideline_offset() + visible,
         "the cursor row is inside the visible window"
     );
     assert!(v.panel_w() > 1, "fixture panel is visible");
     assert_eq!(
         v.sideline_row_at(0, 0),
-        Some(v.sideline_state.offset()),
+        Some(v.sideline_offset()),
         "the top drawn row (row 0) hit-tests to the scrolled index"
     );
 }
@@ -13104,22 +13099,18 @@ fn wheel_scrolls_offset_when_no_selector() {
     v.term = ((total - 1) as u16, 100); // one row below the fold
     let visible = v.sideline_visible_rows();
     v.selector = None;
-    *v.sideline_state.offset_mut() = 0;
+    v.set_sideline_offset(0);
     v.scroll_sideline(true);
-    assert_eq!(v.sideline_state.offset(), 1, "wheel-down advances one row");
+    assert_eq!(v.sideline_offset(), 1, "wheel-down advances one row");
     v.scroll_sideline(false);
-    assert_eq!(v.sideline_state.offset(), 0, "wheel-up retreats one row");
+    assert_eq!(v.sideline_offset(), 0, "wheel-up retreats one row");
     v.scroll_sideline(false);
-    assert_eq!(
-        v.sideline_state.offset(),
-        0,
-        "wheel-up saturates at the top"
-    );
+    assert_eq!(v.sideline_offset(), 0, "wheel-up saturates at the top");
     for _ in 0..total + 5 {
         v.scroll_sideline(true);
     }
     assert_eq!(
-        v.sideline_state.offset(),
+        v.sideline_offset(),
         total - visible,
         "wheel-down stops at the last full window"
     );
@@ -13152,9 +13143,9 @@ fn sideline_scroll_zero_when_rows_fit() {
         "catalog fits the window"
     );
     v.selector = Some(0);
-    *v.sideline_state.offset_mut() = 9; // stale offset from a prior scrolled session
+    v.set_sideline_offset(9); // stale offset from a prior scrolled session
     v.clamp_sideline_scroll();
-    assert_eq!(v.sideline_state.offset(), 0, "fits -> offset resets to 0");
+    assert_eq!(v.sideline_offset(), 0, "fits -> offset resets to 0");
 }
 
 #[test]
@@ -13167,10 +13158,10 @@ fn sideline_scroll_never_past_last_row() {
     v.term = (total as u16, 100); // visible = total - 1
     v.selector = None;
     v.hover_row = None;
-    *v.sideline_state.offset_mut() = 999; // absurd, e.g. after the catalog shrank
+    v.set_sideline_offset(999); // absurd, e.g. after the catalog shrank
     v.clamp_sideline_scroll();
     assert_eq!(
-        v.sideline_state.offset(),
+        v.sideline_offset(),
         total - v.sideline_visible_rows(),
         "clamped to the last full window"
     );
@@ -14272,10 +14263,10 @@ fn resort_scrolls_the_selection_back_into_view() {
     let cur = v.selector.unwrap();
     let visible = v.sideline_visible_rows();
     assert!(
-        cur >= v.sideline_state.offset() && cur < v.sideline_state.offset() + visible,
+        cur >= v.sideline_offset() && cur < v.sideline_offset() + visible,
         "selection {cur} must stay inside the window [{}, {})",
-        v.sideline_state.offset(),
-        v.sideline_state.offset() + visible
+        v.sideline_offset(),
+        v.sideline_offset() + visible
     );
 }
 
@@ -16574,7 +16565,7 @@ fn row_drag_source_at_skips_the_density_button_over_an_agent_row() {
     // row; a press on the button must cycle density (chrome_hit), not start a
     // row drag on the agent underneath.
     let mut view = view_with_agents(vec![focus_agent(10)]);
-    *view.sideline_state.offset_mut() = 1; // scroll so an agent row paints at row 0
+    view.set_sideline_offset(1); // scroll so an agent row paints at row 0
     let pw = view.panel_w() as usize;
     let Some(range) = view.density_button_range(pw) else {
         return; // panel too narrow for the button; the guard is moot

@@ -212,9 +212,9 @@ fn agent_row_unmeasured_renders_a_distinct_dim_glyph_from_exited() {
 
 #[test]
 fn wide_glyph_name_keeps_the_pr_column_aligned() {
-    // x-19bb (absorbed into x-177c): the sideline's glyph_cols returned
-    // width 1 for CJK, so every column after a wide glyph shifted and the PR
-    // column never lined up between rows. The Table's Buffer measures with
+    // The wide-glyph misalignment the old width model missed: glyph_cols
+    // returned width 1 for CJK, so every column after a wide glyph shifted
+    // and the PR column never lined up between rows. The Table's Buffer measures with
     // unicode-width, so a wide name and an ASCII name paint `#pr` at the
     // SAME cell.
     let mut view = two_pane_view();
