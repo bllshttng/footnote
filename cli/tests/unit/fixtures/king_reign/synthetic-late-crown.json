@@ -1,5 +1,5 @@
 {
-  "meta": {"reign_date": "synthetic", "skill": "fno:king-for-a-day", "purpose": "AC4-EDGE: a coronation only AFTER the first ruling"},
+  "meta": {"reign_date": "synthetic", "skill": "fno:reign", "purpose": "AC4-EDGE: a coronation only AFTER the first ruling"},
   "entries": [
     {"index": 0, "kind": "tool_use", "tool": "Bash", "target": "fno do pr watch status --json"},
     {"index": 1, "kind": "assistant_text", "text": "Crown: level 0, scope fno. Issuing the first ruling now."},

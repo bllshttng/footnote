@@ -125,7 +125,7 @@ export const FootnotePlugin = async ({ directory, worktree, client, $ }) => {
                   parts: [
                     {
                       type: "text",
-                      text: `${crown}\nYou hold this crown. Before you reach for any CLI verb, Read skills/king-for-a-day/references/cli-commands.md.`,
+                      text: `${crown}\nYou hold this crown. Before you reach for any CLI verb, Read skills/reign/references/cli-commands.md.`,
                     },
                   ],
                 },
