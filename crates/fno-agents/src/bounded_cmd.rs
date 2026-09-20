@@ -3,17 +3,21 @@
 
 /// One subprocess read under a wall-clock budget: `std` has no
 /// `Command::output` timeout, and a git stalled on a wedged filesystem must
-/// not park the daemon's rm handler forever. Past the deadline the child is
-/// killed and the killed status returned, so a "kept" receipt can never be
-/// contradicted by a removal finishing in the background. Spawn and wait
-/// failures carry as `Err`, for callers that must tell "the binary is gone"
-/// apart from "it ran and was killed".
+/// not park the daemon's rm handler forever. Past the deadline the child's
+/// process group is killed and the killed status returned, so a "kept"
+/// receipt can never be contradicted by a removal finishing in the
+/// background. The group kill matters: a child that forked a grandchild
+/// would otherwise stay alive holding the piped stdout and park the read
+/// past its bound. Spawn and wait failures carry as `Err`, for callers that
+/// must tell "the binary is gone" apart from "it ran and was killed".
 pub(crate) fn output_with_timeout_result(
     mut cmd: std::process::Command,
     secs: u64,
 ) -> std::io::Result<std::process::Output> {
     use std::io::Read;
+    use std::os::unix::process::CommandExt;
     let mut child = cmd
+        .process_group(0)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -39,7 +43,11 @@ pub(crate) fn output_with_timeout_result(
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             Ok(None) => {
-                let _ = child.kill();
+                // The child is its own group leader (process_group(0)), so
+                // this reaches the grandchildren a forking child left behind.
+                unsafe {
+                    libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+                }
                 break child.wait()?;
             }
             Err(e) => return Err(e),
@@ -79,8 +87,26 @@ mod tests {
         let started = std::time::Instant::now();
         let out = output_with_timeout_result(std::process::Command::new(&stub), 1)
             .expect("bash stub must spawn");
-        // exec: bounded_cmd kills the DIRECT child; a forking stub's
-        // grandchild inherits the piped stdout and extends the reader join.
+        let elapsed = started.elapsed();
+        assert!(!out.status.success(), "killed child must read failed");
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "elapsed {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn kill_bounds_a_forking_sleeper() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("s");
+        // No exec: sleep is a grandchild holding the piped stdout. The group
+        // kill must still return the read inside its bound.
+        std::fs::write(&stub, "#!/bin/bash\nsleep 30\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = std::time::Instant::now();
+        let out = output_with_timeout_result(std::process::Command::new(&stub), 1)
+            .expect("bash stub must spawn");
         let elapsed = started.elapsed();
         assert!(!out.status.success(), "killed child must read failed");
         assert!(

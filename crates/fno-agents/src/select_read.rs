@@ -354,7 +354,9 @@ mod tests {
 
     #[test]
     fn stalled_selection_is_unmeasured_at_the_bound() {
-        let dir = stub("#!/bin/sh\nexec sleep 3\n");
+        // No exec: sleep is a grandchild holding the piped stdout, the shape
+        // a wrapper-script stand-in produces. The bound must still hold.
+        let dir = stub("#!/bin/sh\nsleep 3\n");
         let started = Instant::now();
         let args = vec!["--project".to_string(), "fno".to_string()];
         let fno_py = dir.path().join("fno-py");
