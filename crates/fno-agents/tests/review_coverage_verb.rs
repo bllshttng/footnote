@@ -504,10 +504,6 @@ exit 1"#,
     assert_eq!(data["head_sha"], serde_json::json!(HEAD));
 }
 
-/// A pass attested at an OLDER head stays unknown on a failed read: with no
-/// base ref the rescue cannot prove a carry across the head move, so it
-/// fails closed.
-
 /// A refused invocation at the exact head surfaces on a failed-read row the
 /// same way a healthy read emits it: coverage stays unknown (a refusal
 /// never counts toward coverage), and the verdict names the attempt rather
@@ -574,6 +570,9 @@ exit 1"#,
     assert_eq!(last_coverage(&project).as_ref(), Some(&row));
     assert_eq!(last_coverage(&global).as_ref(), Some(&row));
 }
+/// A pass attested at an OLDER head stays unknown on a failed read: with no
+/// base ref the rescue cannot prove a carry across the head move, so it
+/// fails closed.
 #[test]
 fn failed_gh_read_pass_at_older_head_stays_unknown() {
     let parent = TempDir::new().unwrap();

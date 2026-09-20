@@ -11093,9 +11093,10 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     "review_coverage",
                     data.clone(),
                 );
-                // The unknown row is a failure the server must SEE,
-                // never an absence: publish it as a failing status so the
-                // ruleset refuses rather than silently waiting. Only when the
+                // The failed read must stay visible: publish the rescued row
+                // (unknown, or covered when the journal held the pass) as a
+                // status so the ruleset refuses on unknown rather than
+                // silently waiting. Only when the
                 // caller PASSED --head (the merge recompute always does): an
                 // explicit head is the PR head a caller that knows; a derived
                 // local HEAD can be the canonical checkout's default-branch
