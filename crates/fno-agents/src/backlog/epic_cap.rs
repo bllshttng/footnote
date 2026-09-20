@@ -185,7 +185,7 @@ mod tests {
     fn a_hand_up_from_a_terminal_parent_is_exempt() {
         // The parent closes and its live children move in the same write:
         // existing work moves, none is added.
-        let pre = full_epic_rows();
+        let mut pre = full_epic_rows();
         let mut post = full_epic_rows();
         post.push(child("c-16", "e-1"));
         // c-16's OLD parent p-old is done after this write.
@@ -273,9 +273,12 @@ mod tests {
 
     #[test]
     fn children_are_direct_not_descendants() {
-        // A sub-epic under the cap counts as one child; its own children
-        // count against its own cap, never the ancestor's.
-        let pre = full_epic_rows();
+        // A sub-epic counts as one child of its parent and carries its own
+        // cap. Its own children never roll up into the ancestor's count:
+        // e-1 sits at the cap of 15 here, and the ten grandchildren under
+        // sub-1 would read 25 under a descendant count.
+        let mut pre = full_epic_rows();
+        pre.pop(); // 14 open children under e-1
         let mut post = pre.clone();
         post.push(json!({"id": "sub-1", "slug": "sub-1", "title": "sub-1",
                          "type": "epic", "status": "idea", "priority": "p2",
