@@ -235,11 +235,11 @@ Two hidden verbs serve the migration and the operator:
 
 ### Epic child cap
 
-`backlog.epic_max_open_children` bounds how many open direct children one epic may hold. The graph store reads it from the config.toml beside graph.json, which is the global config on a default install. Unset means no cap.
+`backlog.epic_max_open_children` bounds how many open direct children one epic can hold. The graph store reads it from the config.toml beside graph.json, which is the global config on a default install. Unset means no cap.
 
-A child counts when it is open: not done, not superseded, not deferred. Children are direct. A sub-epic counts as one child of its parent and carries its own cap.
+A child is open: not done, not superseded, not deferred. Children are direct. A sub-epic counts as one child of its parent and carries its own cap.
 
-Every write that sets a parent meets the refusal: `update --parent`, `idea --parent`, `contain`, `decompose`, the rollup crown auto-link, and the api node_create. A hand-up is exempt. That is the write that moves the live children of a closing node to its nearest live ancestor, or re-parents stranded children later: it moves existing work and adds none. A crowned `idea` with no `--parent` meets the same refusal when the crown's single epic is full, because the auto-link sets the parent in the same write. The filer re-runs with `--parent <new epic>`.
+Every write that sets a parent meets the refusal: `update --parent`, `idea --parent`, `contain`, `decompose`, the rollup crown auto-link, and the api node_create. A hand-up is exempt. That write moves the live children of a closing node to the nearest live ancestor. It moves existing work and adds none. If the crown's single epic is full, a crowned `idea` with no `--parent` meets the same refusal. The auto-link sets the parent in the same write. The filer re-runs with `--parent <new epic>`.
 
 The refusal names the epic, its open count, the cap, and the next step. Run `fno backlog idea "EPIC: <theme>" --type epic` to start a new small epic, then point the write at the new epic id. If a king leads the full epic, it adds the new epic to its own crown: `fno agents crown <its handle> --scope <each epic it holds> --scope <new-epic-id>`. That works for an epic the king's own session created. Any other epic needs an attended shell or a crown that contains both.
 
