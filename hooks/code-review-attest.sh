@@ -39,6 +39,10 @@
 # gate holds rather than clearing on evidence that never arrived.
 set -euo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 input="$(cat)"
 event="$(printf '%s' "$input" | jq -r '.hook_event_name // empty' 2>/dev/null || true)"
 

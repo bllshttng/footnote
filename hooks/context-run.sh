@@ -3,6 +3,10 @@
 # hooks/context-hooks.json; fno-agents context-run runs one group and writes
 # one context_snapshot.
 set -u
+
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HOOK_DIR/.." && pwd)"
 source "$HOOK_DIR/lib/agents-bin.sh"

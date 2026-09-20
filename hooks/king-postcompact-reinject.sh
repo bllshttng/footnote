@@ -19,6 +19,10 @@
 # reads is missing: no lib, no fno, no registry row, no crown, no brief.
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 # BASH_SOURCE-relative, never `git rev-parse`: cwd is the session's repo, not
 # the plugin (the fix banked from 502af79f2).
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
