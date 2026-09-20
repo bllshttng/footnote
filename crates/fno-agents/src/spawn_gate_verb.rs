@@ -668,13 +668,21 @@ fn lanes_answer(
 ) -> Result<Value, spawn_gate_lanes::LaneFault> {
     let home = crate::paths::AgentsHome::from_env();
     let now_epoch = crate::provider_cap::now_epoch_secs();
-    let quota_states = crate::provider_cap::provider_quota_states(&home, now_epoch, 1_800);
-    let quota_source = match crate::provider_cap::read_persisted_snapshot(&home) {
-        Some(snapshot) if now_epoch.saturating_sub(snapshot.measured_at_epoch) <= 1_800 => {
-            "snapshot"
-        }
+    let snapshot = crate::provider_cap::read_persisted_snapshot(&home);
+    let fresh = snapshot
+        .as_ref()
+        .is_some_and(|s| now_epoch.saturating_sub(s.measured_at_epoch) <= 1_800);
+    let quota_source = match snapshot.as_ref() {
+        Some(_) if fresh => "snapshot",
         Some(_) => "stale-snapshot",
         None => "no-snapshot",
+    };
+    let quota_states = if fresh {
+        snapshot
+            .as_ref()
+            .map(crate::provider_cap::quota_states_from_snapshot)
+    } else {
+        None
     };
     let mut providers: Vec<String> = Vec::new();
     if let Some(table) = agents_config::config_lookup(config_cwd, &["agents", "provider_limits"])
