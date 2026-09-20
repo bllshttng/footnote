@@ -203,7 +203,10 @@ fn run(cfg: &Config) -> i32 {
         by_id.entry(claimed).or_default().push(path);
     }
 
-    // plan_path -> owner id, for the one-plan-one-node guard.
+    // plan_path -> owner id, for the one-plan-one-node guard. Both sides key
+    // on the canonical form: the store legally carries tilde- and
+    // relative-spelled paths (resolve_plan_probe expands them), and a
+    // byte-exact compare would let one file bind to a second node.
     let mut path_owner: BTreeMap<PathBuf, String> = BTreeMap::new();
     for row in &rows {
         if let (Some(id), Some(p)) = (
@@ -211,7 +214,7 @@ fn run(cfg: &Config) -> i32 {
             row.get("plan_path").and_then(Value::as_str),
         ) {
             if !p.is_empty() {
-                path_owner.insert(PathBuf::from(p), id.to_string());
+                path_owner.insert(canon(Path::new(p)), id.to_string());
             }
         }
     }
@@ -267,7 +270,7 @@ fn run(cfg: &Config) -> i32 {
             out_rows.push((node_id.clone(), path.clone(), Verdict::Unfinalized));
             continue;
         }
-        if let Some(owner) = path_owner.get(&path) {
+        if let Some(owner) = path_owner.get(&canon(&path)) {
             if owner != &node_id {
                 out_rows.push((
                     node_id.clone(),
@@ -452,6 +455,13 @@ fn scalar(v: &Value) -> Option<String> {
 fn file_age_secs(path: &Path, now: std::time::SystemTime) -> Option<u64> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
     now.duration_since(modified).ok().map(|d| d.as_secs())
+}
+
+/// The path's canonical form, falling back to the raw spelling for a file
+/// that does not resolve (the store may name a plan that was moved or
+/// deleted; the compare then stays byte-exact, as before).
+fn canon(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 #[cfg(test)]

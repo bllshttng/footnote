@@ -235,7 +235,7 @@ grep -q "Do not force these closed" <<<"$OUT" \
 pass "render: retryable-unknown nodes get their own line and no --force advice"
 
 # ============================================================================
-# AC9-HP: the orphan-plan binder's result file (x-673d) renders one line
+# AC9-HP: the orphan-plan binder's result file renders one line
 # naming every bound id, then the file is consumed to .shown.
 # ============================================================================
 log "orphan: bound_now rows -> one bound line, consumed"
