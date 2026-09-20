@@ -21,6 +21,9 @@ pub struct RebindOutcome {
     pub keeper_pid: u32,
     pub child_pid: u32,
     pub session_id: String,
+    /// The keeper's own process start time, read after it answered. Paired
+    /// with `keeper_pid` in the row, because the two are one fact.
+    pub keeper_start_time: Option<u64>,
 }
 
 /// The thread-lane socket this row's keeper moves to. Named for the ROW, not
@@ -140,6 +143,8 @@ pub fn verify_moved(
         keeper_pid,
         child_pid,
         session_id,
+        // Read for the pid this row is about to name, never for the child.
+        keeper_start_time: crate::daemon::process_start_time(keeper_pid),
     })
 }
 
@@ -154,6 +159,13 @@ pub fn flipped_row(entry: &mut crate::state::RegistryEntry, outcome: &RebindOutc
     // process the operator sees. A row that left them swapped would have
     // the liveness ladder probing the wrong process.
     entry.pid = Some(outcome.keeper_pid);
+    // The stamp moves WITH the pid. `pid_is_ours` compares the recorded
+    // stamp against the live one for whatever pid the row names, so a
+    // keeper pid left beside the child's stamp reads as a reused pid: the
+    // reconcile then marks a live converted row Exited and orphans both
+    // processes from the registry. None is the honest answer when the
+    // keeper's stamp could not be read, and only costs reuse detection.
+    entry.pid_start_time = outcome.keeper_start_time;
     entry.keeper_child_pid = Some(outcome.child_pid);
     entry.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
 }
@@ -291,6 +303,8 @@ mod tests {
             pane_id: 2313,
         });
         entry.pid = Some(4242);
+        // The CHILD's stamp, which is what the row carried before the flip.
+        entry.pid_start_time = Some(111_111);
         flipped_row(
             &mut entry,
             &RebindOutcome {
@@ -298,6 +312,7 @@ mod tests {
                 keeper_pid: 900,
                 child_pid: 4242,
                 session_id: "sid".to_string(),
+                keeper_start_time: Some(222_222),
             },
         );
         assert_eq!(entry.substrate.as_deref(), Some("thread"));
@@ -310,5 +325,13 @@ mod tests {
         // asserted both ways round.
         assert_eq!(entry.pid, Some(900), "pid is the KEEPER on a thread row");
         assert_eq!(entry.keeper_child_pid, Some(4242));
+        // The stamp moves WITH the pid. Left on the child's value, the
+        // reconcile compares it against the keeper's real start time, reads
+        // the pid as recycled, and marks a live converted row Exited.
+        assert_eq!(
+            entry.pid_start_time,
+            Some(222_222),
+            "the stamp must name the same process as the pid"
+        );
     }
 }

@@ -166,7 +166,10 @@ pub fn to_claude_thread(
     entry.short_id = short_id.to_string();
     entry.mux = None;
     entry.pid = writer_pid;
-    entry.pid_start_time = None;
+    // The stamp belongs to whatever pid the row names. Reading it for the
+    // NEW writer keeps `pid_is_ours` able to detect a recycled pid; leaving
+    // the old child's stamp here would make it read a live row as dead.
+    entry.pid_start_time = writer_pid.and_then(crate::daemon::process_start_time);
     entry.harness_session_id = Some(session_id.to_string());
     entry.claude_session_uuid = Some(session_id.to_string());
 }
