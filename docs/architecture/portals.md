@@ -88,4 +88,4 @@ Every pane drains and renders its PTY, so portals cost redraw work. That plus th
 
 ## A conversion leaves no portal
 
-Converting a pane session to a thread (`fno agents resume <name> --substrate thread`) is a substrate change, not a view change: afterward the mux server hosts nothing for that session. It opens no portal and leaves none behind. To look at the converted thread, open one: `fno mux thread <name>`. The reverse direction, a portal, never changes the substrate - `fno mux thread reseat` moves the viewer while the server keeps hosting the process.
+Converting a pane session to a thread (`fno agents resume <name> --substrate thread`) is a substrate change, not a view change. Afterward the mux server hosts nothing for that session. The conversion opens no portal and leaves none behind. To look at the converted thread, open one with `fno mux thread <name>`. A portal never changes the substrate: `fno mux thread reseat` moves the viewer while the server keeps hosting the process.
