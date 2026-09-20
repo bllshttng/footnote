@@ -816,29 +816,27 @@ pub(crate) fn write_changed(
 /// the relational export the parity compare reads.
 pub fn read_entries(graph: &Path) -> Result<Vec<Value>, String> {
     let connection = open(graph)?;
-    export_rows(&connection)
+    // One deferred snapshot: every node's statements read the same committed
+    // state, so a concurrent write cannot land between two nodes. The
+    // unchecked form takes &Connection; the write paths that call
+    // export_rows inside their own transaction need no wrapper here.
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    let entries = export_rows(&transaction)?;
+    drop(transaction);
+    Ok(entries)
 }
 
-/// The rows behind an open connection, in ordinal order.
+/// The rows behind an open connection, in ordinal order. One scan per
+/// table; the batched assembler shares every row mapper with the
+/// single-node load.
 pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
     if meta(connection, "version")?.is_none() {
         return Err("SQLite graph has no version".into());
     }
-    let mut statement = connection
-        .prepare("SELECT id FROM nodes ORDER BY ordinal, id")
-        .map_err(|error| error.to_string())?;
-    let ids = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|error| error.to_string())?;
-    let mut entries = Vec::new();
-    for id in ids {
-        let id = id.map_err(|error| error.to_string())?;
-        let Some(node) = nodes::load(&connection, &id)? else {
-            return Err(format!("node {id} vanished mid-export"));
-        };
-        entries.push(node.to_json());
-    }
-    Ok(entries)
+    let nodes = nodes::export_all(connection)?;
+    Ok(nodes.iter().map(|node| node.to_json()).collect())
 }
 
 pub(crate) fn meta(connection: &Connection, key: &str) -> Result<Option<String>, String> {
@@ -1607,6 +1605,125 @@ mod tests {
                 .unwrap();
             assert_eq!(rows, 0, "{table} holds no rows for the deleted node");
         }
+    }
+
+    fn seeded_rich_graph(dir: &TempDir) -> PathBuf {
+        let graph = dir.path().join("graph.json");
+        let rich = serde_json::json!({
+            "id": "ab-one", "slug": "one", "title": "One", "type": "feature",
+            "status": "ready", "priority": "p1", "domain": "code",
+            "created_at": "2026-09-11T00:00:00+00:00",
+            "locked_by": "holder-1", "locked_at": "2026-09-11T01:00:00+00:00",
+            "dispatch_verb": "do",
+            "source": "idea", "source_kind": "operator_request",
+            "source_session_id": "seed-session", "source_harness": "claude",
+            "supersession": {"successor": "ab-two", "reason": "merged"},
+            "sessions": [{"phase": "do", "harness": "claude",
+                          "session_id": "s-1"}],
+            "comments": [{"created_at": "2026-09-11T02:00:00+00:00",
+                          "body": "first comment", "kind": "note"}],
+            "encounters": [{"ts": "2026-09-11T03:00:00+00:00",
+                            "evidence": "some evidence"}],
+            "primary_pr": {"number": 2280},
+            "additional_prs": [{"number": 2281}],
+            "blocked_by": ["ab-two"]
+        });
+        let plain = serde_json::json!({
+            "id": "ab-two", "slug": "two", "title": "Two", "type": "bug",
+            "status": "ready", "priority": "p2", "domain": "code",
+            "created_at": "2026-09-11T00:00:00+00:00"
+        });
+        std::fs::write(&graph, b"{\"entries\": []}").unwrap();
+        shadow_sync(&graph, &[], &[rich, plain], "sha256:seed").unwrap();
+        graph
+    }
+
+    #[test]
+    fn read_entries_preserves_every_child_aggregate_of_a_seeded_store() {
+        // AC1-HP: a store whose rows carry every child aggregate exports
+        // the same content the seed wrote, in list order. The cached
+        // statements and the snapshot read must not drop or reorder a row.
+        let dir = TempDir::new().unwrap();
+        let graph = seeded_rich_graph(&dir);
+
+        let reloaded = read_entries(&graph).unwrap();
+        assert_eq!(reloaded.len(), 2);
+        assert_eq!(reloaded[0]["id"], "ab-one");
+        assert_eq!(reloaded[0]["locked_by"], "holder-1");
+        assert_eq!(reloaded[0]["dispatch_verb"], "do");
+        assert_eq!(reloaded[0]["source_kind"], "operator_request");
+        assert_eq!(reloaded[0]["supersession"]["successor"], "ab-two");
+        assert_eq!(reloaded[0]["sessions"][0]["session_id"], "s-1");
+        assert_eq!(reloaded[0]["comments"][0]["body"], "first comment");
+        assert_eq!(reloaded[0]["encounters"][0]["evidence"], "some evidence");
+        assert_eq!(reloaded[0]["primary_pr"]["number"], 2280);
+        assert_eq!(reloaded[0]["additional_prs"][0]["number"], 2281);
+        assert_eq!(reloaded[0]["blocked_by"][0], "ab-two");
+        assert_eq!(reloaded[1]["id"], "ab-two");
+        assert_eq!(reloaded[1]["title"], "Two");
+    }
+
+    #[test]
+    fn batched_export_matches_the_per_node_load_row_for_row() {
+        // AC4-HP + AC5-EDGE: the batched export assembles each node through
+        // the same mappers the per-id load uses, so both paths agree row
+        // for row, including a node with no child rows at all.
+        let dir = TempDir::new().unwrap();
+        let graph = seeded_rich_graph(&dir);
+        let connection = open(&graph).unwrap();
+        let mut statement = connection
+            .prepare("SELECT id FROM nodes ORDER BY ordinal, id")
+            .unwrap();
+        let ids: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|id| id.unwrap())
+            .collect();
+        let mut expected = Vec::new();
+        for id in &ids {
+            let node = nodes::load(&connection, id).unwrap().unwrap();
+            expected.push(node.to_json());
+        }
+        let batched = export_rows(&connection).unwrap();
+        assert_eq!(batched, expected);
+    }
+
+    #[test]
+    fn read_entries_holds_one_snapshot_while_a_write_lands() {
+        // AC3-ERR: a reader inside its snapshot keeps seeing the committed
+        // world it started with while a writer commits a new node, and
+        // never reports the node as vanished; only a fresh read sees the
+        // write.
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let before = read_entries(&graph).unwrap();
+
+        let connection = open(&graph).unwrap();
+        let transaction = connection.unchecked_transaction().unwrap();
+        let snapshot = export_rows(&transaction).unwrap();
+        assert_eq!(snapshot.len(), 2);
+
+        let mut after = before.clone();
+        let mut third = before[1].clone();
+        third["id"] = Value::String("ab-three".into());
+        third["slug"] = Value::String("three".into());
+        third["title"] = Value::String("Three".into());
+        after.push(third);
+        shadow_sync(&graph, &before, &after, "sha256:grow").unwrap();
+
+        let held = export_rows(&transaction).unwrap();
+        assert_eq!(
+            held.len(),
+            2,
+            "the held snapshot ignores the committed write"
+        );
+        assert!(
+            held.iter().all(|row| row["id"] != "ab-three"),
+            "no partial view of the write"
+        );
+        drop(transaction);
+        let fresh = read_entries(&graph).unwrap();
+        assert_eq!(fresh.len(), 3, "a fresh read sees the write");
     }
 
     fn raw_rows(graph: &Path) -> Vec<Value> {
