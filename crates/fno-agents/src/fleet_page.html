@@ -1,0 +1,37 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fleet load</title><style>
+:root{color-scheme:light dark;--bg:#f4f0e8;--card:#fffaf2;--ink:#20231f;--muted:#6d716a;--line:#d8d0c2;--accent:#b35c35;--blue:#326b82}
+@media(prefers-color-scheme:dark){:root{--bg:#171916;--card:#20231f;--ink:#f0eadf;--muted:#abb0a7;--line:#3a4039;--accent:#e29a63;--blue:#8ec5d8}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,sans-serif}
+.wrap{max-width:1180px;margin:auto;padding:28px 20px 48px}.eyebrow,h2,th,.meta{font-family:ui-monospace,SFMono-Regular,monospace;text-transform:uppercase;letter-spacing:.08em}
+.eyebrow,.meta{color:var(--muted);font-size:11px}.mast{border-bottom:1px solid var(--line);padding-bottom:22px;margin-bottom:22px}h1{font:clamp(32px,6vw,64px)/1.02 Georgia,serif;margin:10px 0 8px}h2{font-size:12px;margin:0 0 12px;color:var(--muted)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:17px;min-height:160px}.wide{grid-column:1/-1}.now{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 22px}.pill{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:10px 13px}.pill b{display:block;font:22px ui-monospace,monospace}.empty{color:var(--muted);font-style:italic}.chart{min-height:86px;display:flex;align-items:end;gap:3px;border-bottom:1px solid var(--line);padding:12px 0}.bar{min-width:5px;flex:1;background:var(--accent);opacity:.78;border-radius:3px 3px 0 0}.bar.blue{background:var(--blue)}.bar.sub{background:#8fb0c6}.bar.codex{background:#b8860b}.bar.pytest{background:#a3b892}.threshold{border-top:2px dashed var(--accent);padding-top:5px;font:11px ui-monospace,monospace;color:var(--accent)}.legend{color:var(--muted);font-size:12px;margin-top:8px}.table{overflow:auto}table{border-collapse:collapse;width:100%;font-size:13px}td,th{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-align:top}th{font-size:10px;color:var(--muted)}td.num{text-align:right;font-family:ui-monospace,monospace}.hover{cursor:help}.coverage{white-space:pre-wrap;font:12px/1.55 ui-monospace,monospace;color:var(--muted)}footer{color:var(--muted);font-size:12px;margin-top:24px}
+</style></head><body><main class="wrap"><header class="mast"><div class="eyebrow">fno fleet load · <span data-generated="__GENERATED__">__GENERATED__</span></div><h1>Fleet load</h1><div class="meta">Machine history, session activity and a defensible capacity curve</div></header>
+<section class="now" id="now"></section><section class="grid">
+<article class="card wide"><h2>Load and capacity</h2><div id="load"></div><div class="legend">load_15m with the measured core band and slowdown threshold</div></article>
+<article class="card"><h2>Busy share</h2><div id="busy"></div><div class="legend">sum of per-process CPU, compared with the measured band</div></article>
+<article class="card"><h2>Sessions active</h2><div id="sessions"></div><div class="legend">claude, subagent and codex sessions; live-worker line</div></article>
+<article class="card"><h2>Test and build runs</h2><div id="runs"></div><div class="legend">cargo and pytest starts recorded by transcript fold</div></article>
+<article class="card"><h2>Gate refusals</h2><div id="refusals"></div></article>
+<article class="card"><h2>Memory</h2><div id="memory"></div></article>
+<article class="card wide"><h2>Capacity curve</h2><div id="curve"></div><div class="legend">median load_15m by sessions bucket; the cap is a suggestion, not a control decision</div></article>
+<article class="card wide"><h2>Slowdown markers</h2><div class="table" id="slowdowns"></div></article>
+<article class="card wide"><h2>Coverage</h2><div class="coverage" id="coverage"></div></article>
+</section><footer>Generated from fno-owned journals. A missing structured series is shown as missing, never as zero.</footer></main>
+<script>
+const DATA=/*DATA*/null;
+const GENERATED="__GENERATED__";
+function el(id){return document.getElementById(id)}
+function esc(value){return String(value==null?'':value).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+function empty(id,text){el(id).innerHTML='<p class="empty">'+text+'</p>'}
+function vals(rows,key){return rows.map(x=>x[key]).filter(x=>typeof x==='number')}
+function chart(id,rows,key,klass='',threshold=null){let v=vals(rows,key);if(!v.length){empty(id,'No '+key.replaceAll('_',' ')+' recorded in this window.');return}let max=Math.max(...v,1);let mark=threshold==null?'':'<div class="threshold">threshold '+threshold+'</div>';el(id).innerHTML+='<div class="chart">'+v.map(x=>'<span class="bar '+klass+'" style="height:'+Math.max(4,Math.round(x/max*78))+'px" title="'+x+'"></span>').join('')+'</div>'+mark}
+function draw(){let r=DATA||{};let n=r.now||{};let read=n.reading;el('now').innerHTML=read?'<div class="pill"><span class="meta">load_15m</span><b>'+((read.load_15m==null)?'unavailable':read.load_15m)+'</b></div><div class="pill"><span class="meta">busy</span><b>'+read.busy_pct.toFixed(1)+'%</b></div><div class="pill"><span class="meta">verdict</span><b>'+read.verdict+'</b></div>':'<div class="pill empty">No machine_watch reading yet.</div>';
+let rows=r.hours||[];chart('load',rows,'load_15m_median','',r.threshold);chart('busy',rows,'busy_median','blue');chart('refusals',rows,'refusals');
+if(rows.some(x=>x.claude+x.subagent+x.codex)){chart('sessions',rows,'claude');}else{empty('sessions','No session activity in the selected window.')}if(rows.some(x=>x.cargo+x.pytest)){chart('runs',rows,'cargo','blue');}else{empty('runs','No cargo or pytest runs recorded.')}
+let mem=rows.filter(x=>x.compressor_gb_median!=null||x.swap_gb_median!=null);if(mem.length){chart('memory',mem,'compressor_gb_median','blue')}else{empty('memory','No structured machine sample yet. Memory, compressor and swap are not recorded.')}
+let curve=r.curve||[];if(curve.length){chart('curve',curve,'load_15m_median','blue',r.threshold);el('curve').insertAdjacentHTML('beforeend','<p class="meta">'+(r.cap==null?(r.cap_reason||'No suggested cap yet.'):'Suggested cap: '+r.cap+' sessions')+'</p>')}else{empty('curve',r.curve_reason||'No capacity curve yet.')}
+let slow=r.slowdowns||[];if(slow.length){el('slowdowns').innerHTML='<table><thead><tr><th>UTC</th><th>Session</th><th>Harness</th><th>Operator text</th></tr></thead><tbody>'+slow.map(x=>'<tr><td>'+esc(x.ts)+'</td><td>'+esc(x.session)+'</td><td>'+esc(x.harness)+'</td><td class="hover" title="'+esc(x.text)+'">'+esc(x.text)+'</td></tr>').join('')+'</tbody></table>'}else{empty('slowdowns','No slowdown turns in the window.')}
+let c=r.coverage||{};el('coverage').textContent=JSON.stringify({readings:c.readings,refusals:c.refusals,live:c.live,memory:c.memory,fold:c.fold},null,2);}
+draw();
+</script>

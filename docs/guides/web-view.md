@@ -16,6 +16,8 @@ The command prints the URL and a token once at bind. The token is in the query s
 
 The page's **backlog** link opens the current private `fno backlog view` file through the same token. Render or refresh that file first with `FNO_NO_OPEN=1 fno backlog view`. The `/backlog` response is never cached. A missing file names that command, and a missing or wrong token returns no backlog bytes.
 
+The **crown** page serves `reign.html`, re-rendered by the bridge when it is older than five minutes. The **fleet** page serves `fleet.html`, rendered by the fno-agents daemon every 30 minutes; a `/fleet` 404 means the daemon has not ticked yet.
+
 The bridge also writes these values to `<mux dir>/web-<session>.json` at mode 0600. You can get the URL again from this file. The bridge removes the file on exit.
 
 `--server` names the mux server, not an agent. It selects which socket the bridge attaches to. The old `--session` spelling still works and warns. To reach one agent, see the next section.

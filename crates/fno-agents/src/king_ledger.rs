@@ -654,7 +654,7 @@ footer{font-family:var(--mono);font-size:11px;color:var(--ink-mut);border-top:1p
 
 /// The shared page-reload script, inlined into every operator page this
 /// crate renders. `build.rs` copies the same file to the Python package.
-const PAGE_RELOAD_JS: &str = include_str!("page_reload.js");
+pub(crate) const PAGE_RELOAD_JS: &str = include_str!("page_reload.js");
 
 /// The crown_ledger arm's beat: the age after which the /crown route in
 /// crates/fno/src/web.rs starts its own render, so the file on disk and the
@@ -760,7 +760,7 @@ fn maybe_tick_with(
 
 /// `backlog.page_reload_s`: seconds between self-reloads of an open page.
 /// Unset, negative, or not an integer reads as the 60-second default.
-fn reload_secs(value: Option<toml::Value>) -> i64 {
+pub(crate) fn reload_secs(value: Option<toml::Value>) -> i64 {
     value
         .and_then(|v| v.as_integer())
         .filter(|s| *s >= 0)
