@@ -170,13 +170,14 @@ The remedy is merge, not reap. If another node must merge first, record a merge 
 A kept open-PR row is a session that is not driving. The daemon's retire arm runs a nudge ladder over every such row (`pr_nudge.rs` `run_ladder`). The rules, in order:
 
 1. **Reset.** Transcript activity newer than the last nudge clears the budget: the session answered.
-2. **Wait.** The transcript is inside the grace window, or the last nudge is too young.
-3. **Pause.** A live merge order holds the session. The only allowed pause. A lead records it with `fno inbox decide "merge-order:<held-node>:after:<lead-node>" "<lead-node> merges first"`. The ladder waits while the lead node is not done.
-4. **Escalate.** After 3 nudges with no activity, one operator question is filed on the marker `pr-nudge:`. The ladder then waits for activity.
-5. **Mail.** A live session gets `fno agents mail send <full-session-id> "continue: PR #<N> on node <node> is kept open-pr; drive it to merge."`. The message carries the stdout line of `fno do pr status <N>`, so the session sees the verdict without a round trip.
-6. **Resume.** A session with no live process gets `fno agents resume <full-session-id> --message "<text>"`, which relaunches the same conversation under its full session id.
+2. **Red head.** A settled red at a new head leaves exactly one nudge in the budget. The same head never re-arms it.
+3. **Wait.** The transcript is inside the grace window, or the last nudge is too young.
+4. **Pause.** A live merge order holds the session. The only allowed pause. A lead records it with `fno inbox decide "merge-order:<held-node>:after:<lead-node>" "<lead-node> merges first"`. The ladder waits while the lead node is not done.
+5. **Escalate.** After 3 nudges with no activity, one operator question is filed on the marker `pr-nudge:`. The ladder then waits for activity.
+6. **Mail.** A live session gets `fno agents mail send <full-session-id> "continue: ..."`. The text renders the status JSON of `fno do pr status <N>`: verdict, head, and each failing check with its step and first error.
+7. **Resume.** A session with no live process gets `fno agents resume <full-session-id> --message "<text>"`, which relaunches the same conversation under its full session id.
 
-Events: `pr_nudge_sent`, `pr_nudge_escalated`, `pr_nudge_paused`. State is one file per session under `~/.fno/pr-nudge/`. The ladder fires on the daemon arm only. `fno agents reap --dry-run` prints its plan as `would nudge {id} ({action})` and takes no effect.
+Events: `pr_nudge_sent`, `pr_nudge_escalated`, `pr_nudge_paused`. State is one file per session under `~/.fno/agents/pr-nudge/`. The ladder fires on the daemon arm only. `fno agents reap --dry-run` prints its plan as `would nudge {id} ({action})` and takes no effect.
 
 ### open do row on done node
 
