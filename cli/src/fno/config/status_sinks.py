@@ -129,9 +129,7 @@ class StatusSinkConfig(BaseModel):
 
 
 class ReachMeRow(BaseModel):
-    """One ``[[reach_me]]`` row (where questions reach the user). The Rust
-    attention arm reads the same key; this model exists so the setup wizard
-    can ask and ``fno config set`` can write. Unknown keys stay allowed."""
+    """One ``[[reach_me]]`` row: where questions reach the user. The Rust attention arm reads the same key."""
 
     model_config = ConfigDict(extra="allow")
 
