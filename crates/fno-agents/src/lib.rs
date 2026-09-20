@@ -132,6 +132,7 @@ pub mod feed;
 pub mod finalize;
 pub mod fleet_incident;
 pub mod fleet_load;
+pub mod fleet_page;
 pub mod flight_gate;
 pub mod gc;
 pub mod gc_claude_stop;
