@@ -396,13 +396,18 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
     // category error this arm exists to close. Held, not Failed - a required
     // check that is merely pending still arrives, and the reason names the
     // missing context so a human can narrow the ruleset when it never can.
+    // Merge only: Arm hands the PR to GitHub's own queue, which is designed
+    // to wait out a missing requirement, so arming on a ruleset hold is the
+    // right move and this hold must not stand in its way.
     let checks = probes.checks_read(cwd, facts.number);
-    if let Some(missing) = &checks.github_block {
-        return Err(Outcome::Held {
-            reason: format!(
-                "GitHub holds this merge: required checks missing at the head ({missing})"
-            ),
-        });
+    if request.effect == Effect::Merge {
+        if let Some(missing) = &checks.github_block {
+            return Err(Outcome::Held {
+                reason: format!(
+                    "GitHub holds this merge: required checks missing at the head ({missing})"
+                ),
+            });
+        }
     }
     if request.require_checks {
         // Only a POSITIVE red fails. Every other non-green answer holds, so a
@@ -2599,6 +2604,24 @@ mod tests {
         let outcome = run(&fake, &req);
         assert_eq!(outcome.word(), "held");
         assert!(outcome.detail().contains("stacked-base-guard"));
+    }
+
+    #[test]
+    fn an_arm_effect_proceeds_past_a_ruleset_hold_to_the_queue() {
+        // Arm hands the PR to GitHub's own queue, which waits out a missing
+        // requirement by design; the hold must not stand in its way.
+        let fake = Fake {
+            github_block: Some("smoke".to_string()),
+            ..clean()
+        };
+        let mut req = request(Effect::Arm);
+        req.decide_only = true;
+        assert_eq!(
+            run(&fake, &req),
+            Outcome::Authorized {
+                head: "abc123".to_string()
+            }
+        );
     }
 
     #[test]
