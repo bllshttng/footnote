@@ -897,7 +897,7 @@ pub fn render(
     out
 }
 
-fn write_atomic(path: &PathBuf, body: &str) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &PathBuf, body: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;

@@ -374,7 +374,9 @@ def _pm_receipt(node_id: str, days_old: int, **extra) -> dict:
 def test_retire_closes_only_stale_unclaimed_receipts():
     from datetime import datetime as dt, timezone as tz
 
-    now = dt(2026, 9, 10, tzinfo=tz.utc)
+    # Real now, not a fixed date: the fixture ages receipts relative to the
+    # wall clock, so a fixed cutoff goes stale as the calendar advances.
+    now = dt.now(tz.utc)
     entries = [
         _pm_receipt("ab-old00001", 40),                       # retired
         _pm_receipt("ab-young0001", 5),                       # too young, stays

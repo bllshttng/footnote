@@ -2817,7 +2817,7 @@ event_types:
           description: "One object per held row: id, reason, detail, age_s (nullable), escalated."
 
   - name: pr_nudge_sent
-    description: "The nudge ladder acted on a session the retirement sweep keeps on an open PR: mailed or resumed it to drive the PR to merge. attempt counts from 1; delivered reports receipt-confirmed landing (the send's exit 0 covers queued envelopes too). receipt carries the mail verb's own line, or exit <code> when it printed nothing; fallback names the rung that took over mid-pass; undelivered counts this budget's attempts that never landed."
+    description: "The nudge ladder acted on a session the retirement sweep keeps on an open PR: mailed or resumed it to drive the PR to merge. attempt counts from 1; delivered reports receipt-confirmed landing (the send's exit 0 covers queued envelopes too). receipt carries the mail verb's own line, or exit <code> when it printed nothing; fallback names the rung that took over mid-pass; undelivered counts this budget's attempts that never landed. red_head names the head whose settled red caused this wake."
     sources: [daemon]
     data:
       required: [session_id, node, pr, action, attempt, delivered]
@@ -2842,6 +2842,8 @@ event_types:
           enum: [resume]
         undelivered:
           type: integer
+        red_head:
+          type: string
 
   - name: pr_nudge_escalated
     description: "The nudge ladder's attempt budget is spent with no session activity: one operator question was filed (deduplicated on the marker) and the ladder now waits for activity. undelivered is how many of those nudges never landed in the session."
