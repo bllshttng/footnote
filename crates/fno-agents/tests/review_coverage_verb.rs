@@ -384,6 +384,183 @@ exit 1"#,
     assert_eq!(last_coverage(&global).as_ref(), Some(&row));
 }
 
+/// A pass attested at the exact head survives a failed gh read: the failed
+/// read classifies the local axis instead of reporting unknown on sight
+/// (x-0302). Exit stays 4 - the gh read did fail - but the emitted row
+/// carries the pass.
+#[test]
+fn failed_gh_read_rescues_a_pass_attested_at_this_head() {
+    let parent = TempDir::new().unwrap();
+    let (cwd, project, global) = fixture(parent.path(), "rescue");
+    fs::write(
+        &project,
+        serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review",
+                     "head_sha": HEAD,
+                     "verdict": "pass",
+                     "attester_session_id": "sess-x",
+                     "branch": "feature/x",
+                     "reviewed_line_count": 12,
+                     "reviewed_file_count": 3}
+        })
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+    let bins = TempDir::new().unwrap();
+    let gh = make_script(
+        bins.path(),
+        "gh",
+        r#"if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+echo 'gh: network unreachable' >&2
+exit 1"#,
+    );
+    let git = make_script(bins.path(), "git", &format!("echo {HEAD}"));
+    let (code, json) = run_review_coverage_capture(&vec![
+        "review-coverage".to_string(),
+        "--cwd".to_string(),
+        cwd.display().to_string(),
+        "--pr".to_string(),
+        "842".to_string(),
+        "--head".to_string(),
+        HEAD.to_string(),
+        "--session-id".to_string(),
+        "sess-x".to_string(),
+        "--events".to_string(),
+        project.display().to_string(),
+        "--global-events".to_string(),
+        global.display().to_string(),
+        format!("--gh-bin={}", gh.display()),
+        format!("--git-bin={}", git.display()),
+        "--global-settings".to_string(),
+        "/nonexistent/global-settings.yaml".to_string(),
+        "--author-harness".to_string(),
+        "none".to_string(),
+    ]);
+    assert_eq!(code, 4, "the gh read still failed: {json}");
+    let data: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(data["coverage"], serde_json::json!("covered"));
+    assert_eq!(data["reviewed_count"], serde_json::json!(1));
+    let verdicts = data["verdicts"].as_array().expect("verdicts present");
+    let local = verdicts
+        .iter()
+        .find(|v| v["producer"] == serde_json::json!("local_attestation"))
+        .expect("the local attestation is a verdict");
+    assert_eq!(local["verdict"], serde_json::json!("reviewed"));
+    assert_eq!(local["reviewed_sha"], serde_json::json!(HEAD));
+    // The quota diagnostic rides stdout only; the persisted row keeps the
+    // bare schema.
+    let mut row = data.clone();
+    if let Some(obj) = row.as_object_mut() {
+        obj.remove("graphql_remaining");
+        obj.remove("graphql_exhausted");
+        obj.remove("reason");
+    }
+    assert_eq!(last_coverage(&project).as_ref(), Some(&row));
+    assert_eq!(last_coverage(&global).as_ref(), Some(&row));
+}
+
+/// The failed read with an explicit head and no local pass answers exactly
+/// today's row: unknown, no verdicts. The rescue adds nothing when the
+/// journal holds no pass at this head (x-0302).
+#[test]
+fn failed_gh_read_with_head_and_no_local_pass_stays_unknown() {
+    let parent = TempDir::new().unwrap();
+    let (cwd, project, global) = fixture(parent.path(), "ghfail-head");
+    let bins = TempDir::new().unwrap();
+    let gh = make_script(
+        bins.path(),
+        "gh",
+        r#"if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+echo 'gh: network unreachable' >&2
+exit 1"#,
+    );
+    let git = make_script(bins.path(), "git", &format!("echo {HEAD}"));
+    let (code, json) = run_review_coverage_capture(&vec![
+        "review-coverage".to_string(),
+        "--cwd".to_string(),
+        cwd.display().to_string(),
+        "--pr".to_string(),
+        "842".to_string(),
+        "--head".to_string(),
+        HEAD.to_string(),
+        "--events".to_string(),
+        project.display().to_string(),
+        "--global-events".to_string(),
+        global.display().to_string(),
+        format!("--gh-bin={}", gh.display()),
+        format!("--git-bin={}", git.display()),
+        "--global-settings".to_string(),
+        "/nonexistent/global-settings.yaml".to_string(),
+        "--author-harness".to_string(),
+        "none".to_string(),
+    ]);
+    assert_eq!(code, 4, "a failed read is exit 4: {json}");
+    let data: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(data["coverage"], serde_json::json!("unknown"));
+    assert_eq!(data["reviewed_count"], serde_json::json!(0));
+    assert_eq!(data["verdicts"], serde_json::json!([]));
+    assert_eq!(data["head_sha"], serde_json::json!(HEAD));
+}
+
+/// A pass attested at an OLDER head stays unknown on a failed read: with no
+/// base ref the rescue cannot prove a carry across the head move, so it
+/// fails closed (x-0302).
+#[test]
+fn failed_gh_read_pass_at_older_head_stays_unknown() {
+    let parent = TempDir::new().unwrap();
+    let (cwd, project, global) = fixture(parent.path(), "rescue-stale");
+    fs::write(
+        &project,
+        serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review",
+                     "head_sha": "oldhead0000000000000000000000000000000",
+                     "verdict": "pass",
+                     "attester_session_id": "sess-x",
+                     "branch": "feature/x",
+                     "reviewed_line_count": 12,
+                     "reviewed_file_count": 3}
+        })
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+    let bins = TempDir::new().unwrap();
+    let gh = make_script(
+        bins.path(),
+        "gh",
+        r#"if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+echo 'gh: network unreachable' >&2
+exit 1"#,
+    );
+    let git = make_script(bins.path(), "git", &format!("echo {HEAD}"));
+    let (code, json) = run_review_coverage_capture(&vec![
+        "review-coverage".to_string(),
+        "--cwd".to_string(),
+        cwd.display().to_string(),
+        "--pr".to_string(),
+        "842".to_string(),
+        "--head".to_string(),
+        HEAD.to_string(),
+        "--events".to_string(),
+        project.display().to_string(),
+        "--global-events".to_string(),
+        global.display().to_string(),
+        format!("--gh-bin={}", gh.display()),
+        format!("--git-bin={}", git.display()),
+        "--global-settings".to_string(),
+        "/nonexistent/global-settings.yaml".to_string(),
+        "--author-harness".to_string(),
+        "none".to_string(),
+    ]);
+    assert_eq!(code, 4, "a failed read is exit 4: {json}");
+    let data: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(data["coverage"], serde_json::json!("unknown"));
+    assert_eq!(data["verdicts"], serde_json::json!([]));
+}
+
 /// An attestation pinned to a superseded sha -> verdict `stale`, never
 /// `reviewed`. The recompute is as head-pinned as the stop hook's own eval.
 /// The fixture names the PR's head branch (x-e601): a legacy line with no
