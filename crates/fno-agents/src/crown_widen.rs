@@ -91,6 +91,21 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
             .unwrap_or(false)
     };
 
+    // Rule: only a crown over epics widens itself. This runs before the
+    // created-set check below, because a member with NO row is not an epic
+    // either: leave it later and an unknown id falls into the hintless
+    // ordinary-grant refusal, naming nothing the caller can act on.
+    for member in &requested_members {
+        let is_epic = row_for(member)
+            .map(|row| row.get("type").and_then(Value::as_str) == Some("epic"))
+            .unwrap_or(false);
+        if !is_epic {
+            return Ok(refused(Some(&format!(
+                "{member} is not an epic in the graph. Only a crown over epics widens itself."
+            ))));
+        }
+    }
+
     let added: Vec<&str> = requested_members
         .iter()
         .copied()
@@ -122,18 +137,6 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
             missing,
             command
         ))));
-    }
-
-    // Rule: only a crown over epics widens itself.
-    for member in &requested_members {
-        let is_epic = row_for(member)
-            .map(|row| row.get("type").and_then(Value::as_str) == Some("epic"))
-            .unwrap_or(false);
-        if !is_epic {
-            return Ok(refused(Some(&format!(
-                "{member} is not an epic in the graph. Only a crown over epics widens itself."
-            ))));
-        }
     }
 
     // Rule: only an epic this session created joins its own crown.

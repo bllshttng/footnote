@@ -3481,21 +3481,20 @@ mod tests {
         // child aimed at a fresh epic lands.
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        let mut body = String::from("{\n  \"entries\": [\n");
-        body.push_str(&format!(
-            "{{\"id\": \"e-1\", \"slug\": \"e-1\", \"title\": \"the full epic\", \
-             \"type\": \"epic\", \"status\": \"in_progress\", \"priority\": \"p1\", \
-             \"domain\": \"code\"}},\n"
-        ));
+        // Built through serde, never string concatenation: a hand-joined
+        // array leaves a trailing comma and the fixture stops being JSON.
+        let mut rows = vec![json!({"id": "e-1", "slug": "e-1", "title": "the full epic",
+                                   "type": "epic", "status": "in_progress",
+                                   "priority": "p1", "domain": "code"})];
         for i in 1..=15 {
-            body.push_str(&format!(
-                "{{\"id\": \"c-{i:02}\", \"slug\": \"c-{i:02}\", \"title\": \"child {i}\", \
-                 \"type\": \"feature\", \"status\": \"idea\", \"priority\": \"p2\", \
-                 \"domain\": \"code\", \"parent\": \"e-1\"}},\n"
-            ));
+            rows.push(
+                json!({"id": format!("c-{i:02}"), "slug": format!("c-{i:02}"),
+                             "title": format!("child {i}"), "type": "feature",
+                             "status": "idea", "priority": "p2", "domain": "code",
+                             "parent": "e-1"}),
+            );
         }
-        body.push_str("  ]\n}\n");
-        std::fs::write(&graph, body).unwrap();
+        std::fs::write(&graph, serialize_graph_file(&rows)).unwrap();
         std::fs::write(
             dir.path().join("config.toml"),
             "[backlog]\nepic_max_open_children = 15\n",
