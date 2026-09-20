@@ -38,6 +38,10 @@
 
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 # Consecutive checker-unavailable fires tolerated for an active session before a
 # loud give-up allow (mirrors target-stop-hook.sh's MAX_UNAVAIL_RETRIES).
 readonly MAX_UNAVAIL_RETRIES=3

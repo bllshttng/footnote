@@ -24,6 +24,10 @@
 
 set -uo pipefail
 
+# Survive a caller env with no usable PATH (see worktree-write-protect.sh).
+PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+
 PINNED_FMT="1.94.1"   # keep in lockstep with scripts/ci/preflight.sh PINNED_FMT
 
 PAYLOAD="$(cat 2>/dev/null || true)"

@@ -341,7 +341,7 @@ fn is_full_uuid(value: &str) -> bool {
         && value.as_bytes()[23] == b'-'
 }
 
-fn session_id_from_argv(argv: &[String]) -> Option<String> {
+pub(crate) fn session_id_from_argv(argv: &[String]) -> Option<String> {
     let mut it = argv.iter();
     while let Some(arg) = it.next() {
         if arg == "--session-id" {

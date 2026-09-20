@@ -85,3 +85,7 @@ A portal is a VIEWER, not an agent. The thread session runs whether or not a pan
 Measured 2026-09-02 with `fno doctor footprint`: fleet CPU 2.077 cores at 17.3 percent of capacity, descendant CPU 1.286 cores across 154 processes, verdict within.
 
 Every pane drains and renders its PTY, so portals cost redraw work. That plus the seat mechanic is the real bound. This is why there is no numeric cap. When a measurement asks for a cap, add one.
+
+## A conversion leaves no portal
+
+Converting a pane session to a thread (`fno agents resume <name> --substrate thread`) is a substrate change, not a view change. Afterward the mux server hosts nothing for that session. The conversion opens no portal and leaves none behind. To look at the converted thread, open one with `fno mux thread <name>`. A portal never changes the substrate: `fno mux thread reseat` moves the viewer while the server keeps hosting the process.

@@ -303,11 +303,16 @@ NO_PARSER_BIN="$TMP_BASE/no-parser-bin"
 mkdir -p "$NO_PARSER_BIN"
 ln -s "$(command -v bash)" "$NO_PARSER_BIN/bash"
 ln -s "$(command -v cat)" "$NO_PARSER_BIN/cat"
+# The caller PATH here carries no parser at all. The guard's own PATH
+# bootstrap makes that survivable: python3 resolves from the system
+# dirs, so the guard reaches its real verdict instead of failing open
+# before the location check. "Missing parsers -> allow" is no longer
+# reachable on a host with /usr/bin, so pin the rescue instead.
 NO_PARSER_OUTPUT="$(payload "$CANONICAL" | PATH="$NO_PARSER_BIN" "$NO_PARSER_BIN/bash" "$GUARD")"
-if printf '%s' "$NO_PARSER_OUTPUT" | jq -e 'type == "object" and length == 0' >/dev/null; then
-    pass "missing jq and python3 allows"
+if printf '%s' "$NO_PARSER_OUTPUT" | jq -e '.decision == "block"' >/dev/null; then
+    pass "PATH bootstrap finds a parser without caller parser dirs"
 else
-    fail "missing parsers did not allow: $NO_PARSER_OUTPUT"
+    fail "bootstrapped guard failed to reach a verdict: $NO_PARSER_OUTPUT"
 fi
 
 PYTHON_ONLY_BIN="$TMP_BASE/python-only-bin"
@@ -339,6 +344,23 @@ if printf '%s' "$NO_HELPER_OUTPUT" | jq -e 'type == "object" and length == 0' >/
     pass "missing location helper allows"
 else
     fail "missing helper did not allow: $NO_HELPER_OUTPUT"
+fi
+
+# An empty caller PATH must not leak noise into the guard's stderr: a preflight
+# once read a dirname error there as a red push. Plain `env -i` does not
+# reproduce: bash applies a default PATH, so PATH is pinned empty instead.
+# FNO_TEST_HERMETIC survives the wipe on purpose: the smoke runner's state
+# canary plants the checkout's .fno, and without the pin this bare-guard run
+# appends a guard_decision row into it, failing the whole shard.
+EMPTY_PATH_ERR="$TMP_BASE/empty-path-stderr"
+EMPTY_PATH_OUTPUT="$(printf '{}' | env -i PATH= FNO_TEST_HERMETIC=1 /bin/bash "$GUARD" 2>"$EMPTY_PATH_ERR")"
+EMPTY_PATH_RC=$?
+if [[ $EMPTY_PATH_RC -eq 0 ]] \
+    && [[ ! -s "$EMPTY_PATH_ERR" ]] \
+    && printf '%s' "$EMPTY_PATH_OUTPUT" | jq -e 'type == "object" and length == 0' >/dev/null; then
+    pass "empty PATH allows with clean stderr"
+else
+    fail "empty PATH run broke: rc=$EMPTY_PATH_RC stderr=$(cat "$EMPTY_PATH_ERR") output=$EMPTY_PATH_OUTPUT"
 fi
 
 printf '\n=== Results: %d passed, %d failed ===\n' "$PASS" "$FAIL"

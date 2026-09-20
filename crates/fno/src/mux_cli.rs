@@ -64,12 +64,14 @@ pub use crate::cli_args::{BlockAnnotateArgs, BlockPipeArgs, MuxCommon};
 mod block_args;
 pub mod kill_policy;
 mod pane_args;
+mod pane_keeper_list;
 use block_args::{parse_block_annotate, parse_block_args};
 use clap::Parser as _;
 pub use pane_args::{
     parse_pane_args, ParsedPane, PANE_LS_IDENTITY_HELP, PANE_REFERENCE_USAGE, PANE_RUN_WORKER_HELP,
     PANE_SEND_RAW_HELP,
 };
+pub(crate) use pane_keeper_list::pane_keeper_list;
 pub use server_axis::{
     env_server, note_server_flag, resolve_session, LEGACY_SERVER_ENV, SERVER_ENV,
 };
@@ -2265,6 +2267,10 @@ pub enum PaneCmd {
     },
     Kill {
         pane: u64,
+        /// `--hand-off-to <socket>`: release the pane to the thread lane
+        /// instead of killing it. The keeper socket is renamed there and
+        /// the child keeps running.
+        hand_off_to: Option<String>,
     },
     Claim {
         pane: u64,
@@ -2409,153 +2415,6 @@ fn parse_duration(value: &str) -> Result<std::time::Duration, String> {
         format!("--stale-after needs a duration like 24h, 90m or 3600, got {value:?}")
     })?;
     Ok(std::time::Duration::from_secs(n.saturating_mul(unit)))
-}
-
-/// `fno mux pane keeper list`: one row per keeper socket under the panes
-/// dir, probed DIRECTLY (connect + Identify, short timeout). Answers "did
-/// the keeper survive" with the keeper's own word - its pid, its child's
-/// pid, its cwd and argv - never with a process count. A socket nobody
-/// lives behind is listed with the reason, because a silent zero is the
-/// receipt-can-lie shape. Read-only: this verb never unlinks anything (the
-/// server's readopt sweep owns that).
-pub(crate) fn pane_keeper_list(json: bool, stale_after: Option<std::time::Duration>) -> i32 {
-    let dir = crate::pty::keeper_dir();
-    let mut rows: Vec<serde_json::Value> = Vec::new();
-    let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().map(|x| x == "sock").unwrap_or(false))
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
-    for path in names {
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let (session, pane_key) = match stem.rsplit_once('-') {
-            Some((s, key)) if key.chars().all(|c| c.is_ascii_digit()) => {
-                (s.to_string(), key.to_string())
-            }
-            _ => (stem.to_string(), String::new()),
-        };
-        let mut row = serde_json::json!({
-            "socket": path.display().to_string(),
-            "session": session,
-            "pane_key": pane_key,
-        });
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        // Short timeouts everywhere: a wedged keeper must not wedge the read.
-        match std::os::unix::net::UnixStream::connect(&path) {
-            Err(e) => {
-                row["stale"] = serde_json::json!(format!("no listener: {e}"));
-            }
-            Ok(mut stream) => {
-                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(750)));
-                let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(750)));
-                let identified = (|| -> Option<serde_json::Value> {
-                    use crate::pty::{
-                        keeper_decode, keeper_frame_identify, KeeperRead, KEEPER_TAG_IDENTIFY_REPLY,
-                    };
-                    use std::io::{Read as _, Write as _};
-                    stream.write_all(&keeper_frame_identify()).ok()?;
-                    let mut buf: Vec<u8> = Vec::new();
-                    let mut read_buf = [0u8; 4096];
-                    loop {
-                        loop {
-                            match keeper_decode(&buf) {
-                                KeeperRead::NeedMore => break,
-                                KeeperRead::Frame(tag, payload, used) => {
-                                    buf.drain(..used);
-                                    if tag == KEEPER_TAG_IDENTIFY_REPLY {
-                                        return serde_json::from_slice(&payload).ok();
-                                    }
-                                }
-                            }
-                        }
-                        match stream.read(&mut read_buf) {
-                            Ok(0) | Err(_) => return None,
-                            Ok(n) => buf.extend_from_slice(&read_buf[..n]),
-                        }
-                    }
-                })();
-                match identified {
-                    None => {
-                        row["stale"] = serde_json::json!("no identify answer inside the timeout");
-                    }
-                    Some(reply) => {
-                        for field in ["v", "keeper_pid", "child_pid", "cwd", "argv", "started_at"] {
-                            row[field] =
-                                reply.get(field).cloned().unwrap_or(serde_json::Value::Null);
-                        }
-                        let child_pid = reply.get("child_pid").and_then(serde_json::Value::as_u64);
-                        if let Some(pid) = child_pid {
-                            // SAFETY: signal 0 is the existence probe.
-                            let hit = unsafe { libc::kill(pid as libc::pid_t, 0) };
-                            if hit != 0 {
-                                row["stale"] =
-                                    serde_json::json!(format!("child pid {pid} is gone"));
-                            }
-                        }
-                        let age = reply
-                            .get("started_at")
-                            .and_then(serde_json::Value::as_u64)
-                            .map(|t| now.saturating_sub(t));
-                        if let (Some(age), Some(cap)) = (age, stale_after) {
-                            if age > cap.as_secs() {
-                                row["stale"] = serde_json::json!(format!(
-                                    "aged {age}s (> {}s)",
-                                    cap.as_secs()
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        rows.push(row);
-    }
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
-        );
-    } else if rows.is_empty() {
-        println!("no keeper panes");
-    } else {
-        for row in &rows {
-            let stale = row.get("stale").and_then(serde_json::Value::as_str);
-            let desc = match stale {
-                Some(reason) => format!(" (STALE: {reason})"),
-                None => String::new(),
-            };
-            println!(
-                "session {} pane {} keeper {} child {} cwd {}{}",
-                row.get("session")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("?"),
-                row.get("pane_key")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("?"),
-                row.get("keeper_pid")
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "?".into()),
-                row.get("child_pid")
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "?".into()),
-                row.get("cwd")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("?"),
-                desc,
-            );
-        }
-    }
-    EXIT_OK
 }
 
 /// Resolve `--session`/env, connect to the EXISTING server, run one control
@@ -4239,7 +4098,9 @@ pub(crate) fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> 
             },
             Duration::from_millis(timeout_ms) + Duration::from_secs(2),
         ),
-        PaneCmd::Kill { pane } => (ControlVerb::PaneKill { pane }, CONTROL_TIMEOUT),
+        PaneCmd::Kill { pane, hand_off_to } => {
+            (ControlVerb::PaneKill { pane, hand_off_to }, CONTROL_TIMEOUT)
+        }
         PaneCmd::Claim { pane, pid } => (
             ControlVerb::PaneClaim {
                 pane,
@@ -4951,6 +4812,17 @@ fn render_reply(
                 for r in &results {
                     println!("  slot {} pane={} {:?}", r.slot, r.pane_id, r.outcome);
                 }
+            }
+            EXIT_OK
+        }
+        // A one-line receipt. `pane kill --hand-off-to` answers this way:
+        // the pane is released, the keeper is at its new socket, and the
+        // child is still running, which no structured reply describes.
+        ServerMsg::Notice { text } => {
+            if json {
+                println!("{}", serde_json::json!({"notice": text}));
+            } else {
+                println!("{text}");
             }
             EXIT_OK
         }
@@ -5706,21 +5578,39 @@ mod tests {
         // parser must accept its own instrument's remedy.
         let parsed = pane_args(&["kill", "main:76"]).expect("selector must parse");
         assert_eq!(parsed.session.as_deref(), Some("main"));
-        assert_eq!(parsed.cmd, PaneCmd::Kill { pane: 76 });
+        assert_eq!(
+            parsed.cmd,
+            PaneCmd::Kill {
+                pane: 76,
+                hand_off_to: None
+            }
+        );
     }
 
     #[test]
     fn pane_explicit_session_flag_beats_the_selector_session() {
         let parsed = pane_args(&["kill", "--session", "other", "main:76"]).expect("must parse");
         assert_eq!(parsed.session.as_deref(), Some("other"));
-        assert_eq!(parsed.cmd, PaneCmd::Kill { pane: 76 });
+        assert_eq!(
+            parsed.cmd,
+            PaneCmd::Kill {
+                pane: 76,
+                hand_off_to: None
+            }
+        );
     }
 
     #[test]
     fn pane_bare_id_still_parses_with_no_session() {
         let parsed = pane_args(&["kill", "76"]).expect("bare id must parse");
         assert_eq!(parsed.session, None);
-        assert_eq!(parsed.cmd, PaneCmd::Kill { pane: 76 });
+        assert_eq!(
+            parsed.cmd,
+            PaneCmd::Kill {
+                pane: 76,
+                hand_off_to: None
+            }
+        );
     }
 
     #[test]
@@ -6490,7 +6380,10 @@ mod tests {
             ParsedPane {
                 session: Some("work".into()),
                 json: false,
-                cmd: PaneCmd::Kill { pane: 3 }
+                cmd: PaneCmd::Kill {
+                    pane: 3,
+                    hand_off_to: None
+                }
             }
         );
     }

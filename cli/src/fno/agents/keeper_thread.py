@@ -36,12 +36,18 @@ def _agy_finish(argv: list[str], cwd: Path) -> list[str]:
     return argv
 
 
-#: The one completion per harness the contract cannot express. Bare ``pi``
-#: defaults to provider google, so the pair is always appended.
+#: The one completion per harness the contract cannot express. pi's route is
+#: not here: it carries the user's axes, so it runs in complete_launch_argv
+#: before the generic model/effort adds.
 _FINISH_ARGV: dict[str, Callable[[list[str], Path], list[str]]] = {
-    "pi": lambda argv, cwd: [*argv, *_pi_provider_model()],
     "agy": _agy_finish,
 }
+
+
+def _pi_axes(model, effort, tools, deny_tools) -> dict:
+    """The pi_route ask; empty string means "unset" on the Rust side."""
+    return {"model": model or "", "effort": effort or "",
+            "tools": tools or "", "deny_tools": deny_tools or ""}
 
 
 def keeper_arm(harness: str) -> Optional[dict]:
@@ -49,12 +55,6 @@ def keeper_arm(harness: str) -> Optional[dict]:
     from fno.agents.harness_map import _HARNESS_CAPS
 
     return (_HARNESS_CAPS.get(harness) or {}).get("keeper")
-
-
-def _pi_provider_model() -> list[str]:
-    from fno.agents.harnesses.pi import pi_model, pi_provider
-
-    return ["--provider", pi_provider(), "--model", pi_model()]
 
 
 def _trust_agy_folder(cwd: Path) -> bool:
@@ -164,6 +164,8 @@ def complete_launch_argv(
     permission_mode: Optional[str],
     add_dir: Optional[str],
     effort: Optional[str],
+    tools: Optional[str] = None,
+    deny_tools: Optional[str] = None,
 ) -> list[str]:
     """The declared create form plus the axes this harness's PANE arm appends.
     One ORDER serves every lane: flag order is not how a binary launches."""
@@ -179,6 +181,12 @@ def complete_launch_argv(
     from fno.agents.spawn_axes_client import keeper_posture
 
     argv = [*argv, *keeper_posture(harness, "thread", permission_mode, yolo)]
+    if harness == "pi":
+        # One route owner for keeper and pane; the generic adds would misname it.
+        from fno.agents.spawn_axes_client import spawn_axes_call
+
+        route = spawn_axes_call({"pi_route": _pi_axes(model, effort, tools, deny_tools)})
+        return [*argv, *(str(t) for t in route["tokens"])]
     if arm.get("takes_model") and model:
         argv = [*argv, "--model", model]
     if arm.get("takes_effort") and effort:

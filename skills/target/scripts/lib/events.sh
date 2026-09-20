@@ -178,8 +178,12 @@ _shell_events_may_create_parent() {
     # FNO_HOME is the state-root override the rest of the hook tree reads as
     # `${FNO_HOME:-$HOME/.fno}`. Compared physically as well as by spelling,
     # so a symlinked $HOME does not make the same root pass one way and fail
-    # the other.
-    local state_root="${FNO_HOME:-${HOME%/}/.fno}"
+    # the other. HOME is read set-u-safe: under `env -i` (the guards' own
+    # no-PATH regression fixture) it is unset, and an unbound expansion in a
+    # non-interactive shell exits 1 in silence, killing the guard before its
+    # verdict.
+    local home="${HOME:-}"
+    local state_root="${FNO_HOME:-${home%/}/.fno}"
     state_root="${state_root%/}"
     [[ "$parent" == "$state_root" ]] && return 0
     [[ "$(_shell_physical_dir "$parent")" == "$(_shell_physical_dir "$state_root")" ]] && return 0

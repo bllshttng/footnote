@@ -36,8 +36,6 @@ pub struct ProcRow {
     pub command: String,
 }
 
-/// A synthetic row for tests that walk a table without a live census.
-
 /// The shared Codex app-server's census row: health and installed-version
 /// readiness are DIFFERENT axes, so the row carries both. A healthy daemon
 /// running a version older than the installed CLI reads healthy + stale,
@@ -293,6 +291,31 @@ fn process_table_libproc() -> (Vec<ProcRow>, usize) {
         });
     }
     (rows, unreadable)
+}
+
+/// The live argv of one pid, for the caller outside the census that needs
+/// it: a pane-to-thread conversion carries the running writer's own pins
+/// into the relaunch rather than re-deriving them from a default.
+#[cfg(target_os = "macos")]
+pub(crate) fn process_argv(pid: u32) -> Option<Vec<String>> {
+    argv_of(pid)
+}
+
+/// The `ps` leg. It splits on whitespace, so an argument that CONTAINS a
+/// space comes back as two. Every flag the conversion carries takes a
+/// space-free value, and the caller drops what it does not recognise.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn process_argv(pid: u32) -> Option<Vec<String>> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "args=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout);
+    let argv: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+    (!argv.is_empty()).then_some(argv)
 }
 
 /// The live argv of `pid` from `KERN_PROCARGS2`, `None` when unreadable.

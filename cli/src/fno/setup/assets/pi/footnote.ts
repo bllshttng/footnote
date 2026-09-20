@@ -1,54 +1,124 @@
-// footnote <-> pi bridge extension (native agent_settled stop gate).
+// footnote <-> pi bridge extension (transport only).
 //
-// Installed by `fno config setup` into ~/.pi/agent/extensions/footnote.ts
+// Installed by `fno config setup` into <pi agent dir>/extensions/footnote.ts
 // (pi auto-discovers *.ts there; no package publish required). Plain
 // TypeScript against node builtins only, so pi loads it with no install step.
 //
-// Purpose: make pi a first-class footnote harness - replicate /target's
-// in-session stop hook (keep the agent working until the world agrees it's
-// done) using pi's extension surface. pi ships no shell hook at all; its
-// lifecycle boundary is in-process, and the fno stop gate maps onto
-// `pi.on("agent_settled")`, which fires when no retry, compaction or
-// follow-up is left (docs/extensions.md). On settle we:
+// This extension is a TRANSPORT and nothing else. Every decision belongs to
+// Rust: the gate (`fno-agents loop-check`) decides, the store verbs answer,
+// and this file moves bytes. Concretely it carries four abilities:
 //
-//   1. read the session's assistant messages via ctx.sessionManager,
-//   2. synthesize a minimal claude-shaped transcript jsonl,
-//   3. shell `fno-agents loop-check` (the SAME completion gate claude uses:
-//      promise scan + PR-for-HEAD + CI green + bots reviewed + no blocking
-//      finding; it emits the `termination` event itself on a terminal allow),
-//   4. on a non-terminal (block/continue) decision, re-drive the SAME session
-//      in-context via pi.sendUserMessage (preserves history; beats a
-//      loop-wrapper's fresh-process relaunch).
+//   1. DISCOVERY: it tells pi where the Footnote skills live, so a native
+//      pi session sees `/skill:target` in its own catalog.
+//   2. MANIFEST: it asks `fno-agents state path target-state` where the
+//      session manifest for this directory lives (the space-resolved path,
+//      never a guess like `<cwd>/.fno/target-state.md`).
+//   3. BINDING: every settle passes its own session id to the gate with
+//      `--harness pi --harness-session <id>`, so the gate answers whether
+//      THIS session may drive this target. A foreign session gets a typed
+//      refusal, sends nothing, and records why.
+//   4. CONTINUATION: on a non-terminal block it sends exactly the string the
+//      gate named, with prompt expansion enabled so a skill command reaches
+//      the skill. A block without a continuation sends nothing.
 //
-// loop-check is the SOLE completion authority (shared with claude, no drift):
-// the extension never decides "done" itself, and never fabricates a
-// termination when the gate is unavailable.
-//
-// If there is no footnote session (no .fno/target-state.md in the project),
-// the extension no-ops, so a plain native pi session is unaffected. And the
-// gate runs ONLY in a process fno spawned into the loop lane: the keeper sets
-// FNO_AGENT_SESSION_ID on its pi child, so a native pi session in a directory
-// whose stale manifest survives a finished run is never re-driven.
+// Every call is bounded: a wedged child is killed and the settle records one
+// `unavailable` entry instead of hanging or fabricating a termination.
+// loop-check stays the SOLE completion authority: the extension never
+// decides "done", never re-drives on a failure, and never emits a
+// termination itself.
 
 import { execFile } from "node:child_process"
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { homedir } from "node:os"
 import { join } from "node:path"
 
-function fnoSessionId(dir: string): string | null {
-  try {
-    const txt = readFileSync(join(dir, ".fno", "target-state.md"), "utf8")
-    const m = txt.match(/^session_id:\s*"?([^"\s]+)"?/m)
-    return m ? m[1] : null
-  } catch (e: unknown) {
-    // A missing manifest is the dominant case (plain native pi session) -
-    // stay silent. Any OTHER read error (a present-but-unreadable manifest)
-    // is a real footnote session going dark, so surface it once instead of
-    // vanishing.
-    if ((e as { code?: string })?.code !== "ENOENT") {
-      console.error(`[footnote] cannot read target-state.md: ${e}`)
+type Ctx = {
+  sessionManager?: {
+    getSessionId?: () => string
+    buildContextEntries?: () => unknown[]
+    getBranch?: () => unknown[]
+  }
+  isIdle?: () => boolean
+  hasUI?: boolean
+  ui?: { notify?: (message: string, level?: string) => unknown }
+}
+
+// The gate bound, overridable so a test can drive the timeout path in
+// milliseconds instead of five minutes.
+function gateTimeoutMs(): number {
+  const raw = Number(process.env.FNO_PI_GATE_TIMEOUT_MS || "")
+  return Number.isFinite(raw) && raw > 0 ? raw : 300000
+}
+
+function distresTimeoutMs(): number {
+  const raw = Number(process.env.FNO_PI_DISTRESS_TIMEOUT_MS || "")
+  return Number.isFinite(raw) && raw > 0 ? raw : 30000
+}
+
+function statePathTimeoutMs(): number {
+  const raw = Number(process.env.FNO_PI_STATE_TIMEOUT_MS || "")
+  return Number.isFinite(raw) && raw > 0 ? raw : 5000
+}
+
+// One bounded child run. Resolves "" when the child failed for any reason
+// (spawn error, nonzero exit, timeout) - the caller records why it could not
+// read an answer rather than guessing one.
+function runBounded(
+  bin: string,
+  args: string[],
+  timeoutMs: number,
+): Promise<string> {
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        bin,
+        args,
+        {
+          timeout: timeoutMs,
+          killSignal: "SIGKILL",
+          maxBuffer: 10 * 1024 * 1024,
+        },
+        (err, stdout) => resolve(err ? "" : String(stdout)),
+      )
+    } catch {
+      resolve("")
     }
+  })
+}
+
+// The space-resolved manifest for `dir`, when one exists. The verb is the
+// only path authority: a directory with no `.fno` of its own still gates,
+// because the manifest lives under the session's space root.
+async function resolveManifestPath(bin: string, dir: string): Promise<string | null> {
+  const out = await runBounded(bin, ["state", "path", "target-state"], statePathTimeoutMs())
+  const candidate = out.trim().split("\n").pop()?.trim()
+  if (!candidate || !existsSync(candidate)) return null
+  void dir
+  return candidate
+}
+
+// The skills directory the plugin-root pointer names, or null with one
+// `[footnote]` line naming why. A stale or missing pointer degrades to "pi
+// shows no Footnote verbs", never to an error.
+function skillsRoot(): string | null {
+  const base = process.env.FNO_HOME || join(homedir(), ".fno")
+  let root: string
+  try {
+    root = readFileSync(join(base, "plugin-root"), "utf8").trim()
+  } catch {
+    console.error("[footnote] no plugin-root pointer; skills not offered")
     return null
   }
+  if (!root || !existsSync(join(root, ".claude-plugin", "plugin.json"))) {
+    console.error("[footnote] plugin-root pointer names no plugin root; skills not offered")
+    return null
+  }
+  if (!existsSync(join(root, "skills"))) {
+    console.error("[footnote] plugin root carries no skills dir; skills not offered")
+    return null
+  }
+  return join(root, "skills")
 }
 
 // Build the minimal transcript loop-check scans. Its detect_intent_full
@@ -86,13 +156,29 @@ export default function (pi: {
   ) => void
   sendUserMessage: (
     content: string,
-    options?: { deliverAs?: string; triggerTurn?: boolean },
+    options?: {
+      deliverAs?: string
+      triggerTurn?: boolean
+      expandPromptTemplates?: boolean
+    },
   ) => void
+  appendEntry?: (type: string, data: unknown) => void
 }): void {
-  // In-flight guard: never run two loop-checks (or overlap a re-drive) at
-  // once. One boolean: the turn lifecycle + loop-check's NoProgress backstop
-  // already bound a stuck session; this just prevents concurrent fires.
-  let busy = false
+  // Per-session in-flight guard. This is scheduling, never authority: one
+  // loop-check at a time per pi session, and the binding gate still answers
+  // who owns the target.
+  const busy = new Map<string, boolean>()
+
+  pi.on("session_shutdown", (_event: unknown, ctx: unknown) => {
+    const sid = (ctx as Ctx)?.sessionManager?.getSessionId?.()
+    if (sid) busy.delete(sid)
+  })
+
+  // DISCOVERY: put the Footnote verbs in pi's own catalog as skills.
+  pi.on("resources_discover", () => {
+    const skills = skillsRoot()
+    return skills ? { skillPaths: [skills] } : {}
+  })
 
   // Fleet announcements at the pre-turn boundary.
   // `before_agent_start` fires after a prompt and before the agent loop, and
@@ -101,18 +187,16 @@ export default function (pi: {
   // is one bus line; the per-session cursor on the reader side makes this
   // print once and stay silent after. Fail-open: no binary, no output, or a
   // failed read injects nothing.
-  pi.on("before_agent_start", async (_event, _ctx) => {
+  pi.on("before_agent_start", async (_event: unknown, ctx: unknown) => {
     try {
-      const sessionKey = process.env.FNO_AGENT_SESSION_ID || `pi:${process.cwd()}`
+      const sid = (ctx as Ctx)?.sessionManager?.getSessionId?.() || ""
+      const sessionKey = process.env.FNO_AGENT_SESSION_ID || sid || `pi:${process.cwd()}`
       const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
-      const out = await new Promise<string>((resolve) => {
-        execFile(
-          bin,
-          ["announce", "read", "--session-id", sessionKey, "--harness", "pi", "--boundary", "prompt"],
-          { cwd: process.cwd(), timeout: 2000, maxBuffer: 1024 * 1024 },
-          (err, stdout) => resolve(err ? "" : String(stdout)),
-        )
-      })
+      const out = await runBounded(
+        bin,
+        ["announce", "read", "--session-id", sessionKey, "--harness", "pi", "--boundary", "prompt"],
+        2000,
+      )
       const text = out.trim()
       if (!text) return
       return {
@@ -127,54 +211,44 @@ export default function (pi: {
     }
   })
 
-  pi.on("agent_settled", async (_event, ctx) => {
-    // Spawn binding first: the keeper sets FNO_AGENT_SESSION_ID only on a
-    // process fno itself spawned into the loop lane, so a NATIVE pi session
-    // never gates here - no matter what cwd it sits in. Without this, any
-    // pi session opened in a directory whose stale .fno/target-state.md
-    // survives a finished run would be re-driven against a loop it never
-    // joined.
-    if (!process.env.FNO_AGENT_SESSION_ID) return
+  pi.on("agent_settled", async (_event: unknown, ctx: unknown) => {
     const dir = process.cwd()
-    // Presence guard: the manifest is loop-check's state and the marker that
-    // a footnote run owns this directory.
-    if (!fnoSessionId(dir)) {
-      // A worker that dies before `target init` writes a manifest still
-      // carries a <help> tag nobody would otherwise read (loop-check below
-      // never runs on this path). Side effect only, best-effort, never
-      // throws: this is the shell stop hooks' pre-manifest distress-scan,
-      // ported to pi's agent_settled event.
+    const sm = (ctx as Ctx)?.sessionManager
+    const sid = sm?.getSessionId?.() || ""
+    const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
+
+    // MANIFEST: the verb is the presence guard and the gate's --state.
+    const manifestPath = await resolveManifestPath(bin, dir)
+    if (!manifestPath) {
+      // No footnote session here. A worker that dies before `target init`
+      // writes a manifest still carries a distress tag nobody would otherwise
+      // read, so the pre-manifest scan keeps the spawned-run requirement
+      // (FNO_AGENT_SESSION_ID is the run id it reports under).
+      if (!process.env.FNO_AGENT_SESSION_ID) return
       const preSynth = join(
-        dir,
-        ".fno",
+        tmpdir(),
         `.pi-premanifest-${process.pid}-${Date.now()}.jsonl`,
       )
       try {
-        const sm = (ctx as { sessionManager?: Record<string, () => unknown> })
-          .sessionManager
         const read = sm?.buildContextEntries ?? sm?.getBranch
         const entries = read ? (read.call(sm) as unknown[]) : []
         writeFileSync(preSynth, synthesizeTranscript(entries))
-        const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
-        await new Promise<void>((resolve) => {
-          execFile(
-            bin,
-            [
-              "distress-scan",
-              "--transcript",
-              preSynth,
-              "--run",
-              String(process.env.FNO_AGENT_SESSION_ID),
-              "--harness",
-              "pi",
-              "--cwd",
-              dir,
-            ],
-            { cwd: dir, maxBuffer: 10 * 1024 * 1024 },
-            () => resolve(),
-          )
-        })
-      } catch (e) {
+        await runBounded(
+          bin,
+          [
+            "distress-scan",
+            "--transcript",
+            preSynth,
+            "--run",
+            String(process.env.FNO_AGENT_SESSION_ID),
+            "--harness",
+            "pi",
+            "--cwd",
+            dir,
+          ],
+          distresTimeoutMs(),
+        )
+      } catch (e: unknown) {
         console.error(`[footnote] pre-manifest distress-scan skipped (non-fatal): ${e}`)
       } finally {
         try {
@@ -185,104 +259,131 @@ export default function (pi: {
       }
       return
     }
+
     // ctx.isIdle() is true at agent_settled unless another extension started
     // a run; a busy pi is mid-re-drive or mid-tool and the next settle comes.
-    if ((ctx as { isIdle?: () => boolean })?.isIdle?.() === false) return
-    if (busy) return
-    busy = true
+    if ((ctx as Ctx)?.isIdle?.() === false) return
+    if (!sid || busy.get(sid)) return
+    busy.set(sid, true)
 
-    let decision: { decision?: string; termination_reason?: string } | null = null
+    let decision: {
+      decision?: string
+      termination_reason?: string
+      continuation?: string
+      message?: string
+      reason?: string
+    } | null = null
+    let unavailableReason = ""
     // Declared before the try so the finally can clean it up on every path.
-    const synth = join(
-      dir,
-      ".fno",
-      `.pi-loopcheck-${process.pid}-${Date.now()}.jsonl`,
-    )
+    const synth = join(tmpdir(), `.pi-loopcheck-${process.pid}-${Date.now()}.jsonl`)
     try {
-      // 1. Read this session's assistant messages. buildContextEntries is
-      //    the active branch with compaction applied; getBranch is the
-      //    fallback on an older sessionManager.
-      const sm = (ctx as { sessionManager?: Record<string, () => unknown> })
-        .sessionManager
+      // Read this session's assistant messages and synthesize the transcript
+      // the gate scans.
       const read = sm?.buildContextEntries ?? sm?.getBranch
       const entries = read ? (read.call(sm) as unknown[]) : []
-
-      // 2. Synthesize the transcript loop-check reads.
       writeFileSync(synth, synthesizeTranscript(entries))
 
-      // 3. Run the full claude completion gate. loop-check exits 0 for both
-      //    allow and block; only CLI misuse / a missing binary throws. On
-      //    any failure we NEVER re-drive and NEVER fabricate a termination.
-      const bin = process.env.FNO_AGENTS_BIN || "fno-agents"
-      decision = await new Promise((resolve) => {
-        execFile(
-          bin,
-          [
-            "loop-check",
-            "--state",
-            join(dir, ".fno", "target-state.md"),
-            "--transcript",
-            synth,
-            "--cwd",
-            dir,
-          ],
-          { cwd: dir, maxBuffer: 10 * 1024 * 1024 },
-          (err, stdout) => {
-            if (err) {
-              console.error(
-                `[footnote] loop-check unavailable/failed: ${err}; not re-driving`,
-              )
-              resolve(null)
-              return
-            }
-            try {
-              resolve(JSON.parse(String(stdout)))
-            } catch (parseErr) {
-              console.error(
-                `[footnote] loop-check printed unparseable output: ${parseErr}; not re-driving`,
-              )
-              resolve(null)
-            }
-          },
-        )
-      })
-    } catch (e) {
+      const out = await runBounded(
+        bin,
+        [
+          "loop-check",
+          "--state",
+          manifestPath,
+          "--transcript",
+          synth,
+          "--cwd",
+          dir,
+          "--harness",
+          "pi",
+          "--harness-session",
+          sid,
+        ],
+        gateTimeoutMs(),
+      )
+      if (!out) {
+        unavailableReason = "loop-check failed or timed out"
+      } else {
+        try {
+          decision = JSON.parse(out)
+        } catch (parseErr: unknown) {
+          unavailableReason = `unparseable gate output: ${parseErr}`
+        }
+      }
+    } catch (e: unknown) {
       // A failed transcript read or write must not throw out of a hook: the
       // session settles ungated (as it would with no extension) rather than
       // dying mid-settle.
-      console.error(`[footnote] agent_settled handling failed: ${e}`)
-      return
+      unavailableReason = `settle handling failed: ${e}`
     } finally {
-      // Clean up the synth transcript (loop-check has already read it by
-      // now); ignore failures incl. ENOENT when an early return skipped the
-      // write.
       try {
         unlinkSync(synth)
       } catch {
-        // nothing to clean up / already gone
+        // nothing to clean up / early return skipped the write
       }
-      // Release before any re-drive so the re-driven turn's agent_settled is
-      // not dropped by this guard.
-      busy = false
+      busy.delete(sid)
     }
 
+    if (unavailableReason) {
+      // Never re-drive on an unreadable gate, and never fabricate a
+      // termination: record the fact once, visibly.
+      try {
+        pi.appendEntry?.("fno-gate", { state: "unavailable", reason: unavailableReason })
+      } catch {
+        // an appendEntry that throws is the host's problem, not a gate answer
+      }
+      if ((ctx as Ctx)?.hasUI && (ctx as Ctx)?.ui?.notify) {
+        try {
+          ;(ctx as Ctx).ui?.notify?.(`[footnote] gate unavailable: ${unavailableReason}`, "warning")
+        } catch {
+          // notify is best-effort
+        }
+      }
+      return
+    }
     if (!decision) return
+    // The binding refused this session: send nothing, record why. This turns
+    // a wrong-session continuation (the audit's one foreign continuation)
+    // into a typed refusal.
+    if (decision.decision === "refuse") {
+      try {
+        pi.appendEntry?.("fno-gate", {
+          state: "refused",
+          reason: decision.reason || decision.message || "",
+        })
+      } catch {
+        // best-effort record
+      }
+      return
+    }
     // Terminal: loop-check already emitted `termination` - let the session
     // end and emit nothing extra (no duplicate termination event).
     if (decision.termination_reason) return
-    // Non-terminal (the world has not caught up, or no promise yet): re-drive
-    // the same session in-context. followUp + triggerTurn covers both an
-    // idle pi (sends immediately, triggers a turn) and a still-settling one
-    // (queues behind the current run). Fire-and-forget; the next turn's
-    // agent_settled runs the gate again. loop-check's NoProgress backstop
-    // bounds a stuck loop.
+    // Non-terminal block: send EXACTLY the continuation the gate named, with
+    // prompt expansion so a skill command reaches the skill. followUp +
+    // triggerTurn covers both an idle pi (sends immediately, triggers a turn)
+    // and a still-settling one (queues behind the current run). Fire-and-
+    // forget; the next turn's agent_settled runs the gate again. loop-check's
+    // NoProgress backstop bounds a stuck loop.
     if (decision.decision === "block") {
+      const continuation = decision.continuation
+      if (!continuation) {
+        try {
+          pi.appendEntry?.("fno-gate", {
+            state: "unavailable",
+            reason: "gate named no continuation",
+          })
+        } catch {
+          // best-effort record
+        }
+        return
+      }
       try {
-        pi.sendUserMessage("/target --resume", {
+        pi.sendUserMessage(continuation, {
           deliverAs: "followUp",
           triggerTurn: true,
+          expandPromptTemplates: true,
         })
-      } catch (e) {
+      } catch (e: unknown) {
         console.error(`[footnote] re-drive sendUserMessage threw: ${e}`)
       }
     }

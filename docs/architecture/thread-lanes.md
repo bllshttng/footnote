@@ -91,6 +91,32 @@ Some flags are not harness CLI flags at all: codex `--agent` has no spelling on 
 
 Seat and honesty are different answers. `thread_seatable` measured True on 2026-09-11 for claude, codex, opencode, agy, cursor-agent, grok and pi. That is why the table gives opencode a `thread` row carrying `model` only. Every other opencode flag demotes to the pane until the serve lane maps it. Whether the opencode thread lane is HONEST is a separate open question with its own verdict. This row records only what the lane carries today.
 
+## Converting a pane
+
+A session that STARTED on a pane reaches the thread lane with one verb: `fno agents resume <name> --substrate thread`. It keeps its session id, its transcript, its node, its claims and its crown. `--dry-run` prints the plan and changes nothing. `--allow-new-id` is the disclosed, authorized path for a harness that mints a new id anyway. A crowned row refuses that flag. Moving a crown to a new id is succession, not conversion.
+
+Which mechanism a harness uses is declared, not derived. It lives in `[harness.<name>.conversion]` in `crates/fno-agents/src/harness_capabilities.toml`, and the classifier branches on the strategy alone. A derivation gets opencode wrong: `thread_lane` answers `attach` for it, so opencode goes down claude's path and forks the session the operator asked to keep.
+
+| Harness | Strategy | Keeps the id | What actually happens |
+|---|---|---|---|
+| agy, cursor-agent, grok, pi | `keeper-rebind` | yes | Nothing stops. The keeper socket is renamed from `mux/panes/` to `mux/threads/`, the mux server drops its subscriber seat, and the daemon's keeper sweep rebinds the row by socket path. Same pid, same session. |
+| codex | `server-resume` | yes | The pane TUI owns its rollout in-process, so it must exit first, confirmed by ESRCH. The shared app-server then resumes the same rollout id. |
+| claude | `client-resume` | yes | The pane stops, then the client relaunches the session detached. The resumed id is READ BACK from the roster and compared before it is accepted, never promised blind. |
+| opencode | `unsupported` | n/a | The serve lane carries `model` only and the lane's honesty is the open question above. Refused rather than forked. |
+| gemini | `unsupported` | n/a | Deprecated in favor of agy. There is nothing to convert. |
+
+The rebind rests on one measured fact. A renamed unix socket path still reaches the same listener, and the old path stops answering. Measured on macOS 25.3 with a positive control on the old path. That fact is what lets the daemon find the same keeper at the thread socket afterward.
+
+Ordering is the safety argument on every strategy. Every refusal is raised before the first mutation. On a rebind, a failed rename leaves the pane seated and served. A failed detach renames the socket back. On a handoff, the claims re-pin to the daemon before the old writer stops, and to the new writer after it is live. So the session never has two writers and never has none.
+
+A hand-off can land while its row flip fails. Re-run the same command. It reclassifies from what is true, finds the keeper already at the thread path, and finishes. Nothing writes a journal, because the world is the journal.
+
+The fingerprint is the keeper's LANE. A landed hand-off leaves no pane, so the pane listing stops naming the child. `fno mux pane keeper list` still names it, on the thread lane. That pair, no pane and a live thread-lane keeper on this row's child, is the half-converted shape. The classifier answers it with a plan whose only step is the row flip. Without that reading the re-run refuses for want of a pane. The refusal then points at `fno agents resume`. That starts a second writer over a child that never stopped.
+
+Conversion is not a portal. A portal moves the VIEWER and leaves the mux server hosting the process. `fno mux thread reseat` is that operation. Here the server stops hosting anything. Open a view on the converted thread with `fno mux thread <name>`.
+
+Thread-to-pane is not built. `--substrate` takes only `thread`, and any other value refuses by name.
+
 ## The gate rule
 
 A `thread` row flips to true only in the same commit as a passing unattended restart journey. The journey is a dispatched worker that resumes into a fresh session, completes its task, and stops on its own; for a keeper lane it is the restart journey above, asserting a named pid outlived a named death. Flip the row early and the honest refusal becomes a spawn that accepts and then fails at launch. Until that commit lands, a false row records an fno backlog item. It never records a harness verdict.

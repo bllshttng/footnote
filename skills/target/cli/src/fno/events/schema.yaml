@@ -2220,6 +2220,37 @@ event_types:
           type: string
           description: "Why spawned_by_session is absent: the identity resolution's own reason at spawn time. A birth names either its parent or why it could not."
 
+  - name: agent_convert_phase
+    description: "One phase of the agent.convert pane-to-thread transaction. Emitted at each step so an interrupted conversion can be read back from the event stream: classified, claims-held, pane-stopped, hand-off, resumed, flipped, rolled-back."
+    sources: [daemon]
+    data:
+      required: [name, strategy, phase]
+      properties:
+        name:
+          type: string
+          description: "The registry row being converted."
+        strategy:
+          type: string
+          description: "The declared conversion strategy: keeper-rebind, server-resume or client-resume."
+        phase:
+          type: string
+          description: "Which step of the transaction this event reports."
+        socket:
+          type: string
+          description: "The thread-lane keeper socket, on the flipped phase of a keeper rebind."
+        child_pid:
+          type: integer
+          description: "The surviving child process, on the flipped phase of a keeper rebind."
+        short_id:
+          type: string
+          description: "The relaunched session's short id, on the flipped phase of a client resume."
+        session_id:
+          type: string
+          description: "The session id the row carries after the flip."
+        error:
+          type: string
+          description: "Why the conversion rolled back, on the rolled-back phase."
+
   - name: agent_stopped
     description: "An agent was stopped (graceful SIGTERM sequence completed)."
     sources: [daemon]
