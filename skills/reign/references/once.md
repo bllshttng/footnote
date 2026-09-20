@@ -1,9 +1,7 @@
 <!-- style-exception: verbatim move of the one-wave pass from the retired king skill -->
 # The one-wave pass (reign --once)
 
-You have been crowned over one scope, and the crown expires when you exit.
-That is the whole shape: real authority, no tenure.
-Tenure instead - a king that stays active over a territory for days, checking in on a schedule - is `/fno:reign <scope>` without `--once`; this page is the one-wave pass and court.
+You have been crowned over one scope, and the crown expires when you exit. That is the whole shape: real authority, no tenure. Tenure instead - a king that stays active over a territory for days, checking in on a schedule - is `/fno:reign <scope>` without `--once`. This page is the one-wave pass and court.
 
 One fresh-context session reads a track, decides the next wave or two, writes that decision into the graph, kicks it off, and abdicates. The daemon's reflexes are unchanged and the tail dispatches from graph state alone, so nothing takes over the reign.
 
@@ -276,7 +274,7 @@ fno backlog update <id> --blocked-by <a,b>           # replace the whole list
 fno backlog update <id> --priority p1                # what should run first
 ```
 
-Order within a wave comes from blockers and priority; rank is not yours (see [the check-in body](../SKILL.md#the-check-in-body)).
+Order within a wave comes from blockers and priority. Rank is not yours (see [the check-in body](../SKILL.md#the-check-in-body)).
 To say a node cost you time, vote: `fno backlog encounter <id> --evidence "..."`.
 
 Siblings that share a file get chained.
@@ -393,9 +391,7 @@ Join refuses by exit code, and each code is a different answer.
 | 4 | no usable bound plan | The node has no plan, or the plan does not parse. Fix the plan. |
 | 5 | already joined | Live `j-<node>-*` workers exist. The team is already out. |
 
-A refusal is an answer, so record it and move on.
-Do not re-run join against the same code and expect a different one.
-The joiner half of this contract is the joiner posture in [/execute waves](../../execute/references/waves.md).
+A refusal is an answer, so record it and move on. Do not re-run join against the same code and expect a different one. The joiner half of this contract is the joiner posture in [/execute waves](../../execute/references/waves.md).
 
 ### 5. Exit
 

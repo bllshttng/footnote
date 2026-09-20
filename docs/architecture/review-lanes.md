@@ -243,10 +243,7 @@ Short of that, the king-mail loop fires often but not always (refused
 twice in one session with an order in hand).
 Treat self-invocation as the lane worth trying first, `fno agents mail send --raw` as
 the reliable fallback, and king-mail as the asynchronous one - not a
-closed either/or.
-The king-mediated path, the per-harness verbs, and the never-substitute-
-silently contract have a deeper treatment in
-[reign/references/review.md](../../skills/reign/references/review.md).
+closed either/or. The king-mediated path, the per-harness verbs, and the never-substitute-silently contract have a deeper treatment in [reign/references/review.md](../../skills/reign/references/review.md).
 
 ## Counting invocations
 
