@@ -4717,7 +4717,7 @@ impl View {
         }
         // US4: a click on the footer's `☰ menu` region opens the sideline
         // MENU popup; the rest of the footer row keeps its `+ new` create action.
-        if matches!(self.display_rows().get(i), Some(DisplayRow::NewSquad)) {
+        if matches!(self.painted_rows().get(i), Some(DisplayRow::NewSquad)) {
             if let Some(range) = self.footer_menu_range(panel_w as usize) {
                 if range.contains(&(col as usize)) {
                     return Some(ChromeHit::OpenSidelineMenu { row, col });
@@ -4728,12 +4728,12 @@ impl View {
     }
 
     fn table_header_hit(&self, row: usize, col: u16) -> Option<ChromeHit> {
-        if self.density != Density::Extended
-            || !matches!(self.display_rows().get(row), Some(DisplayRow::TableHead))
+        if (self.density != Density::Extended && !self.sideline_full)
+            || !matches!(self.painted_rows().get(row), Some(DisplayRow::TableHead))
         {
             return None;
         }
-        let text_w = self.panel_w().checked_sub(1)?;
+        let text_w = self.sideline_paint_w().checked_sub(1)?;
         let rects = sideline_column_rects(text_w as u16);
         let hit = |r: RtRect| col >= r.x && col < r.x + r.width;
         if hit(rects[0]) {
@@ -4756,7 +4756,7 @@ impl View {
     /// route through, so the two inputs can never diverge. `None` only
     /// for an out-of-range index or an inert [`DisplayRow::Header`].
     fn row_action(&self, i: usize) -> Option<ChromeHit> {
-        match self.display_rows().get(i)? {
+        match self.painted_rows().get(i)? {
             DisplayRow::Sel(row) => match row.tab {
                 // Acting on the already-active squad row was a silent no-op
                 // (SelectSquad to the squad you're on); it now toggles the
@@ -5093,7 +5093,7 @@ impl View {
             return None;
         }
         let i = row as usize - top + self.sideline_offset();
-        (i < self.display_rows().len()).then_some(i)
+        (i < self.painted_rows().len()).then_some(i)
     }
 
     /// Fold one bare-motion (hover) report into the sideline highlight and the
@@ -5824,7 +5824,7 @@ impl View {
     /// last row. Everything-fits (or an empty window) resets the offset to 0, so
     /// the common case renders byte-identically to a non-scrolling sideline.
     fn clamp_sideline_scroll(&mut self) {
-        let total = self.display_rows().len();
+        let total = self.painted_rows().len();
         let visible = self.sideline_visible_rows();
         let off = self.sideline_offset();
         if total <= visible || visible == 0 {
@@ -5860,7 +5860,7 @@ impl View {
         }
         let focus = self.layout.focus;
         let visible = self.sideline_visible_rows();
-        let total = self.display_rows().len();
+        let total = self.painted_rows().len();
         if visible == 0 || total <= visible {
             return;
         }
@@ -5889,7 +5889,7 @@ impl View {
     /// from under the pointer, so the arm is disarmed here; the next pointer Move
     /// re-hit-tests and re-arms.
     fn scroll_sideline(&mut self, down: bool) {
-        let total = self.display_rows().len();
+        let total = self.painted_rows().len();
         let visible = self.sideline_visible_rows();
         if total <= visible || visible == 0 {
             return;
@@ -10833,7 +10833,29 @@ async fn attach_and_run(
                 // send - the pane's own output will repaint when it reacts.
                 chord_since = None;
                 if let Some(event) = scanner.flush_chord() {
-                    if let Err(e) = dispatch_event(&mut view, event, &mut sock_w).await {
+                    // The composer holds the keyboard while open: a flushed
+                    // candidate feeds its folder (Esc closes the composer),
+                    // never a pane that may not even be painted.
+                    if view.launcher.is_some() {
+                        match event {
+                            Event::Forward(chunk) => {
+                                if let Err(e) = agent_launcher::launcher_keys(
+                                    &mut view, &chunk, &mut sock_w,
+                                )
+                                .await
+                                {
+                                    break Err(e);
+                                }
+                            }
+                            event => {
+                                if let Err(e) =
+                                    dispatch_event(&mut view, event, &mut sock_w).await
+                                {
+                                    break Err(e);
+                                }
+                            }
+                        }
+                    } else if let Err(e) = dispatch_event(&mut view, event, &mut sock_w).await {
                         break Err(e);
                     }
                 }
@@ -12079,7 +12101,18 @@ async fn dispatch_event(
             sideline::toggle_composer(view, sock_w).await?;
         }
         Event::ToggleFullSideline => {
+            let was_full = view.sideline_full;
             sideline::toggle_full(view);
+            if was_full {
+                // Leaving restores the painted sideline; if entering had
+                // shown a hidden one, the server still holds panel-free
+                // pane rects, so the content area re-syncs here (a no-op
+                // re-layout when nothing changed).
+                let (r, c) = view.content_dims();
+                write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+                    .await
+                    .map_err(|e| format!("resize send failed: {e}"))?;
+            }
         }
         Event::CycleDensity => {
             view.cycle_density();

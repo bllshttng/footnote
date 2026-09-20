@@ -98,7 +98,7 @@ async fn full_screen_sideline_hides_panes_and_shows_the_composer() {
 }
 
 #[tokio::test]
-async fn full_screen_sideline_toggles_back_and_never_sends_resize() {
+async fn full_screen_sideline_toggles_back_resyncs_and_repaints_panes() {
     let mut v = two_pane_view();
     v.term = (40, 120);
     v.frames.insert(10, text_frame(29, 35, 'Q'));
@@ -115,7 +115,14 @@ async fn full_screen_sideline_toggles_back_and_never_sends_resize() {
         frame_text(&v.compose()).contains('Q'),
         "the panes paint again at their old size"
     );
-    assert!(buf.is_empty(), "no Resize travels in either direction");
+    // Leaving re-syncs the server's content area once: a full-screen visit
+    // that showed a hidden sideline left the server on panel-free pane
+    // rects, and an idempotent re-layout is cheaper than stale geometry.
+    let mut cur = std::io::Cursor::new(buf);
+    match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+        ClientMsg::Resize { .. } => {}
+        other => panic!("expected the leave Resize, got {other:?}"),
+    }
 }
 
 #[tokio::test]
