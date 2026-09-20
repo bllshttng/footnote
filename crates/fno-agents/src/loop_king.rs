@@ -54,6 +54,7 @@
 //! plan to stamp and no node to graduate, so there is nothing left for a
 //! close to do.
 
+use crate::loop_dispatch::retry_etxtbsy;
 use crate::loop_runtime::{CloseOutcome, Evidence, LoopError, Queue, Unit};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -697,24 +698,29 @@ pub(crate) fn escalate_stalled(
     reason: &str,
     scope: &str,
 ) -> String {
-    let output = Command::new(fno_bin)
-        .args([
-            "agents",
-            "king",
-            "escalate",
-            "--stalled",
-            &ids.join(","),
-            "--reason",
-            reason,
-        ])
-        .args(if scope.is_empty() {
-            Vec::<&str>::new()
-        } else {
-            vec![scope]
-        })
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output();
+    // Like every shellout here: retry_etxtbsy, because a binary rewritten
+    // under us (a test stub on a parallel runner, or an fno upgrade racing a
+    // spawn) briefly refuses exec with ETXTBSY.
+    let output = retry_etxtbsy(|| {
+        Command::new(fno_bin)
+            .args([
+                "agents",
+                "king",
+                "escalate",
+                "--stalled",
+                &ids.join(","),
+                "--reason",
+                reason,
+            ])
+            .args(if scope.is_empty() {
+                Vec::<&str>::new()
+            } else {
+                vec![scope]
+            })
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .output()
+    });
     match output {
         Ok(out) if out.status.success() => {
             let target = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -928,7 +934,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "flaky on CI: exec of the freshly written fno stub races ETXTBSY (Text file busy)"]
     fn escalate_stalled_falls_back_to_the_operator_wording_on_an_unprefixed_target() {
         // Defensive parsing: an older CLI (bare qid, no prefix) must not read
         // as a blank presiding-king name.
