@@ -57,7 +57,7 @@ Parse the JSON. Before asking, read each field's current value from the target f
 
 Today the `always` set is small. It covers Obsidian on/off (plus vault name), project vision, backlog id_prefix, external reviewer(s), and auto-merge on/off. The plan is the whole scalar question set. The only questions outside it are the two named exceptions below - the Step 2b review gate and the Step 3 workspace topology map.
 
-The `reach_me` field rides this same model. Ask it in plain words: "When you are away from the terminal, where do questions reach you?" The choices are "a notes file (Obsidian or any markdown app)", "phone push" (after the ntfy sink ships) and "nowhere yet". An empty answer configures nothing. When the user names a file, write `[[reach_me]]` through `fno config set config.reach_me`, then run `fno-agents needs --items --json` yourself and tell the user in one line what will appear in the file and how to answer: tick a box, or write words under the line. The user runs no command. See [attention-items](../../docs/architecture/attention-items.md).
+The `reach_me` field rides this same model. Ask it in plain words: "When you are away from the terminal, where do questions reach you?" The choices are "a notes file (Obsidian or any markdown app)", "phone push" (after the ntfy sink ships) and "nowhere yet". An empty answer configures nothing. When the user names a file, write `[[reach_me]]` through `fno config set config.reach_me`. Then run `fno-agents needs --items --json` yourself. Tell the user in one line what will appear in the file, and how to answer: tick a box, or write words under the line. The user runs no command. See [attention-items](../../docs/architecture/attention-items.md).
 
 ## Step 2: Write each answer through `fno config set`
 

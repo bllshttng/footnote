@@ -1,6 +1,6 @@
 # Attention items
 
-Questions and pins reach a user away from a terminal, and the answer returns. One model, no new store: an attention item is a read-time projection over the question journals, the escalation notes and the user lane. `fno-agents needs --items --json` prints it; the daemon's `attention` arm delivers it; the answer returns through `fno inbox outstanding clear`, the same door the mux overlay uses.
+Questions and pins reach a user away from a terminal, and the answer returns. One model, no new store: an attention item is a read-time projection over the question journals, the escalation notes and the user lane. `fno-agents needs --items --json` prints it. The daemon's `attention` arm delivers it. The answer returns through `fno inbox outstanding clear`, the same door the mux overlay uses.
 
 Setup is one sentence to your agent: "send my questions to my notes file". The agent writes:
 
@@ -24,9 +24,19 @@ A fleet pin is an `operator_question` with no options and an `ask` line. Agents 
 
 ## The ten context fields and the readiness gate
 
-A delivered question names who asked and how to reach them (`asker`, with the exact attach command), the node it asks about (`node`, or the literal `none`), why the asker is blocked (`blocked_because`), why these options (`options_rationale`), the recommendation with its downside (`recommendation`), the options with their nexts, pros and cons (`options`), and what the asker has not thought through (`unknowns`). Two routing fields complete the set: `reversible` (`yes | costly | no`) with `cost_if_wrong`, and `meanwhile` (what the asker does while it waits: stops, or proceeds). `asker.reach` joins the asker's session to the agents registry for the live attach command.
+The eight context fields are:
 
-A question missing a required field is `ready: false`. A sink with `ready_only = true` never delivers it. `fno-agents needs --items --json` prints the `missing` list so the asker can re-ask with the fields. `ready_only` defaults to false for one release, because machine writers cannot supply the fields until the Rust intake ships.
+- `asker`: who asked, and how to reach them.
+- `node`: the node asked about, or the literal `none`.
+- `blocked_because`: why the asker is blocked.
+- `options_rationale`: why these options.
+- `recommendation`: the pick, with its downside.
+- `options`: each with next, pros and cons.
+- `unknowns`: what the asker has not thought through.
+
+Two routing fields complete the set. `reversible` is `yes`, `costly` or `no`, and `cost_if_wrong` names the cost in one line. `meanwhile` says what the asker does while it waits: stops, or proceeds.
+
+A question missing a required field is `ready: false`. A sink with `ready_only = true` never delivers it. `fno-agents needs --items --json` prints the `missing` list so the asker can re-ask with the fields. `ready_only` defaults to false for one release. Machine writers cannot supply the fields until the Rust intake ships.
 
 ## The `md` sink
 
@@ -38,11 +48,16 @@ One item is one task line plus an indented block:
     - The user ticks one, or writes words on an indented line under the item.
 ```
 
-The top line ends with the `^<id>` block anchor. Only the top line carries the tag, so a `#jc` grep counts one item. The tag is how the flip path tells a delivered block from the user's own anchored task lines: the arm flips only blocks whose top line carries the tag.
+The top line ends with the `^<id>` block anchor. Only the top line carries the tag, so a `#jc` grep counts one item. The tag also tells the close flip what is ours. The arm flips only blocks whose top line carries the tag, never the user's own anchored task lines.
 
-The writer's rules: append at EOF only for new items; the settle hash lives in `~/.fno/attention/<name>.json`; whole-file atomic writes that keep the mode; refuse a file with conflict markers; re-read inside every beat (a vault plugin rewrites frontmatter); on any close, flip the top line to `- [x] ... ✅ <date>` with one `Recorded:` sub-bullet, or report the refusal verbatim under the item.
+The writer's rules:
 
-The reader's rules: hash each open block; a changed hash restarts the settle window; after `settle_secs` (default 120), one ticked option records `option: N`, words record `words`, a ticked top line records `done` for a pin, two ticked options record nothing and earn one notice.
+- Append at EOF only, for new items. The settle hash lives in `~/.fno/attention/<name>.json`.
+- Whole-file atomic writes that keep the mode. Re-read inside every beat, because a vault plugin rewrites frontmatter.
+- Refuse a file with conflict markers.
+- On any close, flip the top line to `- [x] ... ✅ <date>` and append one `Recorded:` sub-bullet. Report a refused answer verbatim under the item.
+
+The reader's rules: hash each open block, and let a changed hash restart the settle window. After `settle_secs` (default 120), one ticked option records `option: N`, words record `words`, a ticked top line records `done` for a pin. Two ticked options record nothing and earn one notice.
 
 ## The arm
 
@@ -64,16 +79,16 @@ The `attention` arm beats every 30 s, reads the projection, delivers, settles, r
 
 ## Answer lanes
 
-No sink answer records as `operator`. The code refuses that caller: `_resolve_decider` in `cli/src/fno/decide/__init__.py` refuses a session identity and refuses an unattributed daemon, so a file tick records `authority: file_edit` in the `attention_answer` row and the `clear` that follows runs with no `--authority` flag. The durable row lands first, then the arm runs `clear`; if the clear times out or fails, the row is already durable and the arm retries the clear on the next beat, never writing a second row. First answer wins.
+No sink answer records as `operator`. `_resolve_decider` in `cli/src/fno/decide/__init__.py` refuses a session identity and refuses an unattributed daemon. So a file tick records `authority: file_edit` in the `attention_answer` row, and the `clear` that follows runs with no `--authority` flag. The durable row lands first, then the arm runs `clear`. If that clear times out, the row is already durable. The arm retries the clear on the next beat and never writes a second row. First answer wins.
 
 What a file answer can do: close the question, reach the asker, unblock the nodes in `blocks`. What it cannot do: become law, waive review coverage, supersede or retract a law row. A law-grade answer from a phone stays a coordination ruling until the user confirms it in chat through `/fno:law` or at a terminal.
 
 ## Failure modes
 
 - The Mac sync client is closed: a phone tick never arrives, the item stays visible, the delay is unbounded. Nothing is lost.
-- Any local process can tick a box. The answer carries no identity the machine can check; the `attention_answer` row names the lane, and section-style limits hold.
-- An option label that trips the evidence gate inside `record_decision`: the row lands, the decision is refused, and the arm reports the refusal verbatim under the item. Askers keep citations in `blocked_because`, not in option text.
-- Another writer changes the file between the arm's read and its write: the beat is skipped (`skip_reason: file_changed`) and the next beat retries. New items are delivered by append-mode writes, which cannot drop another writer's text.
+- Any local process can tick a box. The answer carries no identity the machine can check. The `attention_answer` row names the lane, and section-style limits hold.
+- An option label can trip the evidence gate inside `record_decision`. The row lands and the decision is refused, and the arm reports the refusal verbatim under the item. Askers keep citations in `blocked_because`, not in option text.
+- Another writer changes the file between the arm's read and its write. The beat is skipped (`skip_reason: file_changed`) and the next beat retries. New items ride append-mode writes, which cannot drop another writer's text.
 
 ## The other two sink types, named and not built
 
