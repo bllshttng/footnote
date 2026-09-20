@@ -1,6 +1,6 @@
 # Reign: the tenured king
 
-A pass encodes a wave and abdicates (`/fno:king-for-a-day`). A reign stays. The operator asked for a king that keeps working over a territory for days. It checks in on a schedule, drives with levers, and parks rather than dies. `/fno:reign <scope>` is that skill.
+A pass encodes a wave and abdicates (`/fno:reign <scope> --once`). A reign without `--once` stays. The operator asked for a king that keeps working over a territory for days. It checks in on a schedule, drives with levers, and parks rather than dies. `/fno:reign <scope>` is that skill.
 
 ## What keeps a king active
 

@@ -575,7 +575,7 @@ Ask the author who hands out the plan's remaining waves. Record the answer as on
 join: manual | auto   # default manual
 ```
 
-`manual` waits for a person or a `/king-for-a-day` session to hand the remaining waves out with `fno backlog join <node>`. That is today's behavior for every plan, so an author who does not answer changes nothing. `auto` means `fno do target init` hands the remainder to `fno backlog join`, at init, in the holder's worktree.
+`manual` waits for a person or a crowned `/fno:reign` king to hand the remaining waves out with `fno backlog join <node>`. That is today's behavior for every plan, so an author who does not answer changes nothing. `auto` means `fno do target init` hands the remainder to `fno backlog join`, at init, in the holder's worktree.
 
 The gate runs after the Execution Strategy is enriched and before `validate-plan.sh`. The key therefore lands in the same save the validator then reads. `join` sits in `BLUEPRINT_WRITE_ALLOWLIST`, so the write is permitted. Its reader is `hooks/helpers/init-target-state.sh` at target init.
 

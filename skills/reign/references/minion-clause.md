@@ -1,7 +1,7 @@
 <!-- style-exception: canonical court prose predates the style rules; bundled into skills/reign verbatim -->
 # The minion clause (canonical)
 
-The single source for the clause a king appends to **every** spawn payload. Load it when you [spawn a teammate](../SKILL.md#the-minion-contract-rides-every-spawn-payload) and paste the block below verbatim, filling the `<...>` slots.
+The single source for the clause a king appends to **every** spawn payload. Load it when you [spawn a teammate](once.md#the-minion-contract-rides-every-spawn-payload) and paste the block below verbatim, filling the `<...>` slots.
 
 There is exactly one copy-paste clause in this skill, and it is here. The Director composed it freehand three times and drifted each time; the worst drift dropped the delivery doctrine, so reports landed `queued (durable)` on the bus and half were read via drain nags instead of live injection. Do not restate it from memory - paste this.
 
