@@ -70,9 +70,18 @@ pub fn enforce(pre: &[Value], post: &[Value], cap: Option<usize>) -> Result<(), 
         // adds no open child. A child coming back from closed (undefer,
         // reopen) does add one, even under an unchanged edge, so it is
         // judged like a fresh edge rather than skipped here.
-        let already_counted = pre_row
-            .map(|r| parent_of(r) == Some(epic) && row_is_open(r))
+        // A type update can turn a populated feature into an epic. Its
+        // children keep both their edge and their status, so judging the
+        // edge alone skips every one of them and the epic is born over
+        // cap. The parent must ALSO have been an epic before the write.
+        let was_epic = pre_by_id
+            .get(epic)
+            .map(|r| r.get("type").and_then(Value::as_str) == Some("epic"))
             .unwrap_or(false);
+        let already_counted = was_epic
+            && pre_row
+                .map(|r| parent_of(r) == Some(epic) && row_is_open(r))
+                .unwrap_or(false);
         if already_counted {
             continue;
         }
@@ -257,6 +266,39 @@ mod tests {
                              "domain": "code", "parent": "e-1"}));
             enforce(&pre, &post, Some(15)).unwrap();
         }
+    }
+
+    #[test]
+    fn a_populated_feature_turned_into_an_epic_counts_every_child() {
+        // A type update is the other way an epic grows without any edge
+        // moving. The children keep their parent and their status, so
+        // judging the edge alone lets the epic be BORN over cap.
+        let mut pre = full_epic_rows();
+        pre[0]
+            .as_object_mut()
+            .unwrap()
+            .insert("type".into(), json!("feature"));
+        pre.push(child("c-16", "e-1"));
+        let mut post = pre.clone();
+        post[0]
+            .as_object_mut()
+            .unwrap()
+            .insert("type".into(), json!("epic"));
+        let error = enforce(&pre, &post, Some(15)).unwrap_err();
+        assert!(error.contains("16 open children"), "{error}");
+        // The control: the same conversion lands while it has room.
+        let mut pre = full_epic_rows();
+        pre.truncate(15);
+        pre[0]
+            .as_object_mut()
+            .unwrap()
+            .insert("type".into(), json!("feature"));
+        let mut post = pre.clone();
+        post[0]
+            .as_object_mut()
+            .unwrap()
+            .insert("type".into(), json!("epic"));
+        enforce(&pre, &post, Some(15)).unwrap();
     }
 
     #[test]

@@ -622,14 +622,19 @@ fn mutate_single_row_once(
             );
         }
     }
-    crate::backlog::epic_cap::enforce(
-        &rows,
-        &working,
-        crate::backlog::epic_cap::configured_cap(graph),
-    )?;
     write_changed(&transaction, &rows, &working, true)?;
     nodes::recompute_status(&transaction)?;
     let rows_after = export_rows(&transaction)?;
+    // The cap judges what recompute leaves behind, never what the caller
+    // wrote. A rollup can open a container after the write, and a check
+    // placed before it both misses that growth and refuses a write whose
+    // container recompute is about to close. The transaction has not
+    // committed, so the refusal rolls the write back.
+    crate::backlog::epic_cap::enforce(
+        &rows,
+        &rows_after,
+        crate::backlog::epic_cap::configured_cap(graph),
+    )?;
     let version = content_version(&rows_after);
     stamp_version(&transaction, &version)?;
     transaction.commit().map_err(|error| error.to_string())?;
