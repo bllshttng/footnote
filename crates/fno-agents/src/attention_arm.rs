@@ -190,6 +190,10 @@ pub fn tick_sink(
         .filter(|i| sink.match_project.as_ref().is_none_or(|p| p == &i.project))
         .filter(|i| !sink.ready_only || i.ready)
         .collect();
+    // Every open item id, routed or not: a block whose item is merely
+    // filtered away (wrong kind, not ready) is NOT closed elsewhere and
+    // must never flip.
+    let all_open: std::collections::HashSet<&str> = items.iter().map(|i| i.id.as_str()).collect();
     let file_text = match io.read(&sink.path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -238,8 +242,9 @@ pub fn tick_sink(
     let mut close_ids: Vec<(String, String)> = Vec::new();
     for block in &existing2 {
         let Some(item) = open_by_id.get(block.id.as_str()) else {
-            // Closed elsewhere: flip a still-open block that is ours.
-            if block_was_ours(block, &sink.tag) {
+            // Not routed: flip only when the item truly closed (absent from
+            // the whole open set), never when it was merely filtered away.
+            if !all_open.contains(block.id.as_str()) && block_was_ours(block, &sink.tag) {
                 close_ids.push((
                     block.id.clone(),
                     "Recorded: the item closed away from the file".to_string(),
