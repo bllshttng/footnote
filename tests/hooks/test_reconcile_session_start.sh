@@ -235,6 +235,62 @@ grep -q "Do not force these closed" <<<"$OUT" \
 pass "render: retryable-unknown nodes get their own line and no --force advice"
 
 # ============================================================================
+# AC9-HP: the orphan-plan binder's result file (x-673d) renders one line
+# naming every bound id, then the file is consumed to .shown.
+# ============================================================================
+log "orphan: bound_now rows -> one bound line, consumed"
+REPO_OP="$WORK/repo-orphan-bound"; mkdir -p "$REPO_OP/.fno"
+RESULT_OP="$REPO_OP/.fno/.orphan-plans-result.json"
+touch "$REPO_OP/.fno/.reconcile-stamp"
+cat > "$RESULT_OP" <<'JSON'
+{"read_at":"2026-09-19T00:00:00Z","plans_dir":"/tmp/plans","rows":[{"node_id":"x-op1","plan_path":"/tmp/plans/a.md","verdict":"bound_now","detail":""},{"node_id":"x-op2","plan_path":"/tmp/plans/b.md","verdict":"bound_now","detail":""}],"counts":{"bound_now":2}}
+JSON
+OUT=$(CLAUDE_PROJECT_DIR="$REPO_OP" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
+grep -q "bound 2 orphan plan(s) to their nodes (x-op1,x-op2)" <<<"$OUT" \
+    || fail "orphan: bound line missing or wrong (got: $OUT)"
+[[ ! -f "$RESULT_OP" ]] || fail "orphan: result not consumed (should move to .shown)"
+[[ -f "$RESULT_OP.shown" ]] || fail "orphan: consumed result not preserved as .shown"
+pass "orphan: bound_now rows render one line and are consumed"
+
+# ============================================================================
+# AC10-EDGE: only terminal and settling rows stay silent (transient and
+# healthy history never surfaces).
+# ============================================================================
+log "orphan: terminal + settling rows -> silent, still consumed"
+REPO_OQ="$WORK/repo-orphan-quiet"; mkdir -p "$REPO_OQ/.fno"
+RESULT_OQ="$REPO_OQ/.fno/.orphan-plans-result.json"
+touch "$REPO_OQ/.fno/.reconcile-stamp"
+cat > "$RESULT_OQ" <<'JSON'
+{"read_at":"2026-09-19T00:00:00Z","plans_dir":"/tmp/plans","rows":[{"node_id":"x-t1","plan_path":"/tmp/plans/t.md","verdict":"terminal","detail":""},{"node_id":"x-s1","plan_path":"/tmp/plans/s.md","verdict":"settling","detail":""}],"counts":{"terminal":1,"settling":1}}
+JSON
+OUT=$(CLAUDE_PROJECT_DIR="$REPO_OQ" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
+grep -q "orphan plan" <<<"$OUT" \
+    && fail "orphan: terminal/settling rows wrongly surfaced (got: $OUT)"
+[[ -f "$RESULT_OQ.shown" ]] || fail "orphan: quiet result not consumed to .shown"
+pass "orphan: terminal + settling rows stay silent and are consumed"
+
+# ============================================================================
+# AC11-ERR: a result file that is not JSON must not kill the hook: the render
+# is cosmetic, so the run still reaches reconcile_maybe_fire and exits 0.
+# ============================================================================
+log "orphan: non-JSON result -> hook survives and still fires"
+REPO_OB="$WORK/repo-orphan-bad"; mkdir -p "$REPO_OB/.fno"
+RESULT_OB="$REPO_OB/.fno/.orphan-plans-result.json"
+cat > "$RESULT_OB" <<'TEXT'
+not json at all
+TEXT
+: > "$FNO_CALL_LOG"
+OUT=$(CLAUDE_PROJECT_DIR="$REPO_OB" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
+_RC_OB=$?
+[[ "$_RC_OB" -eq 0 ]] \
+    || fail "orphan/bad: hook exited $_RC_OB on a non-JSON orphan result"
+[[ -f "$RESULT_OB.shown" ]] \
+    || fail "orphan/bad: non-JSON result not consumed"
+wait_for_file "$REPO_OB/.fno/.reconcile-result.json" \
+    || fail "orphan/bad: reconcile never fired - the orphan render killed the trigger"
+pass "orphan: non-JSON result survives and the reconcile still fires"
+
+# ============================================================================
 # AC: render - a PROVEN-STALE canonical catchup (outcome fresh, stale true)
 # surfaces the catch-up line: the tick leg that used to alarm on this state
 # is gone, and the hook is now the only place that says so.
