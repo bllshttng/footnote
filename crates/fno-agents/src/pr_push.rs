@@ -811,7 +811,7 @@ pub fn run_push(argv: &[String]) -> i32 {
         // (--cherry-pick drops those pairs from the right-only listing).
         // Run after the rebase, so main's commits are already ancestors of
         // HEAD and a GitHub "Update branch" merge is handled too.
-        match run_labeled(
+        let compared = match run_labeled(
             "pr-push",
             &git,
             &[
@@ -825,38 +825,36 @@ pub fn run_push(argv: &[String]) -> i32 {
             &cwd,
             READ_TIMEOUT,
         ) {
-            Ok((true, out, _)) => {
-                let remote_only = out
-                    .lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                if !remote_only.is_empty() {
-                    eprintln!(
-                        "pr-push: {remote_ref} carries commits this branch lacks: \
-                         {remote_only}. Integrate them with git pull --rebase origin \
-                         {branch}, then re-run the push. Nothing pushed."
-                    );
-                    return 3;
-                }
-                lease = Some(remote_head.clone());
-            }
+            Ok(triple) => triple,
             // Fail closed, the same as the fetch: an incomparable remote is
             // never pushed over.
-            Ok((false, _, err)) => {
-                let err = if err.trim().is_empty() {
-                    "git log failed".to_string()
-                } else {
-                    err
-                };
-                eprintln!("pr-push: could not compare with {remote_ref} ({err}); nothing pushed");
-                return 4;
+            Err(err) => (false, String::new(), err),
+        };
+        if compared.0 {
+            let out = compared.1;
+            let remote_only = out
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !remote_only.is_empty() {
+                eprintln!(
+                    "pr-push: {remote_ref} carries commits this branch lacks: \
+                     {remote_only}. Integrate them with git pull --rebase origin \
+                     {branch}, then re-run the push. Nothing pushed."
+                );
+                return 3;
             }
-            Err(err) => {
-                eprintln!("pr-push: could not compare with {remote_ref} ({err}); nothing pushed");
-                return 4;
-            }
+            lease = Some(remote_head.clone());
+        } else {
+            let err = if compared.2.trim().is_empty() {
+                "git log failed".to_string()
+            } else {
+                compared.2
+            };
+            eprintln!("pr-push: could not compare with {remote_ref} ({err}); nothing pushed");
+            return 4;
         }
     }
 
