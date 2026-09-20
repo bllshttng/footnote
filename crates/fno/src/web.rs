@@ -743,7 +743,7 @@ fn router(state: AppState) -> Router {
         .route("/crown", get(crown))
         .route("/fleet", get(fleet))
         .route("/ws", get(ws_handler))
-        .with_state(state);
+        .with_state(state)
 }
 
 // ---------------------------------------------------------------------------
