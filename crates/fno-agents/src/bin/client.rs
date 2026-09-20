@@ -146,6 +146,15 @@ fn main() {
     if args.first().map(String::as_str) == Some("backlog-update") {
         std::process::exit(fno_agents::backlog::patch::run_update(&args[1..]));
     }
+    // The SessionStart reconcile sweep execs HERE (see its co-fired line in
+    // scripts/lib/reconcile-throttle.sh): finds plan files claiming a node
+    // whose plan_path write never landed, and binds them. Transport-only like
+    // backlog-update: registers no client action (the shrink law allows none).
+    if args.first().map(String::as_str) == Some("backlog-orphan-plans") {
+        std::process::exit(fno_agents::backlog::orphan_plans::run_orphan_plans(
+            &args[1..],
+        ));
+    }
     // scripts/validate-plan.sh shells HERE and reads the E/W/X/O/U line
     // protocol back.
     if args.first().map(String::as_str) == Some("surface-check") {
