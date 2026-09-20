@@ -449,6 +449,36 @@ fn signal_pid(pid: u32, sig: i32) -> bool {
     rc == 0
 }
 
+/// What one `fno` invocation answered.
+pub(crate) struct FnoRun {
+    pub ok: bool,
+    pub stdout: Vec<u8>,
+    pub stderr: String,
+}
+
+/// The ONE door out of this crate into the `fno` CLI for a read that
+/// answers and exits. `fno` is a dev-only link here, so a direct call is not
+/// available and the shellout is the only lane. Keeping it in one place is
+/// what the Rust/Python seam ratchet measures, and what lets a future
+/// in-process path replace every caller at once.
+///
+/// A launch failure is an Err. A nonzero exit is `ok: false` with the
+/// stderr, because several callers treat "the verb refused" as data rather
+/// than as a failure of their own.
+pub(crate) fn run_fno(args: &[&str]) -> Result<FnoRun, String> {
+    let output = std::process::Command::new("fno")
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|error| format!("fno {} failed to start: {error}", args.join(" ")))?;
+    Ok(FnoRun {
+        ok: output.status.success(),
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        stdout: output.stdout,
+    })
+}
+
 /// The production pane listing: `fno mux pane ls --session <s> --json` for
 /// the row's own session, or one ls per session the mux dir holds a socket
 /// for when the row carries no mux ref. A failed or unparseable ls answers
@@ -461,18 +491,13 @@ pub(crate) fn pane_list_via_fno(session: Option<&str>) -> Vec<PaneSighting> {
     };
     let mut found = Vec::new();
     for s in sessions {
-        let Ok(output) = std::process::Command::new("fno")
-            .args(["mux", "pane", "ls", "--server", &s, "--json"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output()
-        else {
+        let Ok(run) = run_fno(&["mux", "pane", "ls", "--server", &s, "--json"]) else {
             continue;
         };
-        if !output.status.success() {
+        if !run.ok {
             continue;
         }
-        let Ok(panes) = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout) else {
+        let Ok(panes) = serde_json::from_slice::<Vec<serde_json::Value>>(&run.stdout) else {
             continue;
         };
         for pane in panes {

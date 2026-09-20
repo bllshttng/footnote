@@ -57,26 +57,23 @@ pub fn hand_off(
 /// pane stops being ours - and a second verb would duplicate the pane
 /// resolution and refusal ladder.
 pub fn run_mux_hand_off(session: &str, pane_id: u64, target: &str) -> Result<(), String> {
-    let output = std::process::Command::new("fno")
-        .args([
-            "mux",
-            "pane",
-            "kill",
-            "--server",
-            session,
-            &pane_id.to_string(),
-            "--hand-off-to",
-            target,
-        ])
-        .output()
-        .map_err(|error| format!("mux pane kill --hand-off-to failed to start: {error}"))?;
-    if output.status.success() {
+    let pane_id = pane_id.to_string();
+    let run = crate::pane_stop::run_fno(&[
+        "mux",
+        "pane",
+        "kill",
+        "--server",
+        session,
+        &pane_id,
+        "--hand-off-to",
+        target,
+    ])?;
+    if run.ok {
         return Ok(());
     }
     Err(format!(
-        "mux pane kill --hand-off-to exited {}: {}",
-        output.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&output.stderr).trim()
+        "mux pane kill --hand-off-to refused: {}",
+        run.stderr
     ))
 }
 
