@@ -75,6 +75,7 @@ pub mod check_supersession;
 pub mod claim_store;
 pub mod claim_verbs;
 pub mod claims;
+pub mod claims_root;
 pub mod claude_adopt;
 pub mod claude_ask;
 pub mod claude_attach;
