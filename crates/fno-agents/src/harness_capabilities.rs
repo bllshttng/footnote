@@ -75,7 +75,7 @@ const FEATURE_STATES: [&str; 4] = ["native", "capable", "absent", "unmeasured"];
 /// on the strategy alone - never on a harness name - and a typo is a parse
 /// error rather than a silent new dimension. Documented beside the stanzas
 /// at the tail of harness_capabilities.toml.
-const CONVERSION_STRATEGIES: [&str; 4] = [
+pub const CONVERSION_STRATEGIES: [&str; 4] = [
     "keeper-rebind",
     "server-resume",
     "client-resume",

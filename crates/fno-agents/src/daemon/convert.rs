@@ -87,10 +87,30 @@ pub(super) async fn handle_convert(ctx: &Arc<Ctx>, req: &Request) -> Response {
             drop(lock);
             response
         }
-        // The claude client-resume strategy lands next. Until it is wired, a
-        // real conversion refuses while NAMING the plan it would have run: a
-        // refusal that shows the plan is still a receipt the operator can
-        // act on, and it can never leave a row mid-move.
+        "client-resume" => {
+            let ctx = Arc::clone(ctx);
+            let req = req.clone();
+            let plan = plan.clone();
+            let allow_new_id = allow_new_id(&req);
+            match tokio::task::spawn_blocking(move || {
+                run_client_resume(&ctx, &req, &plan, allow_new_id)
+            })
+            .await
+            {
+                Ok(response) => {
+                    drop(lock);
+                    response
+                }
+                Err(_) => Response::err(
+                    id,
+                    ErrorCode::ShuttingDown,
+                    "convert: the relaunch was dropped before it ran",
+                ),
+            }
+        }
+        // A strategy the contract names and no arm runs refuses while NAMING
+        // the plan it would have run: a refusal that shows the plan is still
+        // a receipt, and it can never leave a row mid-move.
         other => Response::err(
             req.id,
             ErrorCode::Internal,
@@ -259,6 +279,349 @@ async fn run_server_resume(ctx: &Arc<Ctx>, req: &Request, plan: &ConvertPlan) ->
             }
         }
     }
+}
+
+/// `--allow-new-id`, as the client sends it. Absent reads false, which is the
+/// safe answer: a conversion that silently changed the session id would move
+/// every address the operator has for the session.
+fn allow_new_id(req: &Request) -> bool {
+    req.params
+        .get("allow_new_id")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// How long to wait for the relaunched session to appear on the roster.
+/// `claude --bg` returns as soon as it has forked, and the row lands a beat
+/// later, so a single read would report a roster that has not caught up.
+const ROSTER_SETTLE: Duration = Duration::from_secs(20);
+const ROSTER_POLL: Duration = Duration::from_millis(500);
+
+/// The claude transaction: re-pin to the daemon, stop the pane, relaunch the
+/// session in claude's own background lane, read the id back, flip the row.
+///
+/// The order is forced by one measured fact in `claude --help`: with
+/// `--resume`, `--bg` "continues that session under the same ID, OR STARTS A
+/// COPY AND SAYS SO when the session is already running". A relaunch over a
+/// live pane therefore forks the conversation. So the pane is proven gone
+/// first, and the id is read back rather than assumed.
+///
+/// Claims move in two hops, never one. The pane child dies mid-transaction,
+/// so a claim pinned to it would read stale in the window before the new
+/// writer exists. They go to the DAEMON pid first, which outlives every
+/// outcome here, and only reach the new writer once the roster proves it.
+fn run_client_resume(
+    ctx: &Ctx,
+    req: &Request,
+    plan: &ConvertPlan,
+    allow_new_id: bool,
+) -> Response {
+    let daemon_pid = std::process::id();
+    let child_pid = plan.host.child_pid();
+    let refuse = |detail: String| Response::err(req.id, ErrorCode::Internal, detail);
+    let registry_path = ctx.home.registry_json();
+
+    let Some(entry) = read_row(&registry_path, &plan.name) else {
+        return refuse(format!(
+            "convert {}: the row vanished between classification and the relaunch; nothing was \
+             moved",
+            plan.name
+        ));
+    };
+    // Read ONCE, before anything moves. A crown granted mid-transaction must
+    // not change the verdict on a session that was already relaunched.
+    let crowned = crate::convert::client_resume::row_is_crowned(&entry);
+    let session_id = match entry.harness_session_id.clone() {
+        Some(id) if !id.is_empty() => id,
+        _ => {
+            return refuse(format!(
+                "convert {}: the row names no harness session id, so there is nothing to resume",
+                plan.name
+            ))
+        }
+    };
+    let snapshot = crate::convert::server_resume::RowSnapshot::of(&entry);
+    // The live writer's own pins, before the writer stops.
+    let carried = crate::convert::client_resume::carried_flags(
+        &crate::census::process_argv(child_pid).unwrap_or_default(),
+    );
+
+    if let Some(failure) = repin_session_claims(child_pid, daemon_pid) {
+        return refuse(format!(
+            "convert {}: claims could not be re-pinned to the daemon, so the conversion never \
+             started and the pane is untouched: {failure}",
+            plan.name
+        ));
+    }
+    let _ = ctx.emitter.emit(
+        "agent_convert_phase",
+        &json!({"name": plan.name, "strategy": plan.strategy, "phase": "claims-held"}),
+    );
+
+    let before: Vec<String> = roster_short_ids();
+
+    let stop = crate::pane_stop::stop_pane_process_confirmed(&entry);
+    if !stop.confirmed {
+        return refuse(format!(
+            "convert {}: the pane child {child_pid} could not be proven gone ({}), so the \
+             relaunch never ran. A relaunch over a live session forks it rather than continuing \
+             it. The session is still on its pane, and its claims are held by the daemon.",
+            plan.name, stop.detail
+        ));
+    }
+    let _ = ctx.emitter.emit(
+        "agent_convert_phase",
+        &json!({"name": plan.name, "strategy": plan.strategy, "phase": "pane-stopped"}),
+    );
+
+    let argv = crate::convert::client_resume::resume_argv(&session_id, &carried);
+    let config_dir = crate::claude_roster::removal_config_dir(
+        &crate::claude_roster::read_all_agents_union(),
+        &snapshot.short_id,
+        entry.launch_account.as_deref(),
+    )
+    .unwrap_or(None);
+    if let Err(error) = launch_background_claude(&entry.cwd, &argv, config_dir.as_deref()) {
+        return refuse(rolled_back(
+            ctx,
+            &registry_path,
+            plan,
+            &snapshot,
+            &format!("the relaunch could not start ({error})"),
+        ));
+    }
+
+    let row = match settle_roster(&before, &session_id) {
+        Some(row) => row,
+        None => {
+            return refuse(rolled_back(
+                ctx,
+                &registry_path,
+                plan,
+                &snapshot,
+                "the relaunched session never appeared on the claude roster, or more than one \
+                 new session did and none could be proven to be this one",
+            ))
+        }
+    };
+
+    let verdict = crate::convert::client_resume::id_verdict(
+        &session_id,
+        row.session_id.as_deref(),
+        allow_new_id,
+        crowned,
+    );
+    let new_id = match &verdict {
+        crate::convert::client_resume::IdVerdict::Kept => session_id.clone(),
+        crate::convert::client_resume::IdVerdict::AcceptedNew { new, .. } => new.clone(),
+        crate::convert::client_resume::IdVerdict::RollBack(reason) => {
+            // Stop what the relaunch started before restoring the row. A
+            // rollback that leaves the new session running is two live
+            // readers on one conversation.
+            let stopped = stop_background_claude(&row.short_id, config_dir.as_deref());
+            let detail = match stopped {
+                Ok(()) => reason.clone(),
+                Err(error) => format!(
+                    "{reason}. The session it started ({}) could not be stopped ({error}); stop \
+                     it with: claude stop {}",
+                    row.short_id, row.short_id
+                ),
+            };
+            return refuse(rolled_back(ctx, &registry_path, plan, &snapshot, &detail));
+        }
+    };
+
+    // The new writer is proven live, so the claims take their second hop.
+    // A failure here is reported rather than rolled back: the claims are
+    // still on the daemon, which is live, so nothing reads stale (AC5-ERR).
+    let claim_failure = row
+        .pid
+        .and_then(|writer_pid| repin_session_claims(daemon_pid, writer_pid));
+
+    let name = plan.name.clone();
+    let short_id = row.short_id.clone();
+    let writer_pid = row.pid;
+    let flip_id = new_id.clone();
+    if let Err(error) = state::update_registry(&registry_path, move |registry| {
+        if let Some(row) = registry.find_mut(&name) {
+            crate::convert::client_resume::to_claude_thread(
+                row, &short_id, writer_pid, &flip_id,
+            );
+        }
+    }) {
+        return refuse(format!(
+            "convert {}: the session is live in the background as {} but the row flip failed: \
+             {error}. Re-run the same command; it reclassifies from what is true.",
+            plan.name, row.short_id
+        ));
+    }
+
+    let _ = ctx.emitter.emit(
+        "agent_convert_phase",
+        &json!({
+            "name": plan.name,
+            "strategy": plan.strategy,
+            "phase": "flipped",
+            "short_id": row.short_id,
+            "session_id": new_id,
+        }),
+    );
+
+    if let Some(failure) = claim_failure {
+        return refuse(format!(
+            "convert {}: the session converted and reads live as {}, but claims could not be \
+             re-pinned to the new writer: {failure}. They are still held by the daemon, so \
+             nothing reads stale.",
+            plan.name, row.short_id
+        ));
+    }
+
+    let mut result = plan_json(plan, false);
+    result["short_id"] = json!(row.short_id);
+    result["session_id"] = json!(new_id);
+    result["writer_pid"] = json!(row.pid);
+    result["stop_detail"] = json!(stop.detail);
+    if let crate::convert::client_resume::IdVerdict::AcceptedNew { old, new } = &verdict {
+        result["id_changed"] = json!(true);
+        result["previous_session_id"] = json!(old);
+        result["receipt"] = json!(format!(
+            "{}\n  NOTE: the session id changed from {old} to {new}; --allow-new-id authorized \
+             it.\n",
+            plan.receipt()
+        ));
+    }
+    Response::ok(req.id, result)
+}
+
+/// Put the row back on its pane shape and say so. The pane process is gone
+/// either way, so the row reads exited and the receipt names the one command
+/// that brings the session back.
+fn rolled_back(
+    ctx: &Ctx,
+    registry_path: &std::path::Path,
+    plan: &ConvertPlan,
+    snapshot: &crate::convert::server_resume::RowSnapshot,
+    reason: &str,
+) -> String {
+    let name = plan.name.clone();
+    let restore = snapshot.clone();
+    let restore_error = state::update_registry(registry_path, move |registry| {
+        if let Some(row) = registry.find_mut(&name) {
+            restore.restore(row);
+            row.status = crate::AgentStatus::Exited;
+        }
+    })
+    .err()
+    .map(|error| error.to_string());
+    let _ = ctx.emitter.emit(
+        "agent_convert_phase",
+        &json!({
+            "name": plan.name,
+            "strategy": plan.strategy,
+            "phase": "rolled-back",
+            "error": reason,
+        }),
+    );
+    match restore_error {
+        None => format!(
+            "convert {}: {reason}. The row is back on its pane shape and reads exited. Bring the \
+             session back with: fno agents resume {}",
+            plan.name, plan.name
+        ),
+        Some(restore_error) => format!(
+            "convert {}: {reason} AND the rollback failed ({restore_error}). The session is \
+             stopped. Bring it back with: fno agents resume {}",
+            plan.name, plan.name
+        ),
+    }
+}
+
+/// The short ids the roster already knows. A roster that cannot be read
+/// answers EMPTY, which makes every row look new and so makes the relaunch
+/// identifiable only by its own session id - strictly the safer error.
+fn roster_short_ids() -> Vec<String> {
+    match crate::claude_roster::read_all_agents_union() {
+        crate::claude_roster::ClaudeAgentsSnapshot::Known { rows, .. } => {
+            rows.into_iter().map(|row| row.short_id).collect()
+        }
+        crate::claude_roster::ClaudeAgentsSnapshot::Unknown { .. } => Vec::new(),
+    }
+}
+
+/// Poll the roster until the relaunched session is identifiable, or the
+/// settle window closes. Silence at the end is never read as success.
+fn settle_roster(
+    before: &[String],
+    session_id: &str,
+) -> Option<crate::claude_roster::ClaudeAgentRow> {
+    let deadline = std::time::Instant::now() + ROSTER_SETTLE;
+    loop {
+        let snapshot = crate::claude_roster::read_all_agents_union();
+        let rows = match &snapshot {
+            crate::claude_roster::ClaudeAgentsSnapshot::Known { rows, .. }
+            | crate::claude_roster::ClaudeAgentsSnapshot::Unknown { rows, .. } => rows.as_slice(),
+        };
+        if let Some(row) =
+            crate::convert::client_resume::relaunched_row(before, rows, session_id)
+        {
+            return Some(row.clone());
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(ROSTER_POLL);
+    }
+}
+
+/// Start `claude --bg --resume ...` detached and wait for it to return. It
+/// returns as soon as the background session has forked, so this is seconds,
+/// not the life of the session.
+fn launch_background_claude(
+    cwd: &str,
+    argv: &[String],
+    config_dir: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let mut command = std::process::Command::new("claude");
+    command.args(argv).current_dir(cwd);
+    if let Some(dir) = config_dir {
+        command.env("CLAUDE_CONFIG_DIR", dir);
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("claude --bg failed to start: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(format!(
+        "claude --bg exited {}: {}",
+        output.status,
+        stderr.trim()
+    ))
+}
+
+/// Stop a background session the rollback is undoing.
+fn stop_background_claude(
+    short_id: &str,
+    config_dir: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let mut command = std::process::Command::new("claude");
+    command.args(["stop", short_id]);
+    if let Some(dir) = config_dir {
+        command.env("CLAUDE_CONFIG_DIR", dir);
+    }
+    command.current_dir("/");
+    let output = command
+        .output()
+        .map_err(|error| format!("claude stop failed to start: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "claude stop exited {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
 }
 
 fn read_row(registry_path: &std::path::Path, name: &str) -> Option<RegistryEntry> {
