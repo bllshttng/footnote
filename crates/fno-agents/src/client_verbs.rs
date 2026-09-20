@@ -1569,20 +1569,6 @@ fn interactive_resume_supported(provider: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// True iff `s` is a lowercase `8-4-4-4-12` hex UUID (the shape `claude --resume`
-/// accepts). Guards the dead-arm argv so a malformed/empty recorded uuid can
-/// never reach `claude --resume` (Failure Modes / Boundaries).
-fn is_uuid_shaped(s: &str) -> bool {
-    let groups = [8usize, 4, 4, 4, 12];
-    let parts: Vec<&str> = s.split('-').collect();
-    parts.len() == groups.len()
-        && parts.iter().zip(groups).all(|(p, n)| {
-            p.len() == n
-                && p.chars()
-                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
-        })
-}
-
 /// The shared liveness reader's answer. One stable vocabulary for
 /// every caller that has to know whether a registry row's WORKER is running,
 /// replacing per-caller liveness derivations that each read a different
@@ -2156,7 +2142,7 @@ fn should_delegate_claude_live_attach(
 /// before the claude live-attach delegation that consumes it is ever reached.
 use crate::resume_args::parse_resume_args;
 use crate::resume_wake::{
-    acquire_resume_session_claim, run_and_confirm_respawn, MUX_RESUME_CLAIM_TTL_MS,
+    acquire_resume_session_claim, is_uuid_shaped, run_and_confirm_respawn, MUX_RESUME_CLAIM_TTL_MS,
 };
 
 pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
@@ -2469,6 +2455,24 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // wake attempt, on the failure path.
     if !Path::new(cwd).is_dir() {
         return crate::resume_gate::gone_cwd_refusal(cwd, &name);
+    }
+
+    // A parked claude row (`claude agents`: blocked/done/stopped/failed) takes
+    // the message directly - the harness state decides, not the transcript
+    // truth, so this serves the live arm and the dead arm alike. It runs its
+    // own gate before a revive, so it must precede the block below and never
+    // reserve twice; a row it does not serve returns None and meets that
+    // block as today.
+    if let Some(code) = crate::resume_wake::parked_claude_route(
+        harness,
+        entry,
+        &name,
+        &row_name,
+        cwd,
+        message.as_deref(),
+        home,
+    ) {
+        return code;
     }
 
     // A resume brings the session back from down. If its node (or a PR it
@@ -4205,16 +4209,6 @@ mod tests {
         // A row carrying neither resolves to empty; callers' is_empty refusals keep firing.
         let bare = serde_json::json!({ "harness": "pi", "short_id": "" });
         assert_eq!(resume_session_id(&bare, "pi"), "");
-    }
-
-    #[test]
-    fn is_uuid_shaped_accepts_only_lowercase_8_4_4_4_12_hex() {
-        assert!(is_uuid_shaped("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"));
-        assert!(!is_uuid_shaped("")); // empty
-        assert!(!is_uuid_shaped("not-a-uuid"));
-        assert!(!is_uuid_shaped("0A1B2C3D-4E5F-6071-8293-A4B5C6D7E8F9")); // uppercase
-        assert!(!is_uuid_shaped("0a1b2c3d4e5f6071829 3a4b5c6d7e8f9")); // no dashes
-        assert!(!is_uuid_shaped("0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f")); // 11-char tail
     }
 
     // Fixture: an auto-cleaned temp dir used as a fake $HOME under which the
