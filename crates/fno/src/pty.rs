@@ -343,8 +343,9 @@ pub struct LocalPty {
 /// The keeper-hosted form: the master lives in a `fno-agents-worker --pane`
 /// process; this side holds the single-client unix socket to it.
 pub struct KeeperPty {
-    // The socket path, for diagnostics and the keeper list.
-    _sock_path: PathBuf,
+    // The socket path, for diagnostics, the keeper list, and the
+    // pane-to-thread hand-off, which renames it into the thread dir.
+    sock_path: PathBuf,
     // The CHILD's pid (answered by the keeper's Identify), never the
     // keeper's: a fleet count and any later kill must aim at the process
     // the user sees.
@@ -774,6 +775,18 @@ impl PtyShell {
 
     pub fn is_keeper_hosted(&self) -> bool {
         matches!(self, PtyShell::Keeper(_))
+    }
+
+    /// The keeper socket this pane is served through, or `None` for an
+    /// inline pane. The hand-off renames exactly this path, so it is read
+    /// from the shell that holds the connection rather than rebuilt from
+    /// the session and pane id: a re-adopted keeper keeps the stem it was
+    /// born with, and a rebuilt path would name a socket nobody is behind.
+    pub fn keeper_socket_path(&self) -> Option<&std::path::Path> {
+        match self {
+            PtyShell::Local(_) => None,
+            PtyShell::Keeper(keeper) => Some(keeper.sock_path.as_path()),
+        }
     }
 
     pub fn write_input(&self, bytes: &[u8]) -> Result<(), PtyError> {
@@ -1277,7 +1290,7 @@ fn wire_keeper(
         })
         .expect("spawn keeper writer thread");
     KeeperPty {
-        _sock_path: sock_path,
+        sock_path,
         child_pid,
         exited,
         reader_done,
@@ -1458,7 +1471,7 @@ impl KeeperPty {
             })
             .expect("spawn keeper test writer thread");
         KeeperPty {
-            _sock_path: PathBuf::from("/fno-test/keeper.sock"),
+            sock_path: PathBuf::from("/fno-test/keeper.sock"),
             child_pid,
             exited,
             reader_done,

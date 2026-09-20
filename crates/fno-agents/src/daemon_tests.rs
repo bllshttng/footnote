@@ -700,7 +700,7 @@ fn stop_refusal_names_a_pane_kill_the_mux_parser_accepts() {
     let parsed = fno::mux_cli::parse_pane_args(&op, &[selector.into()])
         .expect("the refusal's own command must parse");
     assert_eq!(parsed.session.as_deref(), Some("main"));
-    assert_eq!(parsed.cmd, fno::mux_cli::PaneCmd::Kill { pane: 76 });
+    assert_eq!(parsed.cmd, fno::mux_cli::PaneCmd::Kill { pane: 76, hand_off_to: None });
 }
 
 #[test]

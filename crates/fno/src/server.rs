@@ -70,6 +70,7 @@ mod keeper_adopt;
 pub(crate) mod lifecycle_target;
 mod pane_close;
 mod pane_identity;
+mod pane_release;
 mod pane_reseat;
 pub(crate) mod placement_fit;
 mod portal_reach;
@@ -824,6 +825,7 @@ pub(crate) enum CoreMsg {
     },
     PaneKill {
         pane: u64,
+        hand_off_to: Option<String>,
         reply: ControlReply,
     },
     /// Acquire/release the per-pane writer claim (4a-G3, brief Locked 5).
@@ -3031,55 +3033,6 @@ impl Core {
     /// Kill+reap a pane's PTY and retire its watch (flipping `exited` so any
     /// subscribed `PaneWait` returns `PaneExited`). The single place panes
     /// leave `panes`/`pane_watch`, so the two maps never drift. Idempotent.
-    fn reap_pane(&mut self, pid: u64) {
-        if let Some(entry) = self.panes.remove(&pid) {
-            if let Ok(mut children) = self.pane_children.lock() {
-                if let Some(child_pid) = entry.pty.child_pid() {
-                    let child = PaneChild {
-                        pid: child_pid,
-                        keeper_hosted: entry.pty.is_keeper_hosted(),
-                    };
-                    children.remove(&child);
-                }
-                entry.pty.kill();
-            } else {
-                entry.pty.kill();
-            }
-        }
-        // A keeper shell's rc dir is this server's to clean: the pane is
-        // closing, so the dir its shell still references goes with it. (An
-        // inline pane's dir dies with its own `ShellRc`.)
-        if let Some(dir) = self.shell_rc_dirs.remove(&pid) {
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-        // Pane exit releases the writer claim UNCONDITIONALLY (Locked 5): a
-        // held claim never blocks the close cascade.
-        self.claims.remove(&pid);
-        self.claim_eligible.remove(&pid);
-        self.touch_last_emit.remove(&pid);
-        self.wheel_gate.remove(&pid);
-        self.pane_stats.write().unwrap().remove(&pid);
-        // Drop any attach mapping onto the dead pane so a re-attach
-        // spawns fresh rather than focusing a corpse (the lazy `panes` check in
-        // `agent_rows()` is the belt to this eager suspenders - Discretion 3).
-        self.attached.retain(|_, p| *p != pid);
-        // Same for the worker resume map: the pane died, so the row
-        // returns to idle and resumable - never a mapping at a corpse.
-        self.worker_pane.retain(|_, panes| {
-            panes.retain(|candidate| *candidate != pid);
-            !panes.is_empty()
-        });
-        self.worker_session_pane.retain(|_, p| *p != pid);
-        self.held_workers.remove(&pid);
-        self.detached_panes.remove(&pid);
-        if let Some(tx) = self.pane_watch.remove(&pid) {
-            // Last observable tick before the sender drops: a watcher that
-            // reads it sees `exited`; one blocked in `changed()` sees the
-            // sender-dropped error and treats it identically.
-            tx.send_modify(|t| t.exited = true);
-        }
-    }
-
     /// Snapshot panes whose children and PTY readers have both finished.
     /// Every candidate's final output is already enqueued, so the caller can
     /// drain the shared output channel before closing this exact set.
@@ -12717,9 +12670,20 @@ impl Core {
                 ));
                 Flow::Continue
             }
-            CoreMsg::PaneKill { pane, reply } => {
+            CoreMsg::PaneKill {
+                pane,
+                hand_off_to,
+                reply,
+            } => {
                 if !self.panes.contains_key(&pane) {
                     let _ = reply.send(dead_pane(pane));
+                    return Flow::Continue;
+                }
+                // A hand-off is the opposite of a kill: it RELEASES the pane
+                // so its keeper keeps the child. It refuses before touching
+                // the layout, so a failed rename leaves the pane as it was.
+                if let Some(target) = hand_off_to {
+                    let _ = reply.send(self.hand_off_pane(pane, &target));
                     return Flow::Continue;
                 }
                 // Reply Ok BEFORE propagating a possible session-ending
@@ -14348,10 +14312,11 @@ async fn handle_control(
                 })
                 .await
         }
-        ControlVerb::PaneKill { pane } => {
+        ControlVerb::PaneKill { pane, hand_off_to } => {
             core_tx
                 .send(CoreMsg::PaneKill {
                     pane,
+                    hand_off_to,
                     reply: reply_tx,
                 })
                 .await

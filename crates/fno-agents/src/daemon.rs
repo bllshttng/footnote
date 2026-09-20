@@ -2301,7 +2301,7 @@ async fn dispatch_agent(ctx: &Arc<Ctx>, req: &Request) -> Response {
         // Label rename: the registry transaction under the flock, off-loop.
         Some("rename") => run_blocking(ctx, req, convert::handle_rename).await,
         // Pane-to-thread conversion: the agent lock plus a registry flip.
-        Some("convert") => run_blocking(ctx, req, convert::handle_convert).await,
+        Some("convert") => convert::handle_convert(ctx, req).await,
         // Inside-leg state push (E3.2): a per-turn hook stores the latest
         // {working|blocked|done} on the matching claude row. Pure flock + CPU.
         Some("report") => run_blocking(ctx, req, handle_report).await,

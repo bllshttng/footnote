@@ -288,6 +288,7 @@ pub fn parse_pane_args(
     let mut style_exception: Option<String> = None;
     let mut provenance: Option<String> = None;
     let mut quiet_ms = None;
+    let mut hand_off_to: Option<String> = None;
     let mut pattern = None;
     let mut timeout_s = None;
     let mut pid = None;
@@ -360,6 +361,12 @@ pub fn parse_pane_args(
                 quiet_ms = Some(parse_u64(&v, "--quiet-ms")?);
             }
             "--pattern" => pattern = Some(value_of!()),
+            // `pane kill --hand-off-to <socket>` is the opposite of a kill:
+            // the keeper socket moves to that path and the child keeps
+            // running. It rides `kill` because it is the same verb from the
+            // server's side - this pane stops being ours - and a second
+            // verb would duplicate the pane-resolution and refusal ladder.
+            "--hand-off-to" => hand_off_to = Some(value_of!()),
             "--timeout" => {
                 let v = value_of!();
                 timeout_s = Some(parse_u64(&v, "--timeout")?);
@@ -461,6 +468,7 @@ pub fn parse_pane_args(
         },
         crate::cli_args::PaneOp::Kill(_) => PaneCmd::Kill {
             pane: pane_arg("kill")?,
+            hand_off_to,
         },
         crate::cli_args::PaneOp::Claim(_) => PaneCmd::Claim {
             pane: pane_arg("claim")?,

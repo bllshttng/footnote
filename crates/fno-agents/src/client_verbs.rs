@@ -2154,7 +2154,6 @@ fn should_delegate_claude_live_attach(
 /// extracted so the flag grammar is unit-testable without a registry fixture;
 /// `--message` must be ACCEPTED here or a `--message` resume dies at argv
 /// before the claude live-attach delegation that consumes it is ever reached.
-use crate::resume_args::parse_resume_args;
 use crate::resume_wake::{
     acquire_resume_session_claim, run_and_confirm_respawn, MUX_RESUME_CLAIM_TTL_MS,
 };
