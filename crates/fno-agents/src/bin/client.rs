@@ -4753,7 +4753,12 @@ fn render_list_table(
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
-                .unwrap_or_else(|| text(r, "session_id"));
+                .or_else(|| {
+                    // Claude's legacy `session_id` is its short transport id,
+                    // not the full session id promised by this column.
+                    (r["harness"].as_str() != Some("claude")).then(|| text(r, "session_id"))
+                })
+                .unwrap_or_else(|| "unknown".to_string());
             // `unknown`, not `never`: no transcript was READ, which is an
             // absent reading, not a claim that no event ever happened.
             let age = match r["last_event_at"].as_str() {

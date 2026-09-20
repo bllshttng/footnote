@@ -2261,9 +2261,19 @@ fn render_list_table_shows_the_ten_roster_columns() {
             "observed_model": {"kind": "no-model-yet"},
             "pr": null,
             "pr_basis": "no-node",
+        },
+        {
+            "name": "legacy-claude",
+            "harness": "claude",
+            "session_id": "abc12345",
+            "effort": "high",
+            "status": "quiet",
+            "observed_model": {"kind": "no-transcript"},
+            "pr": null,
+            "pr_basis": "no-node",
         }
     ]);
-    let table = render_list_table(&agents, &[], Some(2), Some(2));
+    let table = render_list_table(&agents, &[], Some(3), Some(3));
     let lines: Vec<&str> = table.lines().collect();
     assert_eq!(
         lines[0].split_whitespace().collect::<Vec<_>>().join(" "),
@@ -2285,6 +2295,15 @@ fn render_list_table_shows_the_ten_roster_columns() {
     assert!(second.contains("019f4d0c-full"), "{second}");
     assert!(second.contains("- (unrequested)"), "{second}");
     assert!(second.contains("- (no-node)"), "{second}");
+    let legacy = lines[3];
+    assert!(
+        legacy.contains("unknown"),
+        "legacy Claude id is unknown: {legacy}"
+    );
+    assert!(
+        !legacy.contains("abc12345"),
+        "short Claude transport id must not be shown as full session: {legacy}"
+    );
 }
 
 /// AC3/AC6: an observation outranks the stored request, and every PR
