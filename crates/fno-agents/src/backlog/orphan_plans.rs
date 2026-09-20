@@ -113,7 +113,7 @@ pub fn run_orphan_plans(args: &[String]) -> i32 {
     while i < args.len() {
         match args[i].as_str() {
             "--apply" => cfg.apply = true,
-            "--json" => cfg.as_json = true,
+            "--json" | "-J" => cfg.as_json = true,
             "--plans-dir" => match args.get(i + 1) {
                 Some(p) => {
                     cfg.plans_dir = PathBuf::from(p);
@@ -213,10 +213,25 @@ fn run(cfg: &Config) -> i32 {
         classify_claims(&rows, &by_id, &path_owner, cfg.claims_root.as_deref(), now);
     let mut exit = 0;
     if cfg.apply && !adoptable.is_empty() {
-        let rungs: BTreeMap<String, String> = adoptable
+        // The rung map must cover EVERY row, not just the ones being bound:
+        // recompute interprets an id absent from the map as rung none, which
+        // would demote every unlocked planned node to idea behind the bind.
+        // Supply each row's canonical ladder rung, then override the rows
+        // being bound - their plan_path is still empty at map-build time, so
+        // plan_rung answers none for exactly the files this write adopts.
+        let mut rungs: BTreeMap<String, String> = rows
             .iter()
-            .map(|(id, _, rung)| (id.clone(), rung.clone()))
+            .filter_map(|row| {
+                let id = row.get("id").and_then(Value::as_str)?;
+                Some((
+                    id.to_string(),
+                    crate::backlog_ready::plan_rung(row).to_string(),
+                ))
+            })
             .collect();
+        for (id, _, rung) in &adoptable {
+            rungs.insert(id.clone(), rung.clone());
+        }
         let paths: BTreeMap<String, PathBuf> = adoptable
             .iter()
             .map(|(id, path, _)| (id.clone(), path.clone()))
@@ -409,8 +424,14 @@ fn classify_claims(
             continue;
         }
         let (path, fm) = paths.remove(0);
-        let plan_status = fm.get("status").and_then(scalar).unwrap_or_default();
-        let rung = plan_rung_from_status(&plan_status);
+        let rung: &str = match fm.get("status") {
+            // A readable legacy plan with no status reads READY: parity with
+            // the canonical ladder (backlog_ready::plan_rung, which answers
+            // ready for an absent scalar and saves "what every surface
+            // derived before ladder.py existed").
+            None => "ready",
+            Some(v) => plan_rung_from_status(&scalar(v).unwrap_or_default()),
+        };
         if !matches!(rung, "ready" | "in_progress" | "in_review") {
             out_rows.push((node_id.clone(), path.clone(), Verdict::Unfinalized));
             continue;
@@ -539,6 +560,9 @@ mod tests {
 
     struct Fixture {
         _dir: tempfile::TempDir,
+        /// Every fixture resolves claims against its own root, never $HOME:
+        /// a shared root would make the planning guard read a live store.
+        claims: tempfile::TempDir,
         graph: PathBuf,
         plans: PathBuf,
     }
@@ -553,8 +577,10 @@ mod tests {
         .unwrap();
         let plans = dir.path().join("plans");
         std::fs::create_dir(&plans).unwrap();
+        let claims = tempfile::tempdir().unwrap();
         Fixture {
             _dir: dir,
+            claims,
             graph,
             plans,
         }
@@ -581,7 +607,7 @@ mod tests {
             graph_overridden: true,
             apply: true,
             as_json: false,
-            claims_root: None,
+            claims_root: Some(fx.claims.path().to_path_buf()),
         };
         assert_eq!(run(&cfg), 0);
         let rows = graph_store::read_rows(&fx.graph).unwrap();
@@ -608,7 +634,7 @@ mod tests {
             graph_overridden: true,
             apply: false,
             as_json: false,
-            claims_root: None,
+            claims_root: Some(fx.claims.path().to_path_buf()),
         };
         assert_eq!(run(&cfg), 0);
         assert_eq!(
@@ -629,7 +655,7 @@ mod tests {
             graph_overridden: true,
             apply: true,
             as_json: false,
-            claims_root: None,
+            claims_root: Some(fx.claims.path().to_path_buf()),
         };
         assert_eq!(run(&cfg), 0);
         let rows = graph_store::read_rows(&fx.graph).unwrap();
@@ -655,7 +681,7 @@ mod tests {
             graph_overridden: true,
             apply: true,
             as_json: false,
-            claims_root: None,
+            claims_root: Some(fx.claims.path().to_path_buf()),
         };
         assert_eq!(run(&cfg), 0);
         let rows = graph_store::read_rows(&fx.graph).unwrap();
@@ -682,7 +708,7 @@ mod tests {
             graph_overridden: true,
             apply: true,
             as_json: false,
-            claims_root: None,
+            claims_root: Some(fx.claims.path().to_path_buf()),
         };
         assert_eq!(run(&cfg), 0);
         let rows = graph_store::read_rows(&fx.graph).unwrap();
@@ -746,7 +772,7 @@ mod tests {
             graph_overridden: true,
             apply: true,
             as_json: false,
-            claims_root: None,
+            claims_root: Some(fx.claims.path().to_path_buf()),
         };
         assert_eq!(run(&cfg), 0);
         let rows = graph_store::read_rows(&fx.graph).unwrap();
@@ -774,7 +800,7 @@ mod tests {
             &rows,
             &by_id,
             &BTreeMap::new(),
-            None,
+            Some(fx.claims.path()),
             std::time::SystemTime::now(),
         );
         assert!(
@@ -800,7 +826,7 @@ mod tests {
             &rows,
             &by_id,
             &BTreeMap::new(),
-            None,
+            Some(fx.claims.path()),
             std::time::SystemTime::now(),
         );
         assert!(
@@ -833,7 +859,7 @@ mod tests {
             &rows,
             &by_id,
             &path_owner,
-            None,
+            Some(fx.claims.path()),
             std::time::SystemTime::now(),
         );
         assert!(adoptable.is_empty(), "an owned plan file never re-binds");
@@ -841,6 +867,72 @@ mod tests {
             .iter()
             .any(|(id, _, v)| id == "x-free"
                 && matches!(v, Verdict::OwnedBy(owner) if owner == "x-own")));
+    }
+
+    #[test]
+    fn apply_supplies_rungs_for_every_row() {
+        // A second, healthy node whose plan lives outside --plans-dir must
+        // keep its derived status through the bind write: an id absent from
+        // the rung map reads as rung none, which demotes it to idea.
+        let fx = fixture(&[
+            node("x-bind", json!({})),
+            node("x-planned", json!({"plan_path": "/elsewhere/plan.md"})),
+        ]);
+        let plan = plan_file(&fx.plans, "b.md", "x-bind", "ready", "2026-09-02");
+        age_file(&plan, 3600);
+        let cfg = Config {
+            plans_dir: fx.plans.clone(),
+            graph: fx.graph.clone(),
+            graph_overridden: true,
+            apply: true,
+            as_json: false,
+            claims_root: Some(fx.claims.path().to_path_buf()),
+        };
+        assert_eq!(run(&cfg), 0);
+        let rows = graph_store::read_rows(&fx.graph).unwrap();
+        let planned = rows
+            .iter()
+            .find(|r| r.get("id").and_then(Value::as_str) == Some("x-planned"))
+            .unwrap();
+        assert_eq!(
+            planned.get("status").and_then(Value::as_str),
+            Some("ready"),
+            "an unbound bystander row keeps its derived status"
+        );
+    }
+
+    #[test]
+    fn statusless_plan_reads_ready_and_binds() {
+        // Legacy plans predate the status vocabulary entirely; the canonical
+        // ladder reads them READY, so the binder binds them instead of
+        // parking every pre-vocabulary doc as unfinalized.
+        let fx = fixture(&[node("x-legacy", json!({}))]);
+        let plan = fx.plans.join("l.md");
+        std::fs::write(
+            &plan,
+            "---\nclaims: x-legacy\ncreated: 2026-09-02\n---\n\n# plan\n",
+        )
+        .unwrap();
+        age_file(&plan, 3600);
+        let cfg = Config {
+            plans_dir: fx.plans.clone(),
+            graph: fx.graph.clone(),
+            graph_overridden: true,
+            apply: true,
+            as_json: false,
+            claims_root: Some(fx.claims.path().to_path_buf()),
+        };
+        assert_eq!(run(&cfg), 0);
+        let rows = graph_store::read_rows(&fx.graph).unwrap();
+        let bound = rows
+            .iter()
+            .find(|r| r.get("id").and_then(Value::as_str) == Some("x-legacy"))
+            .unwrap();
+        assert_eq!(
+            bound.get("plan_path").and_then(Value::as_str),
+            Some(plan.to_string_lossy().as_ref())
+        );
+        assert_eq!(bound.get("status").and_then(Value::as_str), Some("ready"));
     }
 
     #[test]
