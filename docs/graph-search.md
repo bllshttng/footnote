@@ -26,3 +26,5 @@ graphify update .               # re-extract after changing code (AST only, no A
 ## What it does not replace
 
 The search convention in [AGENTS.md](../AGENTS.md#conventions) still governs. A load-bearing sweep, one whose zero you intend to trust, uses `RIPGREP_CONFIG_PATH= rg -uu` and never a graph query, because the graph is a snapshot and can be stale by exactly the change you are looking for.
+
+A planner that asks which indexes a repo can answer starts at [code-index-providers.md](code-index-providers.md). That page holds the provider manifest, the three directories a user extends, and the blueprint step that asks by role.
