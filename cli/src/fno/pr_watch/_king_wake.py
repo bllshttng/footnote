@@ -76,18 +76,20 @@ def _crowned(
     for entry in crowns:
         by_scope.setdefault(entry.get("scope") or "", []).append(entry)
     out: list[CrownTarget] = []
-    skipped_conflicts = 0
+    dropped: dict[str, int] = {}
     for scope, entries in by_scope.items():
         if not scope:
+            dropped["empty scope(s)"] = dropped.get("empty scope(s)", 0) + 1
             continue
         if len(entries) > 1:
-            skipped_conflicts += 1
+            dropped["conflicting scope(s)"] = dropped.get("conflicting scope(s)", 0) + 1
             continue
         holder = entries[0].get("holder") or ""
         row = by_holder.get(holder)
         cwd = getattr(row, "cwd", "") if row is not None else ""
         short_id = (getattr(row, "short_id", "") or "") if row is not None else ""
         if not holder or not cwd:
+            dropped["unregistered holder(s)"] = dropped.get("unregistered holder(s)", 0) + 1
             continue
         root = Path(cwd)
         # The validating helper, never a hand join: a corrupted crown_scope
@@ -95,8 +97,10 @@ def _crowned(
         try:
             manifest = king_manifest_path(scope, state_root=king_state_root(root))
         except ValueError:
+            dropped["manifest missing"] = dropped.get("manifest missing", 0) + 1
             continue
         if not manifest.is_file():
+            dropped["manifest missing"] = dropped.get("manifest missing", 0) + 1
             continue
         out.append(
             CrownTarget(
@@ -107,8 +111,22 @@ def _crowned(
                 short_id=short_id,
             )
         )
-    note = f"{skipped_conflicts} conflicting scope(s) skipped" if skipped_conflicts else ""
+    note = "; ".join(f"{n} {word}" for word, n in sorted(dropped.items())) if dropped else ""
     return out, note
+
+
+def wake_detail(summary: dict) -> str:
+    """The tick row's detail: cost, wakes, refusals, dropped crowns."""
+    woke = ", ".join(f"{w['scope']}:{w['reason']}" for w in summary.get("woke") or [])
+    refused = ", ".join(f"{r['scope']}:{r['refusal']}" for r in summary.get("refused") or [])
+    crowns = int(summary.get("crowns", 0) or 0)
+    return (
+        f"crowns={crowns} evaluated={int(summary.get('evaluated', 0) or 0)}/{crowns}"
+        f" truth_reads={int(summary.get('truth_reads', 0) or 0)}"
+        + (f" woke={woke}" if woke else "")
+        + (f" refused={refused}" if refused else "")
+        + (f" note={summary.get('note')}" if summary.get("note") else "")
+    )
 
 
 def _holder_absent(truth: dict) -> "str | None":
@@ -273,20 +291,22 @@ def _birth_cursor(manifest: Path) -> str:
 
 
 def _read_board_sidecar(target: CrownTarget) -> "tuple[str, list[tuple[str, ...]] | None]":
-    """``(stored_hash, stored_rows)``; corrupt or row-less reads as a first
-    observation."""
+    """``(stored_hash, stored_rows)``; a corrupt payload reads as no
+    observation, an empty board as one."""
     payload = _read_sidecar(target)
     stored_hash = str(payload.get("board_hash") or "")
     raw_rows = payload.get("board_rows")
     rows = None
-    if isinstance(raw_rows, list) and raw_rows:
+    if isinstance(raw_rows, list):
         # A corrupt element reads as no observation, never raises out of the
-        # tick: every later scope would be stranded with it.
+        # tick. An empty board is an observation, not a first one.
         rows = [
             tuple(str(f) for f in row)
             for row in raw_rows
             if isinstance(row, (list, tuple)) and len(row) == 4
-        ] or None
+        ]
+        if len(rows) != len(raw_rows):
+            rows = None
     return stored_hash, rows
 
 
@@ -294,9 +314,9 @@ def _board_trigger(
     target: CrownTarget, rows
 ) -> tuple[bool, Optional[str], Optional[list], Optional[str], bool]:
     """``(wake?, hash+rows_to_store_after_a_dispatch, diff, first_observation)``.
-    Pure: it never writes. An absent hash or row-less sidecar is a first
+    Pure: it never writes. An absent hash sidecar is a first
     observation - the caller stores it only after the holder reads present; a
-    changed hash stores only after a dispatch; no rows is no signal."""
+    changed hash stores only after a dispatch; None rows is no signal."""
     if rows is None:
         return False, None, None, None, False
     fresh = _hash_rows(rows)
@@ -448,8 +468,10 @@ def _dispatch_walk(
     return True
 
 
-#: A pass stops under 15s left (one truth read measured 10.4s) rather than
-#: being cut mid-read and losing every crown before it.
+#: A pass stops under 15s left rather than being cut mid-read and losing
+#: every crown before it. Sized when a loaded machine measured one truth
+#: read at 10.4s; idle reads cost 0.19s to 2.71s, and a quiet pass now
+#: pays none.
 _KING_STEP_FLOOR_S = 15.0
 
 _GRAPH_ENTRIES_MEMO: dict = {"ident": None, "entries": None}
@@ -574,10 +596,10 @@ def run_king_wake(
     except Exception:  # noqa: BLE001 - an unreadable journal is not a trigger
         answered_records = []
 
-    # Start where the last pass stopped: rotation by debounce window gives
-    # every crown a turn at the front when the pass keeps running out of
-    # slice. The ceiling is fairness per debounce window, not per crown: a
-    # crown can wait two windows when every pass overruns.
+    # Clock-keyed rotation: the offset advances one crown per debounce
+    # window, so a pass that keeps overrunning does not starve the same
+    # head crown every tick. It carries no progress: a crown added or
+    # removed between ticks changes only len(targets), nothing goes stale.
     offset = int(now.timestamp() // max(1, debounce_s)) % len(targets) if targets else 0
     for target in targets[offset:] + targets[:offset]:
         sidecar = _read_sidecar(target)
@@ -639,7 +661,17 @@ def run_king_wake(
                 target, entries, now=now, backstop_s=backstop_s, resolver=scope_resolver
             ):
                 reason = "backstop"
-        if reason is None and not pending_answer_seed and not first_observation:
+        # Seeds record what THIS pass observed, so they do not depend on the
+        # holder. Gating them on the truth read left them unwritten for a
+        # working king, and an unwritten seed re-fires next pass.
+        if pending_answer_seed:
+            # Seed at birth, never the journal max: a max seed swallows an
+            # answer closed before the first armed tick saw it.
+            _update_sidecar(target, answered_cursor=_birth_cursor(target.manifest))
+        if first_observation and fresh_board_hash is not None:
+            _store_board_hash(target, fresh_board_hash, fresh_board_rows or ())
+        if reason is None:
+            # No trigger: this crown cannot wake, so its truth is not worth a read.
             summary["evaluated"] += 1
             continue
         if _under_floor():
@@ -656,18 +688,6 @@ def run_king_wake(
         # A GONE holder is replaced, not woken: the dispatch bills the
         # respawn budget, not only the wake ledger.
         holder_gone = truth.get("state") == "unknown" and truth.get("reason") == "not-found"
-        # Seeds land only for a holder that is present, exactly as when the
-        # truth read came first: the write set is unchanged.
-        if pending_answer_seed:
-            # Seed at birth, never the journal max: a max seed swallows an
-            # answer closed before the first armed tick saw it.
-            _update_sidecar(target, answered_cursor=_birth_cursor(target.manifest))
-        if first_observation and fresh_board_hash is not None:
-            _store_board_hash(target, fresh_board_hash, fresh_board_rows or ())
-        if reason is None:
-            # A first observation is a seed, never a trigger: nothing to wake.
-            summary["evaluated"] += 1
-            continue
         if holder_gone:
             from fno.king.state import at_respawn_ceiling, parse_manifest, respawn_ceiling
 
