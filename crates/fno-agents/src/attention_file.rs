@@ -265,8 +265,10 @@ fn writer_bullet(t: &str) -> bool {
     PREFIXES.iter().any(|p| t.starts_with(p))
 }
 
-/// Flip the block's top line to `[x]`, stamp `✅ <date>` and append the
-/// `Recorded:` sub-bullet. A file with no block for `id` returns unchanged.
+/// Flip the block's top line to `[x]`, stamp `✅ <date>` and insert the
+/// `Recorded:` sub-bullet at the block's own end, never at EOF where it
+/// would read as part of a later block. A file with no block for `id`
+/// returns unchanged.
 pub fn close_block(text: &str, id: &str, receipt_line: &str, date: &str) -> String {
     let found = blocks(text)
         .into_iter()
@@ -291,11 +293,12 @@ pub fn close_block(text: &str, id: &str, receipt_line: &str, date: &str) -> Stri
             top.push_str(&format!(" ✅ {date}"));
         }
     }
-    let mut out: String = lines.join("\n");
     if !receipt_line.is_empty() {
-        out.push('\n');
-        out.push_str("    - ");
-        out.push_str(receipt_line);
+        let receipt = format!("    - {receipt_line}");
+        lines.insert(found.end.min(lines.len()), receipt);
+    }
+    let mut out = lines.join("\n");
+    if text.ends_with('\n') {
         out.push('\n');
     }
     out
@@ -391,17 +394,19 @@ mod tests {
     fn close_block_flips_stamps_and_appends_receipt() {
         let cfg = FileSinkConfig::default();
         let rendered = render_item(&item(), &cfg);
-        let file = format!("user line\n{rendered}");
+        let file = format!("user line\n{rendered}\na trailing line\n");
         let out = close_block(
             &file,
             "q-e5e5520b",
             "Recorded: option 2 as d-abcd (file)",
             "2026-09-20",
         );
-        let block = &blocks(&out)[0];
+        let blocks: Vec<_> = blocks(&out);
+        assert_eq!(blocks.len(), 1, "the receipt must join its own block");
+        let block = &blocks[0];
         assert!(block.text.lines().next().unwrap().starts_with("- [x] "));
         assert!(block.text.contains("✅ 2026-09-20"));
-        assert!(out.contains("Recorded: option 2 as d-abcd (file)"));
+        assert!(block.text.contains("Recorded: option 2 as d-abcd (file)"));
         // Anchor stays line-final on the top line.
         assert!(block
             .text
@@ -410,6 +415,17 @@ mod tests {
             .unwrap()
             .trim_end()
             .ends_with("^q-e5e5520b"));
+        // The trailing line stays outside the block and after the receipt.
+        let out_lines: Vec<&str> = out.lines().collect();
+        let receipt_idx = out_lines
+            .iter()
+            .position(|l| l.contains("Recorded: option 2"))
+            .unwrap();
+        let trailing_idx = out_lines
+            .iter()
+            .position(|l| *l == "a trailing line")
+            .unwrap();
+        assert!(receipt_idx < trailing_idx);
     }
 
     #[test]

@@ -96,8 +96,26 @@ fn parse_sink(row: &toml::Value, index: usize) -> SinkOrErr {
             .and_then(toml::Value::as_str)
             .map(str::to_string)
     };
-    let Some(name) = get_str("name").filter(|n| !n.is_empty()) else {
-        return SinkOrErr::Err(format!("reach_me[{index}]: missing name"));
+    let name = match get_str("name").filter(|n| !n.is_empty()) {
+        Some(n) => n,
+        None => {
+            // The documented setup writes only `type` and `path`; derive a
+            // stable name from the file stem so the doc's claim stays true.
+            let path_raw = get_str("path").unwrap_or_default();
+            let stem = std::path::Path::new(path_raw.trim_start_matches("~/"))
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            match stem {
+                Some(s) => s,
+                None => {
+                    return SinkOrErr::Err(format!(
+                        "reach_me[{index}]: missing name (and no path to derive one from)"
+                    ))
+                }
+            }
+        }
     };
     let sink_type = get_str("type").unwrap_or_else(|| "md".to_string());
     if sink_type != "md" {
@@ -200,6 +218,10 @@ pub fn tick_sink(
         .filter(|i| sink.kinds.iter().any(|k| k == &i.kind))
         .filter(|i| sink.match_project.as_ref().is_none_or(|p| p == &i.project))
         .filter(|i| !sink.ready_only || i.ready)
+        // Wave 1 has no door that closes an escalation note (`clear` only
+        // knows question ids and no-ops on unknown ones), so note items stay
+        // on the projection and the mux until the note-closing path ships.
+        .filter(|i| !i.id.starts_with("note-"))
         .collect();
     // Every open item id, routed or not: a block whose item is merely
     // filtered away (wrong kind, not ready) is NOT closed elsewhere and
@@ -370,9 +392,9 @@ fn settle_block(
                 if matches!(other, FileAnswer::Done) && item.kind != "pin" {
                     return;
                 }
-                let answer_text = answer_text_of(item, &other);
                 match io.record(item, &sink.name, &other) {
                     Ok(receipt) => {
+                        let answer_text = answer_text_of(item, &other);
                         *recorded += 1;
                         if let Some(s) = state.get_mut(&block.id) {
                             s.recorded = true;
@@ -383,14 +405,10 @@ fn settle_block(
                         }
                     }
                     Err(e) => {
-                        if let Some(s) = state.get_mut(&block.id) {
-                            s.recorded = true;
-                            s.answer = answer_text.clone();
-                        }
-                        io.notify(
-                            "Answer refused",
-                            &format!("{}: the door refused the answer: {e}", item.title),
-                        );
+                        // A failed append changed nothing durable: leave the
+                        // state untouched so the next beat retries the whole
+                        // record, and keep the notice out of the user's face.
+                        eprintln!("fno-agents attention: record failed: {e}");
                     }
                 }
             }
@@ -587,7 +605,14 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
             emit_tick_row(&home, 0, Some("no_sinks"), "no [[reach_me]] configured");
             return;
         }
-        let items = read_items(&cwd);
+        let (items, unreadable) = read_items(&cwd);
+        if !unreadable.is_empty() {
+            // An incomplete projection must never drive delivery or the
+            // close-elsewhere flip: absent ids would read as closed and
+            // flip live blocks that the projection could not see.
+            emit_tick_row(&home, 0, Some("source_unreadable"), &unreadable.join("; "));
+            return;
+        }
         write_items_cache(&home, &items);
         let dir = match attention_dir() {
             Ok(d) => d,
@@ -636,26 +661,40 @@ fn now_secs() -> u64 {
 }
 
 /// The projection read: question journals + escalation notes + user lane,
-/// the same three stores `fno-agents needs --items` folds.
-fn read_items(cwd: &Path) -> Vec<AttentionItem> {
+/// the same three stores `fno-agents needs --items` folds. Returns the items
+/// plus the names of stores that exist but could not be read: an unreadable
+/// store means an INCOMPLETE projection, and the caller must not treat its
+/// absent ids as closed.
+fn read_items(cwd: &Path) -> (Vec<AttentionItem>, Vec<String>) {
     let fno_dir = crate::paths::AgentsHome::from_env()
         .root()
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(".fno"));
     let mut journals_raw = String::new();
+    let mut unreadable: Vec<String> = Vec::new();
     for path in crate::needs::question_journals(&fno_dir, cwd) {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            journals_raw.push_str(&content);
-            if !content.ends_with('\n') {
-                journals_raw.push('\n');
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                journals_raw.push_str(&content);
+                if !content.ends_with('\n') {
+                    journals_raw.push('\n');
+                }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => unreadable.push(format!(
+                "{}: {e}",
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("journal")
+            )),
         }
     }
     let notes = read_notes(cwd);
     let lane_path = crate::king_board::scope::operator_lane_path(cwd);
     let lane_text = std::fs::read_to_string(lane_path).unwrap_or_default();
-    crate::attention::project(&journals_raw, &notes, &lane_text, now_secs())
+    let items = crate::attention::project(&journals_raw, &notes, &lane_text, now_secs());
+    (items, unreadable)
 }
 
 /// Escalation notes as (slug, text) pairs.
@@ -770,11 +809,35 @@ impl SinkIo for RealIo {
             FileAnswer::None | FileAnswer::TwoTicked => (None, String::new(), false),
         };
         let answered_at = chrono::Utc::now().to_rfc3339();
-        let receipt = match answer {
-            FileAnswer::Option(n) => format!("Recorded: option {n} (file)"),
-            FileAnswer::Words(_) => "Recorded: words (file)".to_string(),
-            FileAnswer::Done => "Recorded: done (file)".to_string(),
-            FileAnswer::None | FileAnswer::TwoTicked => String::new(),
+        // First answer wins across sinks: an earlier unsuperseded row for
+        // this item makes this one a superseded marker that changes nothing.
+        let home = crate::paths::AgentsHome::from_env();
+        let path = crate::provider_cap::questions_path(&home);
+        let already_won = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .lines()
+            .any(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .ok()
+                    .is_some_and(|v| {
+                        v.get("type").and_then(serde_json::Value::as_str)
+                            == Some("attention_answer")
+                            && v.get("data")
+                                .and_then(|d| d.get("item_id"))
+                                .and_then(serde_json::Value::as_str)
+                                == Some(item.id.as_str())
+                            && v.get("data")
+                                .and_then(|d| d.get("superseded"))
+                                .and_then(serde_json::Value::as_bool)
+                                != Some(true)
+                    })
+            });
+        let receipt = match (answer, already_won) {
+            (FileAnswer::Option(n), false) => format!("Recorded: option {n} (file)"),
+            (FileAnswer::Words(_), false) => "Recorded: words (file)".to_string(),
+            (FileAnswer::Done, false) => "Recorded: done (file)".to_string(),
+            (FileAnswer::None | FileAnswer::TwoTicked, false) => String::new(),
+            (_, true) => "Recorded: superseded by an earlier answer".to_string(),
         };
         let row = json!({
             "ts": answered_at,
@@ -790,13 +853,22 @@ impl SinkIo for RealIo {
                 "authority": "file_edit",
                 "attested_by": format!("file:{}", item.id),
                 "mapped_by": "attention_arm",
-                "superseded": false,
+                "superseded": already_won,
                 "decision_id": null,
             }
         });
-        let home = crate::paths::AgentsHome::from_env();
-        let path = crate::provider_cap::questions_path(&home);
-        crate::provider_cap::append_questions_row(&path, &row);
+        // The row is the durable half of the contract: an append that fails
+        // must fail the record so the settle state never marks it recorded.
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+        writeln!(f, "{row}").map_err(|e| e.to_string())?;
         Ok(receipt)
     }
 
