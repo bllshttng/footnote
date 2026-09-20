@@ -8,6 +8,9 @@ use super::agent_launcher::{
 };
 use super::*;
 use crate::proto::agent_launch::{AgentLaunchUpdate, LaunchState};
+use ratatui_core::buffer::Buffer as RtBuffer;
+use ratatui_core::layout::Rect as RtRect;
+use ratatui_core::style::Modifier;
 
 fn plain_view() -> View {
     let mut v = two_pane_view();
@@ -100,35 +103,39 @@ fn esc_hides_and_reopening_restores_the_draft() {
 }
 
 #[test]
-fn tab_walks_fields_and_skips_collapsed_advanced() {
+fn tab_walks_the_chip_order_and_skips_collapsed_pins() {
     let mut v = view_with_launcher();
-    let mut esc = LauncherEsc::default();
-    let keys = esc.fold(b"\t\t\t");
-    v.launcher_esc = esc;
-    assert_eq!(
-        keys.len(),
-        3,
-        "tab folds to three keys, never a paste or a pane byte"
-    );
-    // Drive through the real folder via launcher_keys.
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
+    // Harness -> Project -> Model -> Effort -> More -> Message (5 tabs, the
+    // two pins are collapsed).
     rt.block_on(async {
-        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\t", &mut sock).await;
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t\t\t\t", &mut sock).await;
     });
-    let l = v.launcher.as_ref().unwrap();
     assert_eq!(
-        l.focus,
-        Focus::Launch,
-        "Harness -> Project -> Message -> Advanced -> Launch (4 tabs)"
+        v.launcher.as_ref().unwrap().focus,
+        Focus::Message,
+        "Harness -> Project -> Model -> Effort -> More -> Message (5 tabs)"
     );
-    // One more Tab with advanced collapsed wraps PAST the four advanced
-    // fields back to Harness.
+    // A sixth tab reaches Launch.
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, b"\t", &mut sock).await;
     });
-    assert_eq!(v.launcher.as_ref().unwrap().focus, Focus::Harness);
+    assert_eq!(v.launcher.as_ref().unwrap().focus, Focus::Launch);
+    // Expanding the pins: Tab past More lands on Permission, then Placement.
+    if let Some(l) = v.launcher.as_mut() {
+        l.draft.expanded = true;
+        l.focus = Focus::More;
+    }
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\t\t", &mut sock).await;
+    });
+    assert_eq!(
+        v.launcher.as_ref().unwrap().focus,
+        Focus::Placement,
+        "expanded: More -> Permission -> Placement"
+    );
 }
 
 #[test]
@@ -314,39 +321,52 @@ fn launched_pane_update_returns_the_focus_pane_and_the_seed_note() {
 }
 
 #[test]
-fn render_rows_carry_every_primary_field_at_80x24() {
+fn chip_row_paints_fields_and_launch_on_one_row() {
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
     let l = v.launcher.as_ref().unwrap();
-    let rows = l.render_rows(&v, 4);
-    let text: Vec<String> = rows.iter().map(|(_, s)| s.clone()).collect();
-    let joined = text.join("\n");
-    for needle in ["harness", "project", "message", "advanced", "Launch"] {
-        assert!(joined.contains(needle), "missing {needle} in:\n{joined}");
-    }
-    // Focused field is marked.
+    let area = RtRect::new(0, 0, 40, 3);
+    let rects = l.dock_layout_rects(&v, area);
+    let labels: Vec<(String, u16)> = rects
+        .chips
+        .iter()
+        .filter(|(_, _, r)| r.y == area.y)
+        .map(|(_, s, r)| (s.clone(), r.x))
+        .collect();
+    let row_text: String = labels.iter().map(|(s, x)| format!("{s}@{x} ")).collect();
     assert!(
-        text[0].starts_with("> "),
-        "first row is the focused harness"
+        row_text.contains("claude@"),
+        "harness chip carries the catalog name: {row_text}"
     );
-    // At 80 columns the longest row still fits the content width.
-    assert!(text.iter().all(|s| s.chars().count() < 72));
-    // Expanding advanced reveals the four pins.
-    if let Some(l) = v.launcher.as_mut() {
-        l.draft.expanded = true;
-    }
-    let rows = v.launcher.as_ref().unwrap().render_rows(&v, 4);
-    let joined = rows
-        .into_iter()
-        .map(|(_, s)| s)
-        .collect::<Vec<_>>()
-        .join("\n");
-    for needle in ["model", "effort", "perms", "place"] {
-        assert!(joined.contains(needle), "advanced missing {needle}");
-    }
+    let launch_x = labels
+        .iter()
+        .find(|(s, _)| s == "[Launch]")
+        .map(|(_, x)| *x);
+    let Some(launch_x) = launch_x else {
+        panic!("launch chip on the primary row: {row_text}");
+    };
+    let after: Vec<_> = labels.iter().filter(|(_, x)| *x > launch_x).collect();
+    assert!(after.is_empty(), "nothing right of Launch: {row_text}");
+    assert_eq!(rects.chips.len(), labels.len(), "collapsed: no pin chips");
 }
 
+#[test]
+fn focused_chip_paints_inverted_and_others_dim() {
+    let mut v = view_with_launcher();
+    if let Some(l) = v.launcher.as_mut() {
+        l.focus = Focus::Effort;
+    }
+    let l = v.launcher.as_ref().unwrap();
+    let area = RtRect::new(0, 0, 40, 3);
+    let rects = l.dock_layout_rects(&v, area);
+    let mut buf = RtBuffer::empty(area);
+    l.paint(&v, &mut buf, area);
+    for (f, _, r) in &rects.chips {
+        let inverted = buf[(r.x, r.y)].modifier.contains(Modifier::REVERSED);
+        assert_eq!(inverted, *f == Focus::Effort, "chip {f:?} inverted state");
+    }
+}
 #[test]
 fn footer_names_the_lifecycle_and_the_refusal_reason() {
     let mut v = view_with_launcher();
@@ -371,63 +391,94 @@ fn footer_names_the_lifecycle_and_the_refusal_reason() {
     );
 }
 
-/// The dock's text block is dynamic: the editor window tracks the typed
-/// lines up to a cap that holds the dock near half the panel, and deleting
-/// shrinks it back down.
 #[test]
-fn dock_editor_window_is_dynamic_and_capped() {
-    let mut v = view_with_launcher();
-    v.term = (24, 80);
-    let l = v.launcher.as_ref().unwrap();
+fn wrap_message_hard_wraps_by_display_width() {
+    let chunks = super::agent_launcher::wrap_message("abcdefghij", 4);
+    let got: Vec<(usize, &str)> = chunks.iter().map(|(o, s)| (*o, s.as_str())).collect();
     assert_eq!(
-        l.dock_layout(24),
-        (6, 1),
-        "4 fields + 1 typed line + footer"
+        got,
+        vec![(0, "abcd"), (4, "efgh"), (8, "ij")],
+        "hard wrap at 4 columns"
     );
-
-    // Ten typed lines against a 24-row panel: the window caps at
-    // 24/2 - 4 fields - 1 footer = 7 and the dock holds at half the panel.
-    if let Some(l) = v.launcher.as_mut() {
-        l.draft.message = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10".into();
-    }
-    let l = v.launcher.as_ref().unwrap();
-    assert_eq!(l.dock_layout(24), (12, 7), "capped at half the panel");
-
-    // Deleting lines shrinks the dock again.
-    if let Some(l) = v.launcher.as_mut() {
-        l.draft.message = "one\ntwo".into();
-    }
-    let l = v.launcher.as_ref().unwrap();
-    assert_eq!(l.dock_layout(24), (7, 2), "two typed lines, dock shrinks");
+    let chunks = super::agent_launcher::wrap_message("ab\n\ncd", 10);
+    let got: Vec<(usize, &str)> = chunks.iter().map(|(o, s)| (*o, s.as_str())).collect();
+    assert_eq!(
+        got,
+        vec![(0, "ab"), (3, ""), (4, "cd")],
+        "blank line is its own chunk"
+    );
+    let chunks = super::agent_launcher::wrap_message("a王b", 2);
+    assert_eq!(chunks[1].1, "王", "wide glyph starts the next chunk");
+    assert!(
+        chunks.iter().all(|(_, s)| s
+            .chars()
+            .map(|c| usize::from(unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)))
+            .sum::<usize>()
+            <= 2),
+        "no chunk wider than 2 columns"
+    );
 }
 
-/// The dock never hides: on a panel too small for even the collapsed fields
-/// beside one sideline row, the editor floors at one line and the painter
-/// clips the rest.
+#[test]
+fn wrapped_cursor_lands_on_the_row_holding_the_char() {
+    let (r, c) = super::agent_launcher::wrapped_cursor("abcdefghij", 9, 4);
+    assert_eq!((r, c), (2, 1), "cursor 9 at width 4 is row 2 col 1");
+    let (r, c) = super::agent_launcher::wrapped_cursor("ab\ncd", 2, 10);
+    assert_eq!((r, c), (0, 2), "cursor on the newline ends its row");
+    let (r, c) = super::agent_launcher::wrapped_cursor("abcdefgh", 8, 4);
+    assert_eq!((r, c), (1, 4), "cursor at the very end");
+}
+
+#[test]
+fn dock_growth_counts_wrapped_rows_and_caps_at_a_third() {
+    let mut v = view_with_launcher();
+    v.term = (24, 80);
+    // A 120-character line at 40 columns wraps to 3 rows: the bar grows to
+    // 1 chip + 3 message + 1 footer = 5 and shrinks when it clears.
+    if let Some(l) = v.launcher.as_mut() {
+        l.draft.message = "x".repeat(120);
+    }
+    let l = v.launcher.as_ref().unwrap();
+    let (total, editor) = l.dock_layout(60, 40);
+    assert_eq!((total, editor), (5, 3), "grows with wrapped rows");
+    if let Some(l) = v.launcher.as_mut() {
+        l.draft.message.clear();
+    }
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(
+        l.dock_layout(60, 40),
+        (3, 1),
+        "clearing gives the rows back"
+    );
+    // 20 wrapped rows against a 30-row panel: capped at a third (editor 8,
+    // total 10) and the window holds the cursor row.
+    if let Some(l) = v.launcher.as_mut() {
+        l.draft.message = "y".repeat(20 * 40);
+    }
+    let l = v.launcher.as_ref().unwrap();
+    let (total, editor) = l.dock_layout(30, 40);
+    assert_eq!((total, editor), (10, 8), "capped at a third of the panel");
+    let area = RtRect::new(0, 0, 40, 10);
+    let rects = l.dock_layout_rects(&v, area);
+    let (cur_row, _) =
+        super::agent_launcher::wrapped_cursor(&l.draft.message, l.draft.cursor_chars, 40);
+    assert!(
+        cur_row >= rects.start_chunk && cur_row < rects.start_chunk + rects.editor_rows,
+        "window holds the cursor row: cur {cur_row}, start {}, rows {}",
+        rects.start_chunk,
+        rects.editor_rows
+    );
+}
+
 #[test]
 fn dock_layout_floors_at_one_editor_line_on_tiny_panels() {
     let mut v = view_with_launcher();
     v.term = (24, 80);
     let l = v.launcher.as_ref().unwrap();
-    // 8 rows: cap = 8/2 - 4 fields - 1 footer = 0, floored to 1.
-    assert_eq!(l.dock_layout(8), (6, 1));
+    // 8 rows: cap = 8/3 - 1 chip - 1 footer = 0, floored to 1.
+    assert_eq!(l.dock_layout(8, 40), (3, 1));
 }
 
-/// paint_dock truncates to the panel width and clips at the terminal rows.
-#[test]
-fn paint_dock_clips_to_width_and_height() {
-    let data = vec![(Focus::Harness, "abcdefghij".to_string())];
-    let mut cells = vec![Cell::default(); 2 * 6];
-    super::agent_launcher::paint_dock(&mut cells, &data, "xy", 1, 2, 6, 5);
-    let painted: String = cells[6..11].iter().map(|c| c.c).collect();
-    assert_eq!(painted, "abcde", "truncated to text_w");
-    assert_eq!(cells[11].c, ' ', "beyond text_w untouched");
-    assert_eq!(cells[0].c, ' ', "row 0 untouched");
-}
-
-/// During an unresolved Unknown the Launch row is dead: Enter (and a
-/// click, which routes through the same submit gate) must not mint a
-/// second spawn attempt while the first birth is unresolved.
 #[test]
 fn launch_is_dead_while_an_unknown_outcome_blocks_retry() {
     let mut v = view_with_launcher();
@@ -476,13 +527,12 @@ fn submitting_dock_offers_dismiss_and_recovers_to_editing() {
         l.armed = Some(1);
         l.phase = Phase::Submitting { request_id: 1 };
     }
-    // The dismiss row exists while starting.
-    let rows = v.launcher.as_ref().unwrap().render_rows(&v, 4);
+    // The dismiss chip exists while starting.
+    let l = v.launcher.as_ref().unwrap();
+    let rects = l.dock_layout_rects(&v, RtRect::new(0, 0, 40, 3));
     assert!(
-        rows.iter()
-            .any(|(_, s)| s.contains("[ dismiss still starting ]")),
-        "dismiss reachable while starting: {:?}",
-        rows.iter().map(|(_, s)| s).collect::<Vec<_>>()
+        rects.chips.iter().any(|(f, _, _)| *f == Focus::Dismiss),
+        "dismiss chip reachable while starting"
     );
     if let Some(l) = v.launcher.as_mut() {
         l.focus = Focus::Dismiss;
@@ -505,4 +555,125 @@ fn degraded_catalog_reprobes_on_reopen() {
     v.launcher_catalog = Some(CatalogOutcome::Degraded("probe failed".into()));
     open(&mut v);
     assert!(v.catalog_want, "a degraded read re-arms the probe");
+}
+
+#[test]
+fn launcher_mouse_clicks_launch_and_submits() {
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    let l = v.launcher.as_ref().unwrap();
+    let pw = v.panel_w() as usize;
+    let chrome = v.bottom_row_is_chrome() as usize;
+    let body = 24 - chrome;
+    let (total, _) = l.dock_layout(body, pw - 1);
+    let top = body - total;
+    let area = RtRect::new(0, top as u16, (pw - 1) as u16, total as u16);
+    let rects = l.dock_layout_rects(&v, area);
+    let (launch_y, launch_x) = rects
+        .chips
+        .iter()
+        .find(|(f, _, _)| *f == Focus::Launch)
+        .map(|(_, _, r)| (r.y, r.x))
+        .unwrap();
+    let rep = crate::mouse::MouseReport {
+        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
+        row: launch_y,
+        col: launch_x,
+        shift: false,
+    };
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let consumed = super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
+            .await
+            .unwrap();
+        assert!(consumed, "a click on the Launch chip is consumed");
+    });
+    assert!(
+        matches!(v.launcher.as_ref().unwrap().phase, Phase::Submitting { .. }),
+        "submit path ran"
+    );
+    assert!(!sock.is_empty(), "request went on the wire");
+}
+
+#[test]
+fn launcher_mouse_click_on_footer_is_unconsumed() {
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    let l = v.launcher.as_ref().unwrap();
+    let pw = v.panel_w() as usize;
+    let chrome = v.bottom_row_is_chrome() as usize;
+    let body = 24 - chrome;
+    let (total, _) = l.dock_layout(body, pw - 1);
+    let top = body - total;
+    let footer_row = (top + total - 1) as u16;
+    let rep = crate::mouse::MouseReport {
+        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
+        row: footer_row,
+        col: 5,
+        shift: false,
+    };
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let consumed = super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
+            .await
+            .unwrap();
+        assert!(!consumed, "the footer row is never the dock's");
+    });
+}
+
+#[test]
+fn launcher_mouse_click_in_message_rect_focuses_the_editor() {
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    let l = v.launcher.as_ref().unwrap();
+    let pw = v.panel_w() as usize;
+    let chrome = v.bottom_row_is_chrome() as usize;
+    let body = 24 - chrome;
+    let (total, _) = l.dock_layout(body, pw - 1);
+    let top = body - total;
+    let area = RtRect::new(0, top as u16, (pw - 1) as u16, total as u16);
+    let rects = l.dock_layout_rects(&v, area);
+    let rep = crate::mouse::MouseReport {
+        kind: crate::proto::MouseKind::Press(crate::proto::MouseButton::Left),
+        row: rects.message.y,
+        col: rects.message.x,
+        shift: false,
+    };
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let consumed = super::agent_launcher::launcher_mouse(&mut v, rep, &mut sock)
+            .await
+            .unwrap();
+        assert!(consumed, "a click in the message rect is consumed");
+    });
+    assert_eq!(v.launcher.as_ref().unwrap().focus, Focus::Message);
+}
+
+#[test]
+fn esc_leaves_full_screen_and_retains_the_draft() {
+    let mut v = view_with_launcher();
+    v.sideline_full = true;
+    type_message(&mut v, "keep me");
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b ", &mut sock).await;
+    });
+    assert!(!v.sideline_full, "Esc leaves full-screen sideline");
+    assert!(v.launcher.is_none(), "composer closed");
+    assert_eq!(
+        v.launcher_closed.as_ref().unwrap().draft.message,
+        "keep me",
+        "draft retained"
+    );
 }
