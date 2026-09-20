@@ -2494,6 +2494,8 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     if should_delegate_claude_live_attach(harness, &claim_uuid, &mux_session) {
         // No claim here: the delegated wake acquires the identical
         // `resume-attach: {short_id}` key under its own skip check.
+        // Route via `fno`, never a bare `fno-py`: a cargo-only install has
+        // only the mux on PATH (crates/fno/src/bootstrap.rs).
         use std::os::unix::process::CommandExt;
         let mut command = std::process::Command::new("fno");
         command
@@ -2512,19 +2514,11 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         if let Some(msg) = &message {
             command.args(["--message", msg]);
         }
+        if let Some(plan) = &reentry_plan {
+            crate::claude_supervisor::guard_birth_for_plan(&plan.env);
+        }
         // exec(), not status(): the process is replaced (exit-127-on-failure
         // convention, no child process group to propagate signals to).
-        crate::claude_supervisor::guard_birth(
-            &mut command,
-            reentry_plan
-                .as_ref()
-                .and_then(|p| {
-                    crate::claude_supervisor::overlay_config_dir(
-                        p.env.iter().map(|(k, v)| (k.as_str(), v.as_str())),
-                    )
-                })
-                .as_deref(),
-        );
         let err = command.exec();
         eprintln!(
             "fno agents resume: delegating {name} to fno-py failed: {err}. \
@@ -2690,6 +2684,14 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     if let Some(plan) = &reentry_plan {
         for (key, value) in &plan.env {
             exec_command.env(key, value);
+        }
+    }
+    // A claude row's argv is a `claude` client, so this exec can birth the
+    // supervisor too.
+    if harness == "claude" {
+        match &reentry_plan {
+            Some(plan) => crate::claude_supervisor::guard_birth_for_plan(&plan.env),
+            None => crate::claude_supervisor::guard_birth([]),
         }
     }
     // the restored route's env rides the in-terminal exec.
@@ -2898,6 +2900,8 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
     for (key, value) in &plan.env {
         exec_command.env(key, value);
     }
+    // recover execs a claude client, so it can birth the supervisor too.
+    crate::claude_supervisor::guard_birth_for_plan(&plan.env);
     let err = exec_command.exec();
     // exec only returns on failure.
     eprintln!("fno agents recover: failed to exec {}: {err}", plan.argv[0]);

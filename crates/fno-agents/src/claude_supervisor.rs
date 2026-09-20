@@ -62,7 +62,7 @@ fn held_poison_keys() -> Vec<String> {
 }
 
 /// The `CLAUDE_CONFIG_DIR` an about-to-run client overlay carries, if any.
-pub fn overlay_config_dir<'a, I>(overlay: I) -> Option<PathBuf>
+fn overlay_config_dir<'a, I>(overlay: I) -> Option<PathBuf>
 where
     I: IntoIterator<Item = (&'a str, &'a str)>,
 {
@@ -86,15 +86,25 @@ fn supervisor_birth_command(config_dir: Option<&Path>) -> std::process::Command 
 }
 
 fn supervisor_running(config_dir: Option<&Path>) -> bool {
+    use std::process::Stdio;
     let mut cmd = std::process::Command::new("claude");
     cmd.args(["daemon", "status"]);
     if let Some(dir) = config_dir {
         cmd.env("CLAUDE_CONFIG_DIR", dir);
     }
+    // Null every stream: this probe runs before an ordinary client spawn, and
+    // `daemon status` prints pid/version/uptime lines that would otherwise
+    // land in the CLIENT's stdout, where a caller is parsing a receipt.
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     cmd.status().map(|s| s.success()).unwrap_or(false)
 }
 
-fn spawn_detached_supervisor(config_dir: Option<&Path>) {
+/// True when the detached supervisor was spawned. False means the spawn
+/// itself failed (no `claude` on PATH, fork refused), and the caller must not
+/// then wait on a birth that was never started.
+fn spawn_detached_supervisor(config_dir: Option<&Path>) -> bool {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
     let mut cmd = supervisor_birth_command(config_dir);
@@ -115,11 +125,14 @@ fn spawn_detached_supervisor(config_dir: Option<&Path>) {
         // Reap asynchronously: the client calling this guard can live as long
         // as an attach TUI (hours), and an unreaped child would sit as a
         // zombie the whole time.
-        Ok(mut child) => std::thread::spawn(move || {
-            let _ = child.wait();
-        }),
-        Err(_) => return,
-    };
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 fn wait_for_supervisor(config_dir: Option<&Path>) -> bool {
@@ -133,20 +146,36 @@ fn wait_for_supervisor(config_dir: Option<&Path>) -> bool {
 }
 
 /// The one call every Rust site that can birth a supervisor makes, right
-/// before it spawns or execs the `claude` client. Arm A (the measured pick):
-/// when no supervisor runs for `config_dir`, start one detached with every
-/// poison key held back, wait up to 5 s for it to serve, and print one
-/// stderr line naming what was held back. The client command is never
-/// touched - the delegation in `run_resume` must keep its
-/// `FNO_AGENTS_RUNTIME=python` pin, and a host that reads it is this guard's
-/// whole problem, not the client's.
-pub fn guard_birth(_cmd: &mut std::process::Command, config_dir: Option<&Path>) {
+/// before it spawns or execs the `claude` client. `overlay` is the env that
+/// site is about to apply, read only for the `CLAUDE_CONFIG_DIR` naming which
+/// supervisor is addressed; the ambient value stands in when it carries none.
+///
+/// Arm A (the measured pick): when no supervisor serves that dir, start one
+/// detached with every poison key held back, wait up to 5 s for it to serve,
+/// and print one stderr line naming what was held back. The client's own
+/// command is never touched, which is why this takes no `Command` - the
+/// delegation in `run_resume` must keep its `FNO_AGENTS_RUNTIME=python` pin,
+/// and only a host that reads that pin is this guard's problem.
+///
+/// Every failure degrades to silence and lets the client run: a guard that
+/// refused here would break a working lane over a condition the client cannot
+/// fix from inside itself.
+pub fn guard_birth<'a, I>(overlay: I)
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let config_dir = overlay_config_dir(overlay);
+    let config_dir = config_dir.as_deref();
     if supervisor_running(config_dir) {
         return;
     }
     let held = held_poison_keys();
-    spawn_detached_supervisor(config_dir);
-    wait_for_supervisor(config_dir);
+    if !spawn_detached_supervisor(config_dir) {
+        return;
+    }
+    if !wait_for_supervisor(config_dir) {
+        return;
+    }
     if !held.is_empty() {
         eprintln!(
             "fno: held {} out of the claude supervisor's birth env: a supervisor \
@@ -156,6 +185,11 @@ pub fn guard_birth(_cmd: &mut std::process::Command, config_dir: Option<&Path>) 
             held.join(", ")
         );
     }
+}
+
+/// `guard_birth` for the common site whose env is a reentry plan's map.
+pub fn guard_birth_for_plan(env: &std::collections::BTreeMap<String, String>) {
+    guard_birth(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
 }
 
 #[cfg(test)]

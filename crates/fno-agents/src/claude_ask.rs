@@ -1514,10 +1514,7 @@ pub fn bg_create(
     // This client can lazily birth the claude supervisor; a supervisor born
     // dirty poisons every session it forks for its whole life, so
     // make sure a clean one is up first. The client command is never touched.
-    crate::claude_supervisor::guard_birth(
-        &mut cmd,
-        crate::claude_supervisor::overlay_config_dir(extra_env.iter().copied()).as_deref(),
-    );
+    crate::claude_supervisor::guard_birth(extra_env.iter().copied());
 
     let start = std::time::Instant::now();
     let mut child = match cmd.spawn() {

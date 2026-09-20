@@ -632,13 +632,7 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
 
     // This client can lazily birth the claude supervisor; make sure a clean
     // one is up first. The client command is never touched.
-    crate::claude_supervisor::guard_birth(
-        &mut command,
-        crate::claude_supervisor::overlay_config_dir(
-            plan.env.iter().map(|(k, v)| (k.as_str(), v.as_str())),
-        )
-        .as_deref(),
-    );
+    crate::claude_supervisor::guard_birth_for_plan(&plan.env);
 
     // Inherit stdio so the claude TUI takes over; mirror its exit code.
     match command.status() {

@@ -509,13 +509,7 @@ where
     // This relaunch can lazily birth the claude supervisor; make sure a clean
     // one is up first. The client command is never touched, so the
     // identity stamp above stays the only carrier of the fno name.
-    crate::claude_supervisor::guard_birth(
-        &mut command,
-        crate::claude_supervisor::overlay_config_dir(
-            plan.env.iter().map(|(k, v)| (k.as_str(), v.as_str())),
-        )
-        .as_deref(),
-    );
+    crate::claude_supervisor::guard_birth_for_plan(&plan.env);
     if bg_resume {
         let out = match command.output() {
             Ok(o) => o,

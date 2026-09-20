@@ -176,23 +176,30 @@ pub fn scrub_onto(cmd: &mut std::process::Command, overlay: &[(&str, &str)]) {
     }
     let routed = overlay.iter().any(|(k, _)| MODEL_ENV_KEYS.contains(k));
     if !routed {
-        let mut claimed = unrouted_model_keys(&|k| std::env::var(k).ok());
-        // The provider stamp follows the same set-or-clear rule: an unrouted
-        // child must not read the launching shell's stamp as its own route
-        // (review_level and review_capability trust it as it reads). A routed
-        // child keeps the stamp its overlay sets, as with the model vars.
-        let stamped = std::env::var(crate::codex_route::ROUTE_PROVIDER_ENV)
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false);
-        if stamped {
-            cmd.env_remove(crate::codex_route::ROUTE_PROVIDER_ENV);
-            claimed.push(crate::codex_route::ROUTE_PROVIDER_ENV.to_string());
-        }
+        let claimed = unrouted_model_keys(&|k| std::env::var(k).ok());
         for key in &claimed {
             cmd.env_remove(key);
         }
         if !claimed.is_empty() {
             eprintln!("{}", unrouted_model_clear_notice(&claimed));
+        }
+        // The provider stamp follows the same set-or-clear rule: an unrouted
+        // child must not read the launching shell's stamp as its own route
+        // (review_level and review_capability trust it as written). It gets
+        // its own notice, because the model notice's "comes from its --model
+        // flag" sentence is false for a provider stamp. A routed child keeps
+        // the stamp its overlay sets, as with the model vars.
+        let stamped = std::env::var(crate::codex_route::ROUTE_PROVIDER_ENV)
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        if stamped {
+            cmd.env_remove(crate::codex_route::ROUTE_PROVIDER_ENV);
+            eprintln!(
+                "fno: cleared {} from this child's env: the provider stamp names \
+                 the route that launched the PARENT, and no overlay here routes \
+                 this child, so the child would report a provider it is not on.",
+                crate::codex_route::ROUTE_PROVIDER_ENV
+            );
         }
     }
     if !dropped.is_empty() {

@@ -88,8 +88,7 @@ fn birth_under_a_dirty_env_is_clean() {
     std::env::set_var("FAKE_STATE", &state);
     std::env::set_var("FAKE_BIRTH_ENV_DUMP", &dump);
 
-    let mut cmd = std::process::Command::new("true");
-    guard_birth(&mut cmd, Some(&dir));
+    guard_birth([("CLAUDE_CONFIG_DIR", dir.to_str().unwrap())]);
     // Restore before asserting so a failure does not leak the poison.
     std::env::remove_var("FAKE_STATE");
     std::env::remove_var("FAKE_BIRTH_ENV_DUMP");
@@ -137,8 +136,7 @@ fn no_second_birth_when_a_supervisor_serves_the_dir() {
     let prior_path = std::env::var("PATH").ok();
     std::env::set_var("PATH", path_with(&bin));
     std::env::set_var("FAKE_STATE", &state);
-    let mut cmd = std::process::Command::new("true");
-    guard_birth(&mut cmd, Some(&dir));
+    guard_birth([("CLAUDE_CONFIG_DIR", dir.to_str().unwrap())]);
     match prior_path {
         Some(v) => std::env::set_var("PATH", v),
         None => std::env::remove_var("PATH"),
