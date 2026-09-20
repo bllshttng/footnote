@@ -13,6 +13,11 @@
 //! The strategies that ACT on a plan live in `convert::keeper_rebind`,
 //! `convert::server_resume` and `convert::client_resume`.
 
+pub mod claim_repin;
+pub mod client_resume;
+pub mod keeper_rebind;
+pub mod server_resume;
+
 use crate::harness_capabilities::ResolvedConversion;
 use crate::state::RegistryEntry;
 
