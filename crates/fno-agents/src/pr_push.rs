@@ -14,12 +14,17 @@
 //! * `1` preflight red (heal already uses 1 for escalations; the meanings
 //!   are per-verb, the numbers shared)
 //! * `2` a run in flight (nothing pushed)
-//! * `3` a refusal the caller must fix (protected, dirty, conflict)
-//! * `4` a read error (fetch failed, check read failed, push failed)
+//! * `3` a refusal the caller must fix (protected, dirty, conflict,
+//!   remote-only commits)
+//! * `4` a read error (fetch failed, check read failed, compare failed,
+//!   push failed)
 //!
-//! The verb performs plain pushes only (never `--force`), so
-//! `scripts/hooks/pre-tool-use.sh`'s force-push answer is unaffected and the
-//! hook's --no-verify disqualifier never applies.
+//! A rebased branch is pushed with `--force-with-lease` pinned to the exact
+//! remote sha this run fetched, and only after a patch-equivalence check
+//! proves the remote branch holds no commit the branch lacks, so the lease
+//! can never drop a commit another writer pushed. The git pre-push hook is
+//! unaffected: it refuses protected branches by destination, and this verb
+//! refuses them before anything moves.
 
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -326,6 +331,11 @@ pub(crate) struct PushCtx {
     pub stamps_dir: PathBuf,
     /// `--force-ci-cancel`: skip the in-flight read and record the bypass.
     pub force: bool,
+    /// The remote sha this push may replace, set only when the fetched
+    /// remote branch carries no commit the local side lacks. `None` keeps
+    /// the push plain: heal's callers never rebase, and a first push has no
+    /// same-name remote to replace.
+    pub lease: Option<String>,
 }
 
 /// What a push decision ended as.
@@ -406,7 +416,15 @@ pub(crate) fn guarded_push(ctx: &PushCtx, head: &str) -> PushOutcome {
     .map(|(_, out, _)| out.trim().to_string())
     .unwrap_or_default();
     let refspec = format!("HEAD:{branch}");
-    let push_args: Vec<&str> = vec!["push", "--set-upstream", "origin", refspec.as_str()];
+    // The lease flag rides after the positionals: git's option parser
+    // accepts it there, and the `push --set-upstream origin HEAD:<branch>`
+    // prefix stays byte-identical for `a_first_push_sets_the_upstream`.
+    let mut push_args: Vec<&str> = vec!["push", "--set-upstream", "origin", refspec.as_str()];
+    let lease_flag;
+    if let Some(sha) = &ctx.lease {
+        lease_flag = format!("--force-with-lease=refs/heads/{branch}:{sha}");
+        push_args.push(lease_flag.as_str());
+    }
     let (ok, _, err) =
         crate::pr_push::run_labeled("pr-push", &ctx.git_bin, &push_args, &ctx.cwd, READ_TIMEOUT)
             .unwrap_or((false, String::new(), "push spawn failed".to_string()));
@@ -675,9 +693,10 @@ fn behind(git_bin: &str, cwd: &Path) -> String {
 /// The guarded push, verb entry. Sequence: refuse protected/dirty, fetch,
 /// measure behind-before, rebase onto origin/main (refuse on conflict,
 /// naming the rebase verb as the resolver door), measure behind-after,
-/// preflight, in-flight read on the remote head, push exactly once, stamp,
-/// receipt. Exit codes: 0 pushed, 1 preflight red, 2 in flight, 3 refusal,
-/// 4 read error.
+/// compare against the fetched remote branch (refuse remote-only commits),
+/// preflight, in-flight read on the remote head, push exactly once (leased
+/// when the branch was rebased), stamp, receipt. Exit codes: 0 pushed, 1
+/// preflight red, 2 in flight, 3 refusal, 4 read error.
 pub fn run_push(argv: &[String]) -> i32 {
     let a = match parse_verb_args(argv) {
         Ok(a) => a,
@@ -762,7 +781,86 @@ pub fn run_push(argv: &[String]) -> i32 {
     // (5) behind-after.
     let after = behind(&git, &cwd);
 
-    // (6) Preflight.
+    // (6) The fetched remote head of the SAME-NAME branch, read BEFORE
+    // preflight: a doomed push must not first spend a rehearsal of up to an
+    // hour. This is the head both the lease and the in-flight read pin to;
+    // `@{u}` is wrong for both - a branch born off origin/main tracks main
+    // until its first verb push re-points the upstream, and main's checks
+    // would read as this branch's runs. A branch with no same-name remote
+    // has an empty head: first push, nothing in flight, no lease.
+    let remote_ref = format!("origin/{branch}");
+    let remote_head = run_labeled(
+        "pr-push",
+        &git,
+        &["rev-parse", "--verify", "--quiet", remote_ref.as_str()],
+        &cwd,
+        READ_TIMEOUT,
+    )
+    .map(|(ok, out, _)| {
+        if ok {
+            out.trim().to_string()
+        } else {
+            String::new()
+        }
+    })
+    .unwrap_or_default();
+    let mut lease = None;
+    if !remote_head.is_empty() {
+        // Patch equivalence: the remote branch may only be replaced when
+        // every commit on it has a patch-equivalent in the rebased HEAD
+        // (--cherry-pick drops those pairs from the right-only listing).
+        // Run after the rebase, so main's commits are already ancestors of
+        // HEAD and a GitHub "Update branch" merge is handled too.
+        match run_labeled(
+            "pr-push",
+            &git,
+            &[
+                "log",
+                "--cherry-pick",
+                "--right-only",
+                "--no-merges",
+                "--format=%h",
+                &format!("HEAD...{remote_head}"),
+            ],
+            &cwd,
+            READ_TIMEOUT,
+        ) {
+            Ok((true, out, _)) => {
+                let remote_only = out
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !remote_only.is_empty() {
+                    eprintln!(
+                        "pr-push: {remote_ref} carries commits this branch lacks: \
+                         {remote_only}. Integrate them with git pull --rebase origin \
+                         {branch}, then re-run the push. Nothing pushed."
+                    );
+                    return 3;
+                }
+                lease = Some(remote_head.clone());
+            }
+            // Fail closed, the same as the fetch: an incomparable remote is
+            // never pushed over.
+            Ok((false, _, err)) => {
+                let err = if err.trim().is_empty() {
+                    "git log failed".to_string()
+                } else {
+                    err
+                };
+                eprintln!("pr-push: could not compare with {remote_ref} ({err}); nothing pushed");
+                return 4;
+            }
+            Err(err) => {
+                eprintln!("pr-push: could not compare with {remote_ref} ({err}); nothing pushed");
+                return 4;
+            }
+        }
+    }
+
+    // (7) Preflight.
     let (mode, preflight_ok) = if a.no_preflight {
         (PreflightMode::Skipped, true)
     } else {
@@ -790,11 +888,8 @@ pub fn run_push(argv: &[String]) -> i32 {
         return 1;
     }
 
-    // (7) In-flight read on the REMOTE head of the SAME-NAME branch: that is
-    // the head a push would supersede. `@{u}` is wrong here - a branch born
-    // off origin/main tracks main until its first verb push re-points the
-    // upstream, and main's checks would read as this branch's runs. A branch
-    // with no same-name remote has nothing in flight anywhere (first push).
+    // (8) In-flight read + the push, leased against the fetched remote sha
+    // when the branch was rebased.
     let ctx = PushCtx {
         git_bin: git.clone(),
         gh_bin: a.gh_bin.clone(),
@@ -802,23 +897,8 @@ pub fn run_push(argv: &[String]) -> i32 {
         cwd: cwd.clone(),
         stamps_dir: a.stamps_dir.clone(),
         force: a.force,
+        lease,
     };
-    let remote_ref = format!("origin/{branch}");
-    let remote_head = run_labeled(
-        "pr-push",
-        &git,
-        &["rev-parse", "--verify", "--quiet", remote_ref.as_str()],
-        &cwd,
-        READ_TIMEOUT,
-    )
-    .map(|(ok, out, _)| {
-        if ok {
-            out.trim().to_string()
-        } else {
-            String::new()
-        }
-    })
-    .unwrap_or_default();
     let outcome = guarded_push(&ctx, &remote_head);
     match outcome {
         PushOutcome::Pushed { sha } => {
