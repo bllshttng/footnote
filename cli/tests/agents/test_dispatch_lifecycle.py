@@ -210,6 +210,38 @@ def test_stop_claude_exit_zero_alive_pid_refuses(
     assert "stopped: worker-claude" not in out
 
 
+def test_stop_claude_exit_zero_pid_without_token_prints_stopped(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """x-ca08: a row with a pid but no incarnation token skips the liveness
+    proof entirely; a recycled pid must not block a dead worker's receipt."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-claude",
+            provider="claude",
+            short_id="7c5dcf5d",
+            pid=4242,
+        ),
+    )
+    _force_claude_on_path(monkeypatch, tmp_path)
+
+    from fno.agents import dispatch
+    from fno.agents import spawn_gate
+    from fno.agents.harnesses import claude as claude_mod
+
+    monkeypatch.setattr(
+        claude_mod, "claude_stop", lambda short_id, *, timeout=30.0: (0, "")
+    )
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, start: True)
+
+    result = dispatch.stop_agent("worker-claude")
+
+    assert result.claude_exit == 0
+    out = capsys.readouterr().out
+    assert "stopped: worker-claude (7c5dcf5d)" in out
+
+
 def test_stop_claude_nonzero_exit_propagates(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

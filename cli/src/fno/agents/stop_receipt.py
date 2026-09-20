@@ -62,11 +62,12 @@ def wake_set_refusal(name: str, short_id: str, existing: AgentEntry) -> Optional
     ) != (existing.harness_session_id, short_id or ""):
         return None
     # The row reads terminal because the stop itself just wrote it, so the
-    # receipt must also prove the PROCESS died: the keeper sweep and
-    # reconcile honestly re-mark a surviving process's row, and the spawn
-    # share counts it again. Only a positive liveness proof blocks.
+    # receipt must prove the PROCESS died: a sweep honestly re-marks a
+    # surviving process's row. The token gate blocks a recycled-pid false positive.
     from fno.agents.spawn_gate import _pid_alive
 
+    if existing.pid_start_time is None:
+        return None
     if _pid_alive(existing.pid, existing.pid_start_time) is True:
         return (
             f"claude stop reported success but pid {existing.pid} for {name} "
