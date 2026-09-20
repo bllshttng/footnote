@@ -179,9 +179,77 @@ pub fn parse_resume_args(rest: &[String]) -> Result<ResumeArgs, i32> {
     }
 }
 
+/// Does this argv ask for the pane-to-thread conversion, rather than a
+/// re-entry? The FLAG in either spelling, never a value that merely starts
+/// with the same letters: `-m "--substrate thread"` is a message, and
+/// routing it to `agent.convert` would move a live pane the caller never
+/// named.
+///
+/// This is only the ROUTING question. Whether the substrate is a legal one
+/// is [`parse_resume_args`]'s answer, and the convert door asserts it
+/// before it builds a request.
+pub fn requests_conversion(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg == "--substrate" || arg.starts_with("--substrate="))
+}
+
+/// Parse an argv that [`requests_conversion`] routed to the convert door,
+/// and refuse it unless the parse really produced `--substrate thread`.
+///
+/// The assertion is the point. The routing question is asked on the argv,
+/// and the answer to "is this a conversion" must come from the PARSER, so a
+/// session whose caller asked for a plain resume can never be converted by
+/// a door that guessed.
+pub fn parse_conversion_args(rest: &[String]) -> Result<ResumeArgs, String> {
+    let parsed = parse_resume_args(rest).map_err(|_| {
+        "resume --substrate thread takes one NAME, plus --dry-run and --allow-new-id".to_string()
+    })?;
+    if parsed.substrate.as_deref() != Some("thread") {
+        return Err(
+            "resume reached the convert door without --substrate thread; this is a \
+                    re-entry, not a lifecycle conversion"
+                .to_string(),
+        );
+    }
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_convert_door_refuses_a_parse_that_named_no_thread_substrate() {
+        let parsed = parse_conversion_args(&args(&["worker", "--substrate", "thread"]))
+            .expect("the flag and the parse agree");
+        assert_eq!(parsed.name, "worker");
+
+        // The routing question can be answered yes by an argv the parser
+        // then rejects; the door must not trust the router.
+        let error = parse_conversion_args(&args(&["worker"])).expect_err("no substrate, no door");
+        assert!(error.contains("--substrate thread"), "{error}");
+    }
+
+    #[test]
+    fn the_convert_door_opens_on_the_flag_and_not_on_a_value_that_looks_like_it() {
+        assert!(requests_conversion(&args(&[
+            "worker",
+            "--substrate",
+            "thread"
+        ])));
+        assert!(requests_conversion(&args(&[
+            "worker",
+            "--substrate=thread"
+        ])));
+        // A message that merely contains the flag's spelling is a message.
+        assert!(!requests_conversion(&args(&[
+            "worker",
+            "-m",
+            "--substrate thread"
+        ])));
+        assert!(!requests_conversion(&args(&["worker", "--substrate-ish"])));
+        assert!(!requests_conversion(&args(&["worker"])));
+    }
 
     fn args(tokens: &[&str]) -> Vec<String> {
         tokens.iter().map(|t| (*t).to_string()).collect()
