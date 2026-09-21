@@ -82,7 +82,7 @@ fn read_corrections(log: &str, since: DateTime<Utc>) -> Vec<AppliedCorrection> {
             continue;
         }
         let fields: Vec<&str> = line.splitn(5, " | ").collect();
-        let [ts, , source, location, details] = fields.as_slice() else {
+        let [ts, _sev, source, location, details] = fields.as_slice() else {
             continue;
         };
         if *source != "git-rule-edit" {
@@ -167,7 +167,8 @@ fn read_sessions(events: &str) -> Vec<SessionEnd> {
 }
 
 fn friction(s: &SessionEnd) -> f64 {
-    if s.stuck { 1.0 } else { 0.0 } + s.blocks as f64
+    let stuck_part = if s.stuck { 1.0 } else { 0.0 };
+    stuck_part + s.blocks as f64
 }
 
 /// Mean friction over up to `n` sessions: the `n` latest that ended before
@@ -391,7 +392,10 @@ pub fn run(args: &[String]) -> i32 {
                     return EXIT_USAGE;
                 }
             },
-            "--now" => match flag_value(args, &mut i, inline).as_deref().and_then(parse_ts) {
+            "--now" => match flag_value(args, &mut i, inline)
+                .as_deref()
+                .and_then(parse_ts)
+            {
                 Some(ts) => now = Some(ts),
                 None => {
                     eprintln!("corrections-verify: --now needs an rfc3339 timestamp");
@@ -428,7 +432,10 @@ pub fn run(args: &[String]) -> i32 {
         Some(p) => std::fs::read_to_string(&p).unwrap_or_default(),
         None => String::new(),
     };
-    let verdicts = score(&read_corrections(&log_text, since), &read_sessions(&events_text));
+    let verdicts = score(
+        &read_corrections(&log_text, since),
+        &read_sessions(&events_text),
+    );
     if markdown_out {
         print!("{}", markdown(&verdicts));
     } else {
