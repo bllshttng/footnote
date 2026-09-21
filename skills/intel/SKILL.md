@@ -14,12 +14,12 @@ The one rule the whole report stands on: **operator turns only**. Relay, harness
 1. Run the fold:
 
    ```bash
-   fno-agents intel --json --days 14 --all-projects
+   fno-agents intel [--json] [--period 2w|1m|2m|3m|all] [--scope <project>[,<project>...]|all] [--harness claude,codex,opencode|all]
    # or one node's story:
    fno-agents intel --json --node <id>
    ```
 
-   (`fno doctor intel` is the same fold. The binary's full flag set, including `--session`, sits on `fno-agents intel`.) Exit 3 means no sessions in the window. Report that and stop.
+   (`fno doctor intel` is the same fold. The binary's full flag set, including `--session`, sits on `fno-agents intel`.) The period words map to `--days`: `2w` is 14, `1m` is 30 (the default), `2m` is 60, `3m` is 90, `all` is 0 (no window). Pass any other word nowhere: refuse it with the allowed list. The binary takes `--scope`'s meaning in two flags: `--scope all`, or no `--scope`, maps to `--all-projects` (the skill's default); each comma entry of `--scope <project>` maps to one `--project <name>`. `--harness` passes through as `-H`. One worked example: `fno-agents intel --json --period 2w --project fno -H codex`. The report's header quotes the fold's `scope` object, so the reader sees which harnesses and roots the fold read. Exit 3 means no sessions in the window. Report that and stop.
 
 2. Judge the attended sessions and write one facet file each: `~/.fno/intel/facets/<session>.json`, mode 0600. Key the facet by session id + mtime + size (all three are on the fold's session row). A session whose key matches an existing facet is not re-judged. Skip it, so a resumed session re-enters the report instead of stranding on a stale cache:
 
@@ -57,6 +57,6 @@ Judgment runs on this session's own model. No profile, no spawned reviewer, no P
 
 - Operator is a residual classification, not a witnessed one: claude records no positive typed-turn marker, so a turn counts as operator after every injected shape fails to match. The mux `operator_submit` event is the designed close for this; until it lands, a session driven from a bare terminal can still misattribute injected text that matches no known envelope shape.
 - The relay delivered-check is a substring read: a bus body that appears verbatim in the transcript through some other channel reads as delivered even if the mail never landed in this session's turn flow.
-- Opencode sessions report under the fold's `skipped.opencode` until a `TranscriptSource` impl ships for that store; they are never guessed into the report.
+- Opencode sessions are folded now. Their operator class is the same residual as claude's (no positive typed-turn marker), subagent child sessions carry a `parent_id` and are excluded, and `skipped.opencode` appears only when no store is readable.
 
 - Full list: [LIMITATIONS.md](LIMITATIONS.md).
