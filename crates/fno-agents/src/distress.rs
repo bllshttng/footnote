@@ -118,10 +118,10 @@ fn extract_result_blocked_json(text: &str) -> Option<HelpDistress> {
     let mut i = 0;
     while i < lines.len() {
         let trimmed = lines[i].trim();
-        let (opener, closer) = if trimmed.starts_with("```") {
-            ("```", "```")
+        let closer = if trimmed.starts_with("```") {
+            "```"
         } else if trimmed == "<result>" {
-            ("<result>", "</result>")
+            "</result>"
         } else {
             i += 1;
             continue;
