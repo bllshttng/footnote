@@ -66,4 +66,5 @@
 # through serde and erases them on its next read-modify-write, so the bump
 # turns a silent erasure into a loud refusal. Rationale lives beside the
 # columns in state.rs / registry.py.
-version = 35
+# v36: additive `node_reason`, the receipt for a named-but-unresolvable node; rationale in state.rs.
+version = 36

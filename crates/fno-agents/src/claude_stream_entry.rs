@@ -38,6 +38,13 @@ pub(crate) fn build_claude_stream_entry(
         // The node this spawn was FOR, from the spawn request - never the
         // daemon's ambient env, which names the daemon-starting session.
         node: node.filter(|v| !v.is_empty()).map(str::to_string),
+        // The sibling receipt: the seed named a node the seam could
+        // not resolve. Absent when the node resolved or none was named.
+        node_reason: spawn_params
+            .get("node_reason")
+            .and_then(serde_json::Value::as_str)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string),
         // Stream-json adoption is gated on host_mode plus mode, not on a
         // substrate, and it is not one of the three names - this row's
         // lifecycle belongs to chat/switchboard/ask, so the axis stays
@@ -113,4 +120,71 @@ pub(crate) fn build_claude_stream_entry(
         entry.spawn_provenance = Some(p.clone());
     }
     entry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_claude_stream_entry;
+
+    /// The node receipt is three-state: a request naming a node binds it
+    /// (reason absent); one carrying node_reason stamps the receipt with the
+    /// node absent; a request naming no node stays silent on both.
+    #[test]
+    fn node_reason_receipt_is_three_state() {
+        let log = std::path::PathBuf::from("/proj/.fno/agents/swR/timeline.jsonl");
+        let bound = build_claude_stream_entry(
+            "bound",
+            "swR",
+            std::path::Path::new("/proj"),
+            "UUID-BOUND",
+            1,
+            None,
+            log.clone(),
+            Some("x-aaaa"),
+            &serde_json::json!({"node": "x-aaaa"}),
+            None,
+        );
+        let receipt = build_claude_stream_entry(
+            "receipt",
+            "swR2",
+            std::path::Path::new("/proj"),
+            "UUID-RECEIPT",
+            1,
+            None,
+            log.clone(),
+            None,
+            &serde_json::json!({"node_reason": "x-gone names no readable row (derived from the seed)"}),
+            None,
+        );
+        let silent = build_claude_stream_entry(
+            "silent",
+            "swR3",
+            std::path::Path::new("/proj"),
+            "UUID-SILENT",
+            1,
+            None,
+            log,
+            None,
+            &serde_json::Value::Null,
+            None,
+        );
+        assert_eq!(bound.node.as_deref(), Some("x-aaaa"));
+        assert_eq!(bound.node_reason, None);
+        assert_eq!(receipt.node, None);
+        assert!(receipt
+            .node_reason
+            .as_deref()
+            .unwrap()
+            .starts_with("x-gone names no readable row"));
+        assert_eq!(silent.node, None);
+        assert_eq!(silent.node_reason, None);
+        // Serialized rows keep the states distinguishable: skip-if-none drops
+        // node_reason when absent and keeps it when stamped.
+        let bound_json = serde_json::to_value(&bound).unwrap();
+        let receipt_json = serde_json::to_value(&receipt).unwrap();
+        let silent_json = serde_json::to_value(&silent).unwrap();
+        assert!(bound_json.get("node_reason").is_none());
+        assert!(receipt_json.get("node_reason").is_some());
+        assert!(silent_json.get("node_reason").is_none());
+    }
 }
