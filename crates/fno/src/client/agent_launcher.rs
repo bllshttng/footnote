@@ -9,10 +9,14 @@
 //! permissions, seed acceptance - stay with the door; a refusal renders
 //! verbatim and the draft survives.
 
-use super::{glyph_cols, write_msg, ClientMsg, StdinFlow, View, MAX_MAIL_TEXT};
+use ratatui_core::buffer::Buffer as RtBuffer;
+use ratatui_core::layout::{Constraint, Layout as RtLayout, Rect as RtRect};
+use ratatui_core::style::{Modifier, Style as RtStyle};
+use unicode_width::UnicodeWidthChar;
+
+use super::{write_msg, ClientMsg, StdinFlow, View, MAX_MAIL_TEXT};
 use crate::clipboard::on_path;
 use crate::proto::agent_launch::{AgentLaunchRequest, AgentLaunchUpdate, LaunchState};
-use crate::proto::{cell_flags, Cell, Color};
 
 /// Ceiling on an open bracketed paste's carried bytes. The submit gate
 /// refuses an over-cap message anyway; this only stops a close-marker-less
@@ -59,30 +63,33 @@ pub(crate) enum CatalogOutcome {
 pub(crate) enum Focus {
     Harness,
     Project,
-    Message,
-    AdvancedToggle,
     Model,
     Effort,
+    /// The expand/collapse chip (`+`/`-`): Enter shows or hides the second
+    /// chip row of pins (permission, placement).
+    More,
     Permission,
     Placement,
+    Message,
     Launch,
-    /// The Unknown-outcome acknowledge row: Enter resolves the blocked
+    /// The Unknown-outcome acknowledge chip: Enter resolves the blocked
     /// launch state back to editing (the plan's "explicit action").
     Dismiss,
 }
 
 impl Focus {
-    fn tab_order() -> [Focus; 9] {
+    fn tab_order() -> [Focus; 10] {
         [
             Focus::Harness,
             Focus::Project,
-            Focus::Message,
-            Focus::AdvancedToggle,
-            Focus::Launch,
             Focus::Model,
             Focus::Effort,
+            Focus::More,
             Focus::Permission,
             Focus::Placement,
+            Focus::Message,
+            Focus::Launch,
+            Focus::Dismiss,
         ]
     }
 
@@ -90,16 +97,10 @@ impl Focus {
         let order = Self::tab_order();
         let pos = order.iter().position(|f| *f == self).unwrap_or(0);
         let mut next = order[(pos + 1) % order.len()];
-        while matches!(
-            next,
-            Focus::Model | Focus::Effort | Focus::Permission | Focus::Placement
-        ) && !advanced
-        {
+        while matches!(next, Focus::Permission | Focus::Placement) && !advanced {
             next = match next {
-                Focus::Model => Focus::Effort,
-                Focus::Effort => Focus::Permission,
                 Focus::Permission => Focus::Placement,
-                _ => Focus::Harness,
+                _ => Focus::Message,
             };
         }
         next
@@ -109,16 +110,10 @@ impl Focus {
         let order = Self::tab_order();
         let pos = order.iter().position(|f| *f == self).unwrap_or(0);
         let mut prev = order[(pos + order.len() - 1) % order.len()];
-        while matches!(
-            prev,
-            Focus::Model | Focus::Effort | Focus::Permission | Focus::Placement
-        ) && !advanced
-        {
+        while matches!(prev, Focus::Permission | Focus::Placement) && !advanced {
             prev = match prev {
                 Focus::Placement => Focus::Permission,
-                Focus::Permission => Focus::Effort,
-                Focus::Effort => Focus::Model,
-                _ => Focus::Launch,
+                _ => Focus::More,
             };
         }
         prev
@@ -710,6 +705,11 @@ pub(crate) async fn launcher_keys(
         match key {
             LKey::Esc => {
                 // Hide, retain the draft. A submitted launch keeps running.
+                // Full-screen sideline leaves with it: keys must never reach
+                // a pane that is not painted.
+                if view.sideline_full {
+                    view.sideline_full = false;
+                }
                 close(view);
                 break;
             }
@@ -808,7 +808,7 @@ pub(crate) async fn launcher_keys(
                         }
                     }
                     Focus::Launch => submit(view, sock_w).await?,
-                    Focus::AdvancedToggle => {
+                    Focus::More => {
                         if let Some(l) = view.launcher.as_mut() {
                             l.draft.expanded = !l.draft.expanded;
                             l.draft.bump();
@@ -931,151 +931,167 @@ pub(crate) fn load_catalog() -> CatalogOutcome {
 // -- render ------------------------------------------------------------------
 
 impl Launcher {
-    /// One `(focus, line)` pair per rendered body row; the SAME table drives
-    /// drawing, keyboard focus marking, and mouse hit-testing. `editor_visible`
-    /// caps the message window: the dock passes its dynamic count.
-    pub(crate) fn render_rows(&self, view: &View, editor_visible: usize) -> Vec<(Focus, String)> {
+    /// The chip row's labels, left to right, minus the expanded-row pins:
+    /// harness, project basename, model, effort, the expand chip, the phase
+    /// controls pinned right (dismiss while an attempt is in flight or
+    /// unresolved, then launch). One table feeds the layout, the paint and
+    /// the mouse hit-test.
+    fn chip_texts(&self, view: &View) -> Vec<(Focus, String)> {
         let d = &self.draft;
-        let mut rows: Vec<(Focus, String)> = Vec::new();
-        let mark = |f: Focus, self_f: Focus| if f == self_f { "> " } else { "  " };
         // Harness: the selected name, or the catalog's live state when no
         // names have synced yet.
-        let harness_label = if d.harnesses.is_empty() {
+        let harness = if d.harnesses.is_empty() {
             match &view.launcher_catalog {
                 None => "<catalog...>".to_string(),
                 Some(CatalogOutcome::Degraded(e)) => format!("unavailable ({e})"),
                 Some(CatalogOutcome::Ok(rows)) if rows.iter().all(|r| !r.selectable()) => {
                     "none available".to_string()
                 }
-                Some(CatalogOutcome::Ok(_)) => "harness default".to_string(),
+                Some(CatalogOutcome::Ok(_)) => "default".to_string(),
             }
         } else {
             d.harness()
         };
-        rows.push((
-            Focus::Harness,
-            format!(
-                "{}harness  {}",
-                mark(Focus::Harness, self.focus),
-                harness_label
-            ),
-        ));
-        rows.push((
-            Focus::Project,
-            format!(
-                "{}project  {}",
-                mark(Focus::Project, self.focus),
-                if d.cwd().is_empty() {
-                    "<none>".to_string()
-                } else {
-                    d.cwd()
-                }
-            ),
-        ));
-        // Message editor: a windowed view of the physical lines.
-        let lines = d.message_lines();
-        let (cur_line, _cur_col) = cursor_line_col(d);
-        let total = lines.len();
-        let start = total
-            .saturating_sub(editor_visible)
-            .min(cur_line.saturating_sub(editor_visible.saturating_sub(1)));
-        let shown: Vec<&str> = lines
-            .iter()
-            .skip(start)
-            .take(editor_visible)
-            .copied()
-            .collect();
-        for (i, text) in shown.iter().enumerate() {
-            let abs = start + i;
-            let cursor = if self.focus == Focus::Message && abs == cur_line {
-                format!("{text}\u{258f}")
-            } else {
-                (*text).to_string()
-            };
-            let gutter = if self.focus == Focus::Message {
-                mark(Focus::Message, self.focus).to_string()
-            } else {
-                "  ".to_string()
-            };
-            rows.push((Focus::Message, format!("{gutter}message {cursor}")));
-        }
-        rows.push((
-            Focus::AdvancedToggle,
-            format!(
-                "{}{} advanced",
-                mark(Focus::AdvancedToggle, self.focus),
-                if d.expanded { "v" } else { ">" }
-            ),
-        ));
-        if d.expanded {
-            rows.push((
-                Focus::Model,
-                format!(
-                    "{}model  {}",
-                    mark(Focus::Model, self.focus),
-                    field_or_default(&d.model)
-                ),
-            ));
-            rows.push((
-                Focus::Effort,
-                format!(
-                    "{}effort  {}",
-                    mark(Focus::Effort, self.focus),
-                    field_or_default(&d.effort)
-                ),
-            ));
-            rows.push((
-                Focus::Permission,
-                format!(
-                    "{}perms  {}",
-                    mark(Focus::Permission, self.focus),
-                    field_or_default(&d.permission)
-                ),
-            ));
-            rows.push((
-                Focus::Placement,
-                format!(
-                    "{}place  {}",
-                    mark(Focus::Placement, self.focus),
-                    field_or_default(&d.placement)
-                ),
-            ));
-        }
-        // Launch: labeled by phase, disabled while submitting.
-        let (launch_label, enabled) = match &self.phase {
-            Phase::Editing => ("[ Launch ]", true),
-            Phase::Submitting { .. } => ("[ Launching... ]", false),
-            Phase::Refused { .. } => ("[ Retry launch ]", true),
-            Phase::Unknown { .. } => ("[ launch blocked ]", false),
-            Phase::Launched { .. } => ("[ Launch ]", true),
+        let project = match d.cwd().rsplit('/').find(|s| !s.is_empty()) {
+            Some(base) => base.to_string(),
+            None => "<none>".to_string(),
         };
-        rows.push((
-            Focus::Launch,
-            format!(
-                "{}{}",
-                mark(Focus::Launch, self.focus),
-                if enabled {
-                    launch_label.to_string()
-                } else {
-                    format!("  {launch_label}")
-                }
-            ),
-        ));
+        let mut chips = vec![
+            (Focus::Harness, harness),
+            (Focus::Project, project),
+            (Focus::Model, chip_field(&d.model)),
+            (Focus::Effort, chip_field(&d.effort)),
+            (Focus::More, if d.expanded { "-" } else { "+" }.to_string()),
+        ];
         if matches!(self.phase, Phase::Unknown { .. } | Phase::Submitting { .. }) {
-            rows.push((
-                Focus::Dismiss,
-                format!(
-                    "{}[ dismiss{} ]",
-                    mark(Focus::Dismiss, self.focus),
-                    if matches!(self.phase, Phase::Submitting { .. }) {
-                        " still starting"
-                    } else {
-                        ""
-                    }
-                ),
-            ));
+            chips.push((Focus::Dismiss, "[dismiss]".to_string()));
         }
-        rows
+        chips.push((Focus::Launch, "[Launch]".to_string()));
+        chips
+    }
+
+    /// The dock's rects inside `area` (its own rows at the sideline bottom).
+    /// The painter and [`launcher_mouse`] both call this, so a click always
+    /// lands on the chip that was drawn.
+    pub(crate) fn dock_layout_rects(&self, view: &View, area: RtRect) -> DockRects {
+        let text_w = area.width.max(1) as usize;
+        // `area` IS the reserved dock (the caller ran dock_layout against the
+        // panel), so the editor window is what remains after the chip rows
+        // and the footer - re-running dock_layout here would re-cap against
+        // the dock's own height and blank most of the reserved rows.
+        let chip_rows = 1 + usize::from(self.draft.expanded);
+        let editor_rows = (area.height as usize).saturating_sub(chip_rows + 1).max(1);
+        let expanded_row = u16::from(self.draft.expanded);
+        // Primary chip row: the field chips absorb the slack (Min), the
+        // expand chip and the phase controls are fixed, Launch pinned right.
+        let primary: Vec<(Focus, String)> = self
+            .chip_texts(view)
+            .into_iter()
+            .filter(|(f, _)| !matches!(f, Focus::Permission | Focus::Placement))
+            .collect();
+        let constraints: Vec<Constraint> = primary
+            .iter()
+            .map(|(f, _)| match f {
+                Focus::More => Constraint::Length(4),
+                Focus::Launch => Constraint::Length(8),
+                Focus::Dismiss => Constraint::Length(9),
+                Focus::Harness => Constraint::Min(6),
+                _ => Constraint::Min(4),
+            })
+            .collect();
+        let row =
+            RtLayout::horizontal(constraints).split(RtRect::new(area.x, area.y, area.width, 1));
+        let mut chips: Vec<(Focus, String, RtRect)> = primary
+            .iter()
+            .zip(row.iter())
+            .map(|((f, label), r)| (*f, label.clone(), *r))
+            .collect();
+        if self.draft.expanded {
+            // The second chip row: the two pins, same Min treatment.
+            let pins = [
+                (Focus::Permission, chip_field(&self.draft.permission)),
+                (Focus::Placement, chip_field(&self.draft.placement)),
+            ];
+            let pc: Vec<Constraint> = pins.iter().map(|_| Constraint::Min(4)).collect();
+            let row2 =
+                RtLayout::horizontal(pc).split(RtRect::new(area.x, area.y + 1, area.width, 1));
+            for ((f, label), r) in pins.iter().zip(row2.iter()) {
+                chips.push((*f, label.clone(), *r));
+            }
+        }
+        // The editor window: bottom-anchored, then pulled up just enough to
+        // keep the cursor row visible.
+        let chunks = wrap_message(&self.draft.message, text_w);
+        let (cur_row, _) = wrapped_cursor(&self.draft.message, self.draft.cursor_chars, text_w);
+        let mut start = chunks.len().saturating_sub(editor_rows);
+        if cur_row < start {
+            start = cur_row;
+        } else if cur_row >= start + editor_rows {
+            start = cur_row + 1 - editor_rows;
+        }
+        let body_y = area.y + 1 + expanded_row;
+        let avail = (area.height as usize).saturating_sub(1 + expanded_row as usize + 1);
+        let editor_h = editor_rows.min(avail) as u16;
+        let message = RtRect::new(area.x, body_y, area.width, editor_h);
+        let footer = RtRect::new(
+            area.x,
+            (body_y + editor_h).min(area.bottom().saturating_sub(1)),
+            area.width,
+            1,
+        );
+        DockRects {
+            chips,
+            message,
+            footer,
+            start_chunk: start,
+            editor_rows: editor_h as usize,
+        }
+    }
+
+    /// Paint the dock into `buf` (the sideline's Buffer) inside `area`: the
+    /// chip row, the wrapped message window with its cursor mark, and the
+    /// outcome footer. Everything renders into the sideline's ratatui Buffer;
+    /// the single blit in `draw_sideline` carries it to the frame.
+    pub(crate) fn paint(&self, view: &View, buf: &mut RtBuffer, area: RtRect) {
+        let rects = self.dock_layout_rects(view, area);
+        for (focus, label, r) in &rects.chips {
+            let style = if *focus == self.focus {
+                RtStyle::new().add_modifier(Modifier::REVERSED)
+            } else {
+                RtStyle::new().add_modifier(Modifier::DIM)
+            };
+            paint_chip(buf, *r, label, style);
+        }
+        let text_w = rects.message.width.max(1) as usize;
+        let chunks = wrap_message(&self.draft.message, text_w);
+        let (cur_row, cur_col) =
+            wrapped_cursor(&self.draft.message, self.draft.cursor_chars, text_w);
+        for k in 0..rects.editor_rows {
+            let Some((_, text)) = chunks.get(rects.start_chunk + k) else {
+                break;
+            };
+            let y = rects.message.y + k as u16;
+            buf.set_string(rects.message.x, y, text, RtStyle::new());
+            if self.focus == Focus::Message && cur_row == rects.start_chunk + k {
+                // The cursor offset is a CHAR index; the mark lands on a
+                // TERMINAL column, so wide glyphs before the cursor shift
+                // it right.
+                let disp_col: usize = text
+                    .chars()
+                    .take(cur_col)
+                    .map(|c| usize::from(UnicodeWidthChar::width(c).unwrap_or(0)))
+                    .sum();
+                if (disp_col as u16) < rects.message.width {
+                    buf[(rects.message.x + disp_col as u16, y)].set_char('\u{258f}');
+                }
+            }
+        }
+        buf.set_string(
+            rects.footer.x,
+            rects.footer.y,
+            self.footer(),
+            RtStyle::new().add_modifier(Modifier::DIM),
+        );
     }
 
     /// The outcome / error footer: refusal reasons, unknown-evidence, seed
@@ -1095,102 +1111,135 @@ impl Launcher {
         }
     }
 
-    /// Dock rows that never shrink: harness, project, the advanced toggle,
-    /// launch, plus the four pins when expanded and the dismiss row while an
-    /// attempt is in flight or unresolved.
-    fn dock_fixed_rows(&self) -> usize {
-        4 + if self.draft.expanded { 4 } else { 0 }
-            + usize::from(matches!(
-                self.phase,
-                Phase::Unknown { .. } | Phase::Submitting { .. }
-            ))
-    }
-
-    /// The dock's geometry in a `panel_rows`-tall sideline: (total rows, the
-    /// editor's visible window). The editor is dynamic - exactly the typed
-    /// lines up to a cap that holds the dock near half the panel - so typing
-    /// grows it and deleting shrinks it. Below the cap's floor the fields
-    /// still paint; the dock never hides.
-    pub(crate) fn dock_layout(&self, panel_rows: usize) -> (usize, usize) {
+    /// The dock's geometry in a `panel_rows`-tall sideline at `text_w` text
+    /// columns: (total rows, the editor's visible window). The editor is
+    /// dynamic - exactly the wrapped message rows up to a cap that holds the
+    /// dock near a third of the panel - so typing grows it and deleting
+    /// gives the rows back. Below the cap's floor the fields still paint;
+    /// the dock never hides.
+    pub(crate) fn dock_layout(&self, panel_rows: usize, text_w: usize) -> (usize, usize) {
         let footer = 1;
-        let fixed = self.dock_fixed_rows();
-        let cap = (panel_rows / 2).saturating_sub(fixed + footer).max(1);
-        let editor = self.draft.message_lines().len().clamp(1, cap);
-        (fixed + footer + editor, editor)
-    }
-
-    /// The dock's paintable lines: the rows table with the dynamic editor
-    /// window, then the outcome footer as the last line.
-    pub(crate) fn dock_lines(
-        &self,
-        view: &View,
-        panel_rows: usize,
-    ) -> (Vec<(Focus, String)>, String) {
-        let (_, editor) = self.dock_layout(panel_rows);
-        (self.render_rows(view, editor), self.footer())
+        let chips = 1 + usize::from(self.draft.expanded);
+        let cap = (panel_rows / 3).saturating_sub(chips + footer).max(1);
+        let editor = wrap_message(&self.draft.message, text_w)
+            .len()
+            .clamp(1, cap);
+        (chips + footer + editor, editor)
     }
 }
 
-fn field_or_default(s: &str) -> String {
+/// One wrapped message row: `(char offset into the message, the chunk's
+/// text)`. A HARD character wrap, not a word wrap, on purpose: one chunker
+/// answers three questions - how many rows the editor needs, what each row
+/// shows, and which row and column holds the cursor - so height, paint and
+/// cursor can never disagree. A wide glyph that would cross the edge starts
+/// the next chunk; an empty message is one empty chunk.
+pub(crate) fn wrap_message(message: &str, width: usize) -> Vec<(usize, String)> {
+    let width = width.max(1);
+    let mut out: Vec<(usize, String)> = Vec::new();
+    let mut off = 0usize;
+    let mut col = 0usize;
+    let mut cur = String::new();
+    for (i, c) in message.chars().enumerate() {
+        if c == '\n' {
+            out.push((off, std::mem::take(&mut cur)));
+            col = 0;
+            off = i + 1;
+            continue;
+        }
+        let w = usize::from(UnicodeWidthChar::width(c).unwrap_or(0));
+        if col + w > width && !cur.is_empty() {
+            out.push((off, std::mem::take(&mut cur)));
+            col = 0;
+            off = i;
+        }
+        cur.push(c);
+        col += w;
+    }
+    out.push((off, cur));
+    out
+}
+
+/// Which wrapped chunk and column hold char offset `cursor_chars`: the
+/// first chunk that spans it. A cursor on the newline that ends a physical
+/// line paints at that line's end; any other chunk boundary (a hard wrap)
+/// paints at the next chunk's start, so the mark is always at the text it
+/// precedes.
+pub(crate) fn wrapped_cursor(message: &str, cursor_chars: usize, width: usize) -> (usize, usize) {
+    let chunks = wrap_message(message, width);
+    for (r, (off, text)) in chunks.iter().enumerate() {
+        let end = off + text.chars().count();
+        if cursor_chars < end {
+            return (r, cursor_chars - off);
+        }
+        if cursor_chars == end && message[char_byte(message, cursor_chars)..].starts_with('\n') {
+            return (r, text.chars().count());
+        }
+    }
+    let (off, text) = chunks.last().expect("wrap_message always yields one chunk");
+    (
+        chunks.len() - 1,
+        cursor_chars.saturating_sub(*off).min(text.chars().count()),
+    )
+}
+
+/// A pin chip's label: the value, or the shared "default" when empty.
+fn chip_field(s: &str) -> String {
     if s.trim().is_empty() {
-        "harness default".to_string()
+        "default".to_string()
     } else {
         s.to_string()
     }
 }
 
-/// Paint the dock's rows and footer at the bottom of the sideline column.
-/// `top` is the dock's first row; the painter truncates to the panel width -
-/// the same rule every sideline row follows. Plain cells: the dock is live
-/// UI, not chrome.
-pub(crate) fn paint_dock(
-    cells: &mut [Cell],
-    rows: &[(Focus, String)],
-    footer: &str,
-    top: usize,
-    term_rows: usize,
-    cols: usize,
-    text_w: usize,
-) {
-    for (k, text) in rows
-        .iter()
-        .map(|(_, s)| s)
-        .chain(std::iter::once(&footer.to_string()))
-        .enumerate()
-    {
-        let r = top + k;
-        if r >= term_rows {
+/// One chip's paint: fill the rect (so REVERSED covers the whole chip, not
+/// just the glyphs), then the label truncated to the rect with an ellipsis.
+pub(crate) fn paint_chip(buf: &mut RtBuffer, r: RtRect, label: &str, style: RtStyle) {
+    if r.width == 0 {
+        return;
+    }
+    buf.set_style(r, style);
+    let mut text = String::new();
+    let mut w = 0usize;
+    let mut truncated = false;
+    for c in label.chars() {
+        let cw = usize::from(UnicodeWidthChar::width(c).unwrap_or(1));
+        if w + cw > r.width as usize {
+            truncated = true;
             break;
         }
-        let mut col = 0usize;
-        for ch in text.chars() {
-            let w = glyph_cols(ch);
-            if col + w > text_w {
-                break;
-            }
-            cells[r * cols + col] = Cell {
-                c: ch,
-                fg: Color::Default,
-                bg: Color::Default,
-                flags: 0,
-            };
-            if w == 2 {
-                cells[r * cols + col + 1] = Cell {
-                    c: ' ',
-                    fg: Color::Default,
-                    bg: Color::Default,
-                    flags: cell_flags::WIDE_SPACER,
-                };
-            }
-            col += w;
-        }
+        text.push(c);
+        w += cw;
     }
+    if truncated {
+        // Reserve one column for the ellipsis over the last kept glyph.
+        while w >= r.width as usize {
+            let Some(last) = text.chars().next_back() else {
+                break;
+            };
+            w -= usize::from(UnicodeWidthChar::width(last).unwrap_or(1));
+            text.pop();
+        }
+        text.push('\u{2026}');
+    }
+    buf.set_string(r.x, r.y, &text, style);
 }
 
-/// Mouse: a left press inside the dock focuses the row it hit (the Launch
-/// row submits). Anything else - the footer line, the list above, the panes -
-/// reads unconsumed so the normal mouse routes still run while the composer
-/// is open.
+/// The dock's hit-and-paint geometry. `chips` is `(focus, label, rect)` in
+/// paint order (the tab order); the painter and `launcher_mouse` both walk
+/// it, so a click always lands on the chip that was drawn.
+pub(crate) struct DockRects {
+    pub chips: Vec<(Focus, String, RtRect)>,
+    pub message: RtRect,
+    pub footer: RtRect,
+    pub start_chunk: usize,
+    pub editor_rows: usize,
+}
+
+/// Mouse: a left press inside the dock focuses the chip it hit (Launch
+/// submits); a press in the message rect focuses the editor. Anything else -
+/// the footer line, the list above, the panes - reads unconsumed so the
+/// normal mouse routes still run while the composer is open.
 pub(crate) async fn launcher_mouse(
     view: &mut View,
     rep: crate::mouse::MouseReport,
@@ -1200,34 +1249,48 @@ pub(crate) async fn launcher_mouse(
     if !matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
         return Ok(false);
     }
-    let panel_rows = view.term.0 as usize;
-    let panel_w = view.panel_w() as usize;
-    // The divider column and the content area beyond are never the dock's.
-    if (rep.col as usize) + 1 >= panel_w {
+    let Some(l) = view.launcher.as_ref() else {
         return Ok(false);
-    }
-    // The SAME usable height the painter computes with (chrome row
-    // subtracted), so a click maps onto the row that was drawn.
-    let chrome = view.bottom_row_is_chrome() as usize;
-    let (rows, _footer) = match view.launcher.as_ref() {
-        Some(l) => l.dock_lines(view, panel_rows - chrome),
-        None => return Ok(false),
     };
-    let dock_len = rows.len() + 1;
-    let top = (panel_rows - chrome).saturating_sub(dock_len);
-    let row = rep.row as usize;
-    // On the footer, above the dock, or clipped off by a too-short panel.
-    if row < top || row >= top + rows.len() {
+    // Full-screen sideline paints the dock across the terminal; otherwise
+    // the dock lives in the sideline column. The SAME width the painter
+    // used, so a click maps onto the chip that was drawn.
+    let pw = if view.sideline_full {
+        view.term.1 as usize
+    } else {
+        view.panel_w() as usize
+    };
+    if pw == 0 || (rep.col as usize) + 1 >= pw {
+        // The divider column and the content area beyond are never the dock's.
         return Ok(false);
     }
-    if let Some((focus, _)) = rows.get(row - top) {
-        let focus = *focus;
-        if let Some(l) = view.launcher.as_mut() {
-            l.focus = focus;
-        }
-        if focus == Focus::Launch {
-            submit(view, sock_w).await?;
-        }
+    let text_w = pw - 1;
+    // The SAME usable height the painter computes with (the tab strip in
+    // full-screen mode, the bottom chrome row always), so a click maps onto
+    // the dock that was drawn.
+    let chrome = view.sideline_top() + view.bottom_row_is_chrome() as usize;
+    let body_rows = (view.term.0 as usize).saturating_sub(chrome);
+    let (total, _) = l.dock_layout(body_rows, text_w);
+    let top = body_rows.saturating_sub(total) as u16;
+    let area = RtRect::new(0, top, text_w as u16, total as u16);
+    let rects = l.dock_layout_rects(view, area);
+    let hit = |r: RtRect| {
+        rep.col >= r.x && rep.col < r.x + r.width && rep.row >= r.y && rep.row < r.y + r.height
+    };
+    let focus = rects
+        .chips
+        .iter()
+        .find(|(_, _, r)| hit(*r))
+        .map(|(f, _, _)| *f)
+        .or_else(|| hit(rects.message).then_some(Focus::Message));
+    let Some(focus) = focus else {
+        return Ok(false);
+    };
+    if let Some(l) = view.launcher.as_mut() {
+        l.focus = focus;
+    }
+    if focus == Focus::Launch {
+        submit(view, sock_w).await?;
     }
     Ok(true)
 }
