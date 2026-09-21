@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+STORE_SCHEMA_VERSION = 2
+
+
 class EventStoreUnavailable(RuntimeError):
     """The native store could not commit the event. No fallback exists."""
 
@@ -97,6 +100,18 @@ def native_rows(
         return None
 
 
+def _refuse_newer_schema(conn: "sqlite3.Connection", db: Path) -> None:
+    """Fail closed on a store written by a NEWER build: today every version
+    from 2 up reads as v2, and silently accepting rows whose shape this
+    build does not know is the fail-open this guard exists to refuse."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version > STORE_SCHEMA_VERSION:
+        raise EventStoreUnavailable(
+            f"events store schema v{version} is newer than this build understands "
+            f"(v{STORE_SCHEMA_VERSION}); upgrade fno before touching {db}"
+        )
+
+
 def read_committed_lines(events_path: Path) -> list[str]:
     """Committed envelope lines, direct SQL, never importing.
 
@@ -111,6 +126,7 @@ def read_committed_lines(events_path: Path) -> list[str]:
         return []
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
+        _refuse_newer_schema(conn, db)
         rows = conn.execute("SELECT line FROM events ORDER BY seq").fetchall()
     finally:
         conn.close()
@@ -156,6 +172,7 @@ def query_rows(
         sql += f" LIMIT {int(limit)}"
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
+        _refuse_newer_schema(conn, db)
         rows = conn.execute(sql, args).fetchall()
     except sqlite3.Error as exc:
         raise EventStoreUnavailable(f"event store unreadable at {db}: {exc}") from exc
@@ -197,6 +214,7 @@ def gc_ephemeral(
     cutoff_ms = (now_ms if now_ms is not None else _now_ms()) - horizon * 3_600_000
     conn = sqlite3.connect(f"file:{db}?mode=rw", uri=True)
     try:
+        _refuse_newer_schema(conn, db)
         scanned, malformed = conn.execute(
             "SELECT count(*), coalesce(sum(reject_reason IS NOT NULL), 0) FROM events"
         ).fetchone()

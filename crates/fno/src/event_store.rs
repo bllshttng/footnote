@@ -254,7 +254,21 @@ pub fn open_read(store: &Path) -> Result<Connection, String> {
         .map_err(|e| format!("{}: {e}", store.display()))?;
     conn.busy_timeout(Duration::from_secs(5))
         .map_err(|e| e.to_string())?;
+    refuse_newer_schema(&conn, store)?;
     Ok(conn)
+}
+
+fn refuse_newer_schema(conn: &Connection, store: &Path) -> Result<i64, String> {
+    let current = conn
+        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+        .map_err(|e| format!("{}: schema version unreadable: {e}", store.display()))?;
+    if current > SCHEMA_VERSION {
+        return Err(format!(
+            "events store schema v{current} is newer than this build understands (v{SCHEMA_VERSION}); upgrade fno before touching {}",
+            store.display()
+        ));
+    }
+    Ok(current)
 }
 
 const EVENTS_V2_COLUMNS: &str = "(\
@@ -288,11 +302,8 @@ CREATE INDEX IF NOT EXISTS events_retention_ts ON events(retention_class, ts_ms)
 /// place; a v2 store is a no-op. Any failure rolls the transaction back, so
 /// `user_version`, row counts, and completion metadata are untouched.
 pub fn ensure_schema(conn: &mut Connection, store: &Path) -> Result<(), String> {
-    let already_v2: bool = conn
-        .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
-        .map(|v| v >= SCHEMA_VERSION)
-        .unwrap_or(false)
-        && events_table_has_event_id(conn);
+    let current = refuse_newer_schema(conn, store)?;
+    let already_v2: bool = current >= SCHEMA_VERSION && events_table_has_event_id(conn);
     if already_v2 {
         return Ok(());
     }

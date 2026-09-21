@@ -358,6 +358,37 @@ fn v1_store_migrates_in_place_oldest_first() {
 }
 
 #[test]
+fn future_schema_is_refused_by_writers_and_readers_without_downgrade() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    let store = store_path(&live);
+    let conn = Connection::open(&store).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TABLE events {EVENTS_V2_COLUMNS}; PRAGMA user_version = {};",
+        SCHEMA_VERSION + 1
+    ))
+    .unwrap();
+    drop(conn);
+
+    let line = checkin("2026-09-10T12:00:00Z", "x-aaaa", "future").to_string();
+    let write_error = append_envelope(&live, &line, None).unwrap_err();
+    assert!(write_error.contains("newer than this build understands"));
+
+    let read_error = query_events(&live, &EventQuery::default()).unwrap_err();
+    assert!(read_error.contains("newer than this build understands"));
+
+    let conn = Connection::open(&store).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, SCHEMA_VERSION + 1);
+    let rows: i64 = conn
+        .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 0);
+}
+
+#[test]
 fn identity_columns_extract_from_envelope_data() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");

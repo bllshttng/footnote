@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import multiprocessing
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -287,6 +288,30 @@ def test_edge_events_file_auto_created(tmp_path: Path) -> None:
     emit_event("phase_init", {}, state_path=state_file, events_path=events_file)
     assert store_db_path(events_file).exists()
     assert len(read_events(events_file)) == 1
+
+
+@pytest.mark.parametrize("operation", ["read", "query", "gc"])
+def test_newer_store_schema_is_refused(tmp_path: Path, operation: str) -> None:
+    from fno.events import store_client
+
+    events = tmp_path / "events.jsonl"
+    db = store_client.store_db_path(events)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE events (line TEXT, type TEXT, session_id TEXT, ts_ms INTEGER, "
+        "reject_reason TEXT, retention_class TEXT)"
+    )
+    conn.execute(f"PRAGMA user_version = {store_client.STORE_SCHEMA_VERSION + 1}")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(store_client.EventStoreUnavailable, match="newer than this build"):
+        if operation == "read":
+            store_client.read_committed_lines(events)
+        elif operation == "query":
+            store_client.query_rows(events)
+        else:
+            store_client.gc_ephemeral(events)
 
 
 def test_edge_nonce_is_32_hex_chars(tmp_path: Path) -> None:
