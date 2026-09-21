@@ -7861,8 +7861,8 @@ mod tests;
 // Declared beside tests (not inside daemon_tests.rs): that aggregator is
 // over the file budget and may only shrink.
 #[cfg(test)]
-#[path = "daemon/tests/pid_zombie_tests.rs"]
-mod pid_zombie_tests;
-#[cfg(test)]
 #[path = "daemon/tests/adopt_pin_tests.rs"]
 mod adopt_pin_tests;
+#[cfg(test)]
+#[path = "daemon/tests/pid_zombie_tests.rs"]
+mod pid_zombie_tests;
