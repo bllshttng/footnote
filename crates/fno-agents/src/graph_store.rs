@@ -2567,6 +2567,24 @@ pub fn read_pr_rows(path: &Path, pr: Option<i64>) -> Result<Vec<Value>, StoreErr
     Ok(rows)
 }
 
+/// The strict rows read: an absent json store is `Err`, never an empty
+/// answer. Territory's boundary contract reads through it ("an unreadable
+/// graph is unknown, never an empty list"); the soft [`read_rows`] would
+/// turn a missing file into zero rows and let resolve assert territory no
+/// store recognizes. Under sqlite the store's own errors surface unchanged.
+pub fn read_rows_strict(path: &Path) -> Result<Vec<Value>, StoreError> {
+    if crate::backlog::backend(path) == crate::backlog::Backend::Sqlite {
+        return crate::backlog::read_entries(path).map_err(StoreError::Sqlite);
+    }
+    if !path.exists() {
+        return Err(StoreError::Unreadable(
+            path.display().to_string(),
+            "no such file".to_string(),
+        ));
+    }
+    read_json_leg(path, false, false)
+}
+
 /// The optimistic mutation cycle every whole-graph writer shares: stamp a
 /// base, read fresh rows, apply, publish over that base, and retry the whole
 /// cycle on [`StoreError::Conflict`] or [`StoreError::LockTimeout`]. `apply`

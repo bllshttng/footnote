@@ -546,12 +546,13 @@ fn normalize_path(raw: &str) -> String {
 }
 
 /// Graph entries at the resolved graph store, or the unknown naming the
-/// read. Through the backend switch (`graph_store::read_rows`): under
-/// sqlite the file is a frozen mirror, and a boundary answered from it
-/// asserts territory the store does not recognize.
+/// read. Through the backend switch (`graph_store::read_rows_strict`):
+/// under sqlite the file is a frozen mirror, and a boundary answered from
+/// it asserts territory the store does not recognize. Strict, because an
+/// unreadable graph is unknown, never an empty list.
 pub(crate) fn graph_entries(config_cwd: &Path) -> Result<Vec<Value>, TerritoryUnknown> {
     let path = graph_json_path(config_cwd);
-    crate::graph_store::read_rows(&path).map_err(|e| {
+    crate::graph_store::read_rows_strict(&path).map_err(|e| {
         TerritoryUnknown(format!(
             "territory: graph unreadable ({}): {e}",
             path.display()
