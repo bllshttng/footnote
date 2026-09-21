@@ -57,6 +57,6 @@ Judgment runs on this session's own model. No profile, no spawned reviewer, no P
 
 - Operator is a residual classification, not a witnessed one: claude records no positive typed-turn marker, so a turn counts as operator after every injected shape fails to match. The mux `operator_submit` event is the designed close for this; until it lands, a session driven from a bare terminal can still misattribute injected text that matches no known envelope shape.
 - The relay delivered-check is a substring read: a bus body that appears verbatim in the transcript through some other channel reads as delivered even if the mail never landed in this session's turn flow.
-- Opencode sessions are folded now. Their operator class is the same residual as claude's (no positive typed-turn marker), subagent child sessions carry a `parent_id` and are excluded, and `skipped.opencode` appears only when no store is readable.
+- Opencode sessions are folded now. Their operator class is the same residual as claude's (no positive typed-turn marker). Subagent child sessions carry a `parent_id` and are excluded. When no store is readable, `skipped.opencode` names the reason.
 
 - Full list: [LIMITATIONS.md](LIMITATIONS.md).
