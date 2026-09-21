@@ -2299,25 +2299,6 @@ fn apply_op_impl(entries: &mut Vec<Value>, name: &str, p: &Value) -> Result<Valu
             }
             Ok(json!({"applied": applied}))
         }
-        "append_progress_note" => {
-            let node_id = param_str(p, "node_id")?;
-            let note = p.get("note").cloned().unwrap_or(Value::Null);
-            let mut found = false;
-            let mut plan_path = Value::Null;
-            if let Some(idx) = find_exact(entries, node_id) {
-                let obj = entries[idx].as_object_mut().unwrap();
-                let notes = obj
-                    .entry("progress_notes".to_string())
-                    .or_insert_with(|| Value::Array(vec![]));
-                if !notes.is_array() {
-                    *notes = Value::Array(vec![]);
-                }
-                notes.as_array_mut().unwrap().push(note.clone());
-                plan_path = obj.get("plan_path").cloned().unwrap_or(Value::Null);
-                found = true;
-            }
-            Ok(json!({"found": found, "plan_path": plan_path}))
-        }
         "append_encounter" => {
             let node_id = param_str(p, "node_id")?;
             let record = p

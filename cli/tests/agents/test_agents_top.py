@@ -576,6 +576,25 @@ def test_an_unreadable_lane_count_is_never_rendered_as_zero(monkeypatch, runner)
     assert "SOURCE" in result.output
 
 
+def test_lane_metadata_is_not_rendered_as_a_provider(monkeypatch):
+    from fno.agents import top as top_mod
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.probe_capacity",
+        lambda *a, **k: {
+            "verdict": "accepted",
+            "lanes": {
+                "zai": {"cap": 7, "live": 3, "counted": []},
+                "quota_source": "snapshot",
+            },
+        },
+    )
+
+    rows = top_mod.lane_rows()
+
+    assert [row["provider"] for row in rows] == ["zai"]
+
+
 def test_an_unanswered_probe_renders_the_lane_block_unreadable(monkeypatch, runner):
     """AC4-ERR (x-6089): an unknown probe verdict is an unreadable lane block,
     never an empty fleet that reads as room to spawn."""

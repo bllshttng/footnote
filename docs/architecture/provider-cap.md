@@ -17,6 +17,8 @@ For each registry row the snapshot reads:
 
 A lane is `open` at `quorum` capped members (default 2). One capped member plus the account's runtime-state lock also opens it. The reset epoch comes from that record. A lane with no reset prints `reset=unknown`. An account missing `reset_timezone` is named on every read.
 
+A lane with no member whose tail was read, and no health lock, reads `unmeasured`, and nothing acts on it.
+
 ## Leaving
 
 Decision ladder per open lane:

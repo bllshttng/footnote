@@ -443,7 +443,7 @@ def note_evidence(
 
 def unmeasured_note_warning(claims: "list[str]") -> str:
     return (
-        f"note appended with an unmeasured code fact ('{claims[0]}'): a reader "
+        f"note recorded with an unmeasured code fact ('{claims[0]}'): a reader "
         "cannot tell measured from assumed. Attach --read <command> - it runs "
         "at record time and its output is stored; pair a zero with a control."
     )
@@ -467,8 +467,8 @@ def warn_if_note_is_long(text: str, *, stream: Any = sys.stderr) -> None:
     if count <= cap * 4:
         return
     print(
-        f"note appended ({count} words). Long evidence belongs in a plan doc; "
-        "a note carrying a path is cheaper for every later reader.",
+        f"note recorded ({count} words). Long evidence belongs in a plan "
+        "doc; a note carrying a path is cheaper for every later reader.",
         file=stream,
     )
 

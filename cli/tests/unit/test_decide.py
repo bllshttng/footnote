@@ -3763,3 +3763,24 @@ def test_a_subject_query_reads_the_graph_once(
 
     assert result.exit_code == 0, result.output
     assert calls["soft"] == 1, calls
+
+
+def test_note_receipt_says_recorded_never_appended() -> None:
+    """The note verb REPLACES current_state; no runtime string may say appended.
+
+    Measured 2026-09-20: the false word made two kings stack-write one
+    node believing notes appended; the help already says REPLACING.
+    """
+    import io
+
+    from fno.decide import unmeasured_note_warning, warn_if_note_is_long
+
+    warning = unmeasured_note_warning(["x = compute()"])
+    assert "appended" not in warning
+    assert "recorded" in warning
+
+    stream = io.StringIO()
+    warn_if_note_is_long(" ".join(["word"] * 400), stream=stream)
+    printed = stream.getvalue()
+    assert "appended" not in printed
+    assert "recorded" in printed
