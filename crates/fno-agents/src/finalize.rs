@@ -3118,6 +3118,18 @@ fn append_corrections_pointer(home: Option<&Path>, postmortem: &Path, reason: &s
         Some(p) => p,
         None => return,
     };
+    // Fixture guard: a postmortem outside the postmortems root of
+    // the home this log resolved through is a unit-test temp dir that fell
+    // through the ladder - 360 of 418 live rows. Refuse at the one writer
+    // rather than filtering in every reader. The FNO_HOME read stays HERE
+    // (one carrier of the ladder, per the reachable-paths twin baseline);
+    // the predicate itself reads no environment. It gates BEFORE creation:
+    // a refused row must not materialize an empty log either.
+    let fno_home = std::env::var_os("FNO_HOME").map(PathBuf::from);
+    let pm_root = crate::real_session::postmortems_root_for_home(fno_home.as_deref(), home);
+    if !crate::real_session::is_real_run(pm_root.as_deref(), postmortem) {
+        return;
+    }
     if !log.is_file() {
         // Create at 0600 rather than drop the row. create_new keeps the
         // mode decision on the creator: an existing file (or a losing
@@ -4185,7 +4197,7 @@ mod tests {
         std::env::set_var("FNO_HOME", &fno_home);
         append_corrections_pointer(
             Some(&unused_home),
-            Path::new("/tmp/pm.md"),
+            &fno_home.join("postmortems/pm.md"),
             "Budget",
             "detail",
         );
@@ -4212,7 +4224,12 @@ mod tests {
 
         std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
         std::env::remove_var("FNO_HOME");
-        append_corrections_pointer(Some(&home), Path::new("/tmp/pm.md"), "NoProgress", "d");
+        append_corrections_pointer(
+            Some(&home),
+            &home.join(".fno/postmortems/pm.md"),
+            "NoProgress",
+            "d",
+        );
 
         let contents = fs::read_to_string(&log_path).unwrap();
         assert!(contents.contains("target-postmortem"), "{contents}");
@@ -4220,10 +4237,43 @@ mod tests {
     }
 
     #[test]
+    fn corrections_pointer_refuses_temp_dir_postmortem() {
+        // AC1-EDGE: the 360-fixture-row shape. A postmortem under a per-test
+        // temp dir with the log resolved through a real home appends NOTHING;
+        // the log must be byte-identical afterwards. Uses a sibling of the
+        // accepted root, not a /tmp name match (AC1-ERR).
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fno_home = std::env::temp_dir().join(format!("fin-corr-fx-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("fin-corr-fxh-{}", std::process::id()));
+        let _ = fs::create_dir_all(&fno_home);
+        let _ = fs::create_dir_all(&home);
+        let log_path = fno_home.join("corrections.log");
+        fs::write(&log_path, "").unwrap();
+        let fixture_pm = fno_home.join("pm-sibling-not-postmortems").join("pm.md");
+
+        std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
+        std::env::set_var("FNO_HOME", &fno_home);
+        append_corrections_pointer(Some(&home), &fixture_pm, "NoProgress", "d");
+        std::env::remove_var("FNO_HOME");
+
+        let contents = fs::read_to_string(&log_path).unwrap();
+        assert!(
+            contents.is_empty(),
+            "fixture postmortem must not append: {contents}"
+        );
+        let _ = fs::remove_dir_all(&fno_home);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn corrections_pointer_creates_absent_log_at_0600() {
         // A termination against a home with no corrections.log yields a
         // one-row log at 0600 instead of a dropped row; a second
-        // termination appends without rewriting the mode.
+        // termination appends without rewriting the mode. The postmortem
+        // sits under the real postmortems root so the fixture guard lets
+        // it through.
         use std::os::unix::fs::PermissionsExt;
         let _guard = crate::claims::test_env_lock()
             .lock()
@@ -4231,20 +4281,25 @@ mod tests {
         let home = std::env::temp_dir().join(format!("fin-corr-create-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
         let fno_dir = home.join(".fno");
-        fs::create_dir_all(&fno_dir).unwrap();
+        let pm_dir = fno_dir.join("postmortems");
+        fs::create_dir_all(&pm_dir).unwrap();
+        let real_pm = pm_dir.join("pm-x.md");
+        fs::write(&real_pm, "postmortem").unwrap();
         let log_path = fno_dir.join("corrections.log");
 
         std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
         std::env::remove_var("FNO_HOME");
-        append_corrections_pointer(Some(&home), Path::new("/tmp/pm-x.md"), "NoProgress", "s");
+        append_corrections_pointer(Some(&home), &real_pm, "NoProgress", "s");
 
         let contents = fs::read_to_string(&log_path).unwrap();
         assert!(contents.contains("target-postmortem"), "{contents}");
-        assert!(contents.contains("/tmp/pm-x.md"), "{contents}");
+        assert!(contents.contains("pm-x.md"), "{contents}");
         let mode = fs::metadata(&log_path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "mode {:o}", mode);
 
-        append_corrections_pointer(Some(&home), Path::new("/tmp/pm-y.md"), "Budget", "d");
+        let real_pm2 = pm_dir.join("pm-y.md");
+        fs::write(&real_pm2, "postmortem").unwrap();
+        append_corrections_pointer(Some(&home), &real_pm2, "Budget", "d");
         let contents = fs::read_to_string(&log_path).unwrap();
         assert_eq!(contents.lines().count(), 2, "{contents}");
         let mode = fs::metadata(&log_path).unwrap().permissions().mode();

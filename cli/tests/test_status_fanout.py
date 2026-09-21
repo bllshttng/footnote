@@ -873,11 +873,22 @@ def test_backlog_note_cli_verb(tmp_graph, monkeypatch):
     payload = _json.loads(res.stdout)
     assert payload["id"] == "x-9" and payload["text"] == "shipped wave 1"
     assert payload["routed"] == "state" and payload["revision"] == 1
+    assert payload["replaced"] is None
     node = _json.loads(tmp_graph.read_text())["entries"][0]
     state = node["current_state"]
     assert state["body"] == "shipped wave 1"
     assert state["source_session_id"] == session_id
     assert state["source_harness"] is None
+    # A second note names the state it just replaced.
+    res = CliRunner().invoke(
+        app, ["backlog", "note", "x-9", "shipped wave 2", "-J", "-q"],
+        catch_exceptions=False,
+    )
+    assert res.exit_code == 0
+    payload = _json.loads(res.stdout)
+    assert payload["revision"] == 2
+    assert payload["replaced"]["revision"] == 1
+    assert payload["replaced"]["source_session_id"] == session_id
 
 
 def test_backlog_note_is_visible_and_preserves_details_and_prior_notes(tmp_graph):
