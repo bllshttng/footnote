@@ -1782,13 +1782,11 @@ def _run_changed(root: Path, opts: dict, env: dict) -> int:
     # see NO checkout fno-agents binary so the @requires_rust parity tests skip,
     # as they do in CI. The claim door is preserved outside target/ first.
     if any(n.startswith("Pytest (changed subset") for n, _, _ in steps):
-        if _RUST_BUILD_STEP in {name for name, _, _ in steps}:
-            # The changed-smoke job has Rust but no setup build. Its selected
-            # build step must run before claim tests, so keep the target path
-            # present and pin the door at the fresh build.
-            _pin_claim_door(env, root / "crates/fno-agents/target/debug/fno-agents")
-        else:
-            _preserve_claim_door(root, env)
+        # The door always reads a sandbox COPY: a build-dir override in the
+        # packet's build step, or a later scrub, must not strand the claim
+        # consumers the way a direct target/ pin did.
+        _preserve_claim_door(root, env)
+        if _RUST_BUILD_STEP not in {name for name, _, _ in steps}:
             _scrub_target_bins(root)
 
     e0 = time.monotonic()
