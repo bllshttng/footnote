@@ -741,13 +741,11 @@ def _commit_snapshot(client, snap: dict, base_entries: list[dict], entries: list
                      plan_rungs: dict, attempt: int) -> dict:
     if _graph_commit_mode() == "rows":
         diff = _row_diff(base_entries, entries)
-        digests = snap.get("base_digests")
-        if diff is not None and isinstance(digests, dict):
+        if diff is not None:
             changed, removed = diff
             try:
                 return client.request("commit_rows", {
                     "base_version": snap["version"],
-                    "base_digests": digests,
                     "base_plan_rungs": _plan_rung_map(base_entries),
                     "changed": changed,
                     "removed": removed,
@@ -1415,6 +1413,9 @@ def _emit_graph_tx_event(**data: Any) -> None:
     try:
         from fno.events import _build, append_event
 
+        session = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
+        if session:
+            data["session_id"] = session
         append_event(_build("graph_tx_conflict", "python", data))
     except Exception:  # noqa: BLE001 - telemetry never changes a store outcome
         pass
@@ -1454,13 +1455,17 @@ def commit_rows_via_store(path: Path, mutator) -> list[dict]:
                 exc.args = (f"graph store unavailable ({exc.state}): {exc.detail}",)
             raise
         except _Conflict as conflict:
+            diff = _row_diff(base_entries, entries)
+            touched = ([r["id"] for r in diff[0]] + diff[1]) if diff else []
             _emit_graph_tx_event(
                 attempt=attempt + 1,
                 attempts_max=_TX_ATTEMPTS,
                 entries=len(entries),
                 exhausted=attempt == _TX_ATTEMPTS - 1,
                 graph_path=str(path),
+                touched=touched,
             )
+            print(f"graph conflict: retrying {attempt + 1}/{_TX_ATTEMPTS} {path}", file=sys.stderr)
             if attempt == _TX_ATTEMPTS - 1:
                 detail = str(conflict)
                 if detail.startswith("graph conflict on "):
@@ -1468,7 +1473,7 @@ def commit_rows_via_store(path: Path, mutator) -> list[dict]:
                         f"{detail} after {_TX_ATTEMPTS} attempts at {path}"
                     ) from None
                 raise RuntimeError(
-                    f"graph mutated under us {_TX_ATTEMPTS} times at {path}; retrying stopped"
+                    f"graph mutated under us {_TX_ATTEMPTS} times at {path}; nothing was written, retry when the fleet quiets"
                 ) from None
             # Full jitter between attempts: the colliding writers all woke at
             # the same instant, so a fixed delay would only line them up again.

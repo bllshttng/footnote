@@ -28,6 +28,16 @@ class _FakeClient:
     def request(self, verb: str, payload: dict[str, Any]) -> dict[str, Any]:
         if verb == "begin":
             return {"version": "v1", "entries": self.entries}
+        if verb == "commit_rows":
+            self.commits += 1
+            if self.commits <= self.conflicts:
+                raise store._Conflict()
+            return {
+                "dropped": 0,
+                "backup": None,
+                "closure_releases": [],
+                "entries": payload["changed"],
+            }
         if verb == "commit":
             self.commits += 1
             if self.commits <= self.conflicts:
@@ -147,3 +157,64 @@ def test_an_unwritable_journal_never_changes_the_outcome(
     )
 
     assert store.locked_mutate_graph(g, lambda entries: entries) == []
+
+
+class _RowsConflictClient:
+    """begin serves named rows; the first `conflicts` commit_rows raise."""
+
+    def __init__(self, conflicts: int, entries: list[dict[str, Any]]):
+        self.conflicts = conflicts
+        self.entries = entries
+        self.attempts = 0
+
+    def request(self, verb: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if verb == "begin":
+            return {"version": "v1", "entries": [dict(row) for row in self.entries]}
+        if verb == "commit_rows":
+            self.attempts += 1
+            if self.attempts <= self.conflicts:
+                raise store._Conflict("graph conflict on n1")
+            changed_ids = {row["id"] for row in payload["changed"]}
+            kept = [row for row in self.entries if row["id"] not in changed_ids]
+            return {"entries": [*kept, *payload["changed"]]}
+        raise AssertionError(f"unexpected verb {verb}")
+
+
+def _retitled(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    entries[0]["title"] = "after"
+    return entries
+
+
+def test_a_retrying_write_speaks_on_stderr(
+    tmp_path: Path, journal: list, tx, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC8: one stderr attempt line per conflict, so a caller killed
+    mid-retry by a timeout or a pipe still has a transcript."""
+    sleeps, install = tx
+    g = _graph(tmp_path)
+    install(_RowsConflictClient(conflicts=2, entries=[{"id": "n1", "title": "before"}]), g)
+
+    store.locked_mutate_graph(g, _retitled)
+
+    err = capsys.readouterr().err
+    assert "retrying 1/5" in err, err
+    assert "retrying 2/5" in err, err
+    assert len(sleeps) == 2
+
+
+def test_a_conflict_event_names_its_nodes_and_session(
+    tmp_path: Path, journal: list, tx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC9: the emitted row carries the touched ids and the session id, so
+    two concurrent chains in one journal can be told apart."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-test-1")
+    sleeps, install = tx
+    g = _graph(tmp_path)
+    install(_RowsConflictClient(conflicts=1, entries=[{"id": "n1", "title": "before"}]), g)
+
+    store.locked_mutate_graph(g, _retitled)
+
+    rows = _conflicts(journal)
+    assert len(rows) == 1, rows
+    assert rows[0]["data"]["touched"] == ["n1"], rows
+    assert rows[0]["data"]["session_id"] == "sess-test-1", rows
