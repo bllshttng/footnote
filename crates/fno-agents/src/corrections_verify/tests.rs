@@ -218,6 +218,57 @@ fn since_bounds_the_corrections_considered() {
 }
 
 #[test]
+fn windows_select_by_ts_not_by_session_id() {
+    // Session ids that sort OPPOSITE to their timestamps: if the ends map
+    // leaks its id order into the window slice, the wrong sessions land in
+    // the before/after windows.
+    let dir = temp_dir("tsorder");
+    let log = dir.join("corrections.log");
+    let events = dir.join("events.jsonl");
+    std::fs::write(
+        &log,
+        "2026-09-10T12:00:00Z | S1 | git-rule-edit | rules/order.md | ts order\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &events,
+        [
+            // ts order: z first (stuck), then a, b, c clean, then the
+            // correction, then clean d, e, f and stuck g LAST.
+            termination("z9", "2026-09-01T10:00:00Z", "NoProgress"),
+            termination("a1", "2026-09-02T10:00:00Z", "DonePRGreen"),
+            termination("b2", "2026-09-03T10:00:00Z", "DonePRGreen"),
+            termination("c3", "2026-09-04T10:00:00Z", "DonePRGreen"),
+            termination("d4", "2026-09-20T10:00:00Z", "DonePRGreen"),
+            termination("e5", "2026-09-21T10:00:00Z", "DonePRGreen"),
+            termination("f6", "2026-09-22T10:00:00Z", "DonePRGreen"),
+            termination("g7", "2026-09-23T10:00:00Z", "Budget"),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let verdicts = score(
+        &read_corrections(
+            &std::fs::read_to_string(&log).unwrap(),
+            parse_ts("2026-01-01T00:00:00Z").unwrap(),
+        ),
+        &read_sessions(&std::fs::read_to_string(&events).unwrap()),
+    );
+    let v = &verdicts[0];
+    // before = {a1, b2, c3} (0.0), NOT {z9, a1, b2} id-sorted; after =
+    // {d4, e5, f6} (0.0), NOT the id-first {d4, e5, f6}... either way after
+    // is clean; before must read 0.0 only if z9 (stuck, id-last) is
+    // excluded by ts.
+    assert_eq!((v.sessions_before, v.sessions_after), (3, 3), "{v:?}");
+    assert_eq!(v.before, 0.0, "z9 (09-01) must not sit in the window head");
+    assert_eq!(v.after, 0.0);
+    // ratio 1.0 on two clean windows is flat, never improved: the stuck z9
+    // session leaking into `before` would fake an improvement.
+    assert_eq!(v.verdict, "flat", "{v:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn missing_files_score_nothing_and_exit_zero() {
     let dir = temp_dir("missing");
     let code = run(&[

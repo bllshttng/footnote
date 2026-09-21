@@ -157,13 +157,19 @@ fn read_sessions(events: &str) -> Vec<SessionEnd> {
             _ => {}
         }
     }
-    ends.into_iter()
+    // window_mean slices the head/tail by ts, so return ends in ts order;
+    // the BTreeMap above iterates by session id, which correlates with
+    // nothing.
+    let mut out: Vec<SessionEnd> = ends
+        .into_iter()
         .map(|(session_id, (ts, stuck))| SessionEnd {
             ts,
             stuck,
             blocks: blocks.get(&session_id).copied().unwrap_or(0),
         })
-        .collect()
+        .collect();
+    out.sort_by_key(|s| s.ts);
+    out
 }
 
 fn friction(s: &SessionEnd) -> f64 {
