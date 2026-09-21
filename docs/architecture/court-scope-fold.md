@@ -89,7 +89,7 @@ A node counts as stuck under exactly these rules, with the threshold at 60 minut
 
 A node is counted ONCE. An L1 crown folds the nodes its L2 epics also fold. An overlapping node therefore reaches the verdict once per crown covering it. Counting it twice reports more stuck work than exists. Several crowns failing the same way is one fault and prints one line.
 
-Each fold also carries its own verdict at `scope_nodes[<scope>].stuck`, computed by the same function over that fold alone, so a scope's answer lives beside the rows it judges and no second reader can disagree about what a row means. The per-scope verdict does not dedupe across crowns, because it judges only its own fold. The top-level `stuck` still counts a node once across all of them. The two answer different questions. A fold whose `status` is not `ok` yields a per-scope verdict with a populated `blind` list and an empty `unclaimed`: for a reader of that scope alone that is a fail-closed marker, never a clean board.
+Each fold also carries its own verdict at `scope_nodes[<scope>].stuck`. It is computed by the same function over that fold alone, so a scope's answer lives beside the rows it judges. No second reader can disagree about what a row means. The per-scope verdict does not dedupe across crowns, because it judges only its own fold. The top-level `stuck` still counts a node once across all of them. The two answer different questions. A fold whose `status` is not `ok` yields a per-scope verdict with a populated `blind` list and an empty `unclaimed`. For a reader of that scope alone that is a fail-closed marker, never a clean board.
 
 A clause names five ids and then counts the rest, because a live court put 40 ids in one clause. The full list stays in the JSON.
 
