@@ -3291,9 +3291,10 @@ MemAvailable:    8000000 kB\n";
         }
     }
 
-    /// Junk, an admission-less payload, and no payload at all all refuse as
-    /// the unreadable instrument (LD3) - never as an idle machine; the
-    /// probe's own failure words travel into the sentence.
+    /// Junk, an admission-less payload, an answered failure, and no payload
+    /// at all all refuse as the unreadable instrument (LD3) - never as an
+    /// idle machine; the probe's own failure words travel into the sentence
+    /// and the sentence names the verb that re-reads the instrument.
     #[test]
     fn junk_and_admission_less_payloads_refuse_as_unreadable() {
         let cases = [
@@ -3302,6 +3303,12 @@ MemAvailable:    8000000 kB\n";
             (Some("not json"), None),
             (
                 Some(r#"{"fleet_cpu_cores":0.79,"cpu_capacity_cores":12}"#),
+                None,
+            ),
+            (
+                Some(
+                    r#"{"error":"footprint unavailable: worker root liveness unavailable: registry row w1 carries no pid start token","exit_code":4}"#,
+                ),
                 None,
             ),
         ];
@@ -3313,6 +3320,18 @@ MemAvailable:    8000000 kB\n";
             assert!(
                 cpu.payload.reason.contains("--force to bypass"),
                 "{payload:?}"
+            );
+            if let Some(probe_words) = err {
+                assert!(
+                    cpu.payload.reason.contains(probe_words),
+                    "{}",
+                    cpu.payload.reason
+                );
+            }
+            assert!(
+                cpu.payload.reason.contains("fno doctor footprint"),
+                "{}",
+                cpu.payload.reason
             );
         }
     }
@@ -3340,6 +3359,11 @@ MemAvailable:    8000000 kB\n";
         }
         assert_eq!(fields["detail"], cpu.payload.reason);
         assert_eq!(fields["bound"], "exact");
+        assert!(
+            cpu.payload.reason.contains("fno doctor footprint"),
+            "{}",
+            cpu.payload.reason
+        );
     }
 
     /// The periodic held reprint prints the payload's holder clause

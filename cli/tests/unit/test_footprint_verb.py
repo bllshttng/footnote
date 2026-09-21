@@ -199,18 +199,25 @@ def test_live_root_pids_includes_live_detached_opencode_serve(monkeypatch, tmp_p
     (tmp_path / "opencode-serve.json").write_text(
         json.dumps({"pid": 901, "pid_start": 123}), encoding="utf-8"
     )
-    assert doctor_footprint._live_shared_serve_root_pids() == (
-        set(),
-        "shared serve root liveness unavailable",
-    )
+    err = doctor_footprint._live_shared_serve_root_pids()[1]
+    assert err is not None and err.startswith("shared serve root liveness unavailable: ")
+    assert "pid 901" in err and "start time could not be read" in err, err
 
     (tmp_path / "opencode-serve.json").write_text(
         json.dumps({"pid": 900, "pid_start": None}), encoding="utf-8"
     )
-    assert doctor_footprint._live_shared_serve_root_pids() == (
-        set(),
-        "shared serve root liveness unavailable",
-    )
+    err = doctor_footprint._live_shared_serve_root_pids()[1]
+    assert err is not None and err.startswith("shared serve root liveness unavailable: ")
+    assert "carries no usable pid and pid_start pair" in err, err
+
+
+def _assert_named_cause(error: str, expect: str) -> None:
+    """The refusal names its own cause, not just the family."""
+    family = "worker root liveness unavailable"
+    assert error.startswith(f"{family}: "), error
+    cause = error.split(": ", 1)[1].strip()
+    assert cause, f"{error!r} carries the family word and no cause"
+    assert expect in cause, error
 
 
 def test_live_root_pids_refuses_registry_pid_without_start_token(monkeypatch) -> None:
@@ -226,10 +233,9 @@ def test_live_root_pids_refuses_registry_pid_without_start_token(monkeypatch) ->
     )
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
 
-    assert doctor_footprint._live_root_pids() == (
-        set(),
-        "worker root liveness unavailable",
-    )
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == set()
+    _assert_named_cause(error, "carries no pid start token")
 
 
 def test_live_root_pids_refuses_unknown_registry_liveness(monkeypatch) -> None:
@@ -249,10 +255,9 @@ def test_live_root_pids_refuses_unknown_registry_liveness(monkeypatch) -> None:
         lambda _pid, _start: None,
     )
 
-    assert doctor_footprint._live_root_pids() == (
-        set(),
-        "worker root liveness unavailable",
-    )
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == set()
+    _assert_named_cause(error, "start time could not be read")
 
 
 def test_live_root_pids_refuses_registered_root_that_dies_after_snapshot(monkeypatch) -> None:
@@ -276,10 +281,9 @@ def test_live_root_pids_refuses_registered_root_that_dies_after_snapshot(monkeyp
         lambda _pid: None,
     )
 
-    assert doctor_footprint._live_root_pids(snapshot_pids={902}) == (
-        set(),
-        "worker root liveness unavailable",
-    )
+    roots, error = doctor_footprint._live_root_pids(snapshot_pids={902})
+    assert roots == set()
+    _assert_named_cause(error, "is dead, sits in the ps snapshot")
 
 
 def test_live_root_pids_names_a_recycled_root_as_a_gap(monkeypatch) -> None:
@@ -335,10 +339,9 @@ def test_live_root_pids_still_refuses_when_recycling_is_unproven(monkeypatch) ->
         lambda _pid: None,
     )
 
-    assert doctor_footprint._live_root_pids(snapshot_pids={902}) == (
-        set(),
-        "worker root liveness unavailable",
-    )
+    roots, error = doctor_footprint._live_root_pids(snapshot_pids={902})
+    assert roots == set()
+    _assert_named_cause(error, "recycling is unproven")
 
 
 def test_live_root_pids_skips_recycled_terminal_root(monkeypatch) -> None:
@@ -408,10 +411,10 @@ def test_live_root_pids_refuses_completed_root_that_matches_snapshot(monkeypatch
         lambda _pid: None,
     )
 
-    assert doctor_footprint._live_root_pids(snapshot_pids={902}) == (
-        set(),
-        "worker root liveness unavailable",
-    )
+    roots, error = doctor_footprint._live_root_pids(snapshot_pids={902})
+    assert roots == set()
+    _assert_named_cause(error, "terminal row")
+    _assert_named_cause(error, "recycling is unproven")
 
 
 def test_live_root_pids_refuses_terminal_root_cleared_after_snapshot(monkeypatch) -> None:
@@ -428,12 +431,11 @@ def test_live_root_pids_refuses_terminal_root_cleared_after_snapshot(monkeypatch
     )
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
 
-    assert doctor_footprint._live_root_pids(
+    roots, error = doctor_footprint._live_root_pids(
         snapshot_pids={902}, snapshot_at=0.0
-    ) == (
-        set(),
-        "worker root liveness unavailable",
     )
+    assert roots == set()
+    _assert_named_cause(error, "exited inside the ps snapshot's second")
 
 
 def test_live_root_pids_ignores_checked_stamp_on_terminal_root(monkeypatch) -> None:
@@ -541,10 +543,11 @@ def test_shared_serve_root_refuses_root_that_dies_after_snapshot(monkeypatch, tm
         lambda _pid, _start: False,
     )
 
-    assert doctor_footprint._live_shared_serve_root_pids(snapshot_pids={900}) == (
-        set(),
-        "shared serve root liveness unavailable",
-    )
+    roots, err = doctor_footprint._live_shared_serve_root_pids(snapshot_pids={900})
+    assert roots == set()
+    assert err is not None and err.startswith("shared serve root liveness unavailable: ")
+    assert "pid 900 is dead, sits in the ps snapshot" in err, err
+    assert "recycling is unproven" in err, err
 
 
 def test_live_root_pids_refuses_unavailable_pidless_worker_discovery(monkeypatch) -> None:
@@ -781,7 +784,64 @@ def test_live_root_pids_suppresses_on_a_roster_held_row_with_a_dead_pid(
 
     roots, error = doctor_footprint._live_root_pids()
     assert roots == set()
-    assert error == "worker root liveness unavailable"
+    _assert_named_cause(error, "roster-resolved pid 404")
+
+
+def test_live_root_pids_refuses_a_socket_resolved_root_whose_start_is_unreadable(
+    monkeypatch,
+) -> None:
+    """The socket map answers with a pid whose start time cannot be read:
+    the liveness oracle returns None and the refusal names the door."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="deadbee",
+        name="socketed",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: {"deadbee": 404},
+    )
+    monkeypatch.setattr(doctor_footprint, "_root_pid_is_live", lambda pid, start: None)
+
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == set()
+    _assert_named_cause(error, "socket-resolved pid 404 start time could not be read")
+
+
+def test_live_root_pids_refuses_a_socket_resolved_root_that_is_dead(
+    monkeypatch,
+) -> None:
+    """A socket-resolved pid that is readably dead refuses with its own
+    cause, distinct from the unreadable-start arm above."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="deadbee",
+        name="socketed",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: {"deadbee": 404},
+    )
+    monkeypatch.setattr(doctor_footprint, "_root_pid_is_live", lambda pid, start: False)
+
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == set()
+    _assert_named_cause(error, "socket-resolved pid 404 for row socketed is not live")
+    assert "start time could not be read" not in error
 
 
 def test_live_root_pids_drops_unrouted_row_with_expired_claim(monkeypatch) -> None:
@@ -962,7 +1022,7 @@ def test_live_root_pids_refuses_a_resolved_codex_root_that_is_dead(monkeypatch) 
 
     roots, error = doctor_footprint._live_root_pids()
     assert roots == set()
-    assert error == "worker root liveness unavailable"
+    _assert_named_cause(error, "codex rollout root pid 907")
 
 
 def test_live_root_pids_spares_an_advancing_row_and_names_only_the_silent_one(
