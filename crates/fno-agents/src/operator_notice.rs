@@ -264,6 +264,16 @@ pub(crate) fn first_seen_age_s(path: &Path, key: &str, now: u64) -> Option<u64> 
     Some(age_seconds(ts, now))
 }
 
+/// The stored keys carrying `prefix`, so a reader can forget the clocks of
+/// scopes that left its payload.
+pub(crate) fn keys_with_prefix(path: &Path, prefix: &str) -> Vec<String> {
+    load_store(path)
+        .keys()
+        .filter(|k| k.starts_with(prefix))
+        .cloned()
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // The notify_watch arm
 // ---------------------------------------------------------------------------

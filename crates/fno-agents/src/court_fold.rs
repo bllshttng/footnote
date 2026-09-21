@@ -348,6 +348,12 @@ fn fold_one(
 /// so an overlapping node reaches this loop once per crown covering it, and
 /// counting it twice would report more stuck work than exists.
 fn stuck_verdict(folds: &BTreeMap<String, Value>) -> Value {
+    stuck_verdict_over(folds.values())
+}
+
+/// The verdict over borrowed folds, so a per-scope caller never clones a
+/// fold to place it in a one-entry map.
+fn stuck_verdict_over<'a>(folds: impl IntoIterator<Item = &'a Value>) -> Value {
     let threshold = STUCK_AFTER_MINUTES / 60.0;
     let mut unclaimed: Vec<String> = Vec::new();
     let mut blocked: Vec<Value> = Vec::new();
@@ -355,7 +361,7 @@ fn stuck_verdict(folds: &BTreeMap<String, Value>) -> Value {
     let mut in_review: Vec<String> = Vec::new();
     let mut blind: Vec<String> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    for fold in folds.values() {
+    for fold in folds {
         if fold.get("status").and_then(|s| s.as_str()) != Some("ok") {
             // One cause is one line: several crowns failing the same way is one
             // fault, and repeating it buries the verdict.
@@ -518,9 +524,9 @@ pub(crate) fn named_ids(ids: &[String]) -> String {
 /// because the two answer different questions.
 fn with_per_scope_stuck(folds: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
     let mut out = folds;
-    for (scope, fold) in out.iter_mut() {
-        let one: BTreeMap<String, Value> = [(scope.clone(), fold.clone())].into();
-        fold["stuck"] = stuck_verdict(&one);
+    for fold in out.values_mut() {
+        let verdict = stuck_verdict_over(std::iter::once(&*fold));
+        fold["stuck"] = verdict;
     }
     out
 }

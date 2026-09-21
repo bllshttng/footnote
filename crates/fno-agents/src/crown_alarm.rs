@@ -58,6 +58,7 @@ pub fn evaluate(
         .ok_or_else(|| "the court payload carries no crowns list".to_string())?;
     let mut findings = Vec::new();
     let mut notes: Vec<String> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for crown in crowns {
         let Some(scope) = s_str(crown, "scope") else {
             continue;
@@ -82,6 +83,7 @@ pub fn evaluate(
             })
             .unwrap_or_default();
         let key = format!("crown_empty:{scope}");
+        seen.insert(key.clone());
         let empty = s_str(crown, "status") == Some("manifest-only");
         if empty && !unclaimed.is_empty() {
             let age_s = match crate::operator_notice::first_seen_age_s(store, &key, now_unix) {
@@ -114,6 +116,15 @@ pub fn evaluate(
         } else {
             // The scope stopped reading empty: recovery is the designed
             // quiet, and the next episode starts a fresh clock.
+            crate::operator_notice::forget_at(store, &key);
+        }
+    }
+    // A readable payload is the authority on which scopes exist: a clock
+    // whose scope left it is stale and would page a fresh handoff instantly.
+    // The Err paths above return before this, so a blind read erases
+    // nothing.
+    for key in crate::operator_notice::keys_with_prefix(store, "crown_empty:") {
+        if !seen.contains(&key) {
             crate::operator_notice::forget_at(store, &key);
         }
     }
@@ -349,6 +360,34 @@ mod tests {
         assert!(err.contains("the court read failed"), "{err}");
         let err = court_payload_from(true, b"not json", b"").unwrap_err();
         assert!(err.contains("did not parse"), "{err}");
+    }
+
+    #[test]
+    fn a_scope_that_leaves_a_readable_payload_drops_its_clock() {
+        let store = temp_store("vanish");
+        seed(&store, "alpha", "2026-09-04T11:30:00Z");
+        // The sweep ran and named no crowns: alpha's clock is stale.
+        let p = payload(json!([]));
+        let (findings, _) = evaluate(&p, &store, NOW).unwrap();
+        assert!(findings.is_empty());
+        let text = std::fs::read_to_string(&store).unwrap();
+        assert!(!text.contains("crown_empty:alpha"), "{text}");
+        std::fs::remove_file(&store).ok();
+    }
+
+    #[test]
+    fn a_blind_read_never_erases_a_clock() {
+        let store = temp_store("blind-keep");
+        seed(&store, "alpha", "2026-09-04T11:30:00Z");
+        let p = json!({
+            "crowns": Value::Null, "registry_readable": false,
+            "graph_readable": Value::Null,
+            "summary": {"reason": "registry unreadable: boom"},
+        });
+        assert!(evaluate(&p, &store, NOW).is_err());
+        let text = std::fs::read_to_string(&store).unwrap();
+        assert!(text.contains("crown_empty:alpha"), "{text}");
+        std::fs::remove_file(&store).ok();
     }
 
     #[test]
