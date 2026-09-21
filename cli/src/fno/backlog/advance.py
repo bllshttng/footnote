@@ -463,7 +463,6 @@ class SelectUnmeasured(RuntimeError):
 
 def _select_read(kind: str, args: list[str]) -> Any:
     from fno.rust_binary import call_binary_json
-
     error, receipt = call_binary_json("select-read", [kind, *args], timeout=None)
     if error is not None or not isinstance(receipt, dict):
         raise RuntimeError(f"select-read {kind}: {error or 'unreadable receipt'}")
