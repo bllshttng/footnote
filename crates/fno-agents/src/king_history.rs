@@ -1267,7 +1267,6 @@ mod verdict_tests {
         assert_eq!(journals.len(), 1);
     }
 
-
     #[test]
     fn scan_counts_only_current_crown_checkins_once() {
         let dir = tempfile::tempdir().unwrap();

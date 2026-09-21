@@ -85,6 +85,8 @@ inbox approvals decide !--db
 inbox approvals ls !--db
 inbox approvals show !--db
 inbox board
+inbox day end
+inbox day start
 inbox decide !--decision !--origin !--subject
 inbox decisions !--subject
 inbox law set

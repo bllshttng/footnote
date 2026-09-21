@@ -46,6 +46,7 @@ READ_ALLOWLIST = (
     "crates/fno-agents/src/prove_it_verdicts.rs",  # the verdict reader's read-only walk, same external-backend refusal as graph_get
     "crates/fno-agents/src/gc_sweep.rs",  # the retirement sweep's read-only reverse join (sessions_index + work_state)
     "crates/fno-agents/src/feed.rs",  # the activity feed's read-only lifecycle derivation
+    "crates/fno-agents/src/day.rs",  # the day readback's read-only completion join
     "crates/fno-agents/src/scratch.rs",  # the sweep's read-only node-status lookup feeding the file/fold decision
     "crates/fno-agents/src/route_slot.rs",  # the routing audit's read-only decision projection
     # Not readers: the backend machinery and its names. mod.rs labels the
