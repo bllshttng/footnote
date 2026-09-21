@@ -57,27 +57,82 @@ pub fn queue_dir_for(claim_path: &Path) -> PathBuf {
 /// putting a newcomer at the front. No clock in the counter: a clock step
 /// backwards would let a newcomer sort ahead of a waiter.
 pub fn enter(queue_dir: &Path) -> Result<Ticket, String> {
-    todo!("claim_queue::enter")
+    std::fs::create_dir_all(queue_dir)
+        .map_err(|e| format!("cannot create queue dir {}: {e}", queue_dir.display()))?;
+    let mut n = highest_ticket(queue_dir)?.map_or(1, |h| h + 1);
+    loop {
+        let candidate = queue_dir.join(format!("{n:06}"));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => {
+                let stamp = format!(
+                    "pid={}\ncreate_time={}\nhost={}\nmachine={}\nstarted={}\n",
+                    std::process::id(),
+                    crate::claims::process_create_time_ms(std::process::id() as i32).unwrap_or(0),
+                    crate::claims::hostname(),
+                    crate::claims::machine_id(),
+                    crate::claims::now_ms(),
+                );
+                return match std::fs::write(candidate.join("holder"), stamp) {
+                    Ok(()) => Ok(Ticket {
+                        dir: candidate,
+                        seq: n,
+                    }),
+                    // A ticket without a stamp is a corpse the next scan would
+                    // reap; drop it now and refuse instead.
+                    Err(e) => {
+                        let _ = std::fs::remove_dir_all(&candidate);
+                        Err(format!(
+                            "cannot stamp queue ticket at {}: {e}",
+                            candidate.display()
+                        ))
+                    }
+                };
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => {
+                return Err(format!(
+                    "cannot enqueue ticket in {}: {e}",
+                    queue_dir.display()
+                ))
+            }
+        }
+    }
 }
 
 /// This waiter's position, reaping dead and recycled tickets as the scan
 /// walks. Fails when the ticket is no longer in the queue (its directory was
 /// removed); the caller decides whether to re-enqueue or wait unordered.
 pub fn position(t: &Ticket) -> Result<Position, String> {
-    todo!("claim_queue::position")
+    let queue_dir = t
+        .dir
+        .parent()
+        .ok_or_else(|| format!("queue ticket {} has no queue dir", t.id()))?;
+    let (survivors, found_self) = scan(queue_dir, Some(t.seq))?;
+    if !found_self {
+        return Err(format!(
+            "queue ticket {} is gone from {}: it was removed; re-enqueue before waiting",
+            t.id(),
+            queue_dir.display()
+        ));
+    }
+    let index = survivors.iter().position(|s| *s == t.seq).unwrap_or(0);
+    Ok(Position {
+        index,
+        total: survivors.len(),
+    })
 }
 
 /// Leave the queue. Idempotent: a ticket whose directory is already gone
 /// (reaped by another waiter's scan) leaves quietly. Call on every return
 /// path - the admitted path, the timeout path, and the admit/stop exits.
 pub fn leave(t: Ticket) {
-    todo!("claim_queue::leave")
+    let _ = std::fs::remove_dir_all(&t.dir);
 }
 
 /// Whether any ticket currently waits. A missing queue directory reads as no
 /// waiters, never an error.
 pub fn has_waiters(queue_dir: &Path) -> bool {
-    todo!("claim_queue::has_waiters")
+    highest_ticket(queue_dir).map_or(false, |h| h.is_some())
 }
 
 /// `fno-agents claim queue {enter,front,leave}` - the seam `preflight.sh`
@@ -86,7 +141,221 @@ pub fn has_waiters(queue_dir: &Path) -> bool {
 /// error. `front` prints `position=N queued=M` (or `position=none` without a
 /// ticket) so a caller can read the queue depth, and reaps as it scans.
 pub fn run_queue(args: &[String]) -> i32 {
-    todo!("claim_queue::run_queue")
+    let Some(op) = args.first().map(String::as_str) else {
+        eprintln!("fno-agents: claim queue requires an operation: enter|front|leave");
+        return 2;
+    };
+    let mut dir: Option<PathBuf> = None;
+    let mut ticket: Option<u64> = None;
+    let mut it = args[1..].iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--dir" => match it.next() {
+                Some(v) => dir = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("fno-agents: claim queue {op}: --dir needs a value");
+                    return 2;
+                }
+            },
+            "--ticket" => match it.next().map(|v| v.parse::<u64>()) {
+                Some(Ok(n)) => ticket = Some(n),
+                Some(Err(_)) => {
+                    eprintln!("fno-agents: claim queue {op}: --ticket: not a ticket number");
+                    return 2;
+                }
+                None => {
+                    eprintln!("fno-agents: claim queue {op}: --ticket needs a value");
+                    return 2;
+                }
+            },
+            other => {
+                eprintln!("fno-agents: claim queue {op}: unrecognized argument: {other}");
+                return 2;
+            }
+        }
+    }
+    let Some(dir) = dir else {
+        eprintln!("fno-agents: claim queue {op} requires --dir <queue-dir>");
+        return 2;
+    };
+    match op {
+        "enter" => match enter(&dir) {
+            Ok(t) => {
+                println!("{}", t.id());
+                0
+            }
+            Err(e) => {
+                eprintln!("fno-agents: claim queue enter: {e}");
+                2
+            }
+        },
+        "front" => {
+            let Some(seq) = ticket else {
+                // No ticket: a probe read for the queue depth. It still reaps,
+                // and it never answers "front" (exit 1) because its caller is
+                // not in the queue.
+                return match scan(&dir, None) {
+                    Ok((survivors, _)) => {
+                        println!("position=none queued={}", survivors.len());
+                        1
+                    }
+                    Err(e) => {
+                        eprintln!("fno-agents: claim queue front: {e}");
+                        2
+                    }
+                };
+            };
+            let t = Ticket {
+                dir: dir.join(format!("{seq:06}")),
+                seq,
+            };
+            match position(&t) {
+                Ok(pos) => {
+                    println!("position={} queued={}", pos.index, pos.total);
+                    if pos.index == 0 {
+                        0
+                    } else {
+                        1
+                    }
+                }
+                Err(e) => {
+                    eprintln!("fno-agents: claim queue front: {e}");
+                    2
+                }
+            }
+        }
+        "leave" => {
+            let Some(seq) = ticket else {
+                eprintln!("fno-agents: claim queue leave requires --ticket <id>");
+                return 2;
+            };
+            leave(Ticket {
+                dir: dir.join(format!("{seq:06}")),
+                seq,
+            });
+            0
+        }
+        other => {
+            eprintln!("fno-agents: claim queue: unknown operation: {other} (enter|front|leave)");
+            2
+        }
+    }
+}
+
+/// The highest surviving ticket number, or `None` for an empty or missing
+/// queue. Non-numeric names are ignored, never errors.
+fn highest_ticket(queue_dir: &Path) -> Result<Option<u64>, String> {
+    Ok(scan_names(queue_dir)?.into_iter().max())
+}
+
+fn scan_names(queue_dir: &Path) -> Result<Vec<u64>, String> {
+    let mut names: Vec<u64> = Vec::new();
+    match std::fs::read_dir(queue_dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry
+                    .map_err(|e| format!("cannot read queue dir {}: {e}", queue_dir.display()))?;
+                let name = entry.file_name();
+                let Some(s) = name.to_str() else { continue };
+                if let Ok(n) = s.parse::<u64>() {
+                    names.push(n);
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!(
+                "cannot read queue dir {}: {e}",
+                queue_dir.display()
+            ))
+        }
+    }
+    Ok(names)
+}
+
+struct Stamp {
+    pid: Option<i32>,
+    create_time: Option<i64>,
+    machine: String,
+    host: String,
+}
+
+/// A ticket whose stamp cannot be read at all reads as a live waiter, never a
+/// corpse: condemning on a guess laps a waiter we cannot prove is gone.
+fn read_stamp(dir: &Path) -> Option<Stamp> {
+    let text = std::fs::read_to_string(dir.join("holder")).ok()?;
+    let (mut pid, mut create_time) = (None, None);
+    let (mut machine, mut host) = (String::new(), String::new());
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("pid=") {
+            pid = v.parse().ok();
+        } else if let Some(v) = line.strip_prefix("create_time=") {
+            create_time = v.parse().ok();
+        } else if let Some(v) = line.strip_prefix("machine=") {
+            machine = v.to_string();
+        } else if let Some(v) = line.strip_prefix("host=") {
+            host = v.to_string();
+        }
+    }
+    Some(Stamp {
+        pid,
+        create_time,
+        machine,
+        host,
+    })
+}
+
+/// A ticket stamped on a machine we cannot pid-probe is skipped: it never
+/// orders a local waiter and it is never reaped (its owner may be live
+/// elsewhere). Identity is compared only when both sides are readable; an
+/// unreadable local id is UNKNOWN, not foreign, so the pid arm decides.
+fn stamp_is_foreign(stamp: &Stamp) -> bool {
+    let mine = crate::claims::machine_id();
+    if !stamp.machine.is_empty() && !mine.is_empty() {
+        return stamp.machine != mine;
+    }
+    let my_host = crate::claims::hostname();
+    !stamp.host.is_empty() && !my_host.is_empty() && stamp.host != my_host
+}
+
+/// Dead = the pid is gone, or was recycled (a live but different incarnation
+/// now owns the number; the ticket's author cannot still be it). A stamp
+/// without a parsable pid survives, like bash's ticket_is_dead.
+fn ticket_is_dead(stamp: &Stamp) -> bool {
+    let Some(pid) = stamp.pid else {
+        return false;
+    };
+    match crate::claims::process_create_time_ms(pid) {
+        None => true,
+        Some(actual) => match stamp.create_time {
+            Some(recorded) => actual != recorded,
+            None => false,
+        },
+    }
+}
+
+/// Survivor numbers in arrival order, with whether `self_seq` is among them.
+/// Dead and recycled tickets are reaped here as the scan walks, so a crashed
+/// waiter never blocks the queue and no sweep lane exists.
+fn scan(queue_dir: &Path, self_seq: Option<u64>) -> Result<(Vec<u64>, bool), String> {
+    let mut names = scan_names(queue_dir)?;
+    names.sort_unstable();
+    let mut survivors: Vec<u64> = Vec::with_capacity(names.len());
+    let mut found_self = false;
+    for seq in names {
+        found_self |= self_seq == Some(seq);
+        let dir = queue_dir.join(format!("{seq:06}"));
+        let stamp = read_stamp(&dir);
+        if stamp.as_ref().is_some_and(stamp_is_foreign) {
+            continue;
+        }
+        if stamp.as_ref().is_some_and(ticket_is_dead) {
+            let _ = std::fs::remove_dir_all(&dir);
+            continue;
+        }
+        survivors.push(seq);
+    }
+    Ok((survivors, found_self))
 }
 
 #[cfg(test)]
