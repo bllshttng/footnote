@@ -844,15 +844,19 @@ pub fn court_orphans(
         }
         if let Some(session) = crate::claude_adopt::manifest_field(content, "harness_session_id") {
             let harness = crate::claude_adopt::manifest_field(content, "harness");
-            let snapshot = roster_read.get_or_insert_with(roster);
-            if let crate::crown_reap::HolderVerdict::Dead(_) = crate::crown_reap::holder_verdict(
-                harness.as_deref(),
-                &session,
-                snapshot,
-                transcript_age_s,
-                window_s,
-            ) {
-                continue;
+            // The read stays lazy exactly as before: a non-claude harness
+            // has a predetermined verdict, so it spends no roster read.
+            if crate::crown_reap::no_witness_reason(harness.as_deref()).is_none() {
+                let snapshot = roster_read.get_or_insert_with(roster);
+                if let crate::crown_reap::HolderVerdict::Dead(_) = crate::crown_reap::holder_verdict(
+                    harness.as_deref(),
+                    &session,
+                    snapshot,
+                    transcript_age_s,
+                    window_s,
+                ) {
+                    continue;
+                }
             }
         }
         // Only a LISTED candidate claims the territory key: one the verdict

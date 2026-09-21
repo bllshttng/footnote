@@ -27,10 +27,20 @@ pub(crate) enum HolderVerdict {
     Unknown(String),
 }
 
+/// The one non-claude answer, so the verdict and the callers that skip the
+/// roster read for a predetermined case cannot drift apart on the wording.
+pub(crate) fn no_witness_reason(harness: Option<&str>) -> Option<String> {
+    harness
+        .filter(|h| !h.is_empty() && *h != "claude")
+        .map(|h| format!("no death witness for harness {h}"))
+}
+
 /// Order matters: the roster witness (a) answers first because it needs no
 /// transcript, then presence in a non-terminal state reads live, then the
 /// transcript witness (b) fires only on a KNOWN, warning-free roster - a
-/// partial list could hide the row, and absence from it is not death.
+/// partial list could hide the row, and absence from it is not death. The
+/// absence proof is the shared predicate, so it cannot diverge between the
+/// readers that apply it.
 pub(crate) fn holder_verdict(
     harness: Option<&str>,
     session: &str,
@@ -38,10 +48,8 @@ pub(crate) fn holder_verdict(
     transcript_age_s: &dyn Fn(&str) -> Option<i64>,
     window_s: i64,
 ) -> HolderVerdict {
-    if let Some(h) = harness.filter(|h| !h.is_empty()) {
-        if h != "claude" {
-            return HolderVerdict::Unknown(format!("no death witness for harness {h}"));
-        }
+    if let Some(reason) = no_witness_reason(harness) {
+        return HolderVerdict::Unknown(reason);
     }
     // The synthesized holder is a query object, never a minted row; built
     // exactly as court_orphans does today so both readers key identically.
@@ -58,12 +66,22 @@ pub(crate) fn holder_verdict(
         let word = row.state.clone().unwrap_or_else(|| "listed".to_string());
         return HolderVerdict::Live(format!("roster {word}"));
     }
-    if !snapshot.is_known() {
-        return HolderVerdict::Unknown("roster unreadable".to_string());
-    }
-    let warnings = snapshot.warning_text();
-    if !warnings.is_empty() {
-        return HolderVerdict::Unknown(format!("roster partial: {warnings}"));
+    if !crate::daemon::roster_death::claude_row_provably_absent(Some(snapshot), row_id.as_deref()) {
+        // Either the row IS listed (non-terminal state, live pid) or the
+        // read cannot prove absence. Name which.
+        if !snapshot.is_known() {
+            return HolderVerdict::Unknown("roster unreadable".to_string());
+        }
+        let warnings = snapshot.warning_text();
+        if !warnings.is_empty() {
+            return HolderVerdict::Unknown(format!("roster partial: {warnings}"));
+        }
+        let word = row_id
+            .as_deref()
+            .and_then(|id| snapshot.find(id))
+            .and_then(|row| row.state.clone())
+            .unwrap_or_else(|| "listed".to_string());
+        return HolderVerdict::Live(format!("roster {word}"));
     }
     let Some(age) = transcript_age_s(session) else {
         return HolderVerdict::Unknown("transcript not found".to_string());
@@ -168,6 +186,12 @@ pub fn sweep(
             continue;
         };
         let harness = crate::claude_adopt::manifest_field(content, "harness");
+        // Same laziness contract as the court: a non-claude harness has a
+        // predetermined verdict, so it spends no roster read.
+        if let Some(reason) = no_witness_reason(harness.as_deref()) {
+            keep(reason);
+            continue;
+        }
         let snapshot = roster_read.get_or_insert_with(roster);
         let evidence = match holder_verdict(
             harness.as_deref(),
