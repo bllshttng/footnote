@@ -1076,6 +1076,17 @@ class _ScriptedClient:
         if method == "begin":
             self.begins += 1
             return {"version": f"v{self.begins}", "entries": []}
+        if method == "commit_rows":
+            if self.conflicts > 0:
+                self.conflicts -= 1
+                raise store_mod._Conflict()
+            return {
+                "entries": [],
+                "dropped": 0,
+                "backup": None,
+                "closure_releases": [],
+                "is_canonical": False,
+            }
         if method == "commit":
             if self.conflicts > 0:
                 self.conflicts -= 1
@@ -1143,14 +1154,16 @@ def test_the_retry_budget_is_bounded_and_every_delay_sits_in_its_band(tmp_path, 
 
 
 def test_the_spent_budget_raises_the_existing_error_unchanged(tmp_path, monkeypatch):
-    """AC14-EDGE: the failure contract is not part of this change - same
-    RuntimeError type, same message, when all five attempts conflict."""
+    """AC14-EDGE: the failure contract keeps its RuntimeError type, its
+    measurement, and its path when all five attempts conflict; change 5
+    adds the nothing-was-written remedy."""
     doomed = _ScriptedClient(conflicts=5)
     delays: list[float] = []
     with pytest.raises(RuntimeError) as exc:
         _run_tx(doomed, monkeypatch, delays.append)
     assert str(exc.value) == (
-        "graph mutated under us 5 times at /tmp/x1601-tx.json; retrying stopped"
+        "graph mutated under us 5 times at /tmp/x1601-tx.json; "
+        "nothing was written, retry when the fleet quiets"
     )
     assert len(delays) == 4, "the fifth conflict raises without a trailing sleep"
 
@@ -1304,7 +1317,7 @@ def test_unconfirmed_commit_names_changed_ids_before_retrying(tmp_path, monkeypa
 
         def request(self, method, params):
             if method == "begin":
-                return {"version": "v1", "base_digests": {}, "entries": []}
+                return {"version": "v1", "entries": []}
             if method == "commit_rows":
                 raise store_mod.WriteUnconfirmed(store_mod.STATE_UNCONFIRMED, "outcome unknown")
             raise AssertionError(f"unexpected method {method}")

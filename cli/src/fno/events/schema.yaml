@@ -1329,6 +1329,14 @@ event_types:
         graph_path:
           type: string
           description: "The graph file whose transaction conflicted."
+        touched:
+          type: array
+          items:
+            type: string
+          description: "Node ids the conflicted write touched; concurrent chains in one journal become attributable."
+        session_id:
+          type: string
+          description: "Full session id of the emitting caller, when resolvable; absent when unprovable."
     consumers: [operator]
 
   - name: orphan_reap_sweep
@@ -2440,6 +2448,18 @@ event_types:
           type: integer
         reclaimed_bytes:
           type: integer
+        removed_rows:
+          description: "The session rows the completion removed."
+          type: array
+        kept:
+          description: "The session rows the completion kept, with the reason."
+          type: array
+        rows:
+          description: "\"present\" | \"none-present\": whether the node join found any row at all."
+          type: string
+        tree:
+          description: "\"removed\" | \"kept:<reason>\" | \"no-worktree\": the worktree outcome."
+          type: string
 
   - name: merge_cleanup_refused
     retention: durable
@@ -2487,6 +2507,9 @@ event_types:
         pr:
           type: integer
         reason:
+          type: string
+        last_hold:
+          description: "The reason of the request's last hold event, or \"none\" when it expired having never been held."
           type: string
 
   - name: merge_flake_accepted

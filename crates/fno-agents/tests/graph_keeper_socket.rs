@@ -181,7 +181,6 @@ fn a_lost_commit_rows_reply_is_recoverable_over_a_fresh_socket() {
     let params = json!({
         "request_id": "r1",
         "base_version": begin["version"],
-        "base_digests": begin["base_digests"],
         "base_plan_rungs": {},
         "changed": [{"id": "x-disconnected", "title": "disconnected"}],
         "removed": [],
@@ -746,14 +745,12 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
                     for attempt in 0..30u64 {
                         let begin = ok_result(rpc(&mut stream, attempt, "begin", json!({})));
                         let version = begin["version"].as_str().unwrap().to_string();
-                        let digests = begin["base_digests"].clone();
                         let reply = rpc(
                             &mut stream,
                             attempt,
                             "commit_rows",
                             json!({
                                 "base_version": version,
-                                "base_digests": digests,
                                 "changed": [row],
                                 "removed": [],
                                 "attempt": attempt + 1,
@@ -901,7 +898,6 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
                 "method": "commit_rows",
                 "params": {
                     "base_version": version,
-                    "base_digests": begin["base_digests"],
                     "changed": [row],
                     "removed": [],
                 },

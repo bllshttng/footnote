@@ -198,6 +198,11 @@ jobs:
         timeout-minutes: 5
         run: bash tests/ci/test_oos_tracked.sh
 
+      - name: S2 ingest reads the intel report
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/tests/test_corrections_insights_tag.sh
+
       - name: PR-create out-of-scope tracking contract
         if: ${{ !cancelled() }}
         timeout-minutes: 5
