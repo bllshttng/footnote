@@ -14,6 +14,9 @@ use ratatui_core::layout::{Constraint, Layout as RtLayout, Rect as RtRect};
 use ratatui_core::style::{Modifier, Style as RtStyle};
 use unicode_width::UnicodeWidthChar;
 
+use crate::ratatui_blit::{rt_color, rt_modifier};
+use crate::theme::{self, Role, Theme};
+
 use super::{write_msg, ClientMsg, StdinFlow, View, MAX_MAIL_TEXT};
 use crate::clipboard::on_path;
 use crate::proto::agent_launch::{AgentLaunchRequest, AgentLaunchUpdate, LaunchState};
@@ -971,12 +974,15 @@ impl Launcher {
             (Focus::Project, project),
             (Focus::Model, chip_field(&d.model)),
             (Focus::Effort, chip_field(&d.effort)),
-            (Focus::More, if d.expanded { "-" } else { "+" }.to_string()),
+            (
+                Focus::More,
+                if d.expanded { "- less" } else { "+ more" }.to_string(),
+            ),
         ];
         if matches!(self.phase, Phase::Unknown { .. } | Phase::Submitting { .. }) {
             chips.push((Focus::Dismiss, "[dismiss]".to_string()));
         }
-        chips.push((Focus::Launch, "[Launch]".to_string()));
+        chips.push((Focus::Launch, "Launch".to_string()));
         chips
     }
 
@@ -999,21 +1005,18 @@ impl Launcher {
             .into_iter()
             .filter(|(f, _)| !matches!(f, Focus::Permission | Focus::Placement))
             .collect();
-        let constraints: Vec<Constraint> = primary
-            .iter()
-            .map(|(f, _)| match f {
-                Focus::More => Constraint::Length(4),
-                Focus::Launch => Constraint::Length(8),
-                Focus::Dismiss => Constraint::Length(9),
-                Focus::Harness => Constraint::Min(6),
-                _ => Constraint::Min(4),
-            })
-            .collect();
+        let constraints = chip_constraints(primary.iter().map(|(f, _)| match f {
+            Focus::More => Constraint::Length(7),
+            Focus::Launch => Constraint::Length(7),
+            Focus::Dismiss => Constraint::Length(9),
+            Focus::Harness => Constraint::Min(6),
+            _ => Constraint::Min(4),
+        }));
         let row =
             RtLayout::horizontal(constraints).split(RtRect::new(area.x, area.y, area.width, 1));
         let mut chips: Vec<(Focus, String, RtRect)> = primary
             .iter()
-            .zip(row.iter())
+            .zip(row.iter().step_by(2))
             .map(|((f, label), r)| (*f, label.clone(), *r))
             .collect();
         if self.draft.expanded {
@@ -1022,10 +1025,10 @@ impl Launcher {
                 (Focus::Permission, chip_field(&self.draft.permission)),
                 (Focus::Placement, chip_field(&self.draft.placement)),
             ];
-            let pc: Vec<Constraint> = pins.iter().map(|_| Constraint::Min(4)).collect();
+            let pc = chip_constraints(pins.iter().map(|_| Constraint::Min(4)));
             let row2 =
                 RtLayout::horizontal(pc).split(RtRect::new(area.x, area.y + 1, area.width, 1));
-            for ((f, label), r) in pins.iter().zip(row2.iter()) {
+            for ((f, label), r) in pins.iter().zip(row2.iter().step_by(2)) {
                 chips.push((*f, label.clone(), *r));
             }
         }
@@ -1065,12 +1068,21 @@ impl Launcher {
     pub(crate) fn paint(&self, view: &View, buf: &mut RtBuffer, area: RtRect) {
         let rects = self.dock_layout_rects(view, area);
         for (focus, label, r) in &rects.chips {
-            let style = if *focus == self.focus {
-                RtStyle::new().add_modifier(Modifier::REVERSED)
-            } else {
-                RtStyle::new().add_modifier(Modifier::DIM)
+            // The popup's control vocabulary, not raw DIM (a dim word reads
+            // as a caption): an unfocused chip is a filled Body block, the
+            // focused chip the BodySel cut-out, Launch the esc-chip accent.
+            let role = match focus {
+                Focus::Launch => Role::Chip,
+                f if *f == self.focus => Role::BodySel,
+                _ => Role::Body,
             };
-            paint_chip(buf, *r, label, style);
+            paint_chip(
+                buf,
+                *r,
+                label,
+                role_style(role, &view.theme),
+                is_picker_chip(*focus),
+            );
         }
         let text_w = rects.message.width.max(1) as usize;
         let chunks = wrap_message(&self.draft.message, text_w);
@@ -1205,19 +1217,60 @@ fn chip_field(s: &str) -> String {
     }
 }
 
-/// One chip's paint: fill the rect (so REVERSED covers the whole chip, not
+/// One theme role as a ratatui style - the conversion the sideline already
+/// uses for its table cells.
+fn role_style(role: Role, t: &Theme) -> RtStyle {
+    let (fg, bg, flags) = theme::cell_style(role, t);
+    RtStyle::new()
+        .fg(rt_color(fg))
+        .bg(rt_color(bg))
+        .add_modifier(rt_modifier(flags))
+}
+
+/// The chips a popover drops from (and so end in the dropdown caret).
+/// Project keeps Left/Right cycling; it gains the label and caret only.
+pub(crate) fn is_picker_chip(f: Focus) -> bool {
+    matches!(
+        f,
+        Focus::Harness
+            | Focus::Project
+            | Focus::Model
+            | Focus::Effort
+            | Focus::Permission
+            | Focus::Placement
+    )
+}
+
+/// Per-chip constraints with a one-column gap before every chip but the
+/// first: each chip reads as its own box, and the gap cells stay
+/// default-styled (never painted). Chip i sits at layout index 2i.
+fn chip_constraints(widths: impl Iterator<Item = Constraint>) -> Vec<Constraint> {
+    let mut out = Vec::new();
+    for (i, c) in widths.enumerate() {
+        if i > 0 {
+            out.push(Constraint::Length(1));
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// One chip's paint: fill the rect (so the block covers the whole chip, not
 /// just the glyphs), then the label truncated to the rect with an ellipsis.
-pub(crate) fn paint_chip(buf: &mut RtBuffer, r: RtRect, label: &str, style: RtStyle) {
+/// A picker chip reserves its last column for the dropdown caret: the label
+/// ellipsizes first, the caret never truncates.
+pub(crate) fn paint_chip(buf: &mut RtBuffer, r: RtRect, label: &str, style: RtStyle, caret: bool) {
     if r.width == 0 {
         return;
     }
     buf.set_style(r, style);
+    let body_w = (r.width as usize).saturating_sub(usize::from(caret));
     let mut text = String::new();
     let mut w = 0usize;
     let mut truncated = false;
     for c in label.chars() {
         let cw = usize::from(UnicodeWidthChar::width(c).unwrap_or(1));
-        if w + cw > r.width as usize {
+        if w + cw > body_w {
             truncated = true;
             break;
         }
@@ -1226,7 +1279,7 @@ pub(crate) fn paint_chip(buf: &mut RtBuffer, r: RtRect, label: &str, style: RtSt
     }
     if truncated {
         // Reserve one column for the ellipsis over the last kept glyph.
-        while w >= r.width as usize {
+        while w >= body_w.max(1) {
             let Some(last) = text.chars().next_back() else {
                 break;
             };
@@ -1236,6 +1289,9 @@ pub(crate) fn paint_chip(buf: &mut RtBuffer, r: RtRect, label: &str, style: RtSt
         text.push('\u{2026}');
     }
     buf.set_string(r.x, r.y, &text, style);
+    if caret {
+        buf[(r.x + r.width - 1, r.y)].set_char('\u{25be}');
+    }
 }
 
 /// The dock's hit-and-paint geometry. `chips` is `(focus, label, rect)` in

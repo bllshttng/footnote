@@ -386,10 +386,7 @@ fn chip_row_paints_fields_and_launch_on_one_row() {
         row_text.contains("claude@"),
         "harness chip carries the catalog name: {row_text}"
     );
-    let launch_x = labels
-        .iter()
-        .find(|(s, _)| s == "[Launch]")
-        .map(|(_, x)| *x);
+    let launch_x = labels.iter().find(|(s, _)| s == "Launch").map(|(_, x)| *x);
     let Some(launch_x) = launch_x else {
         panic!("launch chip on the primary row: {row_text}");
     };
@@ -399,19 +396,52 @@ fn chip_row_paints_fields_and_launch_on_one_row() {
 }
 
 #[test]
-fn focused_chip_paints_inverted_and_others_dim() {
+fn chips_paint_in_the_popup_control_vocabulary() {
+    // Change 2: the popup's control grammar, not raw DIM (a dim word reads
+    // as a caption). Unfocused chips are filled Body blocks (INVERSE under
+    // the terminal theme), the focused chip is the BodySel cut-out, Launch
+    // wears the esc-chip role, adjacent chips sit a default-styled blank
+    // column apart, and every picker chip ends in the dropdown caret.
     let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
     if let Some(l) = v.launcher.as_mut() {
         l.focus = Focus::Effort;
     }
     let l = v.launcher.as_ref().unwrap();
-    let area = RtRect::new(0, 0, 40, 3);
+    let area = RtRect::new(0, 0, 80, 3);
     let rects = l.dock_layout_rects(&v, area);
     let mut buf = RtBuffer::empty(area);
     l.paint(&v, &mut buf, area);
     for (f, _, r) in &rects.chips {
-        let inverted = buf[(r.x, r.y)].modifier.contains(Modifier::REVERSED);
-        assert_eq!(inverted, *f == Focus::Effort, "chip {f:?} inverted state");
+        let focused = *f == Focus::Effort;
+        assert!(
+            !buf[(r.x, r.y)].modifier.contains(Modifier::DIM),
+            "chip {f:?} must not read as a dim caption"
+        );
+        assert_eq!(
+            buf[(r.x, r.y)].modifier.contains(Modifier::REVERSED),
+            !focused,
+            "chip {f:?} filled-block vs focused cut-out"
+        );
+        if super::agent_launcher::is_picker_chip(*f) {
+            let last = buf[(r.x + r.width - 1, r.y)].symbol().to_string();
+            assert_eq!(last, "\u{25be}", "picker chip {f:?} ends in the caret");
+        }
+    }
+    // Adjacent same-row chips are separated by one default-styled column.
+    for pair in rects.chips.windows(2) {
+        let (f0, _, r0) = (&pair[0].0, &pair[0].1, pair[0].2);
+        let (f1, _, r1) = (&pair[1].0, &pair[1].1, pair[1].2);
+        if r0.y == r1.y {
+            let gap_x = r0.x + r0.width;
+            assert!(gap_x < r1.x, "chips {f0:?} and {f1:?} need a gap column");
+            let gap = &buf[(gap_x, r0.y)];
+            assert!(
+                gap.modifier.is_empty(),
+                "the gap column between {f0:?} and {f1:?} stays default-styled"
+            );
+        }
     }
 }
 #[test]
@@ -730,7 +760,7 @@ fn chip_paint_truncates_with_an_ellipsis_inside_its_rect() {
     let area = RtRect::new(0, 0, 6, 1);
     let mut buf = RtBuffer::empty(area);
     let style = RtStyle::new();
-    super::agent_launcher::paint_chip(&mut buf, area, "abcdefgh", style);
+    super::agent_launcher::paint_chip(&mut buf, area, "abcdefgh", style, false);
     let painted: String = (0..area.width)
         .map(|x| buf[(x, 0)].symbol().to_string())
         .collect();
@@ -738,5 +768,23 @@ fn chip_paint_truncates_with_an_ellipsis_inside_its_rect() {
     assert!(
         painted.ends_with('\u{2026}'),
         "truncated chip elides: {painted}"
+    );
+}
+
+#[test]
+fn caret_survives_chip_truncation() {
+    // AC2-EDGE: a chip rect narrower than its label ellipsizes the label and
+    // keeps the caret visible - truncate the text, never the caret.
+    let area = RtRect::new(0, 0, 5, 1);
+    let mut buf = RtBuffer::empty(area);
+    let style = RtStyle::new();
+    super::agent_launcher::paint_chip(&mut buf, area, "long-label", style, true);
+    let painted: String = (0..area.width)
+        .map(|x| buf[(x, 0)].symbol().to_string())
+        .collect();
+    assert_eq!(
+        painted.chars().last(),
+        Some('\u{25be}'),
+        "the caret stays visible: {painted}"
     );
 }
