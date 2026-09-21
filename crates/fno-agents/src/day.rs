@@ -68,8 +68,11 @@ fn in_window(raw: &str, from: DateTime<FixedOffset>, to: DateTime<FixedOffset>) 
 }
 
 fn boundary_id(kind: &str, now: DateTime<FixedOffset>) -> String {
-    let checksum = now
-        .to_rfc3339_opts(SecondsFormat::AutoSi, true)
+    // Stable per (kind, local day): a retry after a failed index append
+    // mints the same id, so the journal leg can recognize its own earlier
+    // row instead of adding a second one.
+    let day = now.date_naive().format("%Y%m%d").to_string();
+    let checksum = format!("{kind}{day}")
         .bytes()
         .fold(0u16, |sum, byte| sum.wrapping_add(byte as u16));
     format!(
@@ -718,14 +721,35 @@ fn append_row(path: &Path, line: &str) -> Result<(), String> {
 /// Commit the fold's boundary row: project journal first, then the
 /// machine-wide question index, mirroring the decide retraction order. A
 /// question-index failure is reported with the boundary id: the row is in
-/// the journal, so recovery names what landed and what did not.
+/// the journal, so recovery names what landed and what did not. The id is
+/// stable per (kind, local day), so a retry after that failure recognizes
+/// its own earlier journal row and only retries the index leg.
 fn commit_boundary(
     payload: &Value,
     journal_path: &Path,
     questions_path: &Path,
 ) -> Result<(), String> {
     let line = boundary_event_line(payload)?;
-    append_row(journal_path, &line).map_err(|e| format!("project journal append failed: {e}"))?;
+    let id = payload["boundary_id"].as_str().unwrap_or_default();
+    let journal_has_it = std::fs::read_to_string(journal_path)
+        .map(|raw| {
+            raw.lines().any(|row| {
+                serde_json::from_str::<Value>(row.trim())
+                    .ok()
+                    .and_then(|v| {
+                        v.get("data")
+                            .and_then(|d| d.get("boundary_id"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .is_some_and(|row_id| row_id == id)
+            })
+        })
+        .unwrap_or(false);
+    if !journal_has_it {
+        append_row(journal_path, &line)
+            .map_err(|e| format!("project journal append failed: {e}"))?;
+    }
     append_row(questions_path, &line).map_err(|e| {
         format!(
             "boundary {} landed in the project journal but not the question index: {e}",
@@ -922,5 +946,16 @@ mod tests {
         let input = inputs("noon", "2026-09-10T12:00:00Z", "");
         let error = fold_day(&input).unwrap_err();
         assert!(error.contains("--kind must be start or end"), "{error}");
+    }
+
+    #[test]
+    fn boundary_id_is_stable_per_kind_and_local_day() {
+        let first = boundary_id("start", "2026-09-21T05:10:19Z".parse().unwrap());
+        let retry = boundary_id("start", "2026-09-21T18:44:02Z".parse().unwrap());
+        let other_day = boundary_id("start", "2026-09-22T05:10:19Z".parse().unwrap());
+        let other_kind = boundary_id("end", "2026-09-21T05:10:19Z".parse().unwrap());
+        assert_eq!(first, retry, "a same-day retry must reuse the id");
+        assert_ne!(first, other_day);
+        assert_ne!(first, other_kind);
     }
 }
