@@ -351,10 +351,10 @@ def done_cmd(
             presider = find_presiding_crown(
                 scope, target_level or _derived_level(scope), crowns, _graph_index()
             )
-            live = any(r.status not in _TERMINAL_ROW_STATUSES for r in mine)
+            has_live = any(r.status not in _TERMINAL_ROW_STATUSES for r in mine)
             member = any(crown_answers_to(r.crown_scope, scope) and r.crown_scope != scope
                          for r in rows)
-            if live or member or (presider or {}).get("holder") != caller.name:
+            if has_live or member or (presider or {}).get("holder") != caller.name:
                 typer.echo(
                     f"king: refusing to expire {scope!r}: this session's crown is "
                     f"{own!r}, and an agent expires only its own crown. Call "
