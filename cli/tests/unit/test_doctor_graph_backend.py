@@ -118,10 +118,15 @@ def test_rollback_exports_first_then_flips(world):
     client.request(
         "op",
         {
-            "name": "append_progress_note",
+            "name": "append_encounter",
             "params": {
                 "node_id": "x-1",
-                "note": {"ts": "2026-09-14T12:00:00Z", "text": "flip probe"},
+                "record": {
+                    "ts": "2026-09-14T12:00:00Z",
+                    "session_id": "voter-1",
+                    "harness": "claude",
+                    "evidence": "flip probe",
+                },
             },
         },
     )
