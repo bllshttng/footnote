@@ -935,9 +935,10 @@ print(rec["payload"]["content"][0]["text"], end="")
         let di = extract_result_blocked("RESULT: BLOCKED\n  REASON: dep missing")
             .expect("indented REASON parses");
         assert_eq!(di.reason, "dep missing");
-        // The preferred JSON object, fenced.
+        // The preferred JSON object, fenced. The fence opens its own line,
+        // the contract shape: prose glued to the opener is not a fence.
         let fenced = concat!(
-            "work so far committed. ",
+            "work so far committed.\n",
             "```json\n",
             r#"{"result": "BLOCKED", "task": "2.1", "summary": "dep missing"}"#,
             "\n```\n"
