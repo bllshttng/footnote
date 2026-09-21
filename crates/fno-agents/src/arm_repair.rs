@@ -303,16 +303,19 @@ fn classify(row: &mut ArmStatus, facts: &RepairFacts) {
     row.line = format!("{} cause={cause} ({hint}){}", render_row(row), suffix(row));
 }
 
-fn select_unmeasured_repair(detail: &str) -> String {
-    let project = detail
-        .split_once("project=")
+/// The project a select-read unmeasured detail names; `None` when it names
+/// none (`-`).
+fn project_from_detail(detail: &str) -> Option<&str> {
+    detail
+        .split_once(crate::select_read::PROJECT_TOKEN)
         .and_then(|(_, rest)| rest.split_whitespace().next())
         .filter(|project| *project != "-")
-        .unwrap_or("");
-    if project.is_empty() {
-        "fno backlog advance --source ac --json".to_string()
-    } else {
-        format!("fno backlog advance --project {project} --source ac --json")
+}
+
+fn select_unmeasured_repair(detail: &str) -> String {
+    match project_from_detail(detail) {
+        Some(project) => format!("fno backlog advance --project {project} --source ac --json"),
+        None => "fno backlog advance --source ac --json".to_string(),
     }
 }
 
@@ -460,9 +463,7 @@ pub fn heal(
         let project = row
             .detail
             .as_deref()
-            .unwrap_or("")
-            .split_once("project=")
-            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .and_then(project_from_detail)
             .unwrap_or("-");
         let action = format!("advance:{project}");
         let ok = run(&action);
@@ -735,10 +736,15 @@ mod tests {
         let mut ac = row("auto_continue", SCHED_DAEMON);
         ac.failing = true;
         ac.skip_reason = Some("select-unmeasured".into());
-        ac.detail = Some(
-            "closed=x-1 node=- reason=select-unmeasured detail=project=fno bound=120s: selection stalled"
-                .into(),
-        );
+        // Round-trip through the writer itself: select_read owns the detail
+        // format, so a wording drift here fails this test instead of silently
+        // degrading the repair verb.
+        ac.detail = Some(crate::select_read::unmeasured_detail(
+            crate::select_read::Kind::Next,
+            &["--project".to_string(), "fno".to_string()],
+            120,
+            Some("selection stalled"),
+        ));
         let mut rows = vec![ac];
         annotate(&mut rows, &facts(false));
         let ac = &rows[0];
@@ -758,10 +764,15 @@ mod tests {
         let mut ac = row("auto_continue", SCHED_DAEMON);
         ac.failing = true;
         ac.cause = Some("select_unmeasured".into());
-        ac.detail = Some(
-            "closed=x-1 node=- reason=select-unmeasured detail=project=fno bound=120s: selection stalled"
-                .into(),
-        );
+        // Round-trip through the writer itself: select_read owns the detail
+        // format, so a wording drift here fails this test instead of silently
+        // degrading the repair verb.
+        ac.detail = Some(crate::select_read::unmeasured_detail(
+            crate::select_read::Kind::Next,
+            &["--project".to_string(), "fno".to_string()],
+            120,
+            Some("selection stalled"),
+        ));
         let rows = vec![ac];
         let mut runs = Vec::new();
         let first = heal(&rows, &[], true, &store, 0, 1800, &mut |action| {
@@ -784,6 +795,25 @@ mod tests {
         });
         assert_eq!(third, "heal=advance:fno:failed");
         assert_eq!(runs, ["advance:fno", "advance:fno"]);
+    }
+
+    #[test]
+    fn an_unnamed_project_repairs_without_a_project_flag() {
+        let mut ac = row("auto_continue", SCHED_DAEMON);
+        ac.failing = true;
+        ac.skip_reason = Some("select-unmeasured".into());
+        ac.detail = Some(crate::select_read::unmeasured_detail(
+            crate::select_read::Kind::Next,
+            &[],
+            120,
+            None,
+        ));
+        let mut rows = vec![ac];
+        annotate(&mut rows, &facts(false));
+        assert_eq!(
+            rows[0].repair.as_deref(),
+            Some("fno backlog advance --source ac --json")
+        );
     }
 
     #[test]

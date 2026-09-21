@@ -60,9 +60,18 @@ fn head(text: &[u8], limit: usize) -> String {
     String::from_utf8_lossy(text).chars().take(limit).collect()
 }
 
-fn unmeasured_detail(kind: Kind, args: &[String], bound_s: u64, suffix: Option<&str>) -> String {
+/// The `project=<p>` token the unmeasured detail carries; arm_repair parses
+/// it back out of the journal row, so writer and readers share this one name.
+pub(crate) const PROJECT_TOKEN: &str = "project=";
+
+pub(crate) fn unmeasured_detail(
+    kind: Kind,
+    args: &[String],
+    bound_s: u64,
+    suffix: Option<&str>,
+) -> String {
     let mut detail = format!(
-        "project={} bound={}s: fno backlog {} did not answer inside its {}s budget; the arm_watch heal lane retries it",
+        "{PROJECT_TOKEN}{} bound={}s: fno backlog {} did not answer inside its {}s budget; the arm_watch heal lane retries it",
         project_name(args),
         bound_s,
         kind_name(kind),
