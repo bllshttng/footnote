@@ -3784,4 +3784,3 @@ def test_note_receipt_says_recorded_never_appended() -> None:
     printed = stream.getvalue()
     assert "appended" not in printed
     assert "recorded" in printed
-    assert "replaced the node's state" in printed

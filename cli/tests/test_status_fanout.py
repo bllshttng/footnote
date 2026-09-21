@@ -957,9 +957,12 @@ def test_backlog_progress_adapter_nodeless_is_noop(tmp_path):
     assert status == sf.DELIVERED
 
 
-def test_backlog_progress_adapter_node_not_found_drops(tmp_path):
+def test_backlog_progress_adapter_node_not_found_drops(tmp_path, monkeypatch):
     from fno import status_fanout as sf
 
+    # _machine_note's contract: None on a missing node or a refused write.
+    # The adapter must turn that into a drop naming the node.
+    monkeypatch.setattr(sf, "_machine_note", lambda *a, **k: None)
     ev = _ev("t", "run_summary", **{"node": "x-gone"})
     status, detail = sf._dispatch_backlog_progress(
         StatusSinkConfig(name="b", type="backlog-progress"), ev, tmp_path)

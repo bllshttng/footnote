@@ -467,9 +467,8 @@ def warn_if_note_is_long(text: str, *, stream: Any = sys.stderr) -> None:
     if count <= cap * 4:
         return
     print(
-        f"note recorded ({count} words); it replaced the node's state. Long "
-        "evidence belongs in a plan doc; a note carrying a path is cheaper "
-        "for every later reader.",
+        f"note recorded ({count} words). Long evidence belongs in a plan "
+        "doc; a note carrying a path is cheaper for every later reader.",
         file=stream,
     )
 
