@@ -479,8 +479,7 @@ def _next_node(project: Optional[str]) -> Optional[dict]:
 
     Project-scoped. Raises on a non-zero/garbled response so advance skips rather than guessing a node (Failure Modes: Errors).
     """
-    args = ["--project", project] if project else []
-    return _select_read("next", args)
+    return _select_read("next", ["--project", project] if project else [])
 
 
 # A node with no `domain` set collapses into ONE bucket in `_live_lane_domains`
