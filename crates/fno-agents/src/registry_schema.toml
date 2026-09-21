@@ -63,9 +63,9 @@
 # request) - so requested, resolved and current-turn stay three
 # distinguishable readings. Same additive-optional writer-protection
 # rationale as v22 through v34: a pre-v35 writer accepts the unknown keys
-# through serde and skip-if-none keeps the stamp off rows that carry none,
-# so the bump turns a silent erasure into a loud refusal. Rationale lives
-# beside the columns in state.rs / registry.py.
+# through serde and erases them on its next read-modify-write, so the bump
+# turns a silent erasure into a loud refusal. Rationale lives beside the
+# columns in state.rs / registry.py.
 #
 # v36: additive `node_reason` - why a mint works no node WHEN THE SPAWN NAMED
 # ONE. The spawn path derives the node from the seed's verb

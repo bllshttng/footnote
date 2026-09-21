@@ -763,6 +763,38 @@ def _insert_spawn_flag(args: "Sequence[str]", flag: str, value: str) -> "list[st
     return toks
 
 
+def _client_carries_node_receipt() -> bool:
+    """True when the binary that will exec this spawn parses --node-reason.
+
+    The auto runtime execs the INSTALLED client for spawn, so that is the one
+    to probe: a stale install predates the receipt flag and its arg parser
+    dies on it as unknown. The probe is exactly the version test - a current
+    binary derives from a nodeless family seed, a stale one refuses it. The
+    dev runtime and any python-lane spawn carry the flag by construction.
+    """
+    import json as _json
+    import subprocess as _sp
+
+    from fno.agents.harness_map import _TARGET_FAMILY_VERBS
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    if runtime_mode() == "rust":
+        binary = find_dev_binary() or resolve_binary()
+    else:
+        binary = resolve_binary() or find_dev_binary()
+    if binary is None:
+        return True  # no client execs argv; the python lane parses it
+    probe = {"node_seed": {"argv": ["spawn", "/fno:target x-aaaa"], "seed_index": 1,
+                           "seed_form": "positional", "family": list(_TARGET_FAMILY_VERBS),
+                           "crown": False, "resume": False}}
+    try:
+        proc = _sp.run([str(binary), "spawn-axes"], input=_json.dumps(probe),
+                       capture_output=True, text=True, timeout=30)
+        return _json.loads(proc.stdout).get("action") in ("derive", "pass")
+    except Exception:
+        return False
+
+
 def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]]":
     """Project the seam's facts to ``fno-agents node-seed`` and apply the
     answer before any lane is chosen. With no explicit ``--node``, the verb
@@ -822,7 +854,13 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]
             return list(args), None
         if find_node_row(derived) is None:
             reason = f"{derived} names no readable backlog row (derived from the seed)"
-            return _insert_spawn_flag(args, "--node-reason", reason), None
+            if _client_carries_node_receipt():
+                return _insert_spawn_flag(args, "--node-reason", reason), None
+            # The client that will exec this spawn predates the receipt flag
+            # and would die on it as unknown; say why here instead and spawn
+            # exactly as before the receipt existed.
+            print(f"fno agents spawn: {reason}", file=sys.stderr)
+            return list(args), None
         args = _insert_spawn_flag(args, "--node", derived)
         node = derived
         slot = _seed_slot(list(args[1:]))
