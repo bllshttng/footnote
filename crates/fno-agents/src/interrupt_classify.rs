@@ -13,8 +13,13 @@ const TRANSCRIPT_MTIME_SKEW: Duration = Duration::from_secs(1);
 /// One transcript record relevant to interrupted-call classification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriptEntry {
-    /// An assistant message recorded a tool invocation.
-    AssistantToolUse { id: String, name: String },
+    /// An assistant message recorded a tool invocation. `at` is the record's
+    /// own `timestamp`, when the line carries one.
+    AssistantToolUse {
+        id: String,
+        name: String,
+        at: Option<String>,
+    },
     /// A later user/tool message recorded the invocation's result.
     ToolResult { tool_use_id: String },
     /// Any record that does not affect tool-call pairing.
@@ -60,6 +65,10 @@ pub fn parse_transcript_entries(line: &str) -> Vec<TranscriptEntry> {
     };
 
     let mut entries = Vec::new();
+    let at = value
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     for block in content {
         let Some(block_type) = block.get("type").and_then(Value::as_str) else {
             continue;
@@ -73,6 +82,7 @@ pub fn parse_transcript_entries(line: &str) -> Vec<TranscriptEntry> {
                     entries.push(TranscriptEntry::AssistantToolUse {
                         id: id.to_string(),
                         name: name.to_string(),
+                        at: at.clone(),
                     });
                 }
             }
@@ -119,26 +129,63 @@ pub fn read_transcript(path: &Path) -> Result<Vec<TranscriptEntry>, std::io::Err
 /// More than one unanswered call is unresolved: the resume prompt must never
 /// guess which side effect was in flight.
 pub fn classify_interrupted(entries: &[TranscriptEntry]) -> InterruptedCallOutcome {
-    let mut open: Vec<(String, String)> = Vec::new();
+    let open = open_calls(entries);
+    match open.as_slice() {
+        [] => InterruptedCallOutcome::NothingInFlight,
+        [c] => InterruptedCallOutcome::Unknown {
+            name: c.name.clone(),
+        },
+        _ => InterruptedCallOutcome::Unresolved,
+    }
+}
+
+/// One unanswered tool call, with the time its record carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenCall {
+    pub id: String,
+    pub name: String,
+    pub at: Option<String>,
+}
+
+/// The calls in `entries` whose recorded `tool_use` has no later result,
+/// in transcript order.
+fn open_calls(entries: &[TranscriptEntry]) -> Vec<OpenCall> {
+    let mut open: Vec<OpenCall> = Vec::new();
     for entry in entries {
         match entry {
-            TranscriptEntry::AssistantToolUse { id, name } => {
-                open.push((id.clone(), name.clone()));
+            TranscriptEntry::AssistantToolUse { id, name, at } => {
+                open.push(OpenCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    at: at.clone(),
+                });
             }
             TranscriptEntry::ToolResult { tool_use_id } => {
-                if let Some(index) = open.iter().position(|(id, _)| id == tool_use_id) {
+                if let Some(index) = open.iter().position(|c| &c.id == tool_use_id) {
                     open.remove(index);
                 }
             }
             TranscriptEntry::Other => {}
         }
     }
+    open
+}
 
-    match open.as_slice() {
-        [] => InterruptedCallOutcome::NothingInFlight,
-        [(.., name)] => InterruptedCallOutcome::Unknown { name: name.clone() },
-        _ => InterruptedCallOutcome::Unresolved,
-    }
+/// The newest tool call in `text` (JSONL) when no later line answers it.
+/// An older open call never counts: only the newest call can still be running.
+pub fn trailing_open_call(text: &str) -> Option<OpenCall> {
+    let entries: Vec<TranscriptEntry> = text.lines().flat_map(parse_transcript_entries).collect();
+    let newest = entries.iter().rev().find_map(|e| match e {
+        TranscriptEntry::AssistantToolUse { .. } => Some(e),
+        _ => None,
+    })?;
+    let newest_id = match newest {
+        TranscriptEntry::AssistantToolUse { id, .. } => id,
+        _ => return None,
+    };
+    open_calls(&entries)
+        .into_iter()
+        .find(|c| &c.id == newest_id)
 }
 
 /// Render the exact resume guidance for a classification.
@@ -234,6 +281,7 @@ mod tests {
         TranscriptEntry::AssistantToolUse {
             id: id.to_string(),
             name: name.to_string(),
+            at: None,
         }
     }
 
@@ -316,5 +364,48 @@ mod tests {
         std::fs::write(&path, "not-json\n").unwrap();
         assert!(read_transcript(&path).is_err());
         std::fs::remove_file(path).ok();
+    }
+
+    // AC1-HP: the trailing reader answers with the newest call's name, id and time.
+    #[test]
+    fn trailing_open_call_reads_the_newest_call_with_its_time() {
+        let tail = concat!(
+            r#"{"type":"assistant","timestamp":"2026-09-21T08:21:13.913Z","message":{"content":[{"type":"tool_use","id":"toolu_01DRy8JKGCBLeubeGxap9SwP","name":"Bash","input":{}}]},"uuid":"u1","parentUuid":null}"#,
+            "\n",
+            r#"{"type":"user","timestamp":"2026-09-21T08:21:40.000Z","message":{"content":[{"type":"queue-operation","content":"x"}]}}"#,
+            "\n",
+        );
+        let call = trailing_open_call(tail).expect("the newest call is open");
+        assert_eq!(call.id, "toolu_01DRy8JKGCBLeubeGxap9SwP");
+        assert_eq!(call.name, "Bash");
+        assert_eq!(call.at.as_deref(), Some("2026-09-21T08:21:13.913Z"));
+    }
+
+    // AC1-EDGE: an older open call never counts once a newer call is answered.
+    #[test]
+    fn trailing_open_call_ignores_older_open_calls() {
+        let tail = concat!(
+            r#"{"type":"assistant","timestamp":"2026-09-21T08:00:00.000Z","message":{"content":[{"type":"tool_use","id":"old","name":"Bash","input":{}}]}}"#,
+            "\n",
+            r#"{"type":"assistant","timestamp":"2026-09-21T08:05:00.000Z","message":{"content":[{"type":"tool_use","id":"new","name":"Read","input":{}}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"new","content":"ok"}]}}"#,
+            "\n",
+        );
+        assert!(trailing_open_call(tail).is_none());
+    }
+
+    // A partial (unterminated) tail line must not break the newest-call read;
+    // the walk skips it like any Other record.
+    #[test]
+    fn trailing_open_call_skips_a_partial_last_line() {
+        let tail = concat!(
+            r#"{"type":"assistant","timestamp":"2026-09-21T08:21:13.913Z","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_re"#,
+        );
+        assert!(trailing_open_call(tail).is_none());
     }
 }
