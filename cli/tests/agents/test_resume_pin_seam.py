@@ -272,6 +272,7 @@ def _stamp_account(name: str, account: str) -> None:
         for entry in entries:
             if entry.name == name:
                 entry.launch_account = account
+        return entries
 
     update_registry(_stamp)
 
