@@ -209,6 +209,7 @@ RUST_CLIENT_VERBS = frozenset(
         # ALL sessions, emitting review_wedged / budget_stop items. Dispatched in
         # client.rs before build_request (no daemon RPC, no Python impl).
         "needs",
+        "select-read",
         # Activity feed projection: questions.jsonl + graph.json ->
         # ordered rows carrying the node id + session id the mux deep link
         # resolves. Dispatched in client.rs before build_request (no daemon

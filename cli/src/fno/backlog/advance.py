@@ -477,9 +477,8 @@ def _select_read(kind: str, args: list[str]) -> Any:
 def _next_node(project: Optional[str]) -> Optional[dict]:
     """Return the next ready node summary (or None), via ``fno backlog next``.
 
-    Project-scoped (Open Question 2 RESOLVED: the same selection bare megawalk
-    uses). Raises on a non-zero/garbled response so advance skips rather than
-    guessing a node (Failure Modes: Errors).
+    Project-scoped. Raises on a non-zero/garbled response so advance skips
+    rather than guessing a node (Failure Modes: Errors).
     """
     args = ["--project", project] if project else []
     return _select_read("next", args)
