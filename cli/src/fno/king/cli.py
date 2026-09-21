@@ -270,11 +270,13 @@ def done_cmd(
         AGENT_UNREGISTERED,
         REGISTRY_UNREADABLE,
         _canonical_members,
+        _derived_level,
         calling_agent_row,
         canonical_scope,
         crown_answers_to,
         emit_crown_vacated,
     )
+    from fno.agents.court import _graph_index, find_presiding_crown
     from fno.agents.registry import TERMINAL_STATUSES as _TERMINAL_ROW_STATUSES
     from fno.agents.registry import load_registry, update_registry
     from fno.king.state import king_manifest_path, parse_manifest, remove_king_manifest
@@ -338,15 +340,30 @@ def done_cmd(
                 raise typer.Exit(2)
             scope = own
         elif own != scope:
-            typer.echo(
-                f"king: refusing to expire {scope!r}: this session's crown is "
-                f"{own!r}, and an agent expires only its own crown. Call "
-                "`fno agents king done` with no --scope, or use an attended "
-                "shell for another territory.",
-                err=True,
+            rows = load_registry()
+            mine = [r for r in rows if getattr(r, "crown_scope", None) == scope]
+            crowns = [
+                {"holder": r.name, "level": r.crown_level, "scope": r.crown_scope}
+                for r in rows
+                if r.status not in _TERMINAL_ROW_STATUSES and r.crown_level is not None
+            ]
+            target_level = next((r.crown_level for r in mine if r.crown_level is not None), None)
+            presider = find_presiding_crown(
+                scope, target_level or _derived_level(scope), crowns, _graph_index()
             )
-            raise typer.Exit(2)
-        holder_name = caller.name
+            live = any(r.status not in _TERMINAL_ROW_STATUSES for r in mine)
+            member = any(crown_answers_to(r.crown_scope, scope) and r.crown_scope != scope
+                         for r in rows)
+            if live or member or (presider or {}).get("holder") != caller.name:
+                typer.echo(
+                    f"king: refusing to expire {scope!r}: this session's crown is "
+                    f"{own!r}, and an agent expires only its own crown. Call "
+                    "`fno agents king done` with no --scope, or use an attended "
+                    "shell for another territory.",
+                    err=True,
+                )
+                raise typer.Exit(2)
+        holder_name = "" if own != scope else caller.name
 
     # Snapshot the manifest's OWN session id BEFORE vacating: removal compares
     # it under the manifest lock, so a successor crowned mid-vacate survives.
@@ -369,6 +386,11 @@ def done_cmd(
 
         def _vacate(rows: list) -> list:
             nonlocal vacated, vacated_rows
+            if attended_named and caller is not None:
+                if any(r.crown_scope == scope
+                       and r.status not in _TERMINAL_ROW_STATUSES for r in rows):
+                    raise ValueError("a live holder crowned mid-expiry")
+                return rows
             for index, row in enumerate(rows):
                 if attended_named:
                     # Attended + named scope: vacate whatever live row holds
