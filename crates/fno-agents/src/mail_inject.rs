@@ -497,17 +497,23 @@ fn emit(delivered: bool, reason: &str) -> i32 {
 }
 
 /// Bracketed-paste guards (xterm DEC mode 2004): the recipient TUI treats
-/// everything between them as ONE paste event. Required because a `<fno_mail>`
-/// envelope is multi-line (`open_tag\nbody\n</fno_mail>`), and a raw multi-line
-/// write without them submits line-by-line -- the recipient records the open tag
-/// alone (enough to satisfy the content confirm) while the body arrives as
-/// separate input, dropping the message. Contract: `docs/architecture/fno-agents-deliver-gate.md`.
+/// everything between them as ONE paste event. Required whenever the payload
+/// carries a control byte (the envelope renderer emits one clean line unless
+/// the body itself does not): a raw multi-line write without them submits
+/// line-by-line -- the recipient records the open tag alone (enough to satisfy
+/// the content confirm) while the body arrives as separate input, dropping the
+/// message; a lone CR or tab fires inside the input box, an ESC opens an
+/// escape sequence. A clean single-line payload is typed as ordinary
+/// keystrokes, unwrapped, so it never wears the operator-clipboard paste
+/// label. Contract: `docs/architecture/fno-agents-deliver-gate.md`.
 const PASTE_BEGIN: &str = "\x1b[200~";
 const PASTE_END: &str = "\x1b[201~";
 
-/// Paste the envelope as RAW BYTES on the ATTACHED transport -- wrapped in
-/// bracketed-paste guards so a multi-line body lands as ONE paste -- settle, then
-/// send a separate raw `\r` byte as the Enter. Post-attach the `control.sock` is a
+/// Type the envelope as RAW BYTES on the ATTACHED transport -- bracketed-paste
+/// guards whenever it carries a control byte, so that form lands as ONE paste
+/// while a clean single-line envelope arrives as typed keystrokes, unlabelled
+/// -- settle, then send a separate raw `\r` byte as the Enter. Post-attach the
+/// `control.sock` is a
 /// raw keystroke pipe (node x-aaaa): an `op:'reply'` JSON write here lands its
 /// frames -- auth key included -- as literal text in the recipient input box,
 /// unsent. So we type the turn exactly as a human would: paste, then a wire-level
@@ -523,8 +529,19 @@ fn inject_with_submit<T: crate::claude_attach::ControlTransport>(
     if contains_detach_sentinel(text) {
         return Err(DriveError::UnsafeText);
     }
+    // Guards whenever the payload carries anything the raw-keystroke path
+    // would act on: a newline splits the submit, a lone CR or tab fires
+    // inside the input box, an ESC opens an escape sequence. One control
+    // char anywhere demotes the whole write to paste content, where every
+    // byte is inert. A clean single-line payload stays typed keystrokes, so
+    // it never wears the operator-clipboard paste label.
+    let line = if text.chars().any(char::is_control) {
+        format!("{PASTE_BEGIN}{text}{PASTE_END}")
+    } else {
+        text.to_string()
+    };
     transport
-        .send_line(&format!("{PASTE_BEGIN}{text}{PASTE_END}"))
+        .send_line(&line)
         .map_err(|e| DriveError::Io(e.to_string()))?;
     std::thread::sleep(settle);
     transport
@@ -1799,6 +1816,39 @@ mod tests {
     }
 
     #[test]
+    fn inject_with_submit_single_line_types_keystrokes_without_paste_guards() {
+        // A single-line envelope is ordinary keystrokes -- no
+        // bracketed-paste guards, so it never wears the operator-clipboard
+        // paste label. The separate wire-level CR is unchanged.
+        let mut t = Fake { sent: Vec::new() };
+        let envelope = "<fno_mail from=\"a1b2c3d4\" node=\"x-aaaa\">hi MARKER</fno_mail>";
+        inject_with_submit(&mut t, envelope, Duration::ZERO).unwrap();
+        assert_eq!(t.sent, vec![envelope.to_string(), "\r".to_string()]);
+        assert!(
+            !t.sent[0].contains(PASTE_BEGIN),
+            "single line must not be paste-labelled"
+        );
+    }
+
+    #[test]
+    fn inject_with_submit_control_byte_payload_still_pastes() {
+        // A lone CR inside a one-line body is the Enter keystroke on this
+        // transport, and the CLI preserves it in bodies by design. A control
+        // byte demotes the whole write to paste content, where every byte is
+        // inert.
+        let mut t = Fake { sent: Vec::new() };
+        let payload = "one\rline MARKER";
+        inject_with_submit(&mut t, payload, Duration::ZERO).unwrap();
+        assert_eq!(
+            t.sent,
+            vec![
+                format!("{PASTE_BEGIN}{payload}{PASTE_END}"),
+                "\r".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn inject_with_submit_refuses_unsafe_envelope_and_writes_nothing() {
         let mut t = Fake { sent: Vec::new() };
         let err = inject_with_submit(&mut t, DETACH_SENTINELS[0], Duration::ZERO);
@@ -2371,7 +2421,7 @@ mod tests {
         let attempts = 2 * CR_RESUBMIT_EVERY; // two resubmit windows
         let r = confirm_with_cr_retry(&mut t, attempts, Duration::ZERO, || false);
         assert_eq!(r, Err("not-confirmed"));
-        // paste + initial CR (inject_with_submit) + one CR per resubmit window.
+        // payload + initial CR (inject_with_submit) + one CR per resubmit window.
         assert_eq!(t.sent.len() as u32, 2 + attempts / CR_RESUBMIT_EVERY);
         // Every write after the paste is a bare raw CR -- no JSON, no auth.
         for line in &t.sent[1..] {

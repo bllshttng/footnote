@@ -84,7 +84,7 @@ def test_mail_envelope_carries_and_validates_origin(monkeypatch):
     assert 'origin="operator"' in wrapped
     # AC1-ORIGIN: origin rides the TAG (last), and no `-- ` footer line of any
     # kind renders anymore.
-    assert wrapped.splitlines()[0].endswith('origin="operator">')
+    assert wrapped.split(">", 1)[0].endswith('origin="operator"')
     assert not any(line.startswith("-- ") for line in wrapped.splitlines())
 
 
@@ -260,7 +260,7 @@ def test_peer_envelope_is_footerless_without_a_crown(tmp_path, monkeypatch):
     )
     assert envelope.wrap_fno_mail(
         "run the smoke", from_="a1b2c3d4"
-    ) == '<fno_mail from="a1b2c3d4">\nrun the smoke\n</fno_mail>'
+    ) == '<fno_mail from="a1b2c3d4">run the smoke</fno_mail>'
 
 
 def test_crowned_sender_renders_from_rank_not_a_footer(tmp_path, monkeypatch):
@@ -442,8 +442,8 @@ def test_abdicated_recipient_reads_its_own_lost_crown_in_the_header(
         to_session="session-former",
     )
     assert 'to_rank="none"' in abdicated
-    # The envelope stays three lines: tag, body, close tag.
-    assert len(abdicated.splitlines()) == 3
+    # A single-line body renders the whole envelope on one line.
+    assert len(abdicated.splitlines()) == 1
 
     crowned = envelope.wrap_fno_mail(
         "rule on this",
@@ -506,7 +506,7 @@ def test_crownless_fleet_envelope_is_byte_unchanged(tmp_path, monkeypatch):
     rendered = envelope.wrap_fno_mail(
         "hi", from_="peer", to_session="session-w"
     )
-    assert rendered == '<fno_mail from="peer">\nhi\n</fno_mail>'
+    assert rendered == '<fno_mail from="peer">hi</fno_mail>'
 
 
 def test_unreadable_registry_never_grants_sender_standing(tmp_path, monkeypatch):
@@ -522,7 +522,7 @@ def test_unreadable_registry_never_grants_sender_standing(tmp_path, monkeypatch)
     )
 
     # Unreadable state grants no standing AND raises nothing: the render
-    # degrades to the plain three-line envelope.
+    # degrades to the plain one-line envelope.
     rendered = envelope.wrap_fno_mail(
         "write the plan",
         from_="king",
@@ -530,7 +530,7 @@ def test_unreadable_registry_never_grants_sender_standing(tmp_path, monkeypatch)
     )
 
     assert "from_rank" not in rendered
-    assert rendered == '<fno_mail from="session-king">\nwrite the plan\n</fno_mail>'
+    assert rendered == '<fno_mail from="session-king">write the plan</fno_mail>'
 
 
 def test_enforce_origin_floor_blocks_agent_channel_claims(monkeypatch):

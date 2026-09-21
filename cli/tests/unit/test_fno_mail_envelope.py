@@ -118,19 +118,20 @@ def test_absent_reply_to_is_byte_identical_to_pre_change():
     )
 
 
-def test_wrap_is_three_lines_with_no_footer():
-    # D4: open tag, body, close tag. Only fno writes the tag, so the
-    # tag itself marks agent text; no `-- ` footer line renders of any kind.
+def test_wrap_is_one_line_for_a_single_line_body():
+    # The renderer emits no envelope newlines of its own, so a single-line
+    # body renders the whole envelope on one line and the live inject needs
+    # no bracketed-paste guards for it.
     assert (
         wrap_fno_mail("ship it", from_="7d1f8bdc", node="x-synth")
-        == '<fno_mail from="7d1f8bdc" node="x-synth">\nship it\n</fno_mail>'
+        == '<fno_mail from="7d1f8bdc" node="x-synth">ship it</fno_mail>'
     )
 
 
 def test_wrap_preserves_multiline_body():
     body = "line one\nline two"
     wrapped = wrap_fno_mail(body, from_="aaaa1111")
-    assert wrapped == '<fno_mail from="aaaa1111">\nline one\nline two\n</fno_mail>'
+    assert wrapped == '<fno_mail from="aaaa1111">line one\nline two</fno_mail>'
     assert wrapped.startswith("<fno_mail ")
     assert wrapped.endswith("</fno_mail>")
 
@@ -161,8 +162,8 @@ def test_wrap_renders_crowned_shapes_as_header_attributes(monkeypatch):
     )
     assert wrapped == (
         '<fno_mail from="sender-session" harness="claude-code" '
-        'from_rank="L2 epic-scope" to="278c9a89" to_rank="L1 fno" id="msg-5a760f">\n'
-        "hi\n"
+        'from_rank="L2 epic-scope" to="278c9a89" to_rank="L1 fno" id="msg-5a760f">'
+        "hi"
         "</fno_mail>"
     )
     assert not any(line.startswith("-- ") for line in wrapped.splitlines())
@@ -234,9 +235,10 @@ def test_envelope_overhead_budget(monkeypatch):
     assert len(peer_wrapped) - len(body) <= 160
 
 
-def test_wrap_is_three_lines_for_every_shape():
+def test_wrap_is_paired_for_every_shape():
     # The v2 precondition: every render through the public renderer is the
-    # paired envelope with no footer lines, whatever the shape.
+    # paired envelope with no footer lines, whatever the shape; only the
+    # body may carry newlines.
     shapes = [
         dict(body="", from_="aaaa1111"),
         dict(body="one line", from_="aaaa1111"),
@@ -253,12 +255,11 @@ def test_wrap_is_three_lines_for_every_shape():
     ]
     for kwargs in shapes:
         wrapped = wrap_fno_mail(**kwargs)
-        lines = wrapped.splitlines()
-        assert lines[0].startswith("<fno_mail "), wrapped
-        assert lines[-1] == "</fno_mail>", wrapped
-        assert lines[1:-1] == kwargs["body"].splitlines() or (
-            kwargs["body"] == "" and lines[1:-1] == [""]
-        ), wrapped
+        assert wrapped.startswith("<fno_mail "), wrapped
+        assert wrapped.endswith("</fno_mail>"), wrapped
+        open_end = wrapped.index(">") + 1
+        close_len = len("</fno_mail>")
+        assert wrapped[open_end:-close_len] == kwargs["body"], wrapped
         assert not any(
             line.startswith("-- ") for line in wrapped.splitlines()
         ), wrapped
