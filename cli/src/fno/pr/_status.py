@@ -471,55 +471,22 @@ def _review_activity(branch: str, head: str, cwd: Optional[str]):
 
 
 def _merge_decision(pr: str, repo: str, facts: dict) -> dict:
-    """The one merge decision, read as an authorized-merge preview ask.
+    """The one merge decision, as an authorized-merge preview (x-53c5)."""
+    from fno.rust_binary import verb_call
 
-    `ready` is this receipt's blockers being empty: status no longer keeps a
-    second conjunction, so a PR that reads ready here is a PR `fno do pr
-    merge` authorizes. The facts status already computed ride the payload so
-    the owner never spawns a second status read for them. An unreachable or
-    unreadable owner is `merge_decision_unknown` and reads not-ready, never
-    the other way.
-    """
-    from fno.rust_binary import VerbUnavailable, verb_call
-
-    payload = {"cwd": repo, "pr": int(pr), "effect": "preview", **facts}
     try:
-        receipt = verb_call("authorized-merge", payload, timeout=180)
-    except VerbUnavailable as exc:
-        receipt = {"outcome": "unknown", "detail": str(exc)}
+        receipt = verb_call(
+            "authorized-merge", {"cwd": repo, "pr": int(pr), "effect": "preview", **facts},
+            timeout=180,
+        )
     except Exception as exc:  # noqa: BLE001 - a broken transport is not a verdict
         receipt = {"outcome": "unknown", "detail": f"{type(exc).__name__}: {exc}"}
     if not isinstance(receipt.get("blockers"), list):
-        receipt["blockers"] = [
-            {
-                "code": "merge_decision_unknown",
-                "class": "unknown",
-                "detail": str(receipt.get("detail") or "authorized-merge receipt unreadable"),
-            }
-        ]
+        receipt["blockers"] = [{
+            "code": "merge_decision_unknown", "class": "unknown",
+            "detail": str(receipt.get("detail") or "authorized-merge receipt unreadable"),
+        }]
     return receipt
-
-
-def _ci_blocker_word(verdict: str, counts: Optional[dict]) -> Optional[str]:
-    """The status-side name for a non-green verdict: the KIND of red, never a
-    generic one (the same split the ready conjunction used to apply)."""
-    if verdict == "green":
-        return None
-    if (
-        verdict == "red"
-        and counts
-        and counts.get("unsettled_fail")
-        and counts.get("unsettled_fail") == counts.get("fail")
-    ):
-        return "ci_cancelled_retrigger"
-    if (
-        verdict == "red"
-        and counts
-        and counts.get("fail_statuses")
-        and counts.get("fail_statuses") == counts.get("fail")
-    ):
-        return "commit_status_red"
-    return f"ci_{verdict}"
 
 
 def _github_merge_blockers(pr_json, rollup, cwd):
@@ -849,8 +816,6 @@ def run_status(
 
     github_merge = None if is_terminal else _github_merge_blockers(pr_json, rollup, cwd)
     # Rerun recovery, probed on every green read of a live PR (fail-open).
-    # A recovery is history of one head (docs, `Reuse across reads of one
-    # head`); `runs` is the listing fetch_pr_rest already read.
     rerun: Optional[dict] = None
     if verdict == "green" and not is_terminal:
         head_sha = pr_json.get("headRefOid")
@@ -878,16 +843,14 @@ def run_status(
         if rerun is not None
         else {}
     )
-    # ONE merge decision (x-53c5): `ready` is the authorized-merge preview
-    # verdict, the same gate chain `fno do pr merge` runs. The probes this
-    # read already paid for ride the ask, so the owner never spawns a second
-    # status read for them.
+    # ONE merge decision (x-53c5): the probes this read already paid for
+    # ride the ask, so the owner never spawns a second status read.
     receipt = _merge_decision(
         pr,
         cwd or os.getcwd(),
         {
             "verdict": verdict,
-            "ci_blocker": _ci_blocker_word(verdict, counts),
+            "counts": counts,
             "rerun_recovered": bool(rerun.get("recovered")) if rerun is not None else None,
             "optional_reviews_unresolved": unresolved,
             "github_blockers": (github_merge or {}).get("blockers") or [],
@@ -1032,8 +995,7 @@ def run_status(
             "worktree": activity.worktree,
         },
         "dispatch_hold": hold_reason,
-        # The preview verdict (x-53c5): ready iff the one merge decision
-        # authorizes, `ready_blockers` naming the gate codes that hold.
+        # The preview verdict (x-53c5).
         "merge_decision": receipt,
         "ready": not blocker_words,
         "ready_blockers": blocker_words,

@@ -145,7 +145,7 @@ fn ask(effect: Effect) -> Request {
         authority: None,
         accept_flake: false,
         supplied_verdict: None,
-        supplied_ci_blocker: None,
+        supplied_counts: None,
         supplied_rerun_recovered: None,
         supplied_optional_unresolved: None,
         supplied_github_blockers: None,

@@ -257,10 +257,10 @@ pub struct Request {
     /// status` for what its caller already computed. When a field is absent
     /// the walk reads its own probes instead.
     pub supplied_verdict: Option<String>,
-    /// The status-side red-kind word (`ci_red`, `commit_status_red`,
-    /// `ci_cancelled_retrigger`, `ci_pending`, `ci_unknown`) so a preview
-    /// receipt names the KIND of red the status read computed.
-    pub supplied_ci_blocker: Option<String>,
+    /// The rollup counts behind `supplied_verdict`, so the walk can name the
+    /// KIND of red (`ci_cancelled_retrigger`, `commit_status_red`) the way
+    /// the status read always has.
+    pub supplied_counts: Option<Value>,
     pub supplied_rerun_recovered: Option<bool>,
     /// `Some(Some(n))` = n unresolved; `Some(None)` = the read answered
     /// unknown; None = not supplied (probe instead).
@@ -881,10 +881,10 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
 
     // (9) the CI verdict gate, same precondition as the effect path.
     if request.require_checks && checks.verdict != "green" {
-        let word = request
-            .supplied_ci_blocker
-            .clone()
-            .unwrap_or_else(|| format!("ci_{}", checks.verdict));
+        let word = ci_blocker_word(
+            &checks.verdict,
+            request.supplied_counts.as_ref(),
+        );
         let detail = format!(
             "checks are {}; require_checks_pass forbids merging without green",
             checks.verdict
@@ -945,6 +945,29 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
     } else {
         PreviewVerdict::Blocked(blockers)
     }
+}
+
+/// The status-side name for a non-green verdict: the KIND of red, never a
+/// generic one. A red whose every failure is a taken-away run is a
+/// cancelled-retrigger; one whose every failure is a StatusContext is a
+/// status red; anything else is the generic word. Unreadable counts
+/// degrade to the generic name - the verdict itself stays authoritative.
+fn ci_blocker_word(verdict: &str, counts: Option<&Value>) -> String {
+    if verdict != "red" {
+        return format!("ci_{verdict}");
+    }
+    if let Some(c) = counts {
+        let uf = c.get("unsettled_fail").and_then(Value::as_i64).unwrap_or(0);
+        let f = c.get("fail").and_then(Value::as_i64).unwrap_or(0);
+        let fs = c.get("fail_statuses").and_then(Value::as_i64).unwrap_or(0);
+        if uf > 0 && uf == f {
+            return "ci_cancelled_retrigger".to_string();
+        }
+        if fs > 0 && fs == f {
+            return "commit_status_red".to_string();
+        }
+    }
+    "ci_red".to_string()
 }
 
 /// The flake gate, shared by the effect and preview walks: a rerun-recovered
@@ -2092,10 +2115,7 @@ fn parse_request(payload: &Value) -> Result<Request, String> {
             .get("verdict")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        supplied_ci_blocker: payload
-            .get("ci_blocker")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        supplied_counts: payload.get("counts").cloned(),
         supplied_rerun_recovered: payload.get("rerun_recovered").and_then(Value::as_bool),
         supplied_optional_unresolved: payload.get("optional_reviews_unresolved").map(|v| {
             if let Some(n) = v.as_i64() {
@@ -2348,7 +2368,7 @@ mod tests {
             authority: None,
             accept_flake: false,
             supplied_verdict: None,
-            supplied_ci_blocker: None,
+            supplied_counts: None,
             supplied_rerun_recovered: None,
             supplied_optional_unresolved: None,
             supplied_github_blockers: None,
@@ -3690,6 +3710,21 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn the_red_kind_word_splits_by_the_counts() {
+        let counts = |uf: i64, f: i64, fs: i64| {
+            serde_json::json!({"unsettled_fail": uf, "fail": f, "fail_statuses": fs})
+        };
+        assert_eq!(
+            ci_blocker_word("red", Some(&counts(1, 1, 0))),
+            "ci_cancelled_retrigger"
+        );
+        assert_eq!(ci_blocker_word("red", Some(&counts(0, 2, 2))), "commit_status_red");
+        assert_eq!(ci_blocker_word("red", Some(&counts(1, 3, 1))), "ci_red");
+        assert_eq!(ci_blocker_word("red", None), "ci_red");
+        assert_eq!(ci_blocker_word("pending", None), "ci_pending");
+    }
+
     fn a_preview_payload_defaults_its_ci_gate_on() {
         let payload: Value = serde_json::from_str(
             r#"{"cwd": "/tmp", "effect": "preview", "pr": 7}"#,

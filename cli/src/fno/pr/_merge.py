@@ -513,17 +513,11 @@ def _is_documentation_path(path: str) -> bool:
 # then sees code pushed must evict or wait out the TTL before merging. Move to
 # a head-keyed cache if a long-lived surface ever needs cross-push exactness.
 def _pr_file_paths(pr_number: int, cwd: str) -> Optional[List[str]]:
-    """The PR's own changed file paths via the REST files endpoint with
-    --paginate (gh pr view --json files caps silently at one GraphQL page).
-    None on a probe miss; an EMPTY list is a real answer."""
+    """Changed file paths via the paginated REST files endpoint; None on a
+    miss, and an EMPTY list is a real answer."""
     res = _gh(
-        [
-            "api",
-            f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/files",
-            "--paginate",
-            "--jq",
-            ".[] | .filename // empty",
-        ],
+        ["api", f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/files",
+         "--paginate", "--jq", ".[] | .filename // empty"],
         cwd,
     )
     if not res.ok:
@@ -1832,11 +1826,8 @@ def run_merge(
         _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
         return 127
 
-    # (2a) Coverage read: the covered head that pins this merge, and the
-    # receipt the gate published. The REFUSAL decision moved into
-    # authorized_merge::decide (x-53c5, the coverage gate in merge_gates.rs);
-    # what stays here is the pin and the published receipt, so the head the
-    # effect re-verifies is the head this gate answered for.
+    # (2a) Coverage read: the pin and the published receipt. The refusal is
+    # decide's now (x-53c5).
     from fno.pr import _coverage_gate
 
     state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
@@ -2068,8 +2059,7 @@ def _do_merge(
     # verdict reads only the latest rollup). Probe ran at 2b; this is only the
     # decision. Sits before the coverage stamp: a held head must not green.
     if flake is not None and flake.get("recovered") and accept_flake:
-        # The hold itself is decide's flake gate (x-53c5); this is only the
-        # sanctioned-override receipt, which needs the probe's failed list.
+        # The hold is decide's flake gate (x-53c5); this is the receipt.
         failed = ", ".join(flake.get("failed") or []) or "unknown checks"
         try:
             from fno.events import _build, append_event

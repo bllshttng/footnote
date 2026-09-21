@@ -1319,14 +1319,9 @@ def run_execute_queue(
                 counts["held"] += 1
                 entry["retries"] = prior_retries
                 bare = _merge.reason_after_outcome(reason)
-                # Terminal answers: the owner's decide names them
-                # ("PR 42 is already merged; nothing to merge") and the
-                # retired pre-gate spelled them "PR already ...".
-                if (
-                    bare.startswith(_merge.ALREADY_TERMINAL)
-                    or "already merged" in bare
-                    or "already closed" in bare
-                ):
+                # Terminal answers: decide's wording and the retired pre-gate's.
+                if (bare.startswith(_merge.ALREADY_TERMINAL)
+                        or "already merged" in bare or "already closed" in bare):
                     entry["last_seen_state"] = "NOT_OPEN"
                 store.set(key, entry)
                 _grant("held", pr, cand, grant_fields, reason=reason)

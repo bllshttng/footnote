@@ -162,9 +162,7 @@ def _serve(row: dict, *, stale: bool) -> int:
         out["green"] = False
         out["settled"] = False
         out["ready"] = False
-        # The gate answers in a stale row are history, not verdicts (x-53c5):
-        # replaying an old blocker beside an unreadable read names a hold the
-        # world may have already released. One honest word instead.
+        # A stale row's gate answers are history, not verdicts (x-53c5).
         out["ready_blockers"] = ["status_stale"]
         out.pop("failures", None)
         out["stale_reason"] = (
@@ -199,12 +197,7 @@ def _serve(row: dict, *, stale: bool) -> int:
 
 
 def _merge_decision_key(slug_key: str, pr: str, info: dict, cwd: Optional[str]) -> str:
-    """The row key, minted by the authorized-merge owner from every fact its
-    decision reads (head, PR state, hold word, live merge-slot rows, review
-    evidence at the head). A hold release, a slot move, a merge, or a fresh
-    attestation changes the key, so a pre-change row can never serve inside
-    the TTL (x-53c5). An unreachable owner falls back to the head-only key:
-    the cache keeps working, with today's staleness window and no worse."""
+    """The row key, minted by the owner's status-cache-key op (x-53c5)."""
     from fno.rust_binary import verb_call
 
     try:

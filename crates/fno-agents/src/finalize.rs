@@ -2144,7 +2144,7 @@ fn arm_auto_merge(cwd: &Path, approved: bool, source: Option<&str>) -> (bool, Op
             authority: None,
             accept_flake: false,
             supplied_verdict: None,
-            supplied_ci_blocker: None,
+            supplied_counts: None,
             supplied_rerun_recovered: None,
             supplied_optional_unresolved: None,
             supplied_github_blockers: None,
