@@ -809,6 +809,7 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]
 
     node = (_spawn_flag_value(args, "--node") or "").strip()
     slot = _seed_slot(list(args[1:]))
+    derived = False
 
     def _payload() -> dict:
         return {
@@ -829,41 +830,27 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]
             if node:
                 print(f"fno agents spawn: spawn-axes unavailable: {exc}", file=sys.stderr)
                 raise SystemExit(2) from exc
-            # No binary, no derivation: the spawn proceeds exactly as before
-            # an explicit node ever reached this seam.
             print(f"fno agents spawn: spawn-axes unavailable, seed-node derivation skipped: {exc}",
                   file=sys.stderr)
             return None
 
     if not node:
         answer = _ask(_payload())
-        if answer is None:
-            return list(args), None
-        action = answer.get("action")
-        if action == "refuse":
-            # A current binary never refuses a derivation (it answers derive
-            # or pass); this refuse names the row gate judging a nodeless
-            # payload, so the installed binary predates this gate. Degrade to
-            # the pre-derivation spawn instead of failing every seeded spawn
-            # until the binary updates.
+        if answer is None or answer.get("action") == "refuse":
+            # A current binary never refuses a nodeless payload; this one
+            # predates the derivation. Spawn exactly as before it existed.
             print("fno agents spawn: installed fno-agents predates seed-node "
                   "derivation; spawning without the derived node", file=sys.stderr)
             return list(args), None
-        derived = (answer.get("node") or "").strip() if action == "derive" else ""
-        if not derived:
-            return list(args), None
-        if find_node_row(derived) is None:
-            reason = f"{derived} names no readable backlog row (derived from the seed)"
-            if _client_carries_node_receipt():
-                return _insert_spawn_flag(args, "--node-reason", reason), None
-            # The client that will exec this spawn predates the receipt flag
-            # and would die on it as unknown; say why here instead and spawn
-            # exactly as before the receipt existed.
-            print(f"fno agents spawn: {reason}", file=sys.stderr)
-            return list(args), None
-        args = _insert_spawn_flag(args, "--node", derived)
-        node = derived
-        slot = _seed_slot(list(args[1:]))
+        if answer.get("action") == "compose":
+            args = [str(tok) for tok in answer.get("argv") or list(args)]
+            node = (_spawn_flag_value(args, "--node") or "").strip()
+            if not node:
+                return args, None  # receipt argv: the mint stamps why
+            derived = True
+            slot = _seed_slot(list(args[1:]))
+        if not node:
+            return list(args), None  # pass: the seed names no node
 
     row = find_node_row(node)
     derive_error: Optional[str] = None
@@ -884,6 +871,7 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]
     payload = _payload()
     payload.update({
         "node": node,
+        "derived": derived,
         "row_found": row is not None,
         "effective_verb": effective_verb,
         "stored_verb": stored or None,

@@ -58,9 +58,33 @@ fn trim_sentence_punct(s: &str) -> &str {
     s.trim_end_matches(['.', ',', ';', ':', '!', '?'])
 }
 
+/// Insert `flag value` into the argv before the `--` fence when one is
+/// present, else append: a client-side flag must never land inside the
+/// harness's own tokens.
+fn with_flag_inserted(mut argv: Vec<String>, flag: &str, value: &str) -> Vec<String> {
+    let at = argv
+        .iter()
+        .position(|tok| tok == "--")
+        .filter(|&i| i > 0)
+        .unwrap_or(argv.len());
+    argv.insert(at, flag.to_string());
+    argv.insert(at + 1, value.to_string());
+    argv
+}
+
+/// Remove `flag` and the value that follows it from the argv.
+fn without_flag(mut argv: Vec<String>, flag: &str) -> Vec<String> {
+    if let Some(i) = argv.iter().position(|tok| tok == flag) {
+        argv.drain(i..(i + 2).min(argv.len()));
+    }
+    argv
+}
+
 /// The nodeless arm: read the seed's verb argument as the node the
-/// spawn is FOR. Answers `derive` with the id, or `pass` with a
-/// `derive_reason` naming why it read none. Pure over the payload.
+/// spawn is FOR, and answer compose with the flag already inserted, so the
+/// Python side applies the answer generically and both lanes see an
+/// explicit node afterwards. A seed naming no node answers pass with a
+/// `derive_reason`. Pure over the payload.
 fn derive_from_seed(payload: &Value, seed: Option<String>) -> Value {
     let pass = |reason: String| json!({"action": "pass", "derive_reason": reason});
     let Some(text) = seed.filter(|t| !t.trim().is_empty()) else {
@@ -88,7 +112,10 @@ fn derive_from_seed(payload: &Value, seed: Option<String>) -> Value {
     }
     let arg = toks.get(1).map(|t| trim_sentence_punct(t));
     match arg.filter(|a| looks_like_node_id(a)) {
-        Some(id) => json!({"action": "derive", "node": id}),
+        Some(id) => {
+            let argv = with_flag_inserted(argv_of(payload), "--node", id);
+            json!({"action": "compose", "argv": argv})
+        }
         None => pass(format!(
             "seed names no node argument (read {})",
             arg.unwrap_or("nothing")
@@ -161,8 +188,17 @@ pub fn decide(payload: &Value) -> Value {
 
     // 4-6. Unknown means refuse, the spawn-gate posture: a missing row, a
     //    derivation error, or a node with no verb is not evidence of
-    //    /target.
+    //    /target. A DERIVED node that names no row is the one exception:
+    //    the spawn proceeds exactly as before the derivation existed, and
+    //    the flag carries the receipt so the mint can stamp why the row
+    //    works no node.
     if payload.get("row_found").and_then(Value::as_bool) != Some(true) {
+        if payload.get("derived").and_then(Value::as_bool) == Some(true) {
+            let reason = format!("{node} names no readable backlog row (derived from the seed)");
+            let argv = without_flag(argv_of(payload), "--node");
+            let argv = with_flag_inserted(argv, "--node-reason", &reason);
+            return json!({"action": "compose", "argv": argv});
+        }
         return json!({"action": "refuse", "message": format!(
             "--node {node} names no readable backlog row; an unknown node is not evidence of a verb")});
     }

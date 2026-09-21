@@ -462,7 +462,8 @@ def test_seam_binds_the_seed_node_without_the_flag(monkeypatch):
     Fails on today's code: the seam never calls the verb and the argv goes
     through unchanged, leaving the minted row's node None."""
     _stub_row(monkeypatch, _row(dispatch_verb="/target"))
-    seen = _stub_verb_seq(monkeypatch, [{"action": "derive", "node": "x-1"}])
+    inserted = ["spawn", "/fno:target x-1", "--node", "x-1"]
+    seen = _stub_verb_seq(monkeypatch, [{"action": "compose", "argv": inserted}])
     from fno.agents.rust_runtime import _node_seed_at_seam
 
     args, node_verb = _node_seed_at_seam(_seed_args("/fno:target x-1"))
@@ -472,6 +473,7 @@ def test_seam_binds_the_seed_node_without_the_flag(monkeypatch):
     assert len(seen) == 2
     assert "node" not in seen[0], "the derive call carries no row facts"
     assert seen[1]["node"] == "x-1"
+    assert seen[1]["derived"] is True
 
 
 def test_seam_derive_names_an_unresolvable_node_as_a_receipt(monkeypatch):
@@ -481,7 +483,13 @@ def test_seam_derive_names_an_unresolvable_node_as_a_receipt(monkeypatch):
     binary carries the receipt flag."""
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "rust")
     _stub_row(monkeypatch, None)
-    _stub_verb_seq(monkeypatch, [{"action": "derive", "node": "x-gone"}])
+    receipt_argv = [
+        "spawn",
+        "/fno:target x-gone",
+        "--node-reason",
+        "x-gone names no readable backlog row (derived from the seed)",
+    ]
+    _stub_verb_seq(monkeypatch, [{"action": "compose", "argv": receipt_argv}])
     from fno.agents.rust_runtime import _node_seed_at_seam
 
     args, node_verb = _node_seed_at_seam(_seed_args("/fno:target x-gone"))
