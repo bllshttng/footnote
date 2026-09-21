@@ -1620,6 +1620,8 @@ def _find_pr_create_segments(segments):
 # branch_node_ids so the three cannot drift apart in silence.
 _HOOK_NODE_ID_BODY = r"[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}"
 _HOOK_BRANCH_NODE_ID_RE = re.compile(rf"(?:^|[/-])({_HOOK_NODE_ID_BODY})(?=$|[/-])")
+_CLOSURE_MARKER_RE = re.compile(r"CLOSURE_TRAILER|Backlog-Closure", re.IGNORECASE)
+_BODY_FILE_CAP = 1 << 20  # a wrong path must never make the hook read something large
 
 
 def _branch_node_ids(head_ref):
@@ -1633,25 +1635,24 @@ def _branch_node_ids(head_ref):
 
 def _body_file_is_unjudgeable(path, touched_elsewhere=frozenset()):
     """Decide a `--body-file` this hook CAN judge: True (allow) unless the
-    file exists, reads under a 1 MiB cap, and carries no closure marker -
-    the one case that returns False. Everything else allows, fail-open:
-    a false ALLOW is CI's to catch, a false DENY is the defect. A path
-    another segment of the same command names allows, because PreToolUse
-    runs BEFORE the write-then-create flow, so it would judge the
-    PREVIOUS occupant of that never-cleaned path; so does a file the hook
-    cannot shape-check (missing, a directory, an OSError, oversized, an
-    unexpanded $VAR), and a segment that merely names the path: a token
-    set, not a writer table, so no unlisted writer forges a false deny.
+    file exists, reads under a 1 MiB cap, and carries no closure marker.
+    The rest allow, fail-open: a false ALLOW is CI's to catch, a false
+    DENY is the defect. A path another same-command segment names allows
+    (case-folded normpath match), because PreToolUse runs BEFORE the
+    write-then-create flow and would judge the stale occupant of that
+    never-cleaned path; so do a file the hook cannot shape-check
+    (missing, directory, OSError, oversized, unexpanded $VAR) and a
+    segment that merely names the path: a token set, not a writer table.
     """
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
-            text = fh.read(1 << 20)
+            text = fh.read(_BODY_FILE_CAP).replace("\x00", "")
     except OSError:
         return True
-    if (os.path.normpath(path) in touched_elsewhere or not os.path.isfile(path)
-            or os.path.getsize(path) > (1 << 20)):
+    if (os.path.normpath(path).casefold() in touched_elsewhere
+            or not os.path.isfile(path) or os.path.getsize(path) > _BODY_FILE_CAP):
         return True
-    return bool(re.search(r"CLOSURE_TRAILER|Backlog-Closure", text, re.IGNORECASE))
+    return bool(_CLOSURE_MARKER_RE.search(text))
 
 
 def _pr_create_signals(seg):
@@ -1714,10 +1715,9 @@ def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=(),
     instead (see _body_file_is_unjudgeable). Either way the only failure mode
     is a false ALLOW, which CI still catches; a composed body is never denied.
 
-    The ids come from `--head` when the command names one, and only otherwise
-    from the checkout: the PR closes the node its HEAD ref names, which is
-    what the CI gate reads. Judging `--head chore/docs` against a node-bearing
-    local branch denied a PR that closes nothing.
+    The ids come from `--head` when named, else the checkout: the PR closes
+    the node its HEAD ref names, which the CI gate reads; `--head chore/docs`
+    once denied a PR that closes nothing.
     """
     # Both spellings, because only one of them is the one people type. A
     # PreToolUse hook is a SEPARATE PROCESS, so an inline
@@ -1737,7 +1737,7 @@ def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=(),
     # "$BODY", so a marker in prose costs a false ALLOW that CI still catches.
     # The three POSITION-read signals above are what a false allow would have
     # bypassed silently.
-    if re.search(r"CLOSURE_TRAILER|Backlog-Closure", command, re.IGNORECASE):
+    if _CLOSURE_MARKER_RE.search(command):
         return None
     judged = [p for p in body_files if not _body_file_is_unjudgeable(p, touched_elsewhere)]
     if body_files and not judged:
@@ -2304,8 +2304,8 @@ def main():
         # Judge each create segment on ITS OWN tokens. The legacy fallback
         # below has no tokens at all, so it reads none of the three signals -
         # deny-leaning there, matching that path's stated posture.
-        nz = {t for seg in segments or () for t in seg if seg not in pr_create_segs}
-        touched_elsewhere = nz | frozenset(map(os.path.normpath, nz))
+        touched_elsewhere = {os.path.normpath(t).casefold() for seg in segments or ()
+                             for t in seg if seg not in pr_create_segs}
         for seg in pr_create_segs:
             if segments is not None:
                 seg_hatch, seg_head, seg_body_files = _pr_create_signals(seg)
