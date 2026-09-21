@@ -167,6 +167,9 @@ pub struct StateReceipt {
     pub total_prose: usize,
     /// Whether a pre-image was journaled (absent on the node's first state).
     pub journaled: bool,
+    /// The state this write replaced, from the attempt that published.
+    /// `None` when the node had no current state.
+    pub replaced: Option<CurrentStateView>,
 }
 
 fn read_rows_for(graph: &Path) -> Result<Vec<Value>, StateError> {
@@ -224,6 +227,7 @@ pub fn replace_state(graph: &Path, input: &StateWriteInput) -> Result<StateRecei
     // keeps both closures shared-borrow.
     let seen = std::cell::Cell::new(None::<(usize, u64)>);
     let expected_cell = std::cell::Cell::new(0u64);
+    let prior = std::cell::Cell::new(None::<CurrentStateView>);
     // Under the publication lock: re-verify the row revision, journal the
     // exact pre-image, then allow publication. Any history failure refuses
     // the whole mutation. (The old details/status snapshot check is
@@ -284,6 +288,7 @@ pub fn replace_state(graph: &Path, input: &StateWriteInput) -> Result<StateRecei
                 )));
             }
             let expected = row_revision(row);
+            prior.set(read_state(row));
             let obj = row.as_object_mut().unwrap();
             let mut state_obj = json!({
                 "body": body,
@@ -310,6 +315,7 @@ pub fn replace_state(graph: &Path, input: &StateWriteInput) -> Result<StateRecei
         revision: expected + 1,
         total_prose: details + body.chars().count(),
         journaled,
+        replaced: prior.take(),
     })
 }
 

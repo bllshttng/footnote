@@ -1436,7 +1436,9 @@ fn render_lines(
                 .and_then(|u| u.as_i64())
                 .unwrap_or(0);
             if unparsed != 0 {
-                text.push_str(&format!(" (unparsed_lines {unparsed})"));
+                text.push_str(&format!(
+                    " (floor: {unparsed} ps row(s) unparsed, their CPU missing, so this admits permissively; fno doctor footprint --json, read .unparsed_samples)"
+                ));
             }
             text.push_str(&format!(" | lanes {}", dash(data.get("capacity_lanes"))));
             lines.push(text);
@@ -2361,6 +2363,50 @@ mod tests {
         .find(|line| line.starts_with("capacity:"))
         .unwrap();
         assert!(unread_line.ends_with("| lanes lanes unreadable"));
+    }
+
+    #[test]
+    fn unparsed_capacity_line_names_the_floor_and_zero_stays_silent() {
+        let capacity_line = |unparsed: i64| {
+            let capacity = r_capacity_pair(
+                &json!({"capacity_verdict": "admit", "unparsed_lines": unparsed}),
+                &json!({"verdict": "accepted"}),
+            )
+            .unwrap();
+            let readings = sample_readings(
+                json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+                json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+                capacity,
+                json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+            );
+            let data = build_data(&readings, "x-bbbb");
+            render_lines("x-bbbb", &readings, &data, &None, "", "no change")
+                .into_iter()
+                .find(|line| line.starts_with("capacity:"))
+                .unwrap()
+        };
+        let floored = capacity_line(3);
+        assert!(
+            floored.contains("floor: 3 ps row(s) unparsed"),
+            "names the count: {floored}"
+        );
+        assert!(
+            floored.contains("their CPU missing"),
+            "names the direction: {floored}"
+        );
+        assert!(
+            floored.contains("admits permissively"),
+            "names the bias: {floored}"
+        );
+        assert!(
+            floored.contains("fno doctor footprint --json"),
+            "names a command to run: {floored}"
+        );
+        let clean = capacity_line(0);
+        assert!(
+            !clean.contains("floor:") && !clean.contains("unparsed"),
+            "zero stays unchanged: {clean}"
+        );
     }
 
     #[test]

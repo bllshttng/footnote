@@ -364,7 +364,7 @@ def _live_root_pids(
                     and row.pid is None
                     and _terminal_row_changed_after_snapshot(row, snapshot_at)
                 ):
-                    return roots, "worker root liveness unavailable"
+                    return roots, f"worker root liveness unavailable: terminal row {getattr(row, 'name', '?')} exited inside the ps snapshot's second, so a later transition cannot be ruled out"
                 if (
                     snapshot_pids is None
                     or row.pid is None
@@ -372,26 +372,26 @@ def _live_root_pids(
                 ):
                     continue
                 if row.pid_start_time is None:
-                    return roots, "worker root liveness unavailable"
+                    return roots, f"worker root liveness unavailable: terminal row {getattr(row, 'name', '?')} sits in the ps snapshot and carries no pid start token"
                 root_live = _root_pid_is_live(row.pid, row.pid_start_time)
                 if root_live is not True:
                     if not _pid_recycled(row.pid, row.pid_start_time):
-                        return roots, "worker root liveness unavailable"
+                        return roots, f"worker root liveness unavailable: terminal row {getattr(row, 'name', '?')} pid {row.pid} is not live and recycling is unproven"
                     continue
                 roots.add(row.pid)
                 continue
             if row.pid is None:
                 continue
             if row.pid_start_time is None:
-                return roots, "worker root liveness unavailable"
+                return roots, f"worker root liveness unavailable: registry row {getattr(row, 'name', '?')} carries no pid start token"
             root_live = _root_pid_is_live(row.pid, row.pid_start_time)
             if root_live is None:
-                return roots, "worker root liveness unavailable"
+                return roots, f"worker root liveness unavailable: pid {row.pid} start time could not be read for row {getattr(row, 'name', '?')}"
             if root_live:
                 roots.add(row.pid)
             elif snapshot_pids is not None and row.pid in snapshot_pids:
                 if not _pid_recycled(row.pid, row.pid_start_time):
-                    return roots, "worker root liveness unavailable"
+                    return roots, f"worker root liveness unavailable: row {getattr(row, 'name', '?')} pid {row.pid} is dead, sits in the ps snapshot, and recycling is unproven"
                 recycled_rows.append(row)
         pidless_rows = [
             row for row in rows if row.status in LIVE_STATUSES and row.pid is None
@@ -438,7 +438,7 @@ def _live_root_pids(
             pid = codex_pids.get(sid)
             if pid is not None:
                 if _root_pid_is_live(pid, None) is not True:
-                    return roots, "worker root liveness unavailable"
+                    return roots, f"worker root liveness unavailable: codex rollout root pid {pid} for row {getattr(row, 'name', '?')} is not live"
                 roots.add(pid)
                 resolved_codex_ids.add(id(row))
         # a routless row is a NAMED gap, not a dead reading -:
@@ -501,7 +501,7 @@ def _live_root_pids(
                     still_missing.append(row)
                     continue
                 if not _root_pid_is_live(pid, None):
-                    return roots, "worker root liveness unavailable"
+                    return roots, f"worker root liveness unavailable: roster-resolved pid {pid} for row {getattr(row, 'name', '?')} is not live"
                 roots.add(pid)
             missing = still_missing
         if missing:
@@ -515,16 +515,16 @@ def _live_root_pids(
                 continue
             root_live = _root_pid_is_live(pid, None)
             if root_live is None:
-                return roots, "worker root liveness unavailable"
+                return roots, f"worker root liveness unavailable: socket-resolved pid {pid} start time could not be read for row {getattr(row, 'name', '?')}"
             if root_live:
                 roots.add(pid)
             else:
-                return roots, "worker root liveness unavailable"
+                return roots, f"worker root liveness unavailable: socket-resolved pid {pid} for row {getattr(row, 'name', '?')} is not live"
         return roots, AttributionGap("; ".join(gap_rows)) if gap_rows else None
     except ImportError:
         raise
-    except Exception:
-        return roots, "worker root discovery unavailable"
+    except Exception as exc:
+        return roots, f"worker root discovery unavailable: {type(exc).__name__}"
 
 
 def _codex_app_server_serve(snapshot_pids: set[int] | None) -> tuple[set[int], str]:
@@ -594,7 +594,7 @@ def _live_shared_serve_root_pids(
             (paths.agents_home_dir() / "opencode-serve.json").read_text(encoding="utf-8")
         )
         if not isinstance(record, dict):
-            return roots, "shared serve root discovery unavailable"
+            return roots, "shared serve root discovery unavailable: opencode-serve.json is not a mapping"
         pid = record.get("pid")
         pid_start = record.get("pid_start")
         if (
@@ -605,19 +605,19 @@ def _live_shared_serve_root_pids(
             or isinstance(pid_start, bool)
             or pid_start <= 0
         ):
-            return roots, "shared serve root liveness unavailable"
+            return roots, "shared serve root liveness unavailable: opencode-serve.json carries no usable pid and pid_start pair"
         root_live = _root_pid_is_live(pid, pid_start)
         if root_live is None:
-            return roots, "shared serve root liveness unavailable"
+            return roots, f"shared serve root liveness unavailable: pid {pid} start time could not be read"
         if root_live:
             roots.add(pid)
         elif snapshot_pids is not None and pid in snapshot_pids:
             if not _pid_recycled(pid, pid_start):
-                return roots, "shared serve root liveness unavailable"
+                return roots, f"shared serve root liveness unavailable: pid {pid} is dead, sits in the ps snapshot, and recycling is unproven"
     except FileNotFoundError:
         return roots, None
-    except Exception:
-        return roots, "shared serve root discovery unavailable"
+    except Exception as exc:
+        return roots, f"shared serve root discovery unavailable: {type(exc).__name__}"
     return roots, None
 
 

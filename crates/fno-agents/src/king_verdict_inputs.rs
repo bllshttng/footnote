@@ -726,9 +726,12 @@ mod tests {
         let dir = tmp("bad-ceiling");
         let manifest = write_manifest(&dir, "x-root");
         fs::create_dir_all(dir.join(".fno")).unwrap();
+        // The scope read needs work.workspaces in a candidate config; without
+        // a stanza here the suite only passes where the operator's live
+        // config supplies one (the flake shape the FNO_CONFIG pin fixed).
         fs::write(
             dir.join(".fno/config.toml"),
-            "[king]\ncompaction_ceiling = \"three\"\n",
+            "[[work.workspaces.t.projects]]\nname = \"x-root\"\n[king]\ncompaction_ceiling = \"three\"\n",
         )
         .unwrap();
         let err = resolve_verdict_inputs(

@@ -317,21 +317,12 @@ fn write_human(
             eprintln!("fno-agents backlog-note: history write failed: {e}");
             return 1;
         }
-        if parsed.json_out {
-            crate::backlog::receipt::emit_line(
-                &json!({
-                    "status": "ok",
-                    "routed": "history",
-                    "node_id": node_id,
-                    "revision": rev,
-                })
-                .to_string(),
-            );
-        } else {
-            crate::backlog::receipt::emit_line(&format!(
-                "recorded {node_id}: history (node is done or superseded)"
-            ));
-        }
+        let out = json!({
+            "status": "ok", "routed": "history", "node_id": node_id, "id": node_id,
+            "text": node_state::normalize_prose(&body), "revision": rev, "replaced": Value::Null,
+            "line": format!("recorded {node_id}: history (node is done or superseded)"),
+        });
+        emit_human(parsed.json_out, &out);
         return 0;
     }
     let node_id = entry
@@ -371,6 +362,8 @@ fn write_human(
         .reads
         .as_deref()
         .and_then(|r| serde_json::from_str(r).ok());
+    let text = body.clone();
+    let chars = body.chars().count();
     let input = StateWriteInput {
         node_id: node_id.clone(),
         body,
@@ -386,25 +379,57 @@ fn write_human(
             return map_state_err(&e);
         }
     };
-    if parsed.json_out {
-        crate::backlog::receipt::emit_line(
-            &json!({
-                "status": "ok",
-                "routed": "state",
-                "node_id": receipt.node_id,
-                "revision": receipt.revision,
-                "journaled": receipt.journaled,
-                "total_prose": receipt.total_prose,
-            })
-            .to_string(),
-        );
-    } else {
-        crate::backlog::receipt::emit_line(&format!(
-            "noted {}: revision {}",
-            receipt.node_id, receipt.revision
-        ));
-    }
+    let (replaced, replaced_line) = replaced_parts(&receipt.node_id, receipt.replaced.as_ref());
+    let out = json!({
+        "status": "ok", "routed": "state", "node_id": receipt.node_id, "id": receipt.node_id,
+        "text": text, "revision": receipt.revision, "journaled": receipt.journaled,
+        "total_prose": receipt.total_prose, "replaced": replaced,
+        "line": format!("noted {}: revision {}, {chars} chars\n{replaced_line}", receipt.node_id, receipt.revision),
+    });
+    emit_human(parsed.json_out, &out);
     0
+}
+
+/// The first line of a body, cut at 80 characters; "..." marks what is left out.
+fn head(body: &str) -> String {
+    let mut out: String = body.lines().next().unwrap_or("").chars().take(80).collect();
+    if out.len() < body.len() {
+        out.push_str("...");
+    }
+    out
+}
+
+/// What a human note replaced, as JSON and as one receipt line.
+fn replaced_parts(node_id: &str, prior: Option<&node_state::CurrentStateView>) -> (Value, String) {
+    let Some(p) = prior else {
+        return (
+            Value::Null,
+            format!("replaced nothing: {node_id} had no current state"),
+        );
+    };
+    let chars = p.body.chars().count();
+    let excerpt = head(&p.body);
+    let author = p.source_session_id.as_deref().unwrap_or("unknown");
+    let when = p.updated_at.as_deref().unwrap_or("an unknown time");
+    let json = json!({
+        "revision": p.revision, "chars": chars, "source_session_id": &p.source_session_id,
+        "updated_at": &p.updated_at, "head": &excerpt,
+    });
+    let line = format!(
+        "replaced revision {} ({chars} chars, written by session {author} at {when}): \"{excerpt}\". Read it back: fno backlog notes history {node_id}",
+        p.revision
+    );
+    (json, line)
+}
+
+/// Print one human receipt: the object under --json, else its `line`.
+fn emit_human(json_out: bool, receipt: &Value) {
+    let line = if json_out {
+        receipt.to_string()
+    } else {
+        receipt["line"].as_str().unwrap_or("").to_string()
+    };
+    crate::backlog::receipt::emit_line(&line);
 }
 
 /// Map a state-write error to the verb's exit code.

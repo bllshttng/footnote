@@ -475,6 +475,17 @@ fn format_elapsed(secs: u64) -> String {
     }
 }
 
+/// One line per process is this table's whole contract, and an argv may hold
+/// a newline that third-party launchers write. Escape the two characters that
+/// break a line, the way `ps` itself does, so the reader sees the bytes a real
+/// `ps` would have handed it.
+fn escape_row_command(command: &str) -> std::borrow::Cow<'_, str> {
+    if !command.contains(['\n', '\r']) {
+        return std::borrow::Cow::Borrowed(command);
+    }
+    std::borrow::Cow::Owned(command.replace('\n', "\\012").replace('\r', "\\015"))
+}
+
 /// The table as the `ps -Ao pid,ppid,state,etime,%cpu,rss,command` text the
 /// Python footprint reader already parses.
 pub fn ps_text(rows: &[ProcRow]) -> String {
@@ -488,7 +499,7 @@ pub fn ps_text(rows: &[ProcRow]) -> String {
             format_elapsed(row.elapsed_s),
             row.cpu_pct,
             row.rss_kb,
-            row.command
+            escape_row_command(&row.command)
         ));
     }
     out
@@ -1059,6 +1070,36 @@ mod process_table_tests {
         assert_eq!(
             ps_text(&rows),
             "PID PPID STAT ELAPSED %CPU RSS COMMAND\n100 1 R 01:00:00 86.0 1024 fno-agents-worker --run\n"
+        );
+    }
+
+    #[test]
+    fn ps_text_escapes_a_newline_argv_to_one_line_per_row() {
+        let rows = vec![
+            super::ProcRow {
+                pid: 101,
+                ppid: 1,
+                state: 'R',
+                elapsed_s: 60,
+                cpu_pct: 0.0,
+                rss_kb: 1024,
+                command: "tr -d \"\nmore\"\r".into(),
+            },
+            super::ProcRow {
+                pid: 102,
+                ppid: 1,
+                state: 'S',
+                elapsed_s: 60,
+                cpu_pct: 0.0,
+                rss_kb: 1024,
+                command: "clean argv".into(),
+            },
+        ];
+        let text = ps_text(&rows);
+        assert_eq!(text.lines().count(), 3, "header plus one line per row");
+        assert!(
+            text.contains("101 1 R 01:00 0.0 1024 tr -d \"\\012more\"\\015"),
+            "newline and CR carry as the four characters \\012 and \\015: {text}"
         );
     }
 
