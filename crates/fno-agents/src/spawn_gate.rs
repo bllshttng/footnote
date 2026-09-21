@@ -637,16 +637,15 @@ pub(crate) fn territory_of_node(
     use crate::king_board::project_map;
     use crate::territory::compile_territory;
 
+    // Through the backend switch (`graph_store::read_rows`): under sqlite
+    // the file is a frozen mirror, and a cap answered from it polices a
+    // territory the store does not recognize. Unreadable is None, the same
+    // cannot-READ contract as before.
     let entries: Vec<Value> = {
         let path = graph_json_path(config_cwd);
-        let raw = std::fs::read_to_string(&path).ok()?;
-        let parsed: Value = serde_json::from_str(&raw).ok()?;
-        if let Some(list) = parsed.get("entries").and_then(Value::as_array) {
-            list.clone()
-        } else if let Some(list) = parsed.as_array() {
-            list.clone()
-        } else {
-            return None;
+        match crate::graph_store::read_rows(&path) {
+            Ok(rows) => rows,
+            Err(_) => return None,
         }
     };
     let by_id: HashMap<String, &Value> = entries

@@ -2548,7 +2548,7 @@ pub fn read_rows(path: &Path) -> Result<Vec<Value>, StoreError> {
         crate::backlog::Backend::Sqlite => {
             crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?
         }
-        crate::backlog::Backend::Json => read_defaulted_opts(path, false, true)?,
+        crate::backlog::Backend::Json => read_json_leg(path, false, true)?,
     };
     apply_defaults(&mut rows, false);
     Ok(rows)
@@ -2640,6 +2640,10 @@ pub fn mutate_rows(
 /// The soft read that degrades `MalformedRoot` to empty and copies the
 /// corrupt bytes to a `.json.bak` sibling first is the explicit
 /// `read_defaulted_opts(path, keep_malformed, true)` spelling.
+///
+/// Both refuse under `graph_meta.backend=sqlite`: there the file is the
+/// frozen mirror, and answering from it turns a stale read into a wrong
+/// one. The guard names the switch (`read_rows`) to call instead.
 pub fn read_defaulted(path: &Path, keep_malformed: bool) -> Result<Vec<Value>, StoreError> {
     read_defaulted_opts(path, keep_malformed, false)
 }
@@ -2649,6 +2653,24 @@ pub fn read_defaulted(path: &Path, keep_malformed: bool) -> Result<Vec<Value>, S
 /// `.json.bak` before the error surfaces. `false` is strict and read-only:
 /// `MalformedRoot`/`Corrupt` surface untouched and nothing is written.
 pub fn read_defaulted_opts(
+    path: &Path,
+    keep_malformed: bool,
+    backup_on_corrupt: bool,
+) -> Result<Vec<Value>, StoreError> {
+    if crate::backlog::backend(path) == crate::backlog::Backend::Sqlite {
+        return Err(StoreError::Invalid(format!(
+            "{} is the frozen json mirror (graph_meta.backend=sqlite); read through graph_store::read_rows",
+            path.display()
+        )));
+    }
+    read_json_leg(path, keep_malformed, backup_on_corrupt)
+}
+
+/// The json leg itself: the file parse under the soft/strict spellings, no
+/// backend awareness. In-crate callers reach it through the switch
+/// (`read_rows`' Json arm) or the guarded public pair; a direct call from
+/// production code elsewhere is a census finding.
+pub(crate) fn read_json_leg(
     path: &Path,
     keep_malformed: bool,
     backup_on_corrupt: bool,
