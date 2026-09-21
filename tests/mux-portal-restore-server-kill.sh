@@ -148,7 +148,10 @@ time.sleep(2)
 s.close()
 PY
 
+. "$REPO_ROOT/scripts/lib/keeper-reap.sh"
+
 cleanup() {
+    local exit_status=$?
     if [[ "${FNO_PORTAL_LIVE:-0}" == "1" ]]; then
         # The LIVE run plants its threads in the real agents home by design;
         # without this removal every run leaks rows the daemon then re-hosts.
@@ -178,10 +181,14 @@ sys.exit(1 if left else 0)
     for pid in $SURVIVOR_PIDS; do
         kill -9 "$pid" 2>/dev/null || true
     done
+    if ! reap_tmp_keepers "$TMP_DIR"; then
+        exit_status=1
+    fi
     wait 2>/dev/null || true
     if [[ "${KEEP_TMP:-0}" != "1" ]]; then
         rm -rf "$TMP_DIR"
     fi
+    return "$exit_status"
 }
 trap cleanup EXIT
 

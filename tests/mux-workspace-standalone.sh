@@ -45,10 +45,18 @@ mkdir -p "$SENT"
 
 S1="wsa-$UNIQ"
 S2="wsc-$UNIQ"
+
+. "$REPO_ROOT/scripts/lib/keeper-reap.sh"
+
 cleanup() {
+  local exit_status=$?
   [ -n "${S1:-}" ] && FNO_SERVER="$S1" "$FNO" mux kill-server >/dev/null 2>&1
   [ -n "${S2:-}" ] && FNO_SERVER="$S2" "$FNO" mux kill-server >/dev/null 2>&1
+  if ! reap_tmp_keepers "$TMP_ROOT"; then
+    exit_status=1
+  fi
   rm -rf "$TMP_ROOT"
+  return "$exit_status"
 }
 trap cleanup EXIT
 

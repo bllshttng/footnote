@@ -58,6 +58,8 @@ pub mod squad_store;
 pub mod store_client;
 pub mod templates;
 #[cfg(test)]
+mod test_keeper_cleanup;
+#[cfg(test)]
 pub(crate) mod test_owner;
 pub mod theme;
 pub(crate) mod thread_viewer;
