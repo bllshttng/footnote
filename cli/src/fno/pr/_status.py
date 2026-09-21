@@ -815,10 +815,8 @@ def run_status(
         )
 
     github_merge = None if is_terminal else _github_merge_blockers(pr_json, rollup, cwd)
-    # ONE merge decision: the probes this read already paid for
-    # ride the ask, so the owner never spawns a second status read. Rerun
-    # recovery is not among them: the walk probes it itself on a green read,
-    # and the receipt carries the fact for the payload.
+    # ONE merge decision: the probes this read paid for ride the ask. Rerun
+    # recovery is not among them - the walk probes it itself on a green read.
     receipt = _merge_decision(
         pr,
         cwd or os.getcwd(),
