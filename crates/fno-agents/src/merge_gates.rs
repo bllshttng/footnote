@@ -294,7 +294,11 @@ pub(crate) fn plan_fidelity_blocker<P: Probes>(probes: &P, cwd: &Path, pr: u64) 
 fn ledger_plan_path(cwd: &Path, pr: u64) -> Option<String> {
     use std::process::Command;
 
-    let text = std::fs::read_to_string(crate::paths::ledger_path(cwd)).ok()?;
+    // Read-only: the optional resolver skips the checkout migration
+    // `ledger_path` performs and answers `None` with no declared root (a
+    // hermetic test), the same no-signal shape as a missing ledger.
+    let path = crate::paths::worktree_space_dir_opt(cwd)?.join("ledger.json");
+    let text = std::fs::read_to_string(path).ok()?;
     let data: Value = serde_json::from_str(&text).ok()?;
     let rows = match data {
         Value::Array(list) => list,
