@@ -586,6 +586,14 @@ fn grant_sqlite_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
                 {"number": 11, "url": "https://github.com/owner/repo/pull/11"}
             ],
         }),
+        json!({
+            "id": "ab-ac1urlonly", "title": "u", "slug": "u", "type": "feature",
+            "status": "ready", "priority": "p2",
+            "cwd": "/tmp/grant-fixture",
+            "additional_prs": [
+                {"url": "https://github.com/external/repo/pull/11"}
+            ],
+        }),
         plain_node("ab-ac1plain1"),
         plain_node("ab-ac1plain2"),
     ]});
@@ -605,7 +613,7 @@ fn narrowed_pr_read_returns_the_queue_superset_in_ordinal_order() {
         .iter()
         .filter_map(|row| row.get("id").and_then(Value::as_str))
         .collect();
-    assert_eq!(ids, vec!["ab-ac1open", "ab-ac1carry"]);
+    assert_eq!(ids, vec!["ab-ac1open", "ab-ac1carry", "ab-ac1urlonly"]);
     let full = crate::graph_store::read_rows(&graph).unwrap();
     for key in [
         "id",

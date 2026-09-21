@@ -878,17 +878,38 @@ pub fn read_pr_entries(graph: &Path, pr: Option<i64>) -> Result<Vec<Value>, Stri
         .map(|(index, _)| format!("?{}", index + 1))
         .collect::<Vec<_>>()
         .join(", ");
+    let like_base = numbers.len();
+    let url_likes = numbers
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("p.url LIKE ?{}", like_base + index + 1))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    // The url arm keeps a PR row that carries the number only in its url
+    // (number NULL), which node_carries_pr would still match. The LIKE may
+    // over-match (/pull/11 also names /pull/110); a superset is the
+    // invariant - the caller's filter re-checks each row precisely.
     let sql = format!(
         "SELECT DISTINCT n.id, n.ordinal FROM nodes n
          JOIN pull_requests p ON p.node_id = n.id
          WHERE p.number IN ({placeholders})
+            OR (p.number IS NULL AND p.url IS NOT NULL AND ({url_likes}))
          ORDER BY n.ordinal, n.id"
+    );
+    let mut params: Vec<rusqlite::types::Value> = numbers
+        .iter()
+        .map(|n| rusqlite::types::Value::from(*n))
+        .collect();
+    params.extend(
+        numbers
+            .iter()
+            .map(|n| rusqlite::types::Value::from(format!("%/pull/{n}%"))),
     );
     let mut statement = transaction
         .prepare(&sql)
         .map_err(|error| error.to_string())?;
     let ids = statement
-        .query_map(rusqlite::params_from_iter(numbers.iter()), |row| {
+        .query_map(rusqlite::params_from_iter(params.iter()), |row| {
             row.get::<_, String>(0)
         })
         .map_err(|error| error.to_string())?
