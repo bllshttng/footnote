@@ -90,6 +90,22 @@ class _FakeGh:
         except json.JSONDecodeError:
             return SimpleNamespace(returncode=2, stdout="", stderr="bad payload")
         op = payload.get("op")
+        if op == "status-cache-key":
+            # The mint hashes live machine state; the key value is irrelevant
+            # here, the SPAWN is what this suite budgets.
+            return self._json({"key": "minted"})
+        if payload.get("effect") == "preview":
+            # The one merge decision: a red supplied verdict holds; anything
+            # else clears, exactly the wire shape the status read renders.
+            held = payload.get("verdict") not in (None, "green")
+            blockers = (
+                [{"code": "ci_red", "class": "refused", "detail": "fake"}]
+                if held
+                else []
+            )
+            return self._json(
+                {"outcome": "held" if held else "authorized", "blockers": blockers}
+            )
         if op == "status-failure-cause":
             return self._json({"items": [{"cause": None}] * len(payload.get("items") or [])})
         if op == "status-merge-blocker":
@@ -380,8 +396,9 @@ def test_f6_miss_sends_at_most_15_spawns(gh, capsys):
     assert len(c["logs"]) == 5 and len(c["jobs"]) == 5
     assert not c["other"]
     # One fno-agents cause read per detailed failure (MAX_DETAILED_FAILURES),
-    # not a gh spawn: the class is bounded, never unclassified.
-    assert len(c["agents"]) == 5
+    # plus the preview ask and the row-key mint, not a gh spawn: the class is
+    # bounded, never unclassified.
+    assert len(c["agents"]) == 7
     assert json.loads(capsys.readouterr().out)["verdict"] == "red"
 
 

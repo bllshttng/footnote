@@ -42,22 +42,6 @@ def _verdict(monkeypatch, state, reason="r", claim_state="stale"):
 # ---------------------------------------------------------------------------
 
 
-def _owner_stub(pr, repo, *, decide_only=False, **kw):
-    """Decide answers authorized; the effect call answers merged, the shape
-    _do_merge consumes after the real effect runs."""
-    if decide_only:
-        return {"outcome": "authorized", "head": "abc123"}
-    return {"outcome": "merged", "note": "", "cleanup_failure": ""}
-
-
-@pytest.fixture(autouse=True)
-def _owner_never_spawns(monkeypatch):
-    """No test talks to the real authorized-merge binary: the spawn is a
-    network surface, and a wedged child holds the suite's pipes forever. A
-    test that needs a specific verdict re-stubs _authorized_merge itself."""
-    monkeypatch.setattr(_merge, "_authorized_merge", _owner_stub)
-
-
 def test_resolver_reads_the_rust_verdict(monkeypatch):
     monkeypatch.setattr(
         "fno.rust_binary.verb_call",

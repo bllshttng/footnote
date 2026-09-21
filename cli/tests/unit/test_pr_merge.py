@@ -450,28 +450,17 @@ def test_fence_crash_failopen_emits_gate_escape(enabled, monkeypatch, capsys, tm
     assert kwargs.get("pr") == 42
 
 
-@pytest.fixture(autouse=True)
-def _owner_never_spawns(monkeypatch):
-    """No test talks to the real authorized-merge binary: the spawn is a
-    network surface, and a wedged child holds the suite's pipes forever. A
-    test that needs a specific verdict re-stubs _authorized_merge itself."""
-    monkeypatch.setattr(
-        _merge,
-        "_authorized_merge",
-        lambda pr, repo, **kw: {"outcome": "authorized", "head": "abc123"},
-    )
-
-
 def _stub_owner_from_row(monkeypatch, tmp_path):
     """The refusal is decide's now: ask the real gate for its line against the
-    seeded row and hand it back as the held receipt the verb renders."""
+    seeded row and hand it back as the held receipt the verb renders. The
+    conftest's own autouse stub owns the covered default, so a covered row
+    patches nothing."""
     from fno.pr import _coverage_gate
 
     state, refusal, _covered, note = _coverage_gate.coverage_verdict(
-        42, str(tmp_path), recompute=False
+        42, str(tmp_path), recompute=True
     )
     if state == _coverage_gate.COVERED:
-        monkeypatch.setattr(_merge, "_authorized_merge", _owner_stub)
         return None
     line = _coverage_gate.refusal_line(refusal, note)
     # Same sentence the Rust gate composes per exit code, so the render pin
