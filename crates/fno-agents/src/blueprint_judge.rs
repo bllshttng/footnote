@@ -112,8 +112,8 @@ const READER_TIMEOUT_SECS: u64 = 240;
 
 /// The lens directory under the repo root or the deployed plugin root: one
 /// file per dimension plus preamble.md, read by the judge, never by the
-/// planner (`disable-model-invocation` keeps it that way).
-const LENS_SUBDIR: &str = "skills/pm-plan-review/lenses";
+/// planner (the blueprint skill never links it, and a lint test holds that).
+const LENS_SUBDIR: &str = "skills/blueprint/lenses/judge";
 
 type Lenses = (String, HashMap<String, String>);
 
@@ -1002,7 +1002,7 @@ mod tests {
         assert_eq!(verdict, None);
         assert_eq!(
             reason,
-            "no lens file skills/pm-plan-review/lenses/deletable.md"
+            "no lens file skills/blueprint/lenses/judge/deletable.md"
         );
         let (verdict, _) = judge_plan("plan", "", "persona", dir.path(), &lenses, None, &spawn);
         assert_eq!(verdict.as_deref(), Some("pass"));

@@ -1,19 +1,17 @@
 """The architect agent body points the planner at drafting lenses, never at
 the grading lenses. A grader read during drafting turns into a checklist
-the author writes to, so the body may name neither the lens files nor the
-pm-plan-review skill."""
+the author writes to, so the body may name neither the lens files nor their
+folders."""
 
 from __future__ import annotations
 
 from fno.paths import resolve_repo_root
 
-FORBIDDEN = ("lenses.md", "lenses/", "pm-plan-review", "pm-plan-draft")
+FORBIDDEN = ("lenses.md", "lenses/")
 
 
-def _split_architect() -> tuple[str, str] | None:
+def _split_architect() -> tuple[str, str]:
     path = resolve_repo_root() / "agents" / "architect.md"
-    if not path.is_file():
-        return None
     # Plain string split on the first two `---` lines; the frontmatter is
     # small and the strict YAML parsers that read every other file live in
     # their own gates.
@@ -37,31 +35,20 @@ def _description_value(frontmatter: str) -> str:
 
 
 def test_architect_body_never_names_the_grading_lenses():
-    split = _split_architect()
-    if split is None:
-        # The architect agent ships with the fno-pm pack work; the guard
-        # activates the moment that file lands.
-        return
-    _, body = split
+    _, body = _split_architect()
     hits = [token for token in FORBIDDEN if token in body]
     assert not hits, f"architect body names grading lenses: {hits}"
 
 
 def test_architect_pins_an_allowed_model_tier():
-    split = _split_architect()
-    if split is None:
-        return
-    frontmatter, _ = split
+    frontmatter, _ = _split_architect()
     assert "model: opus" in frontmatter or "model: fable" in frontmatter, (
         "the architect must pin an allowed blueprint model tier (opus or fable)"
     )
 
 
 def test_architect_keeps_write_access():
-    split = _split_architect()
-    if split is None:
-        return
-    frontmatter, _ = split
+    frontmatter, _ = _split_architect()
     assert "tools:" not in frontmatter, (
         "no tools: allowlist; a code-index MCP tool the user registered stays reachable"
     )
@@ -76,10 +63,7 @@ def test_architect_keeps_write_access():
 
 
 def test_architect_has_no_skills_key():
-    split = _split_architect()
-    if split is None:
-        return
-    frontmatter, _ = split
+    frontmatter, _ = _split_architect()
     assert "skills:" not in frontmatter, (
         "a skills list loads nothing under claude --agent, drops unresolved"
         " entries silently in a subagent, and would preload; ship no skills key"
@@ -87,20 +71,15 @@ def test_architect_has_no_skills_key():
 
 
 def test_architect_links_the_skill_step():
-    split = _split_architect()
-    if split is None:
-        return
-    _, body = split
+    _, body = _split_architect()
     assert "fno:blueprint" in body
     assert "2a-bis" in body
 
 
 def test_blueprint_substrate_launches_architect():
-    text = (resolve_repo_root() / "skills" / "blueprint" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
+    text = (resolve_repo_root() / "skills" / "blueprint" / "SKILL.md").read_text(encoding="utf-8")
     for token in ("subagent_type: fno:architect", "--agent fno:architect", "agent_type: architect"):
         assert token in text, f"blueprint Substrate step 3 does not name the architect: {token}"
-    assert 'Use the Skill tool to run fno:blueprint with args' in text, (
+    assert "Use the Skill tool to run fno:blueprint with args" in text, (
         "the one-line subagent prompt changed"
     )
