@@ -97,6 +97,14 @@ The caller adds only what the fold cannot see. `fno agents court` appends the sp
 
 Live PR state is deliberately out of scope. `merge_status` on a graph entry is a closure stamp that only ever reads `merged` or null. It cannot say CONFLICTING or red. The honest verdict needs a network read, and `fno do pr status <n>` already performs it. The row carries `pr_number` and an age, so an `in_review` node past the threshold surfaces without one.
 
+## Epic load
+
+Each `ok` fold also carries `epics` and `epic_cap`. `epic_cap` is `backlog.epic_max_open_children` as resolved beside the graph, or null when no cap is set. `epics` lists the epics of the scope that hold at least one open direct child, fullest first, as `{"id", "open_children", "full"}`.
+
+The count is `epic_cap::open_child_count`, the same function the write-time refusal counts with, so the read and the refusal cannot disagree. Children are direct: a sub-epic is one child of its parent and carries its own row. An epic with no open child is left out. `full` means the next open child is refused at the current cap.
+
+A fold whose `status` is not `ok` carries neither key, so an unread scope never reads as a scope with no epics.
+
 ## Session ids on a row
 
 A node row's `sessions` is the ordered de-duplicated union of
