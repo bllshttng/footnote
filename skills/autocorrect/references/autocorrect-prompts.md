@@ -47,6 +47,12 @@ If the packet contains zero events in a window, output exactly: `No corrections 
 - Do not propose patches that touch the corrections.log itself, the watermark files, or the capture scripts. Those are infrastructure, not rules.
 - Do not propose general "improvements" beyond what the events justify. The events are the evidence; without an event you have no warrant.
 
+## Verify prior corrections
+
+The packet's `verify:` block scores each correction applied since the last review: friction (stuck terminations plus loop-check block rows) across the three sessions before it and the three after. `improved` means friction fell below 0.7x, `worse` means it rose above 1.3x, `flat` is in between, `insufficient-data` means fewer than three sessions on one side.
+
+For each prior correction with a verdict, say keep (improved), improve (flat), or roll back (worse; the block carries the `git revert` command) BEFORE proposing anything new. Never re-propose a correction whose verdict reads worse.
+
 ## Packet
 
 PACKET:
