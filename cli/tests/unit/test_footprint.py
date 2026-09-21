@@ -18,8 +18,8 @@ def test_ac3_edge_truncated_new_format_row_is_unparsed() -> None:
 
 
 def test_ac1_hp_escaped_newline_argv_parses_and_a_torn_row_still_samples() -> None:
-    """x-4df5: the writer escapes a newline argv to the four characters
-    \\012 (and \\015), so the cell is ordinary characters and parses clean."""
+    """The writer escapes a newline argv to the four-character
+    \\012 (and \\015) form, so the cell is ordinary characters and parses clean."""
     reading = parse_footprint(
         """\
         PID PPID STAT ELAPSED %CPU RSS COMMAND
