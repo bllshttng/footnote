@@ -471,19 +471,29 @@ def _stub_owner_from_row(monkeypatch, tmp_path):
         42, str(tmp_path), recompute=False
     )
     if state == _coverage_gate.COVERED:
-        monkeypatch.setattr(
-            _merge,
-            "_authorized_merge",
-            lambda pr, repo, **kw: {"outcome": "authorized", "head": "abc123"},
-        )
+        monkeypatch.setattr(_merge, "_authorized_merge", _owner_stub)
         return None
     line = _coverage_gate.refusal_line(refusal, note)
+    # Same sentence the Rust gate composes per exit code, so the render pin
+    # is the wire shape, not a test-local dialect.
+    if state == _coverage_gate.IMPOSSIBLE:
+        detail = f"unreviewed merge refused: {line}" if line else (
+            "review coverage impossible at this head"
+        )
+    elif state == _coverage_gate.UNANSWERED:
+        detail = f"coverage probe failed, merge refused: {line}" if line else (
+            "coverage probe failed, merge refused"
+        )
+    else:
+        detail = f"unreviewed merge refused: {line}" if line else (
+            "unreviewed merge refused"
+        )
     monkeypatch.setattr(
         _merge,
         "_authorized_merge",
-        lambda pr, repo, **kw: {"outcome": "held", "detail": line},
+        lambda pr, repo, **kw: {"outcome": "held", "detail": detail},
     )
-    return line
+    return detail
 
 
 # ---- rerun-recovery flake hold ----
@@ -2537,7 +2547,6 @@ def test_fidelity_guard_degrades_open_on_a_probe_crash(enabled, monkeypatch, cap
     import fno.plan.fidelity as fid
 
     monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: False)
-    monkeypatch.setattr(_merge, "_plan_path_for_pr", _fid_plan_path)
     monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number=0: True)
 
     def _boom(*a, **k):

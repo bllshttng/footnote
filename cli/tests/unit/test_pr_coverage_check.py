@@ -96,16 +96,20 @@ def live_head(monkeypatch):
     monkeypatch.setattr(_merge, "_pr_base_head_refs", lambda pr, cwd: ("main", "feature/x"))
 
 
+def _owner_stub(pr, repo, *, decide_only=False, **kw):
+    """Decide answers authorized; the effect call answers merged, the shape
+    _do_merge consumes after the real effect runs."""
+    if decide_only:
+        return {"outcome": "authorized", "head": "abc123"}
+    return {"outcome": "merged", "note": "", "cleanup_failure": ""}
+
+
 @pytest.fixture(autouse=True)
 def _owner_never_spawns(monkeypatch):
     """The real authorized-merge binary is a network surface no unit test may
     spawn; a wedged child holds the suite's pipes. Tests needing a verdict
     stub _authorized_merge themselves."""
-    monkeypatch.setattr(
-        _merge,
-        "_authorized_merge",
-        lambda pr, repo, **kw: {"outcome": "authorized", "head": "abc123"},
-    )
+    monkeypatch.setattr(_merge, "_authorized_merge", _owner_stub)
 
 
 def _merge_refusal(capsys, tmp_path, fake):

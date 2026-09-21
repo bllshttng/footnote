@@ -112,7 +112,7 @@ def test_the_row_key_is_minted_by_the_owner_op(monkeypatch, cache_env):
     assert len(mint) == 1
     assert mint[0]["verb"] == "authorized-merge"
     assert mint[0]["pr"] == 42
-    assert mint[0]["head_sha"] == head["head_sha"]
+    assert mint[0]["head_sha"] == head["sha"]
     assert (cache_dir / "minted-42.json").exists(), "the owner's key names the row file"
 
 
