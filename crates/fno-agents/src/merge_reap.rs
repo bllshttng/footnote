@@ -1333,7 +1333,10 @@ mod tests {
             "1788652300 tree-held:unreachable-from-origin-main",
         )
         .unwrap();
-        consume_merge_cleanup_requests(&home, &["/repo".to_string()], &emitter, i64::MAX / 2);
+        // Grace 0: the 2026-09-06 request is far past the expiry window, so
+        // the pass takes the expiry branch. A huge grace (the in-grace
+        // test's pin) would keep every request in the window forever.
+        consume_merge_cleanup_requests(&home, &["/repo".to_string()], &emitter, 0);
         let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
         let expired = events
             .lines()
@@ -1376,7 +1379,9 @@ mod tests {
             "1788652300",
         )
         .unwrap();
-        consume_merge_cleanup_requests(&home, &["/repo".to_string()], &emitter, i64::MAX / 2);
+        // Grace 0, as in an_expiry_names_the_reason_of_its_last_hold: the
+        // request must land in the expiry branch for the stamp to be read.
+        consume_merge_cleanup_requests(&home, &["/repo".to_string()], &emitter, 0);
         let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
         let expired = events
             .lines()
