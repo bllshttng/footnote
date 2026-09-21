@@ -51,6 +51,24 @@ case "$COMMIT_SUBJECT" in
   urgent:*|revert:*) SEVERITY="S0" ;;
 esac
 
+# SOURCE from the committing repo: the rules corpus in ~/.claude
+# stays git-rule-edit; a shipped skill or rule edited in its own repo is a
+# skill-commit, the row corrections-verify scores a hand-applied correction
+# against. One toplevel comparison, no second hook.
+CLAUDE_REPO="${CLAUDE_DIR_OVERRIDE:-$HOME/.claude}"
+COMMIT_REPO="$(git rev-parse --show-toplevel 2>/dev/null || echo "")"
+SOURCE_FIELD="skill-commit"
+# pwd -P on both sides: macOS git reports /private/var where the caller
+# wrote /var (same directory, two spellings), and a lexical compare would
+# misfile every row.
+if [[ -n "$COMMIT_REPO" ]]; then
+  COMMIT_REPO="$(cd "$COMMIT_REPO" 2>/dev/null && pwd -P || printf '%s' "$COMMIT_REPO")"
+  CLAUDE_REPO="$(cd "$CLAUDE_REPO" 2>/dev/null && pwd -P || printf '%s' "$CLAUDE_REPO")"
+  if [[ "$COMMIT_REPO" == "$CLAUDE_REPO" ]]; then
+    SOURCE_FIELD="git-rule-edit"
+  fi
+fi
+
 # Filter to instruction-bearing files. The set is intentionally narrow so
 # editing arbitrary files in ~/.claude (e.g. transcripts, caches) doesn't
 # flood the log.
@@ -68,7 +86,7 @@ emit_for() {
   esac
   local details
   details="$(corrections_escape_details "$COMMIT_SUBJECT")"
-  local line="${TIMESTAMP} | ${SEVERITY} | git-rule-edit | ${file} | ${details}"
+  local line="${TIMESTAMP} | ${SEVERITY} | ${SOURCE_FIELD} | ${file} | ${details}"
   corrections_lock_append "$LOG_PATH" "$line" || \
     echo "corrections-git-postcommit: failed to write entry for $file" >&2
   return 0
