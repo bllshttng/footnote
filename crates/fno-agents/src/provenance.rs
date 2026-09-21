@@ -1014,7 +1014,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let p = Path::new("/fixture/project");
-        let w1 = Path::new("/fixture/project/.claude/worktrees/w1");
+        let w1 = Path::new("/fixture/project/worktrees/w1");
         let web = Path::new("/fixture/project-web");
         for cwd_path in [p, w1, web] {
             let slug = crate::claude_ask::claude_cwd_slug(cwd_path);
