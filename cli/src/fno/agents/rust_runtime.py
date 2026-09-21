@@ -776,6 +776,9 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]
             if answer.get("action") == "compose":
                 args = [str(tok) for tok in answer.get("argv") or list(args)]
                 node = (_spawn_flag_value(args, "--node") or "").strip()
+                if not node and (reason := _spawn_flag_value(args, "--node-reason")):
+                    os.environ["FNO_NODE_REASON"] = reason
+                    del args[args.index("--node-reason") : args.index("--node-reason") + 2]
             elif answer.get("action") == "refuse":
                 print("fno agents spawn: binary predates seed-node derivation; spawning nodeless", file=sys.stderr)
     if not node:

@@ -3323,7 +3323,6 @@ def dispatch_spawn_pane(
     crown_scope: Optional[str] = None,
     succession: bool = False,
     provenance: Optional[dict[str, str]] = None,
-    node_reason: Optional[str] = None,
     account_env: Optional[dict[str, str]] = None,
     route_env: Optional[dict[str, str]] = None,
     monitor: Optional[str] = None,
@@ -4567,7 +4566,7 @@ def dispatch_spawn_pane(
                     # provenance map the child env got - never the spawning
                     # session's ambient value.
                     node=(provenance or {}).get("FNO_NODE") or None,
-                    node_reason=node_reason,
+                    node_reason=os.environ.pop("FNO_NODE_REASON", None),
                     fno_id=stored_session_uuid or name,
                     route_provider_id=route_provider_id,
                     model_name=model_name,

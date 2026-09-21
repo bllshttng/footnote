@@ -9,6 +9,7 @@ wins over the node.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 from typer.testing import CliRunner
@@ -486,8 +487,9 @@ def test_seam_binds_the_seed_node_without_the_flag(monkeypatch):
 
 def test_seam_derive_names_an_unresolvable_node_as_a_receipt(monkeypatch):
     """x-8d88 Task 4: the seed names a node the verb's store read cannot
-    resolve, so the receipt-compose answer swaps --node for --node-reason and
-    the spawn proceeds WITHOUT a node binding; the mint stamps the reason."""
+    resolve, so the receipt-compose answer hands the reason to the mint
+    through FNO_NODE_REASON and the spawn proceeds WITHOUT a node binding;
+    the receipt is never a parser flag."""
     _stub_row(monkeypatch, None)
     receipt_argv = [
         "spawn",
@@ -500,10 +502,10 @@ def test_seam_derive_names_an_unresolvable_node_as_a_receipt(monkeypatch):
 
     args, node_verb = _node_seed_at_seam(_seed_args("/fno:target x-gone"))
     assert node_verb is None
-    assert "--node-reason" in args
-    reason = args[args.index("--node-reason") + 1]
-    assert "x-gone" in reason
+    assert "--node-reason" not in args
     assert "--node" not in args
+    assert "x-gone" in os.environ.get("FNO_NODE_REASON", "")
+    monkeypatch.delenv("FNO_NODE_REASON", raising=False)
 
 
 def test_seam_degrades_when_the_verb_predates_the_derivation(monkeypatch, capsys):

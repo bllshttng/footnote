@@ -1337,7 +1337,6 @@ def cmd_spawn(
             "for prompt provenance (--slug/--plan override the graph read)."
         ),
     ),
-    node_reason: str | None = typer.Option(None, "--node-reason", hidden=True),
     slug: str | None = typer.Option(
         None, "--slug", help="Provenance FNO_SLUG override (skips the graph read)."
     ),
@@ -2402,7 +2401,6 @@ def cmd_spawn(
                     passthrough=passthrough,
                     launch_account=account or dispatch_account,
                     route_model=route_model,
-                    node_reason=node_reason,
                 )
                 pane_kwargs["workspace"] = squad
                 pane_result = pane_dispatch(**pane_kwargs)
