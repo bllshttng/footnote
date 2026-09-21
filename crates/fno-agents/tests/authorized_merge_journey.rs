@@ -99,7 +99,17 @@ impl Probes for FakeGitHub {
         ChecksRead {
             verdict: "green".to_string(),
             github_block: None,
+            optional_unresolved: Some(Some(0)),
+            rerun_recovered: None,
+            rerun_failures: None,
         }
+    }
+    fn fno_shell(
+        &self,
+        _cwd: &Path,
+        _args: &[String],
+    ) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String> {
+        Ok((Some(0), Vec::new(), Vec::new()))
     }
     fn covered_head(&self, _cwd: &Path) -> Option<String> {
         Some(self.head.borrow().clone())
@@ -133,6 +143,12 @@ fn ask(effect: Effect) -> Request {
         covered_head: None,
         decide_only: false,
         authority: None,
+        accept_flake: false,
+        supplied_verdict: None,
+        supplied_ci_blocker: None,
+        supplied_rerun_recovered: None,
+        supplied_optional_unresolved: None,
+        supplied_github_blockers: None,
     }
 }
 

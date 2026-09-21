@@ -60,6 +60,7 @@ pub mod attention;
 pub mod attention_arm;
 pub mod attention_file;
 pub mod authorized_merge;
+pub mod merge_gates;
 pub mod backlog;
 pub mod backlog_ready;
 pub mod bash_census;

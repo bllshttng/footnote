@@ -1,0 +1,545 @@
+//! The merge gates that used to live in the Python merge verb, ported so
+//! `authorized_merge::decide` is the one merge decision (x-53c5). Each gate
+//! evaluates one input and answers `Option<Blocker>`: None clears. The pure
+//! halves take their facts as arguments so unit tests need no filesystem or
+//! network; the fetching halves ride the caller's `Probes` handle.
+
+use crate::authorized_merge::{Blocker, Probes};
+use serde_json::Value;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+/// `fno do pr coverage-check <n> --recompute`'s exit contract (the verb's
+/// own help text is the source of truth).
+pub(crate) const COVERAGE_CLEAR: i32 = 0;
+pub(crate) const COVERAGE_UNCOVERED: i32 = 3;
+pub(crate) const COVERAGE_UNANSWERED: i32 = 4;
+pub(crate) const COVERAGE_IMPOSSIBLE: i32 = 5;
+
+/// The coverage gate, exit-code polarity kept. The verb runs the operator
+/// waiver overlay inside itself, so a waived PR exits 0 here and no caller
+/// needs a second copy of that overlay.
+pub(crate) fn coverage_blocker<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Blocker> {
+    let args = vec![
+        "do".to_string(),
+        "pr".to_string(),
+        "coverage-check".to_string(),
+        pr.to_string(),
+        "--recompute".to_string(),
+    ];
+    match probes.fno_shell(cwd, &args) {
+        Ok((Some(code), stdout, stderr)) => {
+            let detail = {
+                let err = String::from_utf8_lossy(&stderr).trim().to_string();
+                if err.is_empty() {
+                    String::from_utf8_lossy(&stdout).trim().to_string()
+                } else {
+                    err
+                }
+            };
+            match code {
+                COVERAGE_CLEAR => None,
+                COVERAGE_UNCOVERED => Some(Blocker::held(
+                    "review_coverage_uncovered",
+                    if detail.is_empty() {
+                        "unreviewed merge refused".to_string()
+                    } else {
+                        format!("unreviewed merge refused: {detail}")
+                    },
+                )),
+                COVERAGE_IMPOSSIBLE => Some(Blocker::held(
+                    "review_coverage_impossible",
+                    if detail.is_empty() {
+                        "review coverage impossible at this head".to_string()
+                    } else {
+                        format!("unreviewed merge refused: {detail}")
+                    },
+                )),
+                other => Some(Blocker::unknown(
+                    "review_coverage_unknown",
+                    if detail.is_empty() {
+                        format!("coverage probe failed, merge refused (exit {other})")
+                    } else {
+                        format!("coverage probe failed, merge refused: {detail}")
+                    },
+                )),
+            }
+        }
+        Ok((None, stdout, stderr)) => {
+            let detail = String::from_utf8_lossy(&stderr).trim().to_string();
+            Some(Blocker::unknown(
+                "review_coverage_unknown",
+                if detail.is_empty() {
+                    format!(
+                        "coverage probe failed, merge refused: {}",
+                        String::from_utf8_lossy(&stdout).trim()
+                    )
+                } else {
+                    format!("coverage probe failed, merge refused: {detail}")
+                },
+            ))
+        }
+        Err(error) => Some(Blocker::unknown(
+            "review_coverage_unknown",
+            format!("coverage probe failed, merge refused: {error}"),
+        )),
+    }
+}
+
+/// `<root>/.fno/stub-manifest-<node>.json` (stub_manifest.py's own layout).
+fn stub_manifest_path(root: &Path, node_id: &str) -> PathBuf {
+    root.join(".fno")
+        .join(format!("stub-manifest-{node_id}.json"))
+}
+
+/// The node-side half of the stub-manifest gate, pure over graph entries: the
+/// `dep=contract` node this PR closes, or None. The graph read degrades to
+/// None (the default hard merge path), exactly as the Python `dep` did.
+pub(crate) fn contract_node_for_pr(entries: &[Value], pr: u64) -> Option<String> {
+    for entry in entries {
+        let dep = entry.get("dep").and_then(Value::as_str);
+        if dep != Some("contract") {
+            continue;
+        }
+        let numbers = pr_numbers_of(entry);
+        if numbers.contains(&pr) {
+            return entry.get("id").and_then(Value::as_str).map(str::to_owned);
+        }
+    }
+    None
+}
+
+/// Every PR number a graph row carries: the `pr` field plus urls inside the
+/// row's text fields (the board classifier's own `pr_binding_keys` covers the
+/// backref shapes; this reads the cheap fields first).
+fn pr_numbers_of(entry: &Value) -> Vec<u64> {
+    let mut out = Vec::new();
+    if let Some(n) = entry.get("pr").and_then(Value::as_u64) {
+        out.push(n);
+    }
+    if let Some(list) = entry.get("prs").and_then(Value::as_array) {
+        out.extend(list.iter().filter_map(Value::as_u64));
+    }
+    out
+}
+
+/// The stub-manifest gate, pure over an already-read manifest value: a
+/// contract dependent whose manifest is not `reconciled: true` holds the
+/// merge (mocks would ship). An unreadable manifest of a known contract node
+/// fails CLOSED, as the Python did.
+pub(crate) fn stub_manifest_blocker(root: &Path, node_id: &str) -> Option<Blocker> {
+    let path = stub_manifest_path(root, node_id);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            return Some(Blocker::held(
+                "stub_manifest_unreconciled",
+                format!(
+                    "contract dependent {node_id} carries a malformed stub-manifest \
+                     (cannot prove stubs are gone): {e}; reconcile before merge"
+                ),
+            ))
+        }
+    };
+    let manifest: Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(e) => {
+            return Some(Blocker::held(
+                "stub_manifest_unreconciled",
+                format!(
+                    "contract dependent {node_id} carries a malformed stub-manifest \
+                     (cannot prove stubs are gone): {e}; reconcile before merge"
+                ),
+            ))
+        }
+    };
+    if manifest.get("reconciled").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let stubs = manifest
+        .get("stubs")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    Some(Blocker::held(
+        "stub_manifest_unreconciled",
+        format!(
+            "contract dependent {node_id} carries a unreconciled stub-manifest \
+             ({stubs} stub(s)); reconcile before merge"
+        ),
+    ))
+}
+
+/// The whole stub-manifest gate over graph entries. An unreadable store
+/// degrades to clear (never block a normal merge on our own read).
+pub(crate) fn stub_manifest_gate(root: &Path, entries: &[Value], pr: u64) -> Option<Blocker> {
+    contract_node_for_pr(entries, pr).and_then(|node| stub_manifest_blocker(root, &node))
+}
+
+/// Whether a path is documentation (loopcheck's own classifier; one copy).
+fn is_documentation_path(path: &str) -> bool {
+    crate::loopcheck::is_documentation_path(path)
+}
+
+/// The plan-fidelity gate: a PR bound to a plan whose declared deliverables
+/// did not all ship refuses, unless the PR payload is documentation-only.
+/// Fail-open on a degraded probe (the Python polarity), fail-refused only
+/// when the fidelity verdict itself says so.
+pub(crate) fn plan_fidelity_blocker<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Blocker> {
+    let plan_path = ledger_plan_path(cwd, pr)?;
+    let plan_path = plan_path.trim();
+    if plan_path.is_empty() {
+        return None;
+    }
+    if !pr_payload_is_code(probes, cwd, pr) {
+        return None;
+    }
+    let args = vec![
+        "plan".to_string(),
+        "fidelity".to_string(),
+        plan_path.to_string(),
+        "--json".to_string(),
+    ];
+    match probes.fno_shell(cwd, &args) {
+        Ok((Some(0), stdout, _)) => {
+            let verdict: Value = serde_json::from_slice(&stdout).ok()?;
+            if verdict.get("refused").and_then(Value::as_bool) == Some(true) {
+                let reason = verdict
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("uncovered shortfall");
+                Some(Blocker::refused(
+                    "plan_fidelity_refused",
+                    format!("plan fidelity refused: {reason}"),
+                ))
+            } else {
+                None
+            }
+        }
+        Ok(_) => {
+            breadcrumb("plan fidelity probe answered nonzero; proceeding (fail-open)");
+            None
+        }
+        Err(error) => {
+            breadcrumb(&format!(
+                "plan fidelity probe unavailable ({error}); proceeding (fail-open)"
+            ));
+            None
+        }
+    }
+}
+
+/// The plan_path bound to this PR's delivery row in the ledger, or None.
+/// PR numbers are per-repo and the ledger is global, so when several rows
+/// match, the one whose pr_url names this checkout's remote wins; otherwise
+/// the first match answers (fail-open, as the Python did). A missing or
+/// broken ledger is None: no signal, no gate.
+fn ledger_plan_path(cwd: &Path, pr: u64) -> Option<String> {
+    use std::process::Command;
+
+    let text = std::fs::read_to_string(crate::paths::ledger_path(cwd)).ok()?;
+    let data: Value = serde_json::from_str(&text).ok()?;
+    let rows = match data {
+        Value::Array(list) => list,
+        Value::Object(map) => map.get("entries")?.as_array()?.clone(),
+        _ => return None,
+    };
+    let slug = Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_default();
+    let matches: Vec<&Value> = rows
+        .iter()
+        .filter(|row| row.get("pr_number").and_then(Value::as_u64) == Some(pr))
+        .collect();
+    let picked = matches
+        .iter()
+        .copied()
+        .find(|row| {
+            !slug.is_empty()
+                && row
+                    .get("pr_url")
+                    .and_then(Value::as_str)
+                    .is_some_and(|url| url.contains(&slug))
+        })
+        .or_else(|| matches.first().copied());
+    picked.and_then(|row| {
+        row.get("plan_path")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+}
+
+/// The PR carries a code payload (at least one non-documentation changed
+/// file). A read miss answers false, which skips the gate (fail-open: the
+/// fidelity guard never wedges a merge because gh hiccuped).
+fn pr_payload_is_code<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> bool {
+    let args = vec![
+        "pr".to_string(),
+        "view".to_string(),
+        pr.to_string(),
+        "--json".to_string(),
+        "files".to_string(),
+    ];
+    let Ok((true, stdout)) = probes.run_gh(cwd, &args) else {
+        return false;
+    };
+    let Ok(payload) = serde_json::from_str::<Value>(&stdout) else {
+        return false;
+    };
+    let Some(files) = payload.get("files").and_then(Value::as_array) else {
+        return false;
+    };
+    files.iter().any(|file| {
+        file.get("path")
+            .or_else(|| file.get("filename"))
+            .and_then(Value::as_str)
+            .is_some_and(|path| !is_documentation_path(path))
+    })
+}
+
+fn breadcrumb(message: &str) {
+    let mut err = std::io::stderr();
+    let _ = writeln!(err, "pr-merge: {message}");
+}
+
+/// The overlap gate (parallel-mode G4, LD#9), polarity kept: only arms while
+/// live lanes run; `_behind_by` miss disarms; base-move and PR-file misses
+/// HOLD (fail closed) because the base already moved.
+pub(crate) fn overlap_blocker<P: Probes>(
+    probes: &P,
+    cwd: &Path,
+    facts_number: u64,
+) -> Option<Blocker> {
+    if probes.live_lanes(cwd) == 0 {
+        return None;
+    }
+    let behind = behind_by(probes, cwd, facts_number);
+    if behind == 0 {
+        return None;
+    }
+    let base_paths = base_move_paths(probes, cwd, facts_number)?;
+    let pr_paths = pr_file_paths(probes, cwd, facts_number)?;
+    let overlap = overlaps(&base_paths, &pr_paths);
+    if overlap.is_empty() {
+        return None;
+    }
+    let shown = overlap
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let extra = if overlap.len() > 3 {
+        format!(" and {} more", overlap.len() - 3)
+    } else {
+        String::new()
+    };
+    Some(Blocker::held(
+        "base_overlap",
+        format!(
+            "stale base: base move touches files this PR also changes ({shown}{extra}); \
+             run fno do pr rebase, then retry"
+        ),
+    ))
+}
+
+/// (base, head) ref names for a PR, or None on any read miss.
+fn pr_base_head_refs<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<(String, String)> {
+    let args = vec![
+        "pr".to_string(),
+        "view".to_string(),
+        pr.to_string(),
+        "--json".to_string(),
+        "baseRefName,headRefName".to_string(),
+    ];
+    let (ok, stdout) = probes.run_gh(cwd, &args).ok()?;
+    if !ok {
+        return None;
+    }
+    let refs: Value = serde_json::from_str(&stdout).ok()?;
+    let base = refs.get("baseRefName").and_then(Value::as_str)?;
+    let head = refs.get("headRefName").and_then(Value::as_str)?;
+    if base.is_empty() || head.is_empty() {
+        return None;
+    }
+    Some((base.to_string(), head.to_string()))
+}
+
+/// Commits the PR head is behind its base. 0 on any probe miss (never block
+/// a merge because our own read failed).
+fn behind_by<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> u64 {
+    let Some((base, head)) = pr_base_head_refs(probes, cwd, pr) else {
+        breadcrumb(
+            "stale-base probe unavailable (pr refs unreadable); merging without freshness hold",
+        );
+        return 0;
+    };
+    let args = vec![
+        "api".to_string(),
+        format!("repos/{{owner}}/{{repo}}/compare/{base}...{head}"),
+        "-q".to_string(),
+        ".behind_by".to_string(),
+    ];
+    match probes.run_gh(cwd, &args) {
+        Ok((true, stdout)) => stdout.trim().parse::<u64>().unwrap_or_else(|_| {
+            breadcrumb(
+                "stale-base probe unavailable (gh compare failed); merging without freshness hold",
+            );
+            0
+        }),
+        _ => {
+            breadcrumb(
+                "stale-base probe unavailable (gh compare failed); merging without freshness hold",
+            );
+            0
+        }
+    }
+}
+
+/// Files the BASE branch gained since the PR head diverged, or None (HOLD).
+/// Truncation is a miss: an under-reported move fails in the merging direction.
+fn base_move_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<String>> {
+    let Some((base, head)) = pr_base_head_refs(probes, cwd, pr) else {
+        breadcrumb("overlap probe unavailable (pr refs unreadable); holding for a rebase");
+        return None;
+    };
+    let args = vec![
+        "api".to_string(),
+        format!("repos/{{owner}}/{{repo}}/compare/{head}...{base}"),
+        "--jq".to_string(),
+        "{truncated: .truncated, names: [.files[] | ((.filename // empty), (.previous_filename // empty))]}"
+            .to_string(),
+    ];
+    let (ok, stdout) = probes.run_gh(cwd, &args).ok()?;
+    if !ok {
+        breadcrumb("overlap probe unavailable (gh reverse compare failed); holding for a rebase");
+        return None;
+    }
+    let payload: Value = serde_json::from_str(&stdout).ok()?;
+    let names = payload.get("names").and_then(Value::as_array)?;
+    let mut paths = Vec::with_capacity(names.len());
+    for name in names {
+        match name.as_str() {
+            Some(path) if !path.is_empty() => paths.push(path.to_string()),
+            _ => {
+                breadcrumb("overlap probe unavailable (compare file list carries non-string entries); holding for a rebase");
+                return None;
+            }
+        }
+    }
+    if payload
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || paths.len() >= 300
+    {
+        breadcrumb(&format!(
+            "overlap probe unavailable (compare truncated, {} files; caps at 300); holding for a rebase",
+            paths.len()
+        ));
+        return None;
+    }
+    Some(paths)
+}
+
+/// The PR's own changed file paths, or None (HOLD). An EMPTY list is a real
+/// answer: a PR with no diff cannot overlap anything.
+fn pr_file_paths<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Vec<String>> {
+    let args = vec![
+        "api".to_string(),
+        format!("repos/{{owner}}/{{repo}}/pulls/{pr}/files"),
+        "--paginate".to_string(),
+        "--jq".to_string(),
+        ".[] | .filename // empty".to_string(),
+    ];
+    let (ok, stdout) = probes.run_gh(cwd, &args).ok()?;
+    if !ok {
+        breadcrumb("overlap probe unavailable (gh pr files read failed); holding for a rebase");
+        return None;
+    }
+    Some(
+        stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+/// Sorted intersection of two changed-file lists, documentation paths dropped
+/// from both sides first. Empty: no semantic conflict the merge could carry.
+fn overlaps(base_paths: &[String], pr_paths: &[String]) -> Vec<String> {
+    let base: std::collections::BTreeSet<&str> = base_paths
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !is_documentation_path(p))
+        .collect();
+    let pr: std::collections::BTreeSet<&str> = pr_paths
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !is_documentation_path(p))
+        .collect();
+    base.intersection(&pr).map(|p| (*p).to_string()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn overlaps_drops_documentation_paths_from_both_sides() {
+        let base = vec!["src/a.rs".to_string(), "docs/guide.md".to_string()];
+        let pr = vec!["src/a.rs".to_string(), "docs/guide.md".to_string()];
+        assert_eq!(overlaps(&base, &pr), vec!["src/a.rs".to_string()]);
+    }
+
+    #[test]
+    fn an_unreconciled_manifest_of_a_contract_node_holds() {
+        // AC6's gate half: mocks would ship; the merge holds by code.
+        let root = std::env::temp_dir().join(format!("x53c5-stub-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".fno")).unwrap();
+        let node = "x-test";
+        std::fs::write(
+            root.join(".fno").join(format!("stub-manifest-{node}.json")),
+            r#"{"reconciled": false, "stubs": [{"stub_id": "a"}]}"#,
+        )
+        .unwrap();
+        let blocker = stub_manifest_blocker(&root, node).expect("held");
+        assert_eq!(blocker.code, "stub_manifest_unreconciled");
+        assert!(blocker.detail.contains("1 stub(s)"), "{}", blocker.detail);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_reconciled_manifest_clears_and_a_missing_one_never_holds() {
+        let root = std::env::temp_dir().join(format!("x53c5-stub2-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".fno")).unwrap();
+        let node = "x-test";
+        std::fs::write(
+            root.join(".fno").join(format!("stub-manifest-{node}.json")),
+            r#"{"reconciled": true, "stubs": []}"#,
+        )
+        .unwrap();
+        assert!(stub_manifest_blocker(&root, node).is_none());
+        // No manifest carried: nothing to hold against.
+        assert!(stub_manifest_blocker(&root, "x-never-wrote").is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn contract_node_matches_dep_and_pr() {
+        let entries = vec![
+            json!({"id": "x-1111", "dep": "hard", "pr": 7}),
+            json!({"id": "x-2222", "dep": "contract", "pr": 8}),
+        ];
+        assert_eq!(contract_node_for_pr(&entries, 8).as_deref(), Some("x-2222"));
+        assert_eq!(contract_node_for_pr(&entries, 7), None);
+    }
+}
