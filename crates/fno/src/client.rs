@@ -6233,42 +6233,18 @@ impl View {
         } else if let Some(m) = &self.keys_modal {
             // US3: the centered which-key modal replaces the old top-left
             // key-table poster (opaque, sectioned, scrollable).
-            popup::draw(
-                &mut cells,
-                rows,
-                cols,
-                &m.popup.render(self.term),
-                &self.theme,
-            );
+            draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
         } else if let Some(m) = &self.row_menu {
             // US2: the anchored row context menu, drawn at the pointer.
-            popup::draw(
-                &mut cells,
-                rows,
-                cols,
-                &m.popup.render(self.term),
-                &self.theme,
-            );
+            draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
         } else if let Some(m) = &self.aux {
             // US4/US5: the sideline MENU popup or settings modal.
-            popup::draw(
-                &mut cells,
-                rows,
-                cols,
-                &m.popup.render(self.term),
-                &self.theme,
-            );
+            draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
         } else if let Some(pk) = self.launcher.as_ref().and_then(|l| l.picker.as_ref()) {
-            // The composer's choice popover, the dock's child: drawn over
-            // the sideline blit, below any modal opened after it (which
-            // would take keys first and reveal the picker on close).
-            popup::draw(
-                &mut cells,
-                rows,
-                cols,
-                &pk.popup.render(self.term),
-                &self.theme,
-            );
+            // The composer's choice popover, the dock's child: over the
+            // sideline blit, below any modal opened after it (which takes
+            // keys first and reveals the picker on close).
+            draw_popup_overlay(&mut cells, rows, cols, &pk.popup, self.term, &self.theme);
         } else if let Some(sel) = self.answers {
             // needs-me queue (grown from the answer overlay,
             // folded MINE in as the first lane): MINE then the
@@ -9063,6 +9039,20 @@ fn draw_overlay_layout(
 /// `content_origin` is `(TAB_BAR_ROWS, panel_w)`; `content_dims` is the content
 /// viewport's `(rows, cols)` (status row excluded). The framed block is centered
 /// on its FRAMED dimensions (placement; policy).
+/// Draw one laid-out popup overlay (the which-key modal, the row menu, the
+/// MENU/settings aux popup, the composer's choice popover) at its own
+/// anchor over the composed frame.
+fn draw_popup_overlay(
+    cells: &mut [Cell],
+    rows: usize,
+    cols: usize,
+    popup: &popup::Popup,
+    term: (u16, u16),
+    theme: &Theme,
+) {
+    popup::draw(cells, rows, cols, &popup.render(term), theme);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_lines_overlay<S: AsRef<str>>(
     cells: &mut [Cell],
@@ -10869,11 +10859,8 @@ async fn attach_and_run(
                         break Err(e);
                     }
                 }
-                // A flush can change CLIENT-local state the pane's own output
-                // would never repaint - the launcher's lone-Esc close is the
-                // one that matters (the dock leaves the screen only when this
-                // loop draws). Draw unconditionally: a redundant draw of an
-                // unchanged frame is cheaper than a stale overlay.
+                // A flush can change client-local state no pane output
+                // repaints (the launcher's lone-Esc close): draw here.
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
