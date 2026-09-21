@@ -532,6 +532,32 @@ fn r_capacity_pair(footprint_payload: &Value, gate_payload: &Value) -> Result<Va
             other => other,
         }
     }
+    let lanes = gate_payload
+        .get("lanes")
+        .and_then(Value::as_object)
+        .map(|lanes| {
+            let mut rows = lanes
+                .iter()
+                .filter(|(provider, _)| provider.as_str() != "quota_source")
+                .filter_map(|(provider, lane)| {
+                    let live = lane.get("live").and_then(Value::as_u64)?;
+                    let cap = lane
+                        .get("cap")
+                        .and_then(Value::as_u64)
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "-".into());
+                    let quota = s_str(lane, "quota").unwrap_or("unmeasured");
+                    Some(format!("{provider} {live}/{cap} {quota}"))
+                })
+                .collect::<Vec<_>>();
+            rows.sort();
+            if rows.is_empty() {
+                "lanes unreadable".into()
+            } else {
+                rows.join(", ")
+            }
+        })
+        .unwrap_or_else(|| "lanes unreadable".into());
     Ok(json!({
         "footprint": footprint,
         "gate": gate_verdict,
@@ -542,6 +568,7 @@ fn r_capacity_pair(footprint_payload: &Value, gate_payload: &Value) -> Result<Va
             .get("unparsed_lines")
             .and_then(|u| u.as_i64())
             .unwrap_or(0),
+        "lanes": lanes,
     }))
 }
 
@@ -976,11 +1003,12 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
         );
     }
     if let Some(capacity) = get("capacity").filter(|r| r.ok) {
-        for key in ["footprint", "gate", "disagree", "unparsed_lines"] {
+        for key in ["footprint", "gate", "disagree", "unparsed_lines", "lanes"] {
             let wire = match key {
                 "footprint" => "capacity_footprint",
                 "gate" => "capacity_gate",
                 "disagree" => "capacity_disagree",
+                "lanes" => "capacity_lanes",
                 _ => "unparsed_lines",
             };
             data.insert(
@@ -1410,6 +1438,7 @@ fn render_lines(
             if unparsed != 0 {
                 text.push_str(&format!(" (unparsed_lines {unparsed})"));
             }
+            text.push_str(&format!(" | lanes {}", dash(data.get("capacity_lanes"))));
             lines.push(text);
         }
     }
@@ -2271,6 +2300,67 @@ mod tests {
         assert!(!pair("refuse", "refused"));
         assert!(pair("admit", "refused"));
         assert!(pair("refuse", "accepted"));
+    }
+
+    #[test]
+    fn capacity_pair_renders_provider_lanes_in_order_or_as_unreadable() {
+        let capacity = r_capacity_pair(
+            &json!({"capacity_verdict": "admit", "unparsed_lines": 0}),
+            &json!({
+                "verdict": "refused",
+                "lanes": {
+                    "zai": {"cap": 10, "live": 8, "quota": "closed"},
+                    "openai": {"cap": null, "live": 1, "quota": "unmeasured"}
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(capacity["lanes"], "openai 1/- unmeasured, zai 8/10 closed");
+        let readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            capacity.clone(),
+            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        assert_eq!(
+            data.get("capacity_lanes"),
+            Some(&json!("openai 1/- unmeasured, zai 8/10 closed"))
+        );
+        let line = render_lines("x-bbbb", &readings, &data, &None, "", "no change")
+            .into_iter()
+            .find(|line| line.starts_with("capacity:"))
+            .unwrap();
+        assert!(
+            line.ends_with("| lanes openai 1/- unmeasured, zai 8/10 closed"),
+            "line: {line}"
+        );
+
+        let unreadable = r_capacity_pair(
+            &json!({"capacity_verdict": "admit", "unparsed_lines": 0}),
+            &json!({"verdict": "accepted"}),
+        )
+        .unwrap();
+        assert_eq!(unreadable["lanes"], "lanes unreadable");
+        let unread_readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            unreadable,
+            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+        );
+        let unread_data = build_data(&unread_readings, "x-bbbb");
+        let unread_line = render_lines(
+            "x-bbbb",
+            &unread_readings,
+            &unread_data,
+            &None,
+            "",
+            "no change",
+        )
+        .into_iter()
+        .find(|line| line.starts_with("capacity:"))
+        .unwrap();
+        assert!(unread_line.ends_with("| lanes lanes unreadable"));
     }
 
     #[test]

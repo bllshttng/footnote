@@ -845,6 +845,12 @@ struct View {
     /// Orthogonal to [`View::density`]: this is visibility, that is how much
     /// each visible row shows. `Slim` is a narrow rail, NOT a hidden panel.
     panel_on: bool,
+    /// Full-screen sideline (prefix+F): the agent table takes the terminal
+    /// width with the composer at the bottom, and the panes do not paint.
+    /// Paint-only: `panel_w`/`content_dims` never change, so no `Resize`
+    /// travels in either direction and the server keeps every pane at its
+    /// size.
+    sideline_full: bool,
     /// Sideline density, persisted by [`crate::view_store`]. Since
     /// it drives only the row set (via [`View::display_rows`]) and the
     /// preset width jump - the rendered width is [`View::sideline_width`], an
@@ -2311,6 +2317,7 @@ impl View {
             layout,
             frames: HashMap::new(),
             panel_on: true,
+            sideline_full: false,
             density,
             sideline_width,
             agent_sort,
@@ -4669,8 +4676,16 @@ impl View {
             }
             return None;
         }
-        // Sideline: the panel column minus its divider. Off/narrow => no panel.
-        if panel_w == 0 || col >= panel_w - 1 {
+        // Sideline: the painted width minus its divider (the full terminal
+        // in full-screen mode). Off/narrow => no panel.
+        let paint_w = self.sideline_paint_w();
+        if paint_w == 0 || col as usize >= paint_w - 1 {
+            return None;
+        }
+        // Full-screen sideline paints below the strip; invert the same
+        // offset the painter used.
+        let top = self.sideline_top();
+        if (row as usize) < top {
             return None;
         }
         // The bottom row is overlaid by the status / which-key / search chrome
@@ -4679,11 +4694,13 @@ impl View {
         if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
             return None;
         }
-        // The density button rides the sideline's top row, painted over
-        // whatever display row is scrolled to it. It is chrome pinned to row 0,
-        // not a property of that row, so the check is on the PAINTED row and
-        // must precede the display-row resolution below.
-        if row == 0 {
+        // The density button rides the sideline's top painted row, over
+        // whatever display row is scrolled to it. It is chrome pinned to the
+        // first PAINTED row, not a property of that row, so the check is on
+        // the painted row and must precede the display-row resolution below.
+        if row == top as u16 && !self.sideline_full {
+            // In full-screen the button is not painted, so a hit there would
+            // cycle a density the screen does not show.
             if let Some(range) = self.density_button_range(panel_w as usize) {
                 if range.contains(&(col as usize)) {
                     return Some(ChromeHit::CycleDensity);
@@ -4691,15 +4708,16 @@ impl View {
             }
         }
         // Display row i is painted at `i - offset` (draw_sideline, since
-        // the sideline owns row 0), so invert with the offset - else a click on a
-        // scrolled row activates the wrong row. Mirrors sideline_row_at.
-        let i = row as usize + self.sideline_offset();
+        // the sideline owns the top painted row), so invert with the paint
+        // offset - else a click on a scrolled row activates the wrong row.
+        // Mirrors sideline_row_at.
+        let i = row as usize - top + self.sideline_offset();
         if let Some(hit) = self.table_header_hit(i, col) {
             return Some(hit);
         }
         // US4: a click on the footer's `☰ menu` region opens the sideline
         // MENU popup; the rest of the footer row keeps its `+ new` create action.
-        if matches!(self.display_rows().get(i), Some(DisplayRow::NewSquad)) {
+        if matches!(self.painted_rows().get(i), Some(DisplayRow::NewSquad)) {
             if let Some(range) = self.footer_menu_range(panel_w as usize) {
                 if range.contains(&(col as usize)) {
                     return Some(ChromeHit::OpenSidelineMenu { row, col });
@@ -4710,12 +4728,12 @@ impl View {
     }
 
     fn table_header_hit(&self, row: usize, col: u16) -> Option<ChromeHit> {
-        if self.density != Density::Extended
-            || !matches!(self.display_rows().get(row), Some(DisplayRow::TableHead))
+        if (self.density != Density::Extended && !self.sideline_full)
+            || !matches!(self.painted_rows().get(row), Some(DisplayRow::TableHead))
         {
             return None;
         }
-        let text_w = self.panel_w().checked_sub(1)?;
+        let text_w = self.sideline_paint_w().checked_sub(1)?;
         let rects = sideline_column_rects(text_w as u16);
         let hit = |r: RtRect| col >= r.x && col < r.x + r.width;
         if hit(rects[0]) {
@@ -4738,7 +4756,7 @@ impl View {
     /// route through, so the two inputs can never diverge. `None` only
     /// for an out-of-range index or an inert [`DisplayRow::Header`].
     fn row_action(&self, i: usize) -> Option<ChromeHit> {
-        match self.display_rows().get(i)? {
+        match self.painted_rows().get(i)? {
             DisplayRow::Sel(row) => match row.tab {
                 // Acting on the already-active squad row was a silent no-op
                 // (SelectSquad to the squad you're on); it now toggles the
@@ -5056,19 +5074,26 @@ impl View {
     /// sideline geometry exactly so the highlight lands where a click would
     ///.
     fn sideline_row_at(&self, row: u16, col: u16) -> Option<usize> {
-        let panel_w = self.panel_w();
-        // (US1) The sideline now owns row 0 (the strip moved right of the
-        // divider), so the `row < TAB_BAR_ROWS` exclusion is gone and display
-        // row `i` maps directly from `row` (no TAB_BAR_ROWS offset). A cell on
-        // the divider or in the strip's content columns still returns None.
-        if panel_w == 0 || col >= panel_w - 1 {
+        // The sideline owns row 0 in normal mode (the strip moved right of
+        // the divider), so display row `i` maps directly from `row`. A cell
+        // on the divider or in the strip's content columns returns None.
+        // Sideline: the painted width minus its divider (the full terminal
+        // in full-screen mode). Off/narrow => no panel.
+        let paint_w = self.sideline_paint_w();
+        if paint_w == 0 || col as usize >= paint_w - 1 {
+            return None;
+        }
+        // Full-screen sideline paints below the strip; invert the same
+        // offset the painter used.
+        let top = self.sideline_top();
+        if (row as usize) < top {
             return None;
         }
         if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
             return None;
         }
-        let i = row as usize + self.sideline_offset();
-        (i < self.display_rows().len()).then_some(i)
+        let i = row as usize - top + self.sideline_offset();
+        (i < self.painted_rows().len()).then_some(i)
     }
 
     /// Fold one bare-motion (hover) report into the sideline highlight and the
@@ -5799,7 +5824,7 @@ impl View {
     /// last row. Everything-fits (or an empty window) resets the offset to 0, so
     /// the common case renders byte-identically to a non-scrolling sideline.
     fn clamp_sideline_scroll(&mut self) {
-        let total = self.display_rows().len();
+        let total = self.painted_rows().len();
         let visible = self.sideline_visible_rows();
         let off = self.sideline_offset();
         if total <= visible || visible == 0 {
@@ -5835,7 +5860,7 @@ impl View {
         }
         let focus = self.layout.focus;
         let visible = self.sideline_visible_rows();
-        let total = self.display_rows().len();
+        let total = self.painted_rows().len();
         if visible == 0 || total <= visible {
             return;
         }
@@ -5864,7 +5889,7 @@ impl View {
     /// from under the pointer, so the arm is disarmed here; the next pointer Move
     /// re-hit-tests and re-arms.
     fn scroll_sideline(&mut self, down: bool) {
-        let total = self.display_rows().len();
+        let total = self.painted_rows().len();
         let visible = self.sideline_visible_rows();
         if total <= visible || visible == 0 {
             return;
@@ -5906,262 +5931,276 @@ impl View {
         let mut cells = vec![Cell::default(); rows * cols];
         let panel_w = self.panel_w() as usize;
 
-        self.draw_tab_bar(&mut cells, cols);
-        if panel_w > 0 {
-            self.draw_sideline(&mut cells, rows, cols, panel_w);
+        // Full-screen sideline: the agent table takes the terminal width
+        // with the composer at the bottom, and the panes do not paint. The
+        // strip still owns row 0, so the sideline composes below it (the
+        // click mappers invert the same offset via `sideline_top`), and the
+        // server's viewport is untouched - no `Resize` travels either way.
+        if self.sideline_full {
+            self.draw_tab_bar(&mut cells, cols);
+            let top = TAB_BAR_ROWS as usize;
+            self.draw_sideline(&mut cells[top * cols..], rows - top, cols, cols);
+        } else {
+            self.draw_tab_bar(&mut cells, cols);
+            if panel_w > 0 {
+                self.draw_sideline(&mut cells, rows, cols, panel_w);
+            }
         }
 
-        // Content area: dividers first (uncovered cells), panes blitted over.
-        let origin_r = TAB_BAR_ROWS as usize;
-        let origin_c = panel_w;
-        let mut covered = vec![false; rows * cols];
-        // cells owned by the focused pane, so the divider pass can accent
-        // the seams that bound it (a standing "you are here" outline).
-        let mut focused = vec![false; rows * cols];
-        for (pid, rect) in &self.layout.panes {
-            let frame = self.frames.get(pid);
-            for fr in 0..rect.rows as usize {
-                let r = origin_r + rect.y as usize + fr;
-                if r >= rows {
-                    break;
-                }
-                for fc in 0..rect.cols as usize {
-                    let c = origin_c + rect.x as usize + fc;
-                    if c >= cols {
+        if !self.sideline_full {
+            // Content area: dividers first (uncovered cells), panes blitted over.
+            let origin_r = TAB_BAR_ROWS as usize;
+            let origin_c = panel_w;
+            let mut covered = vec![false; rows * cols];
+            // cells owned by the focused pane, so the divider pass can accent
+            // the seams that bound it (a standing "you are here" outline).
+            let mut focused = vec![false; rows * cols];
+            for (pid, rect) in &self.layout.panes {
+                let frame = self.frames.get(pid);
+                for fr in 0..rect.rows as usize {
+                    let r = origin_r + rect.y as usize + fr;
+                    if r >= rows {
                         break;
                     }
-                    covered[r * cols + c] = true;
-                    if *pid == self.layout.focus {
-                        focused[r * cols + c] = true;
-                    }
-                    if let Some(f) = frame {
-                        if fr < f.rows as usize && fc < f.cols as usize {
-                            cells[r * cols + c] = f.cells[fr * f.cols as usize + fc];
+                    for fc in 0..rect.cols as usize {
+                        let c = origin_c + rect.x as usize + fc;
+                        if c >= cols {
+                            break;
+                        }
+                        covered[r * cols + c] = true;
+                        if *pid == self.layout.focus {
+                            focused[r * cols + c] = true;
+                        }
+                        if let Some(f) = frame {
+                            if fr < f.rows as usize && fc < f.cols as usize {
+                                cells[r * cols + c] = f.cells[fr * f.cols as usize + fc];
+                            }
                         }
                     }
                 }
             }
-        }
-        // (hover affordance) Underline the accepted link span, client-local:
-        // OR UNDERLINE into exactly the pane-local cells the server named,
-        // after the blit (content is in place) and before the grip/indicator/
-        // overlay passes (chrome and overlays still win their cells). The
-        // cached server `Frame` is untouched, so the span clears on the next
-        // compose the moment it is dropped or invalidated. Suppressed while
-        // ANY modal is open: `menu_usurping_open` names the full set, which
-        // closes the keyboard-opened and overlay-blind cases the pointer-event
-        // clear cannot see (an overlay opened with no pointer motion paints no
-        // hover affordance beneath or around itself).
-        if !self.menu_usurping_open() {
-            if let Some((pid, span)) = self.link_hover.accepted.as_ref() {
-                if let Some((_, rect)) = self.layout.panes.iter().find(|(p, _)| p == pid) {
-                    for &(fr, fc) in span {
-                        let r = origin_r + rect.y as usize + fr as usize;
-                        let c = origin_c + rect.x as usize + fc as usize;
-                        if r < rows && c < cols {
-                            cells[r * cols + c].flags |= cell_flags::UNDERLINE;
+            // (hover affordance) Underline the accepted link span, client-local:
+            // OR UNDERLINE into exactly the pane-local cells the server named,
+            // after the blit (content is in place) and before the grip/indicator/
+            // overlay passes (chrome and overlays still win their cells). The
+            // cached server `Frame` is untouched, so the span clears on the next
+            // compose the moment it is dropped or invalidated. Suppressed while
+            // ANY modal is open: `menu_usurping_open` names the full set, which
+            // closes the keyboard-opened and overlay-blind cases the pointer-event
+            // clear cannot see (an overlay opened with no pointer motion paints no
+            // hover affordance beneath or around itself).
+            if !self.menu_usurping_open() {
+                if let Some((pid, span)) = self.link_hover.accepted.as_ref() {
+                    if let Some((_, rect)) = self.layout.panes.iter().find(|(p, _)| p == pid) {
+                        for &(fr, fc) in span {
+                            let r = origin_r + rect.y as usize + fr as usize;
+                            let c = origin_c + rect.x as usize + fc as usize;
+                            if r < rows && c < cols {
+                                cells[r * cols + c].flags |= cell_flags::UNDERLINE;
+                            }
                         }
                     }
                 }
             }
-        }
-        // pane grips, drawn on cells the pane owns, hence after the blit
-        // - but BEFORE the scroll indicator, which is state rather than an
-        // affordance and so wins the cells they contend for on a narrow pane. The dragged pane's own grip stays lit for the
-        // whole gesture, which is what keeps the origin marked (AC3-UI) once
-        // the pointer has run off to a zone somewhere else.
-        let dragged = self.pane_drag.map(|d| d.mover);
-        // Hidden on a single-pane tab, matching `grip_at`: no grip is drawn
-        // where none can be pressed.
-        for (pid, rect) in self
-            .layout
-            .panes
-            .iter()
-            .filter(|_| self.layout.panes.len() >= 2)
-        {
-            let Some((grow, gcols)) = self.grip_span(*rect) else {
-                continue;
-            };
-            let lit = dragged == Some(*pid) || (dragged.is_none() && self.hover_grip == Some(*pid));
-            let (fg, flags) = if lit {
-                (self.theme.accent, cell_flags::BOLD)
-            } else {
-                (Color::Default, cell_flags::DIM)
-            };
-            let (r, start, end) = (grow as usize, gcols.start as usize, gcols.end as usize);
-            if r >= rows {
-                continue;
+            // pane grips, drawn on cells the pane owns, hence after the blit
+            // - but BEFORE the scroll indicator, which is state rather than an
+            // affordance and so wins the cells they contend for on a narrow pane. The dragged pane's own grip stays lit for the
+            // whole gesture, which is what keeps the origin marked (AC3-UI) once
+            // the pointer has run off to a zone somewhere else.
+            let dragged = self.pane_drag.map(|d| d.mover);
+            // Hidden on a single-pane tab, matching `grip_at`: no grip is drawn
+            // where none can be pressed.
+            for (pid, rect) in self
+                .layout
+                .panes
+                .iter()
+                .filter(|_| self.layout.panes.len() >= 2)
+            {
+                let Some((grow, gcols)) = self.grip_span(*rect) else {
+                    continue;
+                };
+                let lit =
+                    dragged == Some(*pid) || (dragged.is_none() && self.hover_grip == Some(*pid));
+                let (fg, flags) = if lit {
+                    (self.theme.accent, cell_flags::BOLD)
+                } else {
+                    (Color::Default, cell_flags::DIM)
+                };
+                let (r, start, end) = (grow as usize, gcols.start as usize, gcols.end as usize);
+                if r >= rows {
+                    continue;
+                }
+                blank_straddling_pair(&mut cells, cols, r, start, end);
+                for (i, ch) in GRIP.chars().enumerate() {
+                    let c = start + i;
+                    if c < cols {
+                        cells[r * cols + c] = Cell {
+                            c: ch,
+                            fg,
+                            bg: Color::Default,
+                            flags,
+                        };
+                    }
+                }
             }
-            blank_straddling_pair(&mut cells, cols, r, start, end);
-            for (i, ch) in GRIP.chars().enumerate() {
-                let c = start + i;
-                if c < cols {
+
+            // Scroll indicator (US1, AC1-UI): a minimal `[+N]` at a scrolled pane's
+            // top-right, inverse-video so it reads over content. Present iff the
+            // pane's frame reports a non-zero offset (group 2's status row becomes
+            // its canonical home). A pane too narrow to fit the label skips it.
+            for (pid, rect) in &self.layout.panes {
+                let Some(f) = self.frames.get(pid) else {
+                    continue;
+                };
+                if f.scroll_offset == 0 {
+                    continue;
+                }
+                let label = format!("[+{}]", f.scroll_offset);
+                let w = label.chars().count();
+                let r = origin_r + rect.y as usize;
+                if (rect.cols as usize) < w || r >= rows {
+                    continue;
+                }
+                let start_c = origin_c + rect.x as usize + rect.cols as usize - w;
+                for (k, ch) in label.chars().enumerate() {
+                    let c = start_c + k;
+                    if c < cols {
+                        cells[r * cols + c] = Cell {
+                            c: ch,
+                            fg: Color::Default,
+                            bg: Color::Default,
+                            flags: cell_flags::INVERSE,
+                        };
+                    }
+                }
+            }
+            // Letterbox (AC1-UI): the server tiled its rects into `Layout.area`
+            // (the view-scoped clamp); content anchors top-left and everything
+            // beyond `area` up to the local content edge is visibly-inert dim
+            // filler, never divider glyphs. `(0, 0)` is the pre-Layout
+            // placeholder: no filler until the first real Layout names a bound.
+            let (a_rows, a_cols) = self.layout.area;
+            let boxed = self.layout.area != (0, 0);
+            // A drag keeps the accent on the seam it grabbed even as the pointer
+            // runs ahead of it, so the thing being moved stays the thing lit.
+            let active_seam = self.seam_drag.map(|d| d.seam).or(self.hover_seam);
+            // the candidate drop zone, lit while a relocation drag is live.
+            // The tab-cell and sideline-row drags reuse the SAME content-edge
+            // zone vocabulary, so one of the three lights the seam/band identically.
+            let drop_zone = self
+                .pane_drag
+                .and_then(|d| d.zone)
+                .or_else(|| self.tab_drag.and_then(|d| d.zone))
+                .or_else(|| self.row_drag.as_ref().and_then(|d| d.zone));
+            // Divider glyphs for in-area content cells no pane covers: pick by
+            // which neighbors are panes so vertical strips read '│', horizontal
+            // '─', crossings '┼'. Dim so chrome never shouts over content.
+            for r in origin_r..rows {
+                for c in origin_c..cols {
+                    if covered[r * cols + c] {
+                        continue;
+                    }
+                    if boxed && (r - origin_r >= a_rows as usize || c - origin_c >= a_cols as usize)
+                    {
+                        cells[r * cols + c] = Cell {
+                            c: '·',
+                            fg: Color::Default,
+                            bg: Color::Default,
+                            flags: cell_flags::DIM,
+                        };
+                        continue;
+                    }
+                    let horiz = c > origin_c && covered[r * cols + c - 1]
+                        || c + 1 < cols && covered[r * cols + c + 1];
+                    let vert = r > origin_r && covered[(r - 1) * cols + c]
+                        || r + 1 < rows && covered[(r + 1) * cols + c];
+                    // a divider cell that borders the focused pane paints in
+                    // the lattice accent at full brightness (not the DIM chrome), so
+                    // the focused pane wears a standing outline that moves with focus.
+                    // Interior seams only - an edge pane has no divider on that side.
+                    // Orthogonal neighbours suffice: a `┼` is emitted only when a cell
+                    // has a covered horizontal AND vertical neighbour, so every
+                    // visible junction is already orthogonally adjacent to its pane.
+                    // The lone diagonal-only cell is the 1-wide crossing where four
+                    // dividers meet, which renders blank (no covered ortho neighbour)
+                    // - accenting a space would be invisible, so we don't.
+                    let outline = c > origin_c && focused[r * cols + c - 1]
+                        || c + 1 < cols && focused[r * cols + c + 1]
+                        || r > origin_r && focused[(r - 1) * cols + c]
+                        || r + 1 < rows && focused[(r + 1) * cols + c];
+                    // the seam under the pointer (or held in a drag) reads
+                    // BOLD, distinct from both idle DIM chrome and the focus
+                    // outline's plain accent. A terminal cannot portably change the
+                    // cursor shape, so this is the only signal a divider is
+                    // draggable before the press.
+                    let grabbable =
+                        active_seam.is_some_and(|s| self.seam_at(r as u16, c as u16) == Some(s));
+                    // the candidate zone outranks the hover accent - during
+                    // a drag the only question on screen is where the pane lands.
+                    let dropping =
+                        drop_zone.is_some_and(|z| self.drop_zone_at(r as u16, c as u16) == Some(z));
+                    let (fg, flags) = if dropping {
+                        (self.theme.accent, cell_flags::INVERSE)
+                    } else if grabbable {
+                        (self.theme.accent, cell_flags::BOLD)
+                    } else if outline {
+                        (self.theme.accent, 0)
+                    } else {
+                        (Color::Default, cell_flags::DIM)
+                    };
                     cells[r * cols + c] = Cell {
-                        c: ch,
+                        c: match (horiz, vert) {
+                            (true, true) => '┼',
+                            (true, false) => '│',
+                            (false, true) => '─',
+                            (false, false) => ' ',
+                        },
                         fg,
                         bg: Color::Default,
                         flags,
                     };
                 }
             }
-        }
 
-        // Scroll indicator (US1, AC1-UI): a minimal `[+N]` at a scrolled pane's
-        // top-right, inverse-video so it reads over content. Present iff the
-        // pane's frame reports a non-zero offset (group 2's status row becomes
-        // its canonical home). A pane too narrow to fit the label skips it.
-        for (pid, rect) in &self.layout.panes {
-            let Some(f) = self.frames.get(pid) else {
-                continue;
-            };
-            if f.scroll_offset == 0 {
-                continue;
-            }
-            let label = format!("[+{}]", f.scroll_offset);
-            let w = label.chars().count();
-            let r = origin_r + rect.y as usize;
-            if (rect.cols as usize) < w || r >= rows {
-                continue;
-            }
-            let start_c = origin_c + rect.x as usize + rect.cols as usize - w;
-            for (k, ch) in label.chars().enumerate() {
-                let c = start_c + k;
-                if c < cols {
-                    cells[r * cols + c] = Cell {
-                        c: ch,
-                        fg: Color::Default,
-                        bg: Color::Default,
-                        flags: cell_flags::INVERSE,
-                    };
+            // an edge drop zone lands on cells a PANE owns, which the
+            // divider pass above skips by construction. Lit here, after the blit,
+            // so the rim reads as a candidate the same way a seam does.
+            if let Some((band_rows, band_cols)) = drop_zone.and_then(|z| self.drop_band(z)) {
+                for r in band_rows.start as usize..(band_rows.end as usize).min(rows) {
+                    for c in band_cols.start as usize..(band_cols.end as usize).min(cols) {
+                        if covered[r * cols + c] {
+                            let cell = &mut cells[r * cols + c];
+                            cell.fg = self.theme.accent;
+                            cell.flags |= cell_flags::INVERSE;
+                        }
+                    }
                 }
             }
-        }
-        // Letterbox (AC1-UI): the server tiled its rects into `Layout.area`
-        // (the view-scoped clamp); content anchors top-left and everything
-        // beyond `area` up to the local content edge is visibly-inert dim
-        // filler, never divider glyphs. `(0, 0)` is the pre-Layout
-        // placeholder: no filler until the first real Layout names a bound.
-        let (a_rows, a_cols) = self.layout.area;
-        let boxed = self.layout.area != (0, 0);
-        // A drag keeps the accent on the seam it grabbed even as the pointer
-        // runs ahead of it, so the thing being moved stays the thing lit.
-        let active_seam = self.seam_drag.map(|d| d.seam).or(self.hover_seam);
-        // the candidate drop zone, lit while a relocation drag is live.
-        // The tab-cell and sideline-row drags reuse the SAME content-edge
-        // zone vocabulary, so one of the three lights the seam/band identically.
-        let drop_zone = self
-            .pane_drag
-            .and_then(|d| d.zone)
-            .or_else(|| self.tab_drag.and_then(|d| d.zone))
-            .or_else(|| self.row_drag.as_ref().and_then(|d| d.zone));
-        // Divider glyphs for in-area content cells no pane covers: pick by
-        // which neighbors are panes so vertical strips read '│', horizontal
-        // '─', crossings '┼'. Dim so chrome never shouts over content.
-        for r in origin_r..rows {
-            for c in origin_c..cols {
-                if covered[r * cols + c] {
-                    continue;
-                }
-                if boxed && (r - origin_r >= a_rows as usize || c - origin_c >= a_cols as usize) {
-                    cells[r * cols + c] = Cell {
-                        c: '·',
-                        fg: Color::Default,
-                        bg: Color::Default,
-                        flags: cell_flags::DIM,
-                    };
-                    continue;
-                }
-                let horiz = c > origin_c && covered[r * cols + c - 1]
-                    || c + 1 < cols && covered[r * cols + c + 1];
-                let vert = r > origin_r && covered[(r - 1) * cols + c]
-                    || r + 1 < rows && covered[(r + 1) * cols + c];
-                // a divider cell that borders the focused pane paints in
-                // the lattice accent at full brightness (not the DIM chrome), so
-                // the focused pane wears a standing outline that moves with focus.
-                // Interior seams only - an edge pane has no divider on that side.
-                // Orthogonal neighbours suffice: a `┼` is emitted only when a cell
-                // has a covered horizontal AND vertical neighbour, so every
-                // visible junction is already orthogonally adjacent to its pane.
-                // The lone diagonal-only cell is the 1-wide crossing where four
-                // dividers meet, which renders blank (no covered ortho neighbour)
-                // - accenting a space would be invisible, so we don't.
-                let outline = c > origin_c && focused[r * cols + c - 1]
-                    || c + 1 < cols && focused[r * cols + c + 1]
-                    || r > origin_r && focused[(r - 1) * cols + c]
-                    || r + 1 < rows && focused[(r + 1) * cols + c];
-                // the seam under the pointer (or held in a drag) reads
-                // BOLD, distinct from both idle DIM chrome and the focus
-                // outline's plain accent. A terminal cannot portably change the
-                // cursor shape, so this is the only signal a divider is
-                // draggable before the press.
-                let grabbable =
-                    active_seam.is_some_and(|s| self.seam_at(r as u16, c as u16) == Some(s));
-                // the candidate zone outranks the hover accent - during
-                // a drag the only question on screen is where the pane lands.
-                let dropping =
-                    drop_zone.is_some_and(|z| self.drop_zone_at(r as u16, c as u16) == Some(z));
-                let (fg, flags) = if dropping {
-                    (self.theme.accent, cell_flags::INVERSE)
-                } else if grabbable {
-                    (self.theme.accent, cell_flags::BOLD)
-                } else if outline {
-                    (self.theme.accent, 0)
-                } else {
-                    (Color::Default, cell_flags::DIM)
-                };
-                cells[r * cols + c] = Cell {
-                    c: match (horiz, vert) {
-                        (true, true) => '┼',
-                        (true, false) => '│',
-                        (false, true) => '─',
-                        (false, false) => ' ',
-                    },
-                    fg,
-                    bg: Color::Default,
-                    flags,
-                };
-            }
-        }
 
-        // an edge drop zone lands on cells a PANE owns, which the
-        // divider pass above skips by construction. Lit here, after the blit,
-        // so the rim reads as a candidate the same way a seam does.
-        if let Some((band_rows, band_cols)) = drop_zone.and_then(|z| self.drop_band(z)) {
-            for r in band_rows.start as usize..(band_rows.end as usize).min(rows) {
-                for c in band_cols.start as usize..(band_cols.end as usize).min(cols) {
-                    if covered[r * cols + c] {
-                        let cell = &mut cells[r * cols + c];
-                        cell.fg = self.theme.accent;
-                        cell.flags |= cell_flags::INVERSE;
+            if self.pane_ids_until.is_some_and(|until| now < until) {
+                for (pid, rect) in &self.layout.panes {
+                    let label = format!("pane {pid}");
+                    let width = label.chars().count();
+                    let rect_cols = rect.cols as usize;
+                    let row = origin_r + rect.y as usize;
+                    if rect_cols < width || row >= rows {
+                        continue;
+                    }
+                    let start = origin_c + rect.x as usize + rect_cols - width;
+                    for (offset, ch) in label.chars().enumerate() {
+                        let col = start + offset;
+                        if col < cols {
+                            cells[row * cols + col] = Cell {
+                                c: ch,
+                                fg: Color::Default,
+                                bg: Color::Default,
+                                flags: cell_flags::INVERSE | cell_flags::DIM,
+                            };
+                        }
                     }
                 }
             }
         }
-
-        if self.pane_ids_until.is_some_and(|until| now < until) {
-            for (pid, rect) in &self.layout.panes {
-                let label = format!("pane {pid}");
-                let width = label.chars().count();
-                let rect_cols = rect.cols as usize;
-                let row = origin_r + rect.y as usize;
-                if rect_cols < width || row >= rows {
-                    continue;
-                }
-                let start = origin_c + rect.x as usize + rect_cols - width;
-                for (offset, ch) in label.chars().enumerate() {
-                    let col = start + offset;
-                    if col < cols {
-                        cells[row * cols + col] = Cell {
-                            c: ch,
-                            fg: Color::Default,
-                            bg: Color::Default,
-                            flags: cell_flags::INVERSE | cell_flags::DIM,
-                        };
-                    }
-                }
-            }
-        }
-
         self.draw_bottom_row(&mut cells, rows, cols);
         // Chrome, not an overlay: after panes, before modals.
         self.draw_feed_panel(&mut cells, rows, cols);
@@ -6430,11 +6469,13 @@ impl View {
                 if let Some(f) = self.frames.get(&self.layout.focus) {
                     cur_r = TAB_BAR_ROWS + rect.y + f.cursor_row.min(rect.rows.saturating_sub(1));
                     cur_c = self.panel_w() + rect.x + f.cursor_col.min(rect.cols.saturating_sub(1));
-                    if boxed {
+                    if !self.sideline_full && self.layout.area != (0, 0) {
                         // Never in the filler (AC1-UI), even mid-race when a
-                        // stale rect exceeds the just-shrunk area.
-                        cur_r = cur_r.min(TAB_BAR_ROWS + a_rows.saturating_sub(1));
-                        cur_c = cur_c.min(self.panel_w() + a_cols.saturating_sub(1));
+                        // stale rect exceeds the just-shrunk area. Skipped in
+                        // full-screen sideline: the cursor belongs to the
+                        // composer, not a pane that is not painted.
+                        cur_r = cur_r.min(TAB_BAR_ROWS + self.layout.area.0.saturating_sub(1));
+                        cur_c = cur_c.min(self.panel_w() + self.layout.area.1.saturating_sub(1));
                     }
                     cur_vis = f.cursor_visible;
                 }
@@ -7570,521 +7611,6 @@ impl View {
             .map(|i| agent_depth_at.get(&i).copied().unwrap_or(0))
             .collect();
         (out, out_depths)
-    }
-
-    fn draw_sideline(&self, cells: &mut [Cell], rows: usize, cols: usize, panel_w: usize) {
-        let text_w = panel_w - 1; // last column is the divider
-                                  // Read the clock ONCE per paint, not per row: every row's age is
-                                  // relative to the same instant, so a mid-paint tick cannot make one
-                                  // row read older than the row above it.
-        let now = crate::digest_overlay::now_secs();
-        let (display, row_depths) = self.display_rows_with_depths();
-        // The docked new-agent composer takes the bottom rows while open,
-        // and the passive court block yields to it: an active editor
-        // outranks glance chrome.
-        let chrome_rows = self.bottom_row_is_chrome() as usize;
-        let dock_len = self
-            .launcher
-            .as_ref()
-            .map_or(0, |l| l.dock_layout(rows - chrome_rows).0);
-        let (block_rows, block_lines) = if dock_len > 0 {
-            (0, Vec::new())
-        } else {
-            self.court_block_layout(rows)
-        };
-        let list_rows = rows.saturating_sub(block_rows + dock_len);
-        // The scroll policy (`clamp_sideline_scroll`) keeps the cursor inside
-        // the terminal minus the bottom chrome row; the widget area must
-        // answer to the same height, or the render-time scroll lands the
-        // selected row under the chrome that paints over it.
-        let table_rows_n = list_rows.saturating_sub(chrome_rows);
-        // The widget renders into a standalone Buffer (no terminal, no
-        // backend) and the blit copies it into the compositor's cells. The
-        // court block and the dock own the rows below the list, so the
-        // widget area stops above them.
-        let btn_reserved = self
-            .density_button_range(panel_w)
-            .map_or(text_w, |range| range.start);
-        let area = RtRect::new(0, 0, text_w as u16, table_rows_n as u16);
-        let mut buf = RtBuffer::empty(area);
-        // The selector rides the TableState's `selected`, which is what the
-        // widget's render-time scroll keeps visible.
-        let mut st = self.sideline_state.get().with_selected(self.selector);
-        let mut off = st.offset();
-        let rects = sideline_column_rects(text_w as u16);
-        if self.density != Density::Slim {
-            let name_w = rects[1].width as usize;
-            let table_rows: Vec<RtRow> = display
-                .iter()
-                .enumerate()
-                .map(|(i, drow)| {
-                    let depth = row_depths.get(i).copied().unwrap_or(0);
-                    self.sideline_table_row(drow, depth, name_w, now)
-                })
-                .collect();
-            let table = RtTable::new(table_rows, SIDELINE_COLUMNS)
-                .flex(Flex::Start)
-                .highlight_spacing(HighlightSpacing::Never);
-            use ratatui_core::widgets::StatefulWidget;
-            StatefulWidget::render(&table, area, &mut buf, &mut st);
-            off = st.offset();
-            // The render-adjusted state IS the truth: persist it so the hit
-            // tests and the confirm anchor read the offset that painted.
-            self.sideline_state.set(st);
-        }
-        crate::ratatui_blit::blit(&buf, cells, cols);
-        // Per-row overlays the widget cannot express: the full-width rows
-        // (bands, sublines, the idle fold, the footer, the empty state - see
-        // the catch-all in `sideline_table_row`), the active-squad caret
-        // accent, the row-scoped outcome stamp, and the selector / hover
-        // bar. The bar XORs INVERSE - a focused row's standing band
-        // de-inverts under the cursor - and ratatui's patch-based highlight
-        // can only add a modifier, never subtract one, so the bar lands
-        // here, after the blit, on the same cells the old painter wrote.
-        for (i, drow) in display.iter().enumerate().skip(off) {
-            let r = i - off;
-            if r >= table_rows_n {
-                break;
-            }
-            let mark_caret = matches!(
-                drow,
-                DisplayRow::Sel(row)
-                    if row.tab.is_none() && row.squad == self.layout.active_squad
-            );
-            let band_w = if r == 0 { btn_reserved } else { text_w };
-            let legacy = match drow {
-                DisplayRow::Sel(row) => {
-                    let Some(squad) = self.layout.squads.iter().find(|s| s.id == row.squad) else {
-                        continue;
-                    };
-                    let is_active = squad.id == self.layout.active_squad;
-                    match row.tab {
-                        None => {
-                            let caret = view_caret(self.section_view(&section_key(squad)));
-                            let mark = if is_active { '*' } else { ' ' };
-                            let rollup = section_rollup(
-                                self.layout
-                                    .agents
-                                    .iter()
-                                    .filter(|a| a.squad == Some(squad.id))
-                                    .map(agent_lattice_state),
-                            );
-                            Some((
-                                header_band_text(
-                                    &format!("{caret}{mark}{}", squad.name),
-                                    &rollup,
-                                    band_w,
-                                ),
-                                header_band_flags(is_active),
-                            ))
-                        }
-                        Some(t) => {
-                            let marker = if is_active && t == squad.active_tab {
-                                '*'
-                            } else {
-                                ' '
-                            };
-                            let label = match squad.tabs.get(t) {
-                                Some(tm) => tab_label_text(&tm.name, t, tm.named),
-                                None => (t + 1).to_string(),
-                            };
-                            Some((format!("  {marker}{label}"), 0))
-                        }
-                    }
-                }
-                DisplayRow::Header {
-                    label,
-                    rollup,
-                    view,
-                    ..
-                } => Some((
-                    header_band_text(&format!("{}{label}", view_caret(*view)), rollup, band_w),
-                    header_band_flags(false),
-                )),
-                DisplayRow::Sub(sub) => Some((format!("    {sub}"), cell_flags::DIM)),
-                DisplayRow::TableEmpty => Some(("  no agents".to_string(), cell_flags::DIM)),
-                DisplayRow::IdleFold {
-                    hidden, expanded, ..
-                } => Some((
-                    if *expanded {
-                        "    - fewer".to_string()
-                    } else {
-                        format!("    +{hidden} more")
-                    },
-                    cell_flags::DIM,
-                )),
-                _ => None,
-            };
-            if let Some((text, flags)) = legacy {
-                paint_legacy_row(cells, r, cols, text_w, &text, flags);
-            }
-            if mark_caret && text_w >= 1 {
-                cells[r * cols].fg = self.theme.accent;
-            }
-            if matches!(drow, DisplayRow::NewSquad) {
-                self.paint_new_squad_footer(cells, r, cols, text_w, panel_w);
-            }
-            let highlit =
-                !row_is_inert(drow) && (self.selector == Some(i) || self.hover_row == Some(i));
-            if highlit {
-                for j in 0..text_w {
-                    cells[r * cols + j].flags ^= cell_flags::INVERSE;
-                }
-            }
-            let row_stamp = self.row_stamp_for(drow);
-            paint_row_stamp(cells, r, cols, text_w, row_stamp);
-        }
-        // The density button, painted LAST over the sideline's top row.
-        // Overlaying is what keeps it pinned to row 0 while the rows beneath it
-        // scroll, and it costs no display row - so the invariant (every
-        // painted line is exactly one display row) still holds and
-        // `sideline_row_at` needs no special case.
-        //
-        // Layout is [inverse glyph][plain pad]: the glyph leads and the
-        // divider-adjacent cell is a NON-inverse space, so the button reads one
-        // column in from the border (the operator's padding ask) without shifting
-        // `range.start`.
-        if rows > 0 {
-            if let Some(range) = self.density_button_range(panel_w) {
-                let glyph = density_glyph(self.density);
-                let start = range.start;
-                for (n, c) in range.clone().enumerate() {
-                    let is_pad = n + 1 == DENSITY_BTN_W; // the trailing cell is the pad
-                                                         // The button yields to a blitted row's own cells: an
-                                                         // agent row scrolled to the top keeps its right-aligned
-                                                         // PR and age, and the density cycle keeps its keybind
-                                                         // (Locked Decision 5) - the button is never the only way.
-                    if cells[c].c != ' ' {
-                        continue;
-                    }
-                    cells[c] = Cell {
-                        c: if c == start { glyph } else { ' ' },
-                        fg: Color::Default,
-                        bg: Color::Default,
-                        flags: if is_pad { 0 } else { cell_flags::INVERSE },
-                    };
-                }
-            }
-        }
-        // The court block: three glance lines minimized, the full
-        // reading expanded, pinned to the bottom rows of the column. The row
-        // list already stopped above it; the block renders DIM so it reads as
-        // chrome beside the live rows, and the painter truncates to the panel
-        // width - the same rule every sideline row follows.
-        court_block::paint_court_block(cells, block_lines, list_rows, rows, cols, text_w);
-        // The docked composer: rows then footer, pinned above the bottom
-        // chrome row. On a panel too small for even the fixed fields the
-        // painter clips; the dock never hides while open.
-        if dock_len > 0 {
-            if let Some(l) = &self.launcher {
-                let (dock_rows, footer) = l.dock_lines(self, rows - chrome_rows);
-                let top = (rows - chrome_rows).saturating_sub(dock_len);
-                agent_launcher::paint_dock(cells, &dock_rows, &footer, top, rows, cols, text_w);
-            }
-        }
-        // The divider column, now full terminal height (the sideline owns row
-        // 0 too; the strip sits right of the divider) - US1.
-        //
-        // Accent it while hovered or dragged, the same signal a pane
-        // seam wears. A terminal cannot change the cursor shape, so this
-        // accent IS the affordance.
-        let border_active = self.hover_sideline_border || self.sideline_drag.is_some();
-        let (border_fg, border_flags) = if border_active {
-            (self.theme.accent, cell_flags::BOLD)
-        } else {
-            (Color::Default, cell_flags::DIM)
-        };
-        for r in 0..rows {
-            cells[r * cols + (panel_w - 1)] = Cell {
-                c: '\u{2502}',
-                fg: border_fg,
-                bg: Color::Default,
-                flags: border_flags,
-            };
-        }
-    }
-
-    /// One sideline display row as a five-cell Table row (status word, name,
-    /// message, PR, age - [`SIDELINE_COLUMNS`]). The glyph lattice moves to
-    /// the status column as its word, and the focused row's band rides the
-    /// row style. The full-width rows (bands, sublines, footer, spacers)
-    /// return empty cells and paint in the overlay pass.
-    fn sideline_table_row(
-        &self,
-        drow: &DisplayRow<'_>,
-        depth: usize,
-        name_w: usize,
-        now: u64,
-    ) -> RtRow<'static> {
-        // The focused pane's owning row is the sole standing full-width
-        // INVERSE band. An EXITED focused row is legibly dead: DIM accent
-        // instead of the bright band (a dead "you are here" never reads as a
-        // live one).
-        let is_focus = matches!(drow, DisplayRow::Agent(a) if a.pane_id == Some(self.layout.focus));
-        let focus_exited = matches!(
-            drow,
-            DisplayRow::Agent(a) if a.pane_id == Some(self.layout.focus) && a.exited
-        );
-        let (row_cells, band): (Vec<RtCell>, u8) = match drow {
-            // The full-width rows - squad and section bands, sublines, the
-            // idle fold, the footer, the empty state - paint in the overlay
-            // pass (`paint_legacy_row`): a band is edge-to-edge at EVERY
-            // width, which five columns cannot give a 16-column rail, and
-            // the narrow-panel pair-dropping in `header_band_text` survives
-            // untouched. The cells here only give the row its height and
-            // its scroll identity in the Table.
-            DisplayRow::Sel(_)
-            | DisplayRow::Header { .. }
-            | DisplayRow::NewSquad
-            | DisplayRow::Sub(_)
-            | DisplayRow::Blank
-            | DisplayRow::TableEmpty
-            | DisplayRow::IdleFold { .. } => {
-                (vec![rt_cell(String::new(), Color::Default, 0, false); 5], 0)
-            }
-            DisplayRow::Agent(a) => {
-                let lat = agent_lattice_state(a);
-                let style = lattice_style(lat, self.theme.accent);
-                let mut flags = style.flags;
-                if a.external && lat != LatticeState::Blocked {
-                    flags |= cell_flags::DIM;
-                }
-                let status_fg = agent_lane_fg(a, lat, style.fg);
-                // The focused row's band carries INVERSE (or DIM when
-                // exited) and the accent ON the cells - the render patches
-                // span styles over row/cell styles, so anything not on the
-                // line itself is overpainted by the cell's own fg.
-                let focus_bit = if is_focus {
-                    if focus_exited {
-                        cell_flags::DIM
-                    } else {
-                        cell_flags::INVERSE
-                    }
-                } else {
-                    0
-                };
-                let cell_fg = if is_focus {
-                    self.theme.accent
-                } else {
-                    status_fg
-                };
-                let cell_flags_v = flags | focus_bit;
-                // The name cell keeps the compact row's identity vocabulary:
-                // recruit mark, DND, deviation token, portal index, tab
-                // context, orphan cwd, reason, crown badge - depth-indented,
-                // ellipsized to the width the solver admits.
-                let mark = if a
-                    .attach_id
-                    .as_deref()
-                    .is_some_and(|id| self.marks.contains(id))
-                {
-                    '*'
-                } else {
-                    ' '
-                };
-                let dnd = if a.dnd { " [DND]" } else { "" };
-                let mut name = if depth > 0 {
-                    format!("{}{mark} {}", "  ".repeat(depth), a.name)
-                } else {
-                    format!("{mark} {}", a.name)
-                };
-                name.push_str(dnd);
-                if let Some(tok) =
-                    sideline_color::deviation_token(a.harness.as_deref(), a.model.as_deref())
-                {
-                    name.push_str(&format!(" {tok}"));
-                }
-                if let Some(idx) = a.portal {
-                    name.push_str(&format!(" \u{25ab}{idx}"));
-                }
-                match self.agent_tab_context(a.squad, a.tab) {
-                    Some(_)
-                        if a.squad == Some(self.layout.active_squad)
-                            && a.tab == self.active_squad_active_tab_id() => {}
-                    Some(TabContext::Named(ctx)) => name.push_str(&format!(" \u{b7}{ctx}")),
-                    Some(TabContext::Ordinal(ord)) => name.push_str(&format!(" \u{b7}{ord}")),
-                    None => {
-                        if a.squad.is_none() {
-                            if let Some(base) = a.cwd_base.as_deref() {
-                                name.push_str(&format!(" ({base})"));
-                            }
-                        }
-                    }
-                }
-                if let Some(reason) = a.reason.as_deref().filter(|x| !x.is_empty()) {
-                    name.push_str(": ");
-                    name.push_str(reason);
-                }
-                if let Some(level) = a.crown_level {
-                    let scope = a.crown_scope.as_deref().unwrap_or("?");
-                    name.push_str(&format!(" [L{level} {scope}]"));
-                }
-                // The message column reads the sentence, not the markup, and
-                // leads with the separator. A PR row with no output names the
-                // session driving it (the server's graph join: the live claim
-                // holder's session, else the node's last do/ship session); no
-                // session id says so. The widest column keeps the handle
-                // visible where the old inline suffix clipped.
-                let tail = match a.tail.as_deref().filter(|t| !t.is_empty()) {
-                    Some(t) => format!("\u{b7} {}", strip_md(t)),
-                    None => match (a.pr, a.pr_session_short.as_deref()) {
-                        (Some(_), Some(sid)) => format!("\u{b7} attach {sid}"),
-                        (Some(_), None) => "\u{b7} no session".to_string(),
-                        (None, _) => String::new(),
-                    },
-                };
-                let pr =
-                    a.pr.map(|n| format!("#{n}"))
-                        .unwrap_or_else(|| "\u{2014}".into());
-                let age = match (a.last_activity_age_s, a.updated_at) {
-                    (Some(s), _) => humanize_age(Some(s)),
-                    (None, Some(u)) => humanize_age(Some(now.saturating_sub(u))),
-                    (None, None) => humanize_age(None),
-                };
-                let quiet = if flags & cell_flags::DIM != 0 {
-                    cell_flags::DIM
-                } else {
-                    0
-                };
-                (
-                    vec![
-                        rt_cell(status_word(lat).to_string(), cell_fg, cell_flags_v, false),
-                        rt_cell(fit_ellipsis(&name, name_w), cell_fg, cell_flags_v, false),
-                        rt_cell(tail, cell_fg, quiet | focus_bit, false),
-                        rt_cell(pr, cell_fg, quiet | focus_bit, true),
-                        rt_cell(age, cell_fg, quiet | focus_bit, true),
-                    ],
-                    0,
-                )
-            }
-            DisplayRow::Card(c) => {
-                let lat = card_lattice_state(c.state);
-                let style = lattice_style(lat, self.theme.accent);
-                let label = card_label(c);
-                let mark = if self.card_pending(&c.id) {
-                    " \u{2026}"
-                } else if c.head {
-                    " head"
-                } else {
-                    ""
-                };
-                (
-                    vec![
-                        rt_cell(status_word(lat).to_string(), style.fg, style.flags, false),
-                        rt_cell(
-                            format!("{label} {}{mark}", c.priority),
-                            style.fg,
-                            style.flags,
-                            false,
-                        ),
-                        rt_cell(String::new(), Color::Default, 0, false),
-                        rt_cell(String::new(), Color::Default, 0, false),
-                        rt_cell(String::new(), Color::Default, 0, false),
-                    ],
-                    0,
-                )
-            }
-            DisplayRow::TableHead => {
-                let marker = |column: AgentSortColumn| {
-                    if self.agent_sort.column == column {
-                        match self.agent_sort.direction {
-                            SortDirection::Ascending => " \u{2191}",
-                            SortDirection::Descending => " \u{2193}",
-                        }
-                    } else {
-                        ""
-                    }
-                };
-                let age_marker = if self.agent_sort.column == AgentSortColumn::Age {
-                    match self.agent_sort.direction {
-                        SortDirection::Ascending => "\u{2191}",
-                        SortDirection::Descending => "\u{2193}",
-                    }
-                } else {
-                    ""
-                };
-                (
-                    vec![
-                        rt_cell(
-                            format!("st{}", marker(AgentSortColumn::Status)),
-                            Color::Default,
-                            cell_flags::DIM,
-                            false,
-                        ),
-                        rt_cell(
-                            format!("agent{}", marker(AgentSortColumn::Agent)),
-                            Color::Default,
-                            cell_flags::DIM,
-                            false,
-                        ),
-                        rt_cell(
-                            format!("last msg{}", marker(AgentSortColumn::LastMessage)),
-                            Color::Default,
-                            cell_flags::DIM,
-                            false,
-                        ),
-                        rt_cell(
-                            format!("pr{}", marker(AgentSortColumn::Pr)),
-                            Color::Default,
-                            cell_flags::DIM,
-                            false,
-                        ),
-                        // Left-aligned like every head label: right-aligned,
-                        // the arrow sits under the density button's two
-                        // overlay columns and the toggle reads dead.
-                        rt_cell(
-                            format!("age{age_marker}"),
-                            Color::Default,
-                            cell_flags::DIM,
-                            false,
-                        ),
-                    ],
-                    0,
-                )
-            }
-        };
-        // The focused row's band: INVERSE (or DIM when exited) with the
-        // accent carried across every cell and the band's padding, so the
-        // whole row is one colour.
-        let mut row_style = RtStyle::new();
-        if is_focus {
-            let focus_flags = if focus_exited {
-                cell_flags::DIM
-            } else {
-                cell_flags::INVERSE
-            };
-            row_style = row_style
-                .fg(rt_color(self.theme.accent))
-                .add_modifier(rt_modifier(focus_flags));
-        }
-        if band != 0 {
-            row_style = row_style.add_modifier(rt_modifier(band));
-        }
-        RtRow::new(row_cells).style(row_style)
-    }
-
-    /// The `+ new` footer row, painted over the blitted cells in its legacy
-    /// full-width composition: the menu button rides the footer's right edge
-    /// at the exact column [`View::footer_menu_range`] names, because that
-    /// range routes a click there - paint and hit range cannot diverge.
-    fn paint_new_squad_footer(
-        &self,
-        cells: &mut [Cell],
-        r: usize,
-        cols: usize,
-        text_w: usize,
-        panel_w: usize,
-    ) {
-        let base = if self.marks.is_empty() {
-            FOOTER_NEW_LABEL.to_string()
-        } else {
-            format!("{FOOTER_NEW_LABEL}   {} marked \u{b7}R", self.marks.len())
-        };
-        let label = match self.footer_menu_range(panel_w) {
-            Some(range) => format!("{}{FOOTER_MENU}", pad_to(&base, range.start)),
-            None => base,
-        };
-        paint_legacy_row(cells, r, cols, text_w, &label, cell_flags::BOLD);
     }
 }
 
@@ -11307,7 +10833,29 @@ async fn attach_and_run(
                 // send - the pane's own output will repaint when it reacts.
                 chord_since = None;
                 if let Some(event) = scanner.flush_chord() {
-                    if let Err(e) = dispatch_event(&mut view, event, &mut sock_w).await {
+                    // The composer holds the keyboard while open: a flushed
+                    // candidate feeds its folder (Esc closes the composer),
+                    // never a pane that may not even be painted.
+                    if view.launcher.is_some() {
+                        match event {
+                            Event::Forward(chunk) => {
+                                if let Err(e) = agent_launcher::launcher_keys(
+                                    &mut view, &chunk, &mut sock_w,
+                                )
+                                .await
+                                {
+                                    break Err(e);
+                                }
+                            }
+                            event => {
+                                if let Err(e) =
+                                    dispatch_event(&mut view, event, &mut sock_w).await
+                                {
+                                    break Err(e);
+                                }
+                            }
+                        }
+                    } else if let Err(e) = dispatch_event(&mut view, event, &mut sock_w).await {
                         break Err(e);
                     }
                 }
@@ -11679,6 +11227,14 @@ async fn handle_stdin(
             if let StdinFlow::Detach = aux_mouse(view, rep, sock_w).await? {
                 return Ok(StdinFlow::Detach);
             }
+            continue;
+        }
+        // Full-screen sideline: the sideline owns every cell, so every
+        // report routes to the sideline's own handlers - the dock first,
+        // then the hit path a normal-mode sideline click runs (clamped into
+        // the panel's column space) - and no byte ever reaches a pane.
+        if view.sideline_full {
+            sideline::route_mouse(view, rep, sock_w).await?;
             continue;
         }
         // The new-agent composer owns presses that land inside its dock
@@ -12264,11 +11820,6 @@ async fn handle_stdin(
         // US4/US5: the MENU popup / settings modal consumes keys.
         return aux_keys(view, &passthrough, sock_w).await;
     }
-    if view.launcher.is_some() {
-        // The new-agent composer consumes keys while open; nothing
-        // reaches a pane while it does.
-        return agent_launcher::launcher_keys(view, &passthrough, sock_w).await;
-    }
     if view.connections.is_some() {
         // the Connections modal consumes all keys while open (Tab
         // switches tabs, j/k move, R refreshes, Esc closes) - never leaks to a
@@ -12351,6 +11902,13 @@ async fn handle_stdin(
     }
     if view.nav.is_some() {
         return nav_keys(view, &passthrough, sock_w).await;
+    }
+    if view.launcher.is_some() {
+        // The composer is a modal like every other: prefix chords still
+        // resolve while it holds the keyboard (which-key parity), so the
+        // chunk scans first and only the plain-byte chunks feed the
+        // composer's own folder. Nothing here reaches a pane.
+        return sideline::route_launcher_keys(view, scanner, &passthrough, sock_w).await;
     }
     for event in scanner.scan(&passthrough, Instant::now()) {
         match dispatch_event(view, event, sock_w).await? {
@@ -12523,12 +12081,38 @@ async fn dispatch_event(
         Event::OpenCourt => view.court.toggle(),
         Event::TogglePanel => {
             view.panel_on = !view.panel_on;
+            // Hiding the sideline never strands an open composer (it would
+            // eat keys while painting nowhere), and full-screen mode is
+            // painted sideline, so it leaves with it.
+            if !view.panel_on {
+                view.sideline_full = false;
+                if view.launcher.is_some() {
+                    agent_launcher::close(view);
+                }
+            }
             // Chrome changed size: report the new content area so rects
             // fill it (the reply Layout redraws everything).
             let (r, c) = view.content_dims();
             write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
                 .await
                 .map_err(|e| format!("resize send failed: {e}"))?;
+        }
+        Event::ToggleComposer => {
+            sideline::toggle_composer(view, sock_w).await?;
+        }
+        Event::ToggleFullSideline => {
+            let was_full = view.sideline_full;
+            sideline::toggle_full(view);
+            if was_full {
+                // Leaving restores the painted sideline; if entering had
+                // shown a hidden one, the server still holds panel-free
+                // pane rects, so the content area re-syncs here (a no-op
+                // re-layout when nothing changed).
+                let (r, c) = view.content_dims();
+                write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
+                    .await
+                    .map_err(|e| format!("resize send failed: {e}"))?;
+            }
         }
         Event::CycleDensity => {
             view.cycle_density();
@@ -16316,3 +15900,6 @@ mod court_block;
 
 #[path = "client/glyph_legend.rs"]
 mod glyph_legend;
+
+#[path = "client/sideline.rs"]
+mod sideline;

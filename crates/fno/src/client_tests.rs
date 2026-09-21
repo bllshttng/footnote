@@ -4597,8 +4597,7 @@ fn client_compose_hint_paints_over_bottom_row() {
 
 #[test]
 fn client_compose_keys_modal_renders_the_which_key_reference() {
-    // x-8ccf US3: prefix+? opens the centered which-key modal (replacing the
-    // top-left poster) built from the single-source binding table.
+    // prefix+? opens the centered which-key modal, built from the single-source binding table.
     let mut view = two_pane_view();
     view.term = (40, 80);
     view.open_keys_modal();
@@ -4612,10 +4611,7 @@ fn client_compose_keys_modal_renders_the_which_key_reference() {
         text.contains("find: goto squad/tab/pane/agent"),
         "the f binding's action names every row class nav_rows emits"
     );
-    // (x-cf97) The digit row names the gesture, its resolve doors, and the
-    // Alt form. The number jump is no longer capped at nine, so the old
-    // "first 9; f goes past" ceiling would now be the lie; what must stay
-    // is the honest description of an input path the scanner really runs.
+    // The digit row names the gesture and its resolve doors: an honest description of an input path the scanner really runs.
     assert!(
         text.contains("jump to tab by number")
             && text.contains("Enter")
@@ -18030,3 +18026,6 @@ mod confirm_tests;
 
 #[path = "client_tests/lineage_paint_tests.rs"]
 mod lineage_paint_tests;
+
+#[path = "client_tests/composer_fullscreen_tests.rs"]
+mod composer_fullscreen_tests;
