@@ -622,6 +622,16 @@ impl LauncherEsc {
                 }
             }
         }
+        // A lone ESC left at the END of a read is a bare Esc press, never a
+        // torn sequence prefix: every launcher chunk has already passed the
+        // chord scanner, which rejoins split CSI sequences and releases this
+        // byte only after its 40ms quiet window. Same rule pick_keys_from_read
+        // (mux_cli) and node_detail_keys already apply at their read
+        // boundaries; without it one Esc press waits forever for a second key.
+        if self.paste.is_none() && self.esc.as_slice() == [0x1b] {
+            self.esc.clear();
+            keys.push(LKey::Esc);
+        }
         keys
     }
 }
@@ -1098,7 +1108,10 @@ impl Launcher {
     /// doubt, or blank.
     pub(crate) fn footer(&self) -> String {
         match &self.phase {
-            Phase::Editing => "tab: field  enter: edit/launch  esc: keep draft".to_string(),
+            Phase::Editing => {
+                "tab: next field \u{b7} enter: pick/launch \u{b7} esc: close, draft kept"
+                    .to_string()
+            }
             Phase::Submitting { .. } => "starting...".to_string(),
             Phase::Refused { reason, .. } => format!("refused: {reason}"),
             Phase::Unknown { reason, .. } => format!("outcome unknown: {reason}"),

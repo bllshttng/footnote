@@ -85,6 +85,53 @@ fn open_seeds_project_candidates_and_kicks_the_catalog_probe() {
 }
 
 #[test]
+fn one_lone_esc_byte_closes_the_dock() {
+    // The unit twin of the pty repro: the scanner flushes [0x1b] into
+    // launcher_keys after its quiet window, and the dock's own carry must
+    // release a trailing lone ESC as a bare Esc press, not re-buffer it.
+    let mut v = view_with_launcher();
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b", &mut sock).await;
+    });
+    assert!(v.launcher.is_none(), "one lone Esc byte closes the dock");
+    assert!(
+        v.launcher_closed.is_some(),
+        "the draft is retained for reopen"
+    );
+}
+
+#[test]
+fn arrow_reaches_the_dock_whole_or_scanner_rejoined() {
+    // AC1-EDGE: an arrow in one chunk, or as the scanner-rejoined pair a
+    // lone-Esc read plus a follow-up, moves the cursor / focus and never
+    // reads as Esc.
+    let mut v = view_with_launcher();
+    if let Some(l) = v.launcher.as_mut() {
+        l.focus = Focus::Message;
+    }
+    type_message(&mut v, "ab");
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b[A", &mut sock).await;
+    });
+    // Whole-chunk arrow: the cursor moves inside the editor, no close.
+    assert!(v.launcher.is_some(), "an arrow never closes the dock");
+    // The scanner rejoins an arrow into ONE chunk, so the fold sees
+    // `\x1b` + `[A` in a single read and folds Up, never Esc.
+    let mut esc = LauncherEsc::default();
+    assert_eq!(
+        esc.fold(b"\x1b[A"),
+        vec![super::agent_launcher::LKey::Up],
+        "a rejoined arrow folds Up, not Esc"
+    );
+}
+
+#[test]
 fn esc_hides_and_reopening_restores_the_draft() {
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true), ("codex", true, true)]);

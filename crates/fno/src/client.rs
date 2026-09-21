@@ -10829,8 +10829,7 @@ async fn attach_and_run(
                 }
             }, if chord_flush_deadline.is_some() => {
                 // (fix) Quiet window elapsed with a candidate still
-                // held: release it to the pane. No redraw needed beyond the
-                // send - the pane's own output will repaint when it reacts.
+                // held: release it to the pane.
                 chord_since = None;
                 if let Some(event) = scanner.flush_chord() {
                     // The composer holds the keyboard while open: a flushed
@@ -10858,6 +10857,14 @@ async fn attach_and_run(
                     } else if let Err(e) = dispatch_event(&mut view, event, &mut sock_w).await {
                         break Err(e);
                     }
+                }
+                // A flush can change CLIENT-local state the pane's own output
+                // would never repaint - the launcher's lone-Esc close is the
+                // one that matters (the dock leaves the screen only when this
+                // loop draws). Draw unconditionally: a redundant draw of an
+                // unchanged frame is cheaper than a stale overlay.
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
                 }
             }
             _ = async {
