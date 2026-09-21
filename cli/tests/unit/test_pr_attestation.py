@@ -140,7 +140,10 @@ def test_retract_refuses_the_identity_override_shape(
     result = _invoke(runner, journal)
     assert result.exit_code == 1
     assert "sess-true" in result.stderr and "sess-forged" in result.stderr
-    assert len(journal.read_text().splitlines()) == 1
+    # The refusal emits nothing: the store keeps exactly the seeded pass.
+    from tests._event_rows import event_rows
+
+    assert len(event_rows(journal)) == 1
 
 
 def test_retract_mirrors_the_revocation_to_the_global_log(
