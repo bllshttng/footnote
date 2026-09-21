@@ -409,13 +409,7 @@ fn replaced_parts(node_id: &str, prior: Option<&node_state::CurrentStateView>) -
     };
     let chars = p.body.chars().count();
     let excerpt = head(&p.body);
-    let author: String = p
-        .source_session_id
-        .as_deref()
-        .unwrap_or("unknown")
-        .chars()
-        .take(8)
-        .collect();
+    let author = p.source_session_id.as_deref().unwrap_or("unknown");
     let when = p.updated_at.as_deref().unwrap_or("an unknown time");
     let json = json!({
         "revision": p.revision, "chars": chars, "source_session_id": &p.source_session_id,

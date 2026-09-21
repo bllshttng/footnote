@@ -359,7 +359,7 @@ fn a_note_names_the_state_it_replaced() {
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("noted t-1: revision 3, "), "{stdout}");
     assert!(
-        stdout.contains("replaced revision 2 (5 chars, written by session sess-bbb"),
+        stdout.contains("replaced revision 2 (5 chars, written by session sess-bbbb2222"),
         "{stdout}"
     );
     assert!(stdout.contains("fno backlog notes history t-1"), "{stdout}");
