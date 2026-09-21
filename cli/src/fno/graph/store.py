@@ -55,6 +55,7 @@ from fno.graph._constants import (  # noqa: F401  GRAPH_MD re-exported: patched 
     GRAPH_JSON,
     GRAPH_MD,
 )
+from fno.rust_binary import newest_runnable
 
 
 
@@ -209,9 +210,7 @@ def store_socket_for(path: Path) -> Path:
 def _worker_binary() -> Path | None:
     """Locate `fno-agents-worker` for an on-demand keeper spawn.
 
-    Dev-checkout artifacts come before PATH on purpose: a stale `cargo
-    install`ed worker predating the `--store-keeper` lane exits 0 with a
-    usage refusal, and a silent old binary is worse than an honest absence.
+    The newest runnable candidate wins among checkout artifacts and PATH; env pins outrank it.
     The worker is a sibling of the daemon binary everywhere it ships, and it
     is never deleted by the smoke shard's @requires_rust clear (which
     removes only `fno-agents`), so the store keeps working where the parity
@@ -228,19 +227,16 @@ def _worker_binary() -> Path | None:
         if candidate.is_file():
             return candidate
     here = Path(__file__).resolve()
+    candidates: list[Path] = []
     for ancestor in here.parents:
         if (ancestor / "crates" / "fno-agents").is_dir():
             for base in (ancestor / "crates/fno-agents/target", ancestor / "target"):
-                for profile in ("debug", "release"):
-                    candidate = base / profile / "fno-agents-worker"
-                    if candidate.is_file() and os.access(candidate, os.X_OK):
-                        return candidate
+                candidates += [base / p / "fno-agents-worker" for p in ("debug", "release")]
             break
     found = shutil.which("fno-agents-worker")
-    # which() answers are normally real files; a stale or faked PATH entry
-    # reaches Popen as FileNotFoundError here, so verify before trusting it.
-    if found and Path(found).is_file():
-        return Path(found)
+    candidates += [Path(found)] if found else []
+    if (newest := newest_runnable(candidates)) is not None:
+        return newest
     try:
         from fno.rust_binary import resolve_binary
 
@@ -610,9 +606,14 @@ class _ExecClient(_Keeper):
                 raise WriteUnconfirmed(
                     STATE_UNCONFIRMED, f"{detail}; read the graph before retrying"
                 ) from None
+            try:
+                built = datetime.fromtimestamp(binary.stat().st_mtime, timezone.utc).isoformat()
+            except OSError:  # the worker vanished mid-exec; the path still names what ran
+                built = "an unstatable path"
             raise StoreUnavailable(
                 STATE_SPAWN_FAILED,
-                f"{detail}; is fno-agents-worker current? `fno doctor` names lag",
+                f"{detail}; ran {binary} built {built}; is fno-agents-worker"
+                " current? `fno doctor` names lag",
             ) from None
         try:
             reply = json.loads(out.decode("utf-8"))
