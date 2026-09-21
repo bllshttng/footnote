@@ -634,6 +634,8 @@ mod tests {
             "ask": "pick one",
             "session_id": "s9",
             "cwd": "/repo/fno",
+            "asker": "worker-9",
+            "node": "x-aaaa",
             "options": [
                 {"n": 1, "text": "Narrow", "next": "unblocks today", "pros": ["fast"], "cons": ["strict"]},
                 {"n": 2, "text": "Wide", "next": "waits", "pros": ["safe"], "cons": ["slow"]}
