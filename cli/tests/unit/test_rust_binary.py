@@ -64,6 +64,79 @@ def test_cargo_dev_lookup_refuses_a_non_checkout_ancestor(tmp_path, monkeypatch)
     assert rust_binary._cargo_dev_binary() is None
 
 
+# --------------------------------------------------------------------------- #
+# Freshness. Four resolvers picked a build artifact by profile NAME in two
+# opposite orders, so a stale debug build shadowed a fresh release beside it;
+# `newest_runnable` decides by mtime instead and every resolver routes
+# through it.
+# --------------------------------------------------------------------------- #
+
+def test_newest_runnable_picks_the_newer_whichever_order(tmp_path):
+    old = _make_exe(tmp_path / "old" / "bin")
+    new = _make_exe(tmp_path / "new" / "bin")
+    os.utime(old, ns=(1_000_000_000, 1_000_000_000))
+    assert rust_binary.newest_runnable([old, new]) == new
+    assert rust_binary.newest_runnable([new, old]) == new
+
+
+def test_newest_runnable_skips_unrunnable_and_answers_none(tmp_path):
+    missing = tmp_path / "gone" / "bin"
+    plain = tmp_path / "plain" / "bin"
+    plain.parent.mkdir(parents=True)
+    plain.write_text("not runnable")
+    assert rust_binary.newest_runnable([missing, plain]) is None
+    assert rust_binary.newest_runnable([]) is None
+
+
+def test_newest_runnable_tie_keeps_the_first_candidate(tmp_path):
+    """max() returns the FIRST maximal element, so equal mtimes keep the
+    caller's existing preference and the result repeats across runs."""
+    first = _make_exe(tmp_path / "a" / "bin")
+    second = _make_exe(tmp_path / "b" / "bin")
+    os.utime(first, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(second, ns=(1_000_000_000, 1_000_000_000))
+    assert rust_binary.newest_runnable([first, second]) is first
+
+
+def test_cargo_dev_lookup_prefers_the_newest_build(tmp_path, monkeypatch):
+    """A fresh release must beat a stale debug; the mtimes inverted, a fresh
+    debug must win. Never the profile name."""
+    root = _fake_checkout(tmp_path, monkeypatch)
+    debug = _make_exe(root / "crates" / "fno-agents" / "target" / "debug" / rust_binary.BINARY_NAME)
+    release = _make_exe(root / "crates" / "fno-agents" / "target" / "release" / rust_binary.BINARY_NAME)
+    os.utime(debug, ns=(1_000_000_000, 1_000_000_000))
+    assert rust_binary._cargo_dev_binary() == release
+    os.utime(release, ns=(0, 0))
+    assert rust_binary._cargo_dev_binary() == debug
+
+
+def test_find_dev_binary_prefers_the_newest_and_answers_none_when_absent(tmp_path, monkeypatch):
+    root = _fake_checkout(tmp_path, monkeypatch)
+    (root / "crates" / "fno-agents").mkdir()
+    assert rust_binary.find_dev_binary() is None  # the @requires_rust skip stays
+    debug = _make_exe(root / "crates" / "fno-agents" / "target" / "debug" / rust_binary.BINARY_NAME)
+    release = _make_exe(root / "crates" / "fno-agents" / "target" / "release" / rust_binary.BINARY_NAME)
+    assert rust_binary.find_dev_binary() == release
+    os.utime(release, ns=(0, 0))
+    assert rust_binary.find_dev_binary() == debug
+
+
+def test_worker_binary_lets_path_compete_on_freshness(tmp_path, monkeypatch):
+    """The store's resolver used to answer the first checkout artifact and
+    never reached PATH; a stale debug build beat a fresh installed one."""
+    from fno.graph import store
+
+    root = _fake_checkout(tmp_path, monkeypatch)
+    (root / "crates" / "fno-agents").mkdir()
+    stale = _make_exe(root / "crates" / "fno-agents" / "target" / "debug" / "fno-agents-worker")
+    os.utime(stale, ns=(0, 0))
+    fresh = _make_exe(tmp_path / "onpath" / "fno-agents-worker")
+    monkeypatch.delenv("FNO_AGENTS_WORKER", raising=False)
+    monkeypatch.delenv("FNO_AGENTS_FRONT", raising=False)
+    monkeypatch.setattr(store.shutil, "which", lambda name: str(fresh))
+    assert store._worker_binary() == fresh
+
+
 def test_env_override_is_honored(tmp_path, monkeypatch):
     """The remedy both CLI error messages advertise actually works."""
     binary = _make_exe(tmp_path / "custom" / rust_binary.BINARY_NAME)

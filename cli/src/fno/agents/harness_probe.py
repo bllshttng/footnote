@@ -23,7 +23,7 @@ from typing import Callable, Literal, Sequence
 
 import typer
 
-from fno.rust_binary import resolve_binary
+from fno.rust_binary import newest_runnable, resolve_binary
 
 Status = Literal["pass", "fail", "skip"]
 PROBE_TIMEOUT_S = 5.0
@@ -626,11 +626,8 @@ def _credential_skip_allowed(*, registry_row: object | None, spawn_output: str) 
 
 
 def _checkout_manifest_binary(root: Path) -> Path | None:
-    for profile in ("debug", "release"):
-        candidate = root / "crates/fno-agents/target" / profile / "fno-agents"
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    return None
+    base = root / "crates/fno-agents/target"
+    return newest_runnable([base / p / "fno-agents" for p in ("debug", "release")])
 
 
 def _readiness_marker(harness: str, root: Path) -> str | None:

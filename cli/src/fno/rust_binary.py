@@ -77,15 +77,22 @@ def _path_binary() -> Optional[Path]:
     return Path(found) if found else None
 
 
+def newest_runnable(candidates: Sequence[Path]) -> Optional[Path]:
+    """The newest runnable candidate, or None when none is runnable."""
+    runnable = [c for c in candidates if c.is_file() and os.access(c, os.X_OK)]
+    return max(runnable, key=lambda c: c.stat().st_mtime_ns, default=None)
+
+
 def _cargo_dev_binary() -> Optional[Path]:
     """Dev fallback: a ``cargo build`` artifact under the repo tree.
 
     ``__file__`` is ``cli/src/fno/rust_binary.py`` so the repo root is
     ``parents[3]``. Checks both a crate-local ``target/`` and a workspace
     ``target/`` so it works whether or not a workspace is introduced later.
-    Release outranks debug so a dev's optimized build wins, but a debug build
-    counts too: the CI smoke lanes build debug and strip ``FNO_*`` env, so
-    this finder is the only reader left for the footprint door there.
+    The newest artifact wins so a fresh build is never shadowed by a stale
+    one, but a debug build counts too: the CI smoke lanes build debug and
+    strip ``FNO_*`` env, so this finder is the only reader left for the
+    footprint door there.
     """
     here = Path(__file__).resolve()
     try:
@@ -103,10 +110,7 @@ def _cargo_dev_binary() -> Optional[Path]:
         repo_root / "crates" / "fno-agents" / "target" / "debug" / BINARY_NAME,
         repo_root / "target" / "debug" / BINARY_NAME,
     )
-    for candidate in candidates:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    return None
+    return newest_runnable(candidates)
 
 
 def _front_binary() -> Optional[Path]:
@@ -218,11 +222,8 @@ def find_dev_binary() -> Optional[Path]:
         return None
     if not (repo_root / "crates" / "fno-agents").is_dir():
         return None
-    for profile in ("release", "debug"):
-        candidate = repo_root / "crates" / "fno-agents" / "target" / profile / BINARY_NAME
-        if candidate.is_file():
-            return candidate
-    return None
+    base = repo_root / "crates" / "fno-agents" / "target"
+    return newest_runnable([base / p / BINARY_NAME for p in ("release", "debug")])
 
 
 class VerbUnavailable(RuntimeError):
