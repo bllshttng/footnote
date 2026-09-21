@@ -665,7 +665,7 @@ mod tests {
         // build and confirmed effects - and the audit passes.
         let home = temp_home();
         for name in ["a", "b"] {
-            let mut receipt = build_reap_receipt(&row(name), None).unwrap();
+            let mut receipt = build_reap_receipt(&row(name), None, Writer::GcSweep).unwrap();
             stamp(&mut receipt, Some(retirement_contract().as_str()));
             receipt.effects = confirmed_effects();
             write_reap_receipt(&home, &receipt).unwrap();
