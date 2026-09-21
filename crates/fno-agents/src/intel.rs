@@ -1,6 +1,7 @@
-//! `fno-agents intel [--days N] [--node <id>] [--session <id>] [--json]
-//! [--all-projects] [--cwd PATH]` - the provenance fold: which of this
-//! machine's sessions did a person type into?
+//! `fno-agents intel [--days N] [--period 2w|1m|2m|3m|all] [--node <id>]
+//! [--session <id>] [--json] [-H|--harness claude,codex,opencode|all]
+//! [--project NAME]... [--all-projects]` - the provenance fold: which of
+//! this machine's sessions did a person type into?
 //!
 //! Read-only fold over transcripts, like [`crate::bash_census`]: no daemon,
 //! nothing written. Every user-shaped turn is classified by provenance
@@ -8,8 +9,10 @@
 //! commits, node, and PR; every bus row addressed to the session is judged
 //! for delivery, reply, and the 80-word contract. No model, no writes: the
 //! narrative judgment runs in the invoking session (`/fno:intel`), never
-//! here.
+//! here. Default scope is this project including its worktrees; `--project`
+//! names others, `--all-projects` reads the machine.
 
+use crate::opencode_transcript::OpencodeSource;
 use crate::paths::AgentsHome;
 use crate::provenance::{BusIndex, ClaudeSource, CodexSource, Provenance, TranscriptSource};
 use serde::Serialize;
@@ -17,8 +20,21 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-const DEFAULT_DAYS: u64 = 14;
+const DEFAULT_DAYS: u64 = 30;
 const WORD_CONTRACT: usize = 80;
+
+/// The `--period` words the skill presents, mapped to `--days` values.
+/// `all` is `--days 0`, the no-window fold.
+fn period_days(word: &str) -> Option<u64> {
+    match word {
+        "2w" => Some(14),
+        "1m" => Some(30),
+        "2m" => Some(60),
+        "3m" => Some(90),
+        "all" => Some(0),
+        _ => None,
+    }
+}
 
 /// Per-session report row.
 #[derive(Debug, Serialize)]
@@ -72,13 +88,23 @@ struct NodeRow {
     longest_silence_s: Option<u64>,
 }
 
+/// The receipt of what this fold read: the selected harnesses, whether every
+/// project was in scope, the named projects, and the resolved roots.
+#[derive(Debug, Serialize)]
+struct Scope {
+    harnesses: Vec<&'static str>,
+    all_projects: bool,
+    projects: Vec<String>,
+    roots: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct Report {
     days: u64,
+    scope: Scope,
     sessions: Vec<SessionRow>,
     nodes: Vec<NodeRow>,
-    /// Harnesses with no registered source yet. They count under a name,
-    /// never as a guess.
+    /// Harnesses whose store could not be read, with the reason.
     skipped: BTreeMap<String, String>,
     totals: Totals,
 }
@@ -258,7 +284,7 @@ fn fold_session(
 ) -> SessionRow {
     // One read serves every parser: turns, tool calls, and the relay
     // delivery check all work from this text.
-    let raw = std::fs::read_to_string(&file.path).unwrap_or_default();
+    let raw = source.read(file);
     let turns = source.turns(&raw);
     let mut counters: BTreeMap<&'static str, u64> = Provenance::all_labels()
         .into_iter()
@@ -464,6 +490,15 @@ fn print_report(report: &Report) {
         "intel: {} session(s) over {} day(s), {} attended",
         report.totals.sessions, report.days, report.totals.operator_sessions
     );
+    println!(
+        "  scope: harness={} project={}",
+        report.scope.harnesses.join(","),
+        if report.scope.all_projects {
+            "all".to_string()
+        } else {
+            report.scope.projects.join(",")
+        }
+    );
     println!("  harness     session                              operator  relay  harness  keepalive  tool_use  commits  node");
     for s in &report.sessions {
         println!(
@@ -533,19 +568,30 @@ pub fn run_intel(args: &[String]) -> i32 {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print!(
-            "fno-agents intel [--days N] [--node <id>] [--session <id>] [--json] [--all-projects]\n\n\
+            "fno-agents intel [--days N] [--period 2w|1m|2m|3m|all] [--node <id>]\n\
+             [--session <id>] [--json] [-H|--harness claude,codex,opencode|all]\n\
+             [--project NAME]... [--all-projects]\n\n\
              The provenance fold: per-session operator/relay/harness/keepalive counters,\n\
              tool_use, commits, the node and PR join, and the relay facets of every bus\n\
-             row addressed to the session. Default window 14 days; --days 0 means every\n\
-             transcript. Exit 3 when the window holds no sessions.\n"
+             row addressed to the session. Default window 30 days (--period 1m); the\n\
+             period words map to --days 14, 30, 60, 90 and 0 (--days 0 means every\n\
+             transcript, and --days beside --period is refused). Default scope is this\n\
+             project including its worktrees; --project NAME (repeatable, comma-\n\
+             separated) names other projects, --all-projects reads the machine,\n\
+             -H/--harness narrows the sources. Exit 3 when the window holds no\n\
+             sessions.\n"
         );
         return 0;
     }
     let mut days = DEFAULT_DAYS;
+    let mut days_set = false;
+    let mut period_set = false;
     let mut node: Option<String> = None;
     let mut session: Option<String> = None;
     let mut json = false;
     let mut all_projects = false;
+    let mut harness_spec: Vec<String> = Vec::new();
+    let mut projects: Vec<String> = Vec::new();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut i = 0;
     while i < args.len() {
@@ -553,9 +599,31 @@ pub fn run_intel(args: &[String]) -> i32 {
             "--days" => {
                 i += 1;
                 match args.get(i).and_then(|v| v.parse::<u64>().ok()) {
-                    Some(v) => days = v,
+                    Some(v) => {
+                        days = v;
+                        days_set = true;
+                    }
                     None => {
                         eprintln!("fno-agents intel: --days needs a non-negative integer");
+                        return 2;
+                    }
+                }
+            }
+            "--period" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    eprintln!("fno-agents intel: --period needs a word (2w, 1m, 2m, 3m, all)");
+                    return 2;
+                };
+                match period_days(v) {
+                    Some(v) => {
+                        days = v;
+                        period_set = true;
+                    }
+                    None => {
+                        eprintln!(
+                            "fno-agents intel: unknown period {v} (known: 2w, 1m, 2m, 3m, all)"
+                        );
                         return 2;
                     }
                 }
@@ -580,6 +648,43 @@ pub fn run_intel(args: &[String]) -> i32 {
                     }
                 }
             }
+            "-H" | "--harness" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    eprintln!("fno-agents intel: --harness needs a comma-separated list");
+                    return 2;
+                };
+                for part in v.split(',') {
+                    match part.trim() {
+                        "" => {}
+                        "claude" | "codex" | "opencode" | "all" => {
+                            let part = part.trim();
+                            if !harness_spec.iter().any(|s| s == part) {
+                                harness_spec.push(part.to_string());
+                            }
+                        }
+                        other => {
+                            eprintln!(
+                                "fno-agents intel: unknown harness {other} (known: claude, codex, opencode, all)"
+                            );
+                            return 2;
+                        }
+                    }
+                }
+            }
+            "--project" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    eprintln!("fno-agents intel: --project needs a name");
+                    return 2;
+                };
+                for part in v.split(',') {
+                    let part = part.trim();
+                    if !part.is_empty() && !projects.iter().any(|s| s == part) {
+                        projects.push(part.to_string());
+                    }
+                }
+            }
             "--json" | "-J" => json = true,
             "--all-projects" => all_projects = true,
             other => {
@@ -589,6 +694,14 @@ pub fn run_intel(args: &[String]) -> i32 {
         }
         i += 1;
     }
+    if !projects.is_empty() && all_projects {
+        eprintln!("fno-agents intel: --project and --all-projects are exclusive");
+        return 2;
+    }
+    if days_set && period_set {
+        eprintln!("fno-agents intel: --days and --period are exclusive");
+        return 2;
+    }
 
     let home = AgentsHome::from_env();
     let fno_dir = home
@@ -596,7 +709,27 @@ pub fn run_intel(args: &[String]) -> i32 {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(".fno"));
-    let report = fold_all(days, node, session, all_projects, &cwd, &fno_dir);
+    let selected = selected_harnesses(&harness_spec);
+    let roots = if all_projects {
+        None
+    } else if !projects.is_empty() {
+        let mut all_roots: Vec<PathBuf> = Vec::new();
+        for name in &projects {
+            match project_roots(name, &cwd, &fno_dir) {
+                Ok(roots) => all_roots.extend(roots),
+                Err(why) => {
+                    eprintln!("{why}");
+                    return 2;
+                }
+            }
+        }
+        let mut seen = HashSet::new();
+        all_roots.retain(|r| seen.insert(r.clone()));
+        Some(all_roots)
+    } else {
+        Some(default_roots(&cwd, &fno_dir))
+    };
+    let report = fold_all(days, node, session, selected, roots, projects, &fno_dir);
 
     if report.sessions.is_empty() {
         println!("no sessions in window");
@@ -613,14 +746,84 @@ pub fn run_intel(args: &[String]) -> i32 {
     0
 }
 
-/// The env-resolved fold `run_intel` prints: sources from the harness roots,
-/// bus/ledger/events/manifests from the fno dir.
+/// The selected harnesses in canonical order: `all` (or nothing named) expands to every harness, otherwise the named values intersect the canonical order.
+fn selected_harnesses(spec: &[String]) -> Vec<&'static str> {
+    const ALL: [&str; 3] = ["claude", "codex", "opencode"];
+    if spec.iter().any(|s| s == "all") || spec.is_empty() {
+        return ALL.to_vec();
+    }
+    ALL.into_iter()
+        .filter(|h| spec.iter().any(|s| s == h))
+        .collect()
+}
+
+/// The transcript roots one named project resolves to: the checkout, its fno
+/// worktrees dir (`<fno>/worktrees/<basename>`), and `<base>/<basename>`
+/// when the project config sets `paths.worktrees_base`. Deduplicated,
+/// order-preserving.
+fn project_roots(name: &str, cwd: &Path, fno_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let map = crate::king_board::scope::project_map(cwd).unwrap_or_default();
+    let Some(canonical) = map.get(name) else {
+        let known: std::collections::BTreeSet<&str> = map.values().map(String::as_str).collect();
+        return Err(format!(
+            "fno-agents intel: unknown project {name} (known: {})",
+            known.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    };
+    let paths = crate::territory::workspace_paths(cwd);
+    let Some(path) = paths.get(canonical).map(PathBuf::from) else {
+        let known: std::collections::BTreeSet<&str> = map.values().map(String::as_str).collect();
+        return Err(format!(
+            "fno-agents intel: unknown project {name} (known: {})",
+            known.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    };
+    let basename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    let mut roots: Vec<PathBuf> = vec![path.clone()];
+    if !basename.is_empty() {
+        roots.push(fno_dir.join("worktrees").join(&basename));
+    }
+    if let Some(base) = crate::agents_config::config_lookup(&path, &["paths", "worktrees_base"])
+        .and_then(|v| v.as_str().map(str::to_string))
+        .filter(|s| !s.is_empty())
+    {
+        roots.push(PathBuf::from(crate::territory::normalize_path(&base)).join(&basename));
+    }
+    let mut seen = HashSet::new();
+    roots.retain(|r| seen.insert(r.clone()));
+    Ok(roots)
+}
+
+/// The default scope: the first configured project whose roots contain the
+/// cwd supplies its roots; otherwise the cwd itself is the only root.
+fn default_roots(cwd: &Path, fno_dir: &Path) -> Vec<PathBuf> {
+    let paths = crate::territory::workspace_paths(cwd);
+    let mut names: Vec<&String> = paths.keys().collect();
+    names.sort();
+    for name in names {
+        if let Ok(roots) = project_roots(name, cwd, fno_dir) {
+            if roots.iter().any(|r| cwd.starts_with(r)) {
+                return roots;
+            }
+        }
+    }
+    vec![cwd.to_path_buf()]
+}
+
+/// The env-resolved fold `run_intel` prints: the selected sources from the
+/// harness list and project roots, bus/ledger/events/manifests from the fno
+/// dir.
 fn fold_all(
     days: u64,
     node: Option<String>,
     session: Option<String>,
-    all_projects: bool,
-    cwd: &Path,
+    selected: Vec<&'static str>,
+    roots: Option<Vec<PathBuf>>,
+    projects: Vec<String>,
     fno_dir: &Path,
 ) -> Report {
     let bus = BusIndex::load(&bus_log_path(fno_dir));
@@ -637,23 +840,34 @@ fn fold_all(
         days,
         now,
     };
-    let claude = ClaudeSource {
-        cwd: cwd.to_path_buf(),
-        all_projects,
-        projects_dir: crate::claude_drive::claude_projects_dir(),
-    };
-    let codex = CodexSource {
-        sessions_dir: None,
-        cwd: if all_projects {
-            None
+    let mut sources: Vec<Box<dyn TranscriptSource>> = Vec::new();
+    if selected.contains(&"claude") {
+        sources.push(Box::new(ClaudeSource {
+            projects_dir: crate::claude_drive::claude_projects_dir(),
+            roots: roots.clone(),
+        }));
+    }
+    if selected.contains(&"codex") {
+        sources.push(Box::new(CodexSource {
+            sessions_dir: None,
+            roots: roots.clone(),
+        }));
+    }
+    let mut skipped = BTreeMap::new();
+    if selected.contains(&"opencode") {
+        let source = OpencodeSource {
+            dbs: crate::opencode_transcript::opencode_stores(),
+            roots: roots.clone(),
+        };
+        if let Err(why) = source.probe() {
+            skipped.insert("opencode".to_string(), why);
         } else {
-            Some(cwd.to_path_buf())
-        },
-    };
-    let sources: [&dyn TranscriptSource; 2] = [&claude, &codex];
+            sources.push(Box::new(source));
+        }
+    }
     let mut rows: Vec<SessionRow> = Vec::new();
-    for source in sources {
-        rows.extend(fold_source(source, &ctx));
+    for source in &sources {
+        rows.extend(fold_source(source.as_ref(), &ctx));
     }
     if let Some(want) = &session {
         rows.retain(|r| &r.session == want);
@@ -661,15 +875,19 @@ fn fold_all(
     if let Some(want) = &node {
         rows.retain(|r| r.node.as_deref() == Some(want.as_str()));
     }
-    let mut skipped = BTreeMap::new();
-    skipped.insert(
-        "opencode".to_string(),
-        "no transcript source registered yet".to_string(),
-    );
     let nodes = node_rows(&rows, &ctx.bus, ctx.now);
     let totals = totals_of(&rows);
     Report {
         days,
+        scope: Scope {
+            harnesses: selected,
+            all_projects: roots.is_none(),
+            projects,
+            roots: roots
+                .as_ref()
+                .map(|rs| rs.iter().map(|r| r.display().to_string()).collect())
+                .unwrap_or_default(),
+        },
         sessions: rows,
         nodes,
         skipped,
@@ -847,13 +1065,12 @@ mod tests {
             now: 1_800_000_000,
         };
         let claude = ClaudeSource {
-            cwd: fx.cwd.clone(),
-            all_projects: false,
             projects_dir: fx.dir.join("claude"),
+            roots: Some(vec![fx.cwd.clone()]),
         };
         let codex = CodexSource {
             sessions_dir: Some(fx.dir.join("codex").join("sessions")),
-            cwd: None,
+            roots: None,
         };
         let sources: [&dyn TranscriptSource; 2] = [&claude, &codex];
         let mut rows = Vec::new();
@@ -920,9 +1137,8 @@ mod tests {
             now: 1_800_000_000,
         };
         let claude = ClaudeSource {
-            cwd: fx.cwd.clone(),
-            all_projects: false,
             projects_dir: fx.dir.join("claude"),
+            roots: Some(vec![fx.cwd.clone()]),
         };
         let rows = fold_source(&claude, &ctx);
         let quiet = rows.iter().find(|r| r.session == QUIET_SID).unwrap();
@@ -938,5 +1154,31 @@ mod tests {
         assert_eq!(run_intel(&["--nonsense".to_string()]), 2);
         assert_eq!(run_intel(&["--days".to_string()]), 2);
         assert_eq!(run_intel(&["--node".to_string()]), 2);
+    }
+
+    #[test]
+    fn harness_and_project_refusals_exit_two() {
+        assert_eq!(run_intel(&["-H".into(), "codex,bogus".into()]), 2);
+        assert_eq!(run_intel(&["--harness".into(), "bogus".into()]), 2);
+        assert_eq!(
+            run_intel(&["--project".into(), "nope".into(), "--all-projects".into()]),
+            2
+        );
+    }
+
+    #[test]
+    fn period_maps_to_days_and_the_default_is_one_month() {
+        assert_eq!(period_days("2w"), Some(14));
+        assert_eq!(period_days("1m"), Some(30));
+        assert_eq!(period_days("2m"), Some(60));
+        assert_eq!(period_days("3m"), Some(90));
+        assert_eq!(period_days("all"), Some(0));
+        assert_eq!(period_days("fortnight"), None);
+        assert_eq!(DEFAULT_DAYS, 30, "the default period is 1m");
+        assert_eq!(run_intel(&["--period".into(), "1x".into()]), 2);
+        assert_eq!(
+            run_intel(&["--days".into(), "7".into(), "--period".into(), "1m".into()]),
+            2
+        );
     }
 }

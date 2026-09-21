@@ -503,14 +503,19 @@ pub(crate) struct Turn {
 
 /// The harness contract, explicit because the classifier must not know whose
 /// file it reads: a harness is a store path, a session listing, and a turn
-/// reader. Two impls ship (claude, codex); opencode is one more impl with no
-/// new classification rule, and until it lands its sessions report under
-/// `skipped.opencode` rather than as a guess.
+/// reader. Three impls ship (claude, codex, opencode); none adds a
+/// classification rule - opencode renders its store as claude-shaped rows.
 pub(crate) trait TranscriptSource {
     fn harness(&self) -> &'static str;
     /// Sessions whose transcript mtime falls inside the last `days` days;
     /// `days == 0` means no window.
     fn sessions(&self, days: u64) -> Vec<SessionFile>;
+    /// One transcript's raw text: the default reads the file the listing
+    /// named; a source whose store is not a plain file (opencode's sqlite)
+    /// overrides it.
+    fn read(&self, file: &SessionFile) -> String {
+        std::fs::read_to_string(&file.path).unwrap_or_default()
+    }
     /// The user-shaped turns (typed, meta, or relayed) of one transcript's
     /// raw text. Takes the raw bytes, not a path: the fold reads each file
     /// once and every parser works from that single read.
@@ -520,25 +525,40 @@ pub(crate) trait TranscriptSource {
     fn tool_uses(&self, raw: &str) -> usize;
 }
 
-fn within_window(mtime: u64, days: u64, now: u64) -> bool {
+pub(crate) fn within_window(mtime: u64, days: u64, now: u64) -> bool {
     days == 0 || now.saturating_sub(mtime) <= days * 86_400
 }
 
-/// The claude transcript store: `<projects>/<cwd-slug>/*.jsonl`, or every
-/// slug with `all_projects`. The projects root is resolved once by the
-/// caller (via [`crate::claude_drive::claude_projects_dir`]) and injected,
-/// so the fold reads the store `resume`/`adopt` already resolve and tests
-/// never mutate process env.
+/// True when a session's recorded cwd sits under one of the project roots.
+/// `None` roots is every project (true); `Some(roots)` is true only when the
+/// cwd is present and component-wise under a root. A session with no cwd
+/// reports only when every project is in scope.
+pub(crate) fn in_roots(cwd: Option<&Path>, roots: Option<&[PathBuf]>) -> bool {
+    match roots {
+        None => true,
+        Some(roots) => match cwd {
+            Some(cwd) => roots.iter().any(|root| cwd.starts_with(root)),
+            None => false,
+        },
+    }
+}
+
+/// The claude transcript store: `<projects>/<cwd-slug>/*.jsonl`. The
+/// projects root is resolved once by the caller (via
+/// [`crate::claude_drive::claude_projects_dir`]) and injected, so the fold
+/// reads the store `resume`/`adopt` already resolve and tests never mutate
+/// process env. `roots` scopes the listing to the requested projects and
+/// their worktrees (every slug dir, then each transcript's own cwd row);
+/// `None` reads every project.
 pub(crate) struct ClaudeSource {
-    pub(crate) cwd: PathBuf,
-    pub(crate) all_projects: bool,
     pub(crate) projects_dir: PathBuf,
+    pub(crate) roots: Option<Vec<PathBuf>>,
 }
 
 impl ClaudeSource {
     fn session_dirs(&self) -> Vec<PathBuf> {
         let base = self.projects_dir.clone();
-        if self.all_projects {
+        let Some(roots) = &self.roots else {
             let mut dirs: Vec<PathBuf> = std::fs::read_dir(&base)
                 .into_iter()
                 .flatten()
@@ -547,10 +567,35 @@ impl ClaudeSource {
                 .filter(|p| p.is_dir())
                 .collect();
             dirs.sort();
-            dirs
-        } else {
-            vec![base.join(crate::claude_ask::claude_cwd_slug(&self.cwd))]
-        }
+            return dirs;
+        };
+        // Worktree sessions live in sibling slug dirs: the project's own
+        // slug, that slug plus a suffix (`<slug>--claude-worktrees-*`), and
+        // an external worktree root's slug. A dir matching any root's slug,
+        // exactly or as a `-`-suffixed form, stays in the listing; the
+        // transcript's own cwd row decides in `sessions`.
+        let mut slugs: Vec<String> = roots
+            .iter()
+            .map(|root| crate::claude_ask::claude_cwd_slug(root))
+            .collect();
+        slugs.sort();
+        slugs.dedup();
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(&base)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .filter(|p| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                slugs.iter().any(|slug| {
+                    name == slug.as_str()
+                        || name.len() > slug.len() && name.starts_with(&format!("{slug}-"))
+                })
+            })
+            .collect();
+        dirs.sort();
+        dirs
     }
 }
 
@@ -586,6 +631,19 @@ impl TranscriptSource for ClaudeSource {
                 if !within_window(mtime, days, now) {
                     continue;
                 }
+                if let Some(roots) = &self.roots {
+                    let row_cwd = first_cwd_row(&path);
+                    let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    let keep = match row_cwd.as_deref() {
+                        Some(cwd) => in_roots(Some(Path::new(cwd)), Some(roots)),
+                        None => roots
+                            .iter()
+                            .any(|r| crate::claude_ask::claude_cwd_slug(r) == dir_name),
+                    };
+                    if !keep {
+                        continue;
+                    }
+                }
                 let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
                     continue;
                 };
@@ -602,50 +660,85 @@ impl TranscriptSource for ClaudeSource {
     }
 
     fn turns(&self, raw: &str) -> Vec<Turn> {
-        raw.lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter(|obj| is_user_turn(obj) || is_meta_row(obj))
-            .map(|obj| {
-                let text = turn_text(&obj);
-                let ts_epoch = turn_ts_epoch(&obj);
-                Turn {
-                    obj,
-                    text,
-                    ts_epoch,
-                }
-            })
-            .collect()
+        claude_shaped_turns(raw)
     }
 
     fn tool_uses(&self, raw: &str) -> usize {
-        raw.lines()
-            .filter(|line| line.contains("\"tool_use\""))
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .map(|row| {
-                row.get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_array())
-                    .map(|blocks| {
-                        blocks
-                            .iter()
-                            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
-                            .count()
-                    })
-                    .unwrap_or(0)
-            })
-            .sum()
+        claude_shaped_tool_uses(raw)
     }
+}
+
+/// The user-shaped turns of a claude-shaped JSONL text: rows where
+/// [`is_user_turn`] or [`is_meta_row`] holds. The claude source's own shape;
+/// the opencode source renders its store rows into this shape so the
+/// classifier runs with no new rule.
+pub(crate) fn claude_shaped_turns(raw: &str) -> Vec<Turn> {
+    raw.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|obj| is_user_turn(obj) || is_meta_row(obj))
+        .map(|obj| {
+            let text = turn_text(&obj);
+            let ts_epoch = turn_ts_epoch(&obj);
+            Turn {
+                obj,
+                text,
+                ts_epoch,
+            }
+        })
+        .collect()
+}
+
+/// Tool calls in the claude row shape (`message.content[].type ==
+/// "tool_use"`), shared with the opencode render.
+pub(crate) fn claude_shaped_tool_uses(raw: &str) -> usize {
+    raw.lines()
+        .filter(|line| line.contains("\"tool_use\""))
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .map(|row| {
+            row.get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+                        .count()
+                })
+                .unwrap_or(0)
+        })
+        .sum()
+}
+
+/// The first JSONL row's string `cwd` field. The head of the file decides
+/// which project a transcript belongs to; rows before the first cwd-carrying
+/// row are skipped.
+pub(crate) fn first_cwd_row(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    use std::io::BufRead;
+    for line in std::io::BufReader::new(file).lines() {
+        let Ok(line) = line else {
+            return None;
+        };
+        let Ok(row) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(cwd) = row.get("cwd").and_then(|v| v.as_str()) {
+            return Some(cwd.to_string());
+        }
+    }
+    None
 }
 
 /// The codex transcript store: `$CODEX_HOME/sessions` rollout files through
 /// [`crate::codex_store`], the listing liveness already walks. `sessions_dir`
 /// is the injected root (None resolves the env home); tests pin a fixture
-/// directory instead of mutating process env. `cwd` scopes the listing to
-/// the requested project when set (matching claude's default view); a
-/// rollout whose session metadata carries no cwd still reports.
+/// directory instead of mutating process env. `roots` scopes the listing to
+/// the requested projects (each rollout's session metadata cwd decides);
+/// `None` reads every project, and a rollout whose session metadata carries
+/// no cwd reports only then.
 pub(crate) struct CodexSource {
     pub(crate) sessions_dir: Option<PathBuf>,
-    pub(crate) cwd: Option<PathBuf>,
+    pub(crate) roots: Option<Vec<PathBuf>>,
 }
 
 /// The rollout uuid: the 36-char id after the last `-` in
@@ -697,15 +790,12 @@ impl TranscriptSource for CodexSource {
     }
 
     fn sessions(&self, days: u64) -> Vec<SessionFile> {
-        let want_slug = self.cwd.as_deref().map(crate::claude_ask::claude_cwd_slug);
         crate::codex_store::codex_sessions(self.sessions_dir.as_deref(), days)
             .into_iter()
             .filter_map(|s| {
                 let (meta_id, meta_cwd) = rollout_meta(&s.path);
-                if let (Some(want), Some(actual)) = (&want_slug, &meta_cwd) {
-                    if crate::claude_ask::claude_cwd_slug(Path::new(actual)) != *want {
-                        return None;
-                    }
+                if !in_roots(meta_cwd.as_deref().map(Path::new), self.roots.as_deref()) {
+                    return None;
                 }
                 Some(SessionFile {
                     session_id: meta_id.unwrap_or(s.session_id),
@@ -905,5 +995,79 @@ mod tests {
             "0f0e1d2c-3b4a-4958-8675-3092f4c1b2a3"
         );
         assert_eq!(rollout_session_id("rollout-plain"), "rollout-plain");
+    }
+
+    fn write_session_file(dir: &Path, slug: &str, sid: &str, cwd: &str) {
+        let rows = serde_json::json!({
+            "cwd": cwd, "type": "user", "timestamp": "2026-09-16T12:00:00.000Z",
+            "message": {"role": "user", "content": "drive the fold"}
+        })
+        .to_string();
+        let path = dir.join(slug).join(format!("{sid}.jsonl"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, rows + "\n").unwrap();
+    }
+
+    #[test]
+    fn claude_roots_keep_project_and_worktrees_drop_sibling_slug() {
+        let base = std::env::temp_dir().join(format!("fno-prov-roots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let p = Path::new("/fixture/project");
+        let w1 = Path::new("/fixture/project/.claude/worktrees/w1");
+        let web = Path::new("/fixture/project-web");
+        for cwd_path in [p, w1, web] {
+            let slug = crate::claude_ask::claude_cwd_slug(cwd_path);
+            let sid = format!("sid-{}", slug.trim_start_matches('-'));
+            write_session_file(&base, &slug, &sid, cwd_path.to_str().unwrap());
+        }
+        let source = ClaudeSource {
+            projects_dir: base.clone(),
+            roots: Some(vec![p.to_path_buf()]),
+        };
+        let ids: Vec<String> = source
+            .sessions(0)
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect();
+        assert_eq!(ids.len(), 2, "project + its worktree, not project-web");
+        let web_slug = crate::claude_ask::claude_cwd_slug(web);
+        assert!(
+            ids.iter()
+                .all(|id| !id.contains("project-web") && !id.contains(web_slug.as_str())),
+            "sibling slug dropped: {ids:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn codex_no_cwd_rollout_reports_only_without_roots() {
+        let dir = std::env::temp_dir().join(format!("fno-prov-codex-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let rollout = dir
+            .join("sessions")
+            .join("2026")
+            .join("09")
+            .join("16")
+            .join(format!(
+                "rollout-2026-09-16T13-00-00-0f0e1d2c-3b4a-4958-8675-3092f4c1b2a3.jsonl"
+            ));
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        std::fs::write(
+            &rollout,
+            "{\"payload\":{\"type\":\"session_meta\",\"id\":\"0f0e1d2c-3b4a-4958-8675-3092f4c1b2a3\"}}\n",
+        )
+        .unwrap();
+        let rooted = CodexSource {
+            sessions_dir: Some(dir.join("sessions")),
+            roots: Some(vec![PathBuf::from("/fixture/project")]),
+        };
+        assert!(rooted.sessions(0).is_empty(), "no cwd row -> dropped");
+        let all = CodexSource {
+            sessions_dir: Some(dir.join("sessions")),
+            roots: None,
+        };
+        assert_eq!(all.sessions(0).len(), 1, "roots: None reads every project");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

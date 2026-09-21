@@ -505,7 +505,7 @@ pub fn workspace_paths(cwd: &Path) -> HashMap<String, String> {
 /// `os.path.normpath(expanduser(raw))` for the path shapes settings carry:
 /// expand a leading `~`, then collapse `.`/`..`/duplicate separators
 /// lexically (no filesystem access, matching normpath).
-fn normalize_path(raw: &str) -> String {
+pub(crate) fn normalize_path(raw: &str) -> String {
     // A bare "~" expands like "~/" with an empty rest, matching Python's
     // os.path.expanduser (which treats both the same), not just the
     // slash-prefixed form.
