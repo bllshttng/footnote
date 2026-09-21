@@ -80,13 +80,25 @@ pub(crate) fn extract_help_distress(text: &str) -> Option<HelpDistress> {
 /// block or a `<result>` wrapper, reason from its `summary`. A reason-less
 /// return still parses; the distress itself is the signal.
 pub(crate) fn extract_result_blocked(text: &str) -> Option<HelpDistress> {
+    // The token must end the line or be followed by whitespace, so
+    // RESULT: BLOCKEDX is prose, not a return.
+    let is_blocked_line = |l: &str| -> bool {
+        match l.trim_start().strip_prefix("RESULT: BLOCKED") {
+            Some(rest) => rest.is_empty() || rest.starts_with(char::is_whitespace),
+            None => false,
+        }
+    };
     for line in text.lines() {
-        if line.trim_start().starts_with("RESULT: BLOCKED") {
+        if is_blocked_line(line) {
             let reason = text
                 .lines()
-                .skip_while(|l| !l.trim_start().starts_with("RESULT: BLOCKED"))
+                .skip_while(|l| !is_blocked_line(l))
                 .skip(1)
-                .find_map(|l| l.strip_prefix("REASON:").map(|r| r.trim().to_string()))
+                .find_map(|l| {
+                    l.trim_start()
+                        .strip_prefix("REASON:")
+                        .map(|r| r.trim().to_string())
+                })
                 .unwrap_or_default();
             return Some(HelpDistress {
                 reason,
@@ -917,6 +929,12 @@ print(rec["payload"]["content"][0]["text"], end="")
         assert_eq!(d.kind, DistressKind::ResultBlocked);
         assert_eq!(d.reason, "missing dependency");
         assert_eq!(d.evidence, None);
+        // A longer token sharing the prefix is prose, not a return.
+        assert_eq!(extract_result_blocked("RESULT: BLOCKEDX"), None);
+        // An indented REASON line still supplies the reason.
+        let di = extract_result_blocked("RESULT: BLOCKED\n  REASON: dep missing")
+            .expect("indented REASON parses");
+        assert_eq!(di.reason, "dep missing");
         // The preferred JSON object, fenced.
         let fenced = concat!(
             "work so far committed. ",
@@ -1048,6 +1066,54 @@ print(rec["payload"]["content"][0]["text"], end="")
             1,
             "exactly one row when both vocabularies appear"
         );
+    }
+
+    #[test]
+    fn run_distress_scan_covers_the_result_blocked_path() {
+        // The CLI verb's own parse (the shape the pre-deploy done_probe
+        // exercises): the transcript reader supplies a RESULT: BLOCKED
+        // return and the scan emits one result_blocked row.
+        let _env_guard = fno_bin_env_test_lock().lock().unwrap();
+        let var = "FNO_LOOPCHECK_FNO_BIN";
+        let prior = std::env::var(var).ok();
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript = tmp.path().join("rollout-result-blocked.jsonl");
+        std::fs::write(&transcript, "rollout bytes the stub vouches for\n").unwrap();
+        let stub = write_exec(
+            tmp.path(),
+            "fno",
+            "#!/bin/sh\n[ \"$1\" = agents ] && [ \"$2\" = newest-assistant-text ] && [ \"$3\" = --transcript ] && [ -f \"$4\" ] || exit 42\nprintf '%s' 'RESULT: BLOCKED\\nREASON: probe reason'\n",
+        );
+        std::env::set_var(var, stub.to_str().unwrap());
+        let project = tmp.path().join("events.jsonl");
+        let global = tmp.path().join("global.jsonl");
+        let args: Vec<String> = [
+            "distress-scan",
+            "--transcript",
+            transcript.to_str().unwrap(),
+            "--run",
+            "rb-run",
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "--events",
+            project.to_str().unwrap(),
+            "--global-events",
+            global.to_str().unwrap(),
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let code = run_distress_scan(&args);
+        match prior {
+            Some(v) => std::env::set_var(var, v),
+            None => std::env::remove_var(var),
+        }
+        assert_eq!(code, 0);
+        let row: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+        assert_eq!(row["type"], "blocked");
+        assert_eq!(row["data"]["kind"], "result_blocked");
+        assert_eq!(row["data"]["reason"], "probe reason");
     }
 
     #[test]

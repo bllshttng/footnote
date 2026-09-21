@@ -78,6 +78,21 @@ else
     fail "event_count wrong"
 fi
 
+# ---- T03b: dead non-postmortem rows count apart from fixtures ----
+echo "T03b: dead rule rows land in skipped_dead_rows, not skipped_fixture_rows"
+printf '%s | S1 | git-rule-edit | %s/gone-rule.md | wall: aged\n' "$TS" "$D" >> "$LOG"
+PACKET3="$(run_pack)"
+if printf '%s\n' "$PACKET3" | grep -q '^skipped_dead_rows: 1$'; then
+    pass "skipped_dead_rows: 1"
+else
+    fail "skipped_dead_rows missing or wrong"
+fi
+if printf '%s\n' "$PACKET3" | grep -q '^skipped_fixture_rows: 1$'; then
+    pass "dead rule row not counted as fixture"
+else
+    fail "dead rule row miscounted as fixture"
+fi
+
 # ---- T04: a vanished path UNDER the root still renders as deleted ----
 echo "T04: vanished real-corpus row still renders deleted"
 aged_pm="$D/fno/postmortems/aged-pm.md"

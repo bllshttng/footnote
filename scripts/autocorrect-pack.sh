@@ -144,6 +144,7 @@ EVENT_COUNT=$(wc -l < "$FILTERED_EVENTS" | tr -d ' ')
 # past the writer guard and is skipped with a count, not rendered.
 PM_ROOT="${FNO_HOME:-$HOME/.fno}/postmortems"
 SKIPPED_FIXTURE_ROWS=0
+SKIPPED_DEAD_ROWS=0
 
 # -------------------------------------------------------------------
 # Collect implicated files (from LOCATION field). Resolve full text or
@@ -165,7 +166,14 @@ while IFS= read -r line; do
     continue
   fi
   if [[ ! -f "$file_path" && "$file_path" != "$PM_ROOT"/* ]]; then
-    SKIPPED_FIXTURE_ROWS=$((SKIPPED_FIXTURE_ROWS + 1))
+    # A dead path on a postmortem row is the fixture leak signature; a dead
+    # path on any other source is ordinary file aging. Count them apart so
+    # corpus poisoning stays readable.
+    src="$(printf '%s' "$line" | awk -F' \\| ' '{print $3}')"
+    case "$src" in
+      *-postmortem) SKIPPED_FIXTURE_ROWS=$((SKIPPED_FIXTURE_ROWS + 1)) ;;
+      *) SKIPPED_DEAD_ROWS=$((SKIPPED_DEAD_ROWS + 1)) ;;
+    esac
     continue
   fi
   printf '%s\n' "$file_path" >> "$IMPLICATED_LIST"
@@ -299,6 +307,7 @@ OUTPUT="$TMPDIR_PACK/packet.yaml"
   emit "severity_filter: [$(printf "%s" "$SEVERITY_FILTER" | sed 's/,/, /g')]"
   emit "event_count: $EVENT_COUNT"
   emit "skipped_fixture_rows: $SKIPPED_FIXTURE_ROWS"
+  emit "skipped_dead_rows: $SKIPPED_DEAD_ROWS"
   emit ""
   emit "events:"
   if [[ "$EVENT_COUNT" -gt 0 ]]; then
