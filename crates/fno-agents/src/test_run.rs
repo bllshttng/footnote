@@ -227,17 +227,85 @@ enum OnHeld {
 /// key refuses, `on_held` sees every refused `(holder, pid, host)` row. A
 /// contender spawns ZERO workers while waiting: the loop returns before any
 /// `Command` is built.
+///
+/// Arrival order: the waiters of one key set line up in a FIFO claim queue
+/// ([`crate::claim_queue`]) beside the first key's lockfile. A contender may
+/// attempt the acquire only from the front `keys.len()` positions - the run
+/// slots pass `cap` keys, which is a counted semaphore, and a front-only rule
+/// would serialise those slots down to one. A queue that cannot be read
+/// (enter failed, position gone) degrades to the old unordered poll rather
+/// than refusing a run that can still make progress.
 fn acquire_claim_blocking(
     keys: &[String],
     holder: &str,
     opts: impl Fn(usize) -> crate::claims::AcquireOpts,
-    mut on_held: impl FnMut(&[(String, Option<i32>, String)]) -> OnHeld,
+    mut on_held: impl FnMut(&[(String, Option<i32>, String)], Option<(usize, usize)>) -> OnHeld,
 ) -> Result<(), i32> {
-    loop {
+    let admit_width = keys.len();
+    let queue_dir = opts(0)
+        .root
+        .as_deref()
+        .and_then(|root| crate::claims::claim_path(&keys[0], Some(root)).ok())
+        .map(|p| crate::claim_queue::queue_dir_for(&p));
+    let mut ticket = queue_dir
+        .as_deref()
+        .and_then(|dir| match crate::claim_queue::enter(dir) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                eprintln!(
+                    "test_run: claim queue enter failed on {}: {e}; waiting unordered. \
+                         remedy: check the directory's permissions or free disk space",
+                    dir.display()
+                );
+                None
+            }
+        });
+    let result = 'wait: loop {
+        let mut pos_out: Option<(usize, usize)> = None;
+        if let (Some(dir), Some(t)) = (queue_dir.as_deref(), ticket.as_ref()) {
+            match crate::claim_queue::position(t) {
+                Ok(pos) => {
+                    if pos.index >= admit_width {
+                        match on_held(&[], Some((pos.index, pos.total))) {
+                            OnHeld::Wait => {
+                                std::thread::sleep(POLL_INTERVAL.max(Duration::from_millis(500)))
+                            }
+                            OnHeld::Admit => break 'wait Ok(()),
+                            OnHeld::Stop(code) => break 'wait Err(code),
+                        }
+                        continue;
+                    }
+                    pos_out = Some((pos.index, pos.total));
+                }
+                Err(e) => {
+                    // The ticket was reaped or removed under us. Re-enqueue
+                    // at the back once, printing one line for the event -
+                    // never one line per poll. Only a failed re-enter waits
+                    // unordered (the old behaviour).
+                    eprintln!("test_run: claim queue ticket {e}; re-enqueueing at the back");
+                    match crate::claim_queue::enter(dir) {
+                        Ok(fresh) => {
+                            // Sleep before the next gate read so the fresh
+                            // back-of-queue ticket cannot snipe the lock in
+                            // the gap before the front waiter's next poll.
+                            ticket = Some(fresh);
+                            std::thread::sleep(POLL_INTERVAL.max(Duration::from_millis(500)));
+                            continue 'wait;
+                        }
+                        Err(e2) => {
+                            eprintln!(
+                                "test_run: claim queue re-enter failed on {}: {e2}; waiting unordered",
+                                dir.display()
+                            );
+                        }
+                    }
+                }
+            }
+        }
         let mut held: Vec<(String, Option<i32>, String)> = Vec::with_capacity(keys.len());
         for (i, key) in keys.iter().enumerate() {
             match crate::claims::acquire(key, holder, opts(i)) {
-                crate::claims::AcquireOutcome::Acquired(_) => return Ok(()),
+                crate::claims::AcquireOutcome::Acquired(_) => break 'wait Ok(()),
                 crate::claims::AcquireOutcome::HeldByOther {
                     holder: h,
                     pid,
@@ -245,16 +313,20 @@ fn acquire_claim_blocking(
                 } => held.push((h, pid, host)),
                 crate::claims::AcquireOutcome::Error(e) => {
                     eprintln!("fno-agents test-run: claim error: {e}");
-                    return Err(2);
+                    break 'wait Err(2);
                 }
             }
         }
-        match on_held(&held) {
+        match on_held(&held, pos_out) {
             OnHeld::Wait => std::thread::sleep(POLL_INTERVAL.max(Duration::from_millis(500))),
-            OnHeld::Admit => return Ok(()),
-            OnHeld::Stop(code) => return Err(code),
+            OnHeld::Admit => break 'wait Ok(()),
+            OnHeld::Stop(code) => break 'wait Err(code),
         }
+    };
+    if let Some(t) = ticket {
+        crate::claim_queue::leave(t);
     }
+    result
 }
 
 fn acquire_suite_claim(
@@ -262,6 +334,7 @@ fn acquire_suite_claim(
     holder: &str,
     root: Option<&Path>,
     deadline: Instant,
+    budget: Duration,
 ) -> Result<(), i32> {
     let opts = |_: usize| crate::claims::AcquireOpts {
         pid: Some(std::process::id()),
@@ -270,17 +343,47 @@ fn acquire_suite_claim(
         root: root.map(PathBuf::from),
         ..Default::default()
     };
-    acquire_claim_blocking(&[SUITE_CLAIM_KEY.to_string()], holder, opts, |rows| {
-        let Some((h, pid, host)) = rows.first() else {
-            return OnHeld::Wait;
+    let started = Instant::now();
+    let mut last_held: Option<(String, Option<i32>, String)> = None;
+    acquire_claim_blocking(&[SUITE_CLAIM_KEY.to_string()], holder, opts, |rows, pos| {
+        // On a queue-gate skip the attempt loop never ran, so `rows` is
+        // empty; keep the last seen holder row so the timeout still names
+        // whom it waited on.
+        if let Some(row) = rows.first() {
+            last_held = Some(row.clone());
+        }
+        let mut fields: Vec<(&str, String)> = match &last_held {
+            Some((h, pid, host)) => vec![
+                ("holder", h.to_string()),
+                ("pid", format!("{pid:?}")),
+                ("host", host.to_string()),
+            ],
+            None => vec![("holder", "-".to_string())],
         };
-        let fields = [
-            ("holder", h.to_string()),
-            ("pid", format!("{pid:?}")),
-            ("host", host.to_string()),
-        ];
+        if let Some((index, total)) = pos {
+            fields.push(("position", index.to_string()));
+            fields.push(("queued", total.to_string()));
+        }
         if Instant::now() >= deadline {
+            fields.push(("waited_s", started.elapsed().as_secs().to_string()));
             emit(run_id, "suite_wait_timeout", &fields);
+            // The x-c425 shape: name the condition, what it measured, and
+            // a remedy the reader can run.
+            let where_txt = match pos {
+                Some((index, total)) => {
+                    format!("it was position {index} of {total} in the wait queue")
+                }
+                None => "it was not queued (no wait queue was active)".to_string(),
+            };
+            eprintln!(
+                    "test_run: the machine-wide test:suite claim did not reach this run inside its {}s budget; {}.",
+                    budget.as_secs(),
+                    where_txt
+                );
+            eprintln!("test_run:   who holds it: fno agents claim status test:suite");
+            eprintln!(
+                "test_run:   raise the budget: fno-agents test-run --timeout <secs> -- <argv>"
+            );
             return OnHeld::Stop(124);
         }
         emit(run_id, "suite_waiting", &fields);
@@ -341,38 +444,45 @@ fn run_build_admit(args: &[String]) -> i32 {
         events_dir: Some(worktree.clone()),
         ..Default::default()
     };
-    let result = acquire_claim_blocking(&[BUILD_CLAIM_KEY.to_string()], &holder, opts, |rows| {
-        let mut scan = |table: &[crate::census::ProcRow], parent: &ParentMap| -> Option<OnHeld> {
-            let (h, pid, _) = rows.first()?;
-            let holder_pid = (*pid).filter(|p| *p > 0)?;
-            // A holder that has stopped compiling keeps the slot for no
-            // one. Feed the idle clock on the scan poll_held already makes;
-            // when the window is out, release the holder's claim by its
-            // exact holder string (a holder mismatch is a silent no-op,
-            // which is how two waiters racing stay safe) and let the next
-            // poll acquire.
-            let compiling = holder_compiling_map(parent, table, holder_pid as u32)?;
-            // A takeover reason names the holder it displaced. When the
-            // claim passes to a different holder, the guard resets, so this
-            // waiter can still take over the new holder when it idles.
-            if idle.holder().is_some_and(|seen| seen != h.as_str()) {
-                *takeover_reason.borrow_mut() = None;
-            }
-            let idle_for = idle.observe(h, compiling, Instant::now());
-            if idle_for >= build_idle_window() && takeover_reason.borrow().is_none() {
-                let waited = idle_for.as_secs();
-                eprintln!(
+    let result = acquire_claim_blocking(
+        &[BUILD_CLAIM_KEY.to_string()],
+        &holder,
+        opts,
+        |rows, _| {
+            let mut scan = |table: &[crate::census::ProcRow],
+                            parent: &ParentMap|
+             -> Option<OnHeld> {
+                let (h, pid, _) = rows.first()?;
+                let holder_pid = (*pid).filter(|p| *p > 0)?;
+                // A holder that has stopped compiling keeps the slot for no
+                // one. Feed the idle clock on the scan poll_held already makes;
+                // when the window is out, release the holder's claim by its
+                // exact holder string (a holder mismatch is a silent no-op,
+                // which is how two waiters racing stay safe) and let the next
+                // poll acquire.
+                let compiling = holder_compiling_map(parent, table, holder_pid as u32)?;
+                // A takeover reason names the holder it displaced. When the
+                // claim passes to a different holder, the guard resets, so this
+                // waiter can still take over the new holder when it idles.
+                if idle.holder().is_some_and(|seen| seen != h.as_str()) {
+                    *takeover_reason.borrow_mut() = None;
+                }
+                let idle_for = idle.observe(h, compiling, Instant::now());
+                if idle_for >= build_idle_window() && takeover_reason.borrow().is_none() {
+                    let waited = idle_for.as_secs();
+                    eprintln!(
                     "cargo admission: taking over; {h} (pid {holder_pid}) ran no compile for {waited}s"
                 );
-                let _ = crate::claims::release(BUILD_CLAIM_KEY, h, None, Some(&worktree));
-                *takeover_reason.borrow_mut() = Some(format!(
-                    "cargo build; took over from {h}, no compile for {waited}s"
-                ));
-            }
-            None
-        };
-        wait.poll_held(rows, None, Some(&mut scan))
-    });
+                    let _ = crate::claims::release(BUILD_CLAIM_KEY, h, None, Some(&worktree));
+                    *takeover_reason.borrow_mut() = Some(format!(
+                        "cargo build; took over from {h}, no compile for {waited}s"
+                    ));
+                }
+                None
+            };
+            wait.poll_held(rows, None, Some(&mut scan))
+        },
+    );
     wait.clear_marker();
     match result {
         Ok(()) => 0,
@@ -416,7 +526,7 @@ fn admit_run_slot(cargo_pid: u32, worktree: &Path) -> Result<(), i32> {
         events_dir: Some(worktree.clone()),
         ..Default::default()
     };
-    let result = acquire_claim_blocking(&keys, &holder, opts, |rows| {
+    let result = acquire_claim_blocking(&keys, &holder, opts, |rows, _| {
         wait.poll_held(rows, Some((cap, "cargo run slots")), None)
     });
     wait.clear_marker();
@@ -983,9 +1093,13 @@ pub fn run_test_run(args: &[String]) -> i32 {
     let nested = nested_owner();
     let mut claimed = false;
     if nested.is_none() {
-        if let Err(code) =
-            acquire_suite_claim(&run_id, &holder, claims_root.as_deref(), overall_deadline)
-        {
+        if let Err(code) = acquire_suite_claim(
+            &run_id,
+            &holder,
+            claims_root.as_deref(),
+            overall_deadline,
+            opts.timeout,
+        ) {
             return code;
         }
         claimed = true;
