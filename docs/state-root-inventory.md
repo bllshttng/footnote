@@ -69,7 +69,7 @@ One file per install. These belong at the root.
 | `pr-watcher-state-delivery.json` | `pr_watch/_dispatch.py` via `_delivery_state_path()` | permanent file, transient entries |
 | `fleet-sweep-state.json`, `.lock` | `fleet_state.py`, written by the pr-watch tick's fleet leg | permanent file, transient entries |
 
-Under `graph_meta.backend=sqlite` the `graph.json` file is frozen and must stay on disk: the keeper binds its socket to the path, and nine existence gates read the file's absence as an empty graph. The store of record is the `.db` sibling. The mirror answers nothing.
+Under `graph_meta.backend=sqlite` the `graph.json` file is frozen and must stay on disk. The keeper binds its socket to the path, and nine existence gates read the file's absence as an empty graph. The store of record is the `.db` sibling. The mirror answers nothing.
 
 `paths.locks_dir()` hardcodes `Path.home() / ".fno" / "locks"` on purpose, and a `config.state_dir` override deliberately does not move it. The config-free plan-stamp path and the config-loading append path have to agree on one directory, and moving it desyncs them. Its docstring says so. Do not "fix" it to match the rest of this page.
 
