@@ -477,8 +477,7 @@ def _select_read(kind: str, args: list[str]) -> Any:
 def _next_node(project: Optional[str]) -> Optional[dict]:
     """Return the next ready node summary (or None), via ``fno backlog next``.
 
-    Project-scoped. Raises on a non-zero/garbled response so advance skips
-    rather than guessing a node (Failure Modes: Errors).
+    Project-scoped. Raises on a non-zero/garbled response so advance skips rather than guessing a node (Failure Modes: Errors).
     """
     args = ["--project", project] if project else []
     return _select_read("next", args)
@@ -592,10 +591,9 @@ def _undispatched_nodes(
     project: Optional[str], mission: Optional[str] = None
 ) -> dict:
     """Read the independent planned-unclaimed observer receipt."""
-    args = (
-        (["--project", project] if project else [])
-        + (["--mission", mission] if mission else [])
-    )
+    args = ["--project", project] if project else []
+    if mission:
+        args += ["--mission", mission]
     receipt = _select_read("undispatched", args)
     if (
         not isinstance(receipt, dict)
