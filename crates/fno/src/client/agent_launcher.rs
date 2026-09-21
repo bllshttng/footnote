@@ -204,18 +204,28 @@ pub(crate) enum PickerAction {
     SetModel { name: String, model: String },
     /// Switch the pin to typed free text (the fallback, never the default).
     TypeIn,
+    /// The `@` node picker: insert the node id into the draft message at
+    /// the cursor.
+    InsertNode(String),
     /// Set the placement.
     Place(Placement),
 }
 
 /// The open choice popover: the shared `Popup` widget anchored at the chip,
-/// plus the commit action per row (parallel to `popup.rows`; `None` on
-/// headers, rules and disabled entries).
+/// plus the commit action per row. Typing filters the rows in place
+/// (change 7): the FULL row set is captured at open, `filter` is the live
+/// query, and the popup rebuilds per keystroke.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Picker {
     pub popup: Popup,
+    /// The commit action per DISPLAYED row.
     pub actions: Vec<Option<PickerAction>>,
+    /// The full, unfiltered row set + actions captured at open.
+    pub all_rows: Vec<PopupRow>,
+    pub all_actions: Vec<Option<PickerAction>>,
     pub field: Focus,
+    pub anchor: Anchor,
+    pub filter: String,
 }
 
 /// Where the launched session goes. Thread placements are VIEW choices, not
@@ -862,9 +872,19 @@ pub(crate) async fn launcher_keys(
                         }
                         // A disabled or header row: the picker stays open.
                     }
+                    LKey::Char(c) => {
+                        // Type-to-filter: the query narrows the rows in
+                        // place; the visible list is the feedback.
+                        picker.filter.push(c);
+                        rebuild_picker(l, picker);
+                    }
+                    LKey::Backspace => {
+                        picker.filter.pop();
+                        rebuild_picker(l, picker);
+                    }
                     _ => {
-                        // Free typing does not reach the picker; the bytes
-                        // are dropped, never forwarded to a pane.
+                        // Every other key keeps the picker as it is; the
+                        // bytes are dropped, never forwarded to a pane.
                         l.picker = Some(picker);
                     }
                 }
@@ -1013,6 +1033,11 @@ pub(crate) async fn launcher_keys(
             LKey::Char(c) => {
                 if let Some(l) = view.launcher.as_mut() {
                     match l.focus {
+                        Focus::Message if c == '@' => {
+                            // The palette's node gesture: `@` opens the node
+                            // picker; the glyph itself never lands.
+                            open_node_picker(l, view);
+                        }
                         Focus::Message => insert_char(&mut l.draft, c),
                         Focus::Model => {
                             if l.draft.model.chars().count() < MAX_MAIL_TEXT {
@@ -1264,17 +1289,65 @@ pub(crate) fn open_picker(l: &mut Launcher, view: &View) -> bool {
     if l.focus == Focus::Effort && !effort_offered(l, view) {
         return false;
     }
+    open_picker_at(l, view, l.focus)
+}
+
+/// The message field's `@` gesture: a node picker over the live layout's
+/// backlog cards, filtered by what follows the `@` (the typed `@` itself
+/// never lands in the draft).
+fn open_node_picker(l: &mut Launcher, view: &View) -> bool {
+    open_picker_at(l, view, Focus::Message)
+}
+
+fn open_picker_at(l: &mut Launcher, view: &View, field: Focus) -> bool {
     let Some((row, col)) = picker_anchor(l, view) else {
         return false;
     };
     let (rows, actions) = picker_rows(l, view);
     l.picker = Some(Picker {
         popup: Popup::new(rows, Anchor::At { row, col })
-            .footer("up/down move \u{b7} enter pick \u{b7} esc close"),
+            .footer("up/down move \u{b7} type to filter \u{b7} enter pick \u{b7} esc close"),
         actions,
-        field: l.focus,
+        all_rows: rows.clone(),
+        all_actions: actions.clone(),
+        field,
+        anchor: Anchor::At { row, col },
+        filter: String::new(),
     });
     true
+}
+
+/// Rebuild the popover's rows around the live filter: substring match on
+/// the entry labels, case-insensitive; the query rides a header so the
+/// filter state is visible, not guessed. Works off the picker's own
+/// captured row set, so it needs no View access.
+fn rebuild_picker(l: &mut Launcher, mut picker: Picker) {
+    let q = picker.filter.to_lowercase();
+    let mut rows: Vec<PopupRow> = Vec::new();
+    let mut actions: Vec<Option<PickerAction>> = Vec::new();
+    if !q.is_empty() {
+        rows.push(PopupRow::Header(format!("filter: {}", picker.filter)));
+        actions.push(None);
+    }
+    for (row, action) in picker
+        .all_rows
+        .iter()
+        .cloned()
+        .zip(picker.all_actions.iter().cloned())
+    {
+        let keep = match &row {
+            PopupRow::Entry { label, .. } => q.is_empty() || label.to_lowercase().contains(&q),
+            _ => true,
+        };
+        if keep {
+            rows.push(row);
+            actions.push(action);
+        }
+    }
+    picker.popup = Popup::new(rows, picker.anchor)
+        .footer("up/down move \u{b7} type to filter \u{b7} enter pick \u{b7} esc close");
+    picker.popup.sel = 0;
+    l.picker = Some(picker);
 }
 
 /// The chip's on-screen cell, in the same geometry `launcher_mouse` maps
@@ -1294,6 +1367,13 @@ fn picker_anchor(l: &Launcher, view: &View) -> Option<(u16, u16)> {
     let top = body_rows.checked_sub(total)?;
     let area = RtRect::new(0, top as u16, text_w as u16, total as u16);
     let rects = l.dock_layout_rects(view, area);
+    if l.focus == Focus::Message {
+        // The `@` picker anchors at the editor, not a chip.
+        return Some((
+            (view.sideline_top() + top + rects.message.y as usize + 1) as u16,
+            rects.message.x,
+        ));
+    }
     let (_, _, r) = rects.chips.iter().find(|(f, _, _)| *f == l.focus)?;
     Some(((view.sideline_top() + top + r.y as usize + 1) as u16, r.x))
 }
@@ -1435,6 +1515,22 @@ fn picker_rows(l: &Launcher, view: &View) -> (Vec<PopupRow>, Vec<Option<PickerAc
                 }
             }
         }
+        Focus::Message => {
+            // The `@` node picker: the live layout's backlog cards, the
+            // freshest list the client already holds - no second read.
+            for card in &view.layout.backlog {
+                push(
+                    "\u{2022}",
+                    &format!("{} {}", card.id, card.slug),
+                    &card.priority,
+                    true,
+                    Some(PickerAction::InsertNode(card.id.clone())),
+                );
+            }
+            if view.layout.backlog.is_empty() {
+                push("\u{2022}", "no backlog cards", "", false, None);
+            }
+        }
         Focus::Placement => {
             push(
                 "\u{2022}",
@@ -1531,6 +1627,13 @@ fn apply_picker_action(l: &mut Launcher, view: &View, action: PickerAction, port
             }
             _ => {}
         },
+        PickerAction::InsertNode(id) => {
+            // The node id lands at the cursor with a trailing space; the
+            // `@` that opened the picker never entered the draft.
+            for c in id.chars().chain(std::iter::once(' ')) {
+                insert_char(&mut l.draft, c);
+            }
+        }
         PickerAction::Place(p) => {
             l.draft.placement = p;
             l.draft.placement_portal = portal;

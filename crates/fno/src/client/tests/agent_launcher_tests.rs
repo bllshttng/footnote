@@ -1060,3 +1060,110 @@ fn editor_paints_prompt_marker_and_empty_draft_placeholder() {
     assert!(row.contains("ship it"), "draft paints: {row:?}");
     assert!(!row.contains("/fno:target"), "placeholder gone: {row:?}");
 }
+
+#[test]
+fn typing_in_an_open_picker_filters_the_rows() {
+    // Change 7: the picker's rows narrow in place as the operator types;
+    // the query rides a visible header; Backspace widens; the commit
+    // actions follow their rows through the filter.
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true), ("codex", true, true)]);
+    sync_catalog(&mut v);
+    let l = v.launcher.as_mut().unwrap();
+    l.focus = Focus::Harness;
+    assert!(super::agent_launcher::open_picker(l, &v));
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    // Type `cod`: only the codex row survives; the header names the query.
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"cod", &mut sock).await;
+    });
+    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
+    let labels: Vec<&str> = picker
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Entry { label, .. } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels, vec!["codex"], "the query narrows the rows");
+    assert!(matches!(
+        picker.popup.rows.first(),
+        Some(crate::popup::PopupRow::Header(h)) if h.contains("cod")
+    ));
+    // Backspace once: `co` still filters; clearing fully restores.
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, &[0x7f], &mut sock).await;
+    });
+    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
+    let labels: Vec<&str> = picker
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Entry { label, .. } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels.len(), 2, "widened: {labels:?}");
+}
+
+#[test]
+fn at_opens_the_node_picker_and_picking_inserts_the_id() {
+    // Change 7: `@` in the message opens a node picker over the layout's
+    // backlog cards; the glyph never lands in the draft; the pick inserts
+    // `<id> ` at the cursor.
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        l.focus = Focus::Message;
+    }
+    type_message(&mut v, "plan ");
+    // The layout fixture's backlog: whatever cards two_pane_view carries.
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"@", &mut sock).await;
+    });
+    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
+    assert_eq!(
+        picker.field,
+        Focus::Message,
+        "the node picker rides the message field"
+    );
+    let entry_count = picker
+        .popup
+        .rows
+        .iter()
+        .filter(|r| matches!(r, crate::popup::PopupRow::Entry { .. }))
+        .count();
+    assert_eq!(
+        v.launcher.as_ref().unwrap().draft.message,
+        "plan ",
+        "the @ never lands in the draft"
+    );
+    // Pick the first card: its id lands at the cursor.
+    let first_id = picker
+        .actions
+        .iter()
+        .find_map(|a| match a {
+            Some(super::agent_launcher::PickerAction::InsertNode(id)) => Some(id.clone()),
+            _ => None,
+        })
+        .expect("the fixture carries at least one InsertNode row");
+    assert!(entry_count >= 1, "cards list: {entry_count}");
+    let mut l = v.launcher.as_mut().unwrap();
+    let action = super::agent_launcher::PickerAction::InsertNode(first_id);
+    super::agent_launcher::apply_picker_action(&mut l, &v, action, 0);
+    v.launcher = Some(l.clone());
+    assert_eq!(
+        v.launcher.as_ref().unwrap().draft.message,
+        format!("plan {first_id} "),
+        "the node id lands at the cursor"
+    );
+}
