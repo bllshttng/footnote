@@ -284,13 +284,16 @@ def wrap_fno_mail(
 ) -> str:
     """Wrap ``body`` in the PAIRED ``<fno_mail>`` envelope::
 
-        <fno_mail ...>
-        {body}
-        </fno_mail>
+        <fno_mail ...>{body}</fno_mail>
 
-    Three lines, no footer lines of any kind (only fno writes the
-    tag, so the tag itself marks agent text, and the crowns ride the header
-    where ``from_rank`` is verified by the Rust door). ``from_session`` is the
+    ONE line (a single-line body renders no newline at all), no footer
+    lines of any kind (only fno writes the tag, so the tag itself marks
+    agent text, and the crowns ride the header where ``from_rank`` is
+    verified by the Rust door). A one-line envelope needs no
+    bracketed-paste guards on the live inject: a multi-line write
+    submits line-by-line without them, a single-line one is ordinary
+    keystrokes, and only the body can still carry newlines.
+    ``from_session`` is the
     SENDER's full session id: when it resolves, it IS the ``from`` value and
     the ``from_rank`` read keys on it. ``to_session`` is the RECIPIENT's full
     session id, when a delivery lane resolved one; it renders ``to_rank``.
@@ -317,4 +320,4 @@ def wrap_fno_mail(
         node=node,
         origin=origin,
     )
-    return "\n".join([open_tag, body, "</fno_mail>"])
+    return f"{open_tag}{body}</fno_mail>"
