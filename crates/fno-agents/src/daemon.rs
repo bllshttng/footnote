@@ -2540,42 +2540,6 @@ fn is_live_writer(status: AgentStatus) -> bool {
     )
 }
 
-/// The worker argv for the claude stream-json lane (everything after the worker
-/// BINARY path). `parse_stream_args` in bin/worker.rs accepts these flags in any
-/// order before `--`; the child argv (normally
-/// [`crate::provider::claude_stream_json_resume_argv`]) follows the separator.
-/// Pure so the flag wiring is unit-testable without spawning a process.
-fn claude_stream_worker_args(
-    short_id: &str,
-    home: &std::path::Path,
-    cwd: &std::path::Path,
-    uuid: &str,
-    holder: &str,
-    child_argv: &[String],
-) -> Vec<String> {
-    let mut args = vec![
-        "--stream".into(),
-        "--short-id".into(),
-        short_id.into(),
-        "--home".into(),
-        home.to_string_lossy().into_owned(),
-        "--cwd".into(),
-        cwd.to_string_lossy().into_owned(),
-        "--session-uuid".into(),
-        uuid.into(),
-        "--holder".into(),
-        holder.into(),
-        "--".into(),
-    ];
-    args.extend(child_argv.iter().cloned());
-    args
-}
-
-/// Build the registry row for an adopted claude stream thread. `provider`=claude
-/// + `host_mode`=interactive (so `is_interactive()` keeps reconcile from
-/// settling it `exited` like a one-shot) + the FULL `claude_session_uuid` (the
-/// resume key, finally populated here -- the field G1 added is set by the front
-/// door). Pure so the row shape is asserted without a live spawn.
 /// The agent-list row's substitution marker: the object naming BOTH
 /// values on a substituted verdict, null on match-or-unknown. Null is the
 /// unknown shape too - a row whose probe has not answered must never read as
@@ -2772,6 +2736,26 @@ async fn spawn_claude_stream_lane(
     let short_id = derive_short_id(name, &registry);
     let holder = stream_claim_holder(&short_id);
 
+    // 2b. Build the child argv BEFORE the claim: an adopt of a session the
+    //    lane cannot carry (a recorded route, a non-default account, or a
+    //    model no default-endpoint resume serves) must refuse before any
+    //    claim or spawn, not strand a session:<uuid> hold. The explicit-argv
+    //    escape hatch lets tests substitute a fake stream emitter so CI never
+    //    spawns a real `claude -p` (Test discipline / Locked Decision 1).
+    let child_argv = match explicit_argv {
+        Some(argv) => argv,
+        None => match crate::claude_stream_entry::stream_child_argv(uuid, &registry) {
+            Ok(argv) => argv,
+            Err(reason) => {
+                let _ = ctx.emitter.emit(
+                    "agent_spawn_failed",
+                    &json!({"name": name, "reason": "resume_unpinned"}),
+                );
+                return Response::err(req.id, ErrorCode::InvalidParams, reason);
+            }
+        },
+    };
+
     // 3. Acquire the single-writer claim BEFORE spawning (Locked Decision 5). A
     //    clear held-by-other refusal aborts; an unavailable substrate fails open
     //    (the registry one-host re-check below is the authoritative in-daemon
@@ -2819,13 +2803,15 @@ async fn spawn_claude_stream_lane(
     };
 
     // 4. Build the child argv and spawn the per-session stream worker in its own
-    //    process group (Outcome B: survives a kill of the daemon's group). The
-    //    explicit-argv escape hatch lets tests substitute a fake stream emitter so
-    //    CI never spawns a real `claude -p` (Test discipline / Locked Decision 1).
-    let child_argv =
-        explicit_argv.unwrap_or_else(|| crate::provider::claude_stream_json_resume_argv(uuid));
-    let worker_args =
-        claude_stream_worker_args(&short_id, ctx.home.root(), cwd, uuid, &holder, &child_argv);
+    //    process group (Outcome B: survives a kill of the daemon's group).
+    let worker_args = crate::claude_stream_entry::claude_stream_worker_args(
+        &short_id,
+        ctx.home.root(),
+        cwd,
+        uuid,
+        &holder,
+        &child_argv,
+    );
     let mut cmd = std::process::Command::new(&ctx.opts.worker_bin);
     cmd.args(&worker_args);
     cmd.process_group(0);
@@ -7877,3 +7863,6 @@ mod tests;
 #[cfg(test)]
 #[path = "daemon/tests/pid_zombie_tests.rs"]
 mod pid_zombie_tests;
+#[cfg(test)]
+#[path = "daemon/tests/adopt_pin_tests.rs"]
+mod adopt_pin_tests;
