@@ -2042,9 +2042,11 @@ mod tests {
     fn node_statuses_follows_the_backend_switch() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
+        // A row the import can represent: from_json requires slug, type and
+        // priority, and a row it refuses is skipped, so the flip drops it.
         std::fs::write(
             &graph,
-            r#"{"entries":[{"id":"x-old","title":"pre-flip","status":"ready"}]}"#,
+            r#"{"entries":[{"id":"x-old","slug":"pre-flip","title":"pre-flip","type":"feature","status":"ready","priority":"p2"}]}"#,
         )
         .unwrap();
         crate::backlog::set_backend(&graph, crate::backlog::Backend::Sqlite).unwrap();
