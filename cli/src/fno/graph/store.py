@@ -210,9 +210,8 @@ def store_socket_for(path: Path) -> Path:
 def _worker_binary() -> Path | None:
     """Locate `fno-agents-worker` for an on-demand keeper spawn.
 
-    The newest runnable candidate wins among the checkout artifacts and the
-    PATH copy; the env pins above are instructions, not candidates. The
-    worker is a sibling of the daemon binary everywhere it ships, and it
+    The newest runnable candidate wins among checkout artifacts and PATH; env pins outrank it.
+    The worker is a sibling of the daemon binary everywhere it ships, and it
     is never deleted by the smoke shard's @requires_rust clear (which
     removes only `fno-agents`), so the store keeps working where the parity
     suites skip.
@@ -613,7 +612,8 @@ class _ExecClient(_Keeper):
                 built = "an unstatable path"
             raise StoreUnavailable(
                 STATE_SPAWN_FAILED,
-                f"{detail}; ran {binary} built {built}; is the worker current? `fno doctor` names lag",
+                f"{detail}; ran {binary} built {built}; is fno-agents-worker"
+                " current? `fno doctor` names lag",
             ) from None
         try:
             reply = json.loads(out.decode("utf-8"))
