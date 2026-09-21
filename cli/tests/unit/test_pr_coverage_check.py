@@ -124,9 +124,12 @@ def _merge_refusal(capsys, tmp_path, fake):
             42, str(tmp_path), recompute=False
         )
         line = _coverage_gate.refusal_line(refusal, note)
+        detail = f"unreviewed merge refused: {line}" if line else (
+            "unreviewed merge refused"
+        )
 
         def _held(pr_number, repo, **kw):
-            return {"outcome": "held", "detail": line}
+            return {"outcome": "held", "detail": detail}
 
         monkeypatch_run.setattr(_merge, "_authorized_merge", _held)
         assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2

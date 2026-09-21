@@ -475,12 +475,9 @@ def _stub_owner_from_row(monkeypatch, tmp_path):
         return None
     line = _coverage_gate.refusal_line(refusal, note)
     # Same sentence the Rust gate composes per exit code, so the render pin
-    # is the wire shape, not a test-local dialect.
-    if state == _coverage_gate.IMPOSSIBLE:
-        detail = f"unreviewed merge refused: {line}" if line else (
-            "review coverage impossible at this head"
-        )
-    elif state == _coverage_gate.UNANSWERED:
+    # is the wire shape, not a test-local dialect. The gate module answers
+    # three states; its uncovered arm is the unreviewed-refusal sentence.
+    if state == _coverage_gate.UNANSWERED:
         detail = f"coverage probe failed, merge refused: {line}" if line else (
             "coverage probe failed, merge refused"
         )

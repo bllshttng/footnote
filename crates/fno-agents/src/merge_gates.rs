@@ -134,18 +134,49 @@ pub(crate) fn contract_node_for_pr(entries: &[Value], pr: u64) -> Option<String>
     None
 }
 
-/// Every PR number a graph row carries: the `pr` field plus urls inside the
-/// row's text fields (the board classifier's own `pr_binding_keys` covers the
-/// backref shapes; this reads the cheap fields first).
+/// Every PR number a graph row carries: the persisted `pr_number` field plus
+/// the `additional_prs` entries (typed rows carry `{number}` or `{url}`
+/// objects; legacy rows carry bare ints or `/pull/<n>` URL strings). A
+/// contract dependent whose PR is recorded only in `additional_prs` must
+/// still be found or the gate is bypassed.
 fn pr_numbers_of(entry: &Value) -> Vec<u64> {
     let mut out = Vec::new();
-    if let Some(n) = entry.get("pr").and_then(Value::as_u64) {
+    if let Some(n) = entry.get("pr_number").and_then(Value::as_u64) {
         out.push(n);
     }
-    if let Some(list) = entry.get("prs").and_then(Value::as_array) {
-        out.extend(list.iter().filter_map(Value::as_u64));
+    if let Some(list) = entry.get("additional_prs").and_then(Value::as_array) {
+        for raw in list {
+            match raw {
+                Value::Number(n) => {
+                    if let Some(n) = n.as_u64() {
+                        out.push(n);
+                    }
+                }
+                Value::Object(o) => {
+                    if let Some(n) = o.get("number").and_then(Value::as_u64) {
+                        out.push(n);
+                    } else if let Some(url) = o.get("url").and_then(Value::as_str) {
+                        if let Some(n) = pull_number_from_url(url) {
+                            out.push(n);
+                        }
+                    }
+                }
+                Value::String(url) => {
+                    if let Some(n) = pull_number_from_url(url) {
+                        out.push(n);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
     out
+}
+
+/// The PR number a `/pull/<n>` URL names, if it names one.
+fn pull_number_from_url(url: &str) -> Option<u64> {
+    let rest = url.split("/pull/").nth(1)?;
+    rest.split('/').next()?.parse::<u64>().ok()
 }
 
 /// The stub-manifest gate, pure over an already-read manifest value: a
@@ -270,13 +301,18 @@ fn ledger_plan_path(cwd: &Path, pr: u64) -> Option<String> {
         Value::Object(map) => map.get("entries")?.as_array()?.clone(),
         _ => return None,
     };
-    let slug = Command::new("git")
+    let origin = Command::new("git")
         .args(["config", "--get", "remote.origin.url"])
         .current_dir(cwd)
         .output()
         .ok()
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         .unwrap_or_default();
+    // The pr_url names `owner/repo` inside its path; the remote url names the
+    // same pair in ssh, https, and .git-suffixed spellings. Compare the
+    // normalized pair, never the raw url: a substring test on the raw form
+    // never matches and every scoping election falls to first-match.
+    let slug = repo_slug_from_origin(&origin).unwrap_or_default();
     let matches: Vec<&Value> = rows
         .iter()
         .filter(|row| row.get("pr_number").and_then(Value::as_u64) == Some(pr))
@@ -347,8 +383,29 @@ pub(crate) fn overlap_blocker<P: Probes>(
     if behind == 0 {
         return None;
     }
-    let base_paths = base_move_paths(probes, cwd, facts_number)?;
-    let pr_paths = pr_file_paths(probes, cwd, facts_number)?;
+    // The probes already know the base moved, so a read that fails holds:
+    // an under-reported move must never read as a clear. This is the Python
+    // miss contract, kept verbatim.
+    let base_paths = match base_move_paths(probes, cwd, facts_number) {
+        Some(paths) => paths,
+        None => {
+            return Some(Blocker::held(
+                "base_overlap",
+                "stale base: overlap probe unavailable (base moved; could not \
+                 compare file sets); run fno do pr rebase, then retry",
+            ));
+        }
+    };
+    let pr_paths = match pr_file_paths(probes, cwd, facts_number) {
+        Some(paths) => paths,
+        None => {
+            return Some(Blocker::held(
+                "base_overlap",
+                "stale base: overlap probe unavailable (the PR's own file \
+                 read failed); run fno do pr rebase, then retry",
+            ));
+        }
+    };
     let overlap = overlaps(&base_paths, &pr_paths);
     if overlap.is_empty() {
         return None;
@@ -513,6 +570,25 @@ fn overlaps(base_paths: &[String], pr_paths: &[String]) -> Vec<String> {
     base.intersection(&pr).map(|p| (*p).to_string()).collect()
 }
 
+/// The `owner/name` pair a remote url names, normalized across the ssh
+/// (`git@host:owner/repo.git`), https (`https://host/owner/repo.git`), and
+/// trailing-slash spellings, so the ledger scoping test reads the same
+/// repository whatever form the checkout's origin takes.
+fn repo_slug_from_origin(url: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    let mut parts: Vec<&str> = trimmed
+        .split(['/', ':'])
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let name = parts.pop()?;
+    let owner = parts.pop()?;
+    Some(format!("{owner}/{name}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,10 +637,51 @@ mod tests {
     #[test]
     fn contract_node_matches_dep_and_pr() {
         let entries = vec![
-            json!({"id": "x-1111", "dep": "hard", "pr": 7}),
-            json!({"id": "x-2222", "dep": "contract", "pr": 8}),
+            json!({"id": "x-1111", "dep": "hard", "pr_number": 7}),
+            json!({"id": "x-2222", "dep": "contract", "pr_number": 8}),
         ];
         assert_eq!(contract_node_for_pr(&entries, 8).as_deref(), Some("x-2222"));
         assert_eq!(contract_node_for_pr(&entries, 7), None);
+    }
+
+    #[test]
+    fn contract_node_reads_the_persisted_pr_fields() {
+        // The store persists `pr_number` + `additional_prs`; a dependent
+        // recorded only in the additional list must still be found.
+        let entries = vec![json!({
+            "id": "x-3333",
+            "dep": "contract",
+            "pr_number": 7,
+            "additional_prs": [
+                {"number": 42},
+                {"url": "https://github.com/o/r/pull/99"},
+                105,
+            ],
+        })];
+        for pr in [7u64, 42, 99, 105] {
+            assert_eq!(
+                contract_node_for_pr(&entries, pr).as_deref(),
+                Some("x-3333"),
+                "pr {pr} must match"
+            );
+        }
+        assert_eq!(contract_node_for_pr(&entries, 8), None);
+    }
+
+    #[test]
+    fn repo_slug_normalizes_the_remote_spellings() {
+        assert_eq!(
+            repo_slug_from_origin("git@github.com:o/r.git"),
+            Some("o/r".to_string())
+        );
+        assert_eq!(
+            repo_slug_from_origin("https://github.com/o/r.git/"),
+            Some("o/r".to_string())
+        );
+        assert_eq!(
+            repo_slug_from_origin("ssh://git@host:2222/o/r"),
+            Some("o/r".to_string())
+        );
+        assert_eq!(repo_slug_from_origin("o"), None);
     }
 }
