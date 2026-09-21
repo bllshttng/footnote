@@ -272,4 +272,120 @@ fn ac7_terminal_node_note_is_history_only() {
     );
     let (_, total) = fno_agents::backlog::note_history::read(&graph, Some("d-1"), 0, 50).unwrap();
     assert_eq!(total, 1);
+    // The terminal receipt still names id and text, and replaces nothing.
+    let (code, stdout, _) = note_captured(
+        &[
+            "--stdin", "--json", "--node", "d-1", "--quiet", &g[0], &g[1],
+        ],
+        "another note",
+    );
+    assert_eq!(code, 0);
+    let receipt: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(receipt["id"], json!("d-1"));
+    assert_eq!(receipt["text"], json!("another note"));
+    assert!(receipt["replaced"].is_null());
+}
+
+#[test]
+fn a_note_names_the_state_it_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    write_graph(&graph, &[fixture("t-1", "ready")]);
+    let g = graph_arg(&graph);
+    // First note over an empty state: the receipt says so.
+    let (code, stdout, stderr) = note_captured(
+        &[
+            "t-1",
+            "first line\nsecond line",
+            "--self-session",
+            "sess-aaaa1111",
+            "--json",
+            "--quiet",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let first: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert!(first["replaced"].is_null());
+    assert!(
+        first["line"]
+            .as_str()
+            .unwrap()
+            .contains("replaced nothing: t-1 had no current state"),
+        "{stdout}"
+    );
+    // Second note: the receipt names revision 1, its size and its author.
+    let (code, stdout, stderr) = note_captured(
+        &[
+            "t-1",
+            "probe",
+            "--self-session",
+            "sess-bbbb2222",
+            "--json",
+            "--quiet",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let second: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(second["replaced"]["revision"], json!(1));
+    assert_eq!(second["replaced"]["chars"], json!(22));
+    assert_eq!(
+        second["replaced"]["source_session_id"],
+        json!("sess-aaaa1111")
+    );
+    assert_eq!(second["replaced"]["head"], json!("first line..."));
+    assert_eq!(second["id"], json!("t-1"));
+    assert_eq!(second["text"], json!("probe"));
+    assert_eq!(second["routed"], json!("state"));
+    assert_eq!(second["revision"], json!(2));
+    // Third note, text receipt: both sizes and the history pointer print.
+    let (code, stdout, stderr) = note_captured(
+        &[
+            "t-1",
+            "probe",
+            "--self-session",
+            "sess-cccc3333",
+            "--quiet",
+            &g[0],
+            &g[1],
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("noted t-1: revision 3, "), "{stdout}");
+    assert!(
+        stdout.contains("replaced revision 2 (5 chars, written by session sess-bbb"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("fno backlog notes history t-1"), "{stdout}");
+    // AC6: the replaced body reads back whole from history.
+    let (records, _) = node_state::history_page(&graph, "t-1", 0, 10).unwrap();
+    assert!(
+        records
+            .iter()
+            .any(|r| r["original"]["body"] == json!("first line\nsecond line")),
+        "the two-line body must read back whole"
+    );
+}
+
+#[test]
+fn a_multibyte_head_is_cut_by_characters() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    write_graph(&graph, &[fixture("t-1", "ready")]);
+    let g = graph_arg(&graph);
+    let prior = "\u{1f30a}".repeat(100);
+    let (code, _, stderr) = note_captured(&["t-1", &prior, "--json", "--quiet", &g[0], &g[1]], "");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (code, stdout, stderr) =
+        note_captured(&["t-1", "probe", "--json", "--quiet", &g[0], &g[1]], "");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let second: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    let expected = format!("{}...", "\u{1f30a}".repeat(80));
+    assert_eq!(second["replaced"]["head"], json!(expected));
 }
