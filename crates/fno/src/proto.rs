@@ -315,7 +315,7 @@ fn default_true() -> bool {
 /// the client derives the age at render. Same decode both ways; floor 58.
 /// v78: `ControlVerb::ServerStats` + `ServerMsg::ServerStats`, the
 /// scoreboard's read-only emission-failure counter read; floor stays 58.
-/// v79: `Layout.missions` carries the active-mission headers; floor stays 58.
+/// v87: `Layout.missions` removed (the band is gone); floor stays 58.
 /// v80: `PanePlacement.fit` serde(default), the server picks the tab; floor 58.
 /// v81: `RestoreRow.portal` (serde default), the verb fills held seats; floor 58.
 /// v82: `AgentRow.lineage_kind` (serde default), the served CHILD/PEER word;
@@ -328,7 +328,7 @@ fn default_true() -> bool {
 /// stays 58.
 /// v86: `AgentRow.pr_session_short` (serde default), the server-joined
 /// driving-session short id behind a PR row's attach handle; floor stays 58.
-pub const PROTO_VERSION: u32 = 86;
+pub const PROTO_VERSION: u32 = 87;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -2155,12 +2155,6 @@ pub enum ServerMsg {
         /// classifier, used by the sideline menu label.
         #[serde(default)]
         sweep_dead_count: usize,
-        /// (v79) Active-mission progress headers, in their own lane so `squads`
-        /// carries only real workspaces. A mission is a header the client draws
-        /// as the `~ missions` band, never a workspace section, so a row grouped
-        /// under one would be drawn by no section at all and vanish.
-        #[serde(default)]
-        missions: Vec<SquadMeta>,
     },
     /// Escape bytes syncing the client terminal to the newly focused pane's
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
@@ -2609,19 +2603,6 @@ pub struct TabMeta {
     /// (empty -> the navigator simply lists no plain panes for the tab).
     #[serde(default)]
     pub panes: Vec<PaneMeta>,
-}
-
-/// High bit of a synthetic "mission squad" `SquadMeta.id` (a render-time
-/// grouping header with no backing session squad - see `derive_missions`).
-/// Real squad ids are monotonic starting at 1, so this bit never collides.
-/// Shared between server (minting) and client (recognizing a virtual id
-/// needs no server round-trip to expand/collapse or place a pane into).
-pub const MISSION_SQUAD_BASE: u64 = 1 << 63;
-
-/// Whether a `SquadMeta.id` names a synthetic mission squad rather than a
-/// real session squad.
-pub fn is_mission_squad(id: u64) -> bool {
-    id & MISSION_SQUAD_BASE != 0
 }
 
 /// One squad's catalog entry inside [`ServerMsg::Layout`]. Identity is the
@@ -4542,7 +4523,6 @@ mod tests {
                 backlog_lanes: vec![("in-progress".into(), 1), ("ready".into(), 56)],
                 backlog_stale: false,
                 sweep_dead_count: 0,
-                missions: Vec::new(),
             },
             ServerMsg::ModeSync {
                 bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),

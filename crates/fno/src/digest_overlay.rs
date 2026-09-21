@@ -111,13 +111,6 @@ pub fn resource_meter_refresh_secs(cwd: &Path) -> u64 {
         .max(1)
 }
 
-/// `config.mux.show_missions` (default ON) - the `~ missions` progress band's
-/// off-switch. A mission can never hold a session, so an operator who runs no
-/// epics can drop the band entirely rather than dismiss it each session.
-pub fn missions_section_enabled(cwd: &Path) -> bool {
-    mux_bool(cwd, "show_missions", true)
-}
-
 /// `config.mux.show_backlog` (default ON) - the `~ backlog` lane's off-switch.
 pub fn backlog_section_enabled(cwd: &Path) -> bool {
     mux_bool(cwd, "show_backlog", true)

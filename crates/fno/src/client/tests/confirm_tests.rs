@@ -57,7 +57,7 @@ fn every_confirm_variant_renders_shared_chrome_and_controls() {
         ),
         (
             ConfirmKind::ClearDead {
-                key: crate::view_store::SectionKey::Missions,
+                key: crate::view_store::SectionKey::Elsewhere,
                 squad: None,
                 dead: 3,
             },

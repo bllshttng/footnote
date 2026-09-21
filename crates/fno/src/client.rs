@@ -813,10 +813,6 @@ struct LayoutView {
     /// has been failing. Rendered as a header marker; the cards still show (a
     /// blank section would be worse than an honestly-labelled stale one).
     backlog_stale: bool,
-    /// (v79) Active-mission progress headers, their own lane so `squads` holds
-    /// only real workspaces. Drawn as the `~ missions` band; never a section an
-    /// agent row can be grouped under.
-    missions: Vec<SquadMeta>,
 }
 
 /// One selectable sideline row: a squad, or one of its tabs when expanded.
@@ -1087,11 +1083,8 @@ struct View {
     /// Feeds the backlog card menu's open-plan item (`link::plan_link`); never
     /// re-read mid-session, matching every other startup-latched config value.
     obsidian: crate::digest_overlay::ObsidianCfg,
-    /// `config.mux.show_missions` / `config.mux.show_backlog` (default on): drop
-    /// the `~ missions` progress band or the `~ backlog` lane entirely. Latched
-    /// once at startup; an operator who runs no epics hides the empty band rather
-    /// than collapsing it each session.
-    show_missions: bool,
+    /// `config.mux.show_backlog` (default on): drop the `~ backlog` lane
+    /// entirely. Latched once at startup.
     show_backlog: bool,
     /// `config.mux.theme`: the chrome palette. Latched once at startup
     /// from the same config ladder `hover_focus` reads, and swapped in memory on
@@ -1585,8 +1578,8 @@ enum MenuTarget {
     Card(String),
     /// A section header (a squad name row or a `~` band). `label` is cosmetic
     /// (the confirm prompt); `key` is the persisted section identity and `squad`
-    /// the runtime one, present for a squad/mission header and `None` for a `~`
-    /// band (which has no squad).
+    /// the runtime one, present for a squad header and `None` for a `~` band
+    /// (which has no squad).
     Section {
         key: SectionKey,
         label: String,
@@ -1647,7 +1640,7 @@ enum MenuAction {
     /// workspace's active-tab focus pane is the `MovePane` anchor, so the live
     /// pane grafts in beside it and de-recruits from its source (the
     /// `move_pane_cross_tab` path the row drag already uses). Appended in
-    /// [`View::open_row_menu`] only when another non-mission workspace exists,
+    /// [`View::open_row_menu`] only when another workspace exists,
     /// so the entry never offers a move with no destination.
     MoveToWorkspace,
     /// Focus an existing pane-hosted row.
@@ -2390,7 +2383,6 @@ impl View {
             search_esc: Vec::new(),
             hover_focus: true,
             obsidian: crate::digest_overlay::ObsidianCfg::default(),
-            show_missions: true,
             show_backlog: true,
             theme: Theme::default_theme(),
             settings_tab: SettingsTab::General,
@@ -3098,7 +3090,7 @@ impl View {
     }
 
     /// The candidate destination squads for a Move-to-workspace gesture on a row
-    /// owned by `own`: every other non-mission workspace. Shared by the menu
+    /// owned by `own`: every other workspace. Shared by the menu
     /// entry's construction, its dispatch, and the tab-move picker so the three
     /// cannot drift on what counts as a destination.
     ///
@@ -3117,16 +3109,13 @@ impl View {
     }
 
     /// The candidate destination workspaces for an attach placement: every
-    /// non-mission workspace. A synthetic mission squad is a render-time
-    /// grouping header, not a real squad `place_spawned_pane` can route into,
-    /// so it is excluded here rather than at each call site.
+    /// real workspace.
     ///
     /// Both entry paths into the placement picker (the click path through
     /// `apply_hit` and the keyboard path through `p`/Enter) built this list
     /// independently and identically. Two constructions of one list is the
-    /// N-reachable-paths trap in miniature: the mission-squad exclusion had
-    /// already been fixed twice, and the `.take(9)` cap had to be removed
-    /// twice. Now there is one.
+    /// N-reachable-paths trap in miniature: the `.take(9)` cap had to be
+    /// removed twice. Now there is one.
     fn attach_dst_squads(&self) -> Vec<u64> {
         self.layout.squads.iter().map(|s| s.id).collect()
     }
@@ -3148,7 +3137,7 @@ impl View {
                 let mut menu = build_row_menu(a, anchor);
                 // A pane-hosted row can relocate its live pane into another
                 // workspace; a paneless row already gets the `p` placement
-                // picker. Append the entry only when another non-mission
+                // picker. Append the entry only when another
                 // workspace exists, so it never offers a move to nowhere. Built
                 // here (where the layout is) rather than in build_row_menu so
                 // the per-state builder stays layout-free and its direct tests
@@ -3212,7 +3201,7 @@ impl View {
                 // there are no dead rows when the truth is we won't guess which.
                 let dead = self.section_dead_rows(&key, squad).len();
                 // A workspace section always has a menu (it can be renamed). A
-                // non-workspace header (Elsewhere/Mission) with nothing to clear
+                // non-workspace header (Elsewhere) with nothing to clear
                 // says so rather than opening a one-entry no-op menu.
                 if dead == 0 && squad.is_none() {
                     self.set_notice(format!("no dead rows in {label}"));
@@ -5194,8 +5183,8 @@ impl View {
         // reorder verb gets. Checked against the incoming backlog before it is
         // stored, since the comparison is against the dispatch-time snapshot.
         self.confirm_backlog_pending(&layout.backlog);
-        // No active-squad or mission seed here: the "active squad and
-        // missions open by default" rule is computed live in `section_view()`,
+        // No active-squad seed here: the "active squad opens by default"
+        // rule is computed live in `section_view()`,
         // so it tracks agents exiting mid-session (a majority-exited section
         // downgrades to LiveOnly, AC3-FR) and leaves this map holding only the
         // operator's own persisted choices - which is exactly what
@@ -5352,14 +5341,14 @@ impl View {
     ///   1. An explicit persisted operator choice wins verbatim - it survives a
     ///      restart and outranks every computed default below (Locked 2, AC1-FR).
     ///   2. Else a computed default, recomputed from the layout in hand:
-    ///      - the active squad and every mission open `Expanded`, downgrading to
+    ///      - the active squad opens `Expanded`, downgrading to
     ///        `LiveOnly` when the section is majority-exited so the dead rows
     ///        fold behind the header's `✗N` while the live agents stay up;
     ///      - an inactive squad stays `Collapsed` - surfacing live rows across
     ///        every idle workspace is the opposite of attention-focus;
     ///      - the two pull-sections `~ elsewhere` / `~ backlog` default
     ///        `Collapsed`, one click from their own header + rollup.
-    /// The active-squad/mission default lives HERE, not in a map-seed: a seed is
+    /// The active-squad default lives HERE, not in a map-seed: a seed is
     /// a one-time snapshot that cannot downgrade to LiveOnly as agents exit
     /// mid-session, and it pollutes the map that should hold only choices.
     fn section_view(&self, key: &SectionKey) -> SectionView {
@@ -5367,11 +5356,6 @@ impl View {
             return chosen;
         }
         match key {
-            // The `~ missions` band is a progress summary, not a workspace: it
-            // opens Expanded (the mission names are the content) and the operator
-            // collapses it explicitly. No LiveOnly tier - the names have no
-            // exited state, so it is binary.
-            SectionKey::Missions => SectionView::Expanded,
             SectionKey::Squad(_) if self.is_active_squad(key) => self.expanded_or_live_only(key),
             SectionKey::Squad(_) | SectionKey::Elsewhere | SectionKey::WorkQueue => {
                 SectionView::Collapsed
@@ -5407,7 +5391,7 @@ impl View {
     /// 50/50 split is not either, so only a real majority downgrades to LiveOnly.
     /// Walks the same membership `section_dead_rows` does, live off the layout
     /// and never cached, so it tracks agents exiting mid-session. Only the
-    /// Expanded-tier keys (active squad, mission) reach it; every other key has
+    /// Expanded-tier key (the active squad) reaches it; every other key has
     /// no squad match and reads as "not a majority".
     fn majority_exited(&self, key: &SectionKey) -> bool {
         let Some(id) = self
@@ -5592,8 +5576,6 @@ impl View {
             SectionKey::Elsewhere => self.orphans().into_iter().filter(|a| a.exited).collect(),
             // Cards have no exited state, so the Backlog section is always binary.
             SectionKey::WorkQueue => Vec::new(),
-            // The `~ missions` band holds progress names, not agents.
-            SectionKey::Missions => Vec::new(),
         }
     }
 
@@ -7344,8 +7326,6 @@ impl View {
         // single squad has no groups to separate (US3 verify: absent with 1
         // squad).
         let multi_squad = self.layout.squads.len() > 1;
-        // `squads` carries only real workspaces: missions ride their own lane
-        // and render under the `~ missions` band below.
         for (idx, s) in self.layout.squads.iter().enumerate() {
             // One spacer between consecutive workspace groups (never before the
             // first, so no leading blank and never doubled).
@@ -7454,43 +7434,6 @@ impl View {
         // The `+` create-workspace affordance sits directly under the squad list
         //, above the agents/work-queue sections.
         out.push(DisplayRow::NewSquad);
-        // Mission squads are progress indicators, not workspaces (an agent is
-        // never assigned a mission id), so they render as one `~ missions` band -
-        // the same `~`-prefixed pull-section shape as `~ elsewhere` / `~ backlog` -
-        // rather than workspace sections an operator rightly expects to hold
-        // sessions. Each mission's name already carries its `done/total` counter.
-        // Skip the collect entirely when the band is off (the documented reason
-        // for the toggle) - display_rows is hot, called per compose.
-        let missions: Vec<&SquadMeta> = if self.show_missions {
-            self.layout.missions.iter().collect()
-        } else {
-            Vec::new()
-        };
-        if !missions.is_empty() {
-            if multi_squad {
-                out.push(DisplayRow::Blank);
-            }
-            let view = self.section_view(&SectionKey::Missions);
-            out.push(DisplayRow::Header {
-                label: "~ missions",
-                rollup: Vec::new(),
-                key: SectionKey::Missions,
-                view,
-            });
-            if view != SectionView::Collapsed {
-                // Inert on purpose, and it stays that way. A mission
-                // squad is a render-time grouping the server appends to the
-                // LAYOUT catalog only (`push_layout`); it is absent from
-                // `session.squads`, so `RenameSquad` and `RemoveSquad` both
-                // answer `no such squad` for its id. A menu built from those
-                // would be entries that all fail, which is worse than none. The
-                // hold answers with `no menu on the held row` instead, so the
-                // row is inert but never silent.
-                for m in missions {
-                    out.push(DisplayRow::Sub(m.name.clone()));
-                }
-            }
-        }
         let orphans = self.orphans();
         if !orphans.is_empty() {
             // Orphans (cwd matched no squad) keep one flat section in the same
@@ -7855,13 +7798,11 @@ fn glyph_cols(ch: char) -> usize {
     }
 }
 
-/// A squad's [`SectionKey`]. Deliberately NOT keyed on `name`: a mission
-/// header's name carries its live `done/total` counters and a derived squad
-/// label is rewritten the moment a sibling collides, so either would orphan
-/// the operator's choice on an unrelated event. The synthetic mission id and
-/// the canonical repo root are the stable identities. A squad with neither
-/// (no cwd, not a mission) falls back to its name - degenerate, and better
-/// than dropping its state entirely.
+/// A squad's [`SectionKey`]. Deliberately NOT keyed on `name`: a derived squad
+/// label is rewritten the moment a sibling collides, which would orphan
+/// the operator's choice on an unrelated event. The canonical repo root is
+/// the stable identity; a squad with no cwd falls back to its name -
+/// degenerate, and better than dropping its state entirely.
 fn section_key(s: &SquadMeta) -> SectionKey {
     if !s.canonical_cwd.is_empty() {
         SectionKey::Squad(s.canonical_cwd.clone())
@@ -7885,7 +7826,7 @@ fn squad_matches(s: &SquadMeta, key: &SectionKey) -> bool {
     match key {
         SectionKey::Squad(ident) if !s.canonical_cwd.is_empty() => &s.canonical_cwd == ident,
         SectionKey::Squad(ident) => &s.name == ident,
-        SectionKey::Elsewhere | SectionKey::WorkQueue | SectionKey::Missions => false,
+        SectionKey::Elsewhere | SectionKey::WorkQueue => false,
     }
 }
 
@@ -7895,9 +7836,7 @@ fn squad_matches(s: &SquadMeta, key: &SectionKey) -> bool {
 fn section_is_live(layout: &LayoutView, key: &SectionKey) -> bool {
     match key {
         SectionKey::Squad(_) => layout.squads.iter().any(|s| squad_matches(s, key)),
-        // The `~ missions` band is live while any mission exists; the two
-        // pull-sections are always considered live (their rows come and go).
-        SectionKey::Missions => !layout.missions.is_empty(),
+        // The pull-sections are always considered live (their rows come and go).
         SectionKey::Elsewhere | SectionKey::WorkQueue => true,
     }
 }
@@ -9653,7 +9592,6 @@ async fn attach_and_run(
             backlog: Vec::new(),
             backlog_lanes: Vec::new(),
             backlog_stale: false,
-            missions: Vec::new(),
         },
     );
     // Latch the focus-follows-mouse off-switch once; a direct
@@ -9671,8 +9609,7 @@ async fn attach_and_run(
     // run loop's first iteration (the loop owns meter_tx, one-shot flag).
     view.resource_meter_sampling = view.resource_meter_on;
     view.obsidian = crate::digest_overlay::ObsidianCfg::read(Path::new(&cwd));
-    // Same idiom for the optional `~ missions` / `~ backlog` section toggles.
-    view.show_missions = crate::digest_overlay::missions_section_enabled(Path::new(&cwd));
+    // Same idiom for the optional `~ backlog` section toggle.
     view.show_backlog = crate::digest_overlay::backlog_section_enabled(Path::new(&cwd));
     // The chrome theme, same ladder. An unknown name falls back to
     // `terminal` WITH a notice - silence here would hide a typo the operator
@@ -9738,7 +9675,6 @@ async fn attach_and_run(
                 backlog,
                 backlog_lanes,
                 backlog_stale,
-                missions,
                 ..
             }) => {
                 view.set_layout(LayoutView {
@@ -9752,7 +9688,6 @@ async fn attach_and_run(
                     backlog,
                     backlog_lanes,
                     backlog_stale,
-                    missions,
                 });
                 break;
             }
@@ -10270,8 +10205,8 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, missions, .. }) => {
-                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, missions });
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, .. }) => {
+                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale });
                     // a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).
@@ -14376,10 +14311,7 @@ async fn selector_keys(
                     _ => None,
                 };
                 // Enter reaches the thread pane, so `p` is the
-                // picker's only door. The synthetic mission squad must still be
-                // excluded here (attach_dst_squads does it) or the virtual id
-                // leaks into the picker and `place_spawned_pane` cannot route
-                // it. Same reason the two no-op cases stay distinct: "no
+                // picker's only door. The two no-op cases stay distinct: "no
                 // workspace" and "not attachable" are different problems to
                 // report.
                 let squads: Vec<u64> = view.attach_dst_squads();
@@ -14623,11 +14555,9 @@ async fn selector_keys(
                 .and_then(|squad| {
                     let sq = view.layout.squads.iter().find(|s| s.id == squad)?;
                     let tid = sq.tabs.get(sq.active_tab).or_else(|| sq.tabs.first())?.id;
-                    // Exclude the source AND mission sentinels: a mission id
-                    // resolves to no server-side squad, so MoveTab into one is
-                    // refused. That rule now lives in `move_dst_squads`, which
-                    // the Move-to-workspace menu entry already uses - this site
-                    // was a fourth hand-rolled copy of the same list.
+                    // Exclude the source: that rule lives in `move_dst_squads`,
+                    // which the Move-to-workspace menu entry already uses - this
+                    // site was a fourth hand-rolled copy of the same list.
                     let dsts: Vec<u64> = view.move_dst_squads(Some(squad));
                     (!dsts.is_empty()).then_some((tid, dsts))
                 });
