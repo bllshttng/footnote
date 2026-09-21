@@ -17,6 +17,31 @@ def test_ac3_edge_truncated_new_format_row_is_unparsed() -> None:
     assert reading.process_count == 0
 
 
+def test_ac1_hp_escaped_newline_argv_parses_and_a_torn_row_still_samples() -> None:
+    """x-4df5: the writer escapes a newline argv to the four characters
+    \\012 (and \\015), so the cell is ordinary characters and parses clean."""
+    reading = parse_footprint(
+        """\
+        PID PPID STAT ELAPSED %CPU RSS COMMAND
+        101 1 R 01:00:00 20.0 1024 fno-agents-worker --run --pin a\\012b\\015c
+        """
+    )
+
+    assert reading.unparsed_lines == 0
+    assert reading.process_count == 1
+    assert reading.top == [(20.0, "fno-agents-worker --run --pin a\\012b\\015c")]
+
+    torn = parse_footprint(
+        """\
+        PID PPID STAT ELAPSED %CPU RSS COMMAND
+        101 1 R 00:01 0.0 1024
+        """
+    )
+
+    assert torn.unparsed_lines == 1
+    assert len(torn.unparsed_samples) == 1
+
+
 def test_ac1_hp_attributes_transitive_build_descendants_and_excludes_negative_tree() -> None:
     reading = parse_footprint(
         """\
