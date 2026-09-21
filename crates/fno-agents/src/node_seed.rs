@@ -22,6 +22,16 @@ fn canonical(node_verb: &str) -> String {
 /// The seed text at `argv[seed_index]`, with the `--message=` prefix
 /// stripped for the `message_eq` form. `None` when there is no slot.
 fn seed_text(payload: &Value) -> Option<String> {
+    // A nodeless derive caller may send bare argv: the seed is then the first
+    // verb-shaped token, and a flag value never parses as a verb.
+    if payload.get("seed_index").and_then(Value::as_u64).is_none() {
+        let argv = payload.get("argv")?.as_array()?;
+        return argv.iter().skip(1).find_map(|tok| {
+            let raw = tok.as_str()?;
+            let text = raw.strip_prefix("--message=").unwrap_or(raw);
+            parse_verb_token(text.split_whitespace().next()?).map(|_| text.to_string())
+        });
+    }
     let index = payload.get("seed_index")?.as_u64()? as usize;
     let argv = payload.get("argv")?.as_array()?;
     let raw = argv.get(index)?.as_str()?.to_string();
@@ -85,7 +95,7 @@ fn without_flag(mut argv: Vec<String>, flag: &str) -> Vec<String> {
 /// Python side applies the answer generically and both lanes see an
 /// explicit node afterwards. A seed naming no node answers pass with a
 /// `derive_reason`. Pure over the payload.
-fn derive_from_seed(payload: &Value, seed: Option<String>) -> Value {
+fn derive_from_seed(payload: &Value, seed: Option<String>, rows: &[Value]) -> Value {
     let pass = |reason: String| json!({"action": "pass", "derive_reason": reason});
     let Some(text) = seed.filter(|t| !t.trim().is_empty()) else {
         return pass("no seed".into());
@@ -113,6 +123,20 @@ fn derive_from_seed(payload: &Value, seed: Option<String>) -> Value {
     let arg = toks.get(1).map(|t| trim_sentence_punct(t));
     match arg.filter(|a| looks_like_node_id(a)) {
         Some(id) => {
+            let named = rows
+                .iter()
+                .any(|r| r.get("id").and_then(Value::as_str) == Some(id));
+            if !named {
+                // A derived name with no row proceeds exactly as before the
+                // derivation existed; the flag carries the receipt.
+                let reason = format!("{id} names no readable backlog row (derived from the seed)");
+                let argv = with_flag_inserted(
+                    without_flag(argv_of(payload), "--node"),
+                    "--node-reason",
+                    &reason,
+                );
+                return json!({"action": "compose", "argv": argv});
+            }
             let argv = with_flag_inserted(argv_of(payload), "--node", id);
             json!({"action": "compose", "argv": argv})
         }
@@ -136,6 +160,22 @@ fn argv_of(payload: &Value) -> Vec<String> {
 }
 
 pub fn decide(payload: &Value) -> Value {
+    let nodeless = payload
+        .get("node")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .is_empty();
+    let rows = if nodeless {
+        crate::graph_store::read_rows(&crate::graph_get::default_graph_path()).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    decide_in(payload, &rows)
+}
+
+/// [`decide`] over a handed-in row set, so a test can pin a fixture and the
+/// nodeless arm never touches the machine store.
+fn decide_in(payload: &Value, rows: &[Value]) -> Value {
     let node = payload
         .get("node")
         .and_then(Value::as_str)
@@ -152,11 +192,11 @@ pub fn decide(payload: &Value) -> Value {
 
     let seed = seed_text(payload);
 
-    // 1b. The nodeless arm: the seed names the node, so derive it and
-    //     answer compose with the flag already inserted; the seam applies
-    //     the argv, so both lanes see an explicit node afterwards.
+    // 1b. The nodeless arm: the seed names the node, so derive it; the row
+    //     check rides the store rows, and a name with no row answers the
+    //     receipt so the spawn proceeds exactly as before.
     if node.is_empty() {
-        return derive_from_seed(payload, seed);
+        return derive_from_seed(payload, seed, rows);
     }
 
     // 2. The de-stub pass spells its own command; its seed carries the token.
@@ -188,17 +228,8 @@ pub fn decide(payload: &Value) -> Value {
 
     // 4-6. Unknown means refuse, the spawn-gate posture: a missing row, a
     //    derivation error, or a node with no verb is not evidence of
-    //    /target. A DERIVED node that names no row is the one exception:
-    //    the spawn proceeds exactly as before the derivation existed, and
-    //    the flag carries the receipt so the mint can stamp why the row
-    //    works no node.
+    //    /target.
     if payload.get("row_found").and_then(Value::as_bool) != Some(true) {
-        if payload.get("derived").and_then(Value::as_bool) == Some(true) {
-            let reason = format!("{node} names no readable backlog row (derived from the seed)");
-            let argv = without_flag(argv_of(payload), "--node");
-            let argv = with_flag_inserted(argv, "--node-reason", &reason);
-            return json!({"action": "compose", "argv": argv});
-        }
         return json!({"action": "refuse", "message": format!(
             "--node {node} names no readable backlog row; an unknown node is not evidence of a verb")});
     }
@@ -284,7 +315,15 @@ mod tests {
     use serde_json::{json, Map};
 
     fn decide_map(payload: Value) -> Map<String, Value> {
-        decide(&payload)
+        decide_in(&payload, &[])
+            .as_object()
+            .cloned()
+            .expect("decision is an object")
+    }
+
+    /// [`decide_map`] over a pinned row set, for the nodeless derive arm.
+    fn decide_map_rows(payload: Value, rows: &[Value]) -> Map<String, Value> {
+        decide_in(&payload, rows)
             .as_object()
             .cloned()
             .expect("decision is an object")
@@ -462,9 +501,19 @@ mod tests {
         })
     }
 
+    /// Fixture rows naming the ids the nodeless derive tests bind.
+    fn rows_named(ids: &[&str]) -> Vec<Value> {
+        ids.iter()
+            .map(|id| json!({"id": id, "status": "ready"}))
+            .collect()
+    }
+
     #[test]
     fn nodeless_family_seed_derives_the_argument() {
-        let out = decide_map(base_derive("/fno:target x-aaaa", 1));
+        let out = decide_map_rows(
+            base_derive("/fno:target x-aaaa", 1),
+            &rows_named(&["x-aaaa"]),
+        );
         assert_eq!(out["action"], "compose");
         let argv = out["argv"].as_array().unwrap();
         assert_eq!(argv[argv.len() - 2], "--node");
@@ -473,7 +522,10 @@ mod tests {
 
     #[test]
     fn nodeless_dollar_seed_derives_too() {
-        let out = decide_map(base_derive("$fno:target x-bbbb", 1));
+        let out = decide_map_rows(
+            base_derive("$fno:target x-bbbb", 1),
+            &rows_named(&["x-bbbb"]),
+        );
         assert_eq!(out["action"], "compose");
         let argv = out["argv"].as_array().unwrap();
         assert_eq!(argv[argv.len() - 1], "x-bbbb");
@@ -481,7 +533,7 @@ mod tests {
 
     #[test]
     fn nodeless_bare_slash_verb_derives() {
-        let out = decide_map(base_derive("/target x-1111", 1));
+        let out = decide_map_rows(base_derive("/target x-1111", 1), &rows_named(&["x-1111"]));
         assert_eq!(out["action"], "compose");
         let argv = out["argv"].as_array().unwrap();
         assert_eq!(argv[argv.len() - 1], "x-1111");
@@ -489,13 +541,37 @@ mod tests {
 
     #[test]
     fn trailing_sentence_punctuation_is_trimmed() {
-        let out = decide_map(base_derive(
-            "/fno:target x-cccc. Plan: /plans/x.md. Rebase first.",
-            1,
-        ));
+        let out = decide_map_rows(
+            base_derive("/fno:target x-cccc. Plan: /plans/x.md. Rebase first.", 1),
+            &rows_named(&["x-cccc"]),
+        );
         assert_eq!(out["action"], "compose");
         let argv = out["argv"].as_array().unwrap();
         assert_eq!(argv[argv.len() - 1], "x-cccc");
+    }
+
+    #[test]
+    fn bare_argv_without_seed_facts_still_derives() {
+        let mut p = base_derive("/fno:target x-eeee", 1);
+        p.as_object_mut().unwrap().remove("seed_index");
+        p.as_object_mut().unwrap().remove("seed_form");
+        let out = decide_map_rows(p, &rows_named(&["x-eeee"]));
+        assert_eq!(out["action"], "compose");
+        let argv = out["argv"].as_array().unwrap();
+        assert_eq!(argv[argv.len() - 1], "x-eeee");
+    }
+
+    #[test]
+    fn derived_name_with_no_row_answers_the_receipt() {
+        let out = decide_map_rows(base_derive("/fno:target x-ffff", 1), &rows_named(&[]));
+        assert_eq!(out["action"], "compose");
+        let argv = out["argv"].as_array().unwrap();
+        assert_eq!(argv[argv.len() - 2], "--node-reason");
+        assert_eq!(
+            argv[argv.len() - 1],
+            "x-ffff names no readable backlog row (derived from the seed)"
+        );
+        assert!(!argv.contains(&json!("--node")));
     }
 
     #[test]
@@ -567,7 +643,7 @@ mod tests {
     fn message_eq_seed_derives_the_argument() {
         let mut p = base_derive("--message=/fno:target x-3333", 1);
         p["seed_form"] = json!("message_eq");
-        let out = decide_map(p);
+        let out = decide_map_rows(p, &rows_named(&["x-3333"]));
         assert_eq!(out["action"], "compose");
         let argv = out["argv"].as_array().unwrap();
         assert_eq!(argv[argv.len() - 1], "x-3333");

@@ -441,6 +441,16 @@ def _target_row(tmp_path):
     return row
 
 
+@pytest.fixture
+def _rust_graph(tmp_path, monkeypatch):
+    """Point the binary's own store read (FNO_HOME -> graph.json) at a fixture
+    naming x-1, so the nodeless derive arm resolves it without the machine."""
+    monkeypatch.setenv("FNO_HOME", str(tmp_path))
+    (tmp_path / "graph.json").write_text(
+        json.dumps({"entries": [{"id": "x-1"}]}), encoding="utf-8"
+    )
+
+
 def _stub_verb_seq(monkeypatch, answers):
     """Like _stub_verb but each call pops the next canned answer; later calls
     answer pass, which is what an agreeing /target derivation meets."""
@@ -457,10 +467,9 @@ def _stub_verb_seq(monkeypatch, answers):
 
 
 def test_seam_binds_the_seed_node_without_the_flag(monkeypatch):
-    """x-8d88 Task 2 (red): a derive answer inserts --node x-1 into the argv,
-    so the mint below the seam binds the row to the node the seed named.
-    Fails on today's code: the seam never calls the verb and the argv goes
-    through unchanged, leaving the minted row's node None."""
+    """x-8d88 Task 2: the derive answer inserts --node x-1 into the argv, the
+    seam applies it and the unmodified explicit block re-decides with the row
+    facts, so the mint below the seam binds the row to the node the seed named."""
     _stub_row(monkeypatch, _row(dispatch_verb="/target"))
     inserted = ["spawn", "/fno:target x-1", "--node", "x-1"]
     seen = _stub_verb_seq(monkeypatch, [{"action": "compose", "argv": inserted}])
@@ -473,15 +482,12 @@ def test_seam_binds_the_seed_node_without_the_flag(monkeypatch):
     assert len(seen) == 2
     assert "node" not in seen[0], "the derive call carries no row facts"
     assert seen[1]["node"] == "x-1"
-    assert seen[1]["derived"] is True
 
 
 def test_seam_derive_names_an_unresolvable_node_as_a_receipt(monkeypatch):
-    """x-8d88 Task 4 (red): the seed names a node the seam cannot resolve, so
-    the spawn proceeds WITHOUT a node binding and the reason rides
-    --node-reason for the mint to stamp. Pinned to the dev runtime: its
-    binary carries the receipt flag."""
-    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "rust")
+    """x-8d88 Task 4: the seed names a node the verb's store read cannot
+    resolve, so the receipt-compose answer swaps --node for --node-reason and
+    the spawn proceeds WITHOUT a node binding; the mint stamps the reason."""
     _stub_row(monkeypatch, None)
     receipt_argv = [
         "spawn",
@@ -517,7 +523,7 @@ def test_seam_degrades_when_the_verb_predates_the_derivation(monkeypatch, capsys
 
 
 @requires_rust
-def test_seam_real_binary_binds_the_seed_node_without_the_flag(monkeypatch, _target_row):
+def test_seam_real_binary_binds_the_seed_node_without_the_flag(monkeypatch, _target_row, _rust_graph):
     """x-8d88 on the real transport: only the graph row is stubbed; the
     compiled node-seed answer derives x-1 from the seed and the seam inserts
     the flag. Fails against a binary built before the derivation."""
@@ -531,7 +537,7 @@ def test_seam_real_binary_binds_the_seed_node_without_the_flag(monkeypatch, _tar
 
 
 @requires_rust
-def test_seam_real_binary_trims_sentence_punctuation(monkeypatch, _target_row):
+def test_seam_real_binary_trims_sentence_punctuation(monkeypatch, _target_row, _rust_graph):
     """x-8d88 Task 1 follow-up: the operator template spells
     `/fno:target x-5d17. Plan: ...`; the trailing period is prose, not id."""
     _stub_row(monkeypatch, _target_row)
@@ -542,7 +548,7 @@ def test_seam_real_binary_trims_sentence_punctuation(monkeypatch, _target_row):
 
 
 @requires_rust
-def test_seed_only_pane_spawn_mints_the_nodes_row_binding(monkeypatch, runner, _target_row):
+def test_seed_only_pane_spawn_mints_the_nodes_row_binding(monkeypatch, runner, _target_row, _rust_graph):
     """x-8d88 Task 2: a /fno:target x-1 seed and no --node reaches the pane
     mint with the node resolved: provenance carries FNO_NODE and the seed
     passes through unchanged (agreement, so no compose rewrite)."""

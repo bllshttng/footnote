@@ -1337,10 +1337,7 @@ def cmd_spawn(
             "for prompt provenance (--slug/--plan override the graph read)."
         ),
     ),
-    node_reason: str | None = typer.Option(
-        None, "--node-reason", hidden=True,
-        help="Seam receipt: the seed's node resolved to no readable row.",
-    ),
+    node_reason: str | None = typer.Option(None, "--node-reason", hidden=True),
     slug: str | None = typer.Option(
         None, "--slug", help="Provenance FNO_SLUG override (skips the graph read)."
     ),

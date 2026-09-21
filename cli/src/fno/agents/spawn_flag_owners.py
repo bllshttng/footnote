@@ -133,6 +133,7 @@ FLAG_OWNERS: dict[str, FlagOwner] = {
     "--crown": FlagOwner(FNO, "crown ladder; no harness has the concept"),
     "--succeed": FlagOwner(FNO, "crown succession; fno validates the transfer"),
     "--node": FlagOwner(FNO, "backlog identity; exports the node-provenance env"),
+    "--node-reason": FlagOwner(FNO, "seam receipt; the seed's derived node named no row"),
     "--slug": FlagOwner(FNO, "provenance override"),
     "--plan": FlagOwner(FNO, "provenance override"),
     "--session-phase": FlagOwner(FNO, "sessions-row lifecycle stamp"),
@@ -142,6 +143,5 @@ FLAG_OWNERS: dict[str, FlagOwner] = {
     "--prompt-file": FlagOwner(FNO, "long-prompt input file ('-' = stdin)"),
 }
 
-#: Growth ratchet, measured at merge: 45 flags (44 + --mux-session, the
-#: dispatch-next lane pin).
-SPAWN_FLAG_CAP = 45
+#: Growth ratchet, measured at merge: 46 flags (45 + --node-reason, the seam receipt).
+SPAWN_FLAG_CAP = 46

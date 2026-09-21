@@ -37,6 +37,12 @@ def _open_node_row(monkeypatch, tmp_path):
         "cwd": str(tmp_path),
     }
     monkeypatch.setattr("fno.graph.load.load_graph", lambda: [row])
+    # The verb reads the store itself for the nodeless derive: point its
+    # FNO_HOME at a fixture graph naming the same row.
+    monkeypatch.setenv("FNO_HOME", str(tmp_path))
+    (tmp_path / "graph.json").write_text(
+        json.dumps({"entries": [{"id": "x-f370"}]}), encoding="utf-8"
+    )
     monkeypatch.setattr(
         "fno.agents.cli._spawn_guard_decision",
         lambda *a, **k: (
