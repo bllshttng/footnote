@@ -107,32 +107,21 @@ def test_the_split_never_invents_a_row_for_an_unkeyed_entry():
 # --- the verdict layer -----------------------------------------------------
 #
 # The split above lives in the REPORT. These pin the BRANCH. `verdict_for`
-# returns red off the combined fail count and `_ready_blockers` names it, so
+# returns red off the combined fail count and the red-kind word names it, so
 # a fix that stops at the counts leaves the two kinds conflated exactly where
 # a reader acts on them. The blocker name is what got read as "CI red" on a
-# head whose every job passed.
+# head whose every job passed. Since x-53c5 the word is status's own supply
+# to the preview ask (`_ci_blocker_word`); the gate renders it verbatim.
 #
 # The verdict itself deliberately does NOT split. A failing StatusContext is a
 # real red and must never read green.
 
 
 def _blockers(rollup, coverage=None):
-    """The ready_blockers a rollup produces, with everything else passing."""
+    """The blocker word a rollup produces, with everything else passing."""
     verdict, _code, counts = _status.verdict_for(rollup)
-    return _status._ready_blockers(
-        verdict == "green",
-        verdict,
-        0,
-        coverage
-        or {
-            "coverage": "covered",
-            "review_state": "reviewed",
-            "reviewed_count": 2,
-        },
-        True,
-        head="h" * 40,
-        counts=counts,
-    )
+    word = _status._ci_blocker_word(verdict, counts)
+    return [word] if word else []
 
 
 def test_a_failing_job_is_still_named_ci_red():
@@ -282,18 +271,9 @@ def test_coverage_statuses_are_removed_before_generic_ci_classification():
     verdict, code, counts = _status.verdict_for(generic)
     assert (verdict, code) == ("green", 0)
     assert counts["total"] == 1
-    blockers = _status._ready_blockers(
-        True,
-        verdict,
-        0,
-        {"coverage": "unknown"},
-        True,
-        head="h" * 40,
-        counts=counts,
-    )
-    assert blockers == ["review_coverage_unknown"]
-    assert "ci_red" not in blockers
-    assert "commit_status_red" not in blockers
+    # A green verdict supplies NO ci word: an unknown coverage read is the
+    # gate's blocker (review_coverage_unknown), never a code red.
+    assert _status._ci_blocker_word(verdict, counts) is None
 
 
 def test_real_uncovered_coverage_stays_a_coverage_blocker_not_code_red():
@@ -305,18 +285,9 @@ def test_real_uncovered_coverage_stays_a_coverage_blocker_not_code_red():
     generic = _status.without_coverage_statuses(rollup)
     verdict, code, counts = _status.verdict_for(generic)
     assert (verdict, code) == ("green", 0)
-    blockers = _status._ready_blockers(
-        True,
-        verdict,
-        0,
-        {"coverage": "uncovered", "review_state": "reviewer_refused"},
-        True,
-        head="h" * 40,
-        counts=counts,
-    )
-    assert any(blocker.startswith("review_coverage_") for blocker in blockers)
-    assert "ci_red" not in blockers
-    assert "commit_status_red" not in blockers
+    # A green verdict supplies NO ci word: an uncovered row is the gate's
+    # review_coverage_* blocker, never a code red.
+    assert _status._ci_blocker_word(verdict, counts) is None
 
 
 def test_an_extra_positional_is_refused_never_dropped():
