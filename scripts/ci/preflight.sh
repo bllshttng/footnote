@@ -730,8 +730,16 @@ acquire_lock() {
         echo "preflight:   or check what is deployed: fno doctor" >&2
         exit 2
     fi
+    # The give-up message advertises `touch .fno/preflight-cancel`. In a fresh
+    # clone that parent is gitignored and nothing has created it, and a queued
+    # waiter writes nothing under .fno, so the advertised recovery would fail
+    # on a missing directory. Ensure the parent before queueing.
+    mkdir -p "$INVOKING_ROOT/.fno" 2>/dev/null || true
     QUEUE_DIR="$LOCKDIR.queue.d"
-    TICKET="$("$QBIN" claim queue enter --dir "$QUEUE_DIR")" || {
+    # --pid stamps THIS shell, not the one-shot verb process: a verb-stamped
+    # ticket carries a pid that is dead by the waiter's own next scan, and
+    # the queue would reap it out from under us.
+    TICKET="$("$QBIN" claim queue enter --dir "$QUEUE_DIR" --pid "$$")" || {
         echo "preflight: cannot enqueue a wait-queue ticket at $QUEUE_DIR" >&2
         exit 3
     }

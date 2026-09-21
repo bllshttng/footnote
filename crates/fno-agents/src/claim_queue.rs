@@ -305,6 +305,9 @@ fn scan_names(queue_dir: &Path) -> Result<Vec<u64>, String> {
 struct Stamp {
     pid: Option<i32>,
     create_time: Option<i64>,
+    /// bash-era stamps carry an ISO-8601 `started=` instead of `create_time`.
+    /// Held as epoch seconds for the recycled-pid compare.
+    started_s: Option<i64>,
     machine: String,
     host: String,
 }
@@ -313,13 +316,15 @@ struct Stamp {
 /// corpse: condemning on a guess laps a waiter we cannot prove is gone.
 fn read_stamp(dir: &Path) -> Option<Stamp> {
     let text = std::fs::read_to_string(dir.join("holder")).ok()?;
-    let (mut pid, mut create_time) = (None, None);
+    let (mut pid, mut create_time, mut started_s) = (None, None, None);
     let (mut machine, mut host) = (String::new(), String::new());
     for line in text.lines() {
         if let Some(v) = line.strip_prefix("pid=") {
             pid = v.parse().ok();
         } else if let Some(v) = line.strip_prefix("create_time=") {
             create_time = v.parse().ok();
+        } else if let Some(v) = line.strip_prefix("started=") {
+            started_s = iso8601_utc_to_epoch_s(v);
         } else if let Some(v) = line.strip_prefix("machine=") {
             machine = v.to_string();
         } else if let Some(v) = line.strip_prefix("host=") {
@@ -329,22 +334,50 @@ fn read_stamp(dir: &Path) -> Option<Stamp> {
     Some(Stamp {
         pid,
         create_time,
+        started_s,
         machine,
         host,
     })
 }
 
+/// `YYYY-MM-DDTHH:MM:SSZ` to epoch seconds, the stamp format the deleted bash
+/// queue wrote. Days-from-civil (Hinnant); no calendar dependency. Unparsable
+/// input returns `None` and the caller keeps the ticket - never condemn on a
+/// guess.
+fn iso8601_utc_to_epoch_s(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || (b[10] != b'T' && b[10] != b' ')
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
+    {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
+    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (mo + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some(days * 86400 + h * 3600 + mi * 60 + sec)
+}
+
 /// A ticket stamped on a machine we cannot pid-probe is skipped: it never
 /// orders a local waiter and it is never reaped (its owner may be live
-/// elsewhere). Identity is compared only when both sides are readable; an
-/// unreadable local id is UNKNOWN, not foreign, so the pid arm decides.
+/// elsewhere). Machine identity only: a legacy stamp with no `machine=`
+/// field cannot differ, so it goes to the pid probe like bash's reaper did.
+/// Hostnames move under a roaming laptop and the bash-era fixtures write
+/// `host=x`, so a host compare would misclassify a live local ticket.
 fn stamp_is_foreign(stamp: &Stamp) -> bool {
     let mine = crate::claims::machine_id();
-    if !stamp.machine.is_empty() && !mine.is_empty() {
-        return stamp.machine != mine;
-    }
-    let my_host = crate::claims::hostname();
-    !stamp.host.is_empty() && !my_host.is_empty() && stamp.host != my_host
+    !stamp.machine.is_empty() && !mine.is_empty() && stamp.machine != mine
 }
 
 /// Dead = the pid is gone, or was recycled (a live but different incarnation
@@ -362,7 +395,13 @@ fn ticket_is_dead(stamp: &Stamp) -> bool {
         crate::claims::PidProbe::Refused => false,
         crate::claims::PidProbe::Created(actual) => match stamp.create_time {
             Some(recorded) => actual != recorded,
-            None => false,
+            // bash-era stamp: recycled when the stamp predates the live
+            // process's birth by more than the minute of slop bash's
+            // holder_pid_recycled allowed.
+            None => match stamp.started_s {
+                Some(started) => started < actual / 1000 - 60,
+                None => false,
+            },
         },
     }
 }
@@ -591,6 +630,55 @@ mod tests {
             position(&t).is_err(),
             "a condemned self ticket must error, never read as front"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A bash-era stamp (ISO `started=`, no `create_time`) whose stamp
+    /// predates the live process's birth by more than the recycle slop is
+    /// condemned - the phantom contract the deleted bash queue's tests pin.
+    #[test]
+    fn a_bash_era_phantom_stamp_is_condemned() {
+        let dir = queue_dir_for(Path::new("/tmp/claim-q-phantom.lock"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let phantom = dir.join("000001");
+        std::fs::create_dir_all(&phantom).expect("mkdir phantom");
+        std::fs::write(
+            phantom.join("holder"),
+            format!(
+                "pid={}\nstarted=2020-01-01T00:00:00Z\nhost=q-host\n",
+                std::process::id()
+            ),
+        )
+        .expect("stamp phantom");
+        let t = enter(&dir).expect("enter");
+        let pos = position(&t).expect("position");
+        assert_eq!(pos.index, 0, "the phantom never blocks: {pos:?}");
+        assert!(!phantom.exists(), "the phantom is reaped");
+        leave(t);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A bash-era stamp that is NOT older than the live process survives:
+    /// the stamp plausibly names this incarnation, so the pid arm keeps it.
+    #[test]
+    fn a_fresh_bash_era_stamp_survives() {
+        let dir = queue_dir_for(Path::new("/tmp/claim-q-legacy.lock"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let fresh = dir.join("000001");
+        std::fs::create_dir_all(&fresh).expect("mkdir legacy");
+        std::fs::write(
+            fresh.join("holder"),
+            format!(
+                "pid={}\nstarted=2030-01-01T00:00:00Z\nhost=q-host\n",
+                std::process::id()
+            ),
+        )
+        .expect("stamp legacy");
+        let t = enter(&dir).expect("enter");
+        let pos = position(&t).expect("position");
+        assert_eq!(pos.total, 2, "the fresh legacy stamp survives: {pos:?}");
+        assert!(fresh.exists(), "a plausibly-live legacy ticket is kept");
+        leave(t);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
