@@ -251,10 +251,14 @@ fn checkin_summary(
         .and_then(|scan| scan.get("rejected"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let mut scope_rows: Vec<(String, (u64, String))> = scopes.into_iter().collect();
+    // HashMap order is randomized per process; a deterministic JSON payload
+    // needs the scopes sorted (the needs fold fixes the same disease).
+    scope_rows.sort_by(|a, b| a.0.cmp(&b.0));
     json!({
         "state": state,
         "rejected": rejected,
-        "scopes": scopes.into_iter().map(|(scope, (count, latest_change))| {
+        "scopes": scope_rows.into_iter().map(|(scope, (count, latest_change))| {
             json!({"scope": scope, "count": count, "latest_change": latest_change})
         }).collect::<Vec<_>>(),
     })
@@ -372,7 +376,10 @@ pub fn fold_day(inputs: &DayInputs) -> Result<Value, String> {
             .find(|(state_path, _)| state_path == path)
             .map(|(_, state)| state.as_str())
             .unwrap_or("read");
-        receipts.push(json!({"source":"journal", "path":path, "state":state, "scanned":raw.lines().count(), "matched":raw.lines().filter(|line| line.contains("reign_checkin")).count()}));
+        // The journal's role in this fold is review-attestation retractions,
+        // so its matched count is those rows, not check-ins (those carry
+        // their own receipt under `checkins`).
+        receipts.push(json!({"source":"journal", "path":path, "state":state, "scanned":raw.lines().count(), "matched":raw.lines().filter(|line| line.contains("retracts_attester")).count()}));
     }
     let id = boundary_id(&inputs.kind, now);
     Ok(json!({

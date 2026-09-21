@@ -3774,7 +3774,7 @@ event_types:
   - name: day_boundary
     retention: durable
     description: "A deterministic project-scoped morning or end-of-day readback folded from existing journals, backlog completion records, and the operator-question lifecycle. The stored row is the bounded historical report; Markdown and JSON rendering are exports. Repeated invocation of the same boundary kind on the same local day reuses the existing row and does not advance question attention."
-    sources: [operator, target, hook, daemon, test]
+    sources: [target, hook, daemon, test]
     data:
       required: [boundary_id, kind, cutoff]
       properties:
