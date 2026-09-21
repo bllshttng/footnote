@@ -82,6 +82,7 @@ crossing	crates/fno/src/yard_overlay.rs	49	fn fno_bin() -> PathBuf {
 crossing	crates/fno/src/yard_overlay.rs	50	crate::server::fno_bin()
 crossing	crates/fno/src/yard_overlay.rs	57	let mut command = crate::process_admission::tokio_command(fno_bin());
 resolver	crates/fno-agents/src/census.rs	835	fn resolve_fno() -> Option<PathBuf> {
+resolver	crates/fno-agents/src/crown_alarm.rs	183	fn read_court_payload(config_cwd: &Path) -> Result<Value, String> {
 resolver	crates/fno-agents/src/daemon.rs	1484	pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonError> {
 resolver	crates/fno-agents/src/delivery_completion.rs	142	pub fn evaluate_manifest(cwd: &Path, plan_path: Option<&str>, events: &Path) -> DeliveryCompletion {
 resolver	crates/fno-agents/src/graph_keeper.rs	637	fn run_render_pass() -> Result<(), (i32, String)> {

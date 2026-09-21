@@ -5,7 +5,7 @@
 
 use crate::stuck_work::Finding;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// A crown mid-handoff is briefly empty by design, so the alarm waits this
 /// long from the first tick that saw the scope empty. The number is not
@@ -208,6 +208,7 @@ fn court_payload_from(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<Val
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::PathBuf;
 
     const NOW: u64 = 1_788_523_200; // 2026-09-04T12:00 to the second
 
@@ -344,7 +345,7 @@ mod tests {
     #[test]
     fn an_unresolved_fold_reads_unreadable_never_clear() {
         let store = temp_store("blind");
-        let bad = json!({"status": "unresolved", "reason": "the fold timed out after 120s"});
+        let bad = json!({"status": "unresolved", "reason": "the fold timed out"});
         let p = payload(json!([manifest_crown("alpha", bad)]));
         let err = evaluate(&p, &store, NOW).unwrap_err();
         assert!(
