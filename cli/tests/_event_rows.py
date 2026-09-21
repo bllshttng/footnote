@@ -10,11 +10,11 @@ events.jsonl. One helper serves every test that used to slurp the journal:
 
 The fast path reads the sibling store DIRECTLY over read-only SQL: no process
 spawn, no retention side effects - a test asserts state, it never prunes.
-A journal whose bytes are NEWER than the store (a raw fixture seeded after the
-last store write) routes through the native ``doctor event rows`` verb, which
-imports uncommitted journal bytes before querying. With no store at all the
-helper answers the raw journal, mirroring the pre-store reader. Rows are
-parsed envelopes in commit order.
+A journal holding ANY bytes routes through the native ``doctor event rows``
+verb, which imports uncommitted journal bytes before querying: a raw fixture
+line written after the last store commit is invisible to direct SQL. With no
+store at all the helper answers the raw journal, mirroring the pre-store
+reader. Rows are parsed envelopes in commit order.
 """
 from __future__ import annotations
 
@@ -42,14 +42,14 @@ def event_rows(events_path: Path, *, types: Optional[list[str]] = None) -> list[
     events_path = Path(events_path)
     committed: Optional[list[str]] = None
     db = store_db_path(events_path)
-    if db.exists():
-        # A raw fixture newer than the store needs the verb's import pass;
-        # a store at least as fresh as the journal is answered directly.
-        journal_fresh = events_path.exists() and (
-            events_path.stat().st_mtime > db.stat().st_mtime
-        )
-        if not journal_fresh:
-            committed = _direct_store_lines(db)
+    # The fast path is only safe when the journal holds no bytes a store
+    # commit could have skipped importing: a raw fixture line written after
+    # the last store commit stays invisible to a direct SQL read. Journal
+    # bytes are rare once writes commit through the store, so tests seeded
+    # only through append_event keep the no-spawn path.
+    journal_has_bytes = events_path.exists() and events_path.stat().st_size > 0
+    if db.exists() and not journal_has_bytes:
+        committed = _direct_store_lines(db)
     if committed is None:
         committed = native_rows(events_path)
     if committed is None:
