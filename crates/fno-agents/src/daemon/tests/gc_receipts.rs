@@ -4827,7 +4827,7 @@ fn ac8_stage_stops_the_claude_thread_before_the_surface_removal() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
-/// x-0e2a: a receipt the sweep stages names its writer. `removed_by` reads
+/// A receipt the sweep stages names its writer. `removed_by` reads
 /// the surface `gc-sweep`, `removal_trigger` reads `unattended`; the 80
 /// unstamped receipts of 2026-09-17 were this sweep declining to sign.
 #[test]

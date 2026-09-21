@@ -470,7 +470,7 @@ exit 2
     fleet.assert_live_stays("after all doors");
     fleet.assert_property("after all doors");
 
-    // x-0e2a: every door's receipt names its writer. A fourth door added
+    // Every door's receipt names its writer. A fourth door added
     // later fails here without anyone remembering to write it a test.
     let receipt_files: Vec<std::path::PathBuf> = std::fs::read_dir(&receipts)
         .expect("reap-receipts exists after the doors ran")

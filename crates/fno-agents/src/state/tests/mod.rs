@@ -1616,7 +1616,7 @@ fn update_registry_accounts_for_a_removed_row() {
     let receipt: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&receipt_path).unwrap()).unwrap();
     assert_eq!(receipt["row_name"], "dropped");
-    // The receipt names its writer (the argv verb, x-0e2a); the event's
+    // The receipt names its writer (the argv verb); the event's
     // `remover` answers the separate process-name question it always did.
     assert!(
         receipt["removed_by"]

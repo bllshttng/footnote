@@ -358,8 +358,8 @@ fn emit_hold_once_per_hour(
 ) {
     let stamp = hold_stamp_path(home, &request.request_id);
     // The stamp holds `<echo ts> <reason>`: the reason is what an expiry
-    // (x-0e2a change 4) names as `last_hold`, and old bare-timestamp stamps
-    // still parse (first whitespace token).
+    // names as `last_hold`, and old bare-timestamp stamps still parse
+    // (first whitespace token).
     let raw = std::fs::read_to_string(&stamp).unwrap_or_default();
     let mut stamp_parts = raw.trim().splitn(2, char::is_whitespace);
     let last_echo = stamp_parts
@@ -1311,7 +1311,7 @@ mod tests {
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
     }
 
-    /// x-0e2a change 4: an expiry names the reason of its last hold, so a
+    /// An expiry names the reason of its last hold, so a
     /// benign expiry (a branch with no worktree) stops reading like one that
     /// stranded a real tree.
     #[test]

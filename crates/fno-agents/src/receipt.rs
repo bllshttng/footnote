@@ -43,13 +43,14 @@ impl Writer {
         }
     }
     /// RegistryWrite reads argv0: the daemon binary is unattended, any
-    /// other invocation is a session's call.
+    /// other invocation is a session's call. The stem (not the whole
+    /// name) matches, so `fno-agents-daemon.exe` still classifies.
     pub fn trigger(self) -> &'static str {
         match self {
             Writer::RegistryWrite => {
                 let exe = std::env::current_exe()
                     .ok()
-                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .and_then(|p| p.file_stem().map(|n| n.to_string_lossy().into_owned()))
                     .unwrap_or_default();
                 if exe == crate::component_update::AGENTS_DAEMON {
                     "unattended"
@@ -410,7 +411,7 @@ mod tests {
     }
 
     /// Every receipt names its writer: two `Writer` values produce the same
-    /// key set and different stamps. The old absence assertions (x-b150) are
+    /// key set and different stamps. The old absence assertions are
     /// gone; a receipt that cannot name its writer is not constructible.
     #[test]
     fn every_receipt_names_its_writer_and_the_key_sets_match() {

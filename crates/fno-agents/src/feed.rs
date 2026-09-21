@@ -934,7 +934,7 @@ mod tests {
             .find(|row| row.kind == "session_reaped")
             .expect("one reaped row");
         assert!(row.title.contains("t-d145"), "title was {}", row.title);
-        // x-0e2a: the stamp is printed, never invented. The fixture carries
+        // The stamp is printed, never invented. The fixture carries
         // a writer, so the row names it and the detail carries the trigger.
         assert!(
             row.title.contains("removed by gc-sweep"),
@@ -956,7 +956,7 @@ mod tests {
     }
 
     // A pre-stamp receipt carries no writer. The feed once invented the
-    // word `reap` for it (x-0e2a); now it says `unknown`, and the actor is
+    // word `reap` for it; now it says `unknown`, and the actor is
     // empty rather than a door nobody named.
     #[test]
     fn a_pre_stamp_receipt_reads_unknown_never_reap() {
