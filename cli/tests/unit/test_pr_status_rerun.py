@@ -136,7 +136,7 @@ def test_wrapper_fails_open_when_gh_is_missing(monkeypatch):
 # ---- status payload ----
 
 
-def _run_status(monkeypatch, capsys, rollup, rerun="__unpatched__"):
+def _run_status(monkeypatch, capsys, rollup, rerun="__unpatched__", decision=None):
     """run_status with gh stubbed out; returns (exit code, parsed JSON, stderr)."""
     from fno.pr import _merge as merge_mod
 
@@ -163,6 +163,19 @@ def _run_status(monkeypatch, capsys, rollup, rerun="__unpatched__"):
         monkeypatch.setattr(
             _status, "rerun_recovery", lambda pr, cwd=None, sha=None, runs=None: rerun
         )
+    if decision is not None:
+        # The flake hold is decide's gate; the receipt names its word.
+        monkeypatch.setattr(
+            _status,
+            "_merge_decision",
+            lambda pr, repo, facts: {
+                "outcome": "held" if decision else "authorized",
+                "blockers": [
+                    {"code": code, "class": "held", "detail": code}
+                    for code in (decision or [])
+                ],
+            },
+        )
     code = _status.run_status("42")
     cap = capsys.readouterr()
     return code, json.loads(cap.out), cap.err
@@ -177,6 +190,7 @@ def test_recovered_green_payload_names_the_failed_checks(monkeypatch, capsys):
         capsys,
         _GREEN_ROLLUP,
         rerun={"recovered": True, "failed": ["smoke-pytest (7)"]},
+        decision=["rerun_recovered_green"],
     )
     assert code == 0
     assert out["verdict"] == "green"
