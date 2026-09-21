@@ -1329,6 +1329,14 @@ event_types:
         graph_path:
           type: string
           description: "The graph file whose transaction conflicted."
+        touched:
+          type: array
+          items:
+            type: string
+          description: "Node ids the conflicted write touched; concurrent chains in one journal become attributable."
+        session_id:
+          type: string
+          description: "Full session id of the emitting caller, when resolvable; absent when unprovable."
     consumers: [operator]
 
   - name: orphan_reap_sweep
