@@ -148,11 +148,13 @@ fn blocks_count_into_friction_and_window_bounds_hold() {
     std::fs::write(
         &events,
         [
-            // before: 1 clean end + 3 blocks of loop friction
+            // before: 3 clean ends, one carrying 3 blocks of loop friction
             termination("s1", "2026-09-01T10:00:00Z", "DonePRGreen"),
             block("s1", "2026-09-01T09:00:00Z"),
             block("s1", "2026-09-01T09:01:00Z"),
             block("s1", "2026-09-01T09:02:00Z"),
+            termination("s6", "2026-09-02T10:00:00Z", "DonePRGreen"),
+            termination("s7", "2026-09-03T10:00:00Z", "DonePRGreen"),
             // at the boundary ts: neither window counts it
             termination("s2", "2026-09-15T12:00:00Z", "DonePRGreen"),
             // after: clean
@@ -173,8 +175,8 @@ fn blocks_count_into_friction_and_window_bounds_hold() {
     );
     let v = &verdicts[0];
     // s2 ends exactly at the correction ts: excluded from both windows.
-    assert_eq!((v.sessions_before, v.sessions_after), (1, 3), "{v:?}");
-    assert_eq!(v.before, 3.0);
+    assert_eq!((v.sessions_before, v.sessions_after), (3, 3), "{v:?}");
+    assert_eq!(v.before, 1.0);
     assert_eq!(v.after, 0.0);
     assert_eq!(v.verdict, "improved");
     let _ = std::fs::remove_dir_all(&dir);

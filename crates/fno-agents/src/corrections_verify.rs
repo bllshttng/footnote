@@ -141,10 +141,10 @@ fn read_sessions(events: &str) -> Vec<SessionEnd> {
                 // Last termination wins: a session ends once, a repeated
                 // row re-reads the same end.
                 ends.entry(session_id.to_string())
-                    .and_modify(|(keep, stuck)| {
+                    .and_modify(|(keep, was_stuck)| {
                         if ts > *keep {
                             *keep = ts;
-                            *stuck = stuck;
+                            *was_stuck = stuck;
                         }
                     })
                     .or_insert((ts, stuck));
@@ -199,6 +199,7 @@ fn window_mean(sessions: &[&SessionEnd], at: DateTime<Utc>, after: bool, n: usiz
 /// One scored correction: the before/after means, the ratio, and the
 /// verdict (improved under 0.7x, worse over 1.3x, flat between,
 /// insufficient-data when either side has fewer than 3 sessions).
+#[derive(Debug)]
 struct Verdict {
     ts: DateTime<Utc>,
     file: String,
@@ -218,7 +219,7 @@ fn score(corrections: &[AppliedCorrection], sessions: &[SessionEnd]) -> Vec<Verd
         .map(|c| {
             let (before, sb) = window_mean(&refs, c.ts, false, 3);
             let (after, sa) = window_mean(&refs, c.ts, true, 3);
-            let ratio = if sb == 0 || sa == 0 {
+            let ratio = if sb < 3 || sa < 3 {
                 None
             } else if before == 0.0 {
                 Some(if after == 0.0 { 1.0 } else { f64::INFINITY })
