@@ -48,8 +48,12 @@ impl Writer {
     pub fn trigger(self) -> &'static str {
         match self {
             Writer::RegistryWrite => {
+                // current_exe can fail while the process lives (an exotic
+                // sandbox, a racing self-update); argv0 is how the process
+                // was actually launched and classifies the same way.
                 let exe = std::env::current_exe()
                     .ok()
+                    .or_else(|| std::env::args_os().next().map(std::path::PathBuf::from))
                     .and_then(|p| p.file_stem().map(|n| n.to_string_lossy().into_owned()))
                     .unwrap_or_default();
                 if exe == crate::component_update::AGENTS_DAEMON {
