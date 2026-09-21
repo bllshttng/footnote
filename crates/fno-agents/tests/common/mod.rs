@@ -78,6 +78,18 @@ pub fn wait_for_path(path: &Path, budget: std::time::Duration) {
 /// soon as the event lands, so a generous budget costs a green run nothing.
 pub const RECONCILE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 
+pub fn event_text(home: &fno_agents::paths::AgentsHome) -> String {
+    let journal = home.events_jsonl();
+    match fno_agents::event_store::query_events(&journal, &Default::default()) {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|row| row.line)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(_) => fs::read_to_string(journal).unwrap_or_default(),
+    }
+}
+
 /// Wait until the daemon's event log carries `needle`.
 ///
 /// The startup reconcile sweep runs CONCURRENTLY with the accept loop, so a
@@ -92,17 +104,7 @@ pub fn wait_for_event(
 ) {
     let start = std::time::Instant::now();
     while start.elapsed() < budget {
-        // The store commit is the write boundary: the daemon's rows land in
-        // the store, and a raw journal read never sees them, so every poll
-        // here once burned its whole budget before failing.
-        let journal = home.events_jsonl();
-        let hit = match fno_agents::event_store::query_events(&journal, &Default::default()) {
-            Ok(rows) => rows.iter().any(|row| row.line.contains(needle)),
-            Err(_) => fs::read_to_string(&journal)
-                .map(|text| text.contains(needle))
-                .unwrap_or(false),
-        };
-        if hit {
+        if event_text(home).contains(needle) {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
