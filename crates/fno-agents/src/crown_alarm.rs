@@ -36,9 +36,88 @@ pub fn evaluate(
     store: &Path,
     now_unix: u64,
 ) -> Result<(Vec<Finding>, String), String> {
-    // STUB red: the real body lands with the green run.
-    let _ = (payload, store, now_unix);
-    Err("not implemented".to_string())
+    if payload.get("registry_readable").and_then(Value::as_bool) != Some(true) {
+        let reason = payload
+            .pointer("/summary/reason")
+            .and_then(Value::as_str)
+            .unwrap_or("the registry could not be read");
+        return Err(format!("registry unreadable: {reason}"));
+    }
+    if payload
+        .pointer("/summary/sweep_ran")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err(
+            "the manifest-only sweep did not run, so a zero answer is an absence".to_string(),
+        );
+    }
+    let crowns = payload
+        .get("crowns")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "the court payload carries no crowns list".to_string())?;
+    let mut findings = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+    for crown in crowns {
+        let Some(scope) = s_str(crown, "scope") else {
+            continue;
+        };
+        // The fold is the instrument for the board half. One unreadable
+        // scope fails the whole read, never a clean empty beside it.
+        let fold = crown
+            .get("scope_nodes")
+            .ok_or_else(|| format!("scope {scope} carries no fold"))?;
+        if s_str(fold, "status") != Some("ok") {
+            let reason = s_str(fold, "reason").unwrap_or("the fold did not run");
+            return Err(format!("scope {scope} fold unread: {reason}"));
+        }
+        let unclaimed: Vec<String> = fold
+            .pointer("/stuck/unclaimed")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let key = format!("crown_empty:{scope}");
+        let empty = s_str(crown, "status") == Some("manifest-only");
+        if empty && !unclaimed.is_empty() {
+            let age_s = match crate::operator_notice::first_seen_age_s(store, &key, now_unix) {
+                Some(age_s) => age_s,
+                None => {
+                    crate::operator_notice::mark_once(store, &key, "empty");
+                    0
+                }
+            };
+            if age_s >= CROWN_EMPTY_GRACE_S {
+                let threshold_min = fold
+                    .pointer("/stuck/threshold_minutes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(60);
+                let first_seen = now_unix.saturating_sub(age_s);
+                findings.push(empty_crown_finding(
+                    crown,
+                    scope,
+                    age_s,
+                    threshold_min,
+                    first_seen,
+                    &unclaimed,
+                ));
+            } else {
+                notes.push(format!(
+                    "crown {scope} empty {age_s}s into a {CROWN_EMPTY_GRACE_S}s grace: {}s more",
+                    CROWN_EMPTY_GRACE_S - age_s
+                ));
+            }
+        } else {
+            // The scope stopped reading empty: recovery is the designed
+            // quiet, and the next episode starts a fresh clock.
+            crate::operator_notice::forget_at(store, &key);
+        }
+    }
+    Ok((findings, notes.join("; ")))
 }
 
 fn empty_crown_finding(
