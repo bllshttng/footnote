@@ -2373,7 +2373,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             None,
             Some(cwd),
         ) {
-            Ok(plan) => reentry_plan = Some(plan),
+            Ok(plan) => reentry_plan = Some(plan.carry_pins(&mut argv)),
             Err(reason) => {
                 if print_command {
                     eprintln!(
