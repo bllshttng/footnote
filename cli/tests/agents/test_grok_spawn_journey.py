@@ -32,7 +32,6 @@ import os
 import socket
 import struct
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -40,6 +39,7 @@ import pytest
 
 from fno.agents.registry import load_registry
 from fno.paths_testing import use_tmpdir
+from tests._afunix import short_bind_root
 
 LIVE = os.environ.get("FNO_GROK_LIVE") == "1"
 GROK_ON_PATH = (
@@ -140,7 +140,7 @@ def test_grok_spawn_journey_public_surface_reaches_a_live_row(
 
     # A keeper socket must fit AF_UNIX's 104-byte sun_path and the pytest
     # basetemp does not: same short-state move as pi's journey.
-    short_state = Path(tempfile.mkdtemp(prefix="fno5g-"))
+    short_state = short_bind_root("fno5g-")
     settings = tmp_path / ".fno" / "settings.yaml"
     settings.write_text(
         f"schema_version: 1\nconfig:\n  state_dir: {short_state}/\n",

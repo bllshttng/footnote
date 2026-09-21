@@ -64,7 +64,6 @@ import shutil
 import signal
 import socket
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -74,6 +73,7 @@ from fno.agents.dispatch import DispatchAskError
 from fno.agents.harnesses.agy import conversation_store_path
 from fno.agents.registry import load_registry
 from fno.paths_testing import use_tmpdir
+from tests._afunix import short_bind_root
 
 LIVE = os.environ.get("FNO_AGY_LIVE") == "1"
 AGY_ON_PATH = (
@@ -291,7 +291,7 @@ def test_AC1_HP_the_spawn_seam_journey_on_a_real_agy_thread(
 
     # A keeper socket must fit AF_UNIX's 104-byte sun_path and the pytest
     # basetemp does not: the same short-state move the pi journey makes.
-    short_state = Path(tempfile.mkdtemp(prefix="fnoagy-"))
+    short_state = short_bind_root("fnoagy-")
     settings = tmp_path / ".fno" / "settings.yaml"
     settings.write_text(
         f"schema_version: 1\nconfig:\n  state_dir: {short_state}/\n",
