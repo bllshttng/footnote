@@ -279,7 +279,7 @@ def test_select_unmeasured_skips_with_its_own_reason(iso, monkeypatch):
 
     assert res.decision == "skipped" and res.reason == "select-unmeasured"
     assert spawned == []
-    rows = [json.loads(line) for line in iso.read_text().splitlines()]
+    rows = event_rows(iso)
     skipped = [row for row in rows if row["type"] == "advance_skipped"]
     ticks = [row for row in rows if row["type"] == "control_plane_tick"]
     assert skipped[0]["data"]["reason"] == "select-unmeasured"
