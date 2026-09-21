@@ -2771,10 +2771,10 @@ def test_write_registry_has_exactly_one_production_caller() -> None:
 def test_update_registry_keeps_a_receipt_the_sweep_already_staged(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The watchdog staged the receipt before dropping rows through update_registry.
+    """The sweep or watchdog staged the receipt before the rows were dropped.
 
-    Rewriting it would stamp removed_by onto a pure reap receipt and change
-    the shape the Rust and Python writers share.
+    Rewriting it would re-sign a record another door already made. The
+    assertion is byte-identity: the file must not change at all.
     """
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, update_registry
@@ -2801,13 +2801,15 @@ def test_update_registry_keeps_a_receipt_the_sweep_already_staged(
         json.dumps({"row_name": "swept", "resume": "claude --resume swept-s"}),
         encoding="utf-8",
     )
+    before = receipt_path.read_bytes()
 
     update_registry(
         lambda es: [e for e in es if e.name != "swept"], path=registry_path
     )
 
-    on_disk = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert "removed_by" not in on_disk, f"the sweep's receipt was rewritten: {on_disk}"
+    assert (
+        receipt_path.read_bytes() == before
+    ), "the sweep's receipt was rewritten by the choke point"
     removals = _removal_events(events_path)
     assert len(removals) == 1
     assert removals[0]["data"]["receipt_staged"] is True

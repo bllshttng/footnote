@@ -2957,7 +2957,7 @@ pub(crate) fn stage_session_retirement(
     // The record precedes the effects: a receipt that cannot be built or
     // persisted refuses BEFORE the harness is touched, so no effect ever
     // fires without its recovery record already on disk (AC3-EDGE).
-    let mut receipt = match build_reap_receipt(e, ledger) {
+    let mut receipt = match build_reap_receipt(e, ledger, crate::receipt::Writer::GcSweep) {
         Ok(receipt) => receipt,
         Err(reason) => return Err(RetireRefusal::NoReceipt(reason)),
     };

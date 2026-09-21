@@ -63,6 +63,15 @@ def test_registry_lists_the_three_keys() -> None:
         assert key in FIELD_META
 
 
+def test_write_roots_default_and_coercion() -> None:
+    assert KingBlock().write_roots == []
+    assert KingBlock(write_roots="docs").write_roots == ["docs"]
+    # Blanks and non-strings drop; a relative entry passes through as written,
+    # the guard resolves it against the repo root.
+    assert KingBlock(write_roots=["docs", " ", 3, ".claude/rules"]).write_roots == ["docs", ".claude/rules"]  # type: ignore[arg-type]
+    assert KingBlock(write_roots=7).write_roots == []  # type: ignore[arg-type]
+
+
 def test_shipped_defaults_pass_the_style_gate_that_sends_them() -> None:
     """The mail bus lints the body it sends, so a default that fails the gate
     refuses its own injection.
