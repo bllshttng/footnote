@@ -417,8 +417,11 @@ def test_f6_second_read_inside_ttl_spends_exactly_one(gh, capsys):
     before = len(gh.argvs)
     assert _cache.cached_status("42") == 1
     calls = _classes(gh.since(before))
-    assert len(gh.since(before)) == 1, "the head read is the only spawn"
-    assert calls["pulls"] == 1
+    # The row key is minted on every call, hit or miss: one cheap local
+    # fno-agents spawn beside the single gh head read. No other read reruns.
+    assert calls["pulls"] == 1, "the head read is the only gh spawn"
+    assert len(calls["agents"]) == 1, "the mint is the one local spawn"
+    assert not calls["logs"] and not calls["jobs"] and not calls["checks"]
     capsys.readouterr()
 
 
@@ -431,7 +434,10 @@ def test_f6_same_head_refresh_reuses_failure_detail_by_job_id(gh, capsys):
     assert _cache.cached_status("42") == 1
     calls = _classes(gh.since(before))
     assert len(calls["logs"]) == 0 and len(calls["jobs"]) == 0
-    assert len(gh.since(before)) <= 5
+    # The re-read budget: the same gh reads as before (pulls, status for the
+    # rerun facts), plus the two sanctioned local spawns the port added (the
+    # row-key mint and the preview ask). Logs and jobs stay at zero above.
+    assert len(gh.since(before)) <= 6
     second = json.loads(capsys.readouterr().out)
     assert second["failures"] == first["failures"]
 
