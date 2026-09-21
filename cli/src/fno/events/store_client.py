@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import time
 from pathlib import Path
@@ -100,7 +101,7 @@ def native_rows(
         return None
 
 
-def _refuse_newer_schema(conn: "sqlite3.Connection", db: Path) -> None:
+def _refuse_newer_schema(conn: sqlite3.Connection, db: Path) -> None:
     """Fail closed on a store written by a NEWER build: today every version
     from 2 up reads as v2, and silently accepting rows whose shape this
     build does not know is the fail-open this guard exists to refuse."""
@@ -119,8 +120,6 @@ def read_committed_lines(events_path: Path) -> list[str]:
     rows verb runs, so callers asserting exact store contents (gc, parity)
     use this and stay out of the retention business.
     """
-    import sqlite3
-
     db = store_db_path(events_path)
     if not db.exists():
         return []
@@ -146,8 +145,6 @@ def query_rows(
     envelopes. A store that does not exist yet is an empty history; a locked
     or corrupt store raises EventStoreUnavailable - unavailable is never
     folded into an empty result."""
-    import sqlite3
-
     db = store_db_path(events_path)
     if not db.exists():
         return []
@@ -198,7 +195,6 @@ def gc_ephemeral(
     With ``dry_run`` nothing is deleted and ``deleted`` reports what the
     horizon WOULD take. The returned shape keeps the historical gc fold
     (scanned/deleted/kept/malformed) so the CLI contract does not drift."""
-    import sqlite3
     from fno.events import RETENTION_MINIMUM_TTL_HOURS
 
     horizon = max(ttl_hours or 0, 0) or RETENTION_MINIMUM_TTL_HOURS
