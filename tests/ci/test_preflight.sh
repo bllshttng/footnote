@@ -207,6 +207,29 @@ write_attest() { printf 'sha=%s mode=FULL verdict=green at=%s iso=now host=%s pi
 
 run_pf() { ( cd "$FIX" && bash scripts/ci/preflight.sh "$@" ); }
 
+# The wait-queue sections drive REAL waiters through preflight's ordering,
+# which lives in the deployed fno-agents (crates/fno-agents/src/claim_queue.rs),
+# never in this script. A runner without that binary cannot exercise them:
+# they SKIP, loudly, rather than failing two dozen ways that all read "binary
+# missing". The queue's logic itself is covered by the Rust property tests in
+# rust-ci; these sections cover the integration where the binary exists.
+QUEUE_BIN="$(command -v fno-agents 2>/dev/null || true)"
+QUEUE_OK=0
+if [[ -n "$QUEUE_BIN" ]]; then
+    "$QUEUE_BIN" claim queue front --dir "$TMP/qcap-probe.d" >/dev/null 2>&1
+    # 0/1 = the verb exists (1 is "not at the front"); 2 = an old binary
+    # without the queue verbs. A capable probe read never creates the dir.
+    [[ $? -le 1 ]] && QUEUE_OK=1
+fi
+need_queue() {
+    if [[ $QUEUE_OK -eq 1 ]]; then
+        return 0
+    fi
+    echo "  SKIP: $1 (needs a queue-capable fno-agents on PATH)"
+    echo "        install it: cargo install --path crates/fno-agents"
+    return 1
+}
+
 echo "== AC2-HP-green: clean HEAD, smoke green, rust stubs green -> exit 0 =="
 out="$(run_pf 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "exit 0 on green" || fail "expected 0 got $rc: $out"
@@ -501,6 +524,7 @@ grep <<<"$out" -q "FNO_SKIP_PREFLIGHT" && ok "immediate fail carries the skip hi
 rm -rf "$LOCKDIR"
 
 echo "== FIFO queue: waiters are served in arrival order, not by chance =="
+need_queue "FIFO queue: waiters served in arrival order" && {
 rm -f "$(cur_att)"
 ( cd "$FIX" && touch STUB_FNO_SLOW && git add -A && git commit -qm "slow stub sentinel" )
 mkdir -p "$LOCKDIR"
@@ -541,7 +565,10 @@ kill "$fifo_holder" 2>/dev/null; wait "$fifo_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 ( cd "$FIX" && git rm -q STUB_FNO_SLOW && git commit -qm "drop slow stub sentinel" )
 
+}
+
 echo "== FIFO queue: --wait-timeout expiry exits 3 and cleans up its ticket =="
+need_queue "FIFO queue: --wait-timeout expiry" && {
 mkdir -p "$LOCKDIR"; printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR/holder"
 out="$(run_pf --wait-timeout 4 2>&1)"; rc=$?
 [[ $rc -eq 3 ]] && ok "expired wait exits 3" || fail "expected 3 got $rc: $out"
@@ -550,7 +577,10 @@ grep <<<"$out" -q "FNO_SKIP_PREFLIGHT" && ok "waiting output carries the skip hi
 [[ -z "$(ls -A "$LOCKDIR.queue.d" 2>/dev/null)" ]] && ok "ticket removed on give-up" || fail "ticket left behind: $(ls -A "$LOCKDIR.queue.d" 2>/dev/null)"
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+}
+
 echo "== FIFO queue: a newcomer allocates above surviving tickets, never a dequeued hole =="
+need_queue "FIFO queue: hole allocation" && {
 mkdir -p "$LOCKDIR" "$LOCKDIR.queue.d/000002"
 printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR/holder"
 printf 'pid=%s started=NOW host=x sha=deadbee\n' "$$" > "$LOCKDIR.queue.d/000002/holder"
@@ -567,7 +597,10 @@ wait "$mono_w"; rc=$?
 [[ $rc -eq 3 ]] && ok "the newcomer gave up cleanly" || fail "expected 3 got $rc"
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+}
+
 echo "== stall steal: an alive-but-idle holder past the age ceiling is stolen =="
+need_queue "stall steal" && {
 rm -f "$(cur_att)"   # the prior section minted an attestation for this SHA; reuse would skip the lock
 # The stamp must sit within the recycle slop of the holder process's real age
 # (a genuinely stalled holder wrote its own stamp): 12s old, STALL_MIN_AGE=10.
@@ -586,7 +619,10 @@ fi
 wait "$stall_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+}
+
 echo "== stall guard: a live, non-stale holder is never stolen =="
+need_queue "stall guard" && {
 # Floor 0 makes the stall branch unreachable by arithmetic (delta >= 0 can
 # never be < 0), and the holder is the suite's own pid: it cannot die or be
 # recycled mid-test, so neither dead path can fire either. The old fixture
@@ -606,7 +642,10 @@ grep <<<"$out" -q "stalled holder" && fail "stole from a healthy holder" || ok "
 [[ "$(cat "$LOCKDIR/holder" 2>/dev/null)" == "$holder_stamp" ]] && ok "the healthy holder kept its lock" || fail "holder stamp changed"
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+}
+
 echo "== orphan steal: a reparented holder is stolen before the stall floor =="
+need_queue "orphan steal" && {
 # Host probe first: a double-fork must reparent to pid 1 for the orphan
 # predicate to be observable. Under a subreaper (systemd --user, some CI
 # wrappers) reparenting lands on the subreaper instead; the code then
@@ -647,7 +686,10 @@ fi
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 fi
 
+}
+
 echo "== orphan guard: an orphan that is computing keeps its lock =="
+need_queue "orphan guard" && {
 # LD3 pinned: the bypass removes the age floor and never the CPU probe. Floor 0
 # makes condemnation unreachable by arithmetic, so an orphan that spins must be
 # waited on to the timeout like any healthy holder.
@@ -672,7 +714,10 @@ kill "$spin_orphan" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 fi
 
+}
+
 echo "== recycled pid: a stamp whose pid is a younger live process reads as dead =="
+need_queue "recycled pid" && {
 old="$(date -u -v-25M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '25 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
 rm -f "$(cur_att)"
 mkdir -p "$LOCKDIR"
@@ -687,7 +732,10 @@ kill -0 "$recycled_holder" 2>/dev/null && ok "the innocent recycled process was 
 kill "$recycled_holder" 2>/dev/null; wait "$recycled_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+}
+
 echo "== phantom ticket: a queued ticket stamped by a recycled pid is reaped =="
+need_queue "phantom ticket" && {
 rm -f "$(cur_att)"   # else attestation reuse skips the lock and the phantom is never walked
 mkdir -p "$LOCKDIR.queue.d/000001"
 sleep 600 & phantom_pid=$!
@@ -698,7 +746,10 @@ out="$(run_pf --wait-timeout 30 2>&1)"; rc=$?
 kill "$phantom_pid" 2>/dev/null; wait "$phantom_pid" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+}
+
 echo "== cancel: the preflight-cancel sentinel stops a queued waiter and clears its ticket =="
+need_queue "cancel sentinel" && {
 # Signals are NOT the asserted path: macOS bash 3.2 does not run INT/TERM
 # traps while waiting on a child (verified against foreground sleep,
 # sleep+wait, and a builtin read), so a SIGINT-asserting test fails on this
@@ -729,7 +780,10 @@ wait "$cancel_w"; rc=$?
 kill "$cancel_holder" 2>/dev/null; wait "$cancel_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+}
+
 echo "== cancel guard: a STALE sentinel never cancels a later, innocent waiter =="
+need_queue "cancel guard" && {
 # A sentinel nobody consumed (its wait already ended) must not sit waiting to
 # kill the next queued run: past the one-hour grace the next waiter discards
 # it and keeps waiting.
@@ -744,7 +798,10 @@ echo "$out" | grep -q "cancelled while queued" && fail "reported a cancellation 
 kill "$stale_holder" 2>/dev/null; wait "$stale_holder" 2>/dev/null
 rm -rf "$LOCKDIR" "$LOCKDIR.queue.d"
 
+}
+
 echo "== cancel (signal lane): INT still works where bash runs traps =="
+need_queue "cancel signal lane" && {
 # macOS bash 3.2 never delivers trapped INT while the shell waits on a child,
 # so the signal branch is asserted only on platforms where it can fire (CI's
 # Linux bash 5); the sentinel test above carries the contract everywhere.
@@ -771,6 +828,8 @@ if [[ "$(uname)" != "Darwin" ]]; then
 else
     echo "  ok: signal lane skipped on Darwin (bash 3.2 does not deliver trapped INT while waiting; sentinel lane covers the contract)"
 fi
+
+}
 
 echo "== cputime parse: octal-looking fields sum in base 10 =="
 eval "$(sed -n '/^cputime_to_s() {/,/^}/p' "$PREFLIGHT_SRC")"

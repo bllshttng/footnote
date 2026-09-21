@@ -77,7 +77,7 @@ fn sideline_status_cell_reads_the_state_word_in_the_lane_color() {
         .iter()
         .map(|c| c.c)
         .collect();
-    assert!(status.starts_with("Working"), "{status:?}");
+    assert!(status.trim_start().starts_with("Work"), "{status:?}");
     let want = sideline_color::resolve_lane_color(Some("codex"), None, None, None)
         .unwrap_or(Color::Default);
     let fg = frame.cells[row * cols + rects[0].x as usize].fg;
@@ -188,6 +188,63 @@ fn sort_label_survives_every_column_configuration() {
         assert!(
             first_line.contains("age\u{2193}"),
             "age header visible at width {cols}: {first_line:?}"
+        );
+    }
+}
+
+#[test]
+fn status_word_sits_one_column_from_the_name_cell_parent_and_child() {
+    // Acceptance: the gap is the test, the widths are not. A short status
+    // word right-aligns inside its fixed cell, so its last glyph sits exactly
+    // one spacing column from the name cell - for a parent row and for a
+    // spawned child (depth 1), whose indent must not widen the gap.
+    let parent = {
+        let mut a = agent_row(
+            "architect-with-a-very-long-name",
+            4,
+            Some(AgentBadge::Working),
+            false,
+        );
+        a.pane_activity = None;
+        a.harness_session_id = Some("sess-arch".into());
+        a
+    };
+    let child = {
+        let mut a = agent_row(
+            "child-with-a-very-long-name-too",
+            5,
+            Some(AgentBadge::Working),
+            false,
+        );
+        a.pane_activity = None;
+        a.lineage_kind = Some("child".into());
+        a.spawned_by_session = Some("sess-arch".into());
+        a
+    };
+    let mut v = wide_view(vec![parent, child]);
+    set_density(&mut v, Density::Extended);
+    let frame = v.compose();
+    let cols = frame.cols as usize;
+    let rects = sideline_column_rects((v.panel_w() - 1) as u16);
+    // Rows: 0 TableHead, 1 squad band, 2 parent, 3 child.
+    for (row, label) in [(2usize, "parent"), (3, "child")] {
+        let status: String = frame.cells
+            [row * cols + rects[0].x as usize..row * cols + (rects[0].x + rects[0].width) as usize]
+            .iter()
+            .map(|c| c.c)
+            .collect();
+        assert_eq!(
+            status.trim(),
+            "Work",
+            "{label} status word reads the state: {status:?}"
+        );
+        // The acceptance IS the gap: from the word's last glyph to the name
+        // cell, exactly the one inter-column space - the widths are not the
+        // test. Left-aligned paint fails this (5 columns for a 7-wide word).
+        assert_eq!(
+            rects[1].x - rects[0].x - status.trim_end().chars().count() as u16,
+            1,
+            "{label}: one column between the status word and the name cell"
         );
     }
 }

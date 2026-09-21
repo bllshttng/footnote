@@ -33,6 +33,7 @@ const LONG_LIVED_TOKENS: [&str; 3] = ["daemon", "attach", "mux"];
 
 /// One stuck thing, self-describing. `key` is the dedupe token part the
 /// arm_watch tick folds it into; `line` is the only text a reader prints.
+#[derive(Debug)]
 pub struct Finding {
     pub kind: &'static str,
     pub key: String,

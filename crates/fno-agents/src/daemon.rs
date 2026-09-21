@@ -270,7 +270,8 @@ fn recover_with_policy(
         ..RecoveryReport::default()
     };
     let registry = load_registry_asserted(&home.registry_json())?;
-    report.interrupted_write_temps = quarantine_interrupted_write_temps(home, emitter);
+    report.interrupted_write_temps =
+        crate::quarantine::quarantine_interrupted_write_temps(home, emitter);
 
     let registered: std::collections::BTreeSet<String> = registry
         .entries
@@ -469,59 +470,6 @@ fn recover_with_policy(
     }
 
     Ok(report)
-}
-
-fn quarantine_interrupted_write_temps(home: &AgentsHome, emitter: &EventEmitter) -> Vec<String> {
-    let mut found = Vec::new();
-    let state_root = home.root().parent().unwrap_or(home.root());
-    let quarantine = state_root.join(".interrupted-writes");
-    for dir in [home.root(), state_root] {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            if !kind.is_file() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !(name.starts_with('.') && (name.contains(".tmp.") || name.ends_with(".part"))) {
-                continue;
-            }
-            let target_name = name
-                .strip_prefix('.')
-                .and_then(|name| name.split_once(".tmp.").map(|(target, _)| target))
-                .or_else(|| {
-                    name.strip_prefix('.')
-                        .and_then(|name| name.strip_suffix(".part"))
-                });
-            let Some(target_name) = target_name else {
-                continue;
-            };
-            let target = dir.join(target_name);
-            let Ok(Some(_lock)) = state::try_lock_path_exclusive(&target) else {
-                continue;
-            };
-            if !entry.path().exists() {
-                continue;
-            }
-            let _ = std::fs::create_dir_all(&quarantine);
-            let dest = quarantine.join(format!("{}-{}", now_compact(), name));
-            let outcome = if std::fs::rename(entry.path(), &dest).is_ok() {
-                "quarantined"
-            } else {
-                "detected"
-            };
-            let _ = emitter.emit(
-                "daemon_recovery_interrupted_temp",
-                &json!({"name": name, "outcome": outcome, "quarantined_to": dest}),
-            );
-            found.push(name);
-        }
-    }
-    found
 }
 
 /// A live process's start time, used to distinguish "our worker" from a recycled
@@ -1679,6 +1627,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let fleet_page = crate::fleet_page::Arm::new(ctx.opts.agents_config_cwd.clone());
     let arm_watch = crate::arm_watch::Arm::new(ctx.opts.agents_config_cwd.clone());
     let provider_cap = crate::provider_cap_verbs::Arm::new(ctx.opts.agents_config_cwd.clone());
+    let attention = crate::attention_arm::Arm::new(ctx.opts.agents_config_cwd.clone());
     // Retirement-sweep cadence: the throttle stamp beside the gate,
     // plus the next interval cell the sweep body hands back (the idle-probe
     // verdict pattern), so the tick reads a mutex instead of config files.
@@ -1859,6 +1808,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 crate::fleet_page::maybe_tick(&fleet_page, ctx.home.clone());
                 crate::arm_watch::maybe_tick(&arm_watch, ctx.home.clone());
                 crate::provider_cap_verbs::maybe_tick(&provider_cap, ctx.home.clone());
+                crate::attention_arm::maybe_tick(&attention, ctx.home.clone());
                 // Serve-only liveness tick: the served pair is the sweep's measurement,
                 // refreshed every SERVED_LIVENESS_CADENCE; off-loop, one-in-flight.
                 let codex_threads_for_liveness = Arc::clone(&ctx.codex_threads);
@@ -7834,7 +7784,7 @@ fn json_obj(pairs: &[(&str, Value)]) -> Map<String, Value> {
 }
 
 /// Compact UTC timestamp for filesystem names (`20260524T023300Z`).
-fn now_compact() -> String {
+pub(crate) fn now_compact() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

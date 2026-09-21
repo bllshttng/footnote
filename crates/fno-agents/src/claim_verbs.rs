@@ -30,12 +30,17 @@ use std::path::{Path, PathBuf};
 pub fn run_claim(args: &[String]) -> i32 {
     let Some(op) = args.first().map(String::as_str) else {
         eprintln!(
-            "fno-agents: claim requires an operation: acquire|release|status|list|sweep|session-pid|flight-acquire|flight-release|long-holds|release-stopped"
+            "fno-agents: claim requires an operation: acquire|release|status|list|sweep|queue|session-pid|flight-acquire|flight-release|long-holds|release-stopped"
         );
         return 2;
     };
     if op == "sweep" {
         return run_claim_sweep(&args[1..]);
+    }
+    if op == "queue" {
+        // One dispatch line: argument parsing and the arm body live in
+        // claim_queue.rs, so this 2,000-line file stays flat.
+        return crate::claim_queue::run_queue(&args[1..]);
     }
     if op == "session-pid" {
         return run_claim_session_pid(&args[1..]);
