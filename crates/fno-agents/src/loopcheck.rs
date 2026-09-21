@@ -2326,28 +2326,11 @@ fn read_pr_info(
     let freshness = |sha: &str| resolver.freshness(sha);
 
     // The range-tiling answer for this PR's attestation chain, computed ONCE
-    // from the same events.jsonl the local axis reads and shared by every
-    // consumer below (the classify_coverage local axis, the emitted
-    // review_coverage row). Fail-closed inside: any git failure answers
-    // not-tiled and today's single-attestation rule stands alone.
-    // The local attestation axis reads every project-log rotation PLUS the global
-    // journal's slug-scoped attestations: a review fork emits into its own
-    // checkout's project log and mirrors to the global journal, and when the
-    // fork's checkout dies the mirror alone survives (measured on PR 2137:
-    // three attestations for one head, zero copies in any surviving project
-    // log). Mirrors of rows the project log still holds are deduped, so a
-    // round is never counted twice. An unreadable journal degrades to
-    // project-only, today's behavior.
-    let project_text = event_lines(events_path).unwrap_or_default().join("\n");
-    let global_text = event_lines(global_events_path)
-        .unwrap_or_default()
-        .join("\n");
-    let extra_global = missing_global_attestations(&global_text, &project_text, repo_slug);
-    let events_text = if extra_global.is_empty() {
-        project_text
-    } else {
-        format!("{project_text}\n{extra_global}")
-    };
+    // and shared by every consumer below (the classify_coverage local axis,
+    // the emitted review_coverage row). The local attestation axis reads the
+    // project rotations plus the global journal's slug-scoped mirrors; any
+    // git failure answers not-tiled and today's rule stands alone.
+    let events_text = review_journal_text(events_path, global_events_path, repo_slug);
     let mut tiling = compute_range_tiling(
         git_bin,
         cwd,
