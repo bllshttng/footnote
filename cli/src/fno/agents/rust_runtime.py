@@ -755,16 +755,32 @@ def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
 
 
 def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]]":
-    """Project the seam's facts to ``fno-agents node-seed`` and apply the
-    answer before any lane is chosen. Only an explicit ``--node`` triggers
-    the call; a refusal exits 2 before ``inject_spawn_defaults`` runs.
-    Returns ``(args, node_verb)``: the verb word on a ``profile`` answer.
-    """
+    """Project the seam's facts to the node-seed verb and apply the answer pre-route."""
     from fno.agents.harness_map import DispatchResolveError, _TARGET_FAMILY_VERBS
     from fno.agents.node_dispatch import find_node_row, node_effective_verb
     from fno.agents.spawn_defaults import _seed_slot
 
     node = (_spawn_flag_value(args, "--node") or "").strip()
+    if not node:
+        from fno.rust_binary import VerbUnavailable, verb_call
+        try:
+            answer = verb_call("spawn-axes", {"node_seed": {
+                "family": list(_TARGET_FAMILY_VERBS),
+                "crown": _is_crown_bearing_spawn("spawn", args),
+                "resume": _is_resume_bearing_spawn("spawn", args),
+                "argv": list(args),
+            }}, VerbUnavailable)
+        except VerbUnavailable as exc:
+            print(f"fno agents spawn: {exc}; seed-node derivation skipped", file=sys.stderr)
+        else:
+            if answer.get("action") == "compose":
+                args = [str(tok) for tok in answer.get("argv") or list(args)]
+                node = (_spawn_flag_value(args, "--node") or "").strip()
+                if not node and (reason := _spawn_flag_value(args, "--node-reason")):
+                    os.environ["FNO_NODE_REASON"] = reason
+                    del args[args.index("--node-reason") : args.index("--node-reason") + 2]
+            elif answer.get("action") == "refuse":
+                print("fno agents spawn: binary predates seed-node derivation; spawning nodeless", file=sys.stderr)
     if not node:
         return list(args), None
 

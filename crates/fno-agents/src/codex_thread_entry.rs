@@ -54,6 +54,13 @@ pub(crate) fn build_codex_thread_entry(
     let spawned_by = thread_lineage(spawn_params, provenance);
     let mut entry = RegistryEntry {
         node: node.filter(|node| !node.is_empty()).map(str::to_string),
+        // The sibling receipt: the seed named a node the seam could
+        // not resolve. Absent when the node resolved or none was named.
+        node_reason: spawn_params
+            .get("node_reason")
+            .and_then(serde_json::Value::as_str)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string),
         // v25: the route axes this lane actually used. When the spawn request
         // pinned an account record id, the row stamps it verbatim (requested
         // provenance - the observed-model comparator owns verification);

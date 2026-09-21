@@ -4490,10 +4490,10 @@ where
                     // so a renderer cannot present a retired id as current.
                     "thread_id": e.fno_id,
                     "current_session_id": e.harness_session_id,
-                    // The node this row works, already stamped in registry
-                    // storage from resolved spawn provenance. Never infer it
-                    // from the row name.
+                    // `node_reason` beside `node` is the sibling receipt:
+                    // why a mint could not bind the node the seed named.
                     "node": e.node,
+                    "node_reason": e.node_reason,
                     "predecessor_session_ids": e.predecessor_session_ids,
                     "forked_from_session_id": e.forked_from_session_id,
                     "short_id": short_id,

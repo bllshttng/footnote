@@ -672,6 +672,7 @@ class AgentEntry:
     # the same discipline as `origin`. Rust's RegistryEntry mirrors it as
     # additive-optional passthrough so a daemon write-back preserves the stamp.
     node: Optional[str] = None
+    node_reason: Optional[str] = None
     # v23: the spawn REQUEST, verbatim as the flags spelled it (any
     # [1m] suffix included), stamped once at birth beside the observed axes.
     # `model`/`model_basis` flip to a verified observation; these three never
