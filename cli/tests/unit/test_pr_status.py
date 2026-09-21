@@ -951,17 +951,10 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2},
     )
     monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
-    # The walk probes rerun recovery itself; the receipt stub answers with
-    # the probed-false fact so the frozen payload contract stays deterministic.
     monkeypatch.setattr(
         _status,
-        "_merge_decision",
-        lambda pr, repo, facts: {
-            "outcome": "authorized",
-            "blockers": [],
-            "rerun_recovered": False,
-            "recovered_failures": [],
-        },
+        "rerun_recovery",
+        lambda pr, cwd=None, sha=None, runs=None: {"recovered": False, "failed": []},
     )
     # The durable-grant projection is stubbed to its own documented no-node
     # answer; the resolver's real arms are pinned in test_pr_merge_grant.py.
@@ -1045,14 +1038,8 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
             },
         },
         "dispatch_hold": None,
-        # The preview receipt (x-53c5): the stub's authorized answer, with the
-        # probed rerun fact it decided on.
-        "merge_decision": {
-            "outcome": "authorized",
-            "blockers": [],
-            "rerun_recovered": False,
-            "recovered_failures": [],
-        },
+        # The preview receipt (x-53c5): the autouse stub's authorized answer.
+        "merge_decision": {"outcome": "authorized", "blockers": []},
         "ready": True,
         "ready_blockers": [],
     }

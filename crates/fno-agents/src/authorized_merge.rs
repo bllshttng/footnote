@@ -339,15 +339,6 @@ pub struct ChecksRead {
     pub rerun_failures: Option<Vec<String>>,
 }
 
-/// The rerun-recovery fact the flake gate's own probe answered, so the
-/// preview receipt carries what it decided on: `recovered` and the job
-/// names the earlier failed attempt lost.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RerunFact {
-    pub recovered: bool,
-    pub failures: Vec<String>,
-}
-
 /// The outside world, injectable so the decision is testable without a network.
 pub trait Probes {
     fn pr_facts(&self, cwd: &Path, pr: Option<u64>) -> Result<PrFacts, String>;
@@ -392,13 +383,6 @@ pub trait Probes {
     fn live_lanes(&self, _cwd: &Path) -> usize {
         0
     }
-    /// The rerun-recovery fact for a head, `(recovered, failed job names)`;
-    /// `(None, _)` = the probe could not answer (fail-open, never a second
-    /// red). The default answers unprobed so Fake-based tests stay silent
-    /// unless they opt in.
-    fn rerun_recovery(&self, _cwd: &Path, _pr: u64, _sha: &str) -> (Option<bool>, Vec<String>) {
-        (None, Vec::new())
-    }
 }
 
 /// A cleared decision: the effect may run, pinned to this head.
@@ -430,7 +414,7 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                     strategy: probes.strategy(cwd),
                 })
             }
-            PreviewVerdict::Blocked { blockers, .. } => Err(Outcome::Held {
+            PreviewVerdict::Blocked(blockers) => Err(Outcome::Held {
                 reason: blockers
                     .iter()
                     .map(|b| b.detail.as_str())
@@ -718,18 +702,10 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
 /// own; otherwise the LIVE config decides, so a manifest snapshot never outlives
 /// an operator flipping the switch off mid-flight.
 /// The preview's verdict shape: authorized, or every blocker the gates could
-/// evaluate. The one receipt `fno do pr status` reads as `ready`. `rerun`
-/// rides both arms: the flake fact the walk probed itself, so the caller's
-/// payload can name what the hold named without a second probe.
+/// evaluate. The one receipt `fno do pr status` reads as `ready`.
 pub enum PreviewVerdict {
-    Go {
-        waiver: Option<String>,
-        rerun: Option<RerunFact>,
-    },
-    Blocked {
-        blockers: Vec<Blocker>,
-        rerun: Option<RerunFact>,
-    },
+    Go { waiver: Option<String> },
+    Blocked(Vec<Blocker>),
 }
 
 /// The read-only preview walk: same gates, same order as the effect path's
@@ -744,17 +720,14 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
 
     // (1) terminal. AC3: the blockers are exactly [pr_terminal].
     if is_terminal_state(&facts.state) {
-        return PreviewVerdict::Blocked {
-            blockers: vec![Blocker::held(
-                "pr_terminal",
-                format!(
-                    "PR {} is already {}; nothing to merge",
-                    facts.number,
-                    facts.state.to_lowercase()
-                ),
-            )],
-            rerun: None,
-        };
+        return PreviewVerdict::Blocked(vec![Blocker::held(
+            "pr_terminal",
+            format!(
+                "PR {} is already {}; nothing to merge",
+                facts.number,
+                facts.state.to_lowercase()
+            ),
+        )]);
     }
 
     // (2) authority: per-run refusal, live config, posture floor. The codes
@@ -878,23 +851,6 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
     if let Some(blocker) = crate::merge_gates::overlap_blocker(probes, cwd, facts.number) {
         blockers.push(blocker);
     }
-    // The flake fact: when the caller supplied none and CI reads green, the
-    // walk probes rerun recovery itself - the gate and its fact live in one
-    // owner, and the receipt carries what it decided on.
-    let mut rerun: Option<RerunFact> = None;
-    if checks.rerun_recovered.is_none() && checks.verdict == "green" {
-        let (recovered, failures) = probes.rerun_recovery(cwd, facts.number, &facts.head_sha);
-        if let Some(recovered) = recovered {
-            checks.rerun_recovered = Some(recovered);
-            if !failures.is_empty() {
-                checks.rerun_failures = Some(failures.clone());
-            }
-            rerun = Some(RerunFact {
-                recovered,
-                failures,
-            });
-        }
-    }
     if let Some(blocker) = flake_blocker(request, &checks) {
         blockers.push(blocker);
     }
@@ -985,9 +941,9 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
         }
     }
     if blockers.is_empty() {
-        PreviewVerdict::Go { waiver, rerun }
+        PreviewVerdict::Go { waiver }
     } else {
-        PreviewVerdict::Blocked { blockers, rerun }
+        PreviewVerdict::Blocked(blockers)
     }
 }
 
@@ -1582,116 +1538,6 @@ impl Probes for RealProbes {
         combined.push_str(&String::from_utf8_lossy(&out.stderr));
         Ok((out.status.success(), combined))
     }
-
-    fn rerun_recovery(&self, cwd: &Path, _pr: u64, sha: &str) -> (Option<bool>, Vec<String>) {
-        // The Python rerun_recovery port: recovery = a head run whose latest
-        // attempt passed while an earlier attempt failed; `failed` names the
-        // jobs the earlier attempt lost. Fail-open: an unreadable probe is a
-        // fact nobody can state, never a second red.
-        if sha.is_empty() {
-            return (None, Vec::new());
-        }
-        let (ok, stdout) = match self.run_gh(
-            cwd,
-            &[
-                "api".to_string(),
-                format!("repos/{{owner}}/{{repo}}/actions/runs?head_sha={sha}&per_page=100"),
-            ],
-        ) {
-            Ok(pair) => pair,
-            Err(_) => return (None, Vec::new()),
-        };
-        if !ok {
-            return (None, Vec::new());
-        }
-        let Ok(v) = serde_json::from_str::<Value>(&stdout) else {
-            return (None, Vec::new());
-        };
-        let rows = match v.get("workflow_runs").and_then(Value::as_array) {
-            Some(rows) => rows,
-            None => return (None, Vec::new()),
-        };
-        const RERUN_MAX_RUNS: usize = 20; // one read must not become a hundred gh calls
-        const RERUN_FAIL_CONCLUSIONS: [&str; 3] = ["failure", "timed_out", "startup_failure"];
-        let mut recovered = false;
-        let mut failed: Vec<String> = Vec::new();
-        for row in rows.iter().take(RERUN_MAX_RUNS) {
-            if row.get("conclusion").and_then(Value::as_str) != Some("success") {
-                continue; // only a run that now passes can have recovered
-            }
-            let latest = row.get("run_attempt").and_then(Value::as_i64).unwrap_or(1);
-            let Some(run_id) = row.get("id").and_then(Value::as_i64) else {
-                continue; // a first-attempt pass never failed
-            };
-            if latest <= 1 {
-                continue;
-            }
-            let (ok2, out2) = match self.run_gh(
-                cwd,
-                &[
-                    "api".to_string(),
-                    format!("repos/{{owner}}/{{repo}}/actions/runs/{run_id}/attempts?per_page=100"),
-                ],
-            ) {
-                Ok(pair) => pair,
-                Err(_) => continue,
-            };
-            if !ok2 {
-                continue;
-            }
-            let Ok(av) = serde_json::from_str::<Value>(&out2) else {
-                continue;
-            };
-            let Some(attempts) = av.get("workflow_runs").and_then(Value::as_array) else {
-                continue;
-            };
-            for attempt in attempts {
-                let n = attempt
-                    .get("run_attempt")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0);
-                if n <= 0 || n >= latest {
-                    continue;
-                }
-                let conclusion = attempt
-                    .get("conclusion")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                if !RERUN_FAIL_CONCLUSIONS.contains(&conclusion) {
-                    continue;
-                }
-                recovered = true;
-                if let Ok((ok3, out3)) = self.run_gh(
-                    cwd,
-                    &[
-                        "api".to_string(),
-                        format!(
-                            "repos/{{owner}}/{{repo}}/actions/runs/{run_id}/attempts/{n}/jobs?per_page=100"
-                        ),
-                    ],
-                ) {
-                    if ok3 {
-                        if let Ok(jv) = serde_json::from_str::<Value>(&out3) {
-                            let empty = Vec::new();
-                            let jobs = jv
-                                .get("jobs")
-                                .and_then(Value::as_array)
-                                .unwrap_or_else(|| jv.as_array().unwrap_or(&empty));
-                            for j in jobs {
-                                if let Some(name) = j.get("name").and_then(Value::as_str) {
-                                    let c = j.get("conclusion").and_then(Value::as_str).unwrap_or("");
-                                    if RERUN_FAIL_CONCLUSIONS.contains(&c) {
-                                        failed.push(name.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        (Some(recovered), failed)
-    }
 }
 
 /// Parse one `fno do pr status` stdout into both facts the door needs. An
@@ -2183,7 +2029,7 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         let receipt = match RealProbes.pr_facts(cwd, request.pr) {
             Err(reason) => serde_json::json!({ "outcome": "unknown", "reason": reason }),
             Ok(facts) => match preview_walk(&RealProbes, &request, &facts) {
-                PreviewVerdict::Go { waiver, rerun } => {
+                PreviewVerdict::Go { waiver } => {
                     let mut receipt = serde_json::json!({
                         "outcome": "authorized",
                         "head": facts.head_sha,
@@ -2192,32 +2038,24 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
                     if let Some(note) = waiver {
                         receipt["coverage_waiver"] = Value::String(note);
                     }
-                    attach_rerun(&mut receipt, rerun);
                     receipt
                 }
-                PreviewVerdict::Blocked {
-                    blockers: rows,
-                    rerun,
-                } => {
-                    let mut receipt = serde_json::json!({
-                        "outcome": "held",
-                        "head": facts.head_sha,
-                        "blockers": rows
-                            .iter()
-                            .map(|b| serde_json::json!({
-                                "code": b.code,
-                                "class": match b.class {
-                                    BlockerClass::Held => "held",
-                                    BlockerClass::Refused => "refused",
-                                    BlockerClass::Unknown => "unknown",
-                                },
-                                "detail": b.detail,
-                            }))
-                            .collect::<Vec<_>>(),
-                    });
-                    attach_rerun(&mut receipt, rerun);
-                    receipt
-                }
+                PreviewVerdict::Blocked(rows) => serde_json::json!({
+                    "outcome": "held",
+                    "head": facts.head_sha,
+                    "blockers": rows
+                        .iter()
+                        .map(|b| serde_json::json!({
+                            "code": b.code,
+                            "class": match b.class {
+                                BlockerClass::Held => "held",
+                                BlockerClass::Refused => "refused",
+                                BlockerClass::Unknown => "unknown",
+                            },
+                            "detail": b.detail,
+                        }))
+                        .collect::<Vec<_>>(),
+                }),
             },
         };
         return (0, format!("{}\n", receipt), String::new());
@@ -2228,18 +2066,6 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
     // binary that could not start, and the caller reads the receipt either way.
     let outcome = run(&RealProbes, &request);
     (0, format!("{}\n", outcome.to_json()), String::new())
-}
-
-/// Ride the probed flake fact onto the preview receipt. Present only when the
-/// walk actually probed: an absent key is "not probed", never "not recovered",
-/// so a payload reader keeps the absent/probed-false distinction the status
-/// payload has always carried.
-fn attach_rerun(receipt: &mut Value, rerun: Option<RerunFact>) {
-    if let Some(fact) = rerun {
-        receipt["rerun_recovered"] = Value::Bool(fact.recovered);
-        receipt["recovered_failures"] =
-            Value::Array(fact.failures.into_iter().map(Value::String).collect());
-    }
 }
 
 fn read_payload(args: &[String]) -> Result<Value, String> {
@@ -2366,10 +2192,6 @@ mod tests {
         /// Answer for the REST recovery call alone, so a test can fail the
         /// `gh pr merge` and let the retry succeed.
         gh_recovery_ok: Option<bool>,
-        /// The rerun-recovery PROBE's answer, distinct from the supplied
-        /// `rerun_recovered` fact a payload carries; `None` keeps the probe
-        /// silent (the trait default's not-answered).
-        probed_rerun: Option<(bool, Vec<String>)>,
         gh_calls: RefCell<Vec<Vec<String>>>,
         /// Simulated merge-slot claim: `None` is free, `Some(pr)` is held.
         slot: RefCell<Option<u64>>,
@@ -2440,12 +2262,6 @@ mod tests {
         }
         fn base_lineage(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
             self.lineage.clone().unwrap_or(ProbeOutcome::Clear)
-        }
-        fn rerun_recovery(&self, _cwd: &Path, _pr: u64, _sha: &str) -> (Option<bool>, Vec<String>) {
-            match &self.probed_rerun {
-                Some((recovered, failures)) => (Some(*recovered), failures.clone()),
-                None => (None, Vec::new()),
-            }
         }
         fn merge_result(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
             self.merge_result.clone().unwrap_or(ProbeOutcome::Clear)
@@ -3744,7 +3560,7 @@ mod tests {
         let facts = fake.facts.clone().unwrap_or_else(open_facts);
         match preview_walk(fake, req, &facts) {
             PreviewVerdict::Go { .. } => Vec::new(),
-            PreviewVerdict::Blocked { blockers, .. } => blockers,
+            PreviewVerdict::Blocked(rows) => rows,
         }
     }
 
@@ -4009,52 +3825,5 @@ mod tests {
             "released lane must not count"
         );
         std::fs::remove_dir_all(&base).ok();
-    }
-
-    #[test]
-    fn a_probed_rerun_fact_holds_and_rides_the_receipt() {
-        // The walk probes rerun recovery itself when the caller supplied no
-        // fact and CI reads green: a recovered green holds, and the fact
-        // rides the receipt for the caller's payload.
-        let fake = Fake {
-            probed_rerun: Some((true, vec!["job-a".to_string()])),
-            ..clean()
-        };
-        let facts = open_facts();
-        match preview_walk(&fake, &preview_request(7), &facts) {
-            PreviewVerdict::Go { .. } => {
-                panic!("a rerun-recovered green must hold")
-            }
-            PreviewVerdict::Blocked { blockers, rerun } => {
-                assert!(
-                    blockers.iter().any(|b| b.code == "rerun_recovered_green"),
-                    "{blockers:?}"
-                );
-                assert_eq!(
-                    rerun,
-                    Some(RerunFact {
-                        recovered: true,
-                        failures: vec!["job-a".to_string()],
-                    })
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn a_probe_none_rerun_answer_never_holds() {
-        // A probe that could not answer is a fact nobody can state: the gate
-        // stays silent rather than holding on an unreadable read.
-        let fake = Fake {
-            probed_rerun: Some((false, vec![])),
-            ..clean()
-        };
-        let facts = open_facts();
-        match preview_walk(&fake, &preview_request(7), &facts) {
-            PreviewVerdict::Go { .. } => {}
-            PreviewVerdict::Blocked { blockers, .. } => {
-                panic!("a probed no-recovery green must not hold: {blockers:?}")
-            }
-        }
     }
 }
