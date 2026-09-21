@@ -72,6 +72,7 @@ pub mod capability_leaves;
 pub mod cargo_build_dirs;
 pub mod census;
 pub mod check_supersession;
+pub mod claim_queue;
 pub mod claim_store;
 pub mod claim_verbs;
 pub mod claims;
