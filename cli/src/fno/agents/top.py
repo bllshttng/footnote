@@ -55,7 +55,9 @@ def lane_rows() -> list[dict]:
 
     out: list[dict] = []
     for provider in sorted(lanes):
-        lane_answer = lanes.get(provider) or {}
+        lane_answer = lanes.get(provider)
+        if not isinstance(lane_answer, dict):
+            continue
         cap = lane_answer.get("cap")
         live = lane_answer.get("live")
         lane: dict = {"provider": provider, "cap": cap, "holders": []}

@@ -176,6 +176,13 @@ mod probe {
             });
         }
 
+        // Read provider lanes before any refusal so the answer preserves the
+        // quota evidence that explains a busy fleet.
+        let lanes_result = lanes_answer(&config_cwd, &registry_path, &mut warnings);
+        if let Ok(lanes) = &lanes_result {
+            out.insert("lanes".into(), lanes.clone());
+        }
+
         // The route axis of the quota wall: the SAME call the gate makes, so
         // the probe and the gate cannot disagree about what refuses (the gate
         // runs it ahead of every machine axis).
@@ -373,7 +380,7 @@ mod probe {
         }
 
         // The lanes: every capped provider AND every provider a live row names.
-        let lanes = match lanes_answer(&config_cwd, &registry_path, &mut warnings) {
+        let lanes = match lanes_result {
             Ok(lanes) => lanes,
             Err(fault) => {
                 return json!({
@@ -659,6 +666,24 @@ fn lanes_answer(
     registry_path: &std::path::Path,
     warnings: &mut Vec<String>,
 ) -> Result<Value, spawn_gate_lanes::LaneFault> {
+    let home = crate::paths::AgentsHome::from_env();
+    let now_epoch = crate::provider_cap::now_epoch_secs();
+    let snapshot = crate::provider_cap::read_persisted_snapshot(&home);
+    let fresh = snapshot
+        .as_ref()
+        .is_some_and(|s| now_epoch.saturating_sub(s.measured_at_epoch) <= 1_800);
+    let quota_source = match snapshot.as_ref() {
+        Some(_) if fresh => "snapshot",
+        Some(_) => "stale-snapshot",
+        None => "no-snapshot",
+    };
+    let quota_states = if fresh {
+        snapshot
+            .as_ref()
+            .map(crate::provider_cap::quota_states_from_snapshot)
+    } else {
+        None
+    };
     let mut providers: Vec<String> = Vec::new();
     if let Some(table) = agents_config::config_lookup(config_cwd, &["agents", "provider_limits"])
         .and_then(|t| {
@@ -716,6 +741,14 @@ fn lanes_answer(
                         }))
                         .collect::<Vec<_>>()),
                 );
+                lane.insert(
+                    "quota".into(),
+                    json!(quota_states
+                        .as_ref()
+                        .and_then(|states| states.get(&provider))
+                        .cloned()
+                        .unwrap_or_else(|| "unmeasured".into())),
+                );
                 lanes.insert(provider, Value::Object(lane));
             }
             Err(error) => {
@@ -723,6 +756,7 @@ fn lanes_answer(
             }
         }
     }
+    lanes.insert("quota_source".into(), json!(quota_source));
     Ok(Value::Object(lanes))
 }
 
@@ -996,6 +1030,90 @@ mod tests {
             "this reign holds 2 of max_live 2 across 1 kings (share 2); the rows charged to you are w1, w2"
         );
         assert_eq!(answer["held_rows"], json!(["w1", "w2"]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn probe_max_live_refusal_carries_provider_lane_quota_state() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-lanes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 2\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
+        let me = std::process::id();
+        let good = crate::daemon::process_start_time(me).unwrap_or(0);
+        let row = |name: &str| {
+            format!(
+                r#"{{"name":"{name}","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{me},"pid_start_time":{good}}}"#
+            )
+        };
+        std::fs::write(
+            home.join("registry.json"),
+            format!(
+                r#"{{"schema_version":{},"entries":[{},{},{}]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION,
+                row("p1"),
+                row("p2"),
+                row("p3")
+            ),
+        )
+        .unwrap();
+
+        let answer = probe::answer(&json!({}));
+
+        assert_eq!(answer["verdict"], "refused");
+        assert_eq!(answer["reason"], "max_live");
+        assert_eq!(answer["lanes"]["zai"]["live"], 3);
+        assert_eq!(answer["lanes"]["zai"]["quota"], "unmeasured");
+        assert_eq!(answer["lanes"]["quota_source"], "no-snapshot");
+
+        std::fs::create_dir_all(home.join("provider-cap")).unwrap();
+        std::fs::write(
+            home.join("provider-cap").join("snapshot.json"),
+            serde_json::json!({
+                "lanes": [{
+                    "lane": "zai:default",
+                    "provider": "zai",
+                    "account": "default",
+                    "reset_epoch": null,
+                    "reset_passed_epoch": null,
+                    "missing_reset_timezone": [],
+                    "state": "closed",
+                    "members": []
+                }],
+                "measured_at": "probe",
+                "measured_at_epoch": crate::provider_cap::now_epoch_secs()
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let snapshot_answer = probe::answer(&json!({}));
+        assert_eq!(snapshot_answer["lanes"]["zai"]["quota"], "closed");
+        assert_eq!(snapshot_answer["lanes"]["quota_source"], "snapshot");
+
+        std::env::remove_var(crate::paths::HOME_ENV);
+        match prior_claims_root {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
