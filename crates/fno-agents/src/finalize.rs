@@ -3104,8 +3104,12 @@ fn append_corrections_pointer(home: Option<&Path>, postmortem: &Path, reason: &s
     // Fixture guard: a postmortem outside the postmortems root of
     // the home this log resolved through is a unit-test temp dir that fell
     // through the ladder - 360 of 418 live rows. Refuse at the one writer
-    // rather than filtering in every reader.
-    if !crate::real_session::is_real_run(home, postmortem) {
+    // rather than filtering in every reader. The FNO_HOME read stays HERE
+    // (one carrier of the ladder, per the reachable-paths twin baseline);
+    // the predicate itself reads no environment.
+    let fno_home = std::env::var_os("FNO_HOME").map(PathBuf::from);
+    let pm_root = crate::real_session::postmortems_root_for_home(fno_home.as_deref(), home);
+    if !crate::real_session::is_real_run(pm_root.as_deref(), postmortem) {
         return;
     }
     let detail_trunc: String = detail.replace(['\n', '\r'], " ").chars().take(80).collect();
