@@ -2718,7 +2718,7 @@ def dispatch_spawn(
                 row_launch_account_source = getattr(
                     lineage_row, "launch_account_source", None
                 )
-                if account_env is None and row_launch_account not in (None, "default"):
+                if account_env is None and row_launch_account not in (None, "", "default"):
                     account_env = fork_lineage.launch_overlay(row_launch_account)
             elif not resume_session_id:
                 row_launch_account = effective_launch_account or "default"

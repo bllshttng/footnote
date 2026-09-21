@@ -54,7 +54,7 @@ async fn routed_row_adopt_refuses_before_any_claim() {
             assert!(
                 e.message.contains("fno agents resume") && e.message.contains("first"),
                 "adopt refusal must name the door and the row; got: {}",
-                fno_message(&resp)
+                e.message
             );
         }
         _ => panic!("expected adopt refusal for a routed row"),
@@ -71,11 +71,4 @@ async fn routed_row_adopt_refuses_before_any_claim() {
         claims.display()
     );
     std::fs::remove_dir_all(home.root()).ok();
-}
-
-fn fno_message(resp: &crate::protocol::Response) -> String {
-    match &resp.payload {
-        crate::protocol::ResponsePayload::Err(e) => e.message.clone(),
-        _ => String::new(),
-    }
 }

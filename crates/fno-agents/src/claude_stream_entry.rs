@@ -56,7 +56,11 @@ pub(crate) fn stream_child_argv(uuid: &str, registry: &Registry) -> Result<Vec<S
                 || e.harness_session_id.as_deref() == Some(uuid))
     });
     if let Some(row) = row {
-        if let Some(_path) = row.route_settings_path.as_deref().filter(|p| !p.is_empty()) {
+        if row
+            .route_settings_path
+            .as_deref()
+            .is_some_and(|p| !p.is_empty())
+        {
             return Err(format!(
                 "{} runs on a recorded route that the adopt lane cannot carry; \
                  resume it with fno agents resume {}, which restores the route",
