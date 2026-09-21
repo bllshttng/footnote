@@ -987,7 +987,8 @@ def test_matrix_resume_routed_row_wakes_under_the_binding(tmp_path, monkeypatch)
 def test_matrix_spawn_resume_inherits_the_recorded_account(tmp_path, monkeypatch) -> None:
     """Door: spawn --resume (revive). The revived row inherits the source
     row's launch account - the transcript lives under the config dir it was
-    created in, so the account is a fact about the transcript."""
+    created in, so the account is a fact about the transcript. The recorded
+    account's overlay rides the spawn, so the process BILLS there too."""
 
     from fno.agents import dispatch
     from fno.agents.harnesses.base import ProviderResult
@@ -1002,11 +1003,24 @@ def test_matrix_spawn_resume_inherits_the_recorded_account(tmp_path, monkeypatch
         lambda home, short: "sess-1",
     )
 
+    seen = {}
+
     def _fake_bg_create(**kwargs):
+        seen.update(kwargs)
         return ProviderResult(0, "", "", 1, session_id_out="feedface")
 
     monkeypatch.setattr(
         "fno.agents.harnesses.claude.bg_create", _fake_bg_create
+    )
+
+    class _Overlay:
+        account_id = "makers"
+        env = {"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}
+        lane = "config-dir"
+
+    monkeypatch.setattr(
+        "fno.agents.account_env.resolve_account_overlay",
+        lambda account_id, **kwargs: _Overlay(),
     )
     result = dispatch.dispatch_spawn(
         name="router",
@@ -1021,6 +1035,9 @@ def test_matrix_spawn_resume_inherits_the_recorded_account(tmp_path, monkeypatch
     row = load_registry()[0]
     assert row.launch_account == "makers", (
         "a revive inherits the source row's account axis"
+    )
+    assert seen["account_env"] == {"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}, (
+        "the recorded account's overlay must ride the resume spawn"
     )
 
 

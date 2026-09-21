@@ -2718,6 +2718,8 @@ def dispatch_spawn(
                 row_launch_account_source = getattr(
                     lineage_row, "launch_account_source", None
                 )
+                if account_env is None and row_launch_account not in (None, "default"):
+                    account_env = fork_lineage.launch_overlay(row_launch_account)
             elif not resume_session_id:
                 row_launch_account = effective_launch_account or "default"
                 if row_launch_account == "default":
@@ -6687,11 +6689,7 @@ def wake_and_deliver(
         return False, "registry-incomplete"
 
     spawn_name = f"{_WAKE_NAME_PREFIX}{canonical_handle(session_uuid)}"
-    route_provider = (
-        getattr(entry, "provider", None)
-        if entry is not None and getattr(entry, "route_settings_path", None)
-        else None
-    )
+    route_provider, route_env = fork_lineage.wake_route(entry, session_uuid)
     from fno.agents.spawn_gate import GateRefused, run_gate
 
     gate = None
@@ -6807,6 +6805,7 @@ def wake_and_deliver(
             cwd=cwd or Path.cwd(),
             resume_session_id=session_uuid,
             route_provider=route_provider,
+            route_env=route_env,
             provider_gate=gate,
         )
         short = (
