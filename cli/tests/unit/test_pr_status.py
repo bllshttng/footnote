@@ -44,6 +44,12 @@ def _receipt(*codes):
     }
 
 
+# The real merge-decision wrapper, captured before the module's autouse
+# fixture replaces it; the transport-failure test restores it so the catch
+# path itself is what runs.
+_REAL_MERGE_DECISION = _status._merge_decision
+
+
 def test_ready_is_the_preview_receipt(monkeypatch, capsys):
     """AC4 (x-53c5): a terminal PR renders ready false with the receipt's
     own blocker word; the receipt itself rides as merge_decision."""
@@ -70,8 +76,10 @@ def test_an_unreachable_owner_reads_not_ready_never_ready(monkeypatch, capsys):
     def boom(verb, payload, timeout=0):
         raise rust_binary.VerbUnavailable("unreachable")
 
-    # The transport dies, not the wrapper: _merge_decision must catch it and
-    # answer the fail-closed receipt itself.
+    # The transport dies, not the wrapper: restore the REAL _merge_decision
+    # over the module's autouse stub so the catch path itself is what runs,
+    # then kill the transport under it.
+    monkeypatch.setattr(_status, "_merge_decision", _REAL_MERGE_DECISION)
     monkeypatch.setattr(rust_binary, "verb_call", boom)
     monkeypatch.setattr(
         _status, "_fetch", lambda pr, cwd: ({"state": "OPEN", "statusCheckRollup": []}, "")
@@ -385,6 +393,11 @@ def test_unknown_coverage_statuses_block_ready_without_code_red(monkeypatch, cap
         {"context": "fno/review-coverage", "state": "PENDING"},
         {"context": "fno/review-coverage-unavailable", "state": "PENDING"},
     ]
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("review_coverage_unknown"),
+    )
     monkeypatch.setattr(
         "fno.pr._reviews.publish_coverage_status",
         lambda *args, **kwargs: (True, ""),
