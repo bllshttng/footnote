@@ -396,7 +396,11 @@ pub fn project(
             .and_then(|l| l.get("graph_node_id"))
             .and_then(Value::as_str)
             .map(str::to_string);
-        let removed_by = r.removed_by.as_deref().unwrap_or("reap");
+        let removed_by = if r.removed_by.is_empty() {
+            "unknown"
+        } else {
+            &r.removed_by
+        };
         rows.push(FeedRow {
             ts: r.reaped_at.clone(),
             kind: "session_reaped".into(),
@@ -413,11 +417,24 @@ pub fn project(
                 .and_then(Value::as_str)
                 .map(str::to_string),
             title: format!("{} removed by {removed_by}", r.row_name),
-            actor: r.removed_by.clone(),
+            actor: if r.removed_by.is_empty() {
+                None
+            } else {
+                Some(r.removed_by.clone())
+            },
             // Copied verbatim. It was rendered from the capability table at
             // reap time; re-deriving it would answer a different question if
             // that table has moved since.
-            detail: Some(format!("resume: {} - cwd {}", r.resume, r.cwd)),
+            detail: Some(format!(
+                "resume: {} - cwd {} - trigger {}",
+                r.resume,
+                r.cwd,
+                if r.removal_trigger.is_empty() {
+                    "unknown"
+                } else {
+                    &r.removal_trigger
+                }
+            )),
             ..FeedRow::default()
         });
     }
@@ -851,7 +868,8 @@ mod tests {
             reaped_at: "2026-09-06T10:00:00Z".into(),
             resume: "claude --resume 00847995".into(),
             ledger: Some(serde_json::json!({"graph_node_id": "x-aaaa"})),
-            removed_by: None,
+            removed_by: "gc-sweep".into(),
+            removal_trigger: "unattended".into(),
             schema_version: Some(2),
             identity: None,
             native_locator: None,
@@ -916,9 +934,17 @@ mod tests {
             .find(|row| row.kind == "session_reaped")
             .expect("one reaped row");
         assert!(row.title.contains("t-d145"), "title was {}", row.title);
+        // x-0e2a: the stamp is printed, never invented. The fixture carries
+        // a writer, so the row names it and the detail carries the trigger.
+        assert!(
+            row.title.contains("removed by gc-sweep"),
+            "title was {}",
+            row.title
+        );
+        assert_eq!(row.actor.as_deref(), Some("gc-sweep"));
         assert_eq!(
             row.detail.as_deref(),
-            Some("resume: claude --resume 00847995 - cwd /tmp/wt")
+            Some("resume: claude --resume 00847995 - cwd /tmp/wt - trigger unattended")
         );
         assert_eq!(row.node.as_deref(), Some("x-aaaa"));
         assert_eq!(
@@ -927,6 +953,36 @@ mod tests {
         );
         let only_reaped = filter_rows(p.rows, None, None, Some("session_reaped"), None, None);
         assert_eq!(only_reaped.len(), 1);
+    }
+
+    // A pre-stamp receipt carries no writer. The feed once invented the
+    // word `reap` for it (x-0e2a); now it says `unknown`, and the actor is
+    // empty rather than a door nobody named.
+    #[test]
+    fn a_pre_stamp_receipt_reads_unknown_never_reap() {
+        let mut r = receipt_fixture();
+        r.removed_by.clear();
+        r.removal_trigger.clear();
+        let p = project("", &[], std::slice::from_ref(&r));
+        let row = p
+            .rows
+            .iter()
+            .find(|row| row.kind == "session_reaped")
+            .expect("one reaped row");
+        assert!(
+            row.title.contains("removed by unknown"),
+            "title was {}",
+            row.title
+        );
+        assert!(!row.title.contains("reap"), "title was {}", row.title);
+        assert_eq!(row.actor, None);
+        assert!(
+            row.detail
+                .as_deref()
+                .is_some_and(|d| d.ends_with("trigger unknown")),
+            "detail was {:?}",
+            row.detail
+        );
     }
 
     // The receipt outlives the registry row, so it is the only surviving

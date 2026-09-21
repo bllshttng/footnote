@@ -2620,7 +2620,7 @@ fn account_for_removed_rows(path: &Path, before: &[RegistryEntry], after: &[Regi
 /// to five following arguments, 200 chars. The binary name alone cannot tell
 /// `agents reap --apply` from `board --json`, and which door dropped rows is
 /// exactly the question the grouped loss event exists to answer.
-fn invocation_verb() -> String {
+pub(crate) fn invocation_verb() -> String {
     let mut parts: Vec<String> = std::env::args_os()
         .take(6)
         .map(|a| a.to_string_lossy().into_owned())

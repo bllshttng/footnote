@@ -293,12 +293,17 @@ fn audit_receipt(
     if (now - reaped).num_seconds() > since_secs as i64 {
         return; // outside the window: not this report's population
     }
-    // A removal receipt (`removed_by` set) records a deliberate operator
-    // removal, not a reap: it carries no effect records by contract, so
-    // demanding them here would make one plain `fno agents rm` red the
-    // whole window.
-    if receipt.removed_by.is_some() {
-        return; // removal receipt: not a retirement, not this audit's population
+    // The sweep is the only writer that runs the four retirement effects,
+    // so it is the only writer this audit has an opinion about. Any OTHER
+    // non-empty stamp (roster-reap, the argv verb of an `rm` door) is a
+    // removal receipt and skips, exactly as before. An EMPTY stamp is the
+    // pre-stamp tail (every receipt written before `removed_by` was
+    // required) and stays in the population until the retention window
+    // rolls it out.
+    if !receipt.removed_by.is_empty()
+        && receipt.removed_by != crate::receipt::Writer::GcSweep.surface()
+    {
+        return;
     }
     // The pin is the contract the writer promised, never its build: the
     // build moves on every merge that touches crates/, and a build pin
@@ -484,7 +489,9 @@ fn audit_event_cohort(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::receipt::{build_reap_receipt, write_reap_receipt, EffectRecord, ReapReceipt};
+    use crate::receipt::{
+        build_reap_receipt, write_reap_receipt, EffectRecord, ReapReceipt, Writer,
+    };
     use crate::state;
 
     fn temp_home() -> AgentsHome {
@@ -583,7 +590,7 @@ mod tests {
         // contracts' receipts - and the audit fails on empty evidence,
         // with the window itself naming why.
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("old"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("old"), None, Writer::GcSweep).unwrap();
         stamp(
             &mut receipt,
             Some("native-stop,active-surface,resume-evidence"),
@@ -636,7 +643,7 @@ mod tests {
         // with nothing in `problems` and nothing in `verified` names no
         // reason at all.
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("v1"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("v1"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, None);
         receipt.effects = confirmed_effects();
         write_reap_receipt(&home, &receipt).unwrap();
@@ -680,11 +687,11 @@ mod tests {
         // the current-contract receipt verifies; the audit passes - the
         // rollout tail never holds the probe red for a full window.
         let home = temp_home();
-        let mut old = build_reap_receipt(&row("prev"), None).unwrap();
+        let mut old = build_reap_receipt(&row("prev"), None, Writer::GcSweep).unwrap();
         stamp(&mut old, Some("native-stop,active-surface,resume-evidence"));
         old.effects = vec![confirmed_effect()];
         write_reap_receipt(&home, &old).unwrap();
-        let mut cur = build_reap_receipt(&row("live"), None).unwrap();
+        let mut cur = build_reap_receipt(&row("live"), None, Writer::GcSweep).unwrap();
         stamp(&mut cur, Some(retirement_contract().as_str()));
         cur.effects = confirmed_effects();
         write_reap_receipt(&home, &cur).unwrap();
@@ -703,7 +710,7 @@ mod tests {
     #[test]
     fn an_older_build_on_the_current_contract_verifies() {
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("older"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("older"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.writer_build =
             Some("fno-agents 0.3.2 rev cf7e0875703610d488e3ee2b2bdecdfc3f39fdb0".into());
@@ -724,7 +731,7 @@ mod tests {
     #[test]
     fn an_older_build_on_the_current_contract_without_mux_member_refuses() {
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("older"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("older"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.writer_build =
             Some("fno-agents 0.3.2 rev cf7e0875703610d488e3ee2b2bdecdfc3f39fdb0".into());
@@ -754,7 +761,7 @@ mod tests {
         // receipt carries the full op set with one op unconfirmed, so the
         // refusal is the unconfirmed-outcome one, not the missing-op one.
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("part"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("part"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = vec![
             effect("native-stop", "confirmed-removed"),
@@ -782,7 +789,7 @@ mod tests {
     #[test]
     fn ac1_hp_a_single_op_receipt_is_refused() {
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("synthetic"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("synthetic"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = vec![confirmed_effect()];
         write_reap_receipt(&home, &receipt).unwrap();
@@ -815,7 +822,7 @@ mod tests {
     #[test]
     fn ac1_edge_full_set_verifies_and_a_failed_op_refuses() {
         let home = temp_home();
-        let mut full = build_reap_receipt(&row("full"), None).unwrap();
+        let mut full = build_reap_receipt(&row("full"), None, Writer::GcSweep).unwrap();
         stamp(&mut full, Some(retirement_contract().as_str()));
         full.effects = vec![
             effect("native-stop", "confirmed-removed"),
@@ -828,7 +835,7 @@ mod tests {
         assert!(report.passes(), "{:?}", report.problems);
         assert_eq!(report.verified.len(), 1);
 
-        let mut failed = build_reap_receipt(&row("failed"), None).unwrap();
+        let mut failed = build_reap_receipt(&row("failed"), None, Writer::GcSweep).unwrap();
         stamp(&mut failed, Some(retirement_contract().as_str()));
         failed.effects = vec![
             effect("native-stop", "confirmed-removed"),
@@ -855,7 +862,7 @@ mod tests {
     #[test]
     fn ac2_hp_a_receipt_without_the_mux_member_op_refuses() {
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("premux"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("premux"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = vec![
             effect("native-stop", "confirmed-removed"),
@@ -879,7 +886,7 @@ mod tests {
     #[test]
     fn ac2_edge_not_applicable_mux_member_passes_with_no_events_log() {
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("nomux"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("nomux"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = vec![
             effect("native-stop", "confirmed-removed"),
@@ -909,7 +916,7 @@ mod tests {
         );
         // A live unrelated receipt so the window is not empty-shaped: the
         // assertion targets the events problem specifically.
-        let mut receipt = build_reap_receipt(&row("live"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("live"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = confirmed_effects();
         write_reap_receipt(&home, &receipt).unwrap();
@@ -959,7 +966,7 @@ mod tests {
             }),
         );
         // A stale-build receipt on disk: existence satisfies the cohort.
-        let mut stale = build_reap_receipt(&row("staleholder"), None).unwrap();
+        let mut stale = build_reap_receipt(&row("staleholder"), None, Writer::GcSweep).unwrap();
         stamp(
             &mut stale,
             Some("native-stop,active-surface,resume-evidence"),
@@ -977,7 +984,7 @@ mod tests {
 
         // A verified receipt keeps the rest of the report green so any
         // failure is attributable to the derived cohort.
-        let mut receipt = build_reap_receipt(&row("live"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("live"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = confirmed_effects();
         write_reap_receipt(&home, &receipt).unwrap();
@@ -1016,7 +1023,7 @@ mod tests {
     #[test]
     fn ac2_hp_the_cohort_names_missing_sessions() {
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("a"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("a"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = confirmed_effects();
         write_reap_receipt(&home, &receipt).unwrap();
@@ -1045,7 +1052,7 @@ mod tests {
     #[test]
     fn ac2_edge_without_expectations_the_gate_is_unchanged() {
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("a"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("a"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = confirmed_effects();
         write_reap_receipt(&home, &receipt).unwrap();
@@ -1056,7 +1063,7 @@ mod tests {
     #[test]
     fn a_receipt_outside_the_window_is_not_audited() {
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("old"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("old"), None, Writer::GcSweep).unwrap();
         stamp(
             &mut receipt,
             Some("native-stop,active-surface,resume-evidence"),
@@ -1094,9 +1101,9 @@ mod tests {
         // contract) must not red the window: one plain `fno agents rm` is a
         // deliberate operator removal, not a failed reap.
         let home = temp_home();
-        let mut receipt = build_reap_receipt(&row("rm-row"), None).unwrap();
+        let mut receipt = build_reap_receipt(&row("rm-row"), None, Writer::GcSweep).unwrap();
         stamp(&mut receipt, Some(retirement_contract().as_str()));
-        receipt.removed_by = Some("operator".into());
+        receipt.removed_by = "operator".into();
         write_reap_receipt(&home, &receipt).unwrap();
 
         let report = verify(&home, 24 * 3600, &[]);

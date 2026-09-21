@@ -14,6 +14,54 @@ use serde_json::{json, Value};
 use crate::paths::AgentsHome;
 use crate::state;
 
+/// The door that produced a receipt. The vocabulary is closed: a new
+/// removal door extends this enum, and the compiler then refuses its
+/// writer until it names itself through the required builder parameter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Writer {
+    /// The scheduled retirement sweep and `fno-agents reap --apply`.
+    GcSweep,
+    /// The roster sweep for harness rows no fno row names.
+    RosterReap,
+    /// The merge reaper's tree/row cleanup.
+    #[allow(dead_code)] // vocabulary sibling; the merge reaper emits
+    // events, not receipts, until a door routes its receipts here
+    MergeReaper,
+    /// The registry choke point: the surface is whatever argv named.
+    RegistryWrite,
+}
+
+impl Writer {
+    pub fn surface(self) -> String {
+        match self {
+            Writer::GcSweep => "gc-sweep".to_string(),
+            Writer::RosterReap => "roster-reap".to_string(),
+            Writer::MergeReaper => "merge-reaper".to_string(),
+            // One verb serves a human shell and a daemon loop, so the
+            // surface is the whole bounded invocation, not the binary.
+            Writer::RegistryWrite => crate::state::invocation_verb(),
+        }
+    }
+    /// RegistryWrite reads argv0: the daemon binary is unattended, any
+    /// other invocation is a session's call.
+    pub fn trigger(self) -> &'static str {
+        match self {
+            Writer::RegistryWrite => {
+                let exe = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .unwrap_or_default();
+                if exe == crate::component_update::AGENTS_DAEMON {
+                    "unattended"
+                } else {
+                    "session"
+                }
+            }
+            _ => "unattended",
+        }
+    }
+}
+
 /// One reaped row's recovery record. Built from the registry row
 /// itself - the fields present on every row - plus the harness-DECLARED
 /// interactive resume form read from the capability table (the same single
@@ -40,11 +88,17 @@ pub struct ReapReceipt {
     /// when the row has no ledger entry at all.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ledger: Option<Value>,
-    /// Who took the row, when the removal came through a NON-reap door
-    ///. A reap receipt stays byte-identical in shape to before this
-    /// field existed: the key is skipped when absent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub removed_by: Option<String>,
+    /// The SURFACE that took the row, never the process that ran it:
+    /// `gc-sweep`, `roster-reap`, `merge-reaper`, or the argv verb for a
+    /// removal that came through the registry choke point. Empty only on
+    /// a receipt written before this field was required.
+    #[serde(default)]
+    pub removed_by: String,
+    /// `unattended` for a sweep nobody asked for, `session` for a call a
+    /// session made. `fno agents rm` is reachable from both, so the writer
+    /// name alone cannot separate them. Empty on pre-stamp receipts.
+    #[serde(default)]
+    pub removal_trigger: String,
     /// Receipt schema version. v1 receipts predate the field and read as
     /// `None` (migration reads old receipts without inventing fields); every
     /// new write stamps `Some(2)`.
@@ -198,6 +252,7 @@ pub fn write_reap_receipt(home: &AgentsHome, receipt: &ReapReceipt) -> std::io::
 pub fn build_reap_receipt(
     e: &state::RegistryEntry,
     ledger: Option<&Value>,
+    writer: Writer,
 ) -> Result<ReapReceipt, String> {
     let harness = e.harness_name();
     if harness.is_empty() {
@@ -239,7 +294,8 @@ pub fn build_reap_receipt(
         reaped_at: crate::daemon::now_rfc3339_like(),
         resume: argv.join(" "),
         ledger: ledger.cloned(),
-        removed_by: None,
+        removed_by: writer.surface(),
+        removal_trigger: writer.trigger().to_string(),
         schema_version: Some(2),
         identity: Some(identity),
         native_locator: Some(serde_json::json!({ "transcripts": transcripts })),
@@ -296,7 +352,7 @@ pub fn stage_removal_accounting(
     // is then the only durable record of it, and must name it. `None` means
     // no attempt was made, never "attempted, outcome unknown".
     let mut active_surface: Option<&'static str> = None;
-    let (receipt_staged, reason) = match build_reap_receipt(entry, None) {
+    let (receipt_staged, reason) = match build_reap_receipt(entry, None, Writer::RegistryWrite) {
         Ok(mut receipt) => {
             // A receipt already on disk for this session was staged moments
             // ago by the reap sweep (or the watchdog) BEFORE it dropped the
@@ -312,7 +368,6 @@ pub fn stage_removal_accounting(
                 // above), so the sweep path never attempts twice.
                 let outcome = crate::gc_native::apply_active_surface_removal(entry);
                 active_surface = Some(outcome.as_str());
-                receipt.removed_by = Some(remover.to_string());
                 receipt
                     .effects
                     .push(outcome.effect_record("active-surface"));
@@ -354,41 +409,48 @@ mod tests {
         .unwrap()
     }
 
-    /// The reap receipt's on-disk shape is unchanged: `removed_by` is absent
-    /// for a reap, present for a non-reap removal (change 2).
+    /// Every receipt names its writer: two `Writer` values produce the same
+    /// key set and different stamps. The old absence assertions (x-b150) are
+    /// gone; a receipt that cannot name its writer is not constructible.
     #[test]
-    fn reap_receipt_omits_removed_by_and_a_removal_receipt_sets_it() {
+    fn every_receipt_names_its_writer_and_the_key_sets_match() {
         let e = sample_row("shape");
-        let reap = build_reap_receipt(&e, None).unwrap();
-        let reap_json: serde_json::Value = serde_json::to_value(&reap).unwrap();
-        assert!(reap_json.get("removed_by").is_none());
-
-        let mut removal = build_reap_receipt(&e, None).unwrap();
-        removal.removed_by = Some("fno-agents-daemon".into());
-        let removal_json: serde_json::Value = serde_json::to_value(&removal).unwrap();
-        assert_eq!(
-            removal_json["removed_by"], "fno-agents-daemon",
-            "a non-reap removal says who took the row"
+        let sweep = build_reap_receipt(&e, None, Writer::GcSweep).unwrap();
+        let choke = build_reap_receipt(&e, None, Writer::RegistryWrite).unwrap();
+        let sweep_json: serde_json::Value = serde_json::to_value(&sweep).unwrap();
+        let choke_json: serde_json::Value = serde_json::to_value(&choke).unwrap();
+        assert_eq!(sweep_json["removed_by"], "gc-sweep");
+        assert_eq!(sweep_json["removal_trigger"], "unattended");
+        assert!(
+            choke_json["removed_by"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "the choke point names its surface: {choke_json}"
         );
-        // Every other key is identical between the two shapes.
-        let mut reap_keys: Vec<&str> = reap_json
+        assert_eq!(
+            choke_json["removal_trigger"], "session",
+            "a cargo test binary is a session, not the daemon: {choke_json}"
+        );
+        assert_ne!(
+            sweep_json["removed_by"], choke_json["removed_by"],
+            "two doors never stamp the same surface"
+        );
+        // The two writers write the same file shape.
+        let mut sweep_keys: Vec<&str> = sweep_json
             .as_object()
             .unwrap()
             .keys()
             .map(|k| k.as_str())
             .collect();
-        let mut removal_keys: Vec<&str> = removal_json
+        let mut choke_keys: Vec<&str> = choke_json
             .as_object()
             .unwrap()
             .keys()
             .map(|k| k.as_str())
             .collect();
-        reap_keys.sort_unstable();
-        removal_keys.sort_unstable();
-        let mut expected = reap_keys.clone();
-        expected.push("removed_by");
-        expected.sort_unstable();
-        assert_eq!(removal_keys, expected);
+        sweep_keys.sort_unstable();
+        choke_keys.sort_unstable();
+        assert_eq!(sweep_keys, choke_keys);
     }
 
     /// A receipt write that fails leaves the harness-side removal already
