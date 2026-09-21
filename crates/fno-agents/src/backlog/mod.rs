@@ -828,6 +828,80 @@ pub fn read_entries(graph: &Path) -> Result<Vec<Value>, String> {
     Ok(entries)
 }
 
+/// The nodes a merge-grant op can use, in ordinal order, built through the
+/// same single-node loader as the full export. With `pr`, every carrier of
+/// that number; without, the queue's grant candidates' seq-0 numbers and
+/// then every carrier of each. The queue filter stays the authority: the
+/// SQL only has to return a superset of what it keeps, so a raw-status
+/// filter here is safe (STATUS_MIGRATION never produces `done` or
+/// `superseded`, and the readiness overlay passes both through).
+pub fn read_pr_entries(graph: &Path, pr: Option<i64>) -> Result<Vec<Value>, String> {
+    let connection = open(graph)?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    if meta(&transaction, "version")?.is_none() {
+        return Err("SQLite graph has no version".into());
+    }
+    let numbers: Vec<i64> = match pr {
+        Some(number) => vec![number],
+        None => {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT DISTINCT p.number FROM pull_requests p
+                     JOIN nodes n ON n.id = p.node_id
+                     WHERE p.seq = 0 AND p.number IS NOT NULL
+                       AND n.status NOT IN ('done', 'superseded')
+                       AND (p.merge_status IS NULL
+                            OR (p.merge_status <> 'merged' AND p.merge_status <> 'closed'))
+                       AND EXISTS (SELECT 1 FROM sessions s WHERE s.node_id = n.id
+                                   AND s.phase = 'do'
+                                   AND s.merge_grant IS NOT NULL
+                                   AND s.merge_grant <> 'null')",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([], |row| row.get(0))
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<i64>, _>>()
+                .map_err(|error| error.to_string())?;
+            rows
+        }
+    };
+    let mut entries = Vec::new();
+    if numbers.is_empty() {
+        return Ok(entries);
+    }
+    let placeholders = numbers
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("?{}", index + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT DISTINCT n.id, n.ordinal FROM nodes n
+         JOIN pull_requests p ON p.node_id = n.id
+         WHERE p.number IN ({placeholders})
+         ORDER BY n.ordinal, n.id"
+    );
+    let mut statement = transaction
+        .prepare(&sql)
+        .map_err(|error| error.to_string())?;
+    let ids = statement
+        .query_map(rusqlite::params_from_iter(numbers.iter()), |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    for id in ids {
+        if let Some(node) = nodes::load(&transaction, &id)? {
+            entries.push(node.to_json());
+        }
+    }
+    Ok(entries)
+}
+
 /// The rows behind an open connection, in ordinal order. One scan per
 /// table; the batched assembler shares every row mapper with the
 /// single-node load.

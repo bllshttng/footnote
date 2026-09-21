@@ -20,7 +20,7 @@
 //! tick index, so a slow head never starves the tail.
 
 use crate::agents_config;
-use crate::backlog::api::{self as backlog_api, Store as GraphStore};
+use crate::backlog::api as backlog_api;
 use crate::claims::{status as claim_status, ClaimState, ClaimState::*};
 use crate::finalize::slug_from_git_remote;
 use crate::graph_keeper::node_carries_pr;
@@ -557,22 +557,26 @@ pub fn queue_op(rows: Result<Vec<Value>, String>, rotate: u64, started: Instant)
 pub fn run_op(op: &str, payload: &Value) -> String {
     match op {
         "grant-verdict" => {
-            let rows = read_rows(payload);
-            verdict_op(rows, payload)
+            // A missing pr narrows to number 0, which no node carries, so the
+            // verdict reads the same `absent` the full read answers.
+            let pr = payload.get("pr").and_then(Value::as_i64).or(Some(0));
+            verdict_op(read_rows(payload, pr), payload)
         }
         "grant-queue" => {
             let started = Instant::now();
             let rotate = payload.get("rotate").and_then(Value::as_u64).unwrap_or(0);
-            queue_op(read_rows(payload), rotate, started).to_string()
+            queue_op(read_rows(payload, None), rotate, started).to_string()
         }
         other => json!({"error": format!("unknown op {other}")}).to_string(),
     }
 }
 
-fn read_rows(payload: &Value) -> Result<Vec<Value>, String> {
+fn read_rows(payload: &Value, pr: Option<i64>) -> Result<Vec<Value>, String> {
     let cwd = payload.get("cwd").and_then(Value::as_str).unwrap_or(".");
     let graph_path = graph_json_path(Path::new(cwd));
-    backlog_api::rows(&GraphStore::new(&graph_path)).map_err(|e| e.0)
+    crate::graph_store::read_pr_rows(&graph_path, pr)
+        .map(|rows| backlog_api::rows_in(&rows))
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

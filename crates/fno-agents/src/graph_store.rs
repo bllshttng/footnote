@@ -2554,6 +2554,19 @@ pub fn read_rows(path: &Path) -> Result<Vec<Value>, StoreError> {
     Ok(rows)
 }
 
+/// The narrowed read the merge-grant ops pay for: on the sqlite backend,
+/// only the nodes a grant op can use (a PR's carriers, or the queue's grant
+/// candidates plus every carrier of their PR numbers). Any other backend
+/// keeps the full [`read_rows`] switch.
+pub fn read_pr_rows(path: &Path, pr: Option<i64>) -> Result<Vec<Value>, StoreError> {
+    if crate::backlog::backend(path) != crate::backlog::Backend::Sqlite {
+        return read_rows(path);
+    }
+    let mut rows = crate::backlog::read_pr_entries(path, pr).map_err(StoreError::Sqlite)?;
+    apply_defaults(&mut rows, false);
+    Ok(rows)
+}
+
 /// The optimistic mutation cycle every whole-graph writer shares: stamp a
 /// base, read fresh rows, apply, publish over that base, and retry the whole
 /// cycle on [`StoreError::Conflict`] or [`StoreError::LockTimeout`]. `apply`

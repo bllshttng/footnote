@@ -544,3 +544,140 @@ fn an_unknown_grant_op_returns_an_error_receipt() {
     let o: Value = serde_json::from_str(&out).expect("receipt is json");
     assert_eq!(o["error"], json!("unknown op grant-nope"));
 }
+
+// --- narrowed store reads (AC1-AC4) ----------------------------------------
+
+fn granted_node(id: &str, pr: i64, status: &str) -> Value {
+    json!({
+        "id": id, "title": id, "slug": id, "type": "feature",
+        "status": status, "priority": "p2",
+        "pr_number": pr,
+        "pr_url": format!("https://github.com/owner/repo/pull/{pr}"),
+        "cwd": "/tmp/grant-fixture",
+        "sessions": [do_row(Some(receipt(true, "config", "2026-09-21T00:00:00Z")), "w1")],
+    })
+}
+
+fn plain_node(id: &str) -> Value {
+    json!({
+        "id": id, "title": id, "slug": id, "type": "feature",
+        "status": "ready", "priority": "p2",
+    })
+}
+
+fn grant_sqlite_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    let entries = json!({"entries": [
+        granted_node("ab-ac1open", 11, "ready"),
+        granted_node("ab-ac1done", 12, "done"),
+        json!({
+            "id": "ab-ac1merged", "title": "m", "slug": "m", "type": "feature",
+            "status": "ready", "priority": "p2",
+            "pr_number": 13, "merge_status": "merged",
+            "pr_url": "https://github.com/owner/repo/pull/13",
+            "cwd": "/tmp/grant-fixture",
+        }),
+        json!({
+            "id": "ab-ac1carry", "title": "c", "slug": "c", "type": "feature",
+            "status": "ready", "priority": "p2",
+            "cwd": "/tmp/grant-fixture",
+            "additional_prs": [
+                {"number": 11, "url": "https://github.com/owner/repo/pull/11"}
+            ],
+        }),
+        plain_node("ab-ac1plain1"),
+        plain_node("ab-ac1plain2"),
+    ]});
+    std::fs::write(&graph, entries.to_string()).unwrap();
+    crate::backlog::set_backend(&graph, crate::backlog::Backend::Sqlite).unwrap();
+    (dir, graph)
+}
+
+/// AC1-HP: the narrowed read keeps the open grant node and the grantless
+/// PR-11 carrier, in ordinal order, each equal to its full-read row on the
+/// keys the grant ops read.
+#[test]
+fn narrowed_pr_read_returns_the_queue_superset_in_ordinal_order() {
+    let (_dir, graph) = grant_sqlite_fixture();
+    let narrowed = crate::graph_store::read_pr_rows(&graph, None).unwrap();
+    let ids: Vec<&str> = narrowed
+        .iter()
+        .filter_map(|row| row.get("id").and_then(Value::as_str))
+        .collect();
+    assert_eq!(ids, vec!["ab-ac1open", "ab-ac1carry"]);
+    let full = crate::graph_store::read_rows(&graph).unwrap();
+    for key in [
+        "id",
+        "status",
+        "pr_number",
+        "pr_url",
+        "additional_prs",
+        "merge_status",
+        "cwd",
+        "sessions",
+    ] {
+        for row in &narrowed {
+            let id = row.get("id").and_then(Value::as_str).unwrap();
+            let want = full
+                .iter()
+                .find(|e| e.get("id").and_then(Value::as_str) == Some(id));
+            assert_eq!(row.get(key), want.and_then(|e| e.get(key)), "{key} of {id}");
+        }
+    }
+}
+
+/// AC2-EDGE: a store whose backend is not sqlite keeps the full read.
+#[test]
+fn non_sqlite_backend_keeps_the_full_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    std::fs::write(
+        &graph,
+        json!({"entries": [granted_node("ab-ac2one", 11, "ready")]}).to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        crate::graph_store::read_pr_rows(&graph, None).unwrap(),
+        crate::graph_store::read_rows(&graph).unwrap()
+    );
+}
+
+/// AC3-HP: the queue receipt is identical over the narrowed and full reads.
+#[test]
+fn queue_receipt_is_identical_over_the_narrowed_read() {
+    let (_dir, graph) = grant_sqlite_fixture();
+    let full = Ok(crate::graph_store::read_rows(&graph).unwrap());
+    let narrowed = Ok(crate::graph_store::read_pr_rows(&graph, None)
+        .map(|rows| crate::backlog::api::rows_in(&rows))
+        .unwrap());
+    let a = queue_op(full, 0, std::time::Instant::now());
+    let b = queue_op(narrowed, 0, std::time::Instant::now());
+    let strip = |mut receipt: Value| {
+        receipt.as_object_mut().unwrap().remove("elapsed_ms");
+        receipt
+    };
+    assert_eq!(strip(a), strip(b));
+}
+
+/// AC4-ERR: two open grant nodes carrying the same PR stay ambiguous over
+/// the narrowed read, naming both ids, as the full read does.
+#[test]
+fn ambiguous_pr_carriers_stay_unknown_over_the_narrowed_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    let entries = json!({"entries": [
+        granted_node("ab-ac4one", 11, "ready"),
+        granted_node("ab-ac4two", 11, "ready"),
+    ]});
+    std::fs::write(&graph, entries.to_string()).unwrap();
+    crate::backlog::set_backend(&graph, crate::backlog::Backend::Sqlite).unwrap();
+    let narrowed = crate::graph_store::read_pr_rows(&graph, Some(11)).unwrap();
+    let full = crate::graph_store::read_rows(&graph).unwrap();
+    for rows in [&narrowed, &full] {
+        let v = verdict_for_pr(rows, 11, None, &stale_claims(), &live);
+        assert_eq!(v.state, UNKNOWN);
+        assert!(v.reason.contains("ab-ac4one"), "{}", v.reason);
+        assert!(v.reason.contains("ab-ac4two"), "{}", v.reason);
+    }
+}
