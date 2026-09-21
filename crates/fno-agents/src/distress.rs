@@ -1082,7 +1082,7 @@ print(rec["payload"]["content"][0]["text"], end="")
         let stub = write_exec(
             tmp.path(),
             "fno",
-            "#!/bin/sh\n[ \"$1\" = agents ] && [ \"$2\" = newest-assistant-text ] && [ \"$3\" = --transcript ] && [ -f \"$4\" ] || exit 42\nprintf '%s' 'RESULT: BLOCKED\\nREASON: probe reason'\n",
+            "#!/bin/sh\n[ \"$1\" = agents ] && [ \"$2\" = newest-assistant-text ] && [ \"$3\" = --transcript ] && [ -f \"$4\" ] || exit 42\nprintf 'RESULT: BLOCKED\\nREASON: probe reason'\n",
         );
         std::env::set_var(var, stub.to_str().unwrap());
         let project = tmp.path().join("events.jsonl");

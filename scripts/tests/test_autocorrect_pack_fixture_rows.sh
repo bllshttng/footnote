@@ -6,7 +6,11 @@
 # Isolates via FNO_HOME + CLAUDE_DIR_OVERRIDE + FNO_GRAPH_PATH so the real
 # ~/.fno and ~/.claude are never touched.
 
-set -uo pipefail
+# No pipefail: the assertions grep a large packet through a pipe, and a
+# grep -q early exit can SIGPIPE the printf producer under load; pipefail
+# would flip that race into a false negative. The producer's status is
+# irrelevant here.
+set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACK="$SCRIPT_DIR/../autocorrect-pack.sh"

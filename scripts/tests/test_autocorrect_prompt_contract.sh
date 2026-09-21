@@ -5,7 +5,10 @@
 # require the evidence rows beside each proposed skill diff, and instruct
 # grouping by failure shape across sources. The existing warrant rules stay.
 
-set -uo pipefail
+# No pipefail: the assertions grep text through a pipe, and a grep -q early
+# exit can SIGPIPE the printf producer under load; pipefail would flip that
+# race into a false negative. The producer's status is irrelevant here.
+set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROMPTS="$SCRIPT_DIR/../../skills/autocorrect/references/autocorrect-prompts.md"
