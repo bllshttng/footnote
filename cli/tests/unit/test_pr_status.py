@@ -1533,6 +1533,9 @@ def test_ready_reads_githubs_blocked_merge_state(monkeypatch, capsys):
     merge_calls: list = []
     asked: list = []
 
+    # The real wrapper asks; this fake IS the transport for every door.
+    monkeypatch.setattr(_status, "_merge_decision", _REAL_MERGE_DECISION)
+
     def fake(verb, payload, **kw):
         # run_status also drives the durable-grant resolver through the same
         # door; only the status op is this conjunct's transport.
@@ -1583,6 +1586,9 @@ def test_ready_fails_closed_when_the_rust_reader_is_unavailable(monkeypatch, cap
     def boom(verb, payload, **kw):
         raise rust_binary.VerbUnavailable("binary not found")
 
+    # The real wrapper must be the one asking, or the module's autouse stub
+    # answers without ever touching the dead transport.
+    monkeypatch.setattr(_status, "_merge_decision", _REAL_MERGE_DECISION)
     monkeypatch.setattr(rust_binary, "verb_call", boom)
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
