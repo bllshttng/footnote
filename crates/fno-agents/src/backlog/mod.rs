@@ -255,8 +255,7 @@ fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), Str
 /// being skipped. It is also the soak restart: the rebuild deletes the
 /// graph_meta soak keys, so the next clean sample starts a fresh 7-day
 /// clock. Under the sqlite backend graph.json is not authoritative, so
-/// the stamp moves and nothing is rewritten. No live store runs sqlite
-/// today.
+/// the stamp moves and nothing is rewritten.
 fn rebuild_if_schema_v2(connection: &mut Connection, graph: &Path) -> Result<(), String> {
     let target: i64 = SCHEMA_VERSION.parse().unwrap_or(i64::MAX);
     let current: i64 = meta(connection, "schema_version")?

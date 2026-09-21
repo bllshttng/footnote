@@ -545,26 +545,19 @@ fn normalize_path(raw: &str) -> String {
     }
 }
 
-/// Graph entries at the resolved `graph.json`, or the unknown naming the read.
+/// Graph entries at the resolved graph store, or the unknown naming the
+/// read. Through the backend switch (`graph_store::read_rows_strict`):
+/// under sqlite the file is a frozen mirror, and a boundary answered from
+/// it asserts territory the store does not recognize. Strict, because an
+/// unreadable graph is unknown, never an empty list.
 pub(crate) fn graph_entries(config_cwd: &Path) -> Result<Vec<Value>, TerritoryUnknown> {
     let path = graph_json_path(config_cwd);
-    let raw = std::fs::read_to_string(&path).map_err(|e| {
+    crate::graph_store::read_rows_strict(&path).map_err(|e| {
         TerritoryUnknown(format!(
             "territory: graph unreadable ({}): {e}",
             path.display()
         ))
-    })?;
-    let parsed: Value = serde_json::from_str(&raw)
-        .map_err(|e| TerritoryUnknown(format!("territory: graph unparseable: {e}")))?;
-    if let Some(list) = parsed.get("entries").and_then(Value::as_array) {
-        return Ok(list.clone());
-    }
-    if let Some(list) = parsed.as_array() {
-        return Ok(list.clone());
-    }
-    Err(TerritoryUnknown(
-        "territory: graph is neither an entries object nor a list".to_string(),
-    ))
+    })
 }
 
 /// One territory per live crown scope, plus one kingless rung-1 territory per

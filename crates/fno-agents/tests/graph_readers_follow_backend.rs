@@ -2,8 +2,8 @@
 //!
 //! A graph flipped to sqlite holds nodes graph.json never saw (the typed
 //! api ops skip the file). Every moved caller must resolve a node the FILE
-//! does not carry; the `read_defaulted` control proves the fixture really
-//! split the two stores.
+//! does not carry; the raw-bytes control proves the fixture really split
+//! the two stores, and the guard tests pin the public json leg shut.
 //!
 //! Split store:
 //! - x-old: written to the file pre-flip, imports into the store at flip.
@@ -53,7 +53,13 @@ fn moved_callers_resolve_the_post_flip_node_the_file_lacks() {
             .any(|e| graph_store::entry_id(e) == Some("x-new")),
         "read_rows must resolve the post-flip node"
     );
-    let file_rows = graph_store::read_defaulted(&graph, false).unwrap();
+    let file_text = std::fs::read_to_string(&graph).unwrap();
+    let file_rows = serde_json::from_str::<serde_json::Value>(&file_text)
+        .unwrap()
+        .get("entries")
+        .and_then(|e| e.as_array())
+        .cloned()
+        .unwrap_or_default();
     assert!(
         !file_rows
             .iter()
@@ -110,5 +116,57 @@ fn x_old_still_resolves_after_the_flip() {
         rows.iter()
             .any(|e| graph_store::entry_id(e) == Some("x-old")),
         "the pre-flip node must survive the flip"
+    );
+}
+
+#[test]
+fn json_leg_refuses_under_sqlite() {
+    let (_root, graph) = split_store_fixture();
+    let err = graph_store::read_defaulted(&graph, false).unwrap_err();
+    match &err {
+        graph_store::StoreError::Invalid(msg) => {
+            assert!(
+                msg.contains("read_rows"),
+                "the refusal must name the switch: {msg}"
+            );
+        }
+        other => panic!("expected StoreError::Invalid under sqlite, got {other:?}"),
+    }
+    let opts_err = graph_store::read_defaulted_opts(&graph, true, true).unwrap_err();
+    assert!(matches!(opts_err, graph_store::StoreError::Invalid(_)));
+
+    // Negative control: a json-backend graph (no db sibling) answers as
+    // before, guard out of the way.
+    let plain = tempfile::tempdir().unwrap();
+    let json_graph = plain.path().join("graph.json");
+    std::fs::write(
+        &json_graph,
+        r#"{"entries":[{"id":"x-json","title":"json only"}]}"#,
+    )
+    .unwrap();
+    let rows = graph_store::read_defaulted(&json_graph, false).unwrap();
+    assert!(
+        rows.iter()
+            .any(|e| graph_store::entry_id(e) == Some("x-json")),
+        "the guard must not touch a json-backend graph"
+    );
+}
+
+#[test]
+fn archive_reads_beside_a_sqlite_graph() {
+    let (_root, graph) = split_store_fixture();
+    let archive = graph.with_file_name("graph-archive.json");
+    std::fs::write(
+        &archive,
+        r#"{"entries":[{"id":"x-archived","title":"archived"}]}"#,
+    )
+    .unwrap();
+    let rows = graph_store::read_rows(&graph).unwrap();
+    let merged = graph_store::entries_with_archive(&rows, &archive);
+    assert!(
+        merged
+            .iter()
+            .any(|e| graph_store::entry_id(e) == Some("x-archived")),
+        "the archive must still merge in beside a sqlite graph"
     );
 }

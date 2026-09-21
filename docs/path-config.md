@@ -62,7 +62,9 @@ plans_dir = ".fno/plans/"   # the legacy default; unset it resolves to <space>/p
 # Per-resource overrides. TOML has no null: OMIT a key to derive it from
 # state_dir. Each line below names the default an omitted key resolves to.
 [paths]
-# graph_json      = ...   # default: <state_dir>/graph.json
+# graph_json      = ...   # default: <state_dir>/graph.json (the store handle;
+#                         # the sqlite store is the .db sibling, the switch is
+#                         # graph_meta.backend, set by `fno doctor graph backend`)
 # ledger_json     = ...   # default: <state_dir>/ledger.json
 # briefs_dir      = ...   # default: <state_dir>/briefs/
 # fleet_dir       = ...   # default: <state_dir>/fleet/

@@ -1038,7 +1038,7 @@ fn read_graph_gated(state: &StoreState, strict: bool) -> Result<GraphRead, Store
                 // today.
                 *state.cache.write().unwrap_or_else(|e| e.into_inner()) = None;
                 let version = graph_store::file_content_version(&state.graph);
-                let entries = graph_store::read_defaulted_opts(&state.graph, false, !strict)?;
+                let entries = graph_store::read_json_leg(&state.graph, false, !strict)?;
                 return Ok(GraphRead::Fresh(Arc::new(entries), version));
             };
             if let Some(hit) = cached_hit(state, &CacheKey::File(pre_ident.clone())) {
@@ -1054,7 +1054,7 @@ fn read_graph_gated(state: &StoreState, strict: bool) -> Result<GraphRead, Store
             // below refuses.
             let version = graph_store::file_content_version(&state.graph);
             state.file_opens.fetch_add(1, Ordering::SeqCst);
-            let entries = graph_store::read_defaulted_opts(&state.graph, false, !strict)?;
+            let entries = graph_store::read_json_leg(&state.graph, false, !strict)?;
             let entries = Arc::new(entries);
             // Re-stat after the parse: cache only when the bytes parsed are
             // the bytes the digest describes. A file replaced mid-read is a
@@ -1150,9 +1150,11 @@ fn cached_entries(
         // load_graph's discovery caller: rare, and its junk-keeping parse is
         // not the list the write path publishes. Serve fresh; cache nothing.
         // Still gate-held: a read mid-publish waits out the publish, exactly
-        // as every other read does.
+        // as every other read does. Through read_state, so the backend
+        // switch decides the store: under sqlite the file is a frozen
+        // mirror, and its junk is not the graph.
         let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
-        return graph_store::read_defaulted_opts(&state.graph, true, true).map(Arc::new);
+        return read_state(state, true, true).map(Arc::new);
     }
     let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
     Ok(cached_entries_gated(state, strict)?.0)
@@ -1738,7 +1740,7 @@ fn read_state(
 ) -> Result<Vec<Value>, StoreError> {
     match state.backend() {
         Backend::Json => {
-            graph_store::read_defaulted_opts(&state.graph, keep_malformed, backup_on_corrupt)
+            graph_store::read_json_leg(&state.graph, keep_malformed, backup_on_corrupt)
         }
         Backend::Sqlite => crate::backlog::read_entries(&state.graph).map_err(|error| {
             StoreError::Unreadable(
@@ -3625,6 +3627,47 @@ mod tests {
         let rows = graph_store::read_defaulted(&graph, false).unwrap();
         assert_eq!(rows[0]["title"], json!("left changed"));
         assert_eq!(rows[1]["title"], json!("right changed"));
+    }
+
+    #[test]
+    fn keep_malformed_read_follows_the_backend_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            r#"{"entries":[{"id":"x-old","title":"pre-flip","status":"ready"}]}"#,
+        )
+        .unwrap();
+        crate::backlog::set_backend(&graph, crate::backlog::Backend::Sqlite).unwrap();
+        let store = crate::backlog::api::Store::new(&graph);
+        crate::backlog::api::node_create(
+            &store,
+            crate::backlog::api::NodeCreateInput {
+                id: "x-new".into(),
+                title: "post-flip".into(),
+                status: Some("ready".into()),
+                priority: Some("p2".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let state = row_commit_state(graph);
+
+        let reply = handle_request(
+            &state,
+            br#"{"id":1,"method":"read","params":{"keep_malformed":true}}"#,
+        );
+        assert_eq!(reply["ok"], json!(true), "{reply}");
+        let entries = reply["result"]["entries"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.get("id").and_then(Value::as_str) == Some("x-new")),
+            "the keep_malformed read must answer from the store: {reply}"
+        );
     }
 
     #[test]
