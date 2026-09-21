@@ -58,10 +58,9 @@ use crate::lane_colors_panel::LaneColorsUi;
 use crate::popup::{self, Anchor, GridCell, NavDir, Popup, PopupRow};
 use crate::proto::{
     self, cell_flags, read_msg, write_msg, AgentBadge, AgentNoPaneReason, AgentRow,
-    AnswerablePrompt, BacklogCard, BacklogVerb, BlockDir, CardState, Cell, ClientMsg, Color,
-    Command, Frame, MouseButton, MouseEvent, MouseKind, PanePlacement, PaneTarget,
-    PlacementFallback, ProtoError, ServerMsg, SquadMeta, TabMeta, BUILD_VERSION, MAX_MAIL_TEXT,
-    MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
+    AnswerablePrompt, BlockDir, Cell, ClientMsg, Color, Command, Frame, MouseButton, MouseEvent,
+    MouseKind, PanePlacement, PaneTarget, PlacementFallback, ProtoError, ServerMsg, SquadMeta,
+    TabMeta, BUILD_VERSION, MAX_MAIL_TEXT, MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
 };
 use crate::ratatui_blit::{rt_color, rt_modifier};
 use crate::sideline_color;
@@ -802,17 +801,6 @@ struct LayoutView {
     /// (v10) The focused pane's `FNO_NODE` provenance, for the status-row
     /// `⚑ <node>` cell. `None` for an ad-hoc pane.
     focus_node: Option<String>,
-    /// (v11) Board-ordered work-queue cards for the sideline backlog
-    /// lane; empty when the graph is unreadable or has no ready/blocked/in-flight
-    /// work (the lane then renders nothing - the agents section is unaffected).
-    backlog: Vec<BacklogCard>,
-    /// (v36) The UNCAPPED per-lane queue-card counts, feeding the
-    /// section's exact `+N more` and the mini-kanban's lane headers.
-    backlog_lanes: Vec<(String, usize)>,
-    /// (v36) `backlog` is last-known rather than current - the graph read
-    /// has been failing. Rendered as a header marker; the cards still show (a
-    /// blank section would be worse than an honestly-labelled stale one).
-    backlog_stale: bool,
 }
 
 /// One selectable sideline row: a squad, or one of its tabs when expanded.
@@ -969,12 +957,6 @@ struct View {
     feed_offset: usize,
     hover_feed_border: bool,
     feed_drag: Option<SidelineDrag>,
-    /// The node detail overlay (Enter on a card): sessions with a derived
-    /// launch per row, king, plan, notes. `None` closed; behavior in
-    /// `node_detail`.
-    node_detail: Option<node_detail::NodeDetailOverlay>,
-    /// Pending escape bytes in node-detail mode ([`View::feed_esc`] safety).
-    node_detail_esc: Vec<u8>,
     /// The event-derived needs-me leg: the last `fno-agents needs` fold
     /// result while the overlay is open (`None` = live-only, not yet fetched
     /// this open). Merged with the live badge leg by [`View::needs_queue`].
@@ -1072,20 +1054,9 @@ struct View {
     /// arrow sequence can never half-close the search or leak its tail into the
     /// pane (same split-arrow safety as [`View::sel_esc`]).
     search_esc: Vec<u8>,
-    /// The one dispatched-but-unconfirmed Backlog reorder verb, if any.
-    /// At most one: the marker doubles as the double-press guard, so a second
-    /// dispatch on the same card cannot fire until the first resolves.
-    backlog_pending: Option<BacklogPending>,
     /// `config.mux.hover_focus`: focus-follows-mouse over panes.
     /// Latched once at startup (default on); false disables the hover pre-pass.
     hover_focus: bool,
-    /// `config.obsidian.*`, latched once at startup like the toggles above.
-    /// Feeds the backlog card menu's open-plan item (`link::plan_link`); never
-    /// re-read mid-session, matching every other startup-latched config value.
-    obsidian: crate::digest_overlay::ObsidianCfg,
-    /// `config.mux.show_backlog` (default on): drop the `~ backlog` lane
-    /// entirely. Latched once at startup.
-    show_backlog: bool,
     /// `config.mux.theme`: the chrome palette. Latched once at startup
     /// from the same config ladder `hover_focus` reads, and swapped in memory on
     /// an explicit apply from the settings modal. `terminal` (the default)
@@ -1573,9 +1544,6 @@ struct RowMenu {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MenuTarget {
     Agent(AgentIdent),
-    /// A Backlog card pinned by node id (ids are unique in the graph,
-    /// so unlike agent names they need no disambiguation).
-    Card(String),
     /// A section header (a squad name row or a `~` band). `label` is cosmetic
     /// (the confirm prompt); `key` is the persisted section identity and `squad`
     /// the runtime one, present for a squad header and `None` for a `~` band
@@ -1647,21 +1615,12 @@ enum MenuAction {
     Focus,
     /// Open the read-only peek overlay.
     Peek,
-    /// The card menu's Plan entry: the dispatch door pinned to the architect
-    /// sub-agent with the blueprint message (gates answer as always).
-    PlanSpawn,
     /// Toggle the git working-diff pane for this row's worktree.
     Diff,
     /// Stop a live row (StopAgent, or StopExternal for a daemon-roster row).
     Stop,
     /// Remove an exited row (RemoveAgent, or RemoveExternal for a roster row).
     Remove,
-    /// Run a reorder verb on a Backlog card.
-    Backlog(BacklogVerb),
-    /// Open a Backlog card's plan: through Obsidian, or as a plain file when
-    /// the plan resolves outside the configured vault. Card-menu only (LD5);
-    /// the resolution and the opener live in `link::plan_link`.
-    OpenPlan,
     /// Remove EVERY exited row in the target section. The section comes
     /// from [`MenuTarget::Section`], so this stays payload-free and `Copy`.
     ClearDead,
@@ -2095,10 +2054,6 @@ pub(crate) enum AuxAction {
     /// Persist one lane color through `fno config set` block-replace, then
     /// restart-free via `reload_palette`.
     LaneColorSet(String, String, String),
-    /// Jump the sideline selector to this Backlog card and close the
-    /// mini-kanban - the overlay is a scanning surface, so acting on a card
-    /// hands you back to the row where its full menu lives.
-    BacklogGoto(String),
 }
 
 /// The settings modal's tabs.
@@ -2132,70 +2087,6 @@ fn build_prefix_settings_rows(live_prefix: &str) -> (Vec<PopupRow>, Vec<AuxActio
     (rows, actions)
 }
 
-/// Build the mini-kanban: the Backlog's lanes as collapsed columns, each
-/// a header carrying its TRUE count over the cards the feed is holding.
-///
-/// It is the QUEUE's lanes, not the whole board's. The feed carries only
-/// actionable work (ready / blocked / in-flight), so done and idea nodes never
-/// reach it and a `Done` column never appears - this is a scan of what is up for
-/// grabs, and `fno backlog board` remains the full-board view. The counts are
-/// true for what they claim: every queue card, including those past the render
-/// cap.
-///
-/// Lanes stack vertically rather than sitting side by side: the sideline is
-/// narrow, and a stacked list needs no 2D navigation to scan. The `counts` are
-/// the uncapped per-lane totals, so a lane whose cards were cut by the feed cap
-/// still states how much work it really holds.
-fn build_kanban(cards: &[BacklogCard], counts: &[(String, usize)], anchor: Anchor) -> AuxPopup {
-    let mut rows = vec![PopupRow::Header("backlog".into()), PopupRow::Rule];
-    let mut actions = Vec::new();
-    for (lane, total) in counts {
-        rows.push(PopupRow::Header(format!("{lane}  {total}")));
-        let mut shown = 0usize;
-        for c in cards.iter().filter(|c| card_lane(c) == lane.as_str()) {
-            let label = card_label(c);
-            rows.push(PopupRow::Entry {
-                glyph: lattice_glyph(card_lattice_state(c.state)).0.into(),
-                label,
-                hint: if c.head {
-                    "head".into()
-                } else {
-                    c.priority.clone()
-                },
-                enabled: true,
-            });
-            actions.push(AuxAction::BacklogGoto(c.id.clone()));
-            shown += 1;
-        }
-        // Say so when the lane holds more than the feed carries, rather than
-        // letting the header count silently disagree with the rows under it.
-        if *total > shown {
-            rows.push(PopupRow::Header(format!("  +{} more", total - shown)));
-        }
-    }
-    AuxPopup {
-        popup: Popup::new(rows, anchor),
-        actions,
-    }
-}
-
-/// The lane a card belongs to in the mini-kanban. A card with no
-/// `_kanban_column` still needs a home, so it gets a named one rather than
-/// vanishing from the board.
-fn card_lane(c: &BacklogCard) -> &str {
-    c.lane.as_deref().unwrap_or(UNLANED)
-}
-
-/// The bucket for cards carrying no `_kanban_column`.
-const UNLANED: &str = "unlaned";
-
-mod card_menu;
-mod node_detail;
-use card_menu::build_card_menu;
-
-/// The one card label, id first (backlog_view owns the shape); every client
-/// paint site folds through it.
-use crate::backlog_view::card_label;
 mod update_menu;
 
 // The sideline new-agent launcher: composer state, input folding,
@@ -2306,7 +2197,6 @@ impl View {
         // canonical size, so nothing changes until the first drag.
         let sideline_width = stored_width.unwrap_or_else(|| canonical_width(density));
         View {
-            backlog_pending: None,
             term,
             session,
             layout,
@@ -2347,8 +2237,6 @@ impl View {
             feed_offset: 0,
             hover_feed_border: false,
             feed_drag: None,
-            node_detail: None,
-            node_detail_esc: Vec::new(),
             needs_fold: None,
             mine_fold: None,
             needs_fold_at: None,
@@ -2382,8 +2270,6 @@ impl View {
             search: None,
             search_esc: Vec::new(),
             hover_focus: true,
-            obsidian: crate::digest_overlay::ObsidianCfg::default(),
-            show_backlog: true,
             theme: Theme::default_theme(),
             settings_tab: SettingsTab::General,
             lane: LaneColorsUi::default(),
@@ -3002,93 +2888,6 @@ impl View {
         }
     }
 
-    /// Every queue card the graph holds, cap included - the sum of the
-    /// per-lane counts, so the section's remainder and the kanban's lane headers
-    /// are the same number twice rather than two independent claims.
-    fn backlog_total(&self) -> usize {
-        self.layout.backlog_lanes.iter().map(|(_, n)| n).sum()
-    }
-
-    /// Open the mini-kanban over the Backlog section.
-    fn open_kanban(&mut self, anchor: Anchor) {
-        self.clear_peek();
-        self.aux = Some(build_kanban(
-            &self.layout.backlog,
-            &self.layout.backlog_lanes,
-            anchor,
-        ));
-        self.aux_esc.clear();
-    }
-
-    /// Whether this card is wearing the dispatched-verb `…` marker.
-    fn card_pending(&self, id: &str) -> bool {
-        self.backlog_pending.as_ref().is_some_and(|p| p.node == id)
-    }
-
-    /// Arm the pending marker for a dispatched reorder verb, snapshotting what
-    /// the TARGET card looked like at dispatch. Returns `false` when one is
-    /// already in flight - the double-press guard, so a second Enter on the same
-    /// card cannot fire a duplicate shellout (and a no-op second `rank --top`
-    /// cannot churn the graph).
-    fn arm_backlog_pending(&mut self, node: &str, verb: BacklogVerb) -> bool {
-        if self.backlog_pending.is_some() {
-            return false;
-        }
-        self.backlog_pending = Some(BacklogPending {
-            node: node.to_string(),
-            verb,
-            was: card_mark(&self.layout.backlog, node),
-            deadline: Instant::now() + BACKLOG_PENDING_TTL,
-        });
-        true
-    }
-
-    /// Clear the pending marker once the feed confirms THIS verb landed: the
-    /// target card's own position or state changed, or it left the feed (what a
-    /// successful defer looks like). Called with the INCOMING backlog before it
-    /// is stored.
-    ///
-    /// Deliberately narrower than "the card set changed at all": claims and
-    /// routing fields churn the set on unrelated cards every few seconds, so a
-    /// whole-set comparison would clear the marker on someone else's news and
-    /// release the single-flight guard while this verb was still running - a
-    /// false confirmation, which is the one thing this marker exists to prevent.
-    fn confirm_backlog_pending(&mut self, incoming: &[BacklogCard]) {
-        let landed = self
-            .backlog_pending
-            .as_ref()
-            .is_some_and(|p| card_mark(incoming, &p.node) != p.was);
-        if landed {
-            self.backlog_pending = None;
-        }
-    }
-
-    /// Clear the pending marker because the verb reported its own outcome. The
-    /// server routes each verb's verdict back as one notice to the requesting
-    /// client, so a notice arriving mid-verb is that verdict: the marker must go
-    /// rather than spin out its full timeout and then replace a specific failure
-    /// ("rank x-a: lock contention") with a generic one. Clearing early on an
-    /// unrelated notice is harmless - the rendered order is never optimistic, so
-    /// the marker is the only thing at stake.
-    fn settle_backlog_pending_on_notice(&mut self) {
-        self.backlog_pending = None;
-    }
-
-    /// The pending marker's expiry deadline, for the select loop's timer arm.
-    fn backlog_pending_deadline(&self) -> Option<Instant> {
-        self.backlog_pending.as_ref().map(|p| p.deadline)
-    }
-
-    /// Declare an unconfirmed verb lost: clear the marker and say so. The row
-    /// must never keep a `…` the feed will not resolve, and silence would read
-    /// as success (this is the same fail-loud stance as the verb's own error
-    /// notice - the order is already truthful; only the marker was a claim).
-    fn expire_backlog_pending(&mut self) {
-        if let Some(p) = self.backlog_pending.take() {
-            self.set_notice(format!("{} {}: no confirmation", p.verb.label(), p.node));
-        }
-    }
-
     /// The candidate destination squads for a Move-to-workspace gesture on a row
     /// owned by `own`: every other workspace. Shared by the menu
     /// entry's construction, its dispatch, and the tab-move picker so the three
@@ -3121,10 +2920,10 @@ impl View {
     }
 
     /// Open the row context menu on `display_rows()` index `i`, anchored at
-    /// `anchor` (US2): the agent lifecycle menu, the Backlog
-    /// card's reorder menu, or a section header's clear-dead menu (a
-    /// squad name row or a `~` band). Returns whether it opened - `false` for a
-    /// row with no menu, which the caller turns into "close whatever is open".
+    /// `anchor` (US2): the agent lifecycle menu, or a section header's
+    /// clear-dead menu (a squad name row or a `~` band). Returns whether it
+    /// opened - `false` for a row with no menu, which the caller turns into
+    /// "close whatever is open".
     fn open_row_menu(&mut self, i: usize, anchor: Anchor) -> bool {
         enum Pick {
             Menu(Box<RowMenu>),
@@ -3157,12 +2956,6 @@ impl View {
                 }
                 Some(Pick::Menu(Box::new(menu)))
             }
-            // A Backlog card gets the reorder menu.
-            Some(DisplayRow::Card(c)) => Some(Pick::Menu(Box::new(build_card_menu(
-                c,
-                &self.obsidian,
-                anchor,
-            )))),
             Some(DisplayRow::Sel(row)) if row.tab.is_none() => squad_key(&self.layout, row.squad)
                 .map(|key| {
                     let label = self
@@ -3187,12 +2980,6 @@ impl View {
                 true
             }
             Some(Pick::Section(key, label, squad)) => {
-                // Cards have no exited state, so the Backlog section has no
-                // menu at all - a notice there would imply "none right now"
-                // about a section that can never have any.
-                if key == SectionKey::WorkQueue {
-                    return false;
-                }
                 // A section with nothing to clear would leave a one-entry menu
                 // whose only entry is a no-op; say so instead (the row menu's
                 // "no dead item ever renders" rule, applied to the whole menu).
@@ -4281,7 +4068,6 @@ impl View {
         match self.display_rows().get(i)? {
             DisplayRow::Agent(a) => Some(format!("agent:{}", a.name)),
             DisplayRow::Sel(s) => Some(format!("squad:{}:{:?}", s.squad, s.tab)),
-            DisplayRow::Card(c) => Some(format!("card:{}", c.id)),
             DisplayRow::Header { key, .. } => Some(format!("header:{key:?}")),
             DisplayRow::IdleFold { key, .. } => Some(format!("idlefold:{key:?}")),
             // A `Sub` line's own text is not unique: it carries an agent's
@@ -4773,9 +4559,6 @@ impl View {
             // shared with the navigator's goto so a click and a keyboard jump
             // never diverge on what an agent's action is.
             DisplayRow::Agent(a) => Some(agent_hit(a, self.layout.active_squad)),
-            // A work-queue card dispatches/focuses via [`View::card_hit`], the
-            // same resolver the navigator uses.
-            DisplayRow::Card(c) => Some(self.card_hit(c)),
             // A `~` section header cycles its own view state, exactly
             // like a squad name row. It stays `row_is_inert` so the selector
             // cursor still skips it (the "never rests on a label"
@@ -4799,51 +4582,12 @@ impl View {
         }
     }
 
-    /// The [`ChromeHit`] for one work-queue card - the resolver shared by a
-    /// sideline click ([`View::row_action`]) and the navigator's goto
-    /// ([`View::nav_rows`]). A method (not a free fn like [`agent_hit`])
-    /// because the Ready confirm needs the term-height guard.
-    ///
-    /// Only a READY card starts a session - the same nodes prefix+g
-    /// picks - and only behind a one-keypress confirm (too costly for a stray
-    /// tap). A blocked/in-flight card is work prefix+g never selects, so it says
-    /// why or routes to the running session (priority pane > attach >
-    /// notice) rather than opening the confirm.
-    fn card_hit(&self, c: &BacklogCard) -> ChromeHit {
-        match c.state {
-            // A terminal too short to render the bottom-row prompt refuses
-            // instead of arming an INVISIBLE confirm that would capture keys and
-            // could dispatch blind (sigma review).
-            CardState::Ready if self.term.0 < MIN_ROWS_FOR_STATUS => {
-                ChromeHit::Notice("terminal too short for the dispatch prompt".into())
-            }
-            CardState::Ready => ChromeHit::Confirm(ConfirmAction {
-                action: ConfirmKind::Dispatch { node: c.id.clone() },
-                label: if c.slug.is_empty() {
-                    c.id.clone()
-                } else {
-                    c.slug.clone()
-                },
-            }),
-            CardState::Blocked => ChromeHit::Notice("card blocked - unmet deps".into()),
-            CardState::InFlight => match (c.pane_id, &c.attach_id) {
-                (Some(pid), _) => ChromeHit::Cmds(vec![Command::FocusPane(pid)]),
-                (None, Some(id)) => ChromeHit::Cmds(vec![Command::attach_agent(id)]),
-                (None, None) => ChromeHit::Notice(
-                    c.where_hint
-                        .clone()
-                        .unwrap_or_else(|| "card in flight - no session visible here".into()),
-                ),
-            },
-        }
-    }
-
     /// The navigator's flat GLOBAL catalog: one [`NavRow`] per squad,
     /// per tab (ignoring expand state - a collapsed squad's tabs still appear,
     /// the key difference from [`display_rows`]), per plain pane (v22: those NOT
-    /// already shown as an agent row), per agent, and per work-queue card across
-    /// the WHOLE session. Shares the agent/card -> [`ChromeHit`]
-    /// mapping with [`row_action`] (via [`agent_hit`]/[`card_hit`]) so a keyboard
+    /// already shown as an agent row), per agent across
+    /// the WHOLE session. Shares the agent -> [`ChromeHit`]
+    /// mapping with [`row_action`] (via [`agent_hit`]) so a keyboard
     /// goto and a mouse click never diverge. Squad/tab rows carry their own
     /// SelectSquad/SelectTab in `hit`; an agent row carries a `goto_squad`
     /// prefix (its pane lives in another squad). The `+ new workspace` footer is
@@ -4852,22 +4596,6 @@ impl View {
     fn nav_rows(&self) -> Vec<NavRow> {
         let mut out = Vec::new();
         let cross = |sq: u64| (sq != self.layout.active_squad).then_some(sq);
-        // The pane -> work-queue join behind "find by node": an agent
-        // row's pane is the pane a card's `pane_id` names when that node is in
-        // flight, so the card carries the node id and title-slug the pane's own
-        // row can be searched by. Built ONCE per catalog rebuild (F5 on PR
-        // 1194): a linear backlog scan per agent row was O(agents x backlog)
-        // on every keypress.
-        let mut card_by_pane: std::collections::HashMap<u64, &BacklogCard> =
-            std::collections::HashMap::new();
-        for c in &self.layout.backlog {
-            if let Some(p) = c.pane_id {
-                card_by_pane.entry(p).or_insert(c);
-            }
-        }
-        let card_for_pane = |pid: Option<u64>| -> Option<&BacklogCard> {
-            pid.and_then(|p| card_by_pane.get(&p)).copied()
-        };
         for s in &self.layout.squads {
             // Always SelectSquad (unlike the sideline's active-squad
             // CycleSection): the navigator is a jump, never a view-state cycle.
@@ -4920,7 +4648,6 @@ impl View {
                     Some(TabContext::Ordinal(n)) => format!("{} › {} ·{n}", s.name, a.name),
                     None => format!("{} › {}", s.name, a.name),
                 };
-                let card = card_for_pane(a.pane_id);
                 out.push(NavRow::new(
                     label,
                     nav_agent_state(a),
@@ -4932,8 +4659,6 @@ impl View {
                     agent_hit(a, self.layout.active_squad),
                     &[
                         a.pane_id.map(|p| p.to_string()).unwrap_or_default(),
-                        card.map(|c| c.id.clone()).unwrap_or_default(),
-                        card.map(|c| c.slug.clone()).unwrap_or_default(),
                         s.name.clone(),
                         // The portal index joins the match key so an
                         // EXISTING portal is reachable by number through the
@@ -4948,7 +4673,6 @@ impl View {
         for a in self.layout.agents.iter().filter(
             |a| !matches!(a.squad, Some(id) if self.layout.squads.iter().any(|s| s.id == id)),
         ) {
-            let card = card_for_pane(a.pane_id);
             out.push(NavRow::new(
                 a.name.clone(),
                 nav_agent_state(a),
@@ -4957,27 +4681,7 @@ impl View {
                 agent_hit(a, self.layout.active_squad),
                 &[
                     a.pane_id.map(|p| p.to_string()).unwrap_or_default(),
-                    card.map(|c| c.id.clone()).unwrap_or_default(),
-                    card.map(|c| c.slug.clone()).unwrap_or_default(),
                     a.portal.map(|p| format!("portal:{p}")).unwrap_or_default(),
-                ],
-            ));
-        }
-        // Work-queue cards: goto opens the dispatch confirm / focuses the worker
-        // (card_hit), no squad switch. A blocked/in-flight card reads as
-        // Blocked/Working so the state filter surfaces stuck work uniformly.
-        for c in &self.layout.backlog {
-            let label = card_label(c);
-            out.push(NavRow::new(
-                format!("{label} {}", c.priority),
-                card_state(c),
-                None,
-                None,
-                self.card_hit(c),
-                &[
-                    c.id.clone(),
-                    c.slug.clone(),
-                    c.pane_id.map(|p| p.to_string()).unwrap_or_default(),
                 ],
             ));
         }
@@ -5179,10 +4883,6 @@ impl View {
         // generation it belongs to).
         let live: HashSet<u64> = layout.panes.iter().map(|(id, _)| *id).collect();
         self.frames.retain(|id, _| live.contains(id));
-        // A changed card set is the ONLY confirmation a dispatched
-        // reorder verb gets. Checked against the incoming backlog before it is
-        // stored, since the comparison is against the dispatch-time snapshot.
-        self.confirm_backlog_pending(&layout.backlog);
         // No active-squad seed here: the "active squad opens by default"
         // rule is computed live in `section_view()`,
         // so it tracks agents exiting mid-session (a majority-exited section
@@ -5346,7 +5046,7 @@ impl View {
     ///        fold behind the header's `✗N` while the live agents stay up;
     ///      - an inactive squad stays `Collapsed` - surfacing live rows across
     ///        every idle workspace is the opposite of attention-focus;
-    ///      - the two pull-sections `~ elsewhere` / `~ backlog` default
+    ///      - the pull-section `~ elsewhere` defaults
     ///        `Collapsed`, one click from their own header + rollup.
     /// The active-squad default lives HERE, not in a map-seed: a seed is
     /// a one-time snapshot that cannot downgrade to LiveOnly as agents exit
@@ -5357,9 +5057,7 @@ impl View {
         }
         match key {
             SectionKey::Squad(_) if self.is_active_squad(key) => self.expanded_or_live_only(key),
-            SectionKey::Squad(_) | SectionKey::Elsewhere | SectionKey::WorkQueue => {
-                SectionView::Collapsed
-            }
+            SectionKey::Squad(_) | SectionKey::Elsewhere => SectionView::Collapsed,
         }
     }
 
@@ -5418,7 +5116,7 @@ impl View {
     /// see [`next_view`].
     fn cycle_section(&mut self, key: SectionKey) {
         let has_dead = !self.section_dead_rows(&key, None).is_empty();
-        let next = next_view(self.section_view(&key), has_dead, &key);
+        let next = next_view(self.section_view(&key), has_dead);
         self.set_section_view(key, next);
     }
 
@@ -5574,8 +5272,6 @@ impl View {
                     .collect()
             }
             SectionKey::Elsewhere => self.orphans().into_iter().filter(|a| a.exited).collect(),
-            // Cards have no exited state, so the Backlog section is always binary.
-            SectionKey::WorkQueue => Vec::new(),
         }
     }
 
@@ -5606,16 +5302,14 @@ impl View {
         }
     }
 
-    /// Force both pull-sections open so a test that exercises orphan
-    /// (`~ elsewhere`) or backlog (`~ backlog`) rows renders them past their new
+    /// Force the pull-section open so a test that exercises orphan
+    /// (`~ elsewhere`) rows renders them past their new
     /// Collapsed defaults. The collapse itself has dedicated AC tests; a test
-    /// about card actions or orphan rows should not silently lose them.
+    /// about orphan rows should not silently lose them.
     #[cfg(test)]
     fn expand_pull_sections(&mut self) {
         self.section_view
             .insert(SectionKey::Elsewhere, SectionView::Expanded);
-        self.section_view
-            .insert(SectionKey::WorkQueue, SectionView::Expanded);
     }
 
     /// Agents matched to no live squad - the `~ elsewhere` section's membership.
@@ -6382,9 +6076,6 @@ impl View {
                 &self.theme,
                 None,
             );
-        } else if self.node_detail.is_some() {
-            // Node detail (Enter on a card): drawn by its own module.
-            self.draw_node_detail(&mut cells, rows, cols, overlay_origin, overlay_dims);
         } else if let Some(nav) = &self.nav {
             // navigator: the filtered flat catalog + query/chip line. Rows
             // recompute per frame from the live layout (no cache), so a push
@@ -6422,7 +6113,6 @@ impl View {
             && self.portal_pick.is_none()
             && self.nav.is_none()
             && self.peek.is_none()
-            && self.node_detail.is_none()
             && self.connections.is_none()
             && self.keys_modal.is_none()
             && self.row_menu.is_none()
@@ -6771,7 +6461,6 @@ impl View {
                     | ConfirmKind::DismissMember { attach_id, .. },
                     DisplayRow::Agent(a),
                 ) => a.attach_id.as_deref() == Some(attach_id.as_str()),
-                (ConfirmKind::Dispatch { node }, DisplayRow::Card(c)) => c.id == *node,
                 _ => false,
             })
     }
@@ -6779,7 +6468,6 @@ impl View {
     fn confirm_text(&self, action: &ConfirmAction) -> String {
         let label = &action.label;
         let text = match &action.action {
-            ConfirmKind::Dispatch { .. } => format!("start session on {label}?"),
             ConfirmKind::RemoveSquad {
                 panes, last: true, ..
             } => format!(
@@ -7474,65 +7162,6 @@ impl View {
                 }
             }
         }
-        // The Backlog section (renamed): board-ordered
-        // ready/blocked/in-flight cards under their own header. Empty
-        // (unreadable/no-work graph) renders nothing - the agents section above
-        // is unaffected (AC-edge fail-open).
-        if !self.layout.backlog.is_empty() && self.show_backlog {
-            if multi_squad {
-                out.push(DisplayRow::Blank);
-            }
-            let rollup = section_rollup(
-                self.layout
-                    .backlog
-                    .iter()
-                    .map(|c| card_lattice_state(c.state)),
-            );
-            let view = self.section_view(&SectionKey::WorkQueue);
-            out.push(DisplayRow::Header {
-                // The cards still render when the graph read is failing - a blank
-                // section would be worse - but the header says they are memory
-                // rather than fact, so nobody acts on old work believing it fresh.
-                label: if self.layout.backlog_stale {
-                    "~ backlog · stale"
-                } else {
-                    "~ backlog"
-                },
-                rollup,
-                key: SectionKey::WorkQueue,
-                view,
-            });
-            // The board's scope rides under the header as its subline, so an
-            // empty or surprising board answers WHY it looks the way it does
-            // (the spawn latch's own words), never a bare pill to decode.
-            out.push(DisplayRow::Sub(format!(
-                "scope: {}",
-                crate::backlog_view::board_scope_reason()
-            )));
-            // Binary: a card has no exited state, so the queue never enters
-            // `LiveOnly` (see [`next_view`]) and only `Collapsed` hides rows.
-            if view != SectionView::Collapsed {
-                for c in &self.layout.backlog {
-                    out.push(DisplayRow::Card(c));
-                    // Line 2: which backlog this row belongs to. Emitted
-                    // only when there is something to say - an unscoped, unlaned
-                    // card stays one clean row, the same exception-based stance
-                    // the agent sublines take.
-                    if let Some(attr) = card_attribution(c) {
-                        out.push(DisplayRow::Sub(attr));
-                    }
-                }
-                // The reader caps its card set, so the section states the exact
-                // remainder rather than implying the backlog ends here.
-                let shown = self.layout.backlog.len();
-                if self.backlog_total() > shown {
-                    out.push(DisplayRow::Sub(format!(
-                        "+{} more",
-                        self.backlog_total() - shown
-                    )));
-                }
-            }
-        }
         // Materialize the aligned depth vec: agent rows carry the
         // depth their emit site recorded (keyed by display index); every other
         // row (headers, sublines, spacers, fold rows) indents nothing.
@@ -7677,9 +7306,6 @@ fn strip_md(s: &str) -> String {
 enum DisplayRow<'a> {
     Sel(SelRow),
     Agent(&'a AgentRow),
-    /// A work-queue backlog card; a Ready card dispatches via the
-    /// confirm, by click or selector Enter.
-    Card(&'a BacklogCard),
     /// (US1+US2) A section header: a full-width INVERSE band with a
     /// right-aligned per-state rollup strip. `rollup` is folded at
     /// `display_rows` time from the section's own rows (orphans / cards), so the
@@ -7697,7 +7323,7 @@ enum DisplayRow<'a> {
     /// list. A click opens the name-input overlay.
     NewSquad,
     /// (US2) The dim, 4-cell-indented line-2 under a row: an agent's
-    /// foreign `cwd_base`, or a Backlog card's `project · lane`
+    /// foreign `cwd_base`.
     /// attribution and the section's `+N more` remainder. Owns its text so any
     /// section can emit one without the painter learning a new row type. Inert:
     /// every painted line stays one display row (the single-enumeration
@@ -7728,57 +7354,6 @@ enum DisplayRow<'a> {
         hidden: usize,
         expanded: bool,
     },
-}
-
-/// A dispatched Backlog reorder verb awaiting confirmation from the feed.
-///
-/// There is no optimistic reorder: the rendered order changes only when the graph
-/// reader republishes, so between dispatch and that republish the card wears a `…`
-/// marker. The card set AT DISPATCH is the confirm signal - layouts push on every
-/// scrape tick, so "any layout arrived" would clear the marker instantly and prove
-/// nothing. `deadline` bounds the wait: a verb whose effect never lands (it failed
-/// silently, or was a server-side no-op like floating an already-top card) must
-/// clear with a visible notice rather than leave the row spinning forever.
-struct BacklogPending {
-    node: String,
-    verb: BacklogVerb,
-    /// What the target card looked like at dispatch; a different mark means the
-    /// feed confirmed THIS verb (see [`card_mark`]).
-    was: Option<(usize, CardState, Option<String>)>,
-    deadline: Instant,
-}
-
-/// How long a dispatched reorder verb may sit unconfirmed before the marker
-/// clears with a notice. The graph reader ticks about once a second, so this is
-/// many refreshes' worth of grace - long enough that a slow verb is not called
-/// lost, short enough that a stuck row is never mistaken for a live one.
-const BACKLOG_PENDING_TTL: Duration = Duration::from_secs(10);
-
-/// What a Backlog card looks like for confirmation purposes: its
-/// position, state, and lane, or `None` when it is not in the feed at all.
-///
-/// Position covers a float (the card moves), lane covers a cross-column move,
-/// state covers a claim, and absence covers a defer (which takes the node off
-/// the board). Everything a v1 verb can do shows up here, and nothing another
-/// card's churn can do does.
-fn card_mark(cards: &[BacklogCard], node: &str) -> Option<(usize, CardState, Option<String>)> {
-    cards
-        .iter()
-        .position(|c| c.id == node)
-        .map(|i| (i, cards[i].state, cards[i].lane.clone()))
-}
-
-/// A Backlog card's `project · lane` attribution subline, or `None` when
-/// the card carries neither (an unscoped, unlaned node says nothing worth a
-/// second row). Either half alone renders alone - the separator only appears
-/// between two present values.
-fn card_attribution(c: &BacklogCard) -> Option<String> {
-    match (c.project.as_deref(), c.lane.as_deref()) {
-        (Some(p), Some(l)) => Some(format!("{p} · {l}")),
-        (Some(p), None) => Some(p.to_string()),
-        (None, Some(l)) => Some(l.to_string()),
-        (None, None) => None,
-    }
 }
 
 /// True for a non-actionable sideline row: the selector skips it, it is
@@ -7826,7 +7401,7 @@ fn squad_matches(s: &SquadMeta, key: &SectionKey) -> bool {
     match key {
         SectionKey::Squad(ident) if !s.canonical_cwd.is_empty() => &s.canonical_cwd == ident,
         SectionKey::Squad(ident) => &s.name == ident,
-        SectionKey::Elsewhere | SectionKey::WorkQueue => false,
+        SectionKey::Elsewhere => false,
     }
 }
 
@@ -7837,7 +7412,7 @@ fn section_is_live(layout: &LayoutView, key: &SectionKey) -> bool {
     match key {
         SectionKey::Squad(_) => layout.squads.iter().any(|s| squad_matches(s, key)),
         // The pull-sections are always considered live (their rows come and go).
-        SectionKey::Elsewhere | SectionKey::WorkQueue => true,
+        SectionKey::Elsewhere => true,
     }
 }
 
@@ -8168,15 +7743,13 @@ enum TabHit {
     NewTab,
 }
 
-/// What a left-click on chrome resolves to: server commands to send, a local
-/// one-line hint for a row that isn't directly actionable, or a pending confirm
-/// (a work-queue card, - dispatch is too costly for a silent tap).
+/// What a left-click on chrome resolves to: server commands to send, or a
+/// local one-line hint for a row that isn't directly actionable.
 enum ChromeHit {
     Cmds(Vec<Command>),
     /// Owned, not `&'static`: an in-flight card's notice carries the
     /// server-computed `where_hint` (v18), which is per-card data.
     Notice(String),
-    Confirm(ConfirmAction),
     /// Open the new-workspace name-input overlay; the `+` footer.
     OpenCreate,
     /// Flip the active squad row's caret locally; no socket write.
@@ -8680,17 +8253,6 @@ fn agent_lattice_state(a: &AgentRow) -> LatticeState {
     }
 }
 
-/// A queue card's icon-lattice state (US3): Ready unifies with `Idle`
-/// (hollow waiting), InFlight with `Working` (filled running), Blocked stays
-/// the accent state - so cards and agent rows render the identical vocabulary.
-fn card_lattice_state(s: CardState) -> LatticeState {
-    match s {
-        CardState::Ready => LatticeState::Idle,
-        CardState::InFlight => LatticeState::Working,
-        CardState::Blocked => LatticeState::Blocked,
-    }
-}
-
 /// Fold a tab's LIVE panes to their worst lattice state for the tab-strip
 /// rollup (US4). Exited panes are filtered BEFORE the fold, so `None`
 /// (no glyph) means "no live panes" - an empty tab or an all-exited tab, which
@@ -8706,17 +8268,6 @@ fn tab_rollup_state(agents: &[AgentRow], squad: u64, tab: TabId) -> Option<Latti
         .map(nav_agent_state)
         .min()?;
     Some(pane_to_lattice(worst))
-}
-
-/// The navigator state of a work-queue card: blocked/in-flight map onto
-/// `Blocked`/`Working` so the state filter surfaces stuck and running work
-/// uniformly with agents; a ready card is neutral (`Idle`).
-fn card_state(c: &BacklogCard) -> PaneState {
-    match c.state {
-        CardState::Blocked => PaneState::Blocked,
-        CardState::InFlight => PaneState::Working,
-        CardState::Ready => PaneState::Idle,
-    }
 }
 
 /// A named tab's visible label width in the tab bar / sideline;
@@ -9078,7 +8629,7 @@ fn yard_eye(a: &AgentRow, need: Option<NeedKind>) -> crate::sprites::Eye {
 const NAV_OVERLAY_W: usize = 54;
 
 /// The unified icon lattice: ONE state->style mapping every renderer
-/// (sideline rows, queue cards, tab rollups, overlays) calls, so glyph, weight,
+/// (sideline rows, tab rollups, overlays) calls, so glyph, weight,
 /// and accent read as one system. Outline `○` = waiting/idle, filled `●` =
 /// active, `▲` = needs-attention (the sole accent state). Exhaustive by design:
 /// a new variant is a compile error at every call site, never a silent glyph.
@@ -9589,9 +9140,6 @@ async fn attach_and_run(
             area: (0, 0),
             agents: Vec::new(),
             focus_node: None,
-            backlog: Vec::new(),
-            backlog_lanes: Vec::new(),
-            backlog_stale: false,
         },
     );
     // Latch the focus-follows-mouse off-switch once; a direct
@@ -9608,9 +9156,6 @@ async fn attach_and_run(
     // A fresh attach with the meter already enabled starts its sampler on the
     // run loop's first iteration (the loop owns meter_tx, one-shot flag).
     view.resource_meter_sampling = view.resource_meter_on;
-    view.obsidian = crate::digest_overlay::ObsidianCfg::read(Path::new(&cwd));
-    // Same idiom for the optional `~ backlog` section toggle.
-    view.show_backlog = crate::digest_overlay::backlog_section_enabled(Path::new(&cwd));
     // The chrome theme, same ladder. An unknown name falls back to
     // `terminal` WITH a notice - silence here would hide a typo the operator
     // cannot otherwise detect, the same reasoning the keymap notices make.
@@ -9672,9 +9217,6 @@ async fn attach_and_run(
                 area,
                 agents,
                 focus_node,
-                backlog,
-                backlog_lanes,
-                backlog_stale,
                 ..
             }) => {
                 view.set_layout(LayoutView {
@@ -9685,9 +9227,6 @@ async fn attach_and_run(
                     area,
                     agents,
                     focus_node,
-                    backlog,
-                    backlog_lanes,
-                    backlog_stale,
                 });
                 break;
             }
@@ -9850,11 +9389,6 @@ async fn attach_and_run(
     let (feed_tx, mut feed_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, crate::feed_overlay::FoldResult)>();
 
-    // the node detail fold: the feed leg's shape (off-loop, gen-tagged,
-    // single-flight); the node id rides beside the gen (ids wrap too).
-    let (detail_tx, mut detail_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(u64, String, node_detail::FoldResult)>();
-
     // task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
     // and reports back here. Single-flight (`mine_acting`), ungated by
     // generation - a mutation always applies wherever the overlay currently
@@ -9977,8 +9511,6 @@ async fn attach_and_run(
         }
         // kick a wanted feed fold off the UI loop, same discipline.
         feed_view::maybe_kick(&mut view, &feed_tx);
-        // kick a wanted node-detail fold off the UI loop, same discipline.
-        node_detail::maybe_kick(&mut view, &detail_tx);
         // task 2.2: kick a queued MINE mutation off the UI loop.
         // `mine_acting` is already set by the stdin handler at enqueue time
         // (mirrors `Connections::acting`), so a second x/d/add press before
@@ -10113,9 +9645,6 @@ async fn attach_and_run(
         // probe debounces the exact cell, and a fired probe stops the clock
         // until motion or a frame restarts it.
         let link_hover_deadline = view.link_hover.deadline();
-        // A dispatched reorder verb the feed never confirmed: the `…`
-        // marker must clear with a notice rather than spin forever.
-        let backlog_deadline = view.backlog_pending_deadline();
         // (AC7-FR) A drag whose mouse-up never arrives - the terminal
         // lost focus mid-gesture, or the release was eaten - would otherwise
         // leave the drag latched, swallowing every later mouse event. Expire it.
@@ -10205,8 +9734,8 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, .. }) => {
-                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale });
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, .. }) => {
+                    view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node });
                     // a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).
@@ -10244,12 +9773,6 @@ async fn attach_and_run(
                     }
                 }
                 Ok(ServerMsg::Notice { text }) => {
-                    // A dispatched reorder verb reports its outcome as
-                    // exactly this notice, so a notice arriving mid-verb settles
-                    // the `…` marker. Without this a FAILED verb left the card
-                    // spinning and every further verb blocked until the timeout,
-                    // which then overwrote the real reason with a generic one.
-                    view.settle_backlog_pending_on_notice();
                     // A row-scoped outcome stamps its row before the
                     // tab-bar notice takes the full text.
                     view.resolve_row_stamp(&text);
@@ -10597,14 +10120,6 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
-            Some((gen, node_id, outcome)) = detail_rx.recv() => {
-                // a node-detail fold landed (the feed arm's contract, plus
-                // the node-id guard: both ids wrap).
-                node_detail::apply_fold(&mut view, gen, &node_id, outcome);
-                if let Err(e) = compositor.draw(&view.compose()) {
-                    break Err(format!("draw: {e}"));
-                }
-            }
             Some(result) = mine_act_rx.recv() => {
                 // task 2.2: a queued MINE mutation finished.
                 view.apply_mine_action_result(result);
@@ -10880,17 +10395,6 @@ async fn attach_and_run(
                 }
             }, if hint_deadline.is_some() => {
                 view.hint = true;
-                if let Err(e) = compositor.draw(&view.compose()) {
-                    break Err(format!("draw: {e}"));
-                }
-            }
-            _ = async {
-                match backlog_deadline {
-                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
-                    None => std::future::pending().await,
-                }
-            }, if backlog_deadline.is_some() => {
-                view.expire_backlog_pending();
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -11493,8 +10997,8 @@ async fn handle_stdin(
                                 },
                             )
                         });
-                        // A row whose menu `open_row_menu` declines (a Backlog
-                        // section, an inert label) still SAYS so - the same
+                        // A row whose menu `open_row_menu` declines (an inert
+                        // label) still SAYS so - the same
                         // notice the row-drag arm emits, for the same reason.
                         if !opened {
                             view.set_notice("no menu on the held row".into());
@@ -12213,9 +11717,6 @@ async fn apply_hit(
             }
         }
         ChromeHit::Notice(msg) => view.set_notice(msg.to_string()),
-        // A card hit opens the confirm; the next keypress (Enter
-        // dispatches, else cancels) resolves it via confirm_keys.
-        ChromeHit::Confirm(action) => view.open_confirm(action),
         // The `+` footer opens the name-input overlay; the next keys
         // route to create_keys (Enter sends NewSquad, Esc cancels).
         ChromeHit::OpenCreate => view.open_create(),
@@ -12315,15 +11816,9 @@ async fn confirm_keys(
                 let _ = kind;
                 unreachable!("CloseTab commits above")
             }
-            kind => match kind {
-                ConfirmKind::Dispatch { node } => vec![Command::DispatchNode {
-                    node,
-                    account: view.active_account.clone(),
-                }],
-                other => match other.command() {
-                    Some(cmd) => vec![cmd],
-                    None => Vec::new(),
-                },
+            kind => match kind.command() {
+                Some(cmd) => vec![cmd],
+                None => Vec::new(),
             },
         };
         if cmds.is_empty() {
@@ -12533,56 +12028,6 @@ async fn execute_row_menu_action(
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<(), String> {
     let target = match (target, action) {
-        // A Backlog reorder verb: refuse a card that left the feed
-        // between menu-open and Enter, arm the pending marker (which is also the
-        // double-press guard), then send. The server re-validates and owns the
-        // shellout; the order changes only when the feed republishes.
-        (MenuTarget::Card(node), MenuAction::Backlog(verb)) => {
-            if !view.layout.backlog.iter().any(|c| c.id == node) {
-                view.set_notice(format!("{node} is no longer in the backlog"));
-                return Ok(());
-            }
-            if !view.arm_backlog_pending(&node, verb) {
-                view.set_notice("a backlog verb is already in flight".into());
-                return Ok(());
-            }
-            write_msg(
-                sock_w,
-                &ClientMsg::Command(Command::BacklogVerb { node, verb }),
-            )
-            .await
-            .map_err(|e| format!("backlog verb send failed: {e}"))?;
-            return Ok(());
-        }
-        // The card menu's Plan entry (the body lives in node_detail).
-        (MenuTarget::Card(node), MenuAction::PlanSpawn) => {
-            let account = view.active_account.clone();
-            node_detail::plan_spawn_send(view, node, account, sock_w).await?;
-            return Ok(());
-        }
-        // Open a Backlog card's plan. Re-resolved at execute (not carried from
-        // the menu build), so a plan_path or obsidian config change between
-        // open and pick is honored rather than acting on a stale target.
-        (MenuTarget::Card(node), MenuAction::OpenPlan) => {
-            let Some(card) = view.layout.backlog.iter().find(|c| c.id == node) else {
-                view.set_notice(format!("{node} is no longer in the backlog"));
-                return Ok(());
-            };
-            let link =
-                crate::link::plan_link(card.plan_path.as_deref().map(Path::new), &view.obsidian);
-            let result = match &link {
-                crate::link::PlanLink::Obsidian { uri } => crate::link::open_fno_uri(uri),
-                crate::link::PlanLink::PlainFile(path) => crate::link::open_fno_path(path),
-                crate::link::PlanLink::Unavailable(_) => {
-                    view.set_notice("plan is no longer available".into());
-                    return Ok(());
-                }
-            };
-            if let Err(e) = result {
-                view.set_notice(e);
-            }
-            return Ok(());
-        }
         // The section menu's clear-dead action, resolved against the
         // section rather than a single row.
         (MenuTarget::Section { key, label, squad }, MenuAction::ClearDead) => {
@@ -12737,10 +12182,8 @@ async fn execute_row_menu_action(
         }
         // A menu is built for exactly one target kind, so a crossed pair can only
         // come from a bug; refuse rather than guess at a target.
-        (MenuTarget::Card(_), _)
-        | (MenuTarget::Section { .. }, _)
+        (MenuTarget::Section { .. }, _)
         | (MenuTarget::Tab(_), _)
-        | (_, MenuAction::Backlog(_))
         | (_, MenuAction::ClearDead)
         | (_, MenuAction::TabNew)
         | (_, MenuAction::TabRename)
@@ -12934,16 +12377,9 @@ async fn execute_row_menu_action(
                 view.set_notice("only a live paneless row can reattach".into());
             }
         }
-        // Unreachable: the crossed-pair guard above returns before an agent
-        // target ever reaches a Backlog verb. Kept as a visible refusal rather
-        // than a silent no-op, so a future miswiring says something.
-        MenuAction::Backlog(_) => view.set_notice("action does not apply to an agent".into()),
         // Unreachable: Rename is built only for a workspace section, which
         // returns above. Visible refusal over a silent no-op.
         MenuAction::Rename => view.set_notice("action does not apply to an agent".into()),
-        // Unreachable: OpenPlan is built only for a Backlog card, which
-        // returns above. Visible refusal over a silent no-op.
-        MenuAction::OpenPlan => view.set_notice("action does not apply to an agent".into()),
         MenuAction::Stop | MenuAction::Remove => {
             let kind = match action {
                 MenuAction::Stop => match (a.external, a.attach_id.clone()) {
@@ -13032,10 +12468,6 @@ async fn execute_row_menu_action(
         | MenuAction::TabMoveTo
         | MenuAction::TabJoin(_)
         | MenuAction::TabClose => view.set_notice("tab actions need a tab cell".into()),
-        // Unreachable the same way: PlanSpawn pairs with `MenuTarget::Card`,
-        // which returns in the target match above. Visible refusal over a
-        // no-op.
-        MenuAction::PlanSpawn => view.set_notice("plan spawn needs a card".into()),
     }
     Ok(())
 }
@@ -13351,21 +12783,6 @@ async fn execute_aux_action(
             };
             view.set_notice(notice);
             view.reopen_settings_keeping_sel();
-        }
-        AuxAction::BacklogGoto(node) => {
-            // The overlay is for scanning; acting on a card hands you
-            // back to its sideline row, where the full reorder menu lives. A card
-            // that left the feed meanwhile says so rather than moving the cursor
-            // somewhere arbitrary.
-            view.aux = None;
-            match view
-                .display_rows()
-                .iter()
-                .position(|r| matches!(r, DisplayRow::Card(c) if c.id == node))
-            {
-                Some(i) => view.selector = Some(i),
-                None => view.set_notice(format!("{node} is no longer in the backlog")),
-            }
         }
         AuxAction::ToggleStatus => {
             view.status_on = !view.status_on;
@@ -14080,11 +13497,6 @@ async fn selector_apply_row_action(
     cur: usize,
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<(), String> {
-    // Enter on a backlog card opens the node detail overlay; the card's
-    // menu stays on `m` and right-click. The selector stays open underneath.
-    if node_detail::open_from_selector(view, cur) {
-        return Ok(());
-    }
     // row_action resolves against the CURRENT catalog (AC6-FR) and returns an
     // OWNED hit, so applying it can mutate the view.
     match view.row_action(cur) {
@@ -14288,17 +13700,6 @@ async fn selector_keys(
                     }
                 } else {
                     view.open_recruit();
-                }
-            }
-            b'b' => {
-                // The mini-kanban: the Backlog's lanes with their true
-                // counts. A section-level view, not a row action, so it opens
-                // from anywhere in the sideline - but only when there is a
-                // backlog to show, rather than an empty board.
-                if view.layout.backlog_lanes.is_empty() {
-                    view.set_notice("the backlog is empty".into());
-                } else {
-                    view.open_kanban(Anchor::Center);
                 }
             }
             b'p' => {
@@ -14513,7 +13914,7 @@ async fn selector_keys(
                 }
             }
             b'm' => {
-                // US2: `m` on an agent row - or a Backlog card,
+                // US2: `m` on an agent row,
                 // or a band header whose section menu the mouse path
                 // already opens - opens its context menu (mouse-off parity),
                 // anchored at the row and sitting over the selector like peek;
@@ -14522,16 +13923,15 @@ async fn selector_keys(
                 // is still swallowed.
                 if matches!(
                     view.display_rows().get(cur),
-                    Some(DisplayRow::Agent(_) | DisplayRow::Card(_) | DisplayRow::Header { .. })
+                    Some(DisplayRow::Agent(_) | DisplayRow::Header { .. })
                 ) {
                     // Screen row = index - the TableState offset (: the sideline
                     // owns row 0; there is no TAB_BAR_ROWS offset on this side
                     // of the divider).
                     let arow = (cur.saturating_sub(view.sideline_offset())) as u16;
                     // A row that refuses with its own notice (an all-live band)
-                    // keeps it; one that refuses SILENTLY (the Backlog band has
-                    // no menu by design and says nothing on the right-press
-                    // path) still gets a word here, because a swallowed key
+                    // keeps it; one that refuses SILENTLY still gets a word here,
+                    // because a swallowed key
                     // with zero feedback reads as a dead key. Compared against
                     // the notice BEFORE the call, so a stale unrelated notice
                     // within its TTL cannot mask the dead-key feedback.
@@ -15682,14 +15082,6 @@ mod update_modal_tests;
 #[cfg(test)]
 #[path = "client_tests/esc_quiet_tests.rs"]
 mod esc_quiet_tests;
-
-#[cfg(test)]
-#[path = "client_tests/node_detail_tests.rs"]
-mod node_detail_tests;
-
-#[cfg(test)]
-#[path = "client_tests/backlog_lane_tests.rs"]
-mod backlog_lane_tests;
 
 #[cfg(test)]
 #[path = "client_tests/feed_view_tests.rs"]

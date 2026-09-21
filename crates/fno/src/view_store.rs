@@ -37,8 +37,6 @@ pub enum SectionKey {
     Squad(String),
     /// The `~ elsewhere` catch-all for agents matched to no squad.
     Elsewhere,
-    /// The `~ backlog` lane.
-    WorkQueue,
 }
 
 impl SectionKey {
@@ -50,27 +48,19 @@ impl SectionKey {
         match self {
             SectionKey::Squad(cwd) => format!("squad:{cwd}"),
             SectionKey::Elsewhere => "elsewhere".into(),
-            SectionKey::WorkQueue => "work-queue".into(),
         }
     }
 
     fn from_wire(s: &str) -> Option<Self> {
         match s {
             "elsewhere" => Some(SectionKey::Elsewhere),
-            "work-queue" => Some(SectionKey::WorkQueue),
-            // Anything else, including a `mission:` or `missions` key saved by
-            // an older build, reads as None and `load` drops that key alone.
+            // Anything else, including a `mission:`, `missions`, or `work-queue`
+            // key saved by an older build, reads as None and `load` drops that
+            // key alone.
             _ => s
                 .strip_prefix("squad:")
                 .map(|cwd| SectionKey::Squad(cwd.into())),
         }
-    }
-
-    /// Whether this section's cycle is binary (expanded <-> collapsed). The
-    /// Backlog section's rows are cards, which have no exited state, so its middle
-    /// state would hide nothing.
-    fn is_binary(&self) -> bool {
-        matches!(self, SectionKey::WorkQueue)
     }
 }
 
@@ -87,14 +77,13 @@ pub enum SectionView {
 
 /// One click on a section header, as a pure function so the cycle is testable
 /// without a View. `has_dead` false skips the `LiveOnly` state entirely (there
-/// would be nothing to hide, so the click would look like a no-op), as does a
-/// binary section - a rule this owns via `key` rather than taking as a second
-/// transposable bool from its caller. `LiveOnly -> Collapsed` unconditionally,
+/// would be nothing to hide, so the click would look like a no-op).
+/// `LiveOnly -> Collapsed` unconditionally,
 /// so a section whose last dead row was reaped elsewhere can never wedge in
 /// `LiveOnly`.
-pub fn next_view(current: SectionView, has_dead: bool, key: &SectionKey) -> SectionView {
+pub fn next_view(current: SectionView, has_dead: bool) -> SectionView {
     match current {
-        SectionView::Expanded if has_dead && !key.is_binary() => SectionView::LiveOnly,
+        SectionView::Expanded if has_dead => SectionView::LiveOnly,
         SectionView::Expanded => SectionView::Collapsed,
         SectionView::LiveOnly => SectionView::Collapsed,
         SectionView::Collapsed => SectionView::Expanded,
@@ -631,15 +620,14 @@ mod tests {
         }
     }
 
-    // AC1-HP: a saved map round-trips, including a squad name and both fixed
-    // sections.
+    // AC1-HP: a saved map round-trips, including a squad name and the fixed
+    // section.
     #[test]
     fn save_load_round_trips() {
         let _s = Scratch::new("round-trip");
         let mut m = HashMap::new();
         m.insert(SectionKey::Squad("footnote".into()), SectionView::LiveOnly);
         m.insert(SectionKey::Elsewhere, SectionView::Collapsed);
-        m.insert(SectionKey::WorkQueue, SectionView::Expanded);
         save(&m);
         assert_eq!(load(), m);
     }
@@ -697,29 +685,21 @@ mod tests {
         assert_eq!(got[&SectionKey::Elsewhere], SectionView::Collapsed);
     }
 
-    // AC5-EDGE: a section with no dead rows skips LiveOnly entirely, and the
-    // the Backlog section is binary in both directions.
+    // AC5-EDGE: a section with no dead rows skips LiveOnly entirely.
     #[test]
     fn next_view_skips_live_only_without_dead() {
         use SectionView::*;
-        let sq = SectionKey::Squad("/repo".into());
-        assert_eq!(next_view(Expanded, false, &sq), Collapsed);
-        assert_eq!(next_view(Collapsed, false, &sq), Expanded);
-        assert_eq!(
-            next_view(Expanded, true, &SectionKey::WorkQueue),
-            Collapsed,
-            "backlog binary even when told rows are dead"
-        );
+        assert_eq!(next_view(Expanded, false), Collapsed);
+        assert_eq!(next_view(Collapsed, false), Expanded);
     }
 
     // AC4-UI: the full tri-state cycle when dead rows exist.
     #[test]
     fn next_view_cycles_tri_state_with_dead() {
         use SectionView::*;
-        let sq = SectionKey::Squad("/repo".into());
-        assert_eq!(next_view(Expanded, true, &sq), LiveOnly);
-        assert_eq!(next_view(LiveOnly, true, &sq), Collapsed);
-        assert_eq!(next_view(Collapsed, true, &sq), Expanded);
+        assert_eq!(next_view(Expanded, true), LiveOnly);
+        assert_eq!(next_view(LiveOnly, true), Collapsed);
+        assert_eq!(next_view(Collapsed, true), Expanded);
     }
 
     // AC12-FR: a section left in LiveOnly whose last dead row was reaped
@@ -727,13 +707,25 @@ mod tests {
     #[test]
     fn live_only_never_wedges_when_dead_disappears() {
         assert_eq!(
-            next_view(
-                SectionView::LiveOnly,
-                false,
-                &SectionKey::Squad("/repo".into())
-            ),
+            next_view(SectionView::LiveOnly, false),
             SectionView::Collapsed
         );
+    }
+
+    // A mux-view.json saved by an older build with the deleted `work-queue`
+    // and `missions` section keys loads, and only the readable entries
+    // survive (AC6-EDGE for the sections' removal).
+    #[test]
+    fn legacy_work_queue_and_missions_keys_load_and_drop() {
+        let _s = Scratch::new("legacy-keys");
+        std::fs::write(
+            view_path(),
+            r#"{"version":1,"sections":{"work-queue":"expanded","missions":"collapsed","squad:/x":"live_only"}}"#,
+        )
+        .unwrap();
+        let got = load();
+        assert_eq!(got.len(), 1, "only the squad key survives: {got:?}");
+        assert_eq!(got[&SectionKey::Squad("/x".into())], SectionView::LiveOnly);
     }
 
     // `strip_prefix` removes only the leading marker, so an identity that

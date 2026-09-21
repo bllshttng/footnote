@@ -454,33 +454,6 @@ impl View {
                     0,
                 )
             }
-            DisplayRow::Card(c) => {
-                let lat = card_lattice_state(c.state);
-                let style = lattice_style(lat, self.theme.accent);
-                let label = card_label(c);
-                let mark = if self.card_pending(&c.id) {
-                    " \u{2026}"
-                } else if c.head {
-                    " head"
-                } else {
-                    ""
-                };
-                (
-                    vec![
-                        rt_cell(status_word(lat).to_string(), style.fg, style.flags, false),
-                        rt_cell(
-                            format!("{label} {}{mark}", c.priority),
-                            style.fg,
-                            style.flags,
-                            false,
-                        ),
-                        rt_cell(String::new(), Color::Default, 0, false),
-                        rt_cell(String::new(), Color::Default, 0, false),
-                        rt_cell(String::new(), Color::Default, 0, false),
-                    ],
-                    0,
-                )
-            }
             DisplayRow::TableHead => {
                 let marker = |column: AgentSortColumn| {
                     if self.agent_sort.column == column {

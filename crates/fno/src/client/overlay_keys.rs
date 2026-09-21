@@ -9,7 +9,7 @@ use super::{
     recruit_keys, rename_keys, row_menu_keys, search_keys, selector_keys, yard_keys, StdinFlow,
     View,
 };
-use super::{aux_keys, node_detail, sideline};
+use super::{aux_keys, sideline};
 
 /// Route one stdin chunk to the overlay that owns the keyboard, in
 /// precedence order. `None` when no overlay owns it: the caller falls
@@ -74,11 +74,6 @@ pub(super) async fn route(
         // The portal picker consumes keys while open, ahead of the
         // selector it replaced - same precedence slot as its sibling.
         return Some(portal_pick_keys(view, bytes, sock_w).await);
-    }
-    if view.node_detail.is_some() {
-        // Node detail (Enter on a card): peek's precedence slot - its keys
-        // never leak to the selector underneath; Esc drops back one layer.
-        return Some(node_detail::detail_keys(view, bytes, sock_w).await);
     }
     if view.peek.is_some() {
         // peek sits ON TOP of the selector; routed BEFORE it so its keys
