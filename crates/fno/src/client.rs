@@ -6241,7 +6241,6 @@ impl View {
             // US4/US5: the sideline MENU popup or settings modal.
             draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
         } else if let Some(pk) = self.launcher.as_ref().and_then(|l| l.picker.as_ref()) {
-            // The dock's child popover, below any modal opened after it.
             draw_popup_overlay(&mut cells, rows, cols, &pk.popup, self.term, &self.theme);
         } else if let Some(sel) = self.answers {
             // needs-me queue (grown from the answer overlay,
@@ -9027,8 +9026,7 @@ fn draw_overlay_layout(
     chrome::blit(cells, rows, cols, layout.origin, &layout.framed, theme);
 }
 
-/// Draw one popup overlay (which-key modal, row menu, aux popup, the dock's
-/// child picker) over the composed frame.
+/// Draw one popup overlay (which-key modal, row menu, aux popup, the dock's child picker).
 fn draw_popup_overlay(
     cells: &mut [Cell],
     rows: usize,
