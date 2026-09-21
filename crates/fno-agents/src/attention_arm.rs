@@ -525,8 +525,20 @@ fn apply_flips(
         tick.skip = Some("file_changed".to_string());
         return;
     }
-    if io.write_atomic(&sink.path, &new_text).is_ok() {
-        tick.flips = close_ids.len() as u64;
+    match io.write_atomic(&sink.path, &new_text) {
+        Ok(()) => tick.flips = close_ids.len() as u64,
+        Err(e) => {
+            eprintln!("fno-agents attention: close rewrite failed: {e}");
+            let changed = io.read(&sink.path).ok().as_deref() != Some(cur.as_str());
+            tick.skip = Some(
+                if changed {
+                    "file_changed"
+                } else {
+                    "write_failed"
+                }
+                .to_string(),
+            );
+        }
     }
 }
 
