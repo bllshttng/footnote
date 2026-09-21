@@ -186,6 +186,22 @@ def hosted_workflow_state(cwd: Path) -> str:
         return "unavailable"
 
 
+def _journal_lines(path: Path) -> "list[str] | None":
+    """Envelope lines for one journal: committed rows first, raw bytes as
+    fallback. The store commit is the write boundary, so a receipt committed
+    through the store leaves no byte trace in the journal; None means the
+    journal could not be read at all."""
+    from fno.events.store_client import native_rows
+
+    committed = native_rows(path)
+    if committed is not None:
+        return committed
+    try:
+        return path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+
+
 def _verification_decision_all(candidate_sha: str, event_paths: list[Path]) -> dict:
     """Select the newest valid receipt across deduped, unordered journals."""
     from fno.events import ValidationError, validate
@@ -208,9 +224,8 @@ def _verification_decision_all(candidate_sha: str, event_paths: list[Path]) -> d
         seen_paths.add(path_key)
         if not path.exists():
             continue
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeError):
+        lines = _journal_lines(path)
+        if lines is None:
             unreadable += 1
             continue
         for line in lines:
@@ -486,14 +501,11 @@ def next_verification_generation(*, cwd: str, candidate_sha: str) -> int:
             if key in seen_paths:
                 continue
             seen_paths.add(key)
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-            except FileNotFoundError:
-                continue
-            except (OSError, UnicodeError) as exc:
+            lines = _journal_lines(path)
+            if lines is None:
                 if skip_unreadable:
                     continue
-                raise ValueError(f"receipt journal unreadable: {path}: {exc}") from exc
+                raise ValueError(f"receipt journal unreadable: {path}")
             for line in lines:
                 if not line.strip():
                     continue
@@ -658,9 +670,8 @@ def rebase_equivalent_evidence(
             if path_key in seen_paths:
                 continue
             seen_paths.add(path_key)
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-            except (OSError, UnicodeError):
+            lines = _journal_lines(path)
+            if lines is None:
                 continue
             for line in lines:
                 line = line.strip()

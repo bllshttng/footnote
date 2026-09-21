@@ -142,7 +142,14 @@ pub fn absence_verdict(
 
 fn absence_evidence(journal: &Path, stderr: &Path) -> String {
     let rows = fno_agents::event_store::query_events(journal, &Default::default());
-    let journal_lines = rows.map(|listed| listed.len()).unwrap_or(0);
+    // Committed rows are the count the reader sees; a raw pre-store fixture
+    // with no store rows still answers its own line count.
+    let journal_lines = match rows {
+        Ok(listed) if !listed.is_empty() => listed.len(),
+        _ => fs::read_to_string(journal)
+            .map(|text| text.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0),
+    };
     let mut out = format!(
         "journal read: {} ({journal_lines} lines)\n",
         journal.display()

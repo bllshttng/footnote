@@ -1864,6 +1864,14 @@ def append_event(
     _refuse_hermetic_escape(requested_path)
     from fno.events.store_client import EventStoreUnavailable, emit_envelope
 
+    if requested_path.is_dir():
+        # A directory at the journal path is a corrupt setup, and the store
+        # would silently commit beside it (events.db strips the .jsonl stem),
+        # reporting a mirrored receipt no reader can ever find there.
+        raise EventStoreUnavailable(
+            f"events path is a directory, not a journal: {requested_path}"
+        )
+
     try:
         return emit_envelope(event, requested_path, timeout=lock_timeout_seconds)
     except EventStoreUnavailable:

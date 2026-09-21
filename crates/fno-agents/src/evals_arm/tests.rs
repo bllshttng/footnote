@@ -222,7 +222,7 @@ fn incident_outranks_the_capacity_gate() {
 
     // Positive control: a clear verdict and a full gate still read fleet_full.
     run_tick_mode(&o, &full_gate, &clear, &never);
-    let text = fs::read_to_string(&events).unwrap_or_default();
+    let text = crate::events::committed_journal_text(&events);
     assert!(text.contains("spawn gate refused: fleet_full"), "{text}");
 }
 
