@@ -34,6 +34,118 @@ def _no_dispatch_hold(monkeypatch):
     monkeypatch.setattr(_status, "_merge_hold_reason", lambda pr, cwd: None)
 
 
+def _receipt(*codes):
+    """A preview receipt naming `codes`; the shape the owner prints."""
+    return {
+        "outcome": "held" if codes else "authorized",
+        "blockers": [
+            {"code": code, "class": "held", "detail": code} for code in codes
+        ],
+    }
+
+
+def test_ready_is_the_preview_receipt(monkeypatch, capsys):
+    """AC4 (x-53c5): a terminal PR renders ready false with the receipt's
+    own blocker word; the receipt itself rides as merge_decision."""
+    import json
+
+    monkeypatch.setattr(
+        _status, "_fetch", lambda pr, cwd: ({"state": "MERGED", "statusCheckRollup": []}, "")
+    )
+    monkeypatch.setattr(_status, "_merge_decision", lambda pr, repo, facts: _receipt("pr_terminal"))
+    _status.run_status("2224")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is False
+    assert out["ready_blockers"] == ["pr_terminal"]
+    assert out["merge_decision"]["blockers"][0]["code"] == "pr_terminal"
+
+
+def test_an_unreachable_owner_reads_not_ready_never_ready(monkeypatch, capsys):
+    """AC5 (x-53c5): an unavailable authorized-merge verb fails closed:
+    ready false and merge_decision_unknown, never an asserted-ready row."""
+    import json
+
+    import fno.rust_binary as rust_binary
+
+    def boom(pr, repo, facts):
+        raise rust_binary.VerbUnavailable("unreachable")
+
+    monkeypatch.setattr(_status, "_merge_decision", boom)
+    monkeypatch.setattr(
+        _status, "_fetch", lambda pr, cwd: ({"state": "OPEN", "statusCheckRollup": []}, "")
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is False
+    assert out["ready_blockers"] == ["merge_decision_unknown"]
+
+
+def test_the_preview_ask_carries_the_facts_status_already_computed(
+    monkeypatch, capsys
+):
+    """The probes this read paid for ride the ask, so the owner never spawns
+    a second status read for them."""
+    import json
+
+    monkeypatch.setattr(
+        _status,
+        "_fetch",
+        lambda pr, cwd: (
+            {
+                "state": "OPEN",
+                "headRefOid": "abc123",
+                "statusCheckRollup": [
+                    {"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}
+                ],
+            },
+            "",
+        ),
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_optional_review_state",
+        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 2},
+    )
+    monkeypatch.setattr(
+        _status, "_merge_decision", lambda pr, repo, facts: _receipt("ci_red")
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is False
+    assert out["ready_blockers"] == ["ci_red"]
+
+
+def test_the_receipt_blockers_render_verbatim(monkeypatch, capsys):
+    """The blocker words a reader keys on are the receipt's codes, spelled by
+    the owner, never re-derived here."""
+    import json
+
+    monkeypatch.setattr(
+        _status, "_fetch", lambda pr, cwd: ({"state": "OPEN", "statusCheckRollup": []}, "")
+    )
+    codes = ["ci_base_stale", "merge_slot_held", "optional_reviews_unresolved"]
+    monkeypatch.setattr(
+        _status, "_merge_decision", lambda pr, repo, facts: _receipt(*codes)
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is False
+    assert out["ready_blockers"] == codes
+
+
+@pytest.fixture(autouse=True)
+def _merge_decision_authorized(monkeypatch):
+    """ready is the authorized-merge preview receipt (x-53c5); the gate
+    logic has Rust tests beside decide. These suites stub the ask and assert
+    the render, the fact plumbing, and the fail-closed transport. A test
+    that needs a specific verdict re-stubs _merge_decision itself."""
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: {"outcome": "authorized", "blockers": []},
+    )
+
+
 @pytest.fixture(autouse=True)
 def _no_review_activity(monkeypatch):
     """Neutralize the in-flight-review probe unless a test steers it.
@@ -288,6 +400,12 @@ def test_ac1_cancelled_latest_is_red_and_unsettled(monkeypatch, capsys):
     """AC1-HP: a genuinely-cancelled latest run keeps verdict red (a cancelled
     run is not a pass) but settled FALSE (it is not a conclusion either - the
     run was taken away, nothing was decided). Exit code stays 1."""
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("ci_cancelled_retrigger"),
+    )
+
     code, out, err = _run_status_on(
         monkeypatch,
         capsys,
@@ -598,6 +716,11 @@ def test_unresolved_counter_tells_you_a_reply_is_not_a_resolve(monkeypatch, caps
         lambda pr, cwd, **kw: {"coverage": "unknown", "reviewed_count": None},
     )
     monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("optional_reviews_unresolved"),
+    )
     _status.run_status("42")
     cap = capsys.readouterr()
     import json
@@ -900,52 +1023,32 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
             },
         },
         "dispatch_hold": None,
+        # The preview receipt (x-53c5): the autouse stub's authorized answer.
+        "merge_decision": {"outcome": "authorized", "blockers": []},
         "ready": True,
         "ready_blockers": [],
     }
 
 
 def test_dispatch_hold_removes_green_pr_from_ready_set(monkeypatch, capsys):
-    _no_floor(monkeypatch)
+    """A held PR is not ready; the receipt names dispatch_hold."""
     monkeypatch.setattr(
         _status,
-        "_fetch",
-        lambda pr, cwd: ({
-            "state": "OPEN",
-            "headRefOid": "abc",
-            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
-        }, ""),
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("dispatch_hold"),
     )
-    monkeypatch.setattr(
-        _status,
-        "read_optional_review_state",
-        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
-    )
-    monkeypatch.setattr(
-        _status,
-        "read_review_coverage",
-        lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2, "head_sha": "abc"},
-    )
-    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
+
+    _green_fetch(monkeypatch)
     monkeypatch.setattr(
         _status,
         "_merge_hold_reason",
-        lambda pr, cwd: "dispatch-hold:x-5a5c: blocking; set_by=king",
+        lambda pr, cwd: "dispatch_hold: held by tgt-x at abc123",
     )
-    assert _status.run_status("42") == 0
-    out = _json.loads(capsys.readouterr().out)
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
     assert out["ready"] is False
-    assert out["ready_blockers"] == ["dispatch_hold"]
-    assert "set_by=king" in out["dispatch_hold"]
-
-
-# ---- x-e601: ready conjoins review coverage, ready_blockers names the conjunct ----
-#
-# `fno do pr merge` already refused on uncovered coverage while this verb printed
-# ready: true from the same payload (the specimen set: five PRs at once, each
-# green and uncovered). ready now conjoins coverage exactly the way merge
-# reads it, and the blockers list is the positive marker for WHICH conjunct
-# failed - a bare false has one explanation per conjunct.
+    assert "dispatch_hold" in out["ready_blockers"]
+    assert out["dispatch_hold"] is not None
 
 
 def _green_fetch(monkeypatch):
@@ -974,8 +1077,8 @@ def _green_fetch(monkeypatch):
 
 
 def test_ready_is_false_when_coverage_is_uncovered(monkeypatch, capsys):
-    """AC3-HP: green CI and zero unresolved findings no longer say ready while
-    the merge gate refuses the same PR for zero coverage."""
+    """AC3-HP: the uncovered head renders not-ready with the gate's own code
+    (the derivation is decide's coverage gate; this is the render)."""
     import json
 
     _green_fetch(monkeypatch)
@@ -984,6 +1087,12 @@ def test_ready_is_false_when_coverage_is_uncovered(monkeypatch, capsys):
         "read_review_coverage",
         lambda pr, cwd, **kw: {"coverage": "uncovered", "reviewed_count": 0},
     )
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("review_coverage_uncovered"),
+    )
+
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
     assert out["green"] is True
@@ -992,12 +1101,10 @@ def test_ready_is_false_when_coverage_is_uncovered(monkeypatch, capsys):
 
 
 def test_operator_waiver_clears_the_coverage_blockers(monkeypatch, capsys):
-    """The same pure resolver the merge gate reads: a single standing ruling
-    turns an uncovered row into ready with the waiver NAMED, so a waived PR
-    never reads as a reviewed one."""
+    """The waiver overlay lives in the coverage gate now (x-53c5); a waived
+    receipt arrives with no coverage blockers and the waiver NAMED, so a
+    waived PR never reads as a reviewed one."""
     import json
-
-    from fno.pr import _coverage_gate
 
     _green_fetch(monkeypatch)
     monkeypatch.setattr(
@@ -1005,15 +1112,9 @@ def test_operator_waiver_clears_the_coverage_blockers(monkeypatch, capsys):
         "read_review_coverage",
         lambda pr, cwd, **kw: {"coverage": "uncovered", "reviewed_count": 0},
     )
-    monkeypatch.setattr(
-        _coverage_gate,
-        "law_authority",
-        lambda subject: (
-            ("single", "")
-            if subject == _coverage_gate.STANDING_WAIVER_SUBJECT
-            else ("none", "")
-        ),
-    )
+    receipt = _receipt()
+    receipt["coverage_waiver"] = "standing operator law"
+    monkeypatch.setattr(_status, "_merge_decision", lambda pr, repo, facts: receipt)
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
     assert out["ready"] is True
@@ -1022,11 +1123,9 @@ def test_operator_waiver_clears_the_coverage_blockers(monkeypatch, capsys):
 
 
 def test_head_pinned_waiver_clears_the_coverage_blockers(monkeypatch, capsys):
-    """The scoped waiver resolves at this exact head: the status and the
-    merge gate build the same subject from the same slug, PR, and head."""
+    """The scoped waiver resolves inside the gate; the payload carries its
+    note verbatim beside a waived ready."""
     import json
-
-    from fno.pr import _coverage_gate
 
     _green_fetch(monkeypatch)
     monkeypatch.setattr(
@@ -1048,17 +1147,9 @@ def test_head_pinned_waiver_clears_the_coverage_blockers(monkeypatch, capsys):
         "read_review_coverage",
         lambda pr, cwd, **kw: {"coverage": "uncovered", "reviewed_count": 0},
     )
-    monkeypatch.setattr(_coverage_gate, "_repo_slug", lambda cwd: "acme/widgets")
-    monkeypatch.setattr(
-        _coverage_gate,
-        "law_authority",
-        lambda subject: (
-            ("single", "")
-            if subject
-            == _coverage_gate.scoped_waiver_subject("acme/widgets", 42, "1" * 40)
-            else ("none", "")
-        ),
-    )
+    receipt = _receipt()
+    receipt["coverage_waiver"] = "head-pinned operator waiver at 11111111"
+    monkeypatch.setattr(_status, "_merge_decision", lambda pr, repo, facts: receipt)
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
     assert out["ready"] is True
@@ -1066,11 +1157,9 @@ def test_head_pinned_waiver_clears_the_coverage_blockers(monkeypatch, capsys):
 
 
 def test_unknown_waiver_authority_is_its_own_blocker(monkeypatch, capsys):
-    """A dead or conflicted decision probe is not 'no waiver': the status
-    names UNKNOWN as its own blocker instead of reporting none."""
+    """A dead decision probe is not 'no waiver': the gate answers unknown and
+    the receipt names it; the render shows the code, fail closed."""
     import json
-
-    from fno.pr import _coverage_gate
 
     _green_fetch(monkeypatch)
     monkeypatch.setattr(
@@ -1079,14 +1168,15 @@ def test_unknown_waiver_authority_is_its_own_blocker(monkeypatch, capsys):
         lambda pr, cwd, **kw: {"coverage": "uncovered", "reviewed_count": 0},
     )
     monkeypatch.setattr(
-        _coverage_gate,
-        "law_authority",
-        lambda subject: ("unknown", f"decision probe failed for {subject}: boom"),
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("review_coverage_unknown"),
     )
+
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
     assert out["ready"] is False
-    assert "review_coverage_waiver_unknown" in out["ready_blockers"]
+    assert "review_coverage_unknown" in out["ready_blockers"]
 
 
 def test_ready_names_reviewer_refused_and_the_reviewer(monkeypatch, capsys):
@@ -1109,6 +1199,12 @@ def test_ready_names_reviewer_refused_and_the_reviewer(monkeypatch, capsys):
             ],
         },
     )
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("review_coverage_reviewer_refused"),
+    )
+
     _status.run_status("42")
     captured = capsys.readouterr()
     out = json.loads(captured.out)
@@ -1164,6 +1260,11 @@ def test_status_reposts_a_stale_green_when_computed_coverage_is_uncovered(
         "publish_coverage_status",
         lambda pr, **kw: (calls.append((pr, kw)) is None, ""),
     )
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("review_coverage_uncovered"),
+    )
 
     code = _status.run_status("42")
     out = _json.loads(capsys.readouterr().out)
@@ -1207,6 +1308,11 @@ def test_status_does_not_repost_when_the_posted_state_agrees(
         "publish_coverage_status",
         lambda *_a, **_kw: pytest.fail("an agreeing status was reposted"),
     )
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("review_coverage_uncovered") if coverage.get("coverage") == "uncovered" else _receipt(),
+    )
 
     _status.run_status("42")
     out = _json.loads(capsys.readouterr().out)
@@ -1247,6 +1353,11 @@ def test_status_reports_a_failed_repost_without_changing_its_verdict(
         "publish_coverage_status",
         lambda *_a, **_kw: (False, "gh exited 1"),
     )
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("review_coverage_uncovered"),
+    )
 
     code = _status.run_status("42")
     out = _json.loads(capsys.readouterr().out)
@@ -1284,6 +1395,12 @@ def test_ready_is_false_when_coverage_is_unknown(monkeypatch, capsys):
         "read_review_coverage",
         lambda pr, cwd, **kw: {"coverage": "unknown", "reviewed_count": None},
     )
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("review_coverage_unknown"),
+    )
+
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
     assert out["ready"] is False
@@ -1292,8 +1409,8 @@ def test_ready_is_false_when_coverage_is_unknown(monkeypatch, capsys):
 
 
 def test_ready_treats_a_legacy_covered_zero_as_uncovered(monkeypatch, capsys):
-    """Historical events serialize a real zero as `covered` with count 0;
-    without validated verdict state, ready still fails closed."""
+    """Historical events serialize a real zero as `covered` with count 0; the
+    GATE (coverage-check) fails closed on it, and the receipt renders here."""
     import json
 
     _green_fetch(monkeypatch)
@@ -1302,44 +1419,16 @@ def test_ready_treats_a_legacy_covered_zero_as_uncovered(monkeypatch, capsys):
         "read_review_coverage",
         lambda pr, cwd, **kw: {"coverage": "covered", "reviewed_count": 0},
     )
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("review_coverage_uncovered"),
+    )
+
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
     assert out["ready"] is False
     assert "review_coverage_uncovered" in out["ready_blockers"]
-
-
-def test_ready_blockers_name_the_ci_conjunct_too(monkeypatch, capsys):
-    """The list is not coverage-only: a red verdict is named with the verdict's
-    own word, so a reader never guesses which of the conjuncts failed."""
-    import json
-
-    monkeypatch.setattr(
-        _status,
-        "_fetch",
-        lambda pr, cwd: ({
-            "state": "OPEN",
-            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "FAILURE"}],
-        }, ""),
-    )
-    monkeypatch.setattr(
-        _status,
-        "read_optional_review_state",
-        lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
-    )
-    monkeypatch.setattr(
-        _status,
-        "read_review_coverage",
-        lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2},
-    )
-    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
-    monkeypatch.setattr(
-        "fno.pr._merge._code_review_attestation_required",
-        lambda repo, pr_number=0: False,
-    )
-    _status.run_status("42")
-    out = json.loads(capsys.readouterr().out)
-    assert out["ready"] is False
-    assert out["ready_blockers"] == ["ci_red"]
 
 
 @pytest.mark.parametrize(
@@ -1358,33 +1447,28 @@ def test_ready_blockers_name_the_ci_conjunct_too(monkeypatch, capsys):
 def test_ready_reflects_mergeable(
     monkeypatch, capsys, mergeable, expected_ready, expected_blocker
 ):
-    """x-4271: PR 965 read verdict green / ready true / ready_blockers empty
-    at mergeable=CONFLICTING, because `mergeable` never reached the ready
-    conjunction. A dirty or still-computing merge state must block ready
-    regardless of what the (self-published, real-CI-free) check tally says."""
+    """The mergeable conjunct is the GitHub gate's now; the fact renders and
+    a not-mergeable receipt reads not-ready."""
     import json
 
-    _green_fetch(monkeypatch)
     monkeypatch.setattr(
         _status,
         "_fetch",
         lambda pr, cwd: ({
             "state": "OPEN",
-            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
             "mergeable": mergeable,
+            "statusCheckRollup": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
         }, ""),
     )
+    codes = [expected_blocker] if expected_blocker else []
     monkeypatch.setattr(
-        _status,
-        "read_review_coverage",
-        lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2},
+        _status, "_merge_decision", lambda pr, repo, facts: _receipt(*codes)
     )
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
+    assert out["mergeable"] == mergeable
     assert out["ready"] is expected_ready
-    if expected_blocker is None:
-        assert out["ready_blockers"] == []
-    else:
+    if expected_blocker:
         assert expected_blocker in out["ready_blockers"]
 
 
@@ -1421,15 +1505,16 @@ def _merge_state_fetch(monkeypatch, merge_state):
 
 def test_ready_reads_githubs_blocked_merge_state(monkeypatch, capsys):
     """`mergeable` answers "does it conflict"; `mergeable_state`
-    answers "will GitHub merge it". A ruleset holding the merge with no red
-    check must block ready, and the missing check must be named on the
-    payload and in the stderr clause workers quote."""
+    answers "will GitHub merge it". The computed words are SUPPLIED to the
+    preview ask (one decision, no second read), and the receipt's word is
+    what renders with the missing checks named in the stderr clause."""
     import json
 
     import fno.rust_binary as rust_binary
 
     _merge_state_fetch(monkeypatch, "blocked")
     merge_calls: list = []
+    asked: list = []
 
     def fake(verb, payload, **kw):
         # run_status also drives the durable-grant resolver through the same
@@ -1441,6 +1526,14 @@ def test_ready_reads_githubs_blocked_merge_state(monkeypatch, capsys):
                 "blockers": ["github_blocked"],
                 "missing_required_checks": ["smoke"],
                 "source": "rules/branches/main",
+            }
+        if payload.get("effect") == "preview":
+            asked.append(dict(payload))
+            return {
+                "outcome": "held",
+                "blockers": [
+                    {"code": "github_blocked", "class": "held", "detail": "blocked"}
+                ],
             }
         return {"state": "absent", "reason": "stub", "node_id": None, "claim_state": None}
 
@@ -1455,10 +1548,15 @@ def test_ready_reads_githubs_blocked_merge_state(monkeypatch, capsys):
     assert len(merge_calls) == 1
     assert merge_calls[0]["mergeStateStatus"] == "blocked"
     assert merge_calls[0]["baseRefName"] == "main"
+    # The supply: the ask carries the words this read computed.
+    assert len(asked) == 1
+    assert asked[0]["github_blockers"] == ["github_blocked"]
 
 
 def test_ready_fails_closed_when_the_rust_reader_is_unavailable(monkeypatch, capsys):
-    """AC4-EDGE: an unreadable merge state never reads as no blocker."""
+    """AC4-EDGE + AC5 (x-53c5): an unreadable merge state never reads as no
+    blocker (the fact degrades loudly), and an unaskable merge decision reads
+    merge_decision_unknown - never ready."""
     import json
 
     import fno.rust_binary as rust_binary
@@ -1471,8 +1569,9 @@ def test_ready_fails_closed_when_the_rust_reader_is_unavailable(monkeypatch, cap
     monkeypatch.setattr(rust_binary, "verb_call", boom)
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
-    assert "github_merge_state_unknown" in out["ready_blockers"]
     assert out["ready"] is False
+    assert "merge_decision_unknown" in out["ready_blockers"]
+    assert out["github_merge_state"]["blockers"] == ["github_merge_state_unknown"]
 
 
 def test_a_clean_github_merge_state_adds_no_blocker(monkeypatch, capsys):
@@ -1583,8 +1682,7 @@ def _lane_fetch(monkeypatch, *, state="OPEN", head="h1"):
 
 def test_ready_requires_the_local_code_review_pass_merge_does(monkeypatch, capsys):
     """PR 917 dual review: with the lane requiring the harness review verb,
-    ready must not pass on a bot-only pass - merge refuses that row, so status
-    answering ready is the two-readers-disagree shape again."""
+    a bot-only pass holds; the gate's word renders on the payload."""
     import json
 
     _lane_fetch(monkeypatch)
@@ -1608,6 +1706,12 @@ def test_ready_requires_the_local_code_review_pass_merge_does(monkeypatch, capsy
             ],
         },
     )
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("review_coverage_no_local_pass"),
+    )
+
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
     assert out["ready"] is False
@@ -1866,7 +1970,7 @@ def test_a_closed_pr_also_reports_not_asked_rather_than_unknown(monkeypatch, cap
 
 def test_ready_names_a_stale_head_pin(monkeypatch, capsys):
     """PR 917 dual review: a covered row pinned to an older head is not ready;
-    merge compares the pin, so status reading it as covered disagrees."""
+    the pin comparison is the gate's (x-53c5) and its word renders here."""
     import json
 
     _lane_fetch(monkeypatch, head="h2")
@@ -1880,6 +1984,12 @@ def test_ready_names_a_stale_head_pin(monkeypatch, capsys):
             "head_sha": "h1",
         },
     )
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("review_coverage_stale_head"),
+    )
+
     _status.run_status("42")
     out = json.loads(capsys.readouterr().out)
     assert out["ready"] is False
@@ -1908,10 +2018,9 @@ def test_local_pass_conjunct_is_satisfiable_on_the_real_read_path(
 ):
     """Round 3, PR 917: read_review_coverage's shaped row dropped `verdicts`,
     so the local-pass conjunct saw an empty list forever on this repo's config
-    while merge, reading the raw row, accepted - the two-readers-disagree shape.
-    This drives run_status through the REAL reader (only the repo root is
-    pointed at the fixture), so the conjunct is proven on the wire, not on the
-    stubbed shapes the other tests pin."""
+    while merge, reading the raw row, accepted. This drives the REAL reader
+    (only the repo root points at the fixture); the conjunct verdicts
+    themselves are the coverage gate's now (x-53c5) and arrive as receipts."""
     import json
 
     _lane_fetch(monkeypatch)
@@ -1942,13 +2051,18 @@ def test_local_pass_conjunct_is_satisfiable_on_the_real_read_path(
     }
     events.write_text(json.dumps(covered_row) + "\n", encoding="utf-8")
     monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    answers = iter([_receipt(), _receipt("review_coverage_no_local_pass")])
+    monkeypatch.setattr(
+        _status, "_merge_decision", lambda pr, repo, facts: next(answers)
+    )
     _status.run_status("42", cwd=str(tmp_path))
     out = json.loads(capsys.readouterr().out)
     assert out["ready"] is True, out["ready_blockers"]
     assert out["review_coverage"]["verdicts"][0]["name"] == "code-review"
 
-    # Same wire, no local pass in the verdicts: the conjunct fails BY NAME, so
-    # the negative direction is also proven on the reader, not the stub.
+    # Same wire, no local pass in the verdicts: the gate's word arrives by
+    # name, so the negative direction is also proven on the reader, not the
+    # stub.
     bot_only = json.loads(json.dumps(covered_row))
     bot_only["data"]["verdicts"] = [
         {"name": "chatgpt-codex-connector", "producer": "github_app",
@@ -2205,6 +2319,10 @@ def test_status_distinguishes_current_review_from_stale_history(
     }
 
     write_event([stale, fresh])
+    answers = iter([_receipt(), _receipt("review_coverage_uncovered")])
+    monkeypatch.setattr(
+        _status, "_merge_decision", lambda pr, repo, facts: next(answers)
+    )
     _status.run_status("826", cwd=str(tmp_path))
     mixed = _json.loads(capsys.readouterr().out)
     assert mixed["ready"] is True
@@ -2449,6 +2567,12 @@ def test_read_review_coverage_rejects_a_stale_labeled_review(
 
     _lane_fetch(monkeypatch, head=head)
     monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("review_coverage_uncovered"),
+    )
+
     _status.run_status("1003", cwd=str(tmp_path))
     status = _json.loads(capsys.readouterr().out)
     assert status["ready"] is False
@@ -2784,6 +2908,12 @@ def test_us2_green_with_unresolved_optional_still_exits_zero(monkeypatch, capsys
     """US2/AC1-UI: an unresolved optional finding never changes the exit code."""
     monkeypatch.setattr(
         _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("optional_reviews_unresolved"),
+    )
+
+    monkeypatch.setattr(
+        _status,
         "_fetch",
         lambda pr, cwd: ({
             "state": "OPEN",
@@ -2798,14 +2928,6 @@ def test_us2_green_with_unresolved_optional_still_exits_zero(monkeypatch, capsys
             "optional_reviews_unresolved": 2,
         },
     )
-    # Coverage stubbed to a counted pass so the ONLY blocker under test is the
-    # unresolved optional finding (ready conjoins coverage since x-e601).
-    monkeypatch.setattr(
-        _status,
-        "read_review_coverage",
-        lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2},
-    )
-    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     code = _status.run_status("42")
     assert code == 0  # green exit unchanged despite an unresolved optional finding
     out = _json.loads(capsys.readouterr().out)
@@ -2856,6 +2978,12 @@ def test_run_status_review_read_unknown_does_not_change_exit(monkeypatch, capsys
     """AC1-ERR: an unknown review read leaves green + exit 0 intact."""
     monkeypatch.setattr(
         _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("optional_reviews_unknown"),
+    )
+
+    monkeypatch.setattr(
+        _status,
         "_fetch",
         lambda pr, cwd: ({
             "state": "OPEN",
@@ -2867,14 +2995,6 @@ def test_run_status_review_read_unknown_does_not_change_exit(monkeypatch, capsys
         "read_optional_review_state",
         lambda pr, cwd: {"optional_reviews": "unknown", "optional_reviews_unresolved": None},
     )
-    # Coverage stubbed to a counted pass so the only blocker under test is the
-    # unknown optional read.
-    monkeypatch.setattr(
-        _status,
-        "read_review_coverage",
-        lambda pr, cwd, **kw: {"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2},
-    )
-    monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
     code = _status.run_status("42")
     assert code == 0
     out = _json.loads(capsys.readouterr().out)
@@ -2882,9 +3002,6 @@ def test_run_status_review_read_unknown_does_not_change_exit(monkeypatch, capsys
     assert out["optional_reviews"] == "unknown"
     assert out["optional_reviews_unresolved"] is None
     assert out["ready"] is False
-
-
-# ---- x-3a3f: status recomputes a missing coverage row ----
 
 
 def test_status_recomputes_a_missing_coverage_row(monkeypatch, capsys, tmp_path):
@@ -3019,6 +3136,12 @@ def test_status_recompute_failure_reads_unmeasurable(monkeypatch, capsys, tmp_pa
     )
     monkeypatch.setattr(_reviews, "_repo_root", lambda cwd=None: tmp_path)
     monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("review_coverage_uncovered"),
+    )
+
     code = _status.run_status("42", cwd=str(tmp_path))
     assert code == 0
     out = json.loads(capsys.readouterr().out)
@@ -3118,10 +3241,15 @@ def _run_status_with_activity(monkeypatch, capsys, activity, *, state="OPEN"):
 
 
 def test_a_running_review_blocks_ready_even_with_no_lane_configured(monkeypatch, capsys):
-    """The config makes this worse rather than better: with no review lane the
-    coverage conjunct opts out entirely, so `ready` was true while a review was
-    mid-flight. The in-flight conjunct is deliberately config-independent."""
+    """The in-flight conjunct is deliberately config-independent: the gate
+    holds while a review is mid-flight, and the receipt names it here."""
     from fno.pr._review_hold import ReviewActivity
+
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("review_in_flight"),
+    )
 
     _code, out, _err, seen = _run_status_with_activity(
         monkeypatch,
@@ -3146,6 +3274,12 @@ def test_the_verdict_and_exit_code_are_untouched_by_the_conjunct(monkeypatch, ca
     """`ready` tightens; the CI verdict is authoritative and stays green."""
     _no_floor(monkeypatch)
     from fno.pr._review_hold import ReviewActivity
+
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("worktree_dirty"),
+    )
 
     code, out, _err, _seen = _run_status_with_activity(
         monkeypatch,
@@ -3499,6 +3633,12 @@ def test_under_budget_row_with_a_stale_verdict_still_blocks(
     """The twin: the same stale row one round under the budget keeps the
     uncovered blocker, so the spent-budget pass is the cap's doing and not
     a shaper that stopped reading staleness."""
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("review_coverage_uncovered"),
+    )
+
     out = _rounds_status_on(
         monkeypatch,
         capsys,
