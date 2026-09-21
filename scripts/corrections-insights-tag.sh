@@ -76,6 +76,17 @@ hash_seen() {
   grep -Fxq "$1" "$WATERMARK_PATH" 2>/dev/null
 }
 
+# The watermark is written only after the loop, so a report quoting the same
+# correction twice would otherwise land two rows in one run.
+seen_this_run() {
+  local h="$1" existing
+  [[ "${#NEW_HASHES[@]}" -eq 0 ]] && return 1
+  for existing in "${NEW_HASHES[@]}"; do
+    [[ "$existing" == "$h" ]] && return 0
+  done
+  return 1
+}
+
 NEW_HASHES=()
 EMITTED=0
 file="$INSIGHTS_FILE_ARG"
@@ -90,8 +101,8 @@ while IFS= read -r match; do
   quote="${content#*\"}"
   quote="${quote%%\"*}"
   hash="$(hash_of "$quote")"
-  if hash_seen "$hash"; then
-    continue  # already ingested in a prior run
+  if hash_seen "$hash" || seen_this_run "$hash"; then
+    continue  # already ingested in a prior run, or earlier in this one
   fi
 
   location="${file##*/}:${line_no}"

@@ -75,6 +75,12 @@ printf -- '- "brand new correction" (x1, ff0199aa, signal=tooling) #agent-correc
 bash "$INGEST" --insights-file "$D/report-c.md" >/dev/null 2>&1
 if [[ "$(count_s2)" == "3" ]]; then pass "new correction ingested"; else fail "want 3 S2 rows, got $(count_s2)"; fi
 
+# ---- T04b: the same quote twice in one report lands once ----
+echo "T04b: in-run duplicate"
+printf -- '- "doubled correction" (x1, aa11bb22, signal=tooling) #agent-correction\n- "doubled correction" (x1, aa11bb22, signal=tooling) #agent-correction\n' > "$D/report-dup.md"
+bash "$INGEST" --insights-file "$D/report-dup.md" >/dev/null 2>&1
+if [[ "$(count_s2)" == "4" ]]; then pass "same quote lands once per report"; else fail "in-run duplicate: want 4 S2 rows, got $(count_s2)"; fi
+
 # ---- T05: --insights-file is required ----
 echo "T05: missing flag is refused"
 MSG=$(bash "$INGEST" 2>&1); RC=$?
