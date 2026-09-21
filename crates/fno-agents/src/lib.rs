@@ -109,6 +109,7 @@ pub mod component_update;
 pub mod context_run;
 pub mod convert;
 pub mod court_fold;
+pub mod crown_reap;
 pub mod crown_settle;
 pub mod crown_split;
 pub mod crown_widen;
@@ -1196,6 +1197,12 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // The receipt a reign's tenure bound leaves; `fno doctor event audit`
     // resolves it through this table exactly like the reign kinds above.
     "king_term",
+    // A crown whose holder session is proven dead left its territory: the
+    // dead-crown sweep journals the vacate with cause holder_dead, the
+    // death evidence, and the inheritor (crown_reap.rs; the daemon retire
+    // arm and `fno agents reap`). Python's attended `king done` emits the
+    // same kind through the shared emitter.
+    "agent_crown_vacated",
     // Startup reconcile sweep (daemon-emitted, plan Architecture B)
     "startup_reconcile_done",
     "startup_reconcile_failed",

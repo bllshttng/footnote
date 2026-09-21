@@ -3200,11 +3200,12 @@ fn run_reap(rest: &[String]) -> i32 {
     let home = AgentsHome::from_env();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let grace_secs = fno_agents::agents_config::retire_grace_secs(&cwd) as i64;
+    // Dead crowns first, matching the arm's in-arm order.
+    let crowns = fno_agents::crown_reap::production_sweep(&home, &cwd, !dry_run);
     let mut summary = if dry_run {
         fno_agents::daemon::gc_sweep_dry_run(&home, grace_secs)
     } else {
-        // Source "daemon" matches the event schema's declared source for
-        // agent_row_reaped; the manual verb is the same operation as the tick.
+        // Source "daemon": the manual verb is the same operation as the tick.
         let emitter = fno_agents::events::EventEmitter::new(home.events_jsonl(), "daemon");
         fno_agents::daemon::gc_sweep(
             &home,
@@ -3214,10 +3215,10 @@ fn run_reap(rest: &[String]) -> i32 {
         )
     };
     summary.mark_escalated(fno_agents::agents_config::hold_escalate_after(&cwd));
+    summary.crowns = Some(crowns);
 
-    // The dry-run JSON read also carries the census (task 4): the
-    // complete per-session identity, observed surfaces and source coverage,
-    // so one read answers both "who would retire" and "what was seen".
+    // The dry-run JSON read also carries the census (task 4): who would
+    // retire and what was seen, one read.
     let inventory = if dry_run && json_out {
         Some(fno_agents::gc_inventory::census(&home))
     } else {

@@ -546,7 +546,7 @@ fn normalize_path(raw: &str) -> String {
 }
 
 /// Graph entries at the resolved `graph.json`, or the unknown naming the read.
-fn graph_entries(config_cwd: &Path) -> Result<Vec<Value>, TerritoryUnknown> {
+pub(crate) fn graph_entries(config_cwd: &Path) -> Result<Vec<Value>, TerritoryUnknown> {
     let path = graph_json_path(config_cwd);
     let raw = std::fs::read_to_string(&path).map_err(|e| {
         TerritoryUnknown(format!(
