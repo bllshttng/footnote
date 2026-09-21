@@ -57,7 +57,6 @@ pub fn run_op(op: &str, payload: &Value) -> String {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // status-cache-key
 
@@ -75,8 +74,14 @@ pub(crate) fn status_cache_key(payload: &Value) -> Value {
 
     let cwd = PathBuf::from(payload.get("cwd").and_then(Value::as_str).unwrap_or("."));
     let pr = payload.get("pr").and_then(Value::as_u64).unwrap_or(0);
-    let head = payload.get("head_sha").and_then(Value::as_str).unwrap_or("");
-    let state = payload.get("pr_state").and_then(Value::as_str).unwrap_or("");
+    let head = payload
+        .get("head_sha")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let state = payload
+        .get("pr_state")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let slug = payload.get("slug").and_then(Value::as_str).unwrap_or("");
 
     // The repo's live merge authority: a config flip must rekey every row
@@ -201,6 +206,17 @@ pub(crate) fn merge_blocker<P: GhProbe>(probes: &P, payload: &Value) -> Value {
             format!("mergeable_state {other}"),
         ),
     };
+    // The mergeable conjunct: GitHub's own conflict answer. DIRTY under
+    // mergeStateStatus says only "unmergeable somehow"; this field names the
+    // conflict. Null (still computing) fails closed, an absent key (an old
+    // caller that never asked) adds nothing.
+    match payload.get("mergeable") {
+        Some(Value::String(word)) if !word.is_empty() && word != "MERGEABLE" => {
+            blockers.push(format!("not_mergeable_{}", word.to_lowercase()));
+        }
+        Some(Value::Null) => blockers.push("not_mergeable_unknown".to_string()),
+        _ => {}
+    }
     blockers.sort();
     blockers.dedup();
     json!({

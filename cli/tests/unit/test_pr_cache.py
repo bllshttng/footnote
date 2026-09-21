@@ -68,6 +68,11 @@ def _assert_locked(real_flock, lock_path):
             real_flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
+# The real mint helper, captured at import time before the autouse fixture
+# patches it; the mint-contract tests restore it over the fixture's patch.
+_REAL_MERGE_DECISION_KEY = _cache._merge_decision_key
+
+
 @pytest.fixture(autouse=True)
 def _deterministic_cache_key(monkeypatch):
     """Pin the row key to the head-only fallback shape: the owner-minted key
@@ -85,6 +90,10 @@ def test_the_row_key_is_minted_by_the_owner_op(monkeypatch, cache_env):
     every fact the merge decision reads; the payload carries the head, the PR
     state, and the slug so the owner can see them without a fetch."""
     import fno.rust_binary as rust_binary
+
+    # The module's autouse fixture pins the head-only fallback key; the mint
+    # contract needs the REAL helper, so restore it over the fixture's patch.
+    monkeypatch.setattr(_cache, "_merge_decision_key", _REAL_MERGE_DECISION_KEY)
 
     seen = []
 

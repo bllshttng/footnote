@@ -406,7 +406,7 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
     // effect: `fno do pr status` reads its receipt as `ready`.
     if request.effect == Effect::Preview {
         return match preview_walk(probes, request, &facts) {
-            PreviewVerdict::Go => {
+            PreviewVerdict::Go { .. } => {
                 let head = facts.head_sha.clone();
                 Ok(Authorized {
                     facts,
@@ -506,7 +506,9 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
     // the CI/slot gates below so a PR the coverage or stub gate holds never
     // takes the merge slot and squats it for its TTL.
     if request.effect == Effect::Merge {
-        if let Some(blocker) = crate::merge_gates::coverage_blocker(probes, cwd, facts.number) {
+        let (coverage_blocker, _waiver) =
+            crate::merge_gates::coverage_gate(probes, cwd, facts.number);
+        if let Some(blocker) = coverage_blocker {
             return Err(Outcome::Held {
                 reason: blocker.detail,
             });
@@ -702,7 +704,7 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
 /// The preview's verdict shape: authorized, or every blocker the gates could
 /// evaluate. The one receipt `fno do pr status` reads as `ready`.
 pub enum PreviewVerdict {
-    Go,
+    Go { waiver: Option<String> },
     Blocked(Vec<Blocker>),
 }
 
@@ -823,15 +825,17 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
     let optional = request
         .supplied_optional_unresolved
         .or(checks.optional_unresolved);
-    let rerun = request.supplied_rerun_recovered.or(checks.rerun_recovered);
 
     // (7b) the ported gates, always in preview (the effect path runs them
-    // only for Merge).
+    // only for Merge). Fidelity reads the ledger, not the graph rows, so it
+    // runs even when the store is unreadable: the gate list must not shrink
+    // with an ingredient the gate does not use.
     if entries.is_none() {
         entries = walk_entries(cwd);
     }
     let repo_root_path = repo_root(cwd);
-    if let Some(blocker) = crate::merge_gates::coverage_blocker(probes, cwd, facts.number) {
+    let (coverage_blocker, waiver) = crate::merge_gates::coverage_gate(probes, cwd, facts.number);
+    if let Some(blocker) = coverage_blocker {
         blockers.push(blocker);
     }
     if let Some(entry_slice) = entries.as_deref() {
@@ -840,10 +844,9 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
         {
             blockers.push(blocker);
         }
-        if let Some(blocker) = crate::merge_gates::plan_fidelity_blocker(probes, cwd, facts.number)
-        {
-            blockers.push(blocker);
-        }
+    }
+    if let Some(blocker) = crate::merge_gates::plan_fidelity_blocker(probes, cwd, facts.number) {
+        blockers.push(blocker);
     }
     if let Some(blocker) = crate::merge_gates::overlap_blocker(probes, cwd, facts.number) {
         blockers.push(blocker);
@@ -860,7 +863,7 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
         checks
             .github_block
             .clone()
-            .map(|m| vec!["github_blocked".to_string()])
+            .map(|_m| vec!["github_blocked".to_string()])
             .unwrap_or_default()
     });
     for word in &github_words {
@@ -881,10 +884,7 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
 
     // (9) the CI verdict gate, same precondition as the effect path.
     if request.require_checks && checks.verdict != "green" {
-        let word = ci_blocker_word(
-            &checks.verdict,
-            request.supplied_counts.as_ref(),
-        );
+        let word = ci_blocker_word(&checks.verdict, request.supplied_counts.as_ref());
         let detail = format!(
             "checks are {}; require_checks_pass forbids merging without green",
             checks.verdict
@@ -941,7 +941,7 @@ pub fn preview_walk<P: Probes>(probes: &P, request: &Request, facts: &PrFacts) -
         }
     }
     if blockers.is_empty() {
-        PreviewVerdict::Go
+        PreviewVerdict::Go { waiver }
     } else {
         PreviewVerdict::Blocked(blockers)
     }
@@ -1459,7 +1459,8 @@ impl Probes for RealProbes {
             reason: Some("ci_base_stale merge slot".to_string()),
             ..Default::default()
         };
-        let value = crate::claim_store::acquire_db(&slot_key(base_ref), &slot_holder_key(pr), &opts)?;
+        let value =
+            crate::claim_store::acquire_db(&slot_key(base_ref), &slot_holder_key(pr), &opts)?;
         match value.get("outcome").and_then(Value::as_str) {
             Some("acquired") => Ok(()),
             Some("held_by_other") => Err(format!(
@@ -1471,12 +1472,8 @@ impl Probes for RealProbes {
     }
 
     fn release_slot(&self, _cwd: &Path, base_ref: &str, pr: u64) {
-        let _ = crate::claim_store::release_db(
-            &slot_key(base_ref),
-            &slot_holder_key(pr),
-            None,
-            None,
-        );
+        let _ =
+            crate::claim_store::release_db(&slot_key(base_ref), &slot_holder_key(pr), None, None);
     }
 
     fn checks_read(&self, cwd: &Path, pr: u64) -> ChecksRead {
@@ -1668,9 +1665,7 @@ fn slot_holder_read(cwd: &Path, base_ref: &str) -> Result<Option<u64>, String> {
                     })?;
                     parse_slot_holder(&record.holder)
                         .map(Some)
-                        .ok_or_else(|| {
-                            format!("merge slot holder unparseable: {}", record.holder)
-                        })
+                        .ok_or_else(|| format!("merge slot holder unparseable: {}", record.holder))
                 }
                 _ => Ok(None),
             }
@@ -2019,11 +2014,17 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         let receipt = match RealProbes.pr_facts(cwd, request.pr) {
             Err(reason) => serde_json::json!({ "outcome": "unknown", "reason": reason }),
             Ok(facts) => match preview_walk(&RealProbes, &request, &facts) {
-                PreviewVerdict::Go => serde_json::json!({
-                    "outcome": "authorized",
-                    "head": facts.head_sha,
-                    "blockers": [],
-                }),
+                PreviewVerdict::Go { waiver } => {
+                    let mut receipt = serde_json::json!({
+                        "outcome": "authorized",
+                        "head": facts.head_sha,
+                        "blockers": [],
+                    });
+                    if let Some(note) = waiver {
+                        receipt["coverage_waiver"] = Value::String(note);
+                    }
+                    receipt
+                }
                 PreviewVerdict::Blocked(rows) => serde_json::json!({
                     "outcome": "held",
                     "head": facts.head_sha,
@@ -2301,11 +2302,7 @@ mod tests {
                 } else {
                     Some(Some(0))
                 },
-                rerun_recovered: if mine {
-                    self.rerun_recovered
-                } else {
-                    None
-                },
+                rerun_recovered: if mine { self.rerun_recovered } else { None },
                 rerun_failures: None,
             }
         }
@@ -3545,12 +3542,9 @@ mod tests {
     }
 
     fn preview_blockers(fake: &Fake, req: &Request) -> Vec<Blocker> {
-        let facts = fake
-            .facts
-            .clone()
-            .unwrap_or_else(open_facts);
+        let facts = fake.facts.clone().unwrap_or_else(open_facts);
         match preview_walk(fake, req, &facts) {
-            PreviewVerdict::Go => Vec::new(),
+            PreviewVerdict::Go { .. } => Vec::new(),
             PreviewVerdict::Blocked(rows) => rows,
         }
     }
@@ -3624,57 +3618,89 @@ mod tests {
         // decision, two collectors.
         let base = || Fake { ..clean() };
         let scenarios: Vec<(&str, Fake)> = vec![
-            ("pr_terminal", Fake {
-                facts: Some(PrFacts {
-                    state: "CLOSED".to_string(),
-                    ..open_facts()
-                }),
-                ..base()
-            }),
-            ("node_unbound", Fake {
-                node_binding: Some(ProbeOutcome::Refused(
-                    "unbound: no node names this PR".to_string(),
-                )),
-                ..base()
-            }),
-            ("dispatch_hold", Fake {
-                dispatch_hold: Some(ProbeOutcome::Refused(
-                    "dispatch_hold: held by tgt-x".to_string(),
-                )),
-                ..base()
-            }),
-            ("review_in_flight", Fake {
-                review_hold: Some(ProbeOutcome::Refused(
-                    "review_in_flight: held by tgt-x at abc123".to_string(),
-                )),
-                ..base()
-            }),
-            ("red_merge_result", Fake {
-                merge_result: Some(ProbeOutcome::Refused("F821 in the merged tree".to_string())),
-                ..base()
-            }),
-            ("stacked_base", Fake {
-                lineage: Some(ProbeOutcome::Refused(
-                    "base no longer reaches the default branch".to_string(),
-                )),
-                ..base()
-            }),
-            ("github_blocked", Fake {
-                github_block: Some("smoke".to_string()),
-                ..base()
-            }),
-            ("review_coverage_uncovered", Fake {
-                coverage_exit: Some(3),
-                ..base()
-            }),
-            ("optional_reviews_unresolved", Fake {
-                optional_unresolved: Some(Some(2)),
-                ..base()
-            }),
-            ("ci_pending", Fake {
-                checks: Some("pending".to_string()),
-                ..base()
-            }),
+            (
+                "pr_terminal",
+                Fake {
+                    facts: Some(PrFacts {
+                        state: "CLOSED".to_string(),
+                        ..open_facts()
+                    }),
+                    ..base()
+                },
+            ),
+            (
+                "node_unbound",
+                Fake {
+                    node_binding: Some(ProbeOutcome::Refused(
+                        "unbound: no node names this PR".to_string(),
+                    )),
+                    ..base()
+                },
+            ),
+            (
+                "dispatch_hold",
+                Fake {
+                    dispatch_hold: Some(ProbeOutcome::Refused(
+                        "dispatch_hold: held by tgt-x".to_string(),
+                    )),
+                    ..base()
+                },
+            ),
+            (
+                "review_in_flight",
+                Fake {
+                    review_hold: Some(ProbeOutcome::Refused(
+                        "review_in_flight: held by tgt-x at abc123".to_string(),
+                    )),
+                    ..base()
+                },
+            ),
+            (
+                "red_merge_result",
+                Fake {
+                    merge_result: Some(ProbeOutcome::Refused(
+                        "F821 in the merged tree".to_string(),
+                    )),
+                    ..base()
+                },
+            ),
+            (
+                "stacked_base",
+                Fake {
+                    lineage: Some(ProbeOutcome::Refused(
+                        "base no longer reaches the default branch".to_string(),
+                    )),
+                    ..base()
+                },
+            ),
+            (
+                "github_blocked",
+                Fake {
+                    github_block: Some("smoke".to_string()),
+                    ..base()
+                },
+            ),
+            (
+                "review_coverage_uncovered",
+                Fake {
+                    coverage_exit: Some(3),
+                    ..base()
+                },
+            ),
+            (
+                "optional_reviews_unresolved",
+                Fake {
+                    optional_unresolved: Some(Some(2)),
+                    ..base()
+                },
+            ),
+            (
+                "ci_pending",
+                Fake {
+                    checks: Some("pending".to_string()),
+                    ..base()
+                },
+            ),
         ];
         for (code, fake) in scenarios {
             let req_merge = Request {
@@ -3710,33 +3736,30 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn the_red_kind_word_splits_by_the_counts() {
-        let counts = |uf: i64, f: i64, fs: i64| {
-            serde_json::json!({"unsettled_fail": uf, "fail": f, "fail_statuses": fs})
-        };
+        let counts = |uf: i64, f: i64, fs: i64| serde_json::json!({"unsettled_fail": uf, "fail": f, "fail_statuses": fs});
         assert_eq!(
             ci_blocker_word("red", Some(&counts(1, 1, 0))),
             "ci_cancelled_retrigger"
         );
-        assert_eq!(ci_blocker_word("red", Some(&counts(0, 2, 2))), "commit_status_red");
+        assert_eq!(
+            ci_blocker_word("red", Some(&counts(0, 2, 2))),
+            "commit_status_red"
+        );
         assert_eq!(ci_blocker_word("red", Some(&counts(1, 3, 1))), "ci_red");
         assert_eq!(ci_blocker_word("red", None), "ci_red");
         assert_eq!(ci_blocker_word("pending", None), "ci_pending");
     }
 
+    #[test]
     fn a_preview_payload_defaults_its_ci_gate_on() {
-        let payload: Value = serde_json::from_str(
-            r#"{"cwd": "/tmp", "effect": "preview", "pr": 7}"#,
-        )
-        .unwrap();
+        let payload: Value =
+            serde_json::from_str(r#"{"cwd": "/tmp", "effect": "preview", "pr": 7}"#).unwrap();
         let request = parse_request(&payload).unwrap();
         assert_eq!(request.effect, Effect::Preview);
         assert!(request.require_checks);
-        let merge_payload: Value = serde_json::from_str(
-            r#"{"cwd": "/tmp", "effect": "merge", "pr": 7}"#,
-        )
-        .unwrap();
+        let merge_payload: Value =
+            serde_json::from_str(r#"{"cwd": "/tmp", "effect": "merge", "pr": 7}"#).unwrap();
         assert!(!parse_request(&merge_payload).unwrap().require_checks);
     }
 }

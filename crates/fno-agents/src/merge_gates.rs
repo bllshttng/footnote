@@ -13,13 +13,18 @@ use std::path::{Path, PathBuf};
 /// own help text is the source of truth).
 pub(crate) const COVERAGE_CLEAR: i32 = 0;
 pub(crate) const COVERAGE_UNCOVERED: i32 = 3;
-pub(crate) const COVERAGE_UNANSWERED: i32 = 4;
 pub(crate) const COVERAGE_IMPOSSIBLE: i32 = 5;
 
 /// The coverage gate, exit-code polarity kept. The verb runs the operator
-/// waiver overlay inside itself, so a waived PR exits 0 here and no caller
-/// needs a second copy of that overlay.
-pub(crate) fn coverage_blocker<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Option<Blocker> {
+/// waiver overlay inside itself: a waived PR exits 0 here, and the verb
+/// prints its `override: ` note on stdout, so the waiver travels with the
+/// gate's answer instead of a caller re-deriving it.
+/// Returns (blocker, waiver).
+pub(crate) fn coverage_gate<P: Probes>(
+    probes: &P,
+    cwd: &Path,
+    pr: u64,
+) -> (Option<Blocker>, Option<String>) {
     let args = vec![
         "do".to_string(),
         "pr".to_string(),
@@ -38,51 +43,71 @@ pub(crate) fn coverage_blocker<P: Probes>(probes: &P, cwd: &Path, pr: u64) -> Op
                 }
             };
             match code {
-                COVERAGE_CLEAR => None,
-                COVERAGE_UNCOVERED => Some(Blocker::held(
-                    "review_coverage_uncovered",
-                    if detail.is_empty() {
-                        "unreviewed merge refused".to_string()
-                    } else {
-                        format!("unreviewed merge refused: {detail}")
-                    },
-                )),
-                COVERAGE_IMPOSSIBLE => Some(Blocker::held(
-                    "review_coverage_impossible",
-                    if detail.is_empty() {
-                        "review coverage impossible at this head".to_string()
-                    } else {
-                        format!("unreviewed merge refused: {detail}")
-                    },
-                )),
-                other => Some(Blocker::unknown(
-                    "review_coverage_unknown",
-                    if detail.is_empty() {
-                        format!("coverage probe failed, merge refused (exit {other})")
-                    } else {
-                        format!("coverage probe failed, merge refused: {detail}")
-                    },
-                )),
+                COVERAGE_CLEAR => {
+                    let line = String::from_utf8_lossy(&stdout).trim().to_string();
+                    // The prefix literal matches Python's OVERRIDE_NOTE_PREFIX.
+                    let waiver = line.strip_prefix("override: ").map(str::to_string);
+                    (None, waiver)
+                }
+                COVERAGE_UNCOVERED => (
+                    Some(Blocker::held(
+                        "review_coverage_uncovered",
+                        if detail.is_empty() {
+                            "unreviewed merge refused".to_string()
+                        } else {
+                            format!("unreviewed merge refused: {detail}")
+                        },
+                    )),
+                    None,
+                ),
+                COVERAGE_IMPOSSIBLE => (
+                    Some(Blocker::held(
+                        "review_coverage_impossible",
+                        if detail.is_empty() {
+                            "review coverage impossible at this head".to_string()
+                        } else {
+                            format!("unreviewed merge refused: {detail}")
+                        },
+                    )),
+                    None,
+                ),
+                other => (
+                    Some(Blocker::unknown(
+                        "review_coverage_unknown",
+                        if detail.is_empty() {
+                            format!("coverage probe failed, merge refused (exit {other})")
+                        } else {
+                            format!("coverage probe failed, merge refused: {detail}")
+                        },
+                    )),
+                    None,
+                ),
             }
         }
         Ok((None, stdout, stderr)) => {
             let detail = String::from_utf8_lossy(&stderr).trim().to_string();
+            (
+                Some(Blocker::unknown(
+                    "review_coverage_unknown",
+                    if detail.is_empty() {
+                        format!(
+                            "coverage probe failed, merge refused: {}",
+                            String::from_utf8_lossy(&stdout).trim()
+                        )
+                    } else {
+                        format!("coverage probe failed, merge refused: {detail}")
+                    },
+                )),
+                None,
+            )
+        }
+        Err(error) => (
             Some(Blocker::unknown(
                 "review_coverage_unknown",
-                if detail.is_empty() {
-                    format!(
-                        "coverage probe failed, merge refused: {}",
-                        String::from_utf8_lossy(&stdout).trim()
-                    )
-                } else {
-                    format!("coverage probe failed, merge refused: {detail}")
-                },
-            ))
-        }
-        Err(error) => Some(Blocker::unknown(
-            "review_coverage_unknown",
-            format!("coverage probe failed, merge refused: {error}"),
-        )),
+                format!("coverage probe failed, merge refused: {error}"),
+            )),
+            None,
+        ),
     }
 }
 

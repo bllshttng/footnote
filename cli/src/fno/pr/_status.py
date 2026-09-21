@@ -495,7 +495,7 @@ def _github_merge_blockers(pr_json, rollup, cwd):
     if pr_json.get("mergeStateStatus") is None:
         return None
     try:
-        op = {k: pr_json.get(k) for k in ("mergeStateStatus", "baseRefName", "pr")}
+        op = {k: pr_json.get(k) for k in ("mergeStateStatus", "baseRefName", "pr", "mergeable")}
         op.update(op="status-merge-blocker", rollup=rollup, cwd=cwd)
         return verb_call("authorized-merge", op, timeout=120)
     except VerbUnavailable as exc:

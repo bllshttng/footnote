@@ -1227,7 +1227,7 @@ def test_status_keys_the_hold_on_the_row_word(monkeypatch, tmp_path):
         f"{5:040x}",
         False,
     )
-    assert covered == (True, None)
+    assert covered == (True, "")
 
 
 def test_ac7_exhausted_rounds_with_no_blocking_findings_stay_covered(
@@ -3313,12 +3313,12 @@ def test_status_and_merge_answer_one_word_on_one_constructed_chain(
     # copy with the merge verb since x-53c5).
     from fno.pr._coverage_gate import covered_conjuncts
 
-    assert covered_conjuncts(dict(_cap_cov_row()), f"{5:040x}", False) == (True, None)
+    assert covered_conjuncts(dict(_cap_cov_row()), f"{5:040x}", False) == (True, "")
     # A row still carrying a stale impossible flag must NOT block on it:
     # the cap is not a conjunct at all, on any row.
     flagged_row = dict(_cap_cov_row())
     flagged_row["impossible"] = True
-    assert covered_conjuncts(flagged_row, f"{5:040x}", False) == (True, None)
+    assert covered_conjuncts(flagged_row, f"{5:040x}", False) == (True, "")
 
 
 def test_a_pr_without_a_head_branch_appends_no_cap_blocker(tmp_path):
@@ -3327,7 +3327,7 @@ def test_a_pr_without_a_head_branch_appends_no_cap_blocker(tmp_path):
     from fno.pr._coverage_gate import covered_conjuncts
 
     _seed_cap_chain(tmp_path, _cap_chain(6))
-    assert covered_conjuncts(_cap_cov_row(), f"{5:040x}", False) == (True, None)
+    assert covered_conjuncts(_cap_cov_row(), f"{5:040x}", False) == (True, "")
 
 
 

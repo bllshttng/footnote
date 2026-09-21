@@ -67,10 +67,12 @@ def test_an_unreachable_owner_reads_not_ready_never_ready(monkeypatch, capsys):
 
     import fno.rust_binary as rust_binary
 
-    def boom(pr, repo, facts):
+    def boom(verb, payload, timeout=0):
         raise rust_binary.VerbUnavailable("unreachable")
 
-    monkeypatch.setattr(_status, "_merge_decision", boom)
+    # The transport dies, not the wrapper: _merge_decision must catch it and
+    # answer the fail-closed receipt itself.
+    monkeypatch.setattr(rust_binary, "verb_call", boom)
     monkeypatch.setattr(
         _status, "_fetch", lambda pr, cwd: ({"state": "OPEN", "statusCheckRollup": []}, "")
     )
@@ -1032,6 +1034,8 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
 
 def test_dispatch_hold_removes_green_pr_from_ready_set(monkeypatch, capsys):
     """A held PR is not ready; the receipt names dispatch_hold."""
+    import json
+
     monkeypatch.setattr(
         _status,
         "_merge_decision",
