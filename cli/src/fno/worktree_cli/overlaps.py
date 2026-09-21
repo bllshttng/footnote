@@ -26,10 +26,12 @@ from fno.events import ValidationError, append_event, validate, worktree_overlap
 # never a lock or an implementation decision.
 RECURRENCE_THRESHOLD = 3
 RECURRENCE_WINDOW_DAYS = 28
-# Hook path bound: far below the 120s liveness window and the event subsystem's
-# default 30s lock wait. Contention degrades to an unrecorded advisory, never a
-# delayed or refused session.
-HOOK_LOCK_BOUND_SECONDS = 0.25
+# Hook path bound: far below the 120s liveness window. The bound is the
+# native commit's whole subprocess budget (spawn, SQLite open, fsync) on a
+# cold runner, so it stays well under the event subsystem's default 30s
+# while leaving a real commit room. Contention degrades to an unrecorded
+# advisory, never a delayed or refused session.
+HOOK_LOCK_BOUND_SECONDS = 10
 
 
 class OverlapReadError(Exception):
