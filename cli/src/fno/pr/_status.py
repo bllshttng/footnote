@@ -480,7 +480,7 @@ def _merge_decision(pr: str, repo: str, facts: dict) -> dict:
             timeout=180,
         )
     except Exception as exc:  # noqa: BLE001 - a broken transport is not a verdict
-        receipt = {"outcome": "unknown", "detail": f"{type(exc).__name__}: {exc}"}
+        receipt = {"detail": f"{type(exc).__name__}: {exc}"}
     if not isinstance(receipt.get("blockers"), list):
         receipt["blockers"] = [{
             "code": "merge_decision_unknown", "class": "unknown",
@@ -815,43 +815,16 @@ def run_status(
         )
 
     github_merge = None if is_terminal else _github_merge_blockers(pr_json, rollup, cwd)
-    # Rerun recovery, probed on every green read of a live PR (fail-open).
-    rerun: Optional[dict] = None
-    if verdict == "green" and not is_terminal:
-        head_sha = pr_json.get("headRefOid")
-        prior_green = (
-            prior_payload.get("verdict") == "green"
-            and prior_payload.get("head") == head_sha
-            and "rerun_recovered" in prior_payload
-            and isinstance(prior_payload.get("checks"), dict)
-            and prior_payload["checks"].get("total") == counts["total"]
-        )
-        if prior_green:
-            rerun = {
-                "recovered": bool(prior_payload.get("rerun_recovered")),
-                "failed": list(prior_payload.get("recovered_failures") or []),
-            }
-        else:
-            rerun = rerun_recovery(
-                pr, cwd, sha=head_sha, runs=pr_json.get("workflowRuns")
-            )
-    rerun_fields = (
-        {
-            "rerun_recovered": bool(rerun.get("recovered")),
-            "recovered_failures": list(rerun.get("failed") or []),
-        }
-        if rerun is not None
-        else {}
-    )
     # ONE merge decision: the probes this read already paid for
-    # ride the ask, so the owner never spawns a second status read.
+    # ride the ask, so the owner never spawns a second status read. Rerun
+    # recovery is not among them: the walk probes it itself on a green read,
+    # and the receipt carries the fact for the payload.
     receipt = _merge_decision(
         pr,
         cwd or os.getcwd(),
         {
             "verdict": verdict,
             "counts": counts,
-            "rerun_recovered": bool(rerun.get("recovered")) if rerun is not None else None,
             "optional_reviews_unresolved": unresolved,
             "github_blockers": (github_merge or {}).get("blockers") or [],
             "covered_head": pr_json.get("headRefOid"),
@@ -933,8 +906,15 @@ def run_status(
         # reads, the failing step, its first error line, and the steps
         # fail-fast never reached (an unreached step is not a pass).
         **({"failures": failures} if failures is not None else {}),
-        # Present iff the probe ran: absent and probed-false are not one fact.
-        **rerun_fields,
+        # Present iff the walk probed: absent and probed-false are not one fact.
+        **(
+            {
+                "rerun_recovered": receipt["rerun_recovered"],
+                "recovered_failures": receipt.get("recovered_failures") or [],
+            }
+            if "rerun_recovered" in receipt
+            else {}
+        ),
         "optional_reviews": reviews.get("optional_reviews", "unknown"),
         "optional_reviews_unresolved": unresolved,
         "optional_reviews_resolved_unchanged": resolved_unchanged,

@@ -136,8 +136,12 @@ def test_wrapper_fails_open_when_gh_is_missing(monkeypatch):
 # ---- status payload ----
 
 
-def _run_status(monkeypatch, capsys, rollup, rerun="__unpatched__", decision=None):
-    """run_status with gh stubbed out; returns (exit code, parsed JSON, stderr)."""
+def _run_status(monkeypatch, capsys, rollup, rerun=None, decision=None):
+    """run_status with gh stubbed out; returns (exit code, parsed JSON, stderr).
+
+    The rerun fact rides the decision receipt now: the walk probes recovery
+    itself, so the stub shapes both the blockers and the probed fact.
+    """
     from fno.pr import _merge as merge_mod
 
     monkeypatch.setattr(
@@ -159,22 +163,19 @@ def _run_status(monkeypatch, capsys, rollup, rerun="__unpatched__", decision=Non
         lambda pr, cwd, **kw: {"coverage": "unknown", "reviewed_count": None},
     )
     monkeypatch.setattr(_status, "_review_lane", lambda pr, cwd: True)
-    if rerun != "__unpatched__":
+    if rerun is not None or decision is not None:
+        receipt = {
+            "outcome": "held" if decision else "authorized",
+            "blockers": [
+                {"code": code, "class": "held", "detail": code}
+                for code in (decision or [])
+            ],
+        }
+        if rerun is not None:
+            receipt["rerun_recovered"] = rerun["recovered"]
+            receipt["recovered_failures"] = list(rerun.get("failed") or [])
         monkeypatch.setattr(
-            _status, "rerun_recovery", lambda pr, cwd=None, sha=None, runs=None: rerun
-        )
-    if decision is not None:
-        # The flake hold is decide's gate; the receipt names its word.
-        monkeypatch.setattr(
-            _status,
-            "_merge_decision",
-            lambda pr, repo, facts: {
-                "outcome": "held" if decision else "authorized",
-                "blockers": [
-                    {"code": code, "class": "held", "detail": code}
-                    for code in (decision or [])
-                ],
-            },
+            _status, "_merge_decision", lambda pr, repo, facts: receipt
         )
     code = _status.run_status("42")
     cap = capsys.readouterr()
@@ -205,7 +206,11 @@ def test_recovered_green_payload_names_the_failed_checks(monkeypatch, capsys):
 
 def test_clean_green_payload_carries_the_probed_false(monkeypatch, capsys):
     code, out, _err = _run_status(
-        monkeypatch, capsys, _GREEN_ROLLUP, rerun={"recovered": False, "failed": []}
+        monkeypatch,
+        capsys,
+        _GREEN_ROLLUP,
+        rerun={"recovered": False, "failed": []},
+        decision=[],
     )
     assert code == 0
     assert out["rerun_recovered"] is False
