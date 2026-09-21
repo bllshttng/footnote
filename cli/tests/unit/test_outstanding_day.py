@@ -11,15 +11,15 @@ from fno.outstanding import day as day_mod
 
 
 def test_day_app_registers_start_and_end() -> None:
-    from typer.testing import CliRunner
+    # Registration only: invoking the commands would shell the fno-agents
+    # binary, whose exit code depends on the machine's stores (a missing
+    # questions.jsonl is a successful incomplete read), so a CI runner with
+    # a resolvable binary exits 0.
+    from typer.main import get_command
 
-    runner = CliRunner()
-    for name in ("start", "end"):
-        result = runner.invoke(day_mod.day_app, [name])
-        # The relay shells the fno-agents binary; inside the test process the
-        # resolve fails and the refusal must be a non-zero exit, never a
-        # silent success.
-        assert result.exit_code != 0
+    command = get_command(day_mod.day_app)
+    registered = {name for name, _cmd in command.commands.items()}
+    assert {"start", "end"} <= registered
 
 
 def test_relay_relays_the_native_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1267,33 +1267,6 @@ mod verdict_tests {
         assert_eq!(journals.len(), 1);
     }
 
-    #[test]
-    fn scope_optional_scan_returns_all_canonical_scopes_and_rejections() {
-        let (_dir, path) = journal(&[
-            checkin(
-                "2026-09-10T08:00:00Z",
-                json!({"scope": "fno", "change": "fno change"}),
-            ),
-            checkin(
-                "2026-09-10T09:00:00Z",
-                json!({"scope": "x-a792", "change": "epic change"}),
-            ),
-            checkin(
-                "2026-09-10T10:00:00Z",
-                json!({"crown": "fno", "change": "legacy"}),
-            ),
-        ]);
-        let payload = scan_scopes(std::slice::from_ref(&path), None).unwrap();
-        assert_eq!(payload["matched"], json!(2));
-        assert_eq!(payload["rejected"], json!(1));
-        let scopes: Vec<&str> = payload["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|event| event["data"]["scope"].as_str())
-            .collect();
-        assert_eq!(scopes, ["x-a792", "fno"]);
-    }
 
     #[test]
     fn scan_counts_only_current_crown_checkins_once() {
@@ -1585,6 +1558,34 @@ mod tests {
 
     fn checkin(ts: &str, data: Value) -> Value {
         json!({"ts": ts, "type": "reign_checkin", "source": "loop", "data": data})
+    }
+
+    #[test]
+    fn scope_optional_scan_returns_all_canonical_scopes_and_rejections() {
+        let (_dir, path) = journal(&[
+            checkin(
+                "2026-09-10T08:00:00Z",
+                json!({"scope": "fno", "change": "fno change"}),
+            ),
+            checkin(
+                "2026-09-10T09:00:00Z",
+                json!({"scope": "x-bbbb", "change": "epic change"}),
+            ),
+            checkin(
+                "2026-09-10T10:00:00Z",
+                json!({"crown": "fno", "change": "legacy"}),
+            ),
+        ]);
+        let payload = scan_scopes(std::slice::from_ref(&path), None).unwrap();
+        assert_eq!(payload["matched"], json!(2));
+        assert_eq!(payload["rejected"], json!(1));
+        let scopes: Vec<&str> = payload["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|event| event["data"]["scope"].as_str())
+            .collect();
+        assert_eq!(scopes, ["x-bbbb", "fno"]);
     }
 
     #[test]

@@ -44,7 +44,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "source-pin",
     "court-orphans",
     "court-fold",
-    "day",
     "detect",
     "digest",
     "distress-scan",
@@ -995,7 +994,10 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     // `day`: daemon-free like `feed`; `--commit` appends the boundary row.
-    if verb == "day" {
+    // `matches!` treatment as `claim`: the verb is unregistered (the action
+    // list is shrink-only, d-fe66560a); the inbox relay reaches it through
+    // resolve_binary, and no advertised `fno agents day` spelling exists.
+    if matches!(verb, "day") {
         return fno_agents::day::run_day(&args[1..], &AgentsHome::from_env());
     }
 

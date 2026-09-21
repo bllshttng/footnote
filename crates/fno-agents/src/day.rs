@@ -881,7 +881,7 @@ mod tests {
             "rejected": 1,
             "events": [
                 {"ts":"2026-09-10T08:10:00Z","type":"reign_checkin","data":{"scope":"fno","change":"green"}},
-                {"ts":"2026-09-10T09:10:00Z","type":"reign_checkin","data":{"scope":"x-a792","change":"stalled"}},
+                {"ts":"2026-09-10T09:10:00Z","type":"reign_checkin","data":{"scope":"x-bbbb","change":"stalled"}},
                 {"ts":"2026-09-09T23:00:00Z","type":"reign_checkin","data":{"scope":"fno","change":"early"}}
             ]
         }));
