@@ -4,7 +4,8 @@
 //! row carries a crown and whose reign manifest declares shape `court` is
 //! refused Edit/Write/NotebookEdit and shell writes to source. Inverted
 //! predicate, never delegation advice: SOURCE is any path realpath-inside
-//! the repo root, except the repo's `.fno` state tree; everything else - the
+//! the repo root, except the repo's `.fno` state tree, build output, and
+//! the `king.write_roots` entries the operator lists; everything else - the
 //! vault wherever it lives, memory wherever the harness keeps it - allows.
 //! Any failure to READ (payload, registry, manifest, config) allows - the
 //! never-block contract.
@@ -145,6 +146,7 @@ pub fn run(_args: &[String]) -> i32 {
     //    unresolvable state, so the never-block contract needs no escape
     //    hatch here: outside the repo allows, whatever it is.
     let repo_root = crate::paths::worktree_repo_root(&cwd);
+    let roots = write_roots(config_lookup(&cwd, &["king", "write_roots"]), &repo_root);
 
     // 9. Limb carve-outs (checked after the roots resolve, like the shell).
     let agent_id = payload
@@ -171,7 +173,7 @@ pub fn run(_args: &[String]) -> i32 {
 
     // 10. Decide: deny SOURCE, allow everything else, one predicate for
     //     every tool.
-    let allowed = |t: &str| !write_denied(t, &cwd, &repo_root);
+    let allowed = |t: &str| !write_denied(t, &cwd, &repo_root, &roots);
     let denied: Option<String> = match tool {
         "Edit" | "Write" | "NotebookEdit" => {
             let file = ti
@@ -204,7 +206,7 @@ pub fn run(_args: &[String]) -> i32 {
 fn deny_text(target: &str, repo_root: &Path) -> String {
     format!(
         "king-delegation-guard: write target '{target}' is inside the repo ({repo}), and a crowned session does not write SOURCE.\n\
-         A king operates the machine and does not author it: deploy and repair verbs (fno config plugin install, fno doctor update) run, build output and everything outside the repo allow, repo source does not. Delegate the edit or escalate.\n",
+         A king operates the machine and does not author it: deploy and repair verbs (fno config plugin install, fno doctor update) run, build output and everything outside the repo allow, repo source does not. Delegate the edit or escalate. An operator can list an in-repo path in config.king.write_roots.\n",
         repo = repo_root.display(),
     )
 }
@@ -673,14 +675,35 @@ fn real_prefix(p: &str, cwd: &Path, root: &Path) -> bool {
     p == root || p.starts_with(&root)
 }
 
+/// `king.write_roots`: in-repo paths the operator lets a court session write.
+/// A bare string is one root. A relative entry joins the repo root, a `~/`
+/// entry joins $HOME, and a blank entry is dropped (it would name the repo).
+fn write_roots(v: Option<toml::Value>, repo_root: &Path) -> Vec<PathBuf> {
+    let raw = match v {
+        Some(toml::Value::String(s)) => vec![s],
+        Some(toml::Value::Array(a)) => a
+            .into_iter()
+            .filter_map(|e| e.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    };
+    raw.iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| repo_root.join(crate::king_board::scope::expand_home(s)))
+        .collect()
+}
+
 /// The inverted step-10 predicate (2026-09-17 ruling): SOURCE is any path
 /// realpath-inside the repo root, with carve-outs for the repo's `.fno`
-/// state tree and for build output. The vault is not source; a write
-/// outside the repo allows wherever it lands.
-fn write_denied(t: &str, cwd: &Path, repo_root: &Path) -> bool {
+/// state tree, for build output, and for the operator's `king.write_roots`
+/// entries. The vault is not source; a write outside the repo allows
+/// wherever it lands.
+fn write_denied(t: &str, cwd: &Path, repo_root: &Path, roots: &[PathBuf]) -> bool {
     real_prefix(t, cwd, repo_root)
         && !real_prefix(t, cwd, &repo_root.join(".fno"))
         && !is_build_output(t, cwd)
+        && !roots.iter().any(|r| real_prefix(t, cwd, r))
 }
 
 /// A path whose nearest ancestor directory holds a `CACHEDIR.TAG` is build
@@ -876,7 +899,9 @@ mod tests {
     /// already the repo root, so a relative path resolves inside it exactly
     /// as a real crowned session would see it.
     fn bash_allowed_in(repo: &Path, cmd: &str) -> bool {
-        targets(cmd).iter().all(|t| !write_denied(t, repo, repo))
+        targets(cmd)
+            .iter()
+            .all(|t| !write_denied(t, repo, repo, &[]))
     }
 
     #[test]
@@ -1037,7 +1062,7 @@ mod tests {
     }
 
     fn allowed(r: &Roots, target: &Path) -> bool {
-        !write_denied(&target.to_string_lossy(), &r.base, &r.repo)
+        !write_denied(&target.to_string_lossy(), &r.base, &r.repo, &[])
     }
 
     #[test]
@@ -1095,16 +1120,114 @@ mod tests {
         assert!(text.contains("operates the machine and does not author it"));
         assert!(text.contains("fno config plugin install"));
         assert!(text.contains("Delegate the edit or escalate"));
+        assert!(text.contains("config.king.write_roots"));
     }
 
     #[test]
     fn no_vault_still_answers_denies_source_allows_outside() {
         // Required test 4: no vault configured anywhere - the predicate only
-        // knows the repo root, so the guard answers the same: source denies,
-        // anything outside allows.
+        // knows the repo root. With `&[]` the guard answers as before:
+        // source denies, anything outside allows.
         let r = roots("novault");
         assert!(!allowed(&r, &r.repo.join("cli/src/fno/anything.py")));
         assert!(allowed(&r, &r.base.join("anywhere/else/foo.md")));
         let _ = std::fs::remove_dir_all(&r.base);
+    }
+
+    #[test]
+    fn listed_write_root_allows_its_subtree_only() {
+        // An operator-named root allows its realpath subtree and nothing
+        // else: docs allows docs/guide.md, not docsx/ and not cli/src.
+        let r = roots("writeroots");
+        let _ = std::fs::create_dir_all(r.repo.join("docs"));
+        let listed = write_roots(
+            Some(toml::Value::Array(vec![toml::Value::from("docs")])),
+            &r.repo,
+        );
+        assert!(!write_denied(
+            &r.repo.join("docs/guide.md").to_string_lossy(),
+            &r.base,
+            &r.repo,
+            &listed
+        ));
+        assert!(write_denied(
+            &r.repo.join("docs/guide.md").to_string_lossy(),
+            &r.base,
+            &r.repo,
+            &[]
+        ));
+        assert!(write_denied(
+            &r.repo.join("docsx/guide.md").to_string_lossy(),
+            &r.base,
+            &r.repo,
+            &listed
+        ));
+        assert!(write_denied(
+            &r.repo.join("cli/src/fno/x.py").to_string_lossy(),
+            &r.base,
+            &r.repo,
+            &listed
+        ));
+        assert!(allowed(&r, &r.base.join("elsewhere/x.md")));
+        let _ = std::fs::remove_dir_all(&r.base);
+    }
+
+    #[test]
+    fn symlinked_write_root_resolves_to_its_target() {
+        // A symlinked entry covers its target: notes -> docs allows a write
+        // into docs, and still denies source beside it.
+        let r = roots("writeroots-symlink");
+        let _ = std::fs::create_dir_all(r.repo.join("docs"));
+        let _ = std::fs::create_dir_all(r.repo.join("src"));
+        let _ = std::os::unix::fs::symlink(r.repo.join("docs"), r.repo.join("notes"));
+        let listed = write_roots(Some(toml::Value::from("notes")), &r.repo);
+        assert!(!write_denied(
+            &r.repo.join("docs/guide.md").to_string_lossy(),
+            &r.base,
+            &r.repo,
+            &listed
+        ));
+        assert!(write_denied(
+            &r.repo.join("src/lib.rs").to_string_lossy(),
+            &r.base,
+            &r.repo,
+            &listed
+        ));
+        let _ = std::fs::remove_dir_all(&r.base);
+    }
+
+    #[test]
+    fn write_roots_parse_relative_home_absolute_and_drop_blank() {
+        // The parser: relative joins the repo, absolute stays absolute,
+        // blanks and non-strings drop, a bare string is one root, `~/` joins
+        // $HOME. HOME is read, never set: env writes race the parallel
+        // test threads.
+        assert_eq!(
+            write_roots(
+                Some(toml::Value::Array(vec![
+                    toml::Value::from("docs"),
+                    toml::Value::from(" "),
+                    toml::Value::from("/abs/x"),
+                    toml::Value::Integer(7),
+                ])),
+                Path::new("/repo"),
+            ),
+            vec![PathBuf::from("/repo/docs"), PathBuf::from("/abs/x")]
+        );
+        assert_eq!(
+            write_roots(Some(toml::Value::from(".claude/rules")), Path::new("/repo")),
+            vec![PathBuf::from("/repo/.claude/rules")]
+        );
+        assert_eq!(write_roots(None, Path::new("/repo")), Vec::<PathBuf>::new());
+        assert_eq!(
+            write_roots(Some(toml::Value::Integer(7)), Path::new("/repo")),
+            Vec::<PathBuf>::new()
+        );
+        if let Ok(home) = std::env::var("HOME") {
+            assert_eq!(
+                write_roots(Some(toml::Value::from("~/vault")), Path::new("/repo")),
+                vec![PathBuf::from(home).join("vault")]
+            );
+        }
     }
 }
