@@ -203,7 +203,10 @@ def test_recompute_moved_head_still_refuses(enabled, monkeypatch, capsys, tmp_pa
     # look like a regression - which would push a future author to shorten the
     # message to go green. The next test pins the disclosed form itself.
     assert "[recomputed" in reason, reason
-    assert len(calls) == 1
+    # Two reads, no loop: the stub helper's gate read recomputes once, and the
+    # verb's own (2a) read recomputes once more. The pin is that the second
+    # read does not fire a third.
+    assert len(calls) == 2
 
 
 def test_a_failed_reviews_read_is_disclosed_beside_the_recompute(

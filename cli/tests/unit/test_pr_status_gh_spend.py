@@ -91,9 +91,17 @@ class _FakeGh:
             return SimpleNamespace(returncode=2, stdout="", stderr="bad payload")
         op = payload.get("op")
         if op == "status-cache-key":
-            # The mint hashes live machine state; the key value is irrelevant
-            # here, the SPAWN is what this suite budgets.
-            return self._json({"key": "minted"})
+            # The mint hashes live machine state; this world has no hold, no
+            # slots, and no review evidence, so the honest answer is the
+            # head-only key the row helpers below address.
+            return self._json(
+                {
+                    "key": (
+                        f"owner--repo-{payload.get('pr')}-"
+                        f"{str(payload.get('head_sha'))[:12]}"
+                    )
+                }
+            )
         if payload.get("effect") == "preview":
             # The one merge decision: a red supplied verdict holds; anything
             # else clears, exactly the wire shape the status read renders.
