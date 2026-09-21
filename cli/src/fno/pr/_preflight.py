@@ -186,20 +186,36 @@ def hosted_workflow_state(cwd: Path) -> str:
         return "unavailable"
 
 
-def _journal_lines(path: Path) -> "list[str] | None":
-    """Envelope lines for one journal: committed rows first, raw bytes as
-    fallback. The store commit is the write boundary, so a receipt committed
-    through the store leaves no byte trace in the journal; None means the
-    journal could not be read at all."""
+def _journal_lines(path: Path) -> "tuple[list[str], int] | None":
+    """Envelope lines for one journal plus its corrupt-line count, or None
+    when the journal could not be read at all.
+
+    Committed rows carry the history: a receipt committed through the store
+    leaves no byte trace in the journal. The raw bytes are still scanned for
+    lines the store never imported, because a not-json line is corrupt
+    evidence and the verdict over it must read fail-closed."""
+    import json as _json
+
     from fno.events.store_client import native_rows
 
     committed = native_rows(path)
-    if committed is not None:
-        return committed
     try:
-        return path.read_text(encoding="utf-8").splitlines()
+        raw = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError):
+        raw = None
+    malformed = 0
+    for line in raw or []:
+        if not line.strip():
+            continue
+        try:
+            _json.loads(line)
+        except _json.JSONDecodeError:
+            malformed += 1
+    if committed is not None:
+        return committed, malformed
+    if raw is None:
         return None
+    return raw, malformed
 
 
 def _verification_decision_all(candidate_sha: str, event_paths: list[Path]) -> dict:
@@ -224,10 +240,12 @@ def _verification_decision_all(candidate_sha: str, event_paths: list[Path]) -> d
         seen_paths.add(path_key)
         if not path.exists():
             continue
-        lines = _journal_lines(path)
-        if lines is None:
+        fetched = _journal_lines(path)
+        if fetched is None:
             unreadable += 1
             continue
+        lines, raw_malformed = fetched
+        malformed += raw_malformed
         for line in lines:
             line = line.strip()
             if not line:
@@ -501,11 +519,14 @@ def next_verification_generation(*, cwd: str, candidate_sha: str) -> int:
             if key in seen_paths:
                 continue
             seen_paths.add(key)
-            lines = _journal_lines(path)
-            if lines is None:
+            fetched = _journal_lines(path)
+            if fetched is None:
                 if skip_unreadable:
                     continue
                 raise ValueError(f"receipt journal unreadable: {path}")
+            lines, raw_malformed = fetched
+            if raw_malformed:
+                raise ValueError(f"receipt journal malformed: {path}: {raw_malformed} unparseable line(s)")
             for line in lines:
                 if not line.strip():
                     continue
@@ -670,9 +691,10 @@ def rebase_equivalent_evidence(
             if path_key in seen_paths:
                 continue
             seen_paths.add(path_key)
-            lines = _journal_lines(path)
-            if lines is None:
+            fetched = _journal_lines(path)
+            if fetched is None:
                 continue
+            lines = fetched[0]
             for line in lines:
                 line = line.strip()
                 if not line:
