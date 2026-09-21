@@ -457,44 +457,28 @@ def _guard_staleness_days() -> int:
         return 21
 
 
+class SelectUnmeasured(RuntimeError):
+    """The native select-read verb hit its bound; arm_watch retries it."""
+
+
+def _select_read(kind: str, args: list[str]) -> Any:
+    from fno.rust_binary import call_binary_json
+    error, receipt = call_binary_json("select-read", [kind, *args], timeout=None)
+    if error is not None or not isinstance(receipt, dict):
+        raise RuntimeError(f"select-read {kind}: {error or 'unreadable receipt'}")
+    if receipt.get("status") == "unmeasured":
+        raise SelectUnmeasured(str(receipt.get("detail")))
+    if receipt.get("status") != "ok":
+        raise RuntimeError(str(receipt.get("detail")))
+    return receipt.get("answer")
+
+
 def _next_node(project: Optional[str]) -> Optional[dict]:
     """Return the next ready node summary (or None), via ``fno backlog next``.
 
-    Project-scoped (Open Question 2 RESOLVED: the same selection bare megawalk
-    uses). Raises on a non-zero/garbled response so advance skips rather than
-    guessing a node (Failure Modes: Errors).
+    Project-scoped. Raises on a non-zero/garbled response so advance skips rather than guessing a node (Failure Modes: Errors).
     """
-    cmd = [*_subprocess_util.fno_py_cmd(), "backlog", "next"]
-    if project:
-        cmd += ["--project", project]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"fno backlog next exited {proc.returncode}: {proc.stderr.strip()[:200]}"
-        )
-    out = (proc.stdout or "").strip()
-    if not out or out == "null":
-        return None
-    node = json.loads(out)
-    if not isinstance(node, dict) or not node.get("id"):
-        raise RuntimeError(f"fno backlog next returned an unexpected shape: {out[:200]}")
-    # `fno backlog next` omits `_resolved_cwd` (the work-map-resolved project
-    # root); only `fno backlog get` derives it. Enrich best-effort so the worker
-    # launches from the mapped root rather than a raw/misscoped recorded cwd
-    # (codex P2). A get failure is non-fatal - _spawn_worker falls back to .cwd.
-    if not node.get("_resolved_cwd"):
-        try:
-            gp = subprocess.run(
-                [*_subprocess_util.fno_py_cmd(), "backlog", "get", node["id"]],
-                capture_output=True, text=True, timeout=30,
-            )
-            if gp.returncode == 0 and (gp.stdout or "").strip():
-                full = json.loads(gp.stdout)
-                if isinstance(full, dict) and full.get("_resolved_cwd"):
-                    node["_resolved_cwd"] = full["_resolved_cwd"]
-        except Exception:  # noqa: BLE001 - best-effort enrichment
-            pass
-    return node
+    return _select_read("next", ["--project", project] if project else [])
 
 
 # A node with no `domain` set collapses into ONE bucket in `_live_lane_domains`
@@ -605,26 +589,10 @@ def _undispatched_nodes(
     project: Optional[str], mission: Optional[str] = None
 ) -> dict:
     """Read the independent planned-unclaimed observer receipt."""
-    cmd = [*_subprocess_util.fno_py_cmd(), "backlog", "undispatched", "--json"]
-    if project:
-        cmd += ["--project", project]
+    args = ["--project", project] if project else []
     if mission:
-        cmd += ["--mission", mission]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"fno backlog undispatched did not answer inside its 60s budget: {' '.join(cmd)}"
-        ) from exc
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"fno backlog undispatched exited {proc.returncode}: {proc.stderr.strip()[:200]}"
-        )
-    out = (proc.stdout or "").strip()
-    try:
-        receipt = json.loads(out)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"fno backlog undispatched returned invalid JSON: {out[:200]}") from exc
+        args += ["--mission", mission]
+    receipt = _select_read("undispatched", args)
     if (
         not isinstance(receipt, dict)
         or receipt.get("status") != "ok"
@@ -3360,6 +3328,8 @@ def advance(
     # 3. Next ready node (project-scoped). Never guess on error.
     try:
         node = _next_node(project)
+    except SelectUnmeasured as exc:
+        return skip("select-unmeasured", detail=str(exc))
     except Exception as exc:  # noqa: BLE001
         return skip("next-error", detail=str(exc))
     if node is None:

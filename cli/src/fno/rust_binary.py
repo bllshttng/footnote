@@ -147,7 +147,9 @@ def resolve_binary() -> Optional[Path]:
     return None
 
 
-def call_binary_json(verb: str, args: Sequence[str] = (), *, timeout: float = 60) -> tuple[Optional[str], Any]:
+def call_binary_json(
+    verb: str, args: Sequence[str] = (), *, timeout: Optional[float] = 60
+) -> tuple[Optional[str], Any]:
     """Run one direct ``fno-agents`` client verb and parse its JSON stdout.
 
     Returns ``(error, parsed)``: ``error`` is None on success; a missing
@@ -166,7 +168,8 @@ def call_binary_json(verb: str, args: Sequence[str] = (), *, timeout: float = 60
             [str(binary), verb, *args], capture_output=True, text=True, timeout=timeout
         )
     except subprocess.TimeoutExpired:
-        return (f"timed out after {timeout:.1f}s", None)
+        bound = f"{timeout:.1f}s" if timeout is not None else "the caller's bound"
+        return (f"timed out after {bound}", None)
     except OSError as exc:
         return (str(exc)[:200], None)
     if proc.returncode != 0:

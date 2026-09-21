@@ -841,6 +841,9 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "active-backlog-receipt" {
         return fno_agents::territory::run_active_backlog_receipt(&args[1..]);
     }
+    if verb == "select-read" {
+        return fno_agents::select_read::run(&args[1..]);
+    }
     if verb == "territory-verdict" {
         return fno_agents::spawn_gate::run_territory_verdict(&args[1..]);
     }
@@ -2992,24 +2995,6 @@ fn print_status_human(result: &Value, arms: &[fno_agents::tick_ledger::ArmStatus
 /// `--dry-run` runs the identical classification with no registry write and no
 /// `agent_row_reaped` event - a reaper an operator cannot rehearse is one they
 /// will not run.
-/// Parse a `<number><s|m|h|d>` duration into seconds (`24h`, `90m`, `30s`,
-/// `7d`). `None` on anything else - an unparsable window is a usage error,
-/// never "everything".
-fn parse_duration_secs(raw: &str) -> Option<u64> {
-    let (digits, unit) = raw.split_at(raw.len().saturating_sub(1));
-    let multiplier = match unit {
-        "s" => 1u64,
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86_400,
-        _ => return None,
-    };
-    digits
-        .parse::<u64>()
-        .ok()
-        .and_then(|n| n.checked_mul(multiplier))
-}
-
 fn run_reap(rest: &[String]) -> i32 {
     let json_out = rest.iter().any(|a| a == "--json" || a == "-J");
 
@@ -3058,7 +3043,10 @@ fn run_reap(rest: &[String]) -> i32 {
     // plan's done probe cannot pass on CI-green alone.
     if rest.iter().any(|a| a == "--verify") {
         let since = match rest.iter().position(|a| a == "--since") {
-            Some(i) => match rest.get(i + 1).and_then(|v| parse_duration_secs(v)) {
+            Some(i) => match rest
+                .get(i + 1)
+                .and_then(|v| fno_agents::duration::parse_duration_secs(v))
+            {
                 Some(secs) => secs,
                 None => {
                     eprintln!(
