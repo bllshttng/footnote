@@ -143,12 +143,6 @@ pub fn leave(t: Ticket) {
     let _ = std::fs::remove_dir_all(&t.dir);
 }
 
-/// Whether any ticket currently waits. A missing queue directory reads as no
-/// waiters, never an error.
-pub fn has_waiters(queue_dir: &Path) -> bool {
-    highest_ticket(queue_dir).map_or(false, |h| h.is_some())
-}
-
 /// `fno-agents claim queue {enter,front,leave}` - the seam `preflight.sh`
 /// calls instead of its old bash queue. Exit codes follow the claim-verb
 /// convention: 0 success (or at the front), 1 not at the front, 2 usage or

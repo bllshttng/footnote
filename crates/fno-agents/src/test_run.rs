@@ -247,14 +247,14 @@ fn acquire_claim_blocking(
         .as_deref()
         .and_then(|root| crate::claims::claim_path(&keys[0], Some(root)).ok())
         .map(|p| crate::claim_queue::queue_dir_for(&p));
-    let ticket = queue_dir
+    let mut ticket = queue_dir
         .as_deref()
         .and_then(|dir| match crate::claim_queue::enter(dir) {
             Ok(t) => Some(t),
             Err(e) => {
                 eprintln!(
                     "test_run: claim queue enter failed on {}: {e}; waiting unordered. \
-                     remedy: check the directory's permissions or free disk space",
+                         remedy: check the directory's permissions or free disk space",
                     dir.display()
                 );
                 None
@@ -277,10 +277,28 @@ fn acquire_claim_blocking(
                     }
                     pos_out = Some((pos.index, pos.total));
                 }
-                // Gone or unreadable: wait unordered (the old behaviour)
-                // rather than refusing a run that can still progress.
                 Err(e) => {
-                    eprintln!("test_run: claim queue position failed: {e}; waiting unordered")
+                    // The ticket was reaped or removed under us. Re-enqueue
+                    // at the back once, printing one line for the event -
+                    // never one line per poll. Only a failed re-enter waits
+                    // unordered (the old behaviour).
+                    eprintln!("test_run: claim queue ticket {e}; re-enqueueing at the back");
+                    match crate::claim_queue::enter(dir) {
+                        Ok(fresh) => {
+                            // Sleep before the next gate read so the fresh
+                            // back-of-queue ticket cannot snipe the lock in
+                            // the gap before the front waiter's next poll.
+                            ticket = Some(fresh);
+                            std::thread::sleep(POLL_INTERVAL.max(Duration::from_millis(500)));
+                            continue 'wait;
+                        }
+                        Err(e2) => {
+                            eprintln!(
+                                "test_run: claim queue re-enter failed on {}: {e2}; waiting unordered",
+                                dir.display()
+                            );
+                        }
+                    }
                 }
             }
         }
