@@ -390,77 +390,34 @@ finish_lock_acquire() {
     echo "preflight: cannot stamp lock ownership at $LOCKDIR" >&2
     exit 3
 }
-# --- FIFO wait queue ----------------------------------------------------------
+# --- wait queue (ordering owned by fno-agents claim queue) --------------------
 # A bare lock plus immediate fail bred hand-rolled retry loops: every release
 # was a thundering herd and an unlucky waiter was lapped indefinitely. The
-# queue fixes the ordering: tickets are allocated by atomic mkdir (the same
-# primitive as the lock itself), only the front ticket ever retries the real
-# mkdir, and a fresh arrival that finds waiters already queued must enqueue
-# rather than snipe the lock in the gap before the front waiter's next poll.
+# ORDERING now lives in one place, crates/fno-agents/src/claim_queue.rs, which
+# this script calls through the deployed fno-agents on PATH (never
+# candidate_fno, so a broken candidate build cannot wedge the gate that would
+# catch it). This file keeps only its wait policy: the cancellation poll, the
+# steal rules, and the status prints. The queue answers one question, "am I at
+# the front", and the caller decides what to do there.
 QUEUE_POLL_INTERVAL=2
 TICKET=""
+QBIN="$(command -v fno-agents 2>/dev/null || true)"
 
-enqueue_ticket() {
-    # Allocate ABOVE the highest surviving ticket, never in the hole a dequeued
-    # front left: restarting the scan at 1 would reissue number 000001 while
-    # 000002 still waits, putting a newcomer at the front of the queue.
-    local n=1 candidate f
-    for f in "$LOCKDIR.queue.d"/*/; do
-        [[ -d "$f" ]] || continue
-        # Strip the trailing slash FIRST: on a path ending in "/", ${f##*/}
-        # removes the whole string and yields empty, silently skipping the
-        # ticket (caught by CI on the first push of this loop).
-        f="${f%/}"; f="${f##*/}"
-        [[ "$f" =~ ^[0-9]+$ ]] || continue
-        (( 10#$f >= n )) && n=$(( 10#$f + 1 ))
-    done
-    while :; do
-        candidate="$LOCKDIR.queue.d/$(printf '%06d' "$n")"
-        if mkdir "$candidate" 2>/dev/null; then
-            printf 'pid=%s started=%s host=%s\n' "$$" \
-                "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" \
-                "$(hostname 2>/dev/null || echo unknown)" > "$candidate/holder" \
-                || { srm -rf "$candidate"
-                     echo "preflight: cannot stamp queue ticket at $candidate" >&2
-                     exit 3; }
-            TICKET="$candidate"
-            return 0
-        fi
-        n=$((n + 1))
-    done
+# Waiter count the queue knows, 0 when the queue tooling is absent: the fast
+# path must keep working on a machine that has not deployed fno-agents yet.
+# The wait path below is where a missing binary refuses (exit 2).
+queue_waiters() {
+    [[ -n "$QBIN" ]] || { echo 0; return; }
+    local out
+    out="$("$QBIN" claim queue front --dir "$LOCKDIR.queue.d" 2>/dev/null || true)"
+    printf '%s' "$out" | sed -n 's/.*queued=\([0-9]*\).*/\1/p'
 }
 
-dequeue_ticket() { [[ -n "$TICKET" ]] && srm -rf "$TICKET"; TICKET=""; }
-
-ticket_is_dead() {
-    # Dead = the pid is gone OR was recycled (a live but younger process now
-    # owns the number; the ticket's author cannot still be it).
-    local line pid
-    line="$(cat "$1/holder" 2>/dev/null || echo '')"
-    pid="$(printf '%s' "$line" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
-    [[ -n "$pid" ]] && { ! kill -0 "$pid" 2>/dev/null || holder_pid_recycled "$line"; }
-}
-
-# True only for the caller whose ticket is the lowest surviving number.
-# Reaps dead tickets it walks past so a crashed waiter never blocks the queue.
-am_i_front() {
-    local f
-    for f in "$LOCKDIR.queue.d"/*/; do
-        [[ -d "$f" ]] || continue
-        f="${f%/}"
-        if ticket_is_dead "$f"; then srm -rf "$f"; continue; fi
-        [[ "$f" == "$TICKET" ]]
-        return
-    done
-    return 1
-}
-
-queue_has_waiters() {
-    local f
-    for f in "$LOCKDIR.queue.d"/*/; do
-        [[ -d "$f" ]] && return 0
-    done
-    return 1
+queue_leave() {
+    if [[ -n "$QBIN" && -n "${TICKET:-}" && -n "${QUEUE_DIR:-}" ]] ; then
+        "$QBIN" claim queue leave --dir "$QUEUE_DIR" --ticket "$TICKET" >/dev/null 2>&1 || true
+    fi
+    TICKET=""
 }
 
 holder_status_line() {
@@ -724,23 +681,25 @@ signal_holder_tree() {
 acquire_lock() {
     # Fast path only when nobody is queued: a fresh arrival must not snipe the
     # lock out of the gap between a release and the front waiter's next poll.
-    if ! queue_has_waiters && mkdir "$LOCKDIR" 2>/dev/null; then
+    local waiters
+    waiters="$(queue_waiters)"; waiters="${waiters:-0}"
+    if [[ "$waiters" -eq 0 ]] && mkdir "$LOCKDIR" 2>/dev/null; then
         finish_lock_acquire; return 0
     fi
     local holder_pid holder_line
     holder_line="$(cat "$LOCKDIR/holder" 2>/dev/null || echo '')"
     holder_pid="$(printf '%s' "$holder_line" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
-    if ! queue_has_waiters && [[ -n "$holder_pid" ]] \
+    if [[ "$waiters" -eq 0 ]] && [[ -n "$holder_pid" ]] \
        && { ! kill -0 "$holder_pid" 2>/dev/null || holder_pid_recycled "$holder_line"; }; then
         if steal_dead_lock "$holder_line"; then return 0; fi
         # Lost the race: re-read so we name the live winner rather than the
         # corpse we just reaped.
         holder_line="$(cat "$LOCKDIR/holder" 2>/dev/null || echo '')"
     fi
-    # Command negation must stay OUTSIDE [[ ]]: inside it, `! queue_has_waiters`
+    # Command negation must stay OUTSIDE [[ ]]: an empty queue read there
     # names a non-empty string and is always false, which turns an unstamped
     # lockdir into a 90-minute wait instead of this refusal.
-    if [[ -z "$holder_line" ]] && ! queue_has_waiters; then
+    if [[ -z "$holder_line" ]] && [[ "$waiters" -eq 0 ]]; then
         # No parsable holder: nothing proves this lock is live, but we still
         # refuse rather than steal (a holder killed between mkdir and its stamp
         # looks identical to this). Check before acting: removing the lockdir
@@ -762,16 +721,20 @@ acquire_lock() {
         skip_hint
         exit 3
     fi
-    mkdir -p "$LOCKDIR.queue.d" 2>/dev/null || {
-        echo "preflight: cannot create the wait queue at $LOCKDIR.queue.d" >&2
+    # The queue needs the deployed binary; the fast path above deliberately
+    # does not, so an uncontended run works without it. Refuse here, where a
+    # queued wait would otherwise hang on a missing tool.
+    if [[ -z "$QBIN" ]]; then
+        echo "preflight: the wait queue needs the fno-agents binary and it is not on PATH." >&2
+        echo "preflight:   install it: cargo install --path crates/fno-agents" >&2
+        echo "preflight:   or check what is deployed: fno doctor" >&2
+        exit 2
+    fi
+    QUEUE_DIR="$LOCKDIR.queue.d"
+    TICKET="$("$QBIN" claim queue enter --dir "$QUEUE_DIR")" || {
+        echo "preflight: cannot enqueue a wait-queue ticket at $QUEUE_DIR" >&2
         exit 3
     }
-    # The give-up message advertises `touch .fno/preflight-cancel`. In a fresh
-    # clone that parent is gitignored and nothing has created it, and a queued
-    # waiter writes nothing under .fno, so the advertised recovery would fail
-    # on a missing directory. Ensure the parent before queueing.
-    mkdir -p "$INVOKING_ROOT/.fno" 2>/dev/null || true
-    enqueue_ticket
     skip_hint
     local waited=0 last_print=0
     while :; do
@@ -782,13 +745,20 @@ acquire_lock() {
         # signal-only cancel would ignore Ctrl-C for the whole 90m on exactly
         # the platform this fleet runs.
         if [[ "$LOCK_SIGNAL" -eq 1 ]] || cancel_requested; then
-            dequeue_ticket
+            queue_leave
             echo "preflight: cancelled while queued (to cancel a wedged wait: touch $INVOKING_ROOT/.fno/preflight-cancel)" >&2
             exit 130
         fi
-        if am_i_front; then
+        front_rc=0
+        front_out="$("$QBIN" claim queue front --dir "$QUEUE_DIR" --ticket "$TICKET" 2>&1)" || front_rc=$?
+        if [[ "$front_rc" -eq 2 ]]; then
+            echo "preflight: wait-queue front check failed: $front_out" >&2
+            queue_leave
+            exit 3
+        fi
+        if [[ "$front_rc" -eq 0 ]]; then
             if mkdir "$LOCKDIR" 2>/dev/null; then
-                dequeue_ticket
+                queue_leave
                 finish_lock_acquire
                 return 0
             fi
@@ -800,7 +770,7 @@ acquire_lock() {
             if [[ -n "$holder_pid" ]] \
                && { ! kill -0 "$holder_pid" 2>/dev/null || holder_pid_recycled "$holder_line"; }; then
                 if steal_dead_lock "$holder_line"; then
-                    dequeue_ticket
+                    queue_leave
                     echo "preflight: queue front took a dead holder's lock" >&2
                     return 0
                 fi
@@ -808,13 +778,13 @@ acquire_lock() {
                 # No holder file and none is coming: an unstamped corpse has no
                 # pid to condemn, so age the directory itself.
                 if steal_dead_lock ""; then
-                    dequeue_ticket
+                    queue_leave
                     echo "preflight: queue front took an abandoned unstamped lock" >&2
                     return 0
                 fi
             elif holder_is_stalled "$holder_line"; then
                 if steal_dead_lock "$holder_line"; then
-                    dequeue_ticket
+                    queue_leave
                     signal_holder_tree "$holder_pid"
                     # Which condemnation fired: an orphan steal beats the age
                     # floor, so "stalled" alone would describe a holder that
@@ -833,7 +803,7 @@ acquire_lock() {
             last_print=$waited
         fi
         if (( waited >= WAIT_TIMEOUT )); then
-            dequeue_ticket
+            queue_leave
             echo "preflight: gave up waiting after ${WAIT_TIMEOUT}s - $holder_line" >&2
             echo "preflight: to cancel a queued wait instead of timing out: touch $INVOKING_ROOT/.fno/preflight-cancel" >&2
             exit 3
@@ -853,7 +823,7 @@ cleanup_lock() {
     [[ "$observed" == "$expected" ]] && srm -rf "$path"
 }
 cleanup() {
-    [[ -n "${TICKET:-}" ]] && srm -rf "$TICKET"
+    [[ -n "${TICKET:-}" ]] && queue_leave
     [[ "${LOCAL_LOCK_ACQUIRED:-0}" -eq 1 ]] && cleanup_lock "${LOCAL_LOCKDIR:-}" "${LOCAL_LOCK_STAMP:-}"
     [[ "${GLOBAL_LOCK_ACQUIRED:-0}" -eq 1 ]] && cleanup_lock "${GLOBAL_LOCKDIR:-}" "${GLOBAL_LOCK_STAMP:-}"
     [[ -n "$TMPHOME" ]] && srm -rf "$TMPHOME"
