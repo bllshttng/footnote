@@ -357,14 +357,25 @@ fn emit_hold_once_per_hour(
     now: i64,
 ) {
     let stamp = hold_stamp_path(home, &request.request_id);
-    let last_echo = std::fs::read_to_string(&stamp)
-        .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok())
+    // The stamp holds `<echo ts> <reason>`: the reason is what an expiry
+    // names as `last_hold`, and old bare-timestamp stamps still parse
+    // (first whitespace token).
+    let raw = std::fs::read_to_string(&stamp).unwrap_or_default();
+    let mut stamp_parts = raw.trim().splitn(2, char::is_whitespace);
+    let last_echo = stamp_parts
+        .next()
+        .and_then(|t| t.parse::<i64>().ok())
         .unwrap_or(0);
+    let last_reason = stamp_parts.next().unwrap_or("").trim().to_string();
     if now.saturating_sub(last_echo) < MERGE_REAP_HOLD_ECHO_SECS {
+        // In-window hold: the echo clock is preserved, the reason stays
+        // current (holds escalate; a stale reason would misname an expiry).
+        if last_reason != reason {
+            let _ = std::fs::write(&stamp, format!("{last_echo} {reason}"));
+        }
         return;
     }
-    let _ = std::fs::write(&stamp, now.to_string());
+    let _ = std::fs::write(&stamp, format!("{now} {reason}"));
     let _ = emitter.emit(
         "merge_cleanup_held",
         &json!({
@@ -769,6 +780,19 @@ pub(crate) fn consume_merge_cleanup_requests(
                 continue;
             }
             if age > MERGE_REAP_EXPIRY_SECS {
+                // The last hold names itself in the expiry, so a benign
+                // expiry (no worktree ever held) stops reading like one that
+                // stranded a real tree. Read before the tombstone removes it.
+                let last_hold = std::fs::read_to_string(hold_stamp_path(home, &request.request_id))
+                    .ok()
+                    .and_then(|raw| {
+                        raw.trim()
+                            .splitn(2, char::is_whitespace)
+                            .nth(1)
+                            .map(|r| r.trim().to_string())
+                            .filter(|r| !r.is_empty())
+                    })
+                    .unwrap_or_else(|| "none".to_string());
                 let _ = emitter.emit(
                     "merge_cleanup_expired",
                     &json!({
@@ -776,6 +800,7 @@ pub(crate) fn consume_merge_cleanup_requests(
                         "repo": request.repo,
                         "pr": request.pr,
                         "reason": "expired",
+                        "last_hold": last_hold,
                     }),
                 );
                 let _ = std::fs::remove_file(hold_stamp_path(home, &request.request_id));
@@ -1283,6 +1308,87 @@ mod tests {
             events.contains("\"skip_reason\":\"all_in_grace\""),
             "the tick row must name the grace hold: {events}"
         );
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    /// An expiry names the reason of its last hold, so a
+    /// benign expiry (a branch with no worktree) stops reading like one that
+    /// stranded a real tree.
+    #[test]
+    fn an_expiry_names_the_reason_of_its_last_hold() {
+        let home = temp_home("expiry-hold");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        write_events(
+            &home,
+            &[request_line(
+                "2026-09-06T00:00:00Z",
+                "merge-cleanup-1",
+                None,
+                json!(["x-1"]),
+            )],
+        );
+        std::fs::create_dir_all(home.root()).unwrap();
+        std::fs::write(
+            home.root().join("merge-cleanup-hold.merge-cleanup-1"),
+            "1788652300 tree-held:unreachable-from-origin-main",
+        )
+        .unwrap();
+        // Grace 0: the 2026-09-06 request is far past the expiry window, so
+        // the pass takes the expiry branch. A huge grace (the in-grace
+        // test's pin) would keep every request in the window forever.
+        consume_merge_cleanup_requests(&home, &["/repo".to_string()], &emitter, 0);
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let expired = events
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|v| v.get("type").and_then(Value::as_str) == Some("merge_cleanup_expired"))
+            .expect("the expiry was emitted");
+        assert_eq!(
+            expired["data"]["last_hold"], "tree-held:unreachable-from-origin-main",
+            "{expired}"
+        );
+        assert!(
+            !home
+                .root()
+                .join("merge-cleanup-hold.merge-cleanup-1")
+                .exists(),
+            "the tombstone removed its stamp"
+        );
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    /// The same expiry against a PRE-WIDENING stamp file (a bare timestamp,
+    /// no reason) reads `last_hold: "none"`: old stamp files still parse and
+    /// an unknown hold never masquerades as a named one.
+    #[test]
+    fn an_expiry_without_a_hold_reads_none() {
+        let home = temp_home("expiry-none");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        write_events(
+            &home,
+            &[request_line(
+                "2026-09-06T00:00:00Z",
+                "merge-cleanup-1",
+                None,
+                json!(["x-1"]),
+            )],
+        );
+        std::fs::create_dir_all(home.root()).unwrap();
+        std::fs::write(
+            home.root().join("merge-cleanup-hold.merge-cleanup-1"),
+            "1788652300",
+        )
+        .unwrap();
+        // Grace 0, as in an_expiry_names_the_reason_of_its_last_hold: the
+        // request must land in the expiry branch for the stamp to be read.
+        consume_merge_cleanup_requests(&home, &["/repo".to_string()], &emitter, 0);
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let expired = events
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|v| v.get("type").and_then(Value::as_str) == Some("merge_cleanup_expired"))
+            .expect("the expiry was emitted");
+        assert_eq!(expired["data"]["last_hold"], "none", "{expired}");
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
     }
 

@@ -606,20 +606,20 @@ fn write_receipt(
     // verdict (the same basis the retirement sweep emits), never the fact
     // that a receipt happened to stage: a transcript gone from the store
     // reports `no-transcript` even though the receipt itself staged fine.
-    let (receipt_staged, evidence) = match crate::receipt::build_reap_receipt(entry, None) {
-        Ok(mut receipt) => {
-            let evidence = crate::gc_sweep::resume_evidence_effect(&receipt);
-            if crate::receipt::reap_receipt_path(home, &receipt).exists() {
-                (true, evidence)
-            } else {
-                receipt.removed_by = Some("roster-reap".to_string());
-                receipt.effects = vec![outcome.effect_record("active-surface")];
-                let staged = crate::receipt::write_reap_receipt(home, &receipt).is_ok();
-                (staged, evidence)
+    let (receipt_staged, evidence) =
+        match crate::receipt::build_reap_receipt(entry, None, crate::receipt::Writer::RosterReap) {
+            Ok(mut receipt) => {
+                let evidence = crate::gc_sweep::resume_evidence_effect(&receipt);
+                if crate::receipt::reap_receipt_path(home, &receipt).exists() {
+                    (true, evidence)
+                } else {
+                    receipt.effects = vec![outcome.effect_record("active-surface")];
+                    let staged = crate::receipt::write_reap_receipt(home, &receipt).is_ok();
+                    (staged, evidence)
+                }
             }
-        }
-        Err(_) => (false, crate::gc_sweep::resume_evidence_effect_unbuilt()),
-    };
+            Err(_) => (false, crate::gc_sweep::resume_evidence_effect_unbuilt()),
+        };
     let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
     let _ = emitter.emit(
         "agent_row_reaped",
@@ -838,7 +838,9 @@ mod tests {
         );
         entry.harness = Some("claude".into());
         entry.short_id = "ab12cd34".into();
-        let receipt = crate::receipt::build_reap_receipt(&entry, None).expect("receipt builds");
+        let receipt =
+            crate::receipt::build_reap_receipt(&entry, None, crate::receipt::Writer::RosterReap)
+                .expect("receipt builds");
         crate::receipt::write_reap_receipt(&home, &receipt).unwrap();
         let summary = run(
             &home,

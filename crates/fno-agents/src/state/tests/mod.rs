@@ -1616,7 +1616,15 @@ fn update_registry_accounts_for_a_removed_row() {
     let receipt: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&receipt_path).unwrap()).unwrap();
     assert_eq!(receipt["row_name"], "dropped");
-    assert_eq!(receipt["removed_by"], event["data"]["remover"]);
+    // The receipt names its writer (the argv verb); the event's
+    // `remover` answers the separate process-name question it always did.
+    assert!(
+        receipt["removed_by"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "the removal receipt names its writer: {receipt}"
+    );
+    assert_eq!(receipt["removal_trigger"], "session");
     assert!(receipt["resume"].as_str().is_some_and(|s| !s.is_empty()));
     // The door that dropped the row also removes the harness side, and its
     // receipt records the attempt as a typed active-surface effect - whatever
@@ -1767,18 +1775,17 @@ fn update_registry_keeps_a_receipt_the_sweep_already_staged() {
         r#"{"row_name":"swept","resume":"claude --resume swept-s"}"#,
     )
     .unwrap();
+    let before = std::fs::read(&receipt_path).unwrap();
 
     update_registry(&path, |r| {
         r.entries.retain(|e| e.name != "swept");
     })
     .unwrap();
 
-    let on_disk: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&receipt_path).unwrap()).unwrap();
-    assert!(
-        on_disk.get("removed_by").is_none(),
-        "the sweep's receipt was rewritten: {on_disk}"
-    );
+    // Byte-identity is the direct assertion: the choke point must not
+    // rewrite a receipt another door already staged and signed.
+    let after = std::fs::read(&receipt_path).unwrap();
+    assert_eq!(before, after, "the sweep's receipt was rewritten");
     let events = std::fs::read_to_string(home.join("events.jsonl")).unwrap();
     let event: serde_json::Value = serde_json::from_str(events.lines().next().unwrap()).unwrap();
     assert_eq!(event["data"]["receipt_staged"], true);
