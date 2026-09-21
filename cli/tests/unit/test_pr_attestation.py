@@ -51,7 +51,11 @@ def runner() -> CliRunner:
 def journal(tmp_path: Path) -> Path:
     events = tmp_path / ".fno" / "events.jsonl"
     events.parent.mkdir(parents=True)
-    events.write_text(_pass_line() + "\n")
+    # Seed through the store: the reader answers committed rows, so a raw
+    # journal write never reaches the history the verb asserts on.
+    from fno.events import append_event
+
+    append_event(json.loads(_pass_line()), events)
     return events
 
 
