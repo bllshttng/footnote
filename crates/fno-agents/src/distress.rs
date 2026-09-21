@@ -993,7 +993,7 @@ print(rec["payload"]["content"][0]["text"], end="")
         );
         assert!(wrote);
         let row: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+            serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
         assert_eq!(row["type"], "blocked");
         assert_eq!(row["data"]["kind"], "result_blocked");
         assert_eq!(row["data"]["reason"], "probe reason");
@@ -1019,7 +1019,7 @@ print(rec["payload"]["content"][0]["text"], end="")
         );
         assert!(wrote2);
         let row2: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&project2).unwrap()).unwrap();
+            serde_json::from_str(&crate::events::committed_journal_text(&project2)).unwrap();
         assert_eq!(row2["data"]["kind"], "result_blocked");
         assert_eq!(row2["data"]["reason"], "gate refused");
         // AC3-EDGE: a second stop on the same message appends nothing - the
@@ -1035,7 +1035,9 @@ print(rec["payload"]["content"][0]["text"], end="")
             Some(json_msg)
         ));
         assert_eq!(
-            std::fs::read_to_string(&project2).unwrap().lines().count(),
+            crate::events::committed_journal_text(&project2)
+                .lines()
+                .count(),
             1
         );
     }
@@ -1063,11 +1065,13 @@ print(rec["payload"]["content"][0]["text"], end="")
         );
         assert!(wrote);
         let row: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+            serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
         assert_eq!(row["data"]["kind"], "help");
         assert_eq!(row["data"]["reason"], "missing dependency");
         assert_eq!(
-            std::fs::read_to_string(&project).unwrap().lines().count(),
+            crate::events::committed_journal_text(&project)
+                .lines()
+                .count(),
             1,
             "exactly one row when both vocabularies appear"
         );
@@ -1115,7 +1119,7 @@ print(rec["payload"]["content"][0]["text"], end="")
         }
         assert_eq!(code, 0);
         let row: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+            serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
         assert_eq!(row["type"], "blocked");
         assert_eq!(row["data"]["kind"], "result_blocked");
         assert_eq!(row["data"]["reason"], "probe reason");
@@ -1140,7 +1144,7 @@ print(rec["payload"]["content"][0]["text"], end="")
             Some(r#"<help reason="stuck">ev</help>"#)
         ));
         let row: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+            serde_json::from_str(&crate::events::committed_journal_text(&project)).unwrap();
         assert_eq!(row["data"]["kind"], "help");
     }
 }
