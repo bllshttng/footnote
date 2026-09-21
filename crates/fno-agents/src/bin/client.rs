@@ -210,17 +210,12 @@ fn main() {
     if args.first().map(String::as_str) == Some("evals-arm") {
         std::process::exit(fno_agents::evals_arm::run_evals_arm(&args[1..]));
     }
-    // `evals-trend`: the eval report fold and the windowed trend,
-    // native under d-b6cc1a2a. Transport-only, dispatched here like
-    // evals-arm: the Python report/trend leaves pass --history and
-    // --stale-days and forward the rest.
+    // `evals-trend` and `corrections-verify`: transport-only folds (the
+    // shrink law allows no new `run` arm); their module docs carry the
+    // contract, autocorrect-pack.sh embeds the verify one.
     if args.first().map(String::as_str) == Some("evals-trend") {
         std::process::exit(fno_agents::evals_trend::run_evals_trend(&args[1..]));
     }
-    // `corrections-verify`: the applied-correction friction score, native
-    // under d-b6cc1a2a. Transport-only, dispatched here like evals-trend;
-    // autocorrect-pack.sh embeds its --markdown block. Registers no verb
-    // (the shrink law allows no new action).
     if args.first().map(String::as_str) == Some("corrections-verify") {
         std::process::exit(fno_agents::corrections_verify::run(&args[1..]));
     }
