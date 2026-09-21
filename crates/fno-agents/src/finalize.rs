@@ -3090,16 +3090,33 @@ fn assistant_text_blocks(val: &Value) -> String {
 /// 2). Resolution order mirrors scripts/lib/corrections-lock.sh's
 /// corrections_log_path(): POSTMORTEM_CORRECTIONS_LOG override, then
 /// FNO_HOME, then home-relative default.
-fn append_corrections_pointer(home: Option<&Path>, postmortem: &Path, reason: &str, detail: &str) {
-    let log = match std::env::var_os("POSTMORTEM_CORRECTIONS_LOG") {
-        Some(p) => PathBuf::from(p),
+/// The corrections.log path, the ONE resolution for the finalize writer and
+/// the corrections-verify reader alike: POSTMORTEM_CORRECTIONS_LOG override,
+/// then FNO_HOME, then home-relative default. None when no home resolves
+/// (mirrors scripts/lib/corrections-lock.sh corrections_log_path()).
+pub(crate) fn corrections_log_path(home: Option<&Path>) -> Option<PathBuf> {
+    match std::env::var_os("POSTMORTEM_CORRECTIONS_LOG") {
+        Some(p) => Some(PathBuf::from(p)),
         None => match std::env::var_os("FNO_HOME") {
-            Some(p) => PathBuf::from(p).join("corrections.log"),
-            None => match home {
-                Some(h) => h.join(".fno/corrections.log"),
-                None => return,
-            },
+            Some(p) => Some(PathBuf::from(p).join("corrections.log")),
+            None => home.map(|h| h.join(".fno/corrections.log")),
         },
+    }
+}
+
+/// The state root that holds the loop journals (events.jsonl sits directly
+/// under it): FNO_HOME override, then home-relative `.fno`. None when no
+/// home resolves.
+pub(crate) fn loop_state_root(home: Option<&Path>) -> Option<PathBuf> {
+    std::env::var_os("FNO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.map(|h| h.join(".fno")))
+}
+
+fn append_corrections_pointer(home: Option<&Path>, postmortem: &Path, reason: &str, detail: &str) {
+    let log = match corrections_log_path(home) {
+        Some(p) => p,
+        None => return,
     };
     if !log.is_file() {
         // Create at 0600 rather than drop the row. create_new keeps the

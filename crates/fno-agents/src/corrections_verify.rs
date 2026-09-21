@@ -51,23 +51,18 @@ fn resolve_log(flag: Option<&str>) -> Option<PathBuf> {
     if let Some(p) = flag {
         return Some(PathBuf::from(p));
     }
-    if let Some(p) = std::env::var_os("POSTMORTEM_CORRECTIONS_LOG") {
-        return Some(PathBuf::from(p));
-    }
-    let base = std::env::var_os("FNO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno")))?;
-    Some(base.join("corrections.log"))
+    // One resolution with the finalize writer: the same override chain, no
+    // second copy of the literals (the reachable-paths twin holds them).
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    crate::finalize::corrections_log_path(home.as_deref())
 }
 
 fn resolve_events(flag: Option<&str>) -> Option<PathBuf> {
     if let Some(p) = flag {
         return Some(PathBuf::from(p));
     }
-    let base = std::env::var_os("FNO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno")))?;
-    Some(base.join("events.jsonl"))
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    crate::finalize::loop_state_root(home.as_deref()).map(|p| p.join("events.jsonl"))
 }
 
 /// The applied corrections: `git-rule-edit` rows only; a `target-postmortem`
@@ -279,9 +274,9 @@ fn revert_sha(claude_dir: &str, file: &str, at: DateTime<Utc>) -> Option<String>
 }
 
 fn resolve_claude_dir() -> String {
-    std::env::var("CLAUDE_DIR_OVERRIDE")
-        .or_else(|_| std::env::var("HOME").map(|h| format!("{h}/.claude")))
-        .unwrap_or_default()
+    crate::claude_roster::config_dir()
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn markdown(verdicts: &[Verdict]) -> String {
