@@ -199,7 +199,7 @@ Backlog: [usage](docs/backlog-usage.md), [board ordering](docs/architecture/back
 
 Loop & target: [control-plane loop](docs/architecture/control-plane-loop.md), [target reliability](docs/architecture/target-reliability-core.md)
 
-Planning & ship: [lean blueprint](docs/architecture/lean-blueprint.md), [plan completion stamp](docs/architecture/plan-completion-stamp.md), [post-merge ritual](docs/architecture/auto-post-merge-ritual.md)
+Planning & ship: [lean blueprint](docs/architecture/lean-blueprint.md), [plan completion stamp](docs/architecture/plan-completion-stamp.md), [post-merge ritual](docs/architecture/auto-post-merge-ritual.md), [attention](docs/architecture/attention-items.md)
 
 Coordination & providers: [coordination](docs/architecture/coordination.md), [mux selector resolution](docs/architecture/mux-selector-resolution.md), [provider rotation](docs/provider-rotation.md), [cross-model review](docs/architecture/cross-model-review.md)
 

@@ -156,6 +156,12 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         scheduler: SCHED_DAEMON,
         upstream: None,
     },
+    ArmSpec {
+        arm: "attention",
+        default_interval_s: crate::attention_arm::ATTENTION_INTERVAL_S,
+        scheduler: SCHED_DAEMON,
+        upstream: None,
+    },
 ];
 
 /// Build the `data` object of one tick row. `skip_reason` is a single token
@@ -1128,7 +1134,16 @@ mod tests {
     /// `KNOWN_ARMS` row, daemon scheduler, the 900s beat for merge_close.
     #[test]
     fn arm_watch_is_the_eleventh_known_arm_merge_close_the_thirteenth() {
-        assert_eq!(KNOWN_ARMS.len(), 16);
+        assert_eq!(KNOWN_ARMS.len(), 17);
+        let attention = KNOWN_ARMS
+            .iter()
+            .find(|s| s.arm == "attention")
+            .expect("attention row");
+        assert_eq!(
+            attention.default_interval_s,
+            crate::attention_arm::ATTENTION_INTERVAL_S
+        );
+        assert_eq!(attention.scheduler, SCHED_DAEMON);
         let spec = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "arm_watch")

@@ -3729,6 +3729,48 @@ event_types:
           description: "Optional. Session id that closed it, which need not be the session that asked."
     consumers: [operator, fno-agents needs]
 
+  - name: attention_answer
+    retention: durable
+    description: "One durable answer row from an attention sink: the projection the daemon arm delivers (a question or pin the user answered away from a terminal, through the configured questions file, or later a sink adapter) recorded before the clear runs, so the answer survives a slow or refused clear. The row lands in questions.jsonl (the feed's question store), first answer wins, a later one records superseded and changes nothing. The `fno inbox outstanding clear` it precedes records the actual decision; this row is the provenance receipt naming the sink and the answer lane. Written by the attention daemon arm; never written by Python."
+    sources: [daemon, test]
+    data:
+      required: [item_id, sink, authority]
+      properties:
+        item_id:
+          type: string
+          description: "The question id (or note/mine item slug) this answers."
+        sink:
+          type: string
+          description: "The sink that carried the answer: `file` for the markdown file, `ntfy`, `webhook`, `mux`, or `harness-native` later."
+        option:
+          type: integer
+          description: "Optional. The chosen option number, 1-based, when the answer picked one."
+        words:
+          type: string
+          description: "Optional. Free-text answer when the user wrote words instead of ticking."
+        done:
+          type: boolean
+          description: "Optional. True when a pin's action was taken (the top line ticked)."
+        answered_at:
+          type: string
+          description: "Optional. When the user's edit settled and the arm read it."
+        authority:
+          type: string
+          description: "The answer lane: `file_edit` for the file sink (a local edit carries no identity the machine can check), `sink` for adapters. Never operator: the clear refuses that caller by design and the plan's section 5 lanes live here."
+        attested_by:
+          type: string
+          description: "Optional. The sink-side evidence: file:<path>:<hash> for the file sink, <sink>:<evidence> for adapters."
+        mapped_by:
+          type: string
+          description: "Optional. The writer that mapped the edit to the item: `attention_arm`."
+        superseded:
+          type: boolean
+          description: "Optional. True when a later answer already won; the row changes nothing."
+        decision_id:
+          type: string
+          description: "Optional. The operator_decision id the subsequent clear records, joined by the reader."
+    consumers: [operator, fno-agents needs]
+
   - name: operator_decision
     retention: durable
     description: "A decision the operator (or an agent under a beastmode grant) made, recorded so it survives the session and the compaction that eats the transcript it was stated in. Emitted from `fno outstanding clear --answer` (the answer IS the decision) and from `fno inbox decide` (a ruling with no question on file). Two producers, both explicit: automatic recording needs a classifier deciding what counts as a ruling, which is judgment on a truncated view. supersedes makes overturning explicit so two decisions on one subject order themselves and a reader of the older one can tell it is not current. Written twice on one call: to the project journal (durability, GC-exempt by the explicit retention above) and to the machine-wide ~/.fno/decisions.jsonl index, which is what `fno inbox decisions` reads. The provider-outage daemon records only its terminal transaction results here, stamped with authority_source=daemon-automation; observations and intermediate phases never become decisions. See docs/architecture/decision-record.md."
