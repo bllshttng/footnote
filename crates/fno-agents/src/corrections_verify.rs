@@ -19,6 +19,8 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
+use crate::evals_trend::round4;
+
 const EXIT_USAGE: i32 = 2;
 const USAGE: &str = "usage: fno-agents corrections-verify (--json | --markdown) [--since <Nd>] [--log <path>] [--events <path>] [--now <rfc3339>]";
 
@@ -43,10 +45,6 @@ fn parse_ts(raw: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(raw)
         .ok()
         .map(|dt| dt.with_timezone(&Utc))
-}
-
-fn round4(v: f64) -> f64 {
-    (v * 10000.0).round() / 10000.0
 }
 
 fn resolve_log(flag: Option<&str>) -> Option<PathBuf> {
