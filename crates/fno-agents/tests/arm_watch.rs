@@ -580,16 +580,6 @@ fn a_paused_tier_pages_nothing_and_heals_nothing() {
 #[test]
 fn a_crown_finding_alone_still_sends() {
     let store = temp_store("crown-wire");
-    let finding = fno_agents::stuck_work::Finding {
-        kind: "empty_crown",
-        key: "crown_empty:x-1@1788520000".to_string(),
-        line: "no king on scope x-1: empty 47m against a 30m grace; respawn: \
-               fno agents spawn --crown x-1 --succeed"
-            .to_string(),
-        root: None,
-        holder: None,
-        claim_key: None,
-    };
     let mut sends: Vec<(String, String)> = Vec::new();
     let mut rows: Vec<ArmStatus> = Vec::new();
     let out = tick_with_heal(
@@ -600,7 +590,21 @@ fn a_crown_finding_alone_still_sends() {
         &store,
         TS_UNIX,
         || Ok(Vec::new()),
-        || Ok((vec![finding], String::new())),
+        || {
+            Ok((
+                vec![fno_agents::stuck_work::Finding {
+                    kind: "empty_crown",
+                    key: "crown_empty:x-1@1788520000".to_string(),
+                    line: "no king on scope x-1: empty 47m against a 30m grace; respawn: \
+                           fno agents spawn --crown x-1 --succeed"
+                        .to_string(),
+                    root: None,
+                    holder: None,
+                    claim_key: None,
+                }],
+                String::new(),
+            ))
+        },
         &mut |_| panic!("no repair"),
         |title, body| {
             sends.push((title.to_string(), body.to_string()));
