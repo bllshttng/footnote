@@ -138,6 +138,13 @@ done < "$LOG_PATH"
 
 EVENT_COUNT=$(wc -l < "$FILTERED_EVENTS" | tr -d ' ')
 
+# The postmortems root of the home the LOG resolved through (same ladder as
+# corrections_log_path). A vanished path under it is a real row whose file
+# aged out; a vanished path anywhere else is a unit-test fixture that leaked
+# past the writer guard and is skipped with a count, not rendered.
+PM_ROOT="${FNO_HOME:-$HOME/.fno}/postmortems"
+SKIPPED_FIXTURE_ROWS=0
+
 # -------------------------------------------------------------------
 # Collect implicated files (from LOCATION field). Resolve full text or
 # mark as deleted.
@@ -157,10 +164,35 @@ while IFS= read -r line; do
   if [[ "$file_path" != */* && "$file_path" != *.* && ! -f "$file_path" ]]; then
     continue
   fi
+  if [[ ! -f "$file_path" && "$file_path" != "$PM_ROOT"/* ]]; then
+    SKIPPED_FIXTURE_ROWS=$((SKIPPED_FIXTURE_ROWS + 1))
+    continue
+  fi
   printf '%s\n' "$file_path" >> "$IMPLICATED_LIST"
 done < "$FILTERED_EVENTS"
+
+# -------------------------------------------------------------------
+# The SOURCE field names the verb its postmortem rows came from
+# (target-postmortem -> target). Resolve that verb's SKILL.md into the
+# implicated set with its full text, so the review can propose a diff to
+# the skill itself. A source that is not *-postmortem, or whose resolved
+# path does not exist, adds nothing.
+# -------------------------------------------------------------------
+REPO_ROOT_PACK="$(cd "$SCRIPT_DIR/.." && pwd)"
+SKILL_LIST="$TMPDIR_PACK/skills.txt"
+: > "$SKILL_LIST"
+while IFS= read -r line; do
+  src="$(printf '%s' "$line" | awk -F' \\| ' '{print $3}')"
+  case "$src" in
+    *-postmortem) verb="${src%-postmortem}" ;;
+    *) continue ;;
+  esac
+  [[ -z "$verb" ]] && continue
+  skill_file="$REPO_ROOT_PACK/skills/$verb/SKILL.md"
+  [[ -f "$skill_file" ]] && printf '%s\n' "$skill_file" >> "$SKILL_LIST"
+done < "$FILTERED_EVENTS"
 UNIQ_IMPLICATED="$TMPDIR_PACK/implicated-uniq.txt"
-sort -u "$IMPLICATED_LIST" > "$UNIQ_IMPLICATED"
+{ cat "$IMPLICATED_LIST"; cat "$SKILL_LIST"; } | sort -u > "$UNIQ_IMPLICATED"
 
 # -------------------------------------------------------------------
 # Backlog graph BLOCKED state, if a store exists.
@@ -266,6 +298,7 @@ OUTPUT="$TMPDIR_PACK/packet.yaml"
   emit "window_end: $WINDOW_END_ISO"
   emit "severity_filter: [$(printf "%s" "$SEVERITY_FILTER" | sed 's/,/, /g')]"
   emit "event_count: $EVENT_COUNT"
+  emit "skipped_fixture_rows: $SKIPPED_FIXTURE_ROWS"
   emit ""
   emit "events:"
   if [[ "$EVENT_COUNT" -gt 0 ]]; then
