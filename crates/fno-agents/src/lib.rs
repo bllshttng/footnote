@@ -112,6 +112,7 @@ pub mod component_update;
 pub mod context_run;
 pub mod convert;
 pub mod court_fold;
+pub mod crown_alarm;
 pub mod crown_reap;
 pub mod crown_settle;
 pub mod crown_split;

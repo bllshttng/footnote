@@ -348,6 +348,12 @@ fn fold_one(
 /// so an overlapping node reaches this loop once per crown covering it, and
 /// counting it twice would report more stuck work than exists.
 fn stuck_verdict(folds: &BTreeMap<String, Value>) -> Value {
+    stuck_verdict_over(folds.values())
+}
+
+/// The verdict over borrowed folds, so a per-scope caller never clones a
+/// fold to place it in a one-entry map.
+fn stuck_verdict_over<'a>(folds: impl IntoIterator<Item = &'a Value>) -> Value {
     let threshold = STUCK_AFTER_MINUTES / 60.0;
     let mut unclaimed: Vec<String> = Vec::new();
     let mut blocked: Vec<Value> = Vec::new();
@@ -355,7 +361,7 @@ fn stuck_verdict(folds: &BTreeMap<String, Value>) -> Value {
     let mut in_review: Vec<String> = Vec::new();
     let mut blind: Vec<String> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    for fold in folds.values() {
+    for fold in folds {
         if fold.get("status").and_then(|s| s.as_str()) != Some("ok") {
             // One cause is one line: several crowns failing the same way is one
             // fault, and repeating it buries the verdict.
@@ -426,16 +432,6 @@ fn stuck_verdict(folds: &BTreeMap<String, Value>) -> Value {
 /// never returns empty, because a clean line and a blind line must not look the
 /// same.
 fn stuck_line(stuck: &Value) -> String {
-    /// How many ids a clause names before it counts the rest. The line exists
-    /// to be glanced at, and a live court put 40 ids in one clause. The full
-    /// list is always in the JSON.
-    const NAMED: usize = 5;
-    fn named(ids: &[String]) -> String {
-        if ids.len() <= NAMED {
-            return ids.join(", ");
-        }
-        format!("{}, +{} more", ids[..NAMED].join(", "), ids.len() - NAMED)
-    }
     let ids = |key: &str| -> Vec<String> {
         stuck
             .get(key)
@@ -455,7 +451,7 @@ fn stuck_line(stuck: &Value) -> String {
             "{} ready over {}m with no worker ({})",
             unclaimed.len(),
             STUCK_AFTER_MINUTES as i64,
-            named(&unclaimed)
+            named_ids(&unclaimed)
         ));
     }
     if let Some(rows) = stuck.get("blocked").and_then(|v| v.as_array()) {
@@ -476,7 +472,7 @@ fn stuck_line(stuck: &Value) -> String {
             let tail = if on.is_empty() {
                 " (on nothing named)".to_string()
             } else {
-                format!(" (on {})", named(&on.into_iter().collect::<Vec<_>>()))
+                format!(" (on {})", named_ids(&on.into_iter().collect::<Vec<_>>()))
             };
             parts.push(format!("{} blocked{tail}", rows.len()));
         }
@@ -486,7 +482,7 @@ fn stuck_line(stuck: &Value) -> String {
         parts.push(format!(
             "{} with an unproven claim ({})",
             unproven.len(),
-            named(&unproven)
+            named_ids(&unproven)
         ));
     }
     let in_review = ids("in_review");
@@ -495,13 +491,44 @@ fn stuck_line(stuck: &Value) -> String {
             "{} in review over {}m ({})",
             in_review.len(),
             STUCK_AFTER_MINUTES as i64,
-            named(&in_review)
+            named_ids(&in_review)
         ));
     }
     for reason in ids("blind") {
         parts.push(format!("could not answer: {reason}"));
     }
     parts.join(", ")
+}
+
+/// How many ids a clause names before it counts the rest. The line exists
+/// to be glanced at, and a live court put 40 ids in one clause. The full
+/// list is always in the JSON.
+pub(crate) const NAMED_IDS: usize = 5;
+
+/// `{ids}, +N more` past the cap, the ids joined when short.
+pub(crate) fn named_ids(ids: &[String]) -> String {
+    if ids.len() <= NAMED_IDS {
+        return ids.join(", ");
+    }
+    format!(
+        "{}, +{} more",
+        ids[..NAMED_IDS].join(", "),
+        ids.len() - NAMED_IDS
+    )
+}
+
+/// Give each fold its own stuck verdict: the same function over a map holding
+/// just that fold, so a scope's answer lives beside the rows it judges and no
+/// second reader can fail to see what a row means. The global verdict over
+/// the returned map still dedupes across crowns; the per-scope one does not,
+/// because the two answer different questions.
+fn with_per_scope_stuck(folds: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+    let mut out = folds;
+    for fold in out.values_mut() {
+        let verdict = stuck_verdict_over(std::iter::once(&*fold));
+        fold["stuck"] = verdict;
+    }
+    out
 }
 
 /// The whole read: fold every crown, then answer as JSON.
@@ -566,7 +593,7 @@ pub fn court_fold(
         );
         refolded.insert(scope.to_string(), fold);
     }
-    let folds = refolded;
+    let folds = with_per_scope_stuck(refolded);
     let stuck = stuck_verdict(&folds);
     let line = stuck_line(&stuck);
     Ok(json!({"scope_nodes": folds, "stuck": stuck, "stuck_line": line}))
@@ -901,6 +928,43 @@ mod tests {
         let line = stuck_line(&v);
         assert!(line.contains("2 ready over 60m with no worker"));
         assert!(!line.contains("x-3") && !line.contains("x-4"));
+    }
+
+    /// One fold shaped as `fold_one` returns it, under a caller-chosen scope.
+    fn fold_of(rows: &[Value]) -> Value {
+        json!({"status": "ok", "total": rows.len(), "counts": {},
+               "nodes": rows, "omitted": 0})
+    }
+
+    #[test]
+    fn each_fold_carries_its_own_verdict_and_the_global_one_dedupes() {
+        let folds: BTreeMap<String, Value> = [
+            ("alpha", vec![row("x-1", "ready", "no-record", 2.0)]),
+            ("beta", vec![row("x-2", "done", "no-record", 0.1)]),
+            // One node folded by an L1 crown and its L2 epic alike.
+            ("gamma", vec![row("x-1", "ready", "no-record", 2.0)]),
+        ]
+        .into_iter()
+        .map(|(scope, rows)| (scope.to_string(), fold_of(&rows)))
+        .collect();
+        let out = with_per_scope_stuck(folds);
+        assert_eq!(out["alpha"]["stuck"]["unclaimed"], json!(["x-1"]));
+        assert_eq!(out["beta"]["stuck"]["unclaimed"], json!([]));
+        // The global verdict still counts a doubly folded node once.
+        let global = stuck_verdict(&out);
+        assert_eq!(global["unclaimed"], json!(["x-1"]));
+        // A fold that did not run reads blind and empty, never clean.
+        let mut blind = BTreeMap::new();
+        blind.insert(
+            "delta".to_string(),
+            json!({"status": "unresolved", "reason": "the fold timed out"}),
+        );
+        let out = with_per_scope_stuck(blind);
+        assert_eq!(out["delta"]["stuck"]["unclaimed"], json!([]));
+        assert!(!out["delta"]["stuck"]["blind"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

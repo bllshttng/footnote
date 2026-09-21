@@ -104,10 +104,10 @@ pub fn tick_arm_watch(
 }
 
 /// One heal-then-page pass: classify the rows, run the safe repairs, read the
-/// stuck work again, and page only what is still red. `collect` is the stuck
-/// work read and `run` executes a repair, both handed in so a test drives the
-/// whole tick. The detail leads with the heal token, so the 200-char cap never
-/// cuts it.
+/// stuck work and the crowns, and page only what is still red. `collect` is
+/// the stuck work read, `crowns` the crown read, and `run` executes a repair,
+/// all handed in so a test drives the whole tick. The detail leads with the
+/// heal token, so the 200-char cap never cuts it.
 #[allow(clippy::too_many_arguments)]
 pub fn tick_with_heal(
     rows: &mut [ArmStatus],
@@ -117,10 +117,18 @@ pub fn tick_with_heal(
     store: &Path,
     now_unix: u64,
     collect: impl Fn() -> Result<Vec<Finding>, String>,
+    crowns: impl Fn() -> Result<(Vec<Finding>, String), String>,
     run: &mut dyn FnMut(&str) -> bool,
     send: impl FnOnce(&str, &str) -> bool,
 ) -> WatchOutcome {
     let (findings, mut note) = split(collect());
+    // The crown read runs ONCE, before the heal: a release touches claims,
+    // not crowns, so the re-collect below never repeats the seconds-long
+    // court read.
+    let (crown_findings, crown_note) = match crowns() {
+        Ok((found, note)) => (found, note),
+        Err(reason) => (Vec::new(), format!("crown unread: {reason}")),
+    };
     crate::arm_repair::annotate(
         rows,
         &crate::arm_repair::RepairFacts::new(install_off_main, &findings),
@@ -134,16 +142,24 @@ pub fn tick_with_heal(
         threshold_s,
         run,
     );
-    let findings = if heal.contains("dead_holder:") {
+    let mut findings = if heal.contains("dead_holder:") {
         let (again, again_note) = split(collect());
         note = again_note;
         again
     } else {
         findings
     };
+    findings.extend(crown_findings);
     let mut outcome = tick_arm_watch(rows, &findings, threshold_s, store, now_unix, send);
     let mut detail = heal;
-    for part in [Some(outcome.detail.clone()), note].into_iter().flatten() {
+    for part in [
+        Some(outcome.detail.clone()),
+        note,
+        Some(crown_note).filter(|n| !n.is_empty()),
+    ]
+    .into_iter()
+    .flatten()
+    {
         if !part.is_empty() {
             detail.push_str("; ");
             detail.push_str(&part);
@@ -296,6 +312,7 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             &store,
             now_unix,
             || crate::stuck_work::collect(&config_cwd),
+            || crate::crown_alarm::collect(&config_cwd),
             &mut |action| crate::arm_repair::run_repair(action, &config_cwd),
             |title, body| {
                 crate::operator_notice::notify_operator_confirmed(
