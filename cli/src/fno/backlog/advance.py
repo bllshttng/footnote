@@ -592,11 +592,10 @@ def _undispatched_nodes(
     project: Optional[str], mission: Optional[str] = None
 ) -> dict:
     """Read the independent planned-unclaimed observer receipt."""
-    args = []
-    if project:
-        args += ["--project", project]
-    if mission:
-        args += ["--mission", mission]
+    args = (
+        (["--project", project] if project else [])
+        + (["--mission", mission] if mission else [])
+    )
     receipt = _select_read("undispatched", args)
     if (
         not isinstance(receipt, dict)
