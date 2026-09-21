@@ -207,9 +207,7 @@ def test_a_conflict_event_names_its_nodes_and_session(
 ) -> None:
     """AC9: the emitted row carries the touched ids and the session id, so
     two concurrent chains in one journal can be told apart."""
-    import fno.agents.self_stamp as self_stamp
-
-    monkeypatch.setattr(self_stamp, "resolve_self_session_id", lambda: "sess-test-1")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-test-1")
     sleeps, install = tx
     g = _graph(tmp_path)
     install(_RowsConflictClient(conflicts=1, entries=[{"id": "n1", "title": "before"}]), g)

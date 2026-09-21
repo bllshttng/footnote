@@ -1410,10 +1410,10 @@ def _emit_graph_tx_event(**data: Any) -> None:
     import the agents runtime journal.
     """
     try:
-        from fno.agents.self_stamp import resolve_self_session_id
         from fno.events import _build, append_event
 
-        if (session := resolve_self_session_id()) is not None:
+        session = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
+        if session:
             data["session_id"] = session
         append_event(_build("graph_tx_conflict", "python", data))
     except Exception:  # noqa: BLE001 - telemetry never changes a store outcome
