@@ -79,7 +79,12 @@ pub(crate) fn status_cache_key(payload: &Value) -> Value {
     let state = payload.get("pr_state").and_then(Value::as_str).unwrap_or("");
     let slug = payload.get("slug").and_then(Value::as_str).unwrap_or("");
 
-    let mut material = format!("{head}|{state}|");
+    // The repo's live merge authority: a config flip must rekey every row
+    // of the repo, or a cached `merge_authority: false` outlives the flip
+    // inside the TTL (x-53c5 wave, PR 2182 specimen).
+    let enabled = crate::agents_config::auto_merge_enabled(&cwd);
+    let dispatch = crate::agents_config::auto_merge_grant_dispatches(&cwd);
+    let mut material = format!("{head}|{state}|{enabled}|{dispatch}|");
 
     // The PR's dispatch-hold word, through the same probe the merge path
     // reads: exit 0 clear, 3 held, anything else unreadable.
