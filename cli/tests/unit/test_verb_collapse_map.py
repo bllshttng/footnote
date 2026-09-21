@@ -355,7 +355,10 @@ def test_live_baseline_matches_the_projected_allocation():
     # ratchet still counts, so the rename nets +3, not 0. Counted from the
     # merged file, not taken from either side: 133, with `agents autonomy
     # provenance` (x-84b2) among them - the group row split into leaves.
-    assert len(leaves) <= 133
+    # +2 for the inbox day boundary commands (start/end): the operator-facing
+    # morning and end-of-day readbacks; the native fold verb behind them stays
+    # unregistered on the shrink-only binary action list.
+    assert len(leaves) <= 135
     assert "fno-agents" in leaves
 
 
