@@ -636,6 +636,20 @@ def test_one_confirmed_delivery_among_failures_still_exits_zero(monkeypatch) -> 
 # --- the verb: refuse before the append, deliver by default --------------------
 
 
+def _stubbed_receipt(node_id: str) -> dict:
+    """The native receipt shape the bridge relays verbatim."""
+    return {
+        "status": "ok",
+        "routed": "state",
+        "node_id": node_id,
+        "revision": 1,
+        "line": (
+            f"noted {node_id}: revision 1, 11 chars\n"
+            f"replaced nothing: {node_id} had no current state"
+        ),
+    }
+
+
 def _run(monkeypatch, argv: list[str], readers=None, refused=None, send=None):
     """Run `fno backlog note` with resolution and the native write stubbed.
 
@@ -652,7 +666,7 @@ def _run(monkeypatch, argv: list[str], readers=None, refused=None, send=None):
 
     def fake_write(node_id, text, *, quiet, session_id, graph_path, reads=None):
         written.append(node_id)
-        return 0, {"status": "ok", "routed": "state", "node_id": node_id, "revision": 1}
+        return 0, _stubbed_receipt(node_id)
 
     monkeypatch.setattr(note_bridge, "_write_state", fake_write)
 
@@ -677,7 +691,7 @@ def test_the_verb_delivers_by_default(monkeypatch) -> None:
     )
     assert result.exit_code == 0
     assert appended == ["x-0d08"]
-    assert "noted x-0d08: the finding" in result.stdout
+    assert "noted x-0d08: revision 1, 11 chars" in result.stdout
     assert "notified sess-worker" in result.stdout
 
 
@@ -694,7 +708,7 @@ def test_quiet_writes_the_note_and_resolves_nobody(monkeypatch) -> None:
         "_write_state",
         lambda node_id, text, *, quiet, session_id, graph_path, reads=None: (
             0,
-            {"status": "ok", "routed": "state", "node_id": node_id, "revision": 1},
+            _stubbed_receipt(node_id),
         ),
     )
 
@@ -706,7 +720,7 @@ def test_quiet_writes_the_note_and_resolves_nobody(monkeypatch) -> None:
         graph_cli.cli, ["note", "x-0d08", "the finding", "--quiet"]
     )
     assert result.exit_code == 0
-    assert "noted x-0d08: the finding" in result.stdout
+    assert "noted x-0d08: revision 1, 11 chars" in result.stdout
     assert "notif" not in result.stdout
 
 
@@ -762,7 +776,7 @@ def test_an_unknown_node_refuses_before_the_append(tmp_path, monkeypatch) -> Non
 
     def fake_write(node_id, text, *, quiet, session_id, graph_path, reads=None):
         written.append(node_id)
-        return 0, {"status": "ok", "routed": "state", "node_id": node_id, "revision": 1}
+        return 0, _stubbed_receipt(node_id)
 
     monkeypatch.setattr(note_bridge, "_write_state", fake_write)
     result = CliRunner().invoke(graph_cli.cli, ["note", "x-ffff", "the finding"])
@@ -797,7 +811,7 @@ def test_failed_sends_land_on_stderr_and_exit_four(monkeypatch) -> None:
         monkeypatch, ["note", "x-0d08", "the finding"], readers=readers, send=boom
     )
     assert result.exit_code == 4
-    assert "noted x-0d08: the finding" in result.stdout
+    assert "noted x-0d08: revision 1, 11 chars" in result.stdout
     assert "notify FAILED sess-a" in result.stderr
     assert "no reader confirmed delivery (0 UNCONFIRMED, 2 FAILED)" in result.stderr
 
@@ -811,7 +825,7 @@ def test_an_undelivered_receipt_never_reaches_stdout(monkeypatch) -> None:
         monkeypatch, ["note", "x-0d08", "the finding"], readers=readers, send=boom
     )
     assert result.exit_code == 4
-    assert "noted x-0d08: the finding" in result.stdout
+    assert "noted x-0d08: revision 1, 11 chars" in result.stdout
     assert "notify FAILED sess-worker" in result.stderr
     assert "notify FAILED" not in result.stdout
 
@@ -835,3 +849,69 @@ def test_a_keeper_error_reply_reaches_the_honest_refusal(monkeypatch, tmp_path) 
     assert isinstance(got, Refused)
     assert "could not read who is bound" in got.message
     assert "no node resolves" not in got.message
+
+
+def test_the_bridge_prints_the_native_line_verbatim(monkeypatch) -> None:
+    """The bridge relays the native `line` whole: two physical lines stay two."""
+    from typer.testing import CliRunner
+
+    from fno.graph import cli as graph_cli
+    from fno.graph import note_cli as note_bridge
+
+    monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
+    monkeypatch.setattr(
+        note_bridge,
+        "_write_state",
+        lambda node_id, text, *, quiet, session_id, graph_path, reads=None: (
+            0,
+            {
+                "status": "ok",
+                "routed": "state",
+                "node_id": node_id,
+                "revision": 1,
+                "line": "noted x-0d08: revision 1, 11 chars\n"
+                "replaced nothing: x-0d08 had no current state",
+            },
+        ),
+    )
+
+    def no_resolve(task_id, graph_path):
+        raise AssertionError("the resolver must not run under --quiet")
+
+    monkeypatch.setattr(note_notify, "readers_before_append", no_resolve)
+    result = CliRunner().invoke(
+        graph_cli.cli, ["note", "x-0d08", "the finding", "--quiet"]
+    )
+    assert result.exit_code == 0
+    assert (
+        "noted x-0d08: revision 1, 11 chars\n"
+        "replaced nothing: x-0d08 had no current state"
+    ) in result.stdout
+
+
+def test_a_receipt_with_no_line_still_exits_zero(monkeypatch) -> None:
+    """AC9-ERR: an older binary's receipt carries no `line`; the relay
+    degrades to an empty line, never a traceback after the write landed."""
+    from typer.testing import CliRunner
+
+    from fno.graph import cli as graph_cli
+    from fno.graph import note_cli as note_bridge
+
+    monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
+    written: list[str] = []
+
+    def fake_write(node_id, text, *, quiet, session_id, graph_path, reads=None):
+        written.append(node_id)
+        return 0, {"status": "ok", "routed": "state", "node_id": node_id, "revision": 1}
+
+    monkeypatch.setattr(note_bridge, "_write_state", fake_write)
+
+    def no_resolve(task_id, graph_path):
+        raise AssertionError("the resolver must not run under --quiet")
+
+    monkeypatch.setattr(note_notify, "readers_before_append", no_resolve)
+    result = CliRunner().invoke(
+        graph_cli.cli, ["note", "x-0d08", "the finding", "--quiet"]
+    )
+    assert result.exit_code == 0
+    assert written == ["x-0d08"]
