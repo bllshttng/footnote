@@ -229,7 +229,7 @@ Because agy's transcript would be skipped by loop-check's `role=="assistant"` fi
 
 The remaining build-time unknown is agy's exact `transcript.jsonl` line schema; the synthesizer handles the documented-likely shapes and skips anything it can't parse (safe: no promise detected → keep working). A captured sample will tighten the filter.
 
-Per-command guards stay on the claude/codex/opencode doors and do not cross this gap: the git-protection pr-create closure guard reaches claude, codex and opencode (codex through the shared hook manifest, opencode through `tool.execute.before`) and does not reach agy, which has no PreToolUse adapter.
+Per-command guards stay on the claude/codex/opencode doors. The git-protection pr-create closure guard reaches claude, codex and opencode. Codex reads the shared hook manifest. opencode reads `tool.execute.before`. agy does not get it, because agy has no PreToolUse adapter.
 
 ### OpenCode: outcome parity through the plugin seams, not a hook manifest
 
