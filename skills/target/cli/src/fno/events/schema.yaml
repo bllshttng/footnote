@@ -2813,6 +2813,33 @@ event_types:
         elapsed_seconds:
           type: integer
 
+  - name: agent_crown_vacated
+    description: "A crown left its holder. The dead-crown sweep emits it with cause holder_dead when a manifest-only crown's holder session is proven dead: evidence carries the death receipt, inheritor names the live crown one rung up that takes the territory (else operator), and cleared_rows names the terminal rows whose stale crown fields cleared in the same registry write. The attended `fno agents king done` emits the same kind with its own cause. The sweep grants no crown; territory falls back to its project by construction."
+    sources: [daemon]
+    data:
+      required: [scope, cause]
+      properties:
+        scope:
+          type: [string, "null"]
+        level:
+          type: [integer, "null"]
+        holder:
+          type: [string, "null"]
+        holder_session:
+          type: [string, "null"]
+        grantor:
+          type: [string, "null"]
+        cause:
+          type: string
+        successor:
+          type: [string, "null"]
+        evidence:
+          type: [string, "null"]
+        inheritor:
+          type: [string, "null"]
+        cleared_rows:
+          type: array
+
   - name: agent_row_reaped
     description: "An agent-view or roster-only row was retired by the retirement sweep, roster-reap, or `fno agents reap`: the session's WORK is done on every resolved node and its transcript has been quiet past agents.retire_grace_s. basis names that verdict. remover identifies the acting sweep when emitted. A resumable receipt is attempted before this event; receipt_staged and resumable report whether that recovery path persisted. Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
     sources: [daemon]
