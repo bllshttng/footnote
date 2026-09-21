@@ -107,8 +107,18 @@ run_hook() {
   rm -f "$SBX/.fno/latches"/.context-nudge-* 2>/dev/null
   OUT=$(printf '%s' "$1" | bash "$HOOK" 2>/dev/null); RC=$?
 }
-events_has() { grep -q "\"type\":\"$1\"" "$SBX/.fno/events.jsonl" 2>/dev/null; }
-reset_events() { rm -f "$SBX/.fno/events.jsonl"; }
+ROWS_BIN="${FNO_BIN:-}"
+if [[ -z "$ROWS_BIN" ]]; then
+  for _profile in debug release; do
+    if [[ -x "$REPO_ROOT/crates/fno/target/$_profile/fno" ]]; then
+      ROWS_BIN="$REPO_ROOT/crates/fno/target/$_profile/fno"
+      break
+    fi
+  done
+fi
+[[ -n "$ROWS_BIN" ]] || ROWS_BIN=$(command -v fno 2>/dev/null)
+events_has() { "$ROWS_BIN" doctor event rows --events "$SBX/.fno/events.jsonl" 2>/dev/null | jq -r '.[]' 2>/dev/null | grep -q "\"type\":\"$1\""; }
+reset_events() { rm -f "$SBX/.fno/events.jsonl" "$SBX/.fno/events.db"; }
 
 # The hook reads the manifest from the resolver's DEFAULT root (the space dir
 # keyed on this cwd), no longer a repo-local .fno: compute it with the same
