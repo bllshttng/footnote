@@ -1207,36 +1207,40 @@ def _source_checkout_sync(source: Optional[Path]) -> dict[str, Any]:
 
 
 def _launch_agent_failures() -> dict[str, Any]:
-    """Every ``sh.fno.*`` LaunchAgent whose LAST EXIT was nonzero.
+    """Dead launchd labels, from the Rust fold the loops table runs.
 
-    Generic over the label prefix rather than groom-specific: two unrelated fno
-    agents were dead and silent when this was written, so one loop is both
-    smaller and wider than a bespoke check per agent. Column 2 is the last exit,
-    not current state - a ``-`` in column 1 is normal for a periodic job.
+    One launchctl reader, not two: the Rust ``loops table --json`` payload
+    carries the dead list (any ``sh.fno.*`` or autocorrect label with a
+    nonzero last exit), so doctor reads the same truth the arms table
+    prints, and the labels the old ``sh.fno.`` prefix filter missed
+    (``com.user.autocorrect*``) show up here too. Exit 1 is the table's own
+    red verdict, not an error: the payload still parses.
     """
-    if sys.platform != "darwin" or not shutil.which("launchctl"):
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
         return {"applicable": False, "dead": []}
     try:
         proc = subprocess.run(
-            ["launchctl", "list"], capture_output=True, text=True, timeout=10
+            [str(binary), "loops", "table", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
     except Exception:  # noqa: BLE001 - an unrunnable probe must not fabricate an alarm
         return {"applicable": False, "dead": []}
-    if proc.returncode != 0:
+    if proc.returncode not in (0, 1):
         return {"applicable": False, "dead": []}
-
-    dead: list[dict[str, Any]] = []
-    for line in (proc.stdout or "").splitlines():
-        cols = line.split("\t")
-        if len(cols) < 3 or not cols[2].startswith("sh.fno."):
-            continue
-        try:
-            status = int(cols[1])
-        except ValueError:
-            continue  # "-" or a header; only a numeric exit proves a failure
-        if status != 0:
-            dead.append({"label": cols[2].strip(), "exit": status})
-    return {"applicable": True, "dead": dead}
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except ValueError:
+        return {"applicable": False, "dead": []}
+    if not isinstance(payload, dict):
+        return {"applicable": False, "dead": []}
+    section = payload.get("launchd") or {}
+    dead = section.get("dead") or []
+    return {"applicable": bool(section.get("applicable")), "dead": list(dead)}
 
 
 # --------------------------------------------------------------------------
