@@ -30,7 +30,7 @@ pub(crate) fn dispatch_spawn_argv(
     node_id: &str,
     session: &str,
     account: Option<&str>,
-    parent: Option<&str>,
+    _parent: Option<&str>,
 ) -> Vec<String> {
     let mut argv: Vec<String> = [
         fno.to_string(),
@@ -38,8 +38,10 @@ pub(crate) fn dispatch_spawn_argv(
         "spawn".to_string(),
         "--node".to_string(),
         node_id.to_string(),
-        "--substrate".to_string(),
-        "pane".to_string(),
+        // No --substrate pin: the door's thread default decides, so every
+        // new spawn from the mux takes the thread lane where the harness
+        // seats one. A dispatch child therefore shows as its own roster row
+        // rather than opening under its epic's tab.
         "--mux-session".to_string(),
         session.to_string(),
         "--no-wait".to_string(),
@@ -51,12 +53,8 @@ pub(crate) fn dispatch_spawn_argv(
         argv.push("--account".to_string());
         argv.push(a.to_string());
     }
-    // A child node opens under its epic's tab, the same placement the card
-    // click visualized.
-    if let Some(p) = parent {
-        argv.push("--tab".to_string());
-        argv.push(p.to_string());
-    }
+    // The epic-tab parent is retired: a thread has no tab to group under.
+    // (`_parent` stays in the signature so the four call sites do not move.)
     argv
 }
 
@@ -143,23 +141,29 @@ pub(crate) async fn run_fno_captured(
 /// `--force`, no `--yolo`: normal gates decide, and a refusal is the
 /// product.
 pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &str) -> Vec<String> {
-    let mut argv: Vec<String> = [
-        fno.to_string(),
-        "agents".to_string(),
-        "spawn".to_string(),
-        "--harness".to_string(),
-        req.harness.clone(),
+    let mut argv: Vec<String> = vec![fno.to_string(), "agents".to_string(), "spawn".to_string()];
+    // A model picked from a routing row rides as a MODEL-ONLY pin: with
+    // --harness typed, the door would take --model as a plain override and
+    // launch the row's model id against the WRONG provider. Omitting
+    // --harness lets the door resolve the row's harness, route, account
+    // and effort itself.
+    if !req.model_names_harness {
+        argv.extend(["--harness".to_string(), req.harness.clone()]);
+    }
+    argv.extend([
         "--cwd".to_string(),
         req.cwd.clone(),
-        "--substrate".to_string(),
-        req.substrate.clone(),
+        // An EMPTY substrate means the door's default (thread where the
+        // harness seats one); only an explicit lane rides the argv.
         "--mux-session".to_string(),
         session.to_string(),
         // Fail immediately on a full spawn gate rather than queueing: a
         // popup launch that silently waits reads as a hung button.
         "--no-wait".to_string(),
-    ]
-    .to_vec();
+    ]);
+    if !req.substrate.is_empty() {
+        argv.extend(["--substrate".to_string(), req.substrate.clone()]);
+    }
     if let Some(m) = &req.model {
         argv.extend(["--model".to_string(), m.clone()]);
     }
@@ -171,6 +175,12 @@ pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &s
     }
     if let Some(t) = &req.placement {
         argv.extend(["--tab".to_string(), t.clone()]);
+    }
+    if let Some(p) = &req.portal {
+        argv.extend(["--portal".to_string(), p.to_string()]);
+    }
+    if let Some(s) = &req.split {
+        argv.extend(["--split".to_string(), s.clone()]);
     }
     // The seed rides stdin even when empty: an empty stdin is the honest
     // "no seed requested", never a fabricated task.
@@ -612,8 +622,9 @@ mod tests {
 
     #[test]
     fn dispatch_spawn_argv_is_pinned() {
-        // AC4-HP: node + pane + session + no-wait, and nothing else - no
-        // --harness, --model, --route and no message.
+        // Node + session + no-wait, and nothing else: no --substrate pin
+        // (the door's thread default decides), no --tab parent, no
+        // --harness/--model/--route and no message.
         assert_eq!(
             dispatch_spawn_argv("fno", "x-1", "work", None, None),
             vec![
@@ -622,14 +633,13 @@ mod tests {
                 "spawn",
                 "--node",
                 "x-1",
-                "--substrate",
-                "pane",
                 "--mux-session",
                 "work",
                 "--no-wait",
             ]
         );
-        // The account and the epic tab ride only when present.
+        // The account rides only when present; the epic-tab parent is
+        // retired (a thread has no tab to group under).
         assert_eq!(
             dispatch_spawn_argv("fno", "x-1", "work", Some("acc"), Some("3")),
             vec![
@@ -638,15 +648,11 @@ mod tests {
                 "spawn",
                 "--node",
                 "x-1",
-                "--substrate",
-                "pane",
                 "--mux-session",
                 "work",
                 "--no-wait",
                 "--account",
                 "acc",
-                "--tab",
-                "3",
             ]
         );
     }
@@ -663,8 +669,6 @@ mod tests {
                 "spawn",
                 "--node",
                 "x-1",
-                "--substrate",
-                "pane",
                 "--mux-session",
                 "work",
                 "--no-wait",
@@ -673,13 +677,13 @@ mod tests {
                 "/fno:blueprint x-1",
             ]
         );
-        // The optional dispatch flags stay in place ahead of the plan pins.
+        // The account still rides when present.
         assert_eq!(
             plan_spawn_argv("fno", "x-2", "work", Some("acc"), Some("3"))
                 .iter()
-                .filter(|a| *a == "--account" || *a == "--tab" || *a == "acc" || *a == "3")
+                .filter(|a| *a == "--account" || *a == "acc")
                 .count(),
-            4
+            2
         );
     }
 
@@ -712,9 +716,12 @@ mod tests {
             harness: "codex".into(),
             substrate: "pane".into(),
             model: Some("gpt-5.6-luna".into()),
+            model_names_harness: false,
             effort: Some("high".into()),
             permission_mode: Some("workspace-write:on-request".into()),
             placement: Some("name:work".into()),
+            portal: None,
+            split: None,
             message: "line one\nline \"two\" $ ` \u{1f600}".into(),
         };
         assert_eq!(
@@ -744,21 +751,25 @@ mod tests {
                 "-",
             ]
         );
-        // Minimal request: only the required axes + the stdin seed door.
-        let bare = AgentLaunchRequest {
+        // Empty substrate omits the flag so the door's default decides; a
+        // thread placed through a portal carries --portal and its geometry.
+        let thread = AgentLaunchRequest {
             request_id: 2,
             revision: 1,
             cwd: "/tmp/p2".into(),
             harness: "claude".into(),
-            substrate: "thread".into(),
+            substrate: String::new(),
             model: None,
+            model_names_harness: false,
             effort: None,
             permission_mode: None,
             placement: None,
+            portal: Some(1),
+            split: Some("right".into()),
             message: String::new(),
         };
         assert_eq!(
-            launch_spawn_argv("fno", &bare, "s"),
+            launch_spawn_argv("fno", &thread, "s"),
             vec![
                 "fno",
                 "agents",
@@ -767,14 +778,43 @@ mod tests {
                 "claude",
                 "--cwd",
                 "/tmp/p2",
-                "--substrate",
-                "thread",
                 "--mux-session",
                 "s",
                 "--no-wait",
+                "--portal",
+                "1",
+                "--split",
+                "right",
                 "--prompt-file",
                 "-",
             ]
+        );
+        // AC5-HP: a routing-row pick omits --harness, so the door resolves
+        // the row's harness, route, account and effort from the model alone.
+        let row_pinned = AgentLaunchRequest {
+            request_id: 3,
+            revision: 1,
+            cwd: "/tmp/p3".into(),
+            harness: "claude".into(),
+            substrate: String::new(),
+            model: Some("glm-5.3-flash[1m]".into()),
+            model_names_harness: true,
+            effort: None,
+            permission_mode: None,
+            placement: None,
+            portal: None,
+            split: None,
+            message: String::new(),
+        };
+        let argv = launch_spawn_argv("fno", &row_pinned, "s");
+        assert!(
+            !argv.contains(&"--harness".to_string()),
+            "a model-only pin omits --harness: {argv:?}"
+        );
+        assert!(
+            argv.contains(&"--model".to_string())
+                && argv.contains(&"glm-5.3-flash[1m]".to_string()),
+            "the model id rides: {argv:?}"
         );
     }
 

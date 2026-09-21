@@ -57,11 +57,66 @@ fn send_launch(client: &mut FakeClient, scratch: &Scratch, request_id: u64, mess
         harness: "claude".to_string(),
         substrate: "pane".to_string(),
         model: None,
+        model_names_harness: false,
         effort: None,
         permission_mode: None,
         placement: None,
+        portal: None,
+        split: None,
         message: message.to_string(),
     }));
+}
+
+#[test]
+fn launcher_journey_model_only_pin_omits_harness() {
+    // AC5-HP: a routing-row pick (model_names_harness) omits --harness so
+    // the door resolves the row's harness, route and account from the model.
+    // AC5-EDGE: the false default keeps today's argv, pinned by
+    // launcher_journey_argv_stdin_and_birth_decode.
+    let scratch = Scratch::new("launcher-journey-modelpin");
+    let record_dir = scratch.0.join("records");
+    std::fs::create_dir_all(&record_dir).unwrap();
+    let door = fake_door(&scratch.0, "fake-fno", RECORDING);
+    let sock = scratch.main_sock();
+    let _server = spawn_server(
+        &sock,
+        &[
+            ("FNO_BIN", door.to_string_lossy().as_ref()),
+            ("RECORD_DIR", record_dir.to_string_lossy().as_ref()),
+        ],
+    );
+    let mut client = attach_and_launch(&scratch, &sock);
+    client.raw(&ClientMsg::AgentLaunch(AgentLaunchRequest {
+        request_id: 1,
+        revision: 1,
+        cwd: scratch.home_cwd(),
+        harness: "claude".to_string(),
+        substrate: String::new(),
+        model: Some("glm-5.3-flash[1m]".to_string()),
+        model_names_harness: true,
+        effort: None,
+        permission_mode: None,
+        placement: None,
+        portal: None,
+        split: None,
+        message: "hi".to_string(),
+    }));
+    client.wait(15, "launch terminal state", |c| {
+        c.launch_updates
+            .iter()
+            .any(|u| !matches!(u.state, fno::proto::LaunchState::Starting))
+            .then_some(())
+    });
+    let argv = std::fs::read_to_string(record_dir.join("argv.log")).unwrap();
+    let argv: Vec<String> = argv.lines().map(str::to_string).collect();
+    assert!(
+        !argv.contains(&"--harness".to_string()),
+        "a model-only pin omits --harness: {argv:?}"
+    );
+    assert!(
+        argv.contains(&"--model".to_string()),
+        "the model id rides: {argv:?}"
+    );
 }
 
 /// Wait for ANY terminal state, not one specific variant: a wait pinned to
@@ -151,6 +206,69 @@ fn launcher_journey_argv_stdin_and_birth_decode() {
     );
     let stdin_seen = std::fs::read_to_string(record_dir.join("stdin.log")).unwrap();
     assert_eq!(stdin_seen, message, "the seed arrives verbatim");
+}
+
+#[test]
+fn launcher_journey_empty_substrate_takes_the_door_default() {
+    // AC6-HP: an EMPTY substrate omits --substrate so the door's thread
+    // default decides; a thread placement through a portal rides --portal
+    // and its geometry flag. The old pane-pinned argv stays pinned by
+    // launcher_journey_argv_stdin_and_birth_decode.
+    let scratch = Scratch::new("launcher-journey-thread");
+    let record_dir = scratch.0.join("records");
+    std::fs::create_dir_all(&record_dir).unwrap();
+    let door = fake_door(&scratch.0, "fake-fno", RECORDING);
+    let sock = scratch.main_sock();
+    let _server = spawn_server(
+        &sock,
+        &[
+            ("FNO_BIN", door.to_string_lossy().as_ref()),
+            ("RECORD_DIR", record_dir.to_string_lossy().as_ref()),
+        ],
+    );
+    let mut client = attach_and_launch(&scratch, &sock);
+    client.raw(&ClientMsg::AgentLaunch(AgentLaunchRequest {
+        request_id: 1,
+        revision: 1,
+        cwd: scratch.home_cwd(),
+        harness: "claude".to_string(),
+        substrate: String::new(),
+        model: None,
+        effort: None,
+        permission_mode: None,
+        placement: None,
+        portal: Some(1),
+        split: Some("right".into()),
+        message: "hi".to_string(),
+    }));
+    client.wait(15, "launch terminal state", |c| {
+        c.launch_updates
+            .iter()
+            .any(|u| !matches!(u.state, fno::proto::LaunchState::Starting))
+            .then_some(())
+    });
+    let argv = std::fs::read_to_string(record_dir.join("argv.log")).unwrap();
+    let argv: Vec<String> = argv.lines().map(str::to_string).collect();
+    let home_cwd = scratch.home_cwd();
+    let expect = [
+        "agents",
+        "spawn",
+        "--harness",
+        "claude",
+        "--cwd",
+        home_cwd.as_str(),
+        "--mux-session",
+        "main",
+        "--no-wait",
+        "--portal",
+        "1",
+        "--split",
+        "right",
+        "--prompt-file",
+        "-",
+    ];
+    let start = argv.len() - expect.len();
+    assert_eq!(&argv[start..], expect, "door argv tail: {argv:?}");
 }
 
 #[test]

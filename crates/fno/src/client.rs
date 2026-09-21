@@ -6258,6 +6258,17 @@ impl View {
                 &m.popup.render(self.term),
                 &self.theme,
             );
+        } else if let Some(pk) = self.launcher.as_ref().and_then(|l| l.picker.as_ref()) {
+            // The composer's choice popover, the dock's child: drawn over
+            // the sideline blit, below any modal opened after it (which
+            // would take keys first and reveal the picker on close).
+            popup::draw(
+                &mut cells,
+                rows,
+                cols,
+                &pk.popup.render(self.term),
+                &self.theme,
+            );
         } else if let Some(sel) = self.answers {
             // needs-me queue (grown from the answer overlay,
             // folded MINE in as the first lane): MINE then the
@@ -10120,7 +10131,7 @@ async fn attach_and_run(
             view.catalog_inflight = true;
             let tx = catalog_tx.clone();
             tokio::spawn(async move {
-                let outcome = agent_launcher::load_catalog();
+                let outcome = agent_launcher::load_catalog().await;
                 let _ = tx.send(outcome);
             });
         }
@@ -10727,7 +10738,7 @@ async fn attach_and_run(
                 // popup's harness names (first landing or a retained draft)
                 // and redraw so an open popup shows the fresh field.
                 view.catalog_inflight = false;
-                if let agent_launcher::CatalogOutcome::Ok(rows) = &outcome {
+                if let agent_launcher::CatalogOutcome::Ok(rows, _) = &outcome {
                     if let Some(l) = view.launcher.as_mut() {
                         if l.draft.harnesses.is_empty() && !rows.is_empty() {
                             l.draft.harnesses = rows.iter().map(|r| r.name.clone()).collect();
