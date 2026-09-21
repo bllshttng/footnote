@@ -219,7 +219,7 @@ fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), Str
         return Ok(());
     }
     let transaction = connection
-        .transaction()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
     for (ordinal, row) in rows.iter().enumerate() {
         // A row the model cannot represent (a minimal legacy fixture row with
@@ -448,7 +448,7 @@ pub fn shadow_sync(
 ) -> Result<PathBuf, String> {
     let mut connection = open(graph)?;
     let transaction = connection
-        .transaction()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
     let _report = write_changed(&transaction, before, after, false)?;
     stamp_version(&transaction, json_version)?;
@@ -465,7 +465,7 @@ pub fn authoritative_sync(
 ) -> Result<String, String> {
     let mut connection = open(graph)?;
     let transaction = connection
-        .transaction()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
     let _report = write_changed(&transaction, before, after, true)?;
     let version = content_version(after);
@@ -537,23 +537,44 @@ pub fn mutate_single_row(
     mutation: &str,
     mut apply: impl FnMut(&mut Vec<Value>) -> Result<bool, String>,
 ) -> Result<bool, String> {
+    let started = std::time::Instant::now();
+    let (outcome, retries) = retry_on_busy(|| mutate_single_row_once(graph, mutation, &mut apply))?;
+    if outcome {
+        emit_gate_event(mutation, started.elapsed().as_millis(), retries);
+    }
+    Ok(outcome)
+}
+
+/// The one busy retry behind both graph write paths: the typed single-row
+/// seam and the whole-graph publish. A busy or locked store sleeps with
+/// linear backoff and retries; anything else surfaces immediately. A busy
+/// error that survives the budget comes back as the honest refusal (AC5):
+/// condition, attempts, elapsed, and the read-back command, still carrying
+/// the `locked` substring every downstream busy-detect matches on. The
+/// second tuple element is the retry count the gate event records.
+pub(crate) fn retry_on_busy<T>(
+    mut op: impl FnMut() -> Result<T, String>,
+) -> Result<(T, u32), String> {
     const ATTEMPTS: usize = 3;
     let started = std::time::Instant::now();
     let mut retries = 0u32;
     for attempt in 0..ATTEMPTS {
-        match mutate_single_row_once(graph, mutation, &mut apply) {
-            Ok(outcome) => {
-                if outcome {
-                    emit_gate_event(mutation, started.elapsed().as_millis(), retries);
-                }
-                return Ok(outcome);
-            }
+        match op() {
+            Ok(value) => return Ok((value, retries)),
             Err(error) => {
                 let busy = error.contains("locked") || error.contains("busy");
                 if busy && attempt + 1 < ATTEMPTS {
                     retries += 1;
                     std::thread::sleep(Duration::from_millis(100 * (attempt as u64 + 1)));
                     continue;
+                }
+                if busy {
+                    return Err(format!(
+                        "graph write refused: the store was busy after {ATTEMPTS} attempts over \
+                         {:.1}s (sqlite: {error}). Nothing was written; no node was created. \
+                         Run `fno backlog get <id>` to confirm, then retry.",
+                        started.elapsed().as_secs_f32()
+                    ));
                 }
                 return Err(error);
             }
@@ -949,7 +970,7 @@ pub fn record_parity_sample(
 ) -> Result<(), String> {
     let mut connection = open(graph)?;
     let transaction = connection
-        .transaction()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
     stamp_meta(
         &transaction,
@@ -2318,6 +2339,58 @@ mod tests {
             "from-slow"
         );
         assert_eq!(two.get("title").unwrap(), "Renamed");
+    }
+
+    #[test]
+    fn a_committer_inside_the_publish_window_does_not_refuse_the_publish() {
+        // AC4-EDGE: another writer holds the write lock and commits while
+        // the authoritative publish runs. On IMMEDIATE the publish waits on
+        // the lock, reads AFTER the interleaved commit, and lands. On the
+        // deferred shape this replaces, the publish's read pinned the
+        // pre-commit snapshot and the upgrade refused the instant the lock
+        // freed (the measured 0.0000s SQLITE_BUSY): the failure this test
+        // exists to keep dead.
+        let _env_lock = crate::claims::test_env_lock().lock().unwrap();
+        let spaces = tempfile::TempDir::new().unwrap();
+        declare_test_roots(spaces.path());
+        let (_dir, graph) = seeded_sqlite_fixture();
+        let before = export_rows(&open(&graph).unwrap()).unwrap();
+        let mut after = before.clone();
+        if let Some(row) = after.first_mut() {
+            row["title"] = serde_json::json!("published-under-contention");
+        }
+
+        // The interleaving writer: takes the write lock, holds it past the
+        // publish's begin, commits mid-publish.
+        let graph_for_writer = graph.clone();
+        let writer = std::thread::spawn(move || {
+            let mut connection = open(&graph_for_writer).unwrap();
+            let transaction = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO graph_meta(key, value) VALUES ('ac4_probe', 'held')",
+                    [],
+                )
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(transaction);
+        });
+        // Let the writer take its lock before the publish starts.
+        std::thread::sleep(std::time::Duration::from_millis(80));
+
+        let version = authoritative_sync(&graph, &before, &after)
+            .expect("the publish must wait out the interleaving writer and commit");
+        writer.join().unwrap();
+        assert!(!version.is_empty());
+        let rows = export_rows(&open(&graph).unwrap()).unwrap();
+        assert_eq!(
+            rows.first()
+                .and_then(|row| row.get("title"))
+                .and_then(|t| t.as_str()),
+            Some("published-under-contention")
+        );
     }
 
     #[test]

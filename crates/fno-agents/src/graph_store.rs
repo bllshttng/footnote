@@ -2488,8 +2488,10 @@ pub fn locked_mutate_with_hook(
     }
 
     let (backup, shadow_warning, version) = if sqlite_backend {
-        let version = crate::backlog::authoritative_sync(path, &shadow_before, &entries)
-            .map_err(StoreError::Sqlite)?;
+        let (version, _retries) = crate::backlog::retry_on_busy(|| {
+            crate::backlog::authoritative_sync(path, &shadow_before, &entries)
+        })
+        .map_err(StoreError::Sqlite)?;
         // graph.json is frozen under sqlite: the readers moved onto the
         // backend switch, so a publish rewrites only graph.db. The file
         // comes back on demand via `fno doctor graph export --now`.
