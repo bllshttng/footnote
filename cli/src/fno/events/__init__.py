@@ -1156,17 +1156,6 @@ def operator_question(
     return _build("operator_question", source, data)
 
 
-def day_boundary(*, boundary_id: str, kind: str, cutoff: str,
-                 source: str = "target", **fields: Any) -> dict[str, Any]:
-    if kind not in {"start", "end"}:
-        raise ValidationError("day boundary kind must be start or end")
-    data: dict[str, Any] = {"boundary_id": boundary_id, "kind": kind, "cutoff": cutoff}
-    if "open_count" in fields:
-        fields["open"] = fields.pop("open_count")
-    data.update({k: v for k, v in fields.items() if v is not None})
-    return _build("day_boundary", source, data)
-
-
 def operator_question_closed(
     *,
     question_id: str,
@@ -1945,7 +1934,6 @@ __all__ = [
     "mission_started",
     "QUESTION_CAP",
     "operator_question",
-    "day_boundary",
     "operator_question_closed",
     "operator_decision",
     "decision_retracted",

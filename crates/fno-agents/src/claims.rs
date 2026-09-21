@@ -1535,7 +1535,7 @@ fn stamp_owner(lock_dir: &Path) -> String {
 /// Acquire a mkdir dir mutex; return an owner token, or None on timeout.
 /// Mirrors `fno.mutex.acquire_dir_mutex`. None means a live, in-age holder was
 /// held past the deadline - genuine congestion, not a corpse.
-fn acquire_dir_mutex(lock_dir: &Path, timeout: Duration, steal: bool) -> Option<String> {
+pub(crate) fn acquire_dir_mutex(lock_dir: &Path, timeout: Duration, steal: bool) -> Option<String> {
     let deadline = Instant::now() + timeout;
     loop {
         match std::fs::create_dir(lock_dir) {
@@ -1563,7 +1563,7 @@ fn acquire_dir_mutex(lock_dir: &Path, timeout: Duration, steal: bool) -> Option<
 /// `fno.mutex.release_dir_mutex`. A mismatch (or missing owner file) means the
 /// lock was stolen or replaced mid-write: leave the current holder's dir intact.
 /// The dir contains an `owner` file, so removal is `remove_dir_all`.
-fn release_dir_mutex(lock_dir: &Path, token: &str) {
+pub(crate) fn release_dir_mutex(lock_dir: &Path, token: &str) {
     if read_owner(lock_dir) == token {
         let _ = std::fs::remove_dir_all(lock_dir);
         return;

@@ -3,7 +3,8 @@
 use chrono::{DateTime, FixedOffset, SecondsFormat, TimeZone, Utc};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Default)]
 pub struct DayInputs {
@@ -495,6 +496,7 @@ pub fn run_day(rest: &[String], home: &crate::paths::AgentsHome) -> i32 {
     let mut now = Utc::now().to_rfc3339();
     let mut json_output = false;
     let mut event_paths = Vec::new();
+    let mut commit = false;
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
@@ -512,6 +514,10 @@ pub fn run_day(rest: &[String], home: &crate::paths::AgentsHome) -> i32 {
             }
             "--json" | "-J" => {
                 json_output = true;
+                i += 1;
+            }
+            "--commit" => {
+                commit = true;
                 i += 1;
             }
             other => {
@@ -591,6 +597,24 @@ pub fn run_day(rest: &[String], home: &crate::paths::AgentsHome) -> i32 {
     };
     match fold_day(&input) {
         Ok(payload) => {
+            if commit && payload["reused"] != json!(true) {
+                // The project journal is the first journal the caller named;
+                // the Python adapter passes `fno.paths.event_journals()` in
+                // order, so [0] is the live project journal.
+                let journal = match event_paths.first() {
+                    Some(path) => path.as_path(),
+                    None => {
+                        eprintln!(
+                            "fno-agents day: --commit needs --events-path for the project journal"
+                        );
+                        return 2;
+                    }
+                };
+                if let Err(error) = commit_boundary(&payload, journal, &questions_path) {
+                    eprintln!("fno-agents day: {error}");
+                    return 1;
+                }
+            }
             if json_output {
                 println!(
                     "{}",
@@ -606,6 +630,102 @@ pub fn run_day(rest: &[String], home: &crate::paths::AgentsHome) -> i32 {
             2
         }
     }
+}
+
+/// The durable boundary row: ids and counts only, never titles. Full
+/// evidence stays in its owning sources.
+fn boundary_event_line(payload: &Value) -> Result<String, String> {
+    let questions = payload.get("questions").cloned().unwrap_or(json!({}));
+    let mut fields = serde_json::Map::new();
+    fields.insert("boundary_id".into(), payload["boundary_id"].clone());
+    fields.insert("kind".into(), payload["kind"].clone());
+    fields.insert("cutoff".into(), payload["cutoff"].clone());
+    if let Some(prior) = payload.get("prior_boundary_id").filter(|v| !v.is_null()) {
+        fields.insert("prior_boundary_id".into(), prior.clone());
+    }
+    if let Some(featured) = questions
+        .get("featured")
+        .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
+    {
+        fields.insert("featured".into(), featured.clone());
+    }
+    if let Some(count) = payload.pointer("/completed/count").and_then(Value::as_u64) {
+        fields.insert("completed".into(), json!(count));
+    }
+    for key in ["open", "opened", "closed"] {
+        if let Some(count) = questions.get(key).and_then(Value::as_u64) {
+            fields.insert(key.into(), json!(count));
+        }
+    }
+    let retraction_count = payload
+        .get("retractions")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    fields.insert("retractions".into(), json!(retraction_count));
+    // An overflow substitute is not a committed boundary: size the row
+    // against the validated limit and refuse rather than write the
+    // event_payload_too_large meta-event in its place.
+    let encoded = serde_json::to_string(&fields).map_err(|e| e.to_string())?;
+    let limit = crate::events_limits::max_data_bytes();
+    if encoded.len() > limit {
+        return Err(format!(
+            "boundary provenance is {} bytes, over the validated limit of {limit}; refusing the boundary instead of substituting",
+            encoded.len()
+        ));
+    }
+    let event = json!({
+        "ts": crate::events::now_rfc3339(),
+        "type": "day_boundary",
+        "source": "target",
+        "data": fields,
+    });
+    let mut line = serde_json::to_string(&event).map_err(|e| e.to_string())?;
+    line.push('\n');
+    Ok(line)
+}
+
+/// One locked O_APPEND write, mirroring the Python journal writer's lock
+/// convention: a `<file>.lock.d` mkdir mutex, an owner file, one atomic append.
+fn append_row(path: &Path, line: &str) -> Result<(), String> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("events.jsonl");
+    let lock_dir = path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(format!("{name}.lock.d"));
+    let token =
+        crate::claims::acquire_dir_mutex(&lock_dir, std::time::Duration::from_secs(30), true)
+            .ok_or_else(|| format!("lock timeout: {}", lock_dir.display()))?;
+    let result = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(line.as_bytes()))
+        .map_err(|e| e.to_string());
+    crate::claims::release_dir_mutex(&lock_dir, &token);
+    result
+}
+
+/// Commit the fold's boundary row: project journal first, then the
+/// machine-wide question index, mirroring the decide retraction order. A
+/// question-index failure is reported with the boundary id: the row is in
+/// the journal, so recovery names what landed and what did not.
+fn commit_boundary(
+    payload: &Value,
+    journal_path: &Path,
+    questions_path: &Path,
+) -> Result<(), String> {
+    let line = boundary_event_line(payload)?;
+    append_row(journal_path, &line).map_err(|e| format!("project journal append failed: {e}"))?;
+    append_row(questions_path, &line).map_err(|e| {
+        format!(
+            "boundary {} landed in the project journal but not the question index: {e}",
+            payload["boundary_id"]
+        )
+    })
 }
 
 #[cfg(test)]
@@ -764,5 +884,37 @@ mod tests {
         assert!(first.starts_with("Start: answer q-1"), "{first}");
         assert!(first.contains("pick the runner"), "{first}");
         assert!(text.lines().count() <= 12, "{text}");
+    }
+
+    #[test]
+    fn boundary_event_line_names_required_keys_and_counts_only() {
+        let payload = json!({
+            "boundary_id": "day-end-20260920-ab12",
+            "kind": "end",
+            "reused": false,
+            "cutoff": "2026-09-20T18:05:00+00:00",
+            "prior_boundary_id": null,
+            "completed": {"count": 3, "items": []},
+            "questions": {"open": 5, "opened": 2, "closed": 1, "featured": ["q-1"], "first_ask": "why"},
+            "retractions": [],
+            "window": {"from": "2026-09-20T08:00:00+00:00", "to": "2026-09-20T18:05:00+00:00", "label": "since previous boundary"}
+        });
+        let line = boundary_event_line(&payload).unwrap();
+        let event: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(event["type"], json!("day_boundary"));
+        assert_eq!(event["source"], json!("target"));
+        let data = &event["data"];
+        assert_eq!(data["boundary_id"], json!("day-end-20260920-ab12"));
+        assert_eq!(data["kind"], json!("end"));
+        assert_eq!(data["featured"].as_array().unwrap().len(), 1);
+        assert!(data.get("title").is_none(), "the row never carries titles");
+        assert!(line.ends_with('\n'));
+    }
+
+    #[test]
+    fn fold_refuses_a_kind_outside_start_and_end() {
+        let input = inputs("noon", "2026-09-10T12:00:00Z", "");
+        let error = fold_day(&input).unwrap_err();
+        assert!(error.contains("--kind must be start or end"), "{error}");
     }
 }

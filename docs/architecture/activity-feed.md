@@ -37,7 +37,7 @@ The lifecycle kinds derive from the graph at query time, so the graph stays the 
 
 ## Day boundaries
 
-`fno inbox day start` and `fno inbox day end` fold the existing project journal, question lifecycle, graph completion records, decision retractions, review retractions, and reign check-ins. The native fold returns JSON or a short text readback. The inbox adapter persists one bounded `day_boundary` row in the project journal first. It then writes the row to `~/.fno/questions.jsonl` for durable cross-rotation recall.
+`fno inbox day start` and `fno inbox day end` fold the existing project journal, question lifecycle, graph completion records, decision retractions, review retractions, and reign check-ins. The native fold returns JSON or a short text readback. The native verb's `--commit` writes one bounded `day_boundary` row to the project journal first. It then writes the same row to `~/.fno/questions.jsonl` for durable cross-rotation recall. The inbox relay only selects the destination, so the operator command lives under the inbox. The row carries ids and counts only. The writer sizes the row against the validated event limit before any write. If the row is over the limit, the writer refuses it and never substitutes.
 
 The permanent question index stores the boundary reference because the project journal rotates at 8 MiB and keeps only one rotated file. The index is recall and provenance, not a second source of question truth. Open questions still come from the existing lifecycle fold, and a failed index append names the boundary id after the project append.
 

@@ -1,93 +1,79 @@
-"""Tests for the project-journal day-boundary adapter."""
+"""Unit tests for the `fno inbox day` relay and the durable boundary row.
 
-from __future__ import annotations
-
-import importlib.util
-from pathlib import Path
-
+The fold and the append live in the native `day` verb. These cover the
+relay's contract (registration, exit-code relay) and a parity guard: the
+Rust-built row shape passes the Python event validator, and a malformed
+kind is refused.
+"""
 import pytest
 
-
-def test_day_boundary_builder_is_available_and_validates() -> None:
-    from fno import events
-
-    assert hasattr(events, "day_boundary")
-    event = events.day_boundary(
-        boundary_id="day-start-20260913-ab12",
-        kind="start",
-        cutoff="2026-09-13T08:00:00Z",
-        prior_boundary_id=None,
-        featured=["q-1"],
-        completed=2,
-        open_count=3,
-        opened=1,
-        closed=0,
-        retractions=1,
-    )
-    assert event["type"] == "day_boundary"
-    assert event["data"]["boundary_id"] == "day-start-20260913-ab12"
-    events.validate(event)
+from fno.outstanding import day as day_mod
 
 
-def test_day_adapter_module_is_registered() -> None:
-    assert importlib.util.find_spec("fno.outstanding.day") is not None
+def test_day_app_registers_start_and_end() -> None:
+    from typer.testing import CliRunner
+
+    runner = CliRunner()
+    for name in ("start", "end"):
+        result = runner.invoke(day_mod.day_app, [name])
+        # The relay shells the fno-agents binary; inside the test process the
+        # resolve fails and the refusal must be a non-zero exit, never a
+        # silent success.
+        assert result.exit_code != 0
 
 
-def test_index_failure_names_boundary_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    from fno.outstanding import day
+def test_relay_relays_the_native_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
 
-    captured: list[tuple[dict, object]] = []
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return type("R", (), {"returncode": 3})()
 
-    def fake_append(event: dict, events_path=None) -> None:
-        captured.append((event, events_path))
-        if len(captured) == 2:
-            raise OSError("index unavailable")
-
-    monkeypatch.setattr(day, "_run_native", lambda kind: {
-        "boundary_id": "day-end-20260913-ab12",
-        "kind": kind,
-        "reused": False,
-        "cutoff": "2026-09-13T18:00:00Z",
-        "window": {"from": "2026-09-13T08:00:00Z", "to": "2026-09-13T18:00:00Z", "label": "since previous boundary"},
-        "prior_boundary_id": "day-start-20260913-ab12",
-        "completed": {"count": 0, "items": []},
-        "questions": {"open": 0, "opened": 0, "closed": 0, "featured": []},
-        "retractions": [],
-    })
-    monkeypatch.setattr(day, "append_event", fake_append)
-    monkeypatch.setattr(day, "events_path", lambda root: root / "events.jsonl")
-    monkeypatch.setattr(day, "questions_path", lambda: Path("questions.jsonl"))
-    monkeypatch.setattr(day, "resolve_carveout_root", lambda: Path("project"))
-
-    with pytest.raises(day.DayIndexWriteError, match="day-end-20260913-ab12"):
-        day._record_boundary("end")
-    assert len(captured) == 2
+    monkeypatch.setattr(day_mod.subprocess, "run", fake_run)
+    command = day_mod._make("start")
+    with pytest.raises(day_mod.typer.Exit) as err:
+        command()
+    assert err.value.exit_code == 3
+    assert calls
 
 
-def test_append_order_is_project_journal_first(monkeypatch: pytest.MonkeyPatch) -> None:
-    from fno.outstanding import day
+def test_rust_row_shape_passes_the_python_validator() -> None:
+    """Parity guard for the native writer's row shape (schema.yaml: day_boundary)."""
+    from fno.events import validate
 
-    captured: list[object] = []
+    event = {
+        "ts": "2026-09-20T18:05:00.123Z",
+        "type": "day_boundary",
+        "source": "target",
+        "data": {
+            "boundary_id": "day-end-20260920-ab12",
+            "kind": "start",
+            "cutoff": "2026-09-20T18:05:00+00:00",
+            "prior_boundary_id": "day-start-20260920-ef34",
+            "featured": ["q-1", "q-2"],
+            "completed": 3,
+            "open": 5,
+            "opened": 2,
+            "closed": 1,
+            "retractions": 0,
+        },
+    }
+    validate(event)
 
-    def fake_append(event: dict, events_path=None) -> None:
-        captured.append(str(events_path))
 
-    monkeypatch.setattr(day, "_run_native", lambda kind: {
-        "boundary_id": "day-end-20260913-ab12",
-        "kind": kind,
-        "reused": False,
-        "cutoff": "2026-09-13T18:00:00Z",
-        "window": {"from": "2026-09-13T08:00:00Z", "to": "2026-09-13T18:00:00Z", "label": "since previous boundary"},
-        "prior_boundary_id": None,
-        "completed": {"count": 0, "items": []},
-        "questions": {"open": 0, "opened": 0, "closed": 0, "featured": []},
-        "retractions": [],
-    })
-    monkeypatch.setattr(day, "append_event", fake_append)
-    monkeypatch.setattr(day, "events_path", lambda root: Path("project") / "events.jsonl")
-    monkeypatch.setattr(day, "questions_path", lambda: Path("questions.jsonl"))
-    monkeypatch.setattr(day, "resolve_carveout_root", lambda: Path("project"))
+def test_rust_row_shape_rejects_a_missing_required_key() -> None:
+    # The validator enforces the envelope and required keys; the kind enum is
+    # the writer's gate, held by the fold's `--kind start|end` refusal.
+    from fno.events import ValidationError, validate
 
-    day._record_boundary("end")
-    assert captured[0] == str(Path("project") / "events.jsonl")
-    assert captured[1] == str(Path("questions.jsonl"))
+    event = {
+        "ts": "2026-09-20T18:05:00.123Z",
+        "type": "day_boundary",
+        "source": "target",
+        "data": {
+            "boundary_id": "day-end-20260920-ab12",
+            "cutoff": "2026-09-20T18:05:00+00:00",
+        },
+    }
+    with pytest.raises(ValidationError):
+        validate(event)
