@@ -9732,7 +9732,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
     // is a word now) + DIM flag.
     let probe = |needle: &str| -> (String, bool) {
         let r = lines.iter().position(|l| l.contains(needle)).unwrap();
-        let status: String = frame.cells[r * cols..r * cols + 11]
+        let status: String = frame.cells[r * cols..r * cols + 5]
             .iter()
             .map(|c| c.c)
             .collect();
@@ -9741,31 +9741,25 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
             frame.cells[r * cols].flags & cell_flags::DIM == cell_flags::DIM,
         )
     };
-    // x-df4c: idle was the outline `○` (was the near-invisible `·`); x-d401
-    // moves a badgeless reading-less row to the marked absence `?` - the
-    // mux cannot see an external/fno live row's workload, so it says so.
-    // The external DIM modifier and the no-reading DIM coincide, and this
-    // is a KNOWN, accepted collision, not an oversight: a badgeless local
-    // row and a badgeless external row both paint `?` + DIM, where before
-    // they were a bright `○` and a dim `○`. What the glyph discriminates
-    // is STATE, never external-ness, and DIM only reinforces it - the
-    // earlier wording read as though the glyph told the two rows apart,
-    // which it does not. External-ness reads through the row's ACTIONS.
-    // Restoring the distinction here means giving `external` a channel of
-    // its own; DIM cannot carry it once the state is already dim, which
-    // was already true of `✗` before this branch. The exited precedence
-    // below is unchanged.
+    // A badgeless reading-less row paints `?` + DIM; a badgeless local row
+    // and a badgeless external row collide there on purpose (the glyph
+    // discriminates STATE, never external-ness; DIM only reinforces it).
+    // External-ness reads through the row's ACTIONS, and the exited
+    // precedence below is unchanged.
     let (word, dim) = probe("z-exited");
     assert!(
-        word.starts_with("Stop") && dim,
+        word.trim_start().starts_with("Stop") && dim,
         "exited: Stop + DIM: {word:?}"
     );
     let (word, dim) = probe("z-external");
-    assert!(word.starts_with('?') && dim, "external: ? + DIM: {word:?}");
+    assert!(
+        word.trim_start().starts_with('?') && dim,
+        "external: ? + DIM: {word:?}"
+    );
     let (word, dim) = probe("z-fnolive");
     assert!(
-        word.starts_with('?') && dim,
-        "fno-live: ? + DIM (no reading; bright-idle is gone): {word:?}"
+        word.trim_start().starts_with('?') && dim,
+        "fno-live: ? + DIM: {word:?}"
     );
     // AC1-UI: external + Blocked renders `Input` in the amber accent,
     // BOLD, and NOT dimmed even though it is external - the accent beats the

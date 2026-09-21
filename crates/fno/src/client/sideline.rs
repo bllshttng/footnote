@@ -442,9 +442,9 @@ impl View {
                 };
                 (
                     vec![
-                        // Right-aligned: a short word's blank parks against the
-                        // margin, so the word sits one spacing column from the
-                        // name instead of up to 7 columns away (x-d7e9).
+                        // Right-aligned: a short word's blank parks against
+                        // the margin, so the word sits one spacing column
+                        // from the name instead of mid-cell.
                         rt_cell(status_word(lat).to_string(), cell_fg, cell_flags_v, true),
                         rt_cell(fit_ellipsis(&name, name_w), cell_fg, cell_flags_v, false),
                         rt_cell(tail, cell_fg, quiet | focus_bit, false),

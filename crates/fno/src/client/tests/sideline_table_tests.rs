@@ -194,10 +194,10 @@ fn sort_label_survives_every_column_configuration() {
 
 #[test]
 fn status_word_sits_one_column_from_the_name_cell_parent_and_child() {
-    // x-d7e9 acceptance: the gap is the test, the widths are not. A short
-    // status word right-aligns inside its fixed cell, so its last glyph sits
-    // exactly one spacing column from the name cell - for a parent row and
-    // for a spawned child (depth 1), whose indent must not widen the gap.
+    // Acceptance: the gap is the test, the widths are not. A short status
+    // word right-aligns inside its fixed cell, so its last glyph sits exactly
+    // one spacing column from the name cell - for a parent row and for a
+    // spawned child (depth 1), whose indent must not widen the gap.
     let parent = {
         let mut a = agent_row(
             "architect-with-a-very-long-name",
