@@ -8,25 +8,50 @@ events.jsonl. One helper serves every test that used to slurp the journal:
 
     rows = event_rows(tmp_path / "events.jsonl")
 
-The read rides the native ``doctor event rows`` verb, which imports any
-uncommitted journal bytes before querying, so a fixture seeded before any
-store-backed write stays visible. Rows are parsed envelopes in commit order.
-When the native binary is unavailable the helper falls back to raw journal
-bytes, mirroring the pre-store reader.
+The fast path reads the sibling store DIRECTLY over read-only SQL: no process
+spawn, no retention side effects - a test asserts state, it never prunes.
+A journal whose bytes are NEWER than the store (a raw fixture seeded after the
+last store write) routes through the native ``doctor event rows`` verb, which
+imports uncommitted journal bytes before querying. With no store at all the
+helper answers the raw journal, mirroring the pre-store reader. Rows are
+parsed envelopes in commit order.
 """
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any, Optional
 
 
+def _direct_store_lines(db: Path) -> Optional[list[str]]:
+    """Committed envelope lines straight from the store, or None if unreadable."""
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        return [row[0] for row in conn.execute("SELECT line FROM events ORDER BY seq")]
+    except sqlite3.DatabaseError:
+        return None
+    finally:
+        conn.close()
+
+
 def event_rows(events_path: Path, *, types: Optional[list[str]] = None) -> list[dict[str, Any]]:
     """Committed envelopes for one journal, optionally filtered by type."""
-    from fno.events.store_client import native_rows
+    from fno.events.store_client import native_rows, store_db_path
 
     events_path = Path(events_path)
-    committed = native_rows(events_path)
+    committed: Optional[list[str]] = None
+    db = store_db_path(events_path)
+    if db.exists():
+        # A raw fixture newer than the store needs the verb's import pass;
+        # a store at least as fresh as the journal is answered directly.
+        journal_fresh = events_path.exists() and (
+            events_path.stat().st_mtime > db.stat().st_mtime
+        )
+        if not journal_fresh:
+            committed = _direct_store_lines(db)
+    if committed is None:
+        committed = native_rows(events_path)
     if committed is None:
         committed = []
         if events_path.exists():
