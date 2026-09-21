@@ -192,6 +192,11 @@ fn launcher_one_esc_closes_the_dock() {
     h.type_bytes(b"\x02i");
     h.wait_screen(15, |s| dock_open(s));
     let before = h.screen();
+    // The PR's rendered evidence: R1_DUMP=1 prints the opened dock's screen
+    // (the after render; the before render is the recorded main failure).
+    if std::env::var("R1_DUMP").is_ok() {
+        eprintln!("--- x-5026 dock render (open, after) ---\n{before}");
+    }
     // Exactly one Esc byte, then silence.
     h.type_bytes(&[0x1b]);
     std::thread::sleep(Duration::from_millis(500));

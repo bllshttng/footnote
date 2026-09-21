@@ -386,9 +386,12 @@ mod tests {
             harness: "claude".to_string(),
             substrate: "pane".to_string(),
             model: None,
+            model_names_harness: false,
             effort: None,
             permission_mode: None,
             placement: None,
+            portal: None,
+            split: None,
             message: String::new(),
         }
     }

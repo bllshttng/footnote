@@ -410,7 +410,7 @@ pub(crate) fn open(view: &mut View) {
     }
     // A missing OR degraded catalog re-probes: one transient failure must
     // not stick for the session while a healthy one stays last-outcome-wins.
-    if !matches!(view.launcher_catalog, Some(CatalogOutcome::Ok(_))) {
+    if !matches!(view.launcher_catalog, Some(CatalogOutcome::Ok(_, _))) {
         view.catalog_want = true;
     }
 }
@@ -845,6 +845,9 @@ pub(crate) async fn launcher_keys(
         // dock). Everything else - Tab included - falls through to the dock.
         if view.launcher.as_ref().is_some_and(|l| l.picker.is_some()) {
             let portal = next_free_portal(view);
+            // Field-disjoint snapshot for the commit path (it may clear
+            // unoffered pins against the catalog).
+            let catalog = view.launcher_catalog.clone();
             if let Some(l) = view.launcher.as_mut() {
                 let Some(mut picker) = l.picker.take() else {
                     unreachable!("checked Some above");
@@ -868,7 +871,7 @@ pub(crate) async fn launcher_keys(
                     LKey::Enter => {
                         let action = picker.actions.get(picker.popup.sel).cloned().flatten();
                         if let Some(action) = action {
-                            apply_picker_action(l, view, action, portal);
+                            apply_picker_action(l, &catalog, action, portal);
                         }
                         // A disabled or header row: the picker stays open.
                     }
@@ -906,27 +909,48 @@ pub(crate) async fn launcher_keys(
                 if let Some(l) = view.launcher.as_mut() {
                     let advanced = l.draft.expanded;
                     l.focus = l.focus.next(advanced);
-                    skip_unoffered_effort(view, l);
+                    // An effort with no surface never takes focus.
+                    let harness = l.draft.harness();
+                    if l.focus == Focus::Effort && !effort_offered(&harness, &view.launcher_catalog)
+                    {
+                        l.focus = l.focus.next(advanced);
+                    }
                 }
             }
             LKey::BackTab => {
                 if let Some(l) = view.launcher.as_mut() {
                     let advanced = l.draft.expanded;
                     l.focus = l.focus.prev(advanced);
-                    skip_unoffered_effort_back(view, l);
+                    let harness = l.draft.harness();
+                    if l.focus == Focus::Effort && !effort_offered(&harness, &view.launcher_catalog)
+                    {
+                        l.focus = l.focus.prev(advanced);
+                    }
                 }
             }
             LKey::Up | LKey::Down => {
                 let delta = if matches!(key, LKey::Up) { -1 } else { 1 };
+                // Down on a picker chip drops its popover; the anchor is
+                // read before the mutable borrow.
+                let open_anchor = view.launcher.as_ref().and_then(|l| {
+                    (delta > 0 && is_picker_chip(l.focus) && l.focus != Focus::Project)
+                        .then(|| picker_anchor(l, view))
+                        .flatten()
+                });
                 if let Some(l) = view.launcher.as_mut() {
                     if l.focus == Focus::Message {
                         move_up_down(&mut l.draft, delta);
                     } else if delta < 0 {
                         let advanced = l.draft.expanded;
                         l.focus = l.focus.prev(advanced);
-                    } else if is_picker_chip(l.focus) && l.focus != Focus::Project {
-                        // Down on a picker chip drops its popover.
-                        open_picker(l, view);
+                    } else if let Some(anchor) = open_anchor {
+                        open_picker_at(
+                            l,
+                            &view.launcher_catalog,
+                            &view.layout.backlog,
+                            Some(anchor),
+                            l.focus,
+                        );
                     } else {
                         let advanced = l.draft.expanded;
                         l.focus = l.focus.next(advanced);
@@ -939,7 +963,7 @@ pub(crate) async fn launcher_keys(
                         Focus::Message => move_left(&mut l.draft),
                         Focus::Harness => {
                             cycle_harness(&mut l.draft, -1);
-                            clear_unoffered_pins(l, view);
+                            clear_unoffered_pins(&mut l.draft, &view.launcher_catalog);
                         }
                         Focus::Project => {
                             l.draft.project_idx = l.draft.project_idx.saturating_sub(1);
@@ -955,7 +979,7 @@ pub(crate) async fn launcher_keys(
                         Focus::Message => move_right(&mut l.draft),
                         Focus::Harness => {
                             cycle_harness(&mut l.draft, 1);
-                            clear_unoffered_pins(l, view);
+                            clear_unoffered_pins(&mut l.draft, &view.launcher_catalog);
                         }
                         Focus::Project => {
                             if l.draft.project_idx + 1 < l.draft.projects.len() {
@@ -1023,20 +1047,39 @@ pub(crate) async fn launcher_keys(
                         submit(view, sock_w).await?;
                     }
                     f if is_picker_chip(f) => {
+                        let anchor = view.launcher.as_ref().and_then(|l| picker_anchor(l, view));
                         if let Some(l) = view.launcher.as_mut() {
-                            open_picker(l, view);
+                            open_picker_at(
+                                l,
+                                &view.launcher_catalog,
+                                &view.layout.backlog,
+                                anchor,
+                                f,
+                            );
                         }
                     }
                     _ => {}
                 }
             }
             LKey::Char(c) => {
+                // The palette's node gesture: `@` in the message opens the
+                // node picker; the glyph itself never lands. The anchor is
+                // read before the mutable borrow.
+                let at_anchor = if c == '@' {
+                    view.launcher.as_ref().and_then(|l| picker_anchor(l, view))
+                } else {
+                    None
+                };
                 if let Some(l) = view.launcher.as_mut() {
                     match l.focus {
                         Focus::Message if c == '@' => {
-                            // The palette's node gesture: `@` opens the node
-                            // picker; the glyph itself never lands.
-                            open_node_picker(l, view);
+                            open_picker_at(
+                                l,
+                                &view.launcher_catalog,
+                                &view.layout.backlog,
+                                at_anchor,
+                                Focus::Message,
+                            );
                         }
                         Focus::Message => insert_char(&mut l.draft, c),
                         Focus::Model => {
@@ -1086,30 +1129,14 @@ pub(crate) async fn launcher_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// The effort chip with no surface never takes focus or input: Tab and
-/// BackTab step past it.
-fn skip_unoffered_effort(view: &View, l: &mut Launcher) {
-    if l.focus == Focus::Effort && !effort_offered(l, view) {
-        let advanced = l.draft.expanded;
-        l.focus = l.focus.next(advanced);
-    }
-}
-
-fn skip_unoffered_effort_back(view: &View, l: &mut Launcher) {
-    if l.focus == Focus::Effort && !effort_offered(l, view) {
-        let advanced = l.draft.expanded;
-        l.focus = l.focus.prev(advanced);
-    }
-}
-
-/// Whether the selected harness offers ANY effort value (a list, or the
+/// Whether the named harness offers ANY effort value (a list, or the
 /// provider passthrough free text). Unknown until the catalog lands: assume
 /// yes, so the chip never dims on a read that has not happened yet.
-fn effort_offered(l: &Launcher, view: &View) -> bool {
-    match &view.launcher_catalog {
+fn effort_offered(harness: &str, catalog: &Option<CatalogOutcome>) -> bool {
+    match catalog {
         Some(CatalogOutcome::Ok(rows, _)) => rows
             .iter()
-            .find(|r| r.name == l.draft.harness())
+            .find(|r| r.name == harness)
             .map(|r| r.efforts.is_some())
             .unwrap_or(true),
         _ => true,
@@ -1117,31 +1144,31 @@ fn effort_offered(l: &Launcher, view: &View) -> bool {
 }
 
 /// After the harness changes, any pin the new harness does not offer clears.
-fn clear_unoffered_pins(l: &mut Launcher, view: &View) {
-    let harness = l.draft.harness();
-    let Some(CatalogOutcome::Ok(rows, _)) = &view.launcher_catalog else {
+fn clear_unoffered_pins(draft: &mut LaunchDraft, catalog: &Option<CatalogOutcome>) {
+    let harness = draft.harness();
+    let Some(CatalogOutcome::Ok(rows, _)) = catalog else {
         return;
     };
     let Some(row) = rows.iter().find(|r| r.name == harness) else {
         return;
     };
-    if let Some(name) = &l.draft.model_row {
+    if let Some(name) = &draft.model_row {
         if !row.models.iter().any(|m| &m.name == name) {
-            l.draft.model.clear();
-            l.draft.model_row = None;
-            l.draft.bump();
+            draft.model.clear();
+            draft.model_row = None;
+            draft.bump();
         }
     }
     if let Some(efforts) = &row.efforts {
-        if !efforts.is_empty() && !efforts.iter().any(|e| *e == l.draft.effort) {
-            l.draft.effort.clear();
-            l.draft.bump();
+        if !efforts.is_empty() && !efforts.iter().any(|e| *e == draft.effort) {
+            draft.effort.clear();
+            draft.bump();
         }
     }
     if let Some(modes) = &row.permission_modes {
-        if !modes.is_empty() && !modes.iter().any(|m| *m == l.draft.permission) {
-            l.draft.permission.clear();
-            l.draft.bump();
+        if !modes.is_empty() && !modes.iter().any(|m| *m == draft.permission) {
+            draft.permission.clear();
+            draft.bump();
         }
     }
 }
@@ -1281,35 +1308,50 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
 
 /// Open the popover for the focused chip. Refuses the chips with no
 /// popover: Project (Left/Right cycles it), an effort with no surface, and
-/// every non-picker control.
+/// every non-picker control. The `&View` convenience for tests; the key
+/// folder precomputes the anchor instead.
+#[cfg(test)]
 pub(crate) fn open_picker(l: &mut Launcher, view: &View) -> bool {
     if !is_picker_chip(l.focus) || l.focus == Focus::Project {
         return false;
     }
-    if l.focus == Focus::Effort && !effort_offered(l, view) {
+    let harness = l.draft.harness();
+    if l.focus == Focus::Effort && !effort_offered(&harness, &view.launcher_catalog) {
         return false;
     }
-    open_picker_at(l, view, l.focus)
-}
-
-/// The message field's `@` gesture: a node picker over the live layout's
-/// backlog cards, filtered by what follows the `@` (the typed `@` itself
-/// never lands in the draft).
-fn open_node_picker(l: &mut Launcher, view: &View) -> bool {
-    open_picker_at(l, view, Focus::Message)
-}
-
-fn open_picker_at(l: &mut Launcher, view: &View, field: Focus) -> bool {
-    let Some((row, col)) = picker_anchor(l, view) else {
+    let Some(anchor) = picker_anchor(l, view) else {
         return false;
     };
-    let (rows, actions) = picker_rows(l, view);
+    open_picker_at(
+        l,
+        &view.launcher_catalog,
+        &view.layout.backlog,
+        Some(anchor),
+        l.focus,
+    )
+}
+
+/// Open a picker on a precomputed anchor. The catalog and backlog ride as
+/// borrows so the key folder (holding `view.launcher.as_mut`) can reach
+/// them through their own, disjoint fields.
+fn open_picker_at(
+    l: &mut Launcher,
+    catalog: &Option<CatalogOutcome>,
+    backlog: &[crate::proto::BacklogCard],
+    anchor: Option<(u16, u16)>,
+    field: Focus,
+) -> bool {
+    let Some((row, col)) = anchor else {
+        return false;
+    };
+    let (rows, actions) = picker_rows(l, catalog, backlog);
+    let (all_rows, all_actions) = (rows.clone(), actions.clone());
     l.picker = Some(Picker {
         popup: Popup::new(rows, Anchor::At { row, col })
             .footer("up/down move \u{b7} type to filter \u{b7} enter pick \u{b7} esc close"),
         actions,
-        all_rows: rows.clone(),
-        all_actions: actions.clone(),
+        all_rows,
+        all_actions,
         field,
         anchor: Anchor::At { row, col },
         filter: String::new(),
@@ -1381,7 +1423,11 @@ fn picker_anchor(l: &Launcher, view: &View) -> Option<(u16, u16)> {
 /// The popover's rows and their commit actions for `field`, read off the
 /// catalog and the live draft. An unavailable choice renders as a disabled
 /// entry carrying its reason (the popup's greyed-with-reason grammar).
-fn picker_rows(l: &Launcher, view: &View) -> (Vec<PopupRow>, Vec<Option<PickerAction>>) {
+fn picker_rows(
+    l: &Launcher,
+    catalog: &Option<CatalogOutcome>,
+    backlog: &[crate::proto::BacklogCard],
+) -> (Vec<PopupRow>, Vec<Option<PickerAction>>) {
     let mut rows: Vec<PopupRow> = Vec::new();
     let mut actions: Vec<Option<PickerAction>> = Vec::new();
     let mut push =
@@ -1402,7 +1448,7 @@ fn picker_rows(l: &Launcher, view: &View) -> (Vec<PopupRow>, Vec<Option<PickerAc
     };
     match l.focus {
         Focus::Harness => {
-            if let Some(CatalogOutcome::Ok(catalog_rows, _)) = &view.launcher_catalog {
+            if let Some(CatalogOutcome::Ok(catalog_rows, _)) = catalog {
                 for row in catalog_rows {
                     if row.selectable() {
                         push(
@@ -1420,7 +1466,7 @@ fn picker_rows(l: &Launcher, view: &View) -> (Vec<PopupRow>, Vec<Option<PickerAc
                 push(
                     "\u{2022}",
                     "catalog unavailable",
-                    view.launcher_catalog
+                    catalog
                         .as_ref()
                         .map(|c| match c {
                             CatalogOutcome::Degraded(e) => e.as_str(),
@@ -1434,7 +1480,7 @@ fn picker_rows(l: &Launcher, view: &View) -> (Vec<PopupRow>, Vec<Option<PickerAc
         }
         Focus::Model => {
             push("\u{2022}", &decides, "", true, Some(PickerAction::Clear));
-            if let Some(CatalogOutcome::Ok(catalog_rows, models_err)) = &view.launcher_catalog {
+            if let Some(CatalogOutcome::Ok(catalog_rows, models_err)) = catalog {
                 if let Some(row) = catalog_rows.iter().find(|r| r.name == harness) {
                     for m in &row.models {
                         if m.verdict == "ok" {
@@ -1473,7 +1519,7 @@ fn picker_rows(l: &Launcher, view: &View) -> (Vec<PopupRow>, Vec<Option<PickerAc
         }
         Focus::Effort => {
             push("\u{2022}", &decides, "", true, Some(PickerAction::Clear));
-            if let Some(CatalogOutcome::Ok(catalog_rows, _)) = &view.launcher_catalog {
+            if let Some(CatalogOutcome::Ok(catalog_rows, _)) = catalog {
                 if let Some(row) = catalog_rows.iter().find(|r| r.name == harness) {
                     if let Some(efforts) = &row.efforts {
                         if efforts.is_empty() {
@@ -1495,7 +1541,7 @@ fn picker_rows(l: &Launcher, view: &View) -> (Vec<PopupRow>, Vec<Option<PickerAc
         }
         Focus::Permission => {
             push("\u{2022}", &decides, "", true, Some(PickerAction::Clear));
-            if let Some(CatalogOutcome::Ok(catalog_rows, _)) = &view.launcher_catalog {
+            if let Some(CatalogOutcome::Ok(catalog_rows, _)) = catalog {
                 if let Some(row) = catalog_rows.iter().find(|r| r.name == harness) {
                     if let Some(modes) = &row.permission_modes {
                         if modes.is_empty() {
@@ -1518,7 +1564,7 @@ fn picker_rows(l: &Launcher, view: &View) -> (Vec<PopupRow>, Vec<Option<PickerAc
         Focus::Message => {
             // The `@` node picker: the live layout's backlog cards, the
             // freshest list the client already holds - no second read.
-            for card in &view.layout.backlog {
+            for card in backlog {
                 push(
                     "\u{2022}",
                     &format!("{} {}", card.id, card.slug),
@@ -1527,7 +1573,7 @@ fn picker_rows(l: &Launcher, view: &View) -> (Vec<PopupRow>, Vec<Option<PickerAc
                     Some(PickerAction::InsertNode(card.id.clone())),
                 );
             }
-            if view.layout.backlog.is_empty() {
+            if backlog.is_empty() {
                 push("\u{2022}", "no backlog cards", "", false, None);
             }
         }
@@ -1568,7 +1614,12 @@ fn picker_rows(l: &Launcher, view: &View) -> (Vec<PopupRow>, Vec<Option<PickerAc
 
 /// Commit a picked row. `portal` was resolved before the picker borrow; a
 /// stale index costs one verbatim door refusal, never a wrong lane.
-fn apply_picker_action(l: &mut Launcher, view: &View, action: PickerAction, portal: u8) {
+pub(crate) fn apply_picker_action(
+    l: &mut Launcher,
+    catalog: &Option<CatalogOutcome>,
+    action: PickerAction,
+    portal: u8,
+) {
     l.picker = None;
     match action {
         PickerAction::Set(name) => match l.focus {
@@ -1576,7 +1627,7 @@ fn apply_picker_action(l: &mut Launcher, view: &View, action: PickerAction, port
                 if let Some(idx) = l.draft.harnesses.iter().position(|h| h == &name) {
                     l.draft.harness_idx = idx;
                     l.draft.bump();
-                    clear_unoffered_pins(l, view);
+                    clear_unoffered_pins(&mut l.draft, catalog);
                 }
             }
             Focus::Effort => {
@@ -1650,7 +1701,7 @@ impl Launcher {
     /// controls pinned right (dismiss while an attempt is in flight or
     /// unresolved, then launch). One table feeds the layout, the paint and
     /// the mouse hit-test.
-    fn chip_texts(&self, view: &View) -> Vec<(Focus, String)> {
+    pub(crate) fn chip_texts(&self, view: &View) -> Vec<(Focus, String)> {
         let d = &self.draft;
         // Harness: the selected name, or the catalog's live state when no
         // names have synced yet.
@@ -1686,7 +1737,7 @@ impl Launcher {
         };
         let effort_label = if !d.effort.is_empty() {
             d.effort.clone()
-        } else if !effort_offered(self, view) {
+        } else if !effort_offered(&d.harness(), &view.launcher_catalog) {
             "not offered".to_string()
         } else if d.harness().is_empty() {
             "harness decides".to_string()
@@ -1816,7 +1867,9 @@ impl Launcher {
             // state (BodyDim, no caret, never focusable).
             let (role, caret) = match focus {
                 Focus::Launch => (Role::Chip, false),
-                Focus::Effort if !effort_offered(self, view) => (Role::BodyDim, false),
+                Focus::Effort if !effort_offered(&self.draft.harness(), &view.launcher_catalog) => {
+                    (Role::BodyDim, false)
+                }
                 f if *f == self.focus => (Role::BodySel, is_picker_chip(*f)),
                 f => (Role::Body, is_picker_chip(*f)),
             };
@@ -2094,6 +2147,8 @@ pub(crate) async fn launcher_mouse(
                 .map(|(t, _, _)| *t)
         });
         let portal = next_free_portal(view);
+        // Field-disjoint snapshot for the commit path.
+        let catalog = view.launcher_catalog.clone();
         if let Some(l) = view.launcher.as_mut() {
             let Some(mut picker) = l.picker.take() else {
                 unreachable!("checked Some above");
@@ -2104,7 +2159,7 @@ pub(crate) async fn launcher_mouse(
                     let action = picker.actions.get(target).cloned().flatten();
                     l.picker = Some(picker);
                     if let Some(action) = action {
-                        apply_picker_action(l, view, action, portal);
+                        apply_picker_action(l, &catalog, action, portal);
                     }
                 }
                 None if picker.popup.render(view.term).contains(rep.row, rep.col) => {
@@ -2157,8 +2212,17 @@ pub(crate) async fn launcher_mouse(
     };
     if let Some(l) = view.launcher.as_mut() {
         l.focus = focus;
-        if is_picker_chip(focus) && focus != Focus::Project {
-            open_picker(l, view);
+    }
+    if is_picker_chip(focus) && focus != Focus::Project {
+        let anchor = view.launcher.as_ref().and_then(|l| picker_anchor(l, view));
+        if let Some(l) = view.launcher.as_mut() {
+            open_picker_at(
+                l,
+                &view.launcher_catalog,
+                &view.layout.backlog,
+                anchor,
+                focus,
+            );
         }
     }
     if focus == Focus::Launch {

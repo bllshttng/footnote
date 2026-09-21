@@ -234,6 +234,7 @@ fn launcher_journey_empty_substrate_takes_the_door_default() {
         harness: "claude".to_string(),
         substrate: String::new(),
         model: None,
+        model_names_harness: false,
         effort: None,
         permission_mode: None,
         placement: None,

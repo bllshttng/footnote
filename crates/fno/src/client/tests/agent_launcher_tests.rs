@@ -47,7 +47,7 @@ fn sync_catalog(v: &mut View) {
     // Mirror the run loop's rx arm: land the catalog and sync the draft's
     // harness names.
     let names: Vec<String> = match &v.launcher_catalog {
-        Some(CatalogOutcome::Ok(rows)) => rows.iter().map(|r| r.name.clone()).collect(),
+        Some(CatalogOutcome::Ok(rows, _)) => rows.iter().map(|r| r.name.clone()).collect(),
         _ => vec![],
     };
     if let Some(l) = v.launcher.as_mut() {
@@ -851,9 +851,14 @@ fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
     }
     v.launcher_catalog = Some(rows);
     sync_catalog(&mut v);
-    let l = v.launcher.as_mut().unwrap();
+    let mut l = v.launcher.take().unwrap();
     l.focus = Focus::Model;
-    assert!(super::agent_launcher::open_picker(l, &v), "picker opens");
+    assert!(
+        super::agent_launcher::open_picker(&mut l, &v),
+        "picker opens"
+    );
+    v.launcher = Some(l);
+    let l = v.launcher.as_ref().unwrap();
     let picker = l.picker.as_ref().unwrap();
     let labels: Vec<String> = picker
         .popup
@@ -888,7 +893,7 @@ fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
         .get(target)
         .cloned()
         .flatten();
-    super::agent_launcher::apply_picker_action(&mut l, &v, action.unwrap(), 0);
+    super::agent_launcher::apply_picker_action(&mut l, &v.launcher_catalog, action.unwrap(), 0);
     v.launcher = Some(l.clone());
     let l = v.launcher.as_ref().unwrap();
     assert!(l.picker.is_none(), "commit closes the picker");
@@ -914,9 +919,11 @@ fn degraded_inventory_leaves_free_text_and_names_the_failure() {
         Some("routing inventory unavailable".into()),
     ));
     sync_catalog(&mut v);
-    let l = v.launcher.as_mut().unwrap();
+    let mut l = v.launcher.take().unwrap();
     l.focus = Focus::Model;
-    assert!(super::agent_launcher::open_picker(l, &v));
+    assert!(super::agent_launcher::open_picker(&mut l, &v));
+    v.launcher = Some(l);
+    let l = v.launcher.as_ref().unwrap();
     let picker = l.picker.as_ref().unwrap();
     let disabled: Vec<&str> = picker
         .popup
@@ -967,10 +974,12 @@ fn placement_picker_offers_thread_views_and_the_one_pane_entry() {
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
-    let l = v.launcher.as_mut().unwrap();
+    let mut l = v.launcher.take().unwrap();
     l.focus = Focus::Placement;
     l.draft.expanded = true;
-    assert!(super::agent_launcher::open_picker(l, &v));
+    assert!(super::agent_launcher::open_picker(&mut l, &v));
+    v.launcher = Some(l);
+    let l = v.launcher.as_ref().unwrap();
     let labels: Vec<String> = l
         .picker
         .as_ref()
@@ -994,10 +1003,10 @@ fn placement_picker_offers_thread_views_and_the_one_pane_entry() {
     );
     // Committing split beside records the placement; request() turns it
     // into --substrate thread --portal N --split right.
-    let mut l = v.launcher.as_mut().unwrap();
+    let mut l = v.launcher.take().unwrap();
     super::agent_launcher::apply_picker_action(
         &mut l,
-        &v,
+        &v.launcher_catalog,
         super::agent_launcher::PickerAction::Place(
             super::agent_launcher::Placement::ThreadSplitBeside,
         ),
@@ -1046,14 +1055,13 @@ fn editor_paints_prompt_marker_and_empty_draft_placeholder() {
         "placeholder on an empty draft: {row:?}"
     );
     // Typing replaces the placeholder and keeps the marker.
-    let mut l = v.launcher.as_mut().unwrap();
-    l.focus = Focus::Message;
-    drop(l);
-    let mut v_mut = v;
-    type_message(&mut v_mut, "ship it");
-    let l = v_mut.launcher.as_ref().unwrap();
+    if let Some(l) = v.launcher.as_mut() {
+        l.focus = Focus::Message;
+    }
+    type_message(&mut v, "ship it");
+    let l = v.launcher.as_ref().unwrap();
     let mut buf = RtBuffer::empty(area);
-    l.paint(&v_mut, &mut buf, area);
+    l.paint(&v, &mut buf, area);
     let row: String = (0..40)
         .map(|x| buf[(x, rects.message.y)].symbol().to_string())
         .collect();
@@ -1069,9 +1077,10 @@ fn typing_in_an_open_picker_filters_the_rows() {
     let mut v = view_with_launcher();
     v.launcher_catalog = catalog(&[("claude", true, true), ("codex", true, true)]);
     sync_catalog(&mut v);
-    let l = v.launcher.as_mut().unwrap();
+    let mut l = v.launcher.take().unwrap();
     l.focus = Focus::Harness;
-    assert!(super::agent_launcher::open_picker(l, &v));
+    assert!(super::agent_launcher::open_picker(&mut l, &v));
+    v.launcher = Some(l);
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1148,7 +1157,7 @@ fn at_opens_the_node_picker_and_picking_inserts_the_id() {
         "the @ never lands in the draft"
     );
     // Pick the first card: its id lands at the cursor.
-    let first_id = picker
+    let first_id: String = picker
         .actions
         .iter()
         .find_map(|a| match a {
@@ -1157,10 +1166,10 @@ fn at_opens_the_node_picker_and_picking_inserts_the_id() {
         })
         .expect("the fixture carries at least one InsertNode row");
     assert!(entry_count >= 1, "cards list: {entry_count}");
-    let mut l = v.launcher.as_mut().unwrap();
-    let action = super::agent_launcher::PickerAction::InsertNode(first_id);
-    super::agent_launcher::apply_picker_action(&mut l, &v, action, 0);
-    v.launcher = Some(l.clone());
+    let mut l = v.launcher.take().unwrap();
+    let action = super::agent_launcher::PickerAction::InsertNode(first_id.clone());
+    super::agent_launcher::apply_picker_action(&mut l, &v.launcher_catalog, action, 0);
+    v.launcher = Some(l);
     assert_eq!(
         v.launcher.as_ref().unwrap().draft.message,
         format!("plan {first_id} "),
