@@ -318,17 +318,22 @@ fn read_stamp(dir: &Path) -> Option<Stamp> {
     let text = std::fs::read_to_string(dir.join("holder")).ok()?;
     let (mut pid, mut create_time, mut started_s) = (None, None, None);
     let (mut machine, mut host) = (String::new(), String::new());
+    // Two writers, two layouts: the deleted bash queue wrote ONE line of
+    // space-separated k=v tokens; this module writes one key per line.
+    // Tokenizing handles both.
     for line in text.lines() {
-        if let Some(v) = line.strip_prefix("pid=") {
-            pid = v.parse().ok();
-        } else if let Some(v) = line.strip_prefix("create_time=") {
-            create_time = v.parse().ok();
-        } else if let Some(v) = line.strip_prefix("started=") {
-            started_s = iso8601_utc_to_epoch_s(v);
-        } else if let Some(v) = line.strip_prefix("machine=") {
-            machine = v.to_string();
-        } else if let Some(v) = line.strip_prefix("host=") {
-            host = v.to_string();
+        for tok in line.split_whitespace() {
+            if let Some(v) = tok.strip_prefix("pid=") {
+                pid = v.parse().ok();
+            } else if let Some(v) = tok.strip_prefix("create_time=") {
+                create_time = v.parse().ok();
+            } else if let Some(v) = tok.strip_prefix("started=") {
+                started_s = iso8601_utc_to_epoch_s(v);
+            } else if let Some(v) = tok.strip_prefix("machine=") {
+                machine = v.to_string();
+            } else if let Some(v) = tok.strip_prefix("host=") {
+                host = v.to_string();
+            }
         }
     }
     Some(Stamp {
@@ -642,10 +647,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let phantom = dir.join("000001");
         std::fs::create_dir_all(&phantom).expect("mkdir phantom");
+        // The exact bash stamp shape: ONE line, space-separated k=v tokens.
         std::fs::write(
             phantom.join("holder"),
             format!(
-                "pid={}\nstarted=2020-01-01T00:00:00Z\nhost=q-host\n",
+                "pid={} started=2020-01-01T00:00:00Z host=x sha=deadbee\n",
                 std::process::id()
             ),
         )
@@ -669,7 +675,7 @@ mod tests {
         std::fs::write(
             fresh.join("holder"),
             format!(
-                "pid={}\nstarted=2030-01-01T00:00:00Z\nhost=q-host\n",
+                "pid={} started=2030-01-01T00:00:00Z host=x sha=deadbee\n",
                 std::process::id()
             ),
         )
