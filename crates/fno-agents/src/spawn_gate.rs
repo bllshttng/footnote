@@ -1839,8 +1839,10 @@ fn decide_gate(
                     // an admit: fail closed (LD3).
                     guard.release();
                     eprintln!(
-                        "spawn-gate: the CPU instrument is unreadable (the payload carries the \
-                         unknown verdict {other:?}); refusing to spawn (--force to bypass)"
+                        "{}",
+                        instrument_refusal_sentence(&format!(
+                            "the payload carries the unknown verdict {other:?}"
+                        ))
                     );
                     return Err(Refusal::with_receipt(
                         EXIT_LOAD_REFUSED,
@@ -2210,6 +2212,16 @@ pub(crate) struct CpuAdmission {
     pub(crate) token: &'static str,
 }
 
+/// The one spelling of the instrument refusal: the condition, the probe's
+/// own words for what it measured, and a verb the reader can run.
+fn instrument_refusal_sentence(why: &str) -> String {
+    format!(
+        "spawn-gate: the CPU instrument is unreadable ({why}); \
+         read the instrument yourself with `fno doctor footprint --json --cause-only`; \
+         refusing to spawn (--force to bypass)"
+    )
+}
+
 /// Read the CPU axis from the prefetched footprint payload (LD3).
 ///
 /// The Python decider `cpu_admission` (doctor_footprint.py) is the ONE
@@ -2225,10 +2237,7 @@ pub(crate) fn check_cpu_axis(prefetched: Option<&str>, probe_err: Option<&str>) 
             payload: AdmissionPayload {
                 verdict: "refuse".to_string(),
                 axis: "cpu_instrument".to_string(),
-                reason: format!(
-                    "spawn-gate: the CPU instrument is unreadable ({why}); \
-                     refusing to spawn (--force to bypass)"
-                ),
+                reason: instrument_refusal_sentence(why),
                 share_low: 0.0,
                 share_high: 0.0,
                 bound: "exact".to_string(),
