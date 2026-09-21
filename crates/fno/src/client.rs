@@ -6241,9 +6241,7 @@ impl View {
             // US4/US5: the sideline MENU popup or settings modal.
             draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
         } else if let Some(pk) = self.launcher.as_ref().and_then(|l| l.picker.as_ref()) {
-            // The composer's choice popover, the dock's child: over the
-            // sideline blit, below any modal opened after it (which takes
-            // keys first and reveals the picker on close).
+            // The dock's child popover, below any modal opened after it.
             draw_popup_overlay(&mut cells, rows, cols, &pk.popup, self.term, &self.theme);
         } else if let Some(sel) = self.answers {
             // needs-me queue (grown from the answer overlay,
@@ -9039,9 +9037,8 @@ fn draw_overlay_layout(
 /// `content_origin` is `(TAB_BAR_ROWS, panel_w)`; `content_dims` is the content
 /// viewport's `(rows, cols)` (status row excluded). The framed block is centered
 /// on its FRAMED dimensions (placement; policy).
-/// Draw one laid-out popup overlay (the which-key modal, the row menu, the
-/// MENU/settings aux popup, the composer's choice popover) at its own
-/// anchor over the composed frame.
+/// Draw one laid-out popup overlay (which-key modal, row menu, aux popup,
+/// composer picker) over the composed frame.
 fn draw_popup_overlay(
     cells: &mut [Cell],
     rows: usize,
