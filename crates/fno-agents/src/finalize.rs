@@ -3078,8 +3078,11 @@ fn assistant_text_blocks(val: &Value) -> String {
 }
 
 /// Best-effort: append a pointer line to `~/.fno/corrections.log` so the
-/// autocorrect monthly review picks the postmortem up. Only writes when the log
-/// already exists (the autocorrect feature creates it) - never creates it.
+/// autocorrect monthly review picks the postmortem up. Creates the log when
+/// absent (mode 0600): both launchd jobs were live while the file never
+/// existed, so every pointer before 2026-09 was dropped on "autocorrect not
+/// enabled here" - the writer starved its own reader. An existing file keeps
+/// its mode; `corrections-log-init.sh` stays the manual creator.
 /// Format mirrors the pre-wedge generator:
 /// `{ts} | S1 | target-postmortem | {path} | {reason}: {detail_truncated}`.
 ///
@@ -3099,7 +3102,18 @@ fn append_corrections_pointer(home: Option<&Path>, postmortem: &Path, reason: &s
         },
     };
     if !log.is_file() {
-        return; // autocorrect not enabled here; nothing to feed
+        // Create at 0600 rather than drop the row. create_new keeps the
+        // mode decision on the creator: an existing file (or a losing
+        // race) never has its mode touched.
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Some(parent) = log.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::OpenOptions::new()
+            .append(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&log);
     }
     let detail_trunc: String = detail.replace(['\n', '\r'], " ").chars().take(80).collect();
     let detail_trunc = if detail_trunc.trim().is_empty() {
@@ -4185,6 +4199,39 @@ mod tests {
 
         let contents = fs::read_to_string(&log_path).unwrap();
         assert!(contents.contains("target-postmortem"), "{contents}");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn corrections_pointer_creates_absent_log_at_0600() {
+        // A termination against a home with no corrections.log yields a
+        // one-row log at 0600 instead of a dropped row; a second
+        // termination appends without rewriting the mode.
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("fin-corr-create-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        let fno_dir = home.join(".fno");
+        fs::create_dir_all(&fno_dir).unwrap();
+        let log_path = fno_dir.join("corrections.log");
+
+        std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
+        std::env::remove_var("FNO_HOME");
+        append_corrections_pointer(Some(&home), Path::new("/tmp/pm-x.md"), "NoProgress", "s");
+
+        let contents = fs::read_to_string(&log_path).unwrap();
+        assert!(contents.contains("target-postmortem"), "{contents}");
+        assert!(contents.contains("/tmp/pm-x.md"), "{contents}");
+        let mode = fs::metadata(&log_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "mode {:o}", mode);
+
+        append_corrections_pointer(Some(&home), Path::new("/tmp/pm-y.md"), "Budget", "d");
+        let contents = fs::read_to_string(&log_path).unwrap();
+        assert_eq!(contents.lines().count(), 2, "{contents}");
+        let mode = fs::metadata(&log_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "mode {:o}", mode);
         let _ = fs::remove_dir_all(&home);
     }
 
