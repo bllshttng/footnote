@@ -19,8 +19,9 @@ const SESSION_SQL: &str = "SELECT s.id, s.directory, s.time_updated, \
      (SELECT coalesce(sum(length(p.data)), 0) FROM part p WHERE p.session_id = s.id) \
      FROM session s WHERE s.parent_id IS NULL";
 
-/// Parts of one session, message-ordered (m.id breaks time ties).
-const PART_SQL: &str = "SELECT m.data, p.data, m.time_created FROM part p \
+/// Parts of one session, message-ordered (m.id breaks time ties and groups
+/// the render).
+const PART_SQL: &str = "SELECT m.id, m.data, p.data, m.time_created FROM part p \
      JOIN message m ON m.id = p.message_id WHERE p.session_id = ?1 \
      ORDER BY m.time_created, m.id, p.id";
 
@@ -171,31 +172,31 @@ impl TranscriptSource for OpencodeSource {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
                 ))
             })
             .map_err(|e| e.to_string())
         else {
             return String::new();
         };
-        // Parts of one message are contiguous in the ordering above and
-        // carry byte-identical message data, which groups them without
-        // selecting m.id.
-        let mut current: Option<(String, Vec<(String, i64)>)> = None;
+        // Parts of one message are contiguous in the ordering above; the
+        // message id groups them.
+        let mut current: Option<(String, String, Vec<(String, i64)>)> = None;
         let mut out = String::new();
         for row in rows.flatten() {
-            let (m_data, p_data, time_created) = row;
+            let (m_id, m_data, p_data, time_created) = row;
             match &mut current {
-                Some((cur_m, parts)) if *cur_m == m_data => parts.push((p_data, time_created)),
+                Some((cur_id, _, parts)) if *cur_id == m_id => parts.push((p_data, time_created)),
                 _ => {
-                    if let Some((m_data, parts)) = current.take() {
+                    if let Some((_, m_data, parts)) = current.take() {
                         render_message(&mut out, &m_data, &parts);
                     }
-                    current = Some((m_data, vec![(p_data, time_created)]));
+                    current = Some((m_id, m_data, vec![(p_data, time_created)]));
                 }
             }
         }
-        if let Some((m_data, parts)) = current.take() {
+        if let Some((_, m_data, parts)) = current.take() {
             render_message(&mut out, &m_data, &parts);
         }
         out

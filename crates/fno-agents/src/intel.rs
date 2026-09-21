@@ -763,20 +763,19 @@ fn selected_harnesses(spec: &[String]) -> Vec<&'static str> {
 /// order-preserving.
 fn project_roots(name: &str, cwd: &Path, fno_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let map = crate::king_board::scope::project_map(cwd).unwrap_or_default();
-    let Some(canonical) = map.get(name) else {
+    let unknown = |map: &std::collections::HashMap<String, String>| {
         let known: std::collections::BTreeSet<&str> = map.values().map(String::as_str).collect();
-        return Err(format!(
+        format!(
             "fno-agents intel: unknown project {name} (known: {})",
             known.into_iter().collect::<Vec<_>>().join(", ")
-        ));
+        )
+    };
+    let Some(canonical) = map.get(name) else {
+        return Err(unknown(&map));
     };
     let paths = crate::territory::workspace_paths(cwd);
     let Some(path) = paths.get(canonical).map(PathBuf::from) else {
-        let known: std::collections::BTreeSet<&str> = map.values().map(String::as_str).collect();
-        return Err(format!(
-            "fno-agents intel: unknown project {name} (known: {})",
-            known.into_iter().collect::<Vec<_>>().join(", ")
-        ));
+        return Err(unknown(&map));
     };
     let basename = path
         .file_name()
