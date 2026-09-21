@@ -704,6 +704,10 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("state-dir path gate self-test", ".",
      "bash scripts/tests/check-no-hardcoded-paths-selftest.sh"),
     ("corrections.log placement migration", ".", "bash scripts/tests/test_corrections_migrate.sh"),
+    ("corrections fixture-row filter in the packet", ".", "bash scripts/tests/test_autocorrect_pack_fixture_rows.sh"),
+    ("autocorrect packet skill-file leg", ".", "bash scripts/tests/test_autocorrect_pack_skill_files.sh"),
+    ("autocorrect prompt contract", ".", "bash scripts/tests/test_autocorrect_prompt_contract.sh"),
+    ("corrections skill-commit SOURCE resolution", ".", "bash tests/hooks/test_corrections_skill_commit.sh"),
     ("placement-rule lint self-test", ".", "bash scripts/tests/test_check_placement_rule.sh"),
     ("Build fno-agents debug binary (for journey tests)", "crates/fno-agents", "cargo build"),
     # The debug binary is present here, so the @requires_rust parity suites run

@@ -109,16 +109,8 @@ def cmd_note(
     if receipt is None:
         typer.echo("Error: the note action returned no receipt", err=True)
         raise typer.Exit(code=1)
-    if json_output:
-        note = {
-            "id": receipt.get("node_id") or task_id,
-            "text": text,
-            "revision": receipt.get("revision"),
-            "routed": receipt.get("routed"),
-        }
-        _echo_receipt(json.dumps(note, separators=(",", ":")))
-    else:
-        _echo_receipt(f"noted {receipt.get('node_id') or task_id}: {text}")
+    shown = json.dumps(receipt, separators=(",", ":")) if json_output else receipt.get("line", "")
+    _echo_receipt(shown)
     warn_if_note_is_long(text)
     # Terminal-routed notes delivered too: the write went to history, but the
     # bound readers are still the people to tell.

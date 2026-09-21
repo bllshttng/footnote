@@ -1,0 +1,29 @@
+# Failure-mode tier: over-decomposition. A one-line change request that a
+# wrong-sized plan will split into a task per semicolon, so the plan and the
+# commit log tell on it: a right-sized plan declares at most three tasks and
+# lands in at most four commits. Corresponds to the `thrash` postmortem
+# detector (many task flips, few done).
+id: failure-plan-thrash
+tier: capability
+prompt: |
+  Turn this one-line request into a plan, then implement it.
+
+  Request: add a `--json` flag to `fno doctor` that makes `fno doctor` print
+  its existing human summary as one JSON object on stdout.
+
+  Rules:
+  - Write the plan to plan.md in the repo root before touching code. Format:
+    one `### Task N:` heading per task, nothing else between them.
+  - Implement on a branch named feature/thrash-probe, committing per task.
+  - Do not open a PR.
+
+  Report your result in the fenced JSON return contract.
+grade:
+  - kind: exit
+    command: "test -f plan.md && test \"$(grep -c '^### Task' plan.md)\" -le 3"
+    expect: 0
+  - kind: exit
+    command: "test \"$(git rev-list --count origin/main..HEAD)\" -le 4"
+    expect: 0
+timeout_minutes: 20
+tags: [failure-mode, thrash]

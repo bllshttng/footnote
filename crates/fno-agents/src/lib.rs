@@ -245,6 +245,7 @@ pub mod quarantine;
 pub mod question_sweep;
 pub mod quiet_retire;
 pub mod readiness;
+pub mod real_session;
 pub mod reap_release;
 pub mod reap_render;
 pub mod receipt;

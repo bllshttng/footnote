@@ -11,7 +11,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use super::TAG_RESPONSE;
-use super::{canonical_row_digests, read_graph_gated, remember_snapshot, GraphRead, StoreState};
+use super::{read_graph_gated, remember_snapshot, GraphRead, StoreState};
 
 /// The full-graph read replies spliced from the cache's serialized views.
 /// `read`, `begin` and api `rows` are the replies whose bodies are one
@@ -25,7 +25,6 @@ pub(super) enum SplicedReply {
     Begin {
         id: u64,
         version: String,
-        digests: Arc<Vec<u8>>,
         entries: Arc<Vec<u8>>,
     },
     Rows {
@@ -81,14 +80,11 @@ impl SplicedReply {
             SplicedReply::Begin {
                 id,
                 version,
-                digests,
                 entries,
             } => (
                 format!(r#"{{"id":{id},"ok":true,"result":{{"version":"#).into_bytes(),
                 vec![
                     SplicePiece::Inline(serde_json::to_vec(version).unwrap_or_default()),
-                    SplicePiece::Inline(br#","base_digests":"#.to_vec()),
-                    SplicePiece::Shared(Arc::clone(digests)),
                     SplicePiece::Inline(br#","entries":"#.to_vec()),
                     SplicePiece::Shared(Arc::clone(entries)),
                 ],
@@ -205,20 +201,10 @@ pub(super) fn splice_reply(state: &StoreState, payload: &[u8]) -> Option<Spliced
                 return Some(SplicedReply::Read { id, entries });
             }
             let version = graph.version.clone();
-            let digests = graph
-                .base_digests_json
-                .get_or_init(|| {
-                    Arc::new(
-                        serde_json::to_vec(&canonical_row_digests(&graph.entries))
-                            .unwrap_or_default(),
-                    )
-                })
-                .clone();
             remember_snapshot(state, &version, &graph.entries);
             Some(SplicedReply::Begin {
                 id,
                 version,
-                digests,
                 entries,
             })
         }

@@ -37,13 +37,14 @@ N. Source: <correction class / source field>
    Rationale: <one sentence>
 ```
 
-Group by source field; if multiple events share a source, generate ONE recommendation that covers all of them.
+When multiple events share a source, generate ONE recommendation that covers all of them. Group by the SHAPE of the failure, not only by source. A recurring shape across DIFFERENT sources is the finding worth naming most. Example shape: "two readers of one fact disagreed, and the loser silently stranded work". Four separately-sourced rows telling that one story are ONE recommendation, not four.
 
 If the packet contains zero events in a window, output exactly: `No corrections in this window; no patches proposed.`
 
 ## What NOT to recommend
 
 - Do not propose changes to files whose full text is not provided in `implicated_rules`. You don't have the current state of those files, so any patch would be guesswork.
+- When a correction class traces to one verb's postmortems, the verb's SKILL.md in `implicated_rules` is a legal patch target. Every proposed skill diff MUST quote the evidence rows that justify it. Quote the rows themselves, not a count of them. A reviewer then checks the warrant without rebuilding the packet.
 - Do not propose patches that touch the corrections.log itself, the watermark files, or the capture scripts. Those are infrastructure, not rules.
 - Do not propose general "improvements" beyond what the events justify. The events are the evidence; without an event you have no warrant.
 

@@ -262,8 +262,6 @@ pub(crate) struct CachedGraph {
     entries: Arc<Vec<Value>>,
     /// serde_json::to_vec(&*entries), filled once per version.
     entries_json: std::sync::OnceLock<Arc<Vec<u8>>>,
-    /// canonical_row_digests(&*entries) serialized, filled once per version.
-    base_digests_json: std::sync::OnceLock<Arc<Vec<u8>>>,
     /// The api rows view: shares the entries Arc (a second Value tree
     /// measured 1191 MB idle), filled once per version.
     api_rows: std::sync::OnceLock<Arc<Vec<Value>>>,
@@ -311,7 +309,7 @@ pub(crate) struct StoreState {
     /// counter is the cache's honest receipt (AC4's positive marker, and
     /// the PR's before/after evidence).
     pub(crate) file_opens: AtomicU64,
-    pub(crate) snapshots: Mutex<std::collections::VecDeque<(String, Arc<Vec<Value>>)>>,
+    pub(crate) snapshots: Mutex<std::collections::VecDeque<(String, Arc<Vec<Value>>, u64)>>,
     pub(crate) write_ledger: Mutex<std::collections::VecDeque<WriteLedgerEntry>>,
     pub(crate) gate_metrics: Mutex<GateMetrics>,
     /// The instant of the last successful publish. The render trigger reads
@@ -1067,7 +1065,6 @@ fn read_graph_gated(state: &StoreState, strict: bool) -> Result<GraphRead, Store
                         version: version.clone(),
                         entries: Arc::clone(&entries),
                         entries_json: std::sync::OnceLock::new(),
-                        base_digests_json: std::sync::OnceLock::new(),
                         api_rows: std::sync::OnceLock::new(),
                     });
                     *state.cache.write().unwrap_or_else(|e| e.into_inner()) =
@@ -1105,7 +1102,6 @@ fn read_graph_gated(state: &StoreState, strict: bool) -> Result<GraphRead, Store
                     version: pre.clone(),
                     entries: Arc::clone(&entries),
                     entries_json: std::sync::OnceLock::new(),
-                    base_digests_json: std::sync::OnceLock::new(),
                     api_rows: std::sync::OnceLock::new(),
                 });
                 *state.cache.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&graph));
@@ -1192,7 +1188,6 @@ fn seed_cache(state: &StoreState, mut entries: Vec<Value>, published_version: &s
                 version: published_version.to_string(),
                 entries: Arc::new(entries),
                 entries_json: std::sync::OnceLock::new(),
-                base_digests_json: std::sync::OnceLock::new(),
                 api_rows: std::sync::OnceLock::new(),
             }));
         }
@@ -1829,21 +1824,40 @@ fn handle_begin(state: &StoreState) -> Result<Value, StoreError> {
     remember_snapshot(state, &version, &entries);
     Ok(json!({
         "version": version,
-        "base_digests": canonical_row_digests(&entries),
         "entries": entries,
     }))
 }
 
 fn remember_snapshot(state: &StoreState, version: &str, entries: &Arc<Vec<Value>>) {
+    let bytes = graph_store::serialize_graph_file(entries).len() as u64;
+    remember_snapshot_with_bytes(state, version, entries, bytes);
+}
+
+/// `bytes` is the snapshot's serialized size, handed in by the publish path,
+/// which already serialized the entries for its gate metric.
+fn remember_snapshot_with_bytes(
+    state: &StoreState,
+    version: &str,
+    entries: &Arc<Vec<Value>>,
+    bytes: u64,
+) {
+    const SNAPSHOT_RING_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
     let mut snapshots = state
         .snapshots
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    if snapshots.iter().any(|(stored, _)| stored == version) {
+    if snapshots.iter().any(|(stored, _, _)| stored == version) {
         return;
     }
-    snapshots.push_back((version.to_string(), Arc::clone(entries)));
-    while snapshots.len() > 2 {
+    snapshots.push_back((version.to_string(), Arc::clone(entries), bytes));
+    // Bound the ring by serialized bytes, not a count: depth adapts to
+    // graph size. 64 MB holds four 16 MB snapshots today; tune from the
+    // attributable graph_tx_conflict events, never from a guess.
+    while snapshots.len() > 1 {
+        let total: u64 = snapshots.iter().map(|(_, _, size)| *size).sum();
+        if total <= SNAPSHOT_RING_BUDGET_BYTES {
+            break;
+        }
         snapshots.pop_front();
     }
 }
@@ -1854,8 +1868,8 @@ fn stored_snapshot(state: &StoreState, version: &str) -> Option<Arc<Vec<Value>>>
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .iter()
-        .find(|(stored, _)| stored == version)
-        .map(|(_, entries)| Arc::clone(entries))
+        .find(|(stored, _, _)| stored == version)
+        .map(|(_, entries, _)| Arc::clone(entries))
 }
 
 fn handle_export_now(state: &StoreState) -> Result<Value, StoreError> {
@@ -1981,15 +1995,23 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
         },
         state.lock_timeout,
     );
-    let bytes = outcome.as_ref().ok().map(outcome_bytes).unwrap_or(0);
+    let mut gate_bytes = 0;
     if let Ok(value) = &outcome {
         refresh_cache_after_publish(state, value);
+        let (graph, total) = outcome_parts(value);
+        remember_snapshot_with_bytes(
+            state,
+            &value.version,
+            &Arc::new(value.entries.clone()),
+            graph,
+        );
+        gate_bytes = total;
     }
     drop(gate);
     record_gate(
         state,
         waited,
-        bytes,
+        gate_bytes,
         params.get("attempt").and_then(Value::as_u64).unwrap_or(1),
     );
     let outcome = outcome?;
@@ -2014,16 +2036,15 @@ fn handle_commit_rows_reply(id: u64, state: &StoreState, params: &Value) -> Valu
         Err(CommitRowsError::Conflict(ids)) => err_reply(
             id,
             "conflict",
-            format!("graph conflict on {}", ids.join(", ")),
+            format!(
+                "graph conflict on {}; nothing was written - confirm with `fno backlog get <id>`, then retry",
+                ids.join(", ")
+            ),
         ),
         Err(CommitRowsError::Store(error)) => {
             err_reply(id, store_err_kind(&error), error.to_string())
         }
     }
-}
-
-fn canonical_row_digests(entries: &[Value]) -> std::collections::BTreeMap<String, String> {
-    canonical_row_digests_with_rungs(entries, None)
 }
 
 fn canonical_row_digests_with_rungs(
@@ -2051,18 +2072,6 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
         .get("base_version")
         .and_then(Value::as_str)
         .ok_or_else(|| StoreError::Invalid("commit_rows needs base_version".into()))?;
-    let _base_digests: std::collections::BTreeMap<String, String> = params
-        .get("base_digests")
-        .and_then(Value::as_object)
-        .ok_or_else(|| StoreError::Invalid("commit_rows needs base_digests".into()))?
-        .iter()
-        .map(|(id, digest)| {
-            digest
-                .as_str()
-                .map(|value| (id.clone(), value.to_string()))
-                .ok_or_else(|| StoreError::Invalid("commit_rows digest must be a string".into()))
-        })
-        .collect::<Result<_, _>>()?;
     let changed_values = params
         .get("changed")
         .and_then(Value::as_array)
@@ -2171,22 +2180,32 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
         },
         state.lock_timeout,
     );
-    let bytes = outcome.as_ref().ok().map(outcome_bytes).unwrap_or(0);
+    let mut gate_bytes = 0;
     if let Ok(value) = &outcome {
         refresh_cache_after_publish(state, value);
+        let (graph, total) = outcome_parts(value);
+        remember_snapshot_with_bytes(
+            state,
+            &value.version,
+            &Arc::new(value.entries.clone()),
+            graph,
+        );
+        gate_bytes = total;
     }
     drop(gate);
     record_gate(
         state,
         waited,
-        bytes,
+        gate_bytes,
         params.get("attempt").and_then(Value::as_u64).unwrap_or(1),
     );
     let outcome = outcome?;
     Ok(outcome_json(&outcome))
 }
 
-fn outcome_bytes(outcome: &graph_store::MutateOutcome) -> u64 {
+/// (serialized graph bytes, total gate bytes) from one serialize: the ring
+/// budgets on the graph alone, the gate metric adds the backup.
+fn outcome_parts(outcome: &graph_store::MutateOutcome) -> (u64, u64) {
     let graph = graph_store::serialize_graph_file(&outcome.entries).len() as u64;
     let backup = outcome
         .backup
@@ -2194,7 +2213,7 @@ fn outcome_bytes(outcome: &graph_store::MutateOutcome) -> u64 {
         .and_then(|path| std::fs::metadata(path).ok())
         .map(|meta| meta.len())
         .unwrap_or(0);
-    graph.saturating_add(backup)
+    (graph, graph.saturating_add(backup))
 }
 
 /// The client-supplied node id -> plan rung map (see
@@ -3597,7 +3616,6 @@ mod tests {
     fn row_commit_params(begin: &Value, row: Value) -> Value {
         json!({
             "base_version": begin["version"],
-            "base_digests": begin["base_digests"],
             "base_plan_rungs": {},
             "changed": [row],
             "removed": [],

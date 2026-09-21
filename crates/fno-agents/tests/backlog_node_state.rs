@@ -42,6 +42,19 @@ fn read_graph(path: &PathBuf) -> Vec<serde_json::Value> {
 }
 
 #[test]
+fn replace_state_returns_the_view_it_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    write_graph(&graph, &[fixture_node("t-1", "d")]);
+    let first = node_state::replace_state(&graph, &ws(&graph, "t-1", "body one")).unwrap();
+    assert!(first.replaced.is_none());
+    let second = node_state::replace_state(&graph, &ws(&graph, "t-1", "body two")).unwrap();
+    let prior = second.replaced.expect("the second write replaced a state");
+    assert_eq!(prior.revision, 1);
+    assert_eq!(prior.body, "body one");
+}
+
+#[test]
 fn ac1_one_current_state_priors_in_history() {
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("graph.json");
