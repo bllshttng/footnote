@@ -512,6 +512,25 @@ def _is_documentation_path(path: str) -> bool:
 # in-process surface (MCP): such a caller that classifies a docs-only head and
 # then sees code pushed must evict or wait out the TTL before merging. Move to
 # a head-keyed cache if a long-lived surface ever needs cross-push exactness.
+def _pr_file_paths(pr_number: int, cwd: str) -> Optional[List[str]]:
+    """The PR's own changed file paths via the REST files endpoint with
+    --paginate (gh pr view --json files caps silently at one GraphQL page).
+    None on a probe miss; an EMPTY list is a real answer."""
+    res = _gh(
+        [
+            "api",
+            f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/files",
+            "--paginate",
+            "--jq",
+            ".[] | .filename // empty",
+        ],
+        cwd,
+    )
+    if not res.ok:
+        return None
+    return [line.strip() for line in res.stdout.splitlines() if line.strip()]
+
+
 _PAYLOAD_CACHE: dict[tuple[str, int], tuple[float, list[str] | None]] = {}
 _PAYLOAD_CACHE_TTL = 120.0
 _CACHE_BOUND = 256
@@ -1625,22 +1644,6 @@ def _merge_lock() -> Iterator[tuple[_MergeLockState, Optional[Callable[[], None]
                 pass
 
 
-def _live_lane_count() -> int:
-    """Live parallel-lane slots (0 on any probe miss, keeping sequential paths
-    byte-identical: the stale-base hold below only arms while lanes run)."""
-    try:
-        from fno.claims.lanes import active_lane_count
-
-        return active_lane_count()
-    except Exception as exc:  # noqa: BLE001
-        # A probe miss disarms the stale-base hold entirely - leave the audit
-        # breadcrumb so an unguarded merge is distinguishable after the fact.
-        sys.stderr.write(
-            f"pr-merge: lane probe unavailable ({exc}); merging without freshness hold\n"
-        )
-        return 0
-
-
 def _pr_base_head_refs(pr_number: int, cwd: str) -> Optional[Tuple[str, str]]:
     """(base, head) ref names for a PR, or None on any read miss. Shared by
     `_behind_by` and `_base_move_paths` so the two probes cannot drift apart
@@ -1664,134 +1667,6 @@ def _pr_base_head_refs(pr_number: int, cwd: str) -> Optional[Tuple[str, str]]:
         return str(base), str(head)
     except Exception:  # noqa: BLE001 - callers carry their own miss semantics
         return None
-
-
-def _behind_by(pr_number: int, cwd: str) -> int:
-    """Commits the PR head is behind its base branch. 0 on any probe miss:
-    the hold must never block a merge because our own read failed, but each
-    miss leaves a stderr breadcrumb - a gh outage is likeliest exactly when
-    many lanes hammer gh, i.e. when the hold matters most."""
-
-    def _miss(why: str) -> int:
-        sys.stderr.write(
-            f"pr-merge: stale-base probe unavailable ({why}); "
-            "merging without freshness hold\n"
-        )
-        return 0
-
-    refs = _pr_base_head_refs(pr_number, cwd)
-    if refs is None:
-        return _miss("pr refs unreadable")
-    base, head = refs
-    try:
-        res = _gh(
-            ["api", f"repos/{{owner}}/{{repo}}/compare/{base}...{head}", "-q", ".behind_by"],
-            cwd,
-        )
-        if not res.ok:
-            return _miss("gh compare failed")
-        return int(res.stdout.strip())
-    except Exception as exc:  # noqa: BLE001 - the hold must never BLOCK a merge
-        return _miss(f"probe error: {exc}")
-
-
-def _base_move_paths(pr_number: int, cwd: str) -> Optional[List[str]]:
-    """Files the BASE branch gained since the PR head diverged, or None on any
-    probe miss. The reverse compare ({head}...{base}) names exactly the commits
-    the head lacks, so its file list IS the base move an overlap hold measures.
-    A renamed base-side entry contributes BOTH its previous and current
-    filename: a PR still editing the old path is a modify-vs-rename overlap,
-    the exact case the hold exists to catch.
-
-    Fails CLOSED, inverting `_behind_by` on purpose: there we did not know
-    whether we were behind at all and a read of ours failing must not block a
-    merge, while here we already know the base moved and cannot tell whether it
-    overlapped - so the caller holds. A truncated compare under-reports the
-    move (GitHub caps the response at 300 files) and fails in the merging
-    direction, so truncation is a miss too."""
-
-    def _miss(why: str) -> Optional[List[str]]:
-        sys.stderr.write(
-            f"pr-merge: overlap probe unavailable ({why}); holding for a rebase\n"
-        )
-        return None
-
-    refs = _pr_base_head_refs(pr_number, cwd)
-    if refs is None:
-        return _miss("pr refs unreadable")
-    head, base = refs
-    try:
-        res = _gh(
-            [
-                "api",
-                f"repos/{{owner}}/{{repo}}/compare/{head}...{base}",
-                "--jq",
-                "{truncated: .truncated, names: [.files[]"
-                " | ((.filename // empty), (.previous_filename // empty))]}",
-            ],
-            cwd,
-        )
-        if not res.ok:
-            return _miss("gh reverse compare failed")
-        try:
-            payload = json.loads(res.stdout or "{}")
-        except json.JSONDecodeError:
-            return _miss("unparseable compare output")
-        if not isinstance(payload, dict):
-            return _miss("compare payload not an object")
-        names = payload.get("names")
-        if not isinstance(names, list):
-            return _miss("compare payload carries no file list")
-        # A non-string entry is shape drift, not a path to drop: str(None) is
-        # the truthy garbage path "None", which would neither match a real
-        # overlap nor trip this breadcrumb. Fail closed on any of them.
-        if not all(isinstance(p, str) and p for p in names):
-            return _miss("compare file list carries non-string entries")
-        if payload.get("truncated") or len(names) >= 300:
-            return _miss(f"compare truncated ({len(names)} files; caps at 300)")
-        return names
-    except Exception as exc:  # noqa: BLE001 - fail CLOSED: holding equals today's behavior
-        return _miss(f"probe error: {exc}")
-
-
-def _pr_file_paths(pr_number: int, cwd: str) -> Optional[List[str]]:
-    """The PR's own changed file paths, complete, or None on a probe miss.
-
-    Served from the REST files endpoint with --paginate because `gh pr view
-    --json files` caps silently at 100 files (one unpaginated GraphQL page),
-    and a truncated PR side would under-report exactly the side whose overlap
-    the hold decides - the base side already treats its 300-file compare cap as
-    a miss, so the PR side must not fail open where its neighbour fails closed.
-    An EMPTY list is not a miss: a PR with no diff cannot overlap anything."""
-    res = _gh(
-        [
-            "api",
-            f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/files",
-            "--paginate",
-            "--jq",
-            ".[] | .filename // empty",
-        ],
-        cwd,
-    )
-    if not res.ok:
-        sys.stderr.write(
-            "pr-merge: overlap probe unavailable (gh pr files read failed); "
-            "holding for a rebase\n"
-        )
-        return None
-    return [line.strip() for line in res.stdout.splitlines() if line.strip()]
-
-
-def _overlaps(base_paths: List[str], pr_paths: List[str]) -> List[str]:
-    """Sorted intersection of two changed-file lists, documentation paths
-    dropped from both sides first. The overlap hold's whole decision, pure over
-    pre-computed path lists so it unit-tests with no gh and no git - the same
-    discipline `review_freshness` follows for the same reason. Empty means no
-    overlap: a base move that touches none of the PR's files cannot carry a
-    semantic conflict into this merge."""
-    base = {p for p in base_paths if not _is_documentation_path(p)}
-    pr = {p for p in pr_paths if not _is_documentation_path(p)}
-    return sorted(base & pr)
 
 
 # ---------------------------------------------------------------------------
@@ -1878,37 +1753,6 @@ def run_merge(
         _emit(pr_number, "blocked", _fence_reason, "none", err=True)
         return 2
 
-    # (0) Stub-manifest hold: a `contract`-tier dependent's PR must not merge
-    # while it carries an unreconciled stub-manifest (mocks would ship). Checked
-    # BEFORE the auto_merge gate so auto-merge cannot bypass it (AC7-EDGE), and
-    # it no-ops for every non-contract PR so the default `hard` path is unchanged
-    # (AC6-EDGE).
-    try:
-        from fno.stub_manifest import unreconciled_manifest_for_pr
-
-        # Resolve the repo top-level: manifests are written under the PROJECT
-        # root's `.fno/`, so a merge invoked from a subdirectory must not look
-        # under that subdir (codex P2). Falls back to `repo` if git can't say.
-        top = _git(["rev-parse", "--show-toplevel"], repo)
-        root = top.stdout.strip() if top.ok and top.stdout.strip() else repo
-        held = unreconciled_manifest_for_pr(pr_number, root)
-    except Exception:
-        held = None  # never let the guard's own failure block a normal merge
-    if held:
-        if held.get("_malformed"):
-            detail = "malformed stub-manifest (cannot prove stubs are gone)"
-        else:
-            detail = f"unreconciled stub-manifest ({len(held.get('stubs', []))} stub(s))"
-        _emit(
-            pr_number,
-            "held",
-            f"contract dependent {held.get('_node')} carries a {detail}; "
-            "reconcile before merge",
-            "none",
-            err=False,
-        )
-        return 2
-
     # (1) One authoritative posture, resolved in the same
     # order init folds it: granted = (live `auto_merge.enabled` OR an explicit
     # per-run env grant) AND NOT a per-run refusal. The who-may-merge gate
@@ -1988,74 +1832,16 @@ def run_merge(
         _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
         return 127
 
-    # (2a-pre) Terminal exemption, the same one the authorized-merge owner
-    # takes on a MERGED or CLOSED PR: this gate protects what WOULD merge, and
-    # a merged or closed PR has no would-merge left. Without it, retrying
-    # `fno do pr merge` on a PR that already landed answers `unreviewed merge
-    # refused` instead of `already merged` - a receipt that sent a competent
-    # lane hunting a coverage defect that was blocking nothing. An unreadable
-    # state falls through to the gate (fail closed), never past it.
-    try:
-        _refs = _pr_head_ref_and_oid(pr_number, repo)
-    except Exception:
-        _refs = None
-    if _refs is not None and _refs[2] in ("MERGED", "CLOSED"):
-        _emit(
-            pr_number,
-            "skipped",
-            f"{ALREADY_TERMINAL}{_refs[2].lower()}; nothing to merge "
-            "(the coverage gate protects what would merge)",
-            "none",
-            err=False,
-        )
-        return 2
-
-    # (2a) Coverage guard: the sanctioned merge must not land a PR
-    # nothing reviewed. The predicate lives in _coverage_gate - one copy,
-    # shared with the hook-facing `fno do pr coverage-check` verb - and this path
-    # passes recompute=True, firing the standalone producer once when no row
-    # describes the head. Consume the review_coverage event loop-check
-    # emits (Ownership: Rust computes, Python reads); missing/stale/zero/
-    # unknown refuses (fail closed), and so does UNANSWERED: a merge that
-    # cannot read its own coverage has not been reviewed. The recompute cannot
-    # rescue the UNANSWERED arm - the producer needs the head to pin the row it
-    # would emit - so a failed head fetch blocks until gh answers again. Runs
-    # only when auto_merge
-    # is enabled (step 1), so a manual `gh pr merge` on a non-auto-merge repo
-    # is untouched. After the gh check so a missing gh still reports its own
-    # exit 127. Skipped when no review lane is configured (a stock install
-    # opted out of review).
+    # (2a) Coverage read: the covered head that pins this merge, and the
+    # receipt the gate published. The REFUSAL decision moved into
+    # authorized_merge::decide (x-53c5, the coverage gate in merge_gates.rs);
+    # what stays here is the pin and the published receipt, so the head the
+    # effect re-verifies is the head this gate answered for.
     from fno.pr import _coverage_gate
 
     state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
         pr_number, repo, recompute=True
     )
-    if state != _coverage_gate.COVERED:
-        # Bracket append, never paren-splice surgery on a builder's output: a
-        # reason whose trailing paren closes an inner clause (a searched list,
-        # a truncated sha) would swallow the note into the wrong parenthetical.
-        line = _coverage_gate.refusal_line(refusal, note)
-        if state == _coverage_gate.UNANSWERED:
-            # UNANSWERED is an instrument failure, not a review verdict: a
-            # receipt that says "unreviewed" about a probe that died sends a
-            # worker hunting reviewers when the recovery is retrying the merge.
-            _emit(
-                pr_number,
-                "blocked",
-                f"coverage probe failed, merge refused: {line}",
-                "none",
-                err=True,
-            )
-            return 2
-        _emit(
-            pr_number,
-            "blocked",
-            f"unreviewed merge refused: {line}",
-            "none",
-            err=True,
-        )
-        return 2
-
     if note.startswith(_coverage_gate.OVERRIDE_NOTE_PREFIX):
         # A waived merge says so on its own receipt. A covered merge and an
         # overridden one both exit 0, and a receipt that cannot tell them apart
@@ -2086,34 +1872,6 @@ def run_merge(
     # staleness check inside the gate already refused a current mismatch; this
     # makes gh itself refuse if the head moves between here and the merge.
 
-    # (2c) Plan fidelity guard: the inverse of the coverage guard on the
-    # ownership axis - review_coverage is Rust-computed/Python-read; plan fidelity
-    # is Python-computed (fno.plan.fidelity)/read here. A plan whose declared
-    # deliverables did not all ship refuses the merge unless each shortfall
-    # carries a carveout (a PR-body sentence is not one). Skipped when the PR
-    # carries no plan (no denominator) or is not a code payload. The join is
-    # plan-grain, so an inline run with no separate planning thread has zero
-    # planned rows and passes; this catches an orphan plan that never shipped.
-    # A merge gate is required because a stop-gate-only check is skipped by a
-    # direct `fno do pr merge`; the stop gate (loopcheck.rs) holds the other path.
-    _plan_path = _plan_path_for_pr(pr_number, repo)
-    if _plan_path and _pr_payload_is_code(repo, pr_number):
-        from fno.plan.fidelity import compute_plan_fidelity
-
-        try:
-            _fid = compute_plan_fidelity(plan_path=_plan_path)
-        except Exception as exc:  # noqa: BLE001 - fail OPEN: a broken probe must not wedge a green merge
-            _fid = {"refused": False, "reason": f"fidelity probe degraded: {exc}"}
-        if _fid.get("refused"):
-            _emit(
-                pr_number,
-                "blocked",
-                f"plan fidelity refused: {_fid.get('reason', 'uncovered shortfall')}",
-                "none",
-                err=True,
-            )
-            return 2
-
     # (2b) Merge serialization + overlap hold (parallel mode G4, LD#9).
     # Builds run parallel; merges run one at a time, and while lanes are live a
     # PR whose changed files OVERLAP the base move is held for `fno do pr rebase`
@@ -2138,65 +1896,6 @@ def run_merge(
                 err=False,
             )
             return 2
-        if _live_lane_count() > 0:
-            behind = _behind_by(pr_number, repo)
-            if behind > 0:
-                base_paths = _base_move_paths(pr_number, repo)
-                pr_paths = None if base_paths is None else _pr_file_paths(pr_number, repo)
-                if base_paths is None or pr_paths is None:
-                    _emit(
-                        pr_number,
-                        "held",
-                        "stale base: overlap probe unavailable (base moved; "
-                        "could not compare file sets); run fno do pr rebase, "
-                        "then retry",
-                        "none",
-                        err=False,
-                    )
-                    return 2
-                overlap = _overlaps(base_paths, pr_paths)
-                if overlap:
-                    shown = ", ".join(overlap[:3])
-                    extra = (
-                        f" and {len(overlap) - 3} more" if len(overlap) > 3 else ""
-                    )
-                    _emit(
-                        pr_number,
-                        "held",
-                        f"stale base: base move touches files this PR also "
-                        f"changes ({shown}{extra}); run fno do pr rebase, then "
-                        "retry",
-                        "none",
-                        err=False,
-                    )
-                    return 2
-        # (2c) Stacked-base guard: a base branch that no longer leads to the
-        # default branch merges green and ships nothing. Inside the lock because
-        # the event that kills a base IS a peer merge, which is what the lock
-        # serializes. `_behind_by` above cannot see this: it compares head to
-        # base, and a PR stacked on an already-landed base is 0 behind it.
-        # A refusal needs a retarget, so it is `blocked` (an operator action),
-        # never `held` (retry the same command). An unevaluated probe proceeds
-        # with a breadcrumb, matching `_behind_by`: our own read failing must
-        # not wedge a merge.
-        from fno.pr import _base_lineage
-
-        verdict, why = _base_lineage.lineage_verdict(pr_number, repo)
-        if verdict == "stale":
-            if _base_lineage.bypassed():
-                _base_lineage.emit_bypass_escape(pr_number, repo, why)
-                sys.stderr.write(
-                    f"pr-merge: stacked-base guard bypassed "
-                    f"({_base_lineage.BYPASS_ENV}); {why}\n"
-                )
-            else:
-                _emit(pr_number, "blocked", f"stacked base refused: {why}", "none", err=True)
-                return 2
-        elif verdict == "unknown":
-            sys.stderr.write(
-                f"pr-merge: stacked-base probe unavailable ({why}); "
-                "merging without the lineage guard\n"
-            )
         return _do_merge(
             pr_number,
             auto_merge,
@@ -2245,6 +1944,7 @@ def _authorized_merge(
     decide_only: bool = False,
     timeout_s: float = 300.0,
     authority: str = "manifest",
+    accept_flake: bool = False,
 ) -> dict:
     """Ask the one authorized-merge operation, in fno-agents.
 
@@ -2266,6 +1966,7 @@ def _authorized_merge(
         "require_checks": bool(require_checks),
         "decide_only": bool(decide_only),
         "authority": authority,
+        "accept_flake": bool(accept_flake),
     }
     if approved is not None:
         payload["approved"] = bool(approved)
@@ -2353,6 +2054,7 @@ def _do_merge(
         "require_checks": auto_merge.require_checks_pass,
         "covered_head": covered_pin(pr_number, repo, covered_head),
         "authority": authority,
+        "accept_flake": bool(accept_flake),
     }
 
     # Authorize BEFORE publishing anything. The coverage status greens the head
@@ -2365,16 +2067,10 @@ def _do_merge(
     # The flake hold: a rerun-recovered green is not a clean green (the checks
     # verdict reads only the latest rollup). Probe ran at 2b; this is only the
     # decision. Sits before the coverage stamp: a held head must not green.
-    if flake is not None and flake.get("recovered"):
+    if flake is not None and flake.get("recovered") and accept_flake:
+        # The hold itself is decide's flake gate (x-53c5); this is only the
+        # sanctioned-override receipt, which needs the probe's failed list.
         failed = ", ".join(flake.get("failed") or []) or "unknown checks"
-        if not accept_flake:
-            _emit(
-                pr_number, "held",
-                f"rerun-recovered green (earlier failed attempt: {failed}); merge held. "
-                f"Sanctioned override: fno do pr merge {pr_number} --accept-flake",
-                "none", err=True,
-            )
-            return 2
         try:
             from fno.events import _build, append_event
 
