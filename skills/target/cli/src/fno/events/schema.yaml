@@ -6347,6 +6347,9 @@ event_types:
     data:
       required: []
       properties:
+        kind:
+          type: string
+          description: "Which distress vocabulary produced the row: help for an in-session <help> tag, result_blocked for a RESULT: BLOCKED return. Additive within v:1; the type enum is frozen."
         reason:
           type: string
           description: "Why it blocked, truncated to the reason cap."

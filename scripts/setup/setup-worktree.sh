@@ -323,6 +323,8 @@ _salvage_dispatcher_body='toplevel="$(git rev-parse --show-toplevel 2>/dev/null)
 if [ -n "$toplevel" ]; then
   _fno_salvage_script="$toplevel/hooks/'"$_salvage_marker"'"
   [ -x "$_fno_salvage_script" ] && "$_fno_salvage_script"
+  _fno_corrections_hook="$toplevel/hooks/corrections-git-postcommit.sh"
+  [ -x "$_fno_corrections_hook" ] && "$_fno_corrections_hook"
 fi'
 _common_hooks_dir="$(git -C "$WORKTREE" rev-parse --git-common-dir 2>/dev/null)" || _common_hooks_dir=""
 if [[ -n "$_common_hooks_dir" ]]; then
