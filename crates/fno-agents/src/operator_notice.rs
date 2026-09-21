@@ -255,6 +255,15 @@ pub fn forget_at(path: &Path, key: &str) {
     }
 }
 
+/// The seconds since the entry under `key` was first written, or `None` when
+/// the store holds none. The crown alarm's first-seen clock reads through
+/// here: the store shapes stay private to this module.
+pub(crate) fn first_seen_age_s(path: &Path, key: &str, now: u64) -> Option<u64> {
+    let store = load_store(path);
+    let ts = store.get(key)?.get("ts")?.as_str()?;
+    Some(age_seconds(ts, now))
+}
+
 // ---------------------------------------------------------------------------
 // The notify_watch arm
 // ---------------------------------------------------------------------------
