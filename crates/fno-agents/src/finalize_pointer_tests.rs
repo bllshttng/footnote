@@ -22,7 +22,7 @@ fn corrections_pointer_refuses_temp_dir_postmortem() {
     fs::write(&log_path, "").unwrap();
     let fixture_pm = fno_home.join("pm-sibling-not-postmortems").join("pm.md");
 
-    std::env::remove_var(CORRECTIONS_LOG_ENV);
+    std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
     std::env::set_var("FNO_HOME", &fno_home);
     append_corrections_pointer(Some(&home), &fixture_pm, "NoProgress", "d");
     std::env::remove_var("FNO_HOME");
@@ -56,7 +56,7 @@ fn corrections_pointer_creates_absent_log_at_0600() {
     fs::write(&real_pm, "postmortem").unwrap();
     let log_path = fno_dir.join("corrections.log");
 
-    std::env::remove_var(CORRECTIONS_LOG_ENV);
+    std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
     std::env::remove_var("FNO_HOME");
     append_corrections_pointer(Some(&home), &real_pm, "NoProgress", "s");
 

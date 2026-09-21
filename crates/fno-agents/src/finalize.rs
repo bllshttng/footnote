@@ -3090,17 +3090,12 @@ fn assistant_text_blocks(val: &Value) -> String {
 /// 2). Resolution order mirrors scripts/lib/corrections-lock.sh's
 /// corrections_log_path(): POSTMORTEM_CORRECTIONS_LOG override, then
 /// FNO_HOME, then home-relative default.
-/// The override env for the corrections.log path, named once so the
-/// reachable-paths twin keeps exactly one rs carrier (hermetic.py holds the
-/// py side); tests scrub it through this name.
-pub(crate) const CORRECTIONS_LOG_ENV: &str = "POSTMORTEM_CORRECTIONS_LOG";
-
 /// The corrections.log path, the ONE resolution for the finalize writer and
 /// the corrections-verify reader alike: POSTMORTEM_CORRECTIONS_LOG override,
 /// then FNO_HOME, then home-relative default. None when no home resolves
 /// (mirrors scripts/lib/corrections-lock.sh corrections_log_path()).
 pub(crate) fn corrections_log_path(home: Option<&Path>) -> Option<PathBuf> {
-    match std::env::var_os(CORRECTIONS_LOG_ENV) {
+    match std::env::var_os("POSTMORTEM_CORRECTIONS_LOG") {
         Some(p) => Some(PathBuf::from(p)),
         None => match std::env::var_os("FNO_HOME") {
             Some(p) => Some(PathBuf::from(p).join("corrections.log")),
@@ -4202,7 +4197,7 @@ mod tests {
         let log_path = fno_home.join("corrections.log");
         fs::write(&log_path, "").unwrap();
 
-        std::env::remove_var(CORRECTIONS_LOG_ENV);
+        std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
         std::env::set_var("FNO_HOME", &fno_home);
         append_corrections_pointer(
             Some(&unused_home),
@@ -4231,7 +4226,7 @@ mod tests {
         let log_path = fno_dir.join("corrections.log");
         fs::write(&log_path, "").unwrap();
 
-        std::env::remove_var(CORRECTIONS_LOG_ENV);
+        std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
         std::env::remove_var("FNO_HOME");
         append_corrections_pointer(
             Some(&home),

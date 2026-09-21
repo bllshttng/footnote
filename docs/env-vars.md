@@ -21,6 +21,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `CLAUDE_CODE_SESSION_ID` | py+rs | unclear: cli/src/fno/carveout/core.py:202 |
 | `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` | rs | unclear: crates/fno-agents/src/loopcheck.rs:9010 |
 | `CLAUDE_CONFIG_DIR` | py+rs | Overrides the Claude config directory for managed provider lookups. |
+| `CLAUDE_DIR_OVERRIDE` | rs | Redirects the Claude config root the corrections-verify reads the rule repo's git log from; mirrors the bash-side override in autocorrect-pack.sh. |
 | `CLAUDE_EFFORT` | py | unclear: cli/src/fno/graph/cli.py:903 |
 | `CLAUDE_PLUGIN_ROOT` | py+rs | unclear: cli/src/fno/doctor.py:3465 |
 | `CLAUDE_SESSION_ID` | rs | unclear: crates/fno-agents/src/claims.rs:3690 |
@@ -212,7 +213,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `PI_CODING_AGENT_DIR` | rs | pi's agent dir; fno installs the extension under it and resolves the session store from it. |
 | `PI_CODING_AGENT_SESSION_DIR` | rs | pi's flat session store override; fno matches a session by the file header's cwd. |
 | `POSTMORTEMS_DIR` | rs | unclear: crates/fno-agents/src/finalize.rs:4044 |
-| `POSTMORTEM_CORRECTIONS_LOG` | rs | unclear: crates/fno-agents/src/finalize.rs:2890 |
+| `POSTMORTEM_CORRECTIONS_LOG` | rs | Overrides the corrections.log path; the finalize writer and the corrections-verify reader resolve it together. crates/fno-agents/src/finalize.rs:3098 |
 | `POST_MERGE_NONINTERACTIVE` | py | unclear: cli/src/fno/pr/cli.py:918 |
 | `PWD` | py+rs | unclear: cli/src/fno/adapters/providers/cli.py:54 |
 | `PYTEST_CURRENT_TEST` | py | unclear: cli/src/fno/cli.py:404 |
