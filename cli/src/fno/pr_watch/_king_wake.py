@@ -77,23 +77,18 @@ def _crowned(
     for entry in crowns:
         by_scope.setdefault(entry.get("scope") or "", []).append(entry)
     out: list[CrownTarget] = []
-    dropped: dict[str, int] = {}
+    skipped_conflicts = 0
     for scope, entries in by_scope.items():
         if not scope:
-            dropped["empty scope(s)"] = dropped.get("empty scope(s)", 0) + 1
             continue
         if len(entries) > 1:
-            dropped["conflicting scope(s)"] = dropped.get("conflicting scope(s)", 0) + 1
+            skipped_conflicts += 1
             continue
         holder = entries[0].get("holder") or ""
-        if not holder:
-            dropped["holderless crown(s)"] = dropped.get("holderless crown(s)", 0) + 1
-            continue
         row = by_holder.get(holder)
         cwd = getattr(row, "cwd", "") if row is not None else ""
         short_id = (getattr(row, "short_id", "") or "") if row is not None else ""
-        if not cwd:
-            dropped["unregistered holder(s)"] = dropped.get("unregistered holder(s)", 0) + 1
+        if not holder or not cwd:
             continue
         root = Path(cwd)
         # The validating helper, never a hand join: a corrupted crown_scope
@@ -101,10 +96,8 @@ def _crowned(
         try:
             manifest = king_manifest_path(scope, state_root=king_state_root(root))
         except ValueError:
-            dropped["manifest missing"] = dropped.get("manifest missing", 0) + 1
             continue
         if not manifest.is_file():
-            dropped["manifest missing"] = dropped.get("manifest missing", 0) + 1
             continue
         out.append(
             CrownTarget(
@@ -115,7 +108,7 @@ def _crowned(
                 short_id=short_id,
             )
         )
-    note = "; ".join(f"{n} {word}" for word, n in sorted(dropped.items())) if dropped else ""
+    note = f"{skipped_conflicts} conflicting scope(s) skipped" if skipped_conflicts else ""
     return out, note
 
 
@@ -281,21 +274,20 @@ def _birth_cursor(manifest: Path) -> str:
 
 
 def _read_board_sidecar(target: CrownTarget) -> "tuple[str, list[tuple[str, ...]] | None]":
-    """``(stored_hash, stored_rows)``; corrupt reads as no observation."""
+    """``(stored_hash, stored_rows)``; corrupt or row-less reads as a first
+    observation."""
     payload = _read_sidecar(target)
     stored_hash = str(payload.get("board_hash") or "")
     raw_rows = payload.get("board_rows")
     rows = None
-    if isinstance(raw_rows, list):
+    if isinstance(raw_rows, list) and raw_rows:
         # A corrupt element reads as no observation, never raises out of the
         # tick: every later scope would be stranded with it.
         rows = [
             tuple(str(f) for f in row)
             for row in raw_rows
             if isinstance(row, (list, tuple)) and len(row) == 4
-        ]
-        if len(rows) != len(raw_rows):
-            rows = None
+        ] or None
     return stored_hash, rows
 
 
@@ -303,7 +295,7 @@ def _board_trigger(
     target: CrownTarget, rows
 ) -> tuple[bool, Optional[str], Optional[list], Optional[str], bool]:
     """``(wake?, hash+rows_to_store_after_a_dispatch, diff, first_observation)``.
-    Pure: it never writes. An absent-hash sidecar is a first
+    Pure: it never writes. An absent hash or row-less sidecar is a first
     observation - the caller stores it only after the holder reads present; a
     changed hash stores only after a dispatch; no rows is no signal."""
     if rows is None:
@@ -481,6 +473,11 @@ def graph_entries(path: Optional[Path] = None) -> list:
         if ident is not None and _GRAPH_ENTRIES_MEMO["ident"] == ident:
             return _GRAPH_ENTRIES_MEMO["entries"]
         entries = wire_rows(path=gpath)
+        # The read may materialize the store (first contact folds the seed),
+        # which moves the backend the identity keys on, so the key is read
+        # AFTER the rows: caching the pre-materialization key would miss on
+        # the next tick and read twice forever.
+        ident = drain_cache.graph_ident(gpath)
         if ident is not None:
             _GRAPH_ENTRIES_MEMO.update(ident=ident, entries=entries)
         return entries
@@ -585,7 +582,10 @@ def run_king_wake(
     except Exception:  # noqa: BLE001 - an unreadable journal is not a trigger
         answered_records = []
 
-    # Clock-keyed rotation, no progress kept: the offset advances one crown per window.
+    # Start where the last pass stopped: rotation by debounce window gives
+    # every crown a turn at the front when the pass keeps running out of
+    # slice. The ceiling is fairness per debounce window, not per crown: a
+    # crown can wait two windows when every pass overruns.
     offset = int(now.timestamp() // max(1, debounce_s)) % len(targets) if targets else 0
     for target in targets[offset:] + targets[:offset]:
         sidecar = _read_sidecar(target)
@@ -648,13 +648,7 @@ def run_king_wake(
                 target, entries, now=now, backstop_s=backstop_s, resolver=scope_resolver
             ):
                 reason = "backstop"
-        if reason is None:
-            # Seeds record what this pass observed, so a crown that cannot
-            # wake never pays the read that was meant to gate them.
-            if pending_answer_seed:
-                _update_sidecar(target, answered_cursor=_birth_cursor(target.manifest))
-            if first_observation and fresh_board_hash is not None:
-                _store_board_hash(target, fresh_board_hash, fresh_board_rows or ())
+        if reason is None and not pending_answer_seed and not first_observation:
             summary["evaluated"] += 1
             continue
         if _under_floor():

@@ -90,6 +90,16 @@ def comment_create(node_id: str, input: CommentCreateInput, *, path: Path = GRAP
     return _payload(_api("comment_create", {"id": node_id, "input": input.model_dump()}, path=path))
 
 
+def archive_node(node_id: str, *, path: Path = GRAPH_JSON) -> NodePayload:
+    """Fold a node into the archive: it stops answering default reads."""
+    return _payload(_api("node_archive", {"id": node_id}, path=path))
+
+
+def unarchive_node(node_id: str, *, path: Path = GRAPH_JSON) -> NodePayload:
+    """Restore an archived node to the live board."""
+    return _payload(_api("node_unarchive", {"id": node_id}, path=path))
+
+
 def cmd_version() -> None:
     """Print the store's mutation counter: it grows one per write."""
     import typer
@@ -97,20 +107,25 @@ def cmd_version() -> None:
     typer.echo(version())
 
 
-def wire_rows(*, path: Path = GRAPH_JSON) -> list[dict]:
+def wire_rows(*, path: Path = GRAPH_JSON, include_archived: bool = False) -> list[dict]:
     """Wire rows; absent store reads empty; unrepresentable rows ride
-    verbatim; the dumped status IS the stored status."""
+    verbatim; the dumped status IS the stored status. Archived residents
+    answer only when asked for."""
     from fno.graph.store import StoreUnavailable
     from pydantic import ValidationError
 
     try:
-        reply = _api("rows", {}, path=path)
+        reply = _api("rows", {"include_archived": include_archived}, path=path)
     except StoreUnavailable:
         if not path.exists():
             return []
         raise
     out: list[dict] = []
     for row in reply.get("rows") or []:
+        # The rows op serves archived residents raw (only the nodes op
+        # filters server-side), so the default read hides them here.
+        if not include_archived and isinstance(row, dict) and row.get("archived_at"):
+            continue
         try:
             dumped = Node.model_validate(row).model_dump(by_alias=True)
         except ValidationError:

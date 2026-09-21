@@ -807,7 +807,6 @@ jobs:
 
   test-mux:
     name: cargo test (fno mux)
-    needs: [smoke-pytest]
     runs-on: ubuntu-latest
     # 20 against a load measured in single minutes: the mux lib suite, the
     # real-process integration suite, and the workspace standalone journey,
@@ -864,8 +863,13 @@ jobs:
       - name: cargo test --test '*' --test-threads=1 (fno mux real-process integration)
         # The mux e2e tests spawn real PTYs and Unix sockets; both work on
         # the ubuntu-latest runner (the harness needs no TTY of its own).
+        # The board/restore e2e binaries run FIRST: they are the ones that
+        # have regressed, and at the back of a serial suite a red lands at
+        # minute 31 instead of minute 5.
         working-directory: crates/fno
-        run: cargo test --test '*' -- --test-threads=1
+        run: |
+          cargo test --test idle_cpu_budget_e2e --test mux_restore_doneness_e2e --test cross_door_property -- --test-threads=1
+          cargo test --test '*' -- --test-threads=1
 
       - name: Workspace standalone journey
         # The conformance journey on the real binaries: server, plain shell

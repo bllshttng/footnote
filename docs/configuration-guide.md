@@ -29,8 +29,6 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `paths.observer_reports_dir` | str (optional) | _(none)_ | never | Override path to the observer harness digest dir. |
 | `paths.operator_lane` | str (optional) | _(none)_ | never | Override path to the operator's priorities lane. |
 | `paths.spaces_dir` | str (optional) | _(none)_ | never | Override path to the per-repo spaces root. |
-| `graph.commit_mode` | typing.Literal['rows', 'whole'] | `rows` | advanced | Graph mutation payload: rows uses row-scoped conflicts; whole restores the legacy whole-graph commit path (default rows). |
-| `graph.read_source` | typing.Literal['json', 'sqlite'] | `json` | advanced | Authoritative graph backend: json or sqlite. Owned by `fno doctor graph backend`; do not set by hand. |
 | `obsidian.enabled` | bool | `false` | always | Whether this project uses an Obsidian vault for plans/docs. |
 | `obsidian.vault` | str (optional) | _(none)_ | always | Vault area name (NOT a filesystem path). |
 | `project.id` | str (optional) | _(none)_ | advanced | Project identifier. |
@@ -50,7 +48,6 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `backlog.id_prefix` | str (optional) | _(none)_ | always | Prefix for minted node IDs (<=7 chars; not cv-/fu-/tgt-). |
 | `backlog.id_hex_width` | int | `8` | advanced | Hex width of minted node IDs (4-8). |
 | `backlog.staleness_days` | int | `21` | advanced | Age (days) before an unmoved ready node is quarantined from selection. |
-| `backlog.epic_max_open_children` | int (optional) | _(none)_ | advanced | Most open children an epic may hold. A write that would parent one more open child under a full epic is refused and names the new-epic verb. Unset means no cap. The graph store reads it from the config.toml beside graph.json, the global config on a default install. |
 | `backlog.render_targets` | list[RenderTargetConfig] | `[]` | advanced | Auto-rendered projections (GLOBAL config file only): every graph mutation re-renders each {path, scope, projection=local\|backlog\|roadmap} target; public targets use the leak gate and local is full-detail. |
 | `backlog.page_reload_s` | int | `60` | advanced | Seconds an open local board or reign.html tab waits, visible and untouched, before it reloads itself (default 60; 0 is off). |
 | `batch.enabled` | bool | `false` | advanced | Coalesce same-domain nodes into one batch PR (opt-in). |

@@ -184,7 +184,8 @@ def test_missing_plan_file_never_fails_verb(tmp_graph, tmp_path):
     res = runner.invoke(app, ["backlog", "update", "x-1234", "--priority", "p0", "--blocks-everything"])
     assert res.exit_code == 0, res.output
     # graph still committed the change
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    from fno.graph.store import read_graph_strict
+    entries = read_graph_strict(tmp_graph)
     assert entries[0]["priority"] == "p0"
 
 
@@ -196,7 +197,8 @@ def test_tag_roundtrip_reaches_doc(tmp_graph, tmp_path):
     res = runner.invoke(app, ["backlog", "update", "x-1234", "--tag", "mux", "--tag", "mux"])
     assert res.exit_code == 0, res.output
 
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    from fno.graph.store import read_graph_strict
+    entries = read_graph_strict(tmp_graph)
     assert entries[0]["tags"] == ["mux"]  # dedup, idempotent
     _, fields, _ = read_plan_file(plan)
     assert fields["tags"] == ["mux"]
@@ -209,7 +211,8 @@ def test_untag_removes_tag(tmp_graph, tmp_path):
 
     res = runner.invoke(app, ["backlog", "update", "x-1234", "--untag", "mux", "--untag", "gone"])
     assert res.exit_code == 0, res.output
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    from fno.graph.store import read_graph_strict
+    entries = read_graph_strict(tmp_graph)
     assert entries[0]["tags"] == ["ui"]
 
 
@@ -221,7 +224,8 @@ def test_malformed_tag_refused_node_unchanged(tmp_graph, tmp_path):
     res = runner.invoke(app, ["backlog", "update", "x-1234", "--tag", "Mux UX!"])
     assert res.exit_code != 0
     assert "lowercase-kebab" in res.output
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    from fno.graph.store import read_graph_strict
+    entries = read_graph_strict(tmp_graph)
     assert entries[0].get("tags", []) == []  # unchanged
 
 
@@ -237,7 +241,8 @@ def test_epic_under_mission_allowed(tmp_graph, tmp_path):
     _seed(tmp_graph, [_epic("x-0a01", "mission"), _epic("x-0e02", "epic")])
     res = runner.invoke(app, ["backlog", "update", "x-0e02", "--parent", "x-0a01"])
     assert res.exit_code == 0, res.output
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    from fno.graph.store import read_graph_strict
+    entries = read_graph_strict(tmp_graph)
     assert next(e for e in entries if e["id"] == "x-0e02")["parent"] == "x-0a01"
 
 
@@ -252,7 +257,8 @@ def test_epic_depth_cap_refused(tmp_graph, tmp_path):
     res = runner.invoke(app, ["backlog", "update", "x-0c03", "--parent", "x-0e02"])
     assert res.exit_code != 0
     assert "cap" in res.output.lower()
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    from fno.graph.store import read_graph_strict
+    entries = read_graph_strict(tmp_graph)
     assert next(e for e in entries if e["id"] == "x-0c03")["parent"] is None  # unchanged
 
 
@@ -269,7 +275,8 @@ def test_epic_owning_subtree_cannot_nest_under_mission(tmp_graph, tmp_path):
     res = runner.invoke(app, ["backlog", "update", "x-0b02", "--parent", "x-0a01"])
     assert res.exit_code != 0
     assert "cap" in res.output.lower()
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    from fno.graph.store import read_graph_strict
+    entries = read_graph_strict(tmp_graph)
     assert next(e for e in entries if e["id"] == "x-0b02")["parent"] is None  # unchanged
 
 
@@ -298,7 +305,8 @@ def test_add_epic_depth_cap_refused(tmp_graph, tmp_path):
     assert res.exit_code != 0
     assert "cap" in res.output.lower()
     # No new node was appended.
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    from fno.graph.store import read_graph_strict
+    entries = read_graph_strict(tmp_graph)
     assert len(entries) == 2
 
 
@@ -342,7 +350,8 @@ def test_type_change_to_epic_respects_depth_cap(tmp_graph, tmp_path):
     res = runner.invoke(app, ["backlog", "update", "x-1234", "--type", "epic"])
     assert res.exit_code != 0
     assert "cap" in res.output.lower()
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    from fno.graph.store import read_graph_strict
+    entries = read_graph_strict(tmp_graph)
     assert next(e for e in entries if e["id"] == "x-1234")["type"] == "feature"  # unchanged
 
 

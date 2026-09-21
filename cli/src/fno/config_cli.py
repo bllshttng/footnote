@@ -267,13 +267,18 @@ def _repo_has_fno_activity(repo_root: Path, project_id: Optional[str]) -> bool:
 
     # 3. Global graph holds a node mapping this repo (by project.id or cwd).
     try:
-        from fno.graph.store import StoreUnavailable, read_graph
+        from fno.graph.store import (
+            GraphCorruptError,
+            GraphUnreadableError,
+            StoreUnavailable,
+            read_graph_strict,
+        )
         from fno.tracker import active_backend_name
 
         if active_backend_name() != "graph":
             return False  # an external backend has no local graph: dormant
 
-        entries = read_graph()
+        entries = read_graph_strict()
         root_str = str(repo_root.resolve())
         for node in entries:
             if not isinstance(node, dict):
@@ -286,7 +291,7 @@ def _repo_has_fno_activity(repo_root: Path, project_id: Optional[str]) -> bool:
                     cwd == root_str or cwd.startswith(root_str + "/")
                 ):
                     return True
-    except (OSError, ValueError, StoreUnavailable):
+    except (OSError, ValueError, StoreUnavailable, GraphUnreadableError, GraphCorruptError):
         pass  # bias dormant
 
     return False

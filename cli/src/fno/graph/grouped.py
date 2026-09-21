@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
-from fno.graph.types import Entry
+from fno.graph.types import Node as Entry
 
 
 GROUPED_FIELD_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
