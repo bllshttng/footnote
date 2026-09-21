@@ -125,6 +125,7 @@ pub mod decision_index;
 pub mod delivery_completion;
 pub mod digest;
 pub mod disposition_gate;
+pub mod corrections_verify;
 pub mod distress;
 pub mod drift;
 pub mod duration;

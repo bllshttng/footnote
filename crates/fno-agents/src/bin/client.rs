@@ -217,6 +217,13 @@ fn main() {
     if args.first().map(String::as_str) == Some("evals-trend") {
         std::process::exit(fno_agents::evals_trend::run_evals_trend(&args[1..]));
     }
+    // `corrections-verify`: the applied-correction friction score, native
+    // under d-b6cc1a2a. Transport-only, dispatched here like evals-trend;
+    // autocorrect-pack.sh embeds its --markdown block. Registers no verb
+    // (the shrink law allows no new action).
+    if args.first().map(String::as_str) == Some("corrections-verify") {
+        std::process::exit(fno_agents::corrections_verify::run(&args[1..]));
+    }
     // `evals-attempt`: the native attempt-eligibility verdict for eval history
     // rows. Transport-only, dispatched here like evals-trend: the
     // Python runner asks it per attempt at write time; the report re-asks it
