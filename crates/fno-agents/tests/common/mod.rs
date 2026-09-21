@@ -92,10 +92,17 @@ pub fn wait_for_event(
 ) {
     let start = std::time::Instant::now();
     while start.elapsed() < budget {
-        if fs::read_to_string(home.events_jsonl())
-            .unwrap_or_default()
-            .contains(needle)
-        {
+        // The store commit is the write boundary: the daemon's rows land in
+        // the store, and a raw journal read never sees them, so every poll
+        // here once burned its whole budget before failing.
+        let journal = home.events_jsonl();
+        let hit = match fno_agents::event_store::query_events(&journal, &Default::default()) {
+            Ok(rows) => rows.iter().any(|row| row.line.contains(needle)),
+            Err(_) => fs::read_to_string(&journal)
+                .map(|text| text.contains(needle))
+                .unwrap_or(false),
+        };
+        if hit {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
