@@ -471,7 +471,7 @@ def _review_activity(branch: str, head: str, cwd: Optional[str]):
 
 
 def _merge_decision(pr: str, repo: str, facts: dict) -> dict:
-    """The one merge decision, as an authorized-merge preview (x-53c5)."""
+    """The one merge decision, as an authorized-merge preview."""
     from fno.rust_binary import verb_call
 
     try:
@@ -843,7 +843,7 @@ def run_status(
         if rerun is not None
         else {}
     )
-    # ONE merge decision (x-53c5): the probes this read already paid for
+    # ONE merge decision: the probes this read already paid for
     # ride the ask, so the owner never spawns a second status read.
     receipt = _merge_decision(
         pr,
@@ -995,7 +995,7 @@ def run_status(
             "worktree": activity.worktree,
         },
         "dispatch_hold": hold_reason,
-        # The preview verdict (x-53c5).
+        # The preview verdict.
         "merge_decision": receipt,
         "ready": not blocker_words,
         "ready_blockers": blocker_words,

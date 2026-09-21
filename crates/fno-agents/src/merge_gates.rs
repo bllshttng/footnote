@@ -1,5 +1,5 @@
 //! The merge gates that used to live in the Python merge verb, ported so
-//! `authorized_merge::decide` is the one merge decision (x-53c5). Each gate
+//! `authorized_merge::decide` is the one merge decision. Each gate
 //! evaluates one input and answers `Option<Blocker>`: None clears. The pure
 //! halves take their facts as arguments so unit tests need no filesystem or
 //! network; the fetching halves ride the caller's `Probes` handle.

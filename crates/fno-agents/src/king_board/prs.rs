@@ -315,7 +315,7 @@ pub(crate) fn read_pr_gates(
             skipped.join(", ")
         ));
     }
-    // The merge slot is the fact that ORDERS this queue (x-53c5): name its
+    // The merge slot is the fact that ORDERS this queue: name its
     // holder on every row, and when the holder's own row is absent (the
     // listing filter or a spent gate slice dropped it), carry a synthetic
     // row so the queue names the PR every queued merge waits behind. One

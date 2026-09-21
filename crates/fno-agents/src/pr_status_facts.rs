@@ -62,7 +62,7 @@ pub fn run_op(op: &str, payload: &Value) -> String {
 // status-cache-key
 
 /// The status row's cache key, minted from every fact the merge decision
-/// reads (x-53c5): head sha, PR state, the PR's dispatch-hold word, every
+/// reads: head sha, PR state, the PR's dispatch-hold word, every
 /// live merge-slot row in the repo's space, and the review-evidence lines
 /// naming this head. A hold release, a slot move, a merge, or a fresh
 /// attestation changes the key, so a row written before the change can
@@ -81,7 +81,7 @@ pub(crate) fn status_cache_key(payload: &Value) -> Value {
 
     // The repo's live merge authority: a config flip must rekey every row
     // of the repo, or a cached `merge_authority: false` outlives the flip
-    // inside the TTL (x-53c5 wave, PR 2182 specimen).
+    // inside the TTL (the PR 2182 specimen).
     let enabled = crate::agents_config::auto_merge_enabled(&cwd);
     let dispatch = crate::agents_config::auto_merge_grant_dispatches(&cwd);
     let mut material = format!("{head}|{state}|{enabled}|{dispatch}|");

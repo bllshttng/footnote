@@ -1827,7 +1827,7 @@ def run_merge(
         return 127
 
     # (2a) Coverage read: the pin and the published receipt. The refusal is
-    # decide's now (x-53c5).
+    # decide's now.
     from fno.pr import _coverage_gate
 
     state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
@@ -2059,7 +2059,7 @@ def _do_merge(
     # verdict reads only the latest rollup). Probe ran at 2b; this is only the
     # decision. Sits before the coverage stamp: a held head must not green.
     if flake is not None and flake.get("recovered") and accept_flake:
-        # The hold is decide's flake gate (x-53c5); this is the receipt.
+        # The hold is decide's flake gate; this is the receipt.
         failed = ", ".join(flake.get("failed") or []) or "unknown checks"
         try:
             from fno.events import _build, append_event

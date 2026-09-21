@@ -162,7 +162,7 @@ def _serve(row: dict, *, stale: bool) -> int:
         out["green"] = False
         out["settled"] = False
         out["ready"] = False
-        # A stale row's gate answers are history, not verdicts (x-53c5).
+        # A stale row's gate answers are history, not verdicts.
         out["ready_blockers"] = ["status_stale"]
         out.pop("failures", None)
         out["stale_reason"] = (
@@ -197,7 +197,7 @@ def _serve(row: dict, *, stale: bool) -> int:
 
 
 def _merge_decision_key(slug_key: str, pr: str, info: dict, cwd: Optional[str]) -> str:
-    """The row key, minted by the owner's status-cache-key op (x-53c5)."""
+    """The row key, minted by the owner's status-cache-key op."""
     from fno.rust_binary import verb_call
 
     try:
