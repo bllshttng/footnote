@@ -1420,12 +1420,12 @@ mod tests {
 
     #[test]
     fn a_roster_absent_holder_with_an_old_transcript_drops_out() {
-        // AC10: the x-16b7 shape. Holder absent from a KNOWN, warning-free
+        // AC10: the live specimen shape. Holder absent from a KNOWN, warning-free
         // roster, transcript quiet 19h past a 12h window: the court drops
         // the candidate instead of listing it forever.
         let root = tmp("verdict-transcript");
         let sess = "aaaa7777-0000-4000-8000-000000000007";
-        write_court_manifest(&root, "x-16b7", sess, "2026-09-18T18:11:00Z");
+        write_court_manifest(&root, "zed", sess, "2026-09-18T18:11:00Z");
         let roster = || crate::claude_roster::ClaudeAgentsSnapshot::known(vec![]);
         let out = court_orphans(
             &root,
@@ -1450,7 +1450,7 @@ mod tests {
         // from the roster proves nothing and the candidate stays listed.
         let root = tmp("verdict-no-transcript");
         let sess = "bbbb8888-0000-4000-8000-000000000008";
-        write_court_manifest(&root, "x-16b7", sess, "2026-09-18T18:11:00Z");
+        write_court_manifest(&root, "zed", sess, "2026-09-18T18:11:00Z");
         let roster = || crate::claude_roster::ClaudeAgentsSnapshot::known(vec![]);
         let out = court_orphans(&root, &[], &roster, &|_| None, 12 * 3600);
         assert_eq!(out.len(), 1, "{out:?}");

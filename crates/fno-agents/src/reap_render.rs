@@ -686,9 +686,9 @@ mod tests {
         let mut s = summary(&[]);
         s.crowns = Some(crate::crown_reap::CrownReap {
             vacated: vec![crate::crown_reap::VacatedCrown {
-                scope: "x-dead".to_string(),
+                scope: "zed".to_string(),
                 level: Some(2),
-                manifest_path: "/tmp/x-dead.md".to_string(),
+                manifest_path: "/tmp/zed.md".to_string(),
                 holder_session: Some("sess-1".to_string()),
                 evidence: "absent from the roster; transcript quiet 90000s > window 43200s"
                     .to_string(),
@@ -704,7 +704,7 @@ mod tests {
         let text = render_reap(&s, false, false);
         assert!(
             text.contains(
-                "vacated crown x-dead (holder sess-1 dead: absent from the roster; transcript quiet 90000s > window 43200s; inherits: operator)",
+                "vacated crown zed (holder sess-1 dead: absent from the roster; transcript quiet 90000s > window 43200s; inherits: operator)",
             ),
             "{text}"
         );
@@ -714,7 +714,7 @@ mod tests {
         );
         let json = render_reap(&s, true, false);
         let v: Value = serde_json::from_str(json.trim()).unwrap();
-        assert_eq!(v["crowns"]["vacated"][0]["scope"], "x-dead");
+        assert_eq!(v["crowns"]["vacated"][0]["scope"], "zed");
         assert_eq!(v["crowns"]["kept"][0]["reason"], "roster blocked");
         // A pass that ran no crown sweep renders null, never a missing key.
         let json = render_reap(&summary(&[]), true, false);
@@ -727,9 +727,9 @@ mod tests {
         let mut s = summary(&[]);
         s.crowns = Some(crate::crown_reap::CrownReap {
             vacated: vec![crate::crown_reap::VacatedCrown {
-                scope: "x-dead".to_string(),
+                scope: "zed".to_string(),
                 level: None,
-                manifest_path: "/tmp/x-dead.md".to_string(),
+                manifest_path: "/tmp/zed.md".to_string(),
                 holder_session: None,
                 evidence: "evidence".to_string(),
                 inheritor: "operator".to_string(),
@@ -739,7 +739,7 @@ mod tests {
             unread: None,
         });
         let text = render_reap(&s, false, true);
-        assert!(text.contains("would vacate crown x-dead"), "{text}");
+        assert!(text.contains("would vacate crown zed"), "{text}");
     }
 
     /// The doc's key list: every backticked snake_case token in the first

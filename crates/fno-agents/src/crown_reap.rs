@@ -561,11 +561,11 @@ mod tests {
     fn dead_fixture(tag: &str, session: &str) -> (PathBuf, PathBuf, PathBuf, String) {
         let dir = tmp(tag);
         pin_window(&dir, None);
-        let manifest = write_crown_manifest(&dir, "x-dead", session, old_created(), "claude");
+        let manifest = write_crown_manifest(&dir, "zed", session, old_created(), "claude");
         fs::write(manifest.with_extension("cancelled"), "cancel").unwrap();
         let registry = registry_file(
             &dir,
-            &[reg_row("stale-row", "exited", Some("x-dead"), Some(2))],
+            &[reg_row("stale-row", "exited", Some("zed"), Some(2))],
         );
         (dir, manifest, registry, session.to_string())
     }
@@ -588,7 +588,7 @@ mod tests {
         assert!(out.unread.is_none(), "{:?}", out.unread);
         assert_eq!(out.vacated.len(), 1, "{:?}", out.kept);
         let v = &out.vacated[0];
-        assert_eq!(v.scope, "x-dead");
+        assert_eq!(v.scope, "zed");
         assert_eq!(v.holder_session.as_deref(), Some(session.as_str()));
         assert_eq!(v.inheritor, "operator");
         assert!(
@@ -609,7 +609,7 @@ mod tests {
             .collect();
         assert_eq!(vacated.len(), 1, "{:?}", events);
         assert_eq!(vacated[0]["data"]["cause"], "holder_dead");
-        assert_eq!(vacated[0]["data"]["scope"], "x-dead");
+        assert_eq!(vacated[0]["data"]["scope"], "zed");
         assert_eq!(vacated[0]["data"]["inheritor"], "operator");
         assert!(vacated[0]["data"]["evidence"].as_str().is_some());
         // AC7: the terminal row's stale crown fields cleared in the same write.
@@ -818,7 +818,7 @@ mod tests {
         // lock names a different session, so nothing is written.
         let err = vacate(
             &manifest,
-            "x-dead",
+            "zed",
             Some("successor-session"),
             &registry,
             "evidence",
@@ -839,14 +839,11 @@ mod tests {
         // Same race on the registry side: classify saw no holder row, the
         // vacate finds a live one holding the scope.
         let _ = fs::remove_file(&registry);
-        let registry = registry_file(
-            &dir,
-            &[reg_row("new-king", "busy", Some("x-dead"), Some(2))],
-        );
+        let registry = registry_file(&dir, &[reg_row("new-king", "busy", Some("zed"), Some(2))]);
         let emitter = events_of(&dir);
         let err = vacate(
             &manifest,
-            "x-dead",
+            "zed",
             Some(&session),
             &registry,
             "evidence",
@@ -921,7 +918,7 @@ mod tests {
             Utc::now(),
         );
         assert_eq!(out.vacated.len(), 1, "{:?}", out.kept);
-        assert_eq!(out.vacated[0].scope, "x-dead");
+        assert_eq!(out.vacated[0].scope, "zed");
         assert_eq!(
             out.vacated[0].holder_session.as_deref(),
             Some(session.as_str())
@@ -936,7 +933,7 @@ mod tests {
         // The terminal row keeps its crown fields: only the apply clears them.
         let rows: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();
-        assert_eq!(rows["agents"][0]["crown_scope"], "x-dead");
+        assert_eq!(rows["agents"][0]["crown_scope"], "zed");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -946,7 +943,7 @@ mod tests {
         pin_window(&dir, None);
         write_crown_manifest(
             &dir,
-            "x-dead",
+            "zed",
             "bbbb2222-0000-4000-8000-000000000002",
             old_created(),
             "claude",
