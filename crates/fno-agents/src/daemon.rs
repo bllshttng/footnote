@@ -1777,10 +1777,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         crate::scrape::scrape_sweep(&home, &emitter, notify_on_blocked);
                     });
                 }
-                // Retirement sweep: a row leaves when its work is done
-                // (reverse join) and its transcript is quiet past
-                // `agents.retire_grace_s`; held process stopped first, receipt
-                // written before the drop, clean worktree pruned. Throttled to
+                // Retirement sweep: a row leaves when its work is done (reverse
+                // join) and its transcript is quiet past `agents.retire_grace_s`.
+                // The dead crown sweep runs first. Throttled to
                 // `agents.retire_interval_s`; off-loop.
                 let retire_interval = crate::gc::retire_interval_snapshot(&retire_interval_next);
                 crate::gc::maybe_retirement_sweep(
@@ -1793,6 +1792,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     retire_interval,
                     || crate::gc::mux_tab_sweep(false, false),
                     crate::gc::production_roster_sweep,
+                    crate::gc::production_crown_sweep,
                 );
                 // Worktree sweep + merge reaper: the sweep backstops
                 // what the reaper cannot reach; the reaper is the merge-triggered

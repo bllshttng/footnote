@@ -23,6 +23,7 @@
 //! unit-testable in isolation.
 
 use crate::graph_store::WorkState;
+use std::path::Path;
 use std::time::Duration;
 
 /// The row verdict: retire now, or keep with a named reason.
@@ -1041,6 +1042,13 @@ pub fn mux_tab_sweep(dry_run: bool, include_used_shells: bool) -> crate::reap_re
 
 /// The production roster sweep the retire arm runs: the real enumeration
 /// and removal, `dry_run` false, at the scope the caller resolved.
+/// The production dead-crown sweep the retire arm runs: apply on. The
+/// manual verb calls `crown_reap::sweep` itself so a dry run can report
+/// without applying.
+pub fn production_crown_sweep(home: &AgentsHome, cwd: &Path) -> crate::crown_reap::CrownReap {
+    crate::crown_reap::production_sweep(home, cwd, true)
+}
+
 pub fn production_roster_sweep(
     home: &AgentsHome,
     grace_secs: i64,
@@ -1063,6 +1071,7 @@ pub fn maybe_retirement_sweep(
         i64,
         crate::agents_config::RosterScope,
     ) -> crate::roster_reap::RosterReapSummary,
+    crown_sweep: fn(&AgentsHome, &Path) -> crate::crown_reap::CrownReap,
 ) {
     if last_sweep.elapsed() < interval || in_flight.swap(true, Ordering::SeqCst) {
         return;
@@ -1076,6 +1085,10 @@ pub fn maybe_retirement_sweep(
         let grace_secs = crate::agents_config::retire_grace_secs(&grace_cwd) as i64;
         let retain_days = crate::agents_config::reap_receipt_retain_days(&grace_cwd);
         let _ = state_file_sweep(&home, &emitter, &grace_cwd);
+        // The dead-crown sweep runs BEFORE the registry sweep: a vacated
+        // crown frees the territory this tick, so the registry pass reads a
+        // world that already answers for it.
+        let crowns = crown_sweep(&home, &grace_cwd);
         let summary = gc_sweep(&home, &emitter, grace_secs, retain_days);
         // Locked Decision 5: the nudge ladder rides the daemon's retire arm
         // only, after the sweep that classified the open-PR rows. A manual
@@ -1112,8 +1125,17 @@ pub fn maybe_retirement_sweep(
                 roster.refused.len()
             )
         };
+        let crowns_detail = if crowns.unread.is_some() {
+            "crowns=unreadable".to_string()
+        } else {
+            format!(
+                "crowns=vacated {} kept {}",
+                crowns.vacated.len(),
+                crowns.kept.len()
+            )
+        };
         let detail = format!(
-            "roster={roster_detail} {mux_detail} held={}",
+            "roster={roster_detail} {mux_detail} {crowns_detail} held={}",
             summary.holds.len()
         );
         // `acted` counts BOTH sweeps' retirements: the registry sweep's and
@@ -1192,6 +1214,12 @@ mod tests {
         _scope: crate::agents_config::RosterScope,
     ) -> crate::roster_reap::RosterReapSummary {
         crate::roster_reap::RosterReapSummary::default()
+    }
+
+    /// Same stub for the crown seam: the arm wiring is under test, never
+    /// the dead-crown sweep body.
+    fn noop_crown_sweep(_home: &AgentsHome, _cwd: &Path) -> crate::crown_reap::CrownReap {
+        crate::crown_reap::CrownReap::default()
     }
 
     use super::*;
@@ -1278,6 +1306,7 @@ mod tests {
                 Duration::from_secs(300),
                 || crate::reap_render::MuxSweep::Skipped,
                 noop_roster_sweep,
+                noop_crown_sweep,
             );
             // A second tick inside the window is refused by the elapsed
             // check: no second run can start until the window closes.
@@ -1291,6 +1320,7 @@ mod tests {
                 Duration::from_secs(300),
                 || crate::reap_render::MuxSweep::Skipped,
                 noop_roster_sweep,
+                noop_crown_sweep,
             );
             let rows = wait_for_retire_row(&home.events_jsonl());
             assert_eq!(rows, 1, "two ticks in one window must yield one sweep");
@@ -1340,6 +1370,7 @@ mod tests {
                 interval,
                 || crate::reap_render::MuxSweep::Skipped,
                 noop_roster_sweep,
+                noop_crown_sweep,
             );
             wait_for_retire_row(&home.events_jsonl());
             let row = std::fs::read_to_string(home.events_jsonl())
@@ -1419,6 +1450,7 @@ mod tests {
                 Duration::from_secs(300),
                 tab_sweep,
                 roster_sweep,
+                noop_crown_sweep,
             );
             // The production seams probe staged rows through real
             // subprocesses; in a sandbox without a transcript store those
@@ -1810,6 +1842,7 @@ mod tests {
                 Duration::from_secs(300),
                 || crate::reap_render::MuxSweep::Skipped,
                 noop_roster_sweep,
+                noop_crown_sweep,
             );
             // The production age probe pays a real subprocess on this
             // fixture (two probes, seconds apiece under load), so the tick

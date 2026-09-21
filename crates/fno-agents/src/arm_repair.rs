@@ -74,6 +74,11 @@ fn entry(
             Some("fno backlog reconcile --json"),
             Some(OPERATOR),
         ),
+        "select_unmeasured" => (
+            "the next-node read did not answer inside auto_continue.select_timeout_s; the heal lane retries it",
+            None,
+            Some(AUTO),
+        ),
         "configured_off" => (
             "the arm is off in config; its age is the switch, not a dead scheduler",
             None,
@@ -268,7 +273,11 @@ fn classify(row: &mut ArmStatus, facts: &RepairFacts) {
     } else if let Some(cause) = row.cause.clone() {
         // `explain` already named the cause and its hint: add only the repair.
         let (hint, verb, heal) = entry(&cause, sched.as_deref());
-        row.repair = verb.map(str::to_string);
+        row.repair = if cause == "select_unmeasured" {
+            Some(select_unmeasured_repair(&detail))
+        } else {
+            verb.map(str::to_string)
+        };
         row.heal = heal.map(str::to_string);
         if row.line.is_empty() {
             row.line = format!("{} cause={cause} ({hint})", render_row(row));
@@ -277,6 +286,11 @@ fn classify(row: &mut ArmStatus, facts: &RepairFacts) {
         return;
     } else if row.failing && detail.contains("parent-gone") {
         ("parent_gone".to_string(), None)
+    } else if skip == "select-unmeasured" {
+        (
+            "select_unmeasured".to_string(),
+            Some(select_unmeasured_repair(&detail)),
+        )
     } else if skip == "timeout" {
         ("timeout".to_string(), None)
     } else {
@@ -287,6 +301,22 @@ fn classify(row: &mut ArmStatus, facts: &RepairFacts) {
     row.repair = repair.or_else(|| verb.map(str::to_string));
     row.heal = heal.map(str::to_string);
     row.line = format!("{} cause={cause} ({hint}){}", render_row(row), suffix(row));
+}
+
+/// The project a select-read unmeasured detail names; `None` when it names
+/// none (`-`).
+fn project_from_detail(detail: &str) -> Option<&str> {
+    detail
+        .split_once(crate::select_read::PROJECT_TOKEN)
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .filter(|project| *project != "-")
+}
+
+fn select_unmeasured_repair(detail: &str) -> String {
+    match project_from_detail(detail) {
+        Some(project) => format!("fno backlog advance --project {project} --source ac --json"),
+        None => "fno backlog advance --source ac --json".to_string(),
+    }
 }
 
 fn suffix(row: &ArmStatus) -> String {
@@ -420,6 +450,28 @@ pub fn heal(
         let ok = run("install");
         parts.push(format!("install:{}", if ok { "spawned" } else { "failed" }));
     }
+    let mut advance_rows: Vec<&ArmStatus> = rows
+        .iter()
+        .filter(|r| r.cause.as_deref() == Some("select_unmeasured"))
+        .collect();
+    advance_rows.sort_by_key(|r| r.last_ts.as_deref().unwrap_or("never"));
+    for row in advance_rows {
+        let token = row.last_ts.as_deref().unwrap_or("never");
+        if !crate::operator_notice::mark_once(store, "self_heal:advance", token) {
+            continue;
+        }
+        let project = row
+            .detail
+            .as_deref()
+            .and_then(project_from_detail)
+            .unwrap_or("-");
+        let action = format!("advance:{project}");
+        let ok = run(&action);
+        parts.push(format!(
+            "{action}:{}",
+            if ok { "spawned" } else { "failed" }
+        ));
+    }
     if parts.is_empty() {
         "heal=0".to_string()
     } else {
@@ -474,6 +526,29 @@ pub fn run_repair(action: &str, cwd: &Path) -> bool {
                 return false;
             };
             // Reap it off the tick, so the daemon keeps no zombie.
+            std::thread::spawn(move || child.wait());
+            true
+        }
+        action if action.starts_with("advance:") => {
+            let Some(root) = crate::paths::canonical_repo_root(cwd) else {
+                return false;
+            };
+            let project = action.strip_prefix("advance:").unwrap_or("");
+            let mut child = std::process::Command::new(crate::scrape::fno_py());
+            child.args(["backlog", "advance"]);
+            if !project.is_empty() && project != "-" {
+                child.args(["--project", project]);
+            }
+            let child = child
+                .args(["--source", "ac", "--json"])
+                .current_dir(root)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            let Ok(mut child) = child else {
+                return false;
+            };
             std::thread::spawn(move || child.wait());
             true
         }
@@ -654,6 +729,110 @@ mod tests {
         assert!(mc.line.ends_with("heal=operator"), "{}", mc.line);
         assert!(!mc.line.contains("repair:"), "{}", mc.line);
         assert!(mc.repair.is_none());
+    }
+
+    #[test]
+    fn an_unmeasured_selection_names_the_advance_repair() {
+        let mut ac = row("auto_continue", SCHED_DAEMON);
+        ac.failing = true;
+        ac.skip_reason = Some("select-unmeasured".into());
+        // Round-trip through the writer itself: select_read owns the detail
+        // format, so a wording drift here fails this test instead of silently
+        // degrading the repair verb.
+        ac.detail = Some(crate::select_read::unmeasured_detail(
+            crate::select_read::Kind::Next,
+            &["--project".to_string(), "fno".to_string()],
+            120,
+            Some("selection stalled"),
+        ));
+        let mut rows = vec![ac];
+        annotate(&mut rows, &facts(false));
+        let ac = &rows[0];
+        assert_eq!(ac.cause.as_deref(), Some("select_unmeasured"));
+        assert_eq!(
+            ac.repair.as_deref(),
+            Some("fno backlog advance --project fno --source ac --json")
+        );
+        assert_eq!(ac.heal.as_deref(), Some("auto"));
+        assert!(ac.line.contains("cause=select_unmeasured"), "{}", ac.line);
+    }
+
+    #[test]
+    fn heal_retries_each_unmeasured_selection_once_per_timestamp() {
+        let td = tempfile::TempDir::new().unwrap();
+        let store = td.path().join("signals.json");
+        let mut ac = row("auto_continue", SCHED_DAEMON);
+        ac.failing = true;
+        ac.cause = Some("select_unmeasured".into());
+        // Round-trip through the writer itself: select_read owns the detail
+        // format, so a wording drift here fails this test instead of silently
+        // degrading the repair verb.
+        ac.detail = Some(crate::select_read::unmeasured_detail(
+            crate::select_read::Kind::Next,
+            &["--project".to_string(), "fno".to_string()],
+            120,
+            Some("selection stalled"),
+        ));
+        let rows = vec![ac];
+        let mut runs = Vec::new();
+        let first = heal(&rows, &[], true, &store, 0, 1800, &mut |action| {
+            runs.push(action.to_string());
+            true
+        });
+        assert_eq!(first, "heal=advance:fno:spawned");
+        let second = heal(&rows, &[], true, &store, 300, 1800, &mut |action| {
+            runs.push(action.to_string());
+            true
+        });
+        assert_eq!(second, "heal=0");
+        assert_eq!(runs, ["advance:fno"]);
+
+        let mut next = rows.clone();
+        next[0].last_ts = Some("2026-09-04T13:00:00Z".into());
+        let third = heal(&next, &[], true, &store, 600, 1800, &mut |action| {
+            runs.push(action.to_string());
+            false
+        });
+        assert_eq!(third, "heal=advance:fno:failed");
+        assert_eq!(runs, ["advance:fno", "advance:fno"]);
+    }
+
+    #[test]
+    fn an_unnamed_project_repairs_without_a_project_flag() {
+        let mut ac = row("auto_continue", SCHED_DAEMON);
+        ac.failing = true;
+        ac.skip_reason = Some("select-unmeasured".into());
+        ac.detail = Some(crate::select_read::unmeasured_detail(
+            crate::select_read::Kind::Next,
+            &[],
+            120,
+            None,
+        ));
+        let mut rows = vec![ac];
+        annotate(&mut rows, &facts(false));
+        assert_eq!(
+            rows[0].repair.as_deref(),
+            Some("fno backlog advance --source ac --json")
+        );
+    }
+
+    #[test]
+    fn next_error_never_enters_the_advance_heal_lane() {
+        let td = tempfile::TempDir::new().unwrap();
+        let store = td.path().join("signals.json");
+        let mut ac = row("auto_continue", SCHED_DAEMON);
+        ac.failing = true;
+        ac.skip_reason = Some("next-error".into());
+        ac.detail = Some("project=fno: graph unreadable".into());
+        let mut rows = vec![ac];
+        annotate(&mut rows, &facts(false));
+        let mut runs = Vec::new();
+        let token = heal(&rows, &[], true, &store, 0, 1800, &mut |action| {
+            runs.push(action.to_string());
+            true
+        });
+        assert_eq!(token, "heal=0");
+        assert!(runs.is_empty());
     }
 
     // AC4: no pin, or a bad pin, is never a stale build.

@@ -14,7 +14,6 @@ import os
 import shutil
 import socket
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -325,7 +324,7 @@ def test_broken_lane_reaps_nothing(monkeypatch) -> None:
 def test_probe_states_off_the_filesystem(tmp_path) -> None:
     # macOS caps AF_UNIX paths at 104 bytes; pytest tmp dirs overflow it, so
     # the fixtures bind directly in the short POSIX /tmp.
-    short = Path(tempfile.gettempdir()) / f"fk-lane-{os.getpid()}-a.sock"
+    short = Path("/tmp") / f"fk-lane-{os.getpid()}-a.sock"
     assert kl.sock_state_of(None) == kl.UNREADABLE
     assert kl.sock_state_of(short.parent / "gone.sock") == kl.ABSENT
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -341,7 +340,7 @@ def test_probe_states_off_the_filesystem(tmp_path) -> None:
 def test_a_permission_denied_connect_is_not_a_death_certificate(tmp_path) -> None:
     """EACCES on connect proves nothing about the listener: a keeper behind a
     socket this uid cannot reach is UNREACHABLE, never reapable."""
-    locked = Path(tempfile.gettempdir()) / f"fk-lane-{os.getpid()}-c.sock"
+    locked = Path("/tmp") / f"fk-lane-{os.getpid()}-c.sock"
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(str(locked))
     srv.listen(1)
@@ -361,7 +360,7 @@ def test_a_permission_denied_connect_is_not_a_death_certificate(tmp_path) -> Non
 def test_a_nonspeaking_listener_reads_silent(tmp_path) -> None:
     """A plain AF_UNIX socket that accepts and never speaks the frame protocol
     is SILENT - the wedged keeper's shape - and silence never reaps."""
-    live = Path(tempfile.gettempdir()) / f"fk-lane-{os.getpid()}-b.sock"
+    live = Path("/tmp") / f"fk-lane-{os.getpid()}-b.sock"
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(str(live))
     srv.listen(1)
@@ -411,7 +410,7 @@ def _spawn_planted_keeper(worker_bin: Path, tmp_path: Path) -> tuple[int, Path, 
     The socket lives in short POSIX /tmp, not the pytest tmp dir: macOS caps
     AF_UNIX paths at 104 bytes and the pytest tree overflows it. The returned
     parent is what a test deletes to produce the measured orphan shape."""
-    sock_dir = Path(tempfile.gettempdir()) / f"fk-lane-{os.getpid()}" / "panes"
+    sock_dir = Path("/tmp") / f"fk-lane-{os.getpid()}" / "panes"
     sock = sock_dir / "fk-test-1.sock"
     sock_dir.mkdir(parents=True)
     proc = subprocess.Popen(

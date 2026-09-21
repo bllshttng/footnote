@@ -2813,6 +2813,33 @@ event_types:
         elapsed_seconds:
           type: integer
 
+  - name: agent_crown_vacated
+    description: "A crown left its holder. The dead-crown sweep emits it with cause holder_dead when a manifest-only crown's holder session is proven dead: evidence carries the death receipt, inheritor names the live crown one rung up that takes the territory (else operator), and cleared_rows names the terminal rows whose stale crown fields cleared in the same registry write. The attended `fno agents king done` emits the same kind with its own cause. The sweep grants no crown; territory falls back to its project by construction."
+    sources: [daemon]
+    data:
+      required: [scope, cause]
+      properties:
+        scope:
+          type: [string, "null"]
+        level:
+          type: [integer, "null"]
+        holder:
+          type: [string, "null"]
+        holder_session:
+          type: [string, "null"]
+        grantor:
+          type: [string, "null"]
+        cause:
+          type: string
+        successor:
+          type: [string, "null"]
+        evidence:
+          type: [string, "null"]
+        inheritor:
+          type: [string, "null"]
+        cleared_rows:
+          type: array
+
   - name: agent_row_reaped
     description: "An agent-view or roster-only row was retired by the retirement sweep, roster-reap, or `fno agents reap`: the session's WORK is done on every resolved node and its transcript has been quiet past agents.retire_grace_s. basis names that verdict. remover identifies the acting sweep when emitted. A resumable receipt is attempted before this event; receipt_staged and resumable report whether that recovery path persisted. Distinct from agent_orphan_reaped: this removes the ROW, not just flips a PID to exited."
     sources: [daemon]
@@ -3928,42 +3955,6 @@ event_types:
           description: "Last few lines of gh stderr, or empty string if unavailable."
     consumers: [operator]
 
-  - name: loop_check_graphql_standdown
-    description: "Emitted when a fire stands down instead of blocking via loop_check: the fleet GitHub request budget holds a live refusal backoff or an exhausted 60s point window (budget_cause names which; `fno-agents fleet-incident gh-budget status` reads the ledger), the primary GraphQL floor is breached, or both. It verified no PR state, so it has no fingerprint and must not be counted as a loop_check fire (an empty fingerprint would break the reverse-scan streak in read_prior_fires)."
-    sources: [hook]
-    data:
-      required: [session_id, decision, standing_down, graphql_remaining, graphql_floor]
-      properties:
-        session_id:
-          type: string
-          description: "Target session identifier."
-        decision:
-          type: string
-          description: "Always 'block': the fire spends no GraphQL and retries next tick."
-        intent:
-          type: string
-          description: "The detected intent for this fire: promise, aborted, watching, or none."
-        intent_source:
-          type: string
-          description: "Where the intent was detected (transcript tag, etc)."
-        standing_down:
-          type: boolean
-          description: "Always true; distinguishes this from a normal block."
-        graphql_remaining:
-          type: [integer, "null"]
-          description: "GraphQL quota remaining at the top-of-fire probe, or null if the probe itself failed (a secondary refusal can still trigger stand-down with no probe reading)."
-        graphql_floor:
-          type: integer
-          description: "The configured floor (GRAPHQL_FLOOR) this remaining count fell below."
-        secondary_refusal:
-          type: boolean
-          description: "True when the fleet GitHub request budget (or, historically, a recent observed secondary refusal) says the machine is being burst-limited - a failure mode the advertised quota cannot see."
-        budget_cause:
-          type: [string, "null"]
-          enum: [backoff, budget, null]
-          description: "Why the fleet GitHub request budget is holding calls: 'backoff' (a live refusal backoff) or 'budget' (the 60s point window is at its cap). Null when the stand-down came from the primary floor alone."
-    consumers: [operator]
-
   - name: loop_check_config
     description: "Emitted once on the first loop-check fire of a session, recording the resolved CLAUDE_CODE_STOP_HOOK_BLOCK_CAP so a run force-ended by the harness override (blocks meeting the cap, then silence) is distinguishable from a budget end (a terminal budget decision)."
     sources: [hook]
@@ -3996,8 +3987,8 @@ event_types:
           description: "PR number the session is watching."
         blocker:
           type: string
-          enum: [ci, review, unknown]
-          description: "The async blocker being waited on: 'ci' (checks pending), 'review' (a bot review outstanding), or 'unknown' (a GraphQL-floor stand-down idled on the tag alone, with no read to classify the wait)."
+          enum: [ci, review, merge_slot, unknown]
+          description: "The async blocker being waited on, taken from the <watching> tag's reason: 'ci' (checks pending), 'review' (a bot review outstanding), 'merge_slot' (waiting for a merge slot), or 'unknown' (any other reason; the idle verifies nothing)."
         declared_timeout:
           type: string
           description: "Optional. The raw timeout attribute from the <watching> tag (e.g. '30m'), or empty when absent."
@@ -4007,15 +3998,6 @@ event_types:
         lease_ms:
           type: integer
           description: "The claim-lease window (ms) the fire renewed to cover the watch: declared timeout clamped to [5m,2h] plus slack."
-        stand_down:
-          type: boolean
-          description: "Optional. True when this idle was reached via a GraphQL stand-down (primary floor or a secondary refusal) rather than a normal verified async wait."
-        graphql_remaining:
-          type: [integer, "null"]
-          description: "Optional. GraphQL quota remaining at the top-of-fire probe, present on a stand-down idle; null if the probe itself failed."
-        secondary_refusal:
-          type: boolean
-          description: "Optional. True when this idle's stand-down was triggered by an observed secondary (burst/concurrency) refusal rather than (or in addition to) the primary floor."
     consumers: [operator]
 
   - name: loop_advisory_mode
@@ -4467,7 +4449,7 @@ event_types:
       properties:
         reason:
           type: string
-          enum: [disabled, walker-live, no-work, already-claimed, next-error, claim-error, unmapped-project, no-project, no-cwd, dependents-error, closed-project-unknown, quota-deferred, lane-cap, children-error, capacity-refused, gate-unavailable, sandbox-unreachable, state-root-ungranted, slot-queue-deferred]
+          enum: [disabled, walker-live, no-work, already-claimed, next-error, select-unmeasured, claim-error, unmapped-project, no-project, no-cwd, dependents-error, closed-project-unknown, quota-deferred, lane-cap, children-error, capacity-refused, gate-unavailable, sandbox-unreachable, state-root-ungranted, slot-queue-deferred]
           description: "Why advance dispatched nothing this run. The dependent-path reasons (advance_dependents): unmapped-project = a cross-project dependent's project is not in config.work.workspaces (refused, not guessed); no-project = the dependent carries no project; no-cwd = a same-project dependent has no recorded cwd (fail-closed rather than guess canonical main, RC1/); dependents-error = the graph read for direct dependents failed; closed-project-unknown = the closed node's project could not be resolved, so same- vs cross-project cannot be told apart and nothing is dispatched (fail-closed, RC2/); quota-deferred = the node's resolved provider has no quota headroom and defer_dispatch is on, so it stays ready until the reset. The epic-advance-path reasons (epic advance, K1): lane-cap = the child's project is at its per-project config.parallel.max_lanes concurrency cap this pass; children-error = the ready-leaf-children read for the epic failed. The machine-scoped reasons : capacity-refused = the spawn gate refused on a machine-wide condition (spawn-gate exits 75-80: queue timeout, no-wait, RAM, provider cap, load, king share), so the row stays ready and neither its failure budget nor its streak moves; gate-unavailable = spawn-gate exit 81 or 86: a registry no spawn on this machine can pass, or a gate that could not answer at all; sandbox-unreachable = exit 85 from the codex sandbox probe at the spawn seam, a sandbox that blocks a tool every code payload on that lane needs (gh or a git ref write); state-root-ungranted = spawn-gate exit 84, the lane declares no stance toward the state root and a human grants; slot-queue-deferred = the retired exit-78 defer path, kept in the enum because journal rows already carry it."
         node_id:
           type: string

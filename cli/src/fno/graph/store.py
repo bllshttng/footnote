@@ -1488,57 +1488,27 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
 # Node resolution + the targeted helpers (typed ops over the keeper)
 # ---------------------------------------------------------------------------
 
-def _resolve_node_id(
-    client_keeper_path: Path, node_id: str, *, entries_out: "list | None" = None
-) -> str | None:
+def _resolve_node_id(client_keeper_path: Path, node_id: str) -> str | None:
     """Resolve a (possibly partial) node id against the begin snapshot.
 
     The fuzzy resolver is surface: it stays Python (`_intake._find_node`),
     reads the snapshot the mutation is keyed on, and the keeper op re-checks
-    the resolved id under the lock. ``entries_out``, when given, receives that
-    snapshot: it is already in hand, and a caller that needs it next would
-    otherwise read the whole graph again.
+    the resolved id under the lock.
     """
     from fno.graph._intake import _find_node
 
-    if entries_out is None:
-        # The by-id fast path: one exact row instead of a whole-graph begin.
-        # The tier guard keeps resolution identical to _find_node's exact
-        # tiers (exact id, exact slug); anything else falls through to the
-        # snapshot so title-fuzzy and id-prefix never change.
-        fast = read_nodes_by_ids(client_keeper_path, [node_id])
-        if fast and fast["entries"] and not fast["missing"]:
-            row = fast["entries"][0]
-            if row.get("id") == node_id or (row.get("slug") or "").lower() == node_id.lower():
-                return row.get("id")
+    # The by-id fast path: one exact row instead of a whole-graph begin.
+    # The tier guard keeps resolution identical to _find_node's exact
+    # tiers (exact id, exact slug); anything else falls through to the
+    # snapshot so title-fuzzy and id-prefix never change.
+    fast = read_nodes_by_ids(client_keeper_path, [node_id])
+    if fast and fast["entries"] and not fast["missing"]:
+        row = fast["entries"][0]
+        if row.get("id") == node_id or (row.get("slug") or "").lower() == node_id.lower():
+            return row.get("id")
     snap = _client_for(client_keeper_path).request("begin", {})
-    if entries_out is not None:
-        entries_out.extend(snap["entries"])
     node = _find_node(snap["entries"], node_id)
     return node.get("id") if node else None
-
-
-def append_progress_note(
-    path: Path, node_id: str, note: dict, *, entries_out: "list | None" = None
-) -> "tuple[bool, str | None]":
-    """Append a ``{ts, text}`` progress note to a node's ``progress_notes``
-    (append-only), returning ``(found, plan_path)``. Shared by ``fno backlog
-    note`` and the status-fanout backlog-progress adapter.
-
-    ``entries_out`` is filled with the begin snapshot this call already read, so
-    a caller that needs the graph next (the note verb, to resolve who to tell)
-    reuses it instead of paying a second full read.
-    """
-    resolved = _resolve_node_id(Path(path), node_id, entries_out=entries_out)
-    if resolved is None:
-        return False, None
-    result = _run_op(Path(path), "append_progress_note", {"node_id": resolved, "note": note})
-    if not result.get("found"):
-        return False, result.get("plan_path")
-    # Same world-read gate as the wave append: found=true from the op
-    # alone is the op's word, not the published file's.
-    landed, _ = _confirm_note_landed(Path(path), resolved, note)
-    return landed, result.get("plan_path")
 
 
 def append_encounter(
