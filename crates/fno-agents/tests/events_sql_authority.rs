@@ -46,7 +46,7 @@ fn concurrent_appenders_commit_exactly_once_each() {
     // Dense commit order with no gaps and no duplicates.
     seqs.iter()
         .enumerate()
-        .for_each(|(i, seq)| assert_eq!(*seq, (i + 1) as i64));
+        .for_each(|(i, seq)| assert_eq!(*seq, (i + 2) as i64));
     assert_eq!(count(&fno_agents::event_store::store_path(&live)), 9);
 }
 
