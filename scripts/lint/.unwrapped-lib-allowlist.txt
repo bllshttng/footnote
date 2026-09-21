@@ -307,3 +307,8 @@ cargo-build-dir.sh
 # verb would be a second path around the same detection. Standalone tool; no
 # CLI of its own.
 code-index-detect.sh
+
+# The shared mux-test keeper reaper. Sourced by the test proof scripts
+# (tests/mux-portal-restore-server-kill.sh, tests/mux-workspace-standalone.sh)
+# from their EXIT cleanup; a pure library with no fno surface of its own.
+keeper-reap.sh

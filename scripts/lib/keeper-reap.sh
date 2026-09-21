@@ -12,9 +12,15 @@ keeper_pids_for_tmp() {
 
 reap_tmp_keepers() {
   local tmp_dir="$1"
-  local pids
+  local pids pid kids kid
   pids="$(keeper_pids_for_tmp "$tmp_dir")"
   for pid in $pids; do
+    # Kill the hosted child before its keeper: a child that ignores SIGHUP
+    # would survive the keeper as an untracked orphan.
+    kids=$(pgrep -P "$pid" 2>/dev/null || true)
+    for kid in $kids; do
+      kill -9 "$kid" 2>/dev/null || true
+    done
     kill -9 "$pid" 2>/dev/null || true
   done
   for _ in {1..100}; do
