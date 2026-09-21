@@ -9027,18 +9027,8 @@ fn draw_overlay_layout(
     chrome::blit(cells, rows, cols, layout.origin, &layout.framed, theme);
 }
 
-/// Draw overlay lines centered in the content viewport (right of the sideline,
-/// above any splits), framed with `chrome` and colored by `theme`. The seven
-/// family-B overlays (catch-up, needs-me, move-pick, attach-place, connections,
-/// peek, navigator) all route through here, so framing them all is this one
-/// change - the point of chrome being a frame function rather than a field on
-/// `Popup`. Cell-bounds-checked (a tiny terminal clips rather than panics).
-///
-/// `content_origin` is `(TAB_BAR_ROWS, panel_w)`; `content_dims` is the content
-/// viewport's `(rows, cols)` (status row excluded). The framed block is centered
-/// on its FRAMED dimensions (placement; policy).
-/// Draw one laid-out popup overlay (which-key modal, row menu, aux popup,
-/// composer picker) over the composed frame.
+/// Draw one popup overlay (which-key modal, row menu, aux popup, the dock's
+/// child picker) over the composed frame.
 fn draw_popup_overlay(
     cells: &mut [Cell],
     rows: usize,
@@ -9050,6 +9040,16 @@ fn draw_popup_overlay(
     popup::draw(cells, rows, cols, &popup.render(term), theme);
 }
 
+/// Draw overlay lines centered in the content viewport (right of the sideline,
+/// above any splits), framed with `chrome` and colored by `theme`. The seven
+/// family-B overlays (catch-up, needs-me, move-pick, attach-place, connections,
+/// peek, navigator) all route through here, so framing them all is this one
+/// change - the point of chrome being a frame function rather than a field on
+/// `Popup`. Cell-bounds-checked (a tiny terminal clips rather than panics).
+///
+/// `content_origin` is `(TAB_BAR_ROWS, panel_w)`; `content_dims` is the content
+/// viewport's `(rows, cols)` (status row excluded). The framed block is centered
+/// on its FRAMED dimensions (placement; policy).
 #[allow(clippy::too_many_arguments)]
 fn draw_lines_overlay<S: AsRef<str>>(
     cells: &mut [Cell],
@@ -10856,8 +10856,8 @@ async fn attach_and_run(
                         break Err(e);
                     }
                 }
-                // A flush can change client-local state no pane output
-                // repaints (the launcher's lone-Esc close): draw here.
+                // A flush can change client-local state (the launcher's
+                // lone-Esc close): draw here, no pane repaint covers it.
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
