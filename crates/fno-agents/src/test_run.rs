@@ -316,6 +316,7 @@ fn acquire_suite_claim(
     holder: &str,
     root: Option<&Path>,
     deadline: Instant,
+    budget: Duration,
 ) -> Result<(), i32> {
     let opts = |_: usize| crate::claims::AcquireOpts {
         pid: Some(std::process::id()),
@@ -324,27 +325,52 @@ fn acquire_suite_claim(
         root: root.map(PathBuf::from),
         ..Default::default()
     };
-    acquire_claim_blocking(
-        &[SUITE_CLAIM_KEY.to_string()],
-        holder,
-        opts,
-        |rows, _pos| {
-            let Some((h, pid, host)) = rows.first() else {
-                return OnHeld::Wait;
-            };
-            let fields = [
+    let started = Instant::now();
+    let mut last_held: Option<(String, Option<i32>, String)> = None;
+    acquire_claim_blocking(&[SUITE_CLAIM_KEY.to_string()], holder, opts, |rows, pos| {
+        // On a queue-gate skip the attempt loop never ran, so `rows` is
+        // empty; keep the last seen holder row so the timeout still names
+        // whom it waited on.
+        if let Some(row) = rows.first() {
+            last_held = Some(row.clone());
+        }
+        let mut fields: Vec<(&str, String)> = match &last_held {
+            Some((h, pid, host)) => vec![
                 ("holder", h.to_string()),
                 ("pid", format!("{pid:?}")),
                 ("host", host.to_string()),
-            ];
-            if Instant::now() >= deadline {
-                emit(run_id, "suite_wait_timeout", &fields);
-                return OnHeld::Stop(124);
-            }
-            emit(run_id, "suite_waiting", &fields);
-            OnHeld::Wait
-        },
-    )
+            ],
+            None => vec![("holder", "-".to_string())],
+        };
+        if let Some((index, total)) = pos {
+            fields.push(("position", index.to_string()));
+            fields.push(("queued", total.to_string()));
+        }
+        if Instant::now() >= deadline {
+            fields.push(("waited_s", started.elapsed().as_secs().to_string()));
+            emit(run_id, "suite_wait_timeout", &fields);
+            // The x-c425 shape: name the condition, what it measured, and
+            // a remedy the reader can run.
+            let where_txt = match pos {
+                Some((index, total)) => {
+                    format!("it was position {index} of {total} in the wait queue")
+                }
+                None => "it was not queued (no wait queue was active)".to_string(),
+            };
+            eprintln!(
+                    "test_run: the machine-wide test:suite claim did not reach this run inside its {}s budget; {}.",
+                    budget.as_secs(),
+                    where_txt
+                );
+            eprintln!("test_run:   who holds it: fno agents claim status test:suite");
+            eprintln!(
+                "test_run:   raise the budget: fno-agents test-run --timeout <secs> -- <argv>"
+            );
+            return OnHeld::Stop(124);
+        }
+        emit(run_id, "suite_waiting", &fields);
+        OnHeld::Wait
+    })
 }
 
 /// `test-run build-admit --cargo-pid PID --worktree PATH`: the rustc wrapper
@@ -1049,9 +1075,13 @@ pub fn run_test_run(args: &[String]) -> i32 {
     let nested = nested_owner();
     let mut claimed = false;
     if nested.is_none() {
-        if let Err(code) =
-            acquire_suite_claim(&run_id, &holder, claims_root.as_deref(), overall_deadline)
-        {
+        if let Err(code) = acquire_suite_claim(
+            &run_id,
+            &holder,
+            claims_root.as_deref(),
+            overall_deadline,
+            opts.timeout,
+        ) {
             return code;
         }
         claimed = true;
