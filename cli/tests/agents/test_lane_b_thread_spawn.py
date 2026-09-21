@@ -15,7 +15,6 @@ import os
 import shutil
 import socket
 import subprocess
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -38,6 +37,7 @@ from fno.agents.harness_map import (
 from fno.agents.harnesses.pi import pi_model, pi_provider
 from fno.agents.registry import load_registry
 from fno.paths_testing import use_tmpdir
+from tests._afunix import short_bind_root
 
 
 @pytest.fixture(autouse=True)
@@ -528,9 +528,7 @@ def test_lane_b_journey_real_keeper_hosts_the_thread(lane_b_home, monkeypatch) -
     # basetemp does not: rewrite the isolated state root to a short tmp dir
     # (use_tmpdir's docstring invites overwriting the settings file).
     settings = lane_b_home / ".fno" / "settings.yaml"
-    short_state = Path(
-        tempfile.mkdtemp(prefix="fno-laneb-")
-    )  # noqa: PTH103 - lifetime is this one journey test
+    short_state = short_bind_root("fno-laneb-")  # lifetime is this one journey test
     settings.write_text(
         f"schema_version: 1\nconfig:\n  state_dir: {short_state}/\n",
         encoding="utf-8",
@@ -674,7 +672,7 @@ def test_stop_agent_kills_a_keeper_row_over_its_own_socket(lane_b_home) -> None:
 
     # A keeper socket must fit AF_UNIX's 104-byte sun_path and the pytest
     # basetemp does not (the same rewrite the journey test below makes).
-    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-"))
+    short_state = short_bind_root("fno-laneb-")
     sock = short_state / "mux" / "threads" / "wk-stoppy.sock"
     sock.parent.mkdir(parents=True, exist_ok=True)
     seen: dict[str, object] = {}
@@ -704,7 +702,7 @@ def test_stop_agent_refuses_a_keeper_that_never_confirms(lane_b_home) -> None:
     from fno.agents.dispatch import DispatchAskError, _stop_keeper_thread
     from fno.agents.registry import AgentEntry, load_registry, update_registry
 
-    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-"))
+    short_state = short_bind_root("fno-laneb-")
     sock = short_state / "mux" / "threads" / "wk-stubborn.sock"
     sock.parent.mkdir(parents=True, exist_ok=True)
     seen: dict[str, object] = {}
@@ -747,7 +745,7 @@ def test_stop_agent_stops_a_keeper_that_dies_between_probe_and_kill(lane_b_home)
     from fno.agents.dispatch import _stop_keeper_thread
     from fno.agents.registry import AgentEntry, load_registry, update_registry
 
-    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-", dir="/tmp"))
+    short_state = short_bind_root("fno-laneb-")
     sock = short_state / "mux" / "threads" / "wk-vanish.sock"
     sock.parent.mkdir(parents=True, exist_ok=True)
     seen: dict[str, object] = {}
@@ -822,7 +820,7 @@ def test_stop_agent_routes_a_cursor_thread_through_the_keeper_kill(
     # pytest tmpdir can exceed it, which would make bind fail and this test
     # pass vacuously. The test asserts the bind and the accepted frames, so
     # neither failure mode is silent.
-    short_state = Path(tempfile.mkdtemp(prefix="fno-laneb-cursor-", dir="/tmp"))
+    short_state = short_bind_root("fno-laneb-cursor-")
     sock = short_state / "mux" / "threads" / "wk-cursor-stop.sock"
     sock.parent.mkdir(parents=True, exist_ok=True)
     seen: dict[str, object] = {}
@@ -1154,7 +1152,7 @@ def test_answering_a_modal_keeps_the_frame_decoder_in_sync() -> None:
 
     # AF_UNIX caps sun_path at 104 bytes and the pytest basetemp does not fit,
     # the same short-path move the keeper spawn itself makes.
-    short = Path(tempfile.mkdtemp(prefix="fnok-"))
+    short = short_bind_root("fnok-")
     sock_path = short / "k.sock"
     modal = _frame(1, b"Do you trust the contents of this project?\n")
     ready = _frame(1, b"? for shortcuts")
@@ -1220,7 +1218,7 @@ def test_a_modal_arriving_with_the_marker_is_still_answered() -> None:
     """
     from fno.agents.dispatch import _keeper_seed_submit
 
-    short = Path(tempfile.mkdtemp(prefix="fnok-"))
+    short = short_bind_root("fnok-")
     sock_path = short / "k.sock"
     modal = _frame(1, b"Do you trust the contents of this project?\n")
     ready = _frame(1, b"? for shortcuts")

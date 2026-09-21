@@ -353,9 +353,9 @@ _SRC = str(Path(__file__).resolve().parents[2] / "src")
 def _short_sock_dir() -> Path:
     """A short-lived dir with a socket path UNDER the 104-char AF_UNIX cap
     (pytest's tmp_path is far over it on macOS)."""
-    import tempfile
+    from tests._afunix import short_bind_root
 
-    return Path(tempfile.mkdtemp(prefix="x626f-"))
+    return short_bind_root("x626f-")
 
 # A reconcile whose work blocks forever reading a unix socket that accepted
 # but never replies - the AC1-HP blocking read, in ~15 lines.
