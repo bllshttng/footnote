@@ -450,6 +450,42 @@ def test_fence_crash_failopen_emits_gate_escape(enabled, monkeypatch, capsys, tm
     assert kwargs.get("pr") == 42
 
 
+@pytest.fixture(autouse=True)
+def _owner_never_spawns(monkeypatch):
+    """No test talks to the real authorized-merge binary: the spawn is a
+    network surface, and a wedged child holds the suite's pipes forever. A
+    test that needs a specific verdict re-stubs _authorized_merge itself."""
+    monkeypatch.setattr(
+        _merge,
+        "_authorized_merge",
+        lambda pr, repo, **kw: {"outcome": "authorized", "head": "abc123"},
+    )
+
+
+def _stub_owner_from_row(monkeypatch, tmp_path):
+    """The refusal is decide's now: ask the real gate for its line against the
+    seeded row and hand it back as the held receipt the verb renders."""
+    from fno.pr import _coverage_gate
+
+    state, refusal, _covered, note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    if state == _coverage_gate.COVERED:
+        monkeypatch.setattr(
+            _merge,
+            "_authorized_merge",
+            lambda pr, repo, **kw: {"outcome": "authorized", "head": "abc123"},
+        )
+        return None
+    line = _coverage_gate.refusal_line(refusal, note)
+    monkeypatch.setattr(
+        _merge,
+        "_authorized_merge",
+        lambda pr, repo, **kw: {"outcome": "held", "detail": line},
+    )
+    return line
+
+
 # ---- rerun-recovery flake hold ----
 
 
@@ -485,7 +521,7 @@ def test_rerun_recovered_green_is_held_without_the_flag(
     )
     _flake_recovered(monkeypatch)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    obj = _last_json(capsys, stream="err")
+    obj = _last_json(capsys)  # a held receipt renders on stdout
     assert obj["outcome"] == "held"
     assert "rerun-recovered green" in obj["reason"]
     assert "smoke-pytest (7)" in obj["reason"]
@@ -1272,9 +1308,17 @@ def test_a_green_verdict_without_a_readable_head_refuses(
     )
     monkeypatch.setattr(_merge, "run", fake)
 
+    monkeypatch.setattr(
+        _merge,
+        "_authorized_merge",
+        lambda pr, repo, **kw: {
+            "outcome": "held",
+            "detail": "no covered head is readable for PR 42; refusing an unpinned merge",
+        },
+    )
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    blocked = _last_json(capsys, stream="err")
-    assert blocked["outcome"] == "blocked"
+    blocked = _last_json(capsys)  # a held receipt renders on stdout
+    assert blocked["outcome"] == "held"
     assert "head" in blocked["reason"]
     # Refused BEFORE any merge call: the pin is a precondition, not a retry.
     assert len(fake.merge_cmds) == 0
@@ -1531,9 +1575,10 @@ def test_coverage_missing_refuses(enabled, monkeypatch, capsys, tmp_path):
     # head it could not fetch, and this test pins the missing-ROW refusal.
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
     monkeypatch.setattr(_merge, "_review_coverage_for_pr", lambda pr, repo, head=None: (None, ""))
+    _stub_owner_from_row(monkeypatch, tmp_path)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    obj = _last_json(capsys, stream="err")
-    assert obj["outcome"] == "blocked"
+    obj = _last_json(capsys)  # a held receipt renders on stdout
+    assert obj["outcome"] == "held"
     assert "unreviewed" in obj["reason"]
 
 
@@ -1543,8 +1588,9 @@ def test_coverage_zero_refuses(enabled, monkeypatch, capsys, tmp_path):
         "_review_coverage_for_pr",
         lambda pr, repo, head=None: ({"coverage": "covered", "reviewed_count": 0, "head_sha": "abc"}, ""),
     )
+    _stub_owner_from_row(monkeypatch, tmp_path)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    assert _last_json(capsys, stream="err")["outcome"] == "blocked"
+    assert _last_json(capsys)["outcome"] == "held"
 
 
 def test_reviewed_state_proceeds_when_diagnostic_count_is_zero(
@@ -1577,8 +1623,9 @@ def test_coverage_unknown_refuses(enabled, monkeypatch, capsys, tmp_path):
         "_review_coverage_for_pr",
         lambda pr, repo, head=None: ({"coverage": "unknown", "head_sha": "abc"}, ""),
     )
+    _stub_owner_from_row(monkeypatch, tmp_path)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    assert _last_json(capsys, stream="err")["outcome"] == "blocked"
+    assert _last_json(capsys)["outcome"] == "held"
 
 
 def test_coverage_reviewer_refused_names_the_reviewer(
@@ -1605,8 +1652,9 @@ def test_coverage_reviewer_refused_names_the_reviewer(
         ),
     )
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "abc")
+    _stub_owner_from_row(monkeypatch, tmp_path)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    reason = _last_json(capsys, stream="err")["reason"]
+    reason = _last_json(capsys)["reason"]
     assert "reviewer-refused" in reason
     assert "chatgpt-codex-connector" in reason
 
@@ -1720,9 +1768,10 @@ def test_fresh_eval_carrying_only_a_stale_bot_verdict_refuses(
         }, ""),
     )
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "89bc0b91")
+    _stub_owner_from_row(monkeypatch, tmp_path)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    obj = _last_json(capsys, stream="err")
-    assert obj["outcome"] == "blocked"
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "held"
     # The refusal names coverage, not staleness: the eval was not stale.
     assert "uncovered" in obj["reason"]
 
@@ -1805,9 +1854,10 @@ def test_code_review_gate_rejects_unrelated_github_app_coverage(
         }, ""),
     )
 
+    _stub_owner_from_row(monkeypatch, tmp_path)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    obj = _last_json(capsys, stream="err")
-    assert obj["outcome"] == "blocked"
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "held"
     assert "code-review" in obj["reason"]
     assert not any(c[:3] == ["gh", "pr", "merge"] for c in fake.calls)
 
@@ -1853,8 +1903,9 @@ def test_coverage_stale_head_refuses(enabled, monkeypatch, capsys, tmp_path):
         lambda pr, repo, head=None: ({"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2, "head_sha": "oldhead"}, ""),
     )
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "newhead")
+    _stub_owner_from_row(monkeypatch, tmp_path)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    assert _last_json(capsys, stream="err")["outcome"] == "blocked"
+    assert _last_json(capsys)["outcome"] == "held"
 
 
 def test_covered_head_pins_the_merge_cmd(monkeypatch, tmp_path):
@@ -2174,8 +2225,9 @@ def test_stale_head_blocked_receipt_carries_the_cause(enabled, monkeypatch, caps
         lambda pr, repo, head=None: ({"coverage": "covered", "review_state": "reviewed", "reviewed_count": 2, "head_sha": "oldhead0"}, ""),
     )
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "newhead0")
+    _stub_owner_from_row(monkeypatch, tmp_path)
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    reason = _last_json(capsys, stream="err")["reason"]
+    reason = _last_json(capsys)["reason"]
     assert "0 reviewed" not in reason
     assert "oldhead0" in reason and "newhead0" in reason
 
@@ -2426,54 +2478,28 @@ def test_corrupt_line_does_not_wedge_the_gate(monkeypatch, tmp_path):
 # stayed green.
 
 
-def _fid_plan_path(pr, *a, **k):
-    return "/x/plan.md"
-
-
-def test_plan_path_for_pr_is_scoped_to_this_repo(monkeypatch):
-    """The ledger is global and PR numbers are per-repo, so a bare number can
-    match a foreign repo's row. _plan_path_for_pr scopes by the row's pr_url so
-    the merge gate never evaluates a foreign plan."""
-    import fno.scoreboard.fold as fold
-
-    rows = [
-        {"pr_number": 42, "pr_url": "https://github.com/other/repo/pull/42",
-         "plan_path": "/foreign/plan.md"},
-        {"pr_number": 42, "pr_url": "https://github.com/bllshttng/footnote/pull/42",
-         "plan_path": "/local/plan.md"},
-    ]
-    monkeypatch.setattr(fold, "load_ledger_rows", lambda *a, **k: rows)
-    # Without the repo scope the foreign row (first) would win.
-    assert _merge._plan_path_for_pr(42, repo="bllshttng/footnote") == "/local/plan.md"
-    assert _merge._plan_path_for_pr(42, repo="other/repo") == "/foreign/plan.md"
-
-
-def test_plan_path_for_pr_considers_a_row_with_no_pr_url(monkeypatch):
-    """A row missing pr_url is not silently dropped by the repo filter."""
-    import fno.scoreboard.fold as fold
-
-    monkeypatch.setattr(
-        fold, "load_ledger_rows",
-        lambda *a, **k: [{"pr_number": 42, "pr_url": None, "plan_path": "/p.md"}],
-    )
-    assert _merge._plan_path_for_pr(42, repo="bllshttng/footnote") == "/p.md"
-
-
 def test_fidelity_guard_blocks_an_uncovered_shortfall(enabled, monkeypatch, capsys, tmp_path):
     """AC5: an unjoined planned row with no covering carveout refuses the merge."""
     import fno.plan.fidelity as fid
 
     monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: False)
-    monkeypatch.setattr(_merge, "_plan_path_for_pr", _fid_plan_path)
     monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number=0: True)
     monkeypatch.setattr(
         fid, "compute_plan_fidelity",
         lambda *, plan_path, **k: {"refused": True, "reason": "1 unjoined, 0 carveouts"},
     )
+    monkeypatch.setattr(
+        _merge,
+        "_authorized_merge",
+        lambda pr, repo, **kw: {
+            "outcome": "held",
+            "detail": "plan fidelity refused: 1 unjoined, 0 carveouts",
+        },
+    )
     rc = _merge.run_merge(["42"], cwd=str(tmp_path))
     assert rc == 2
-    obj = _last_json(capsys, stream="err")
-    assert obj["outcome"] == "blocked"
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "held"
     assert "plan fidelity refused" in obj["reason"]
 
 
@@ -2482,8 +2508,6 @@ def test_fidelity_guard_proceeds_when_the_shortfall_is_covered(enabled, monkeypa
     import fno.plan.fidelity as fid
 
     monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: False)
-    monkeypatch.setattr(_merge, "_plan_path_for_pr", _fid_plan_path)
-    monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number=0: True)
     monkeypatch.setattr(
         fid, "compute_plan_fidelity", lambda *, plan_path, **k: {"refused": False},
     )
@@ -2498,7 +2522,6 @@ def test_fidelity_guard_skipped_when_the_pr_carries_no_plan(enabled, monkeypatch
     import fno.plan.fidelity as fid
 
     monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: False)
-    monkeypatch.setattr(_merge, "_plan_path_for_pr", lambda pr, *a, **k: None)
     monkeypatch.setattr(
         fid, "compute_plan_fidelity",
         lambda *a, **k: pytest.fail("fidelity must not run without a plan"),
@@ -2686,7 +2709,7 @@ def test_an_open_pr_still_faces_the_coverage_gate(enabled, monkeypatch, capsys, 
         },
     )
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-    obj = _last_json(capsys, stream="err")
+    obj = _last_json(capsys)  # a held receipt renders on stdout
     assert obj["outcome"] == "held"
     assert "unreviewed merge refused" in obj["reason"]
 

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from fno.config import AutoMergeBlock
 from fno.pr import _merge
 from fno.pr._merge_grant import (
@@ -38,6 +40,18 @@ def _verdict(monkeypatch, state, reason="r", claim_state="stale"):
 # ---------------------------------------------------------------------------
 # AC4-HP / AC4-ERR: the transport reads the Rust owner and fails closed
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _owner_never_spawns(monkeypatch):
+    """No test talks to the real authorized-merge binary: the spawn is a
+    network surface, and a wedged child holds the suite's pipes forever. A
+    test that needs a specific verdict re-stubs _authorized_merge itself."""
+    monkeypatch.setattr(
+        _merge,
+        "_authorized_merge",
+        lambda pr, repo, **kw: {"outcome": "authorized", "head": "abc123"},
+    )
 
 
 def test_resolver_reads_the_rust_verdict(monkeypatch):
@@ -262,8 +276,6 @@ def test_manifest_arm_ignores_the_durable_receipt(tmp_path, monkeypatch, capsys)
         "coverage_verdict",
         lambda pr, repo, recompute=False: (_coverage_gate.COVERED, "", "abc123", ""),
     )
-    monkeypatch.setattr(_merge, "_plan_path_for_pr", lambda pr, repo=None: None)
-    monkeypatch.setattr(_merge, "_live_lane_count", lambda: 0)
     monkeypatch.setattr(_base_lineage, "lineage_verdict", lambda pr, cwd: ("ok", ""))
 
     seen: dict = {}

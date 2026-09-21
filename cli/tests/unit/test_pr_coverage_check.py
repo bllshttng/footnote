@@ -96,6 +96,18 @@ def live_head(monkeypatch):
     monkeypatch.setattr(_merge, "_pr_base_head_refs", lambda pr, cwd: ("main", "feature/x"))
 
 
+@pytest.fixture(autouse=True)
+def _owner_never_spawns(monkeypatch):
+    """The real authorized-merge binary is a network surface no unit test may
+    spawn; a wedged child holds the suite's pipes. Tests needing a verdict
+    stub _authorized_merge themselves."""
+    monkeypatch.setattr(
+        _merge,
+        "_authorized_merge",
+        lambda pr, repo, **kw: {"outcome": "authorized", "head": "abc123"},
+    )
+
+
 def _merge_refusal(capsys, tmp_path, fake):
     """The refusal sentence the merge verb renders for this row, prefix
     stripped. The coverage gate is decide's now (x-53c5): the test seeds the
@@ -114,7 +126,8 @@ def _merge_refusal(capsys, tmp_path, fake):
 
         monkeypatch_run.setattr(_merge, "_authorized_merge", _held)
         assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
-        reason = _merge.reason_after_outcome(_last_json(capsys, stream="err")["reason"])
+        # A held receipt renders on stdout (err=False in the emit table).
+        reason = _merge.reason_after_outcome(_last_json(capsys)["reason"])
     finally:
         monkeypatch_run.undo()
     assert reason.startswith("unreviewed merge refused: ")

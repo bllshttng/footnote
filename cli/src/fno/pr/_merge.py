@@ -301,50 +301,6 @@ def _pr_head_ref_and_oid(
     return branch, sha, str(info.get("state") or "").upper()
 
 
-_REPO_FROM_URL = re.compile(r"github\.com/([^/]+/[^/]+?)(?:\.git)?/pull/")
-
-
-def _row_repo(row: dict) -> Optional[str]:
-    """The ``owner/name`` repo a ledger delivery row belongs to, parsed from its
-    ``pr_url``. None when the row has no usable url (older rows); callers treat
-    None as 'do not filter on repo' so a missing url never silently drops a plan.
-    """
-    url = row.get("pr_url")
-    if isinstance(url, str):
-        m = _REPO_FROM_URL.search(url)
-        if m:
-            return m.group(1)
-    return None
-
-
-def _plan_path_for_pr(pr_number: int, repo: Optional[str] = None) -> Optional[str]:
-    """The plan_path bound to this PR's delivery row in the ledger, or None.
-
-    The ledger is global (cross-repo), and PR numbers are per-repo, so a bare
-    number match can return a foreign repo's plan. ``repo`` (``owner/name``)
-    scopes the match to this repository via the row's ``pr_url``; a row without a
-    parseable url is still considered, so the filter fails open rather than
-    silently dropping a plan. None means no plan - the fidelity gate is a no-op
-    for the PR. A ledger read failure is also None: a missing ledger must not
-    block a merge that has no plan-fidelity signal to evaluate."""
-    try:
-        from fno import paths as _paths
-        from fno.scoreboard.fold import load_ledger_rows
-
-        for row in load_ledger_rows(_paths.ledger_json()):
-            if row.get("pr_number") != pr_number:
-                continue
-            row_repo = _row_repo(row)
-            if repo is not None and row_repo is not None and row_repo != repo:
-                continue
-            pp = row.get("plan_path")
-            if isinstance(pp, str) and pp.strip():
-                return pp
-    except Exception:  # noqa: BLE001 - the gate is advisory on a missing ledger
-        return None
-    return None
-
-
 def _coverage_refused_reason(
     cov: Optional[dict],
     head: Optional[str] = None,
