@@ -1,22 +1,16 @@
 #!/usr/bin/env bash
-# corrections-insights-tag.sh - ingest /insights entries tagged #agent-correction
-# into corrections.log as S2 events.
+# corrections-insights-tag.sh - ingest the /fno:intel report's operator
+# corrections into corrections.log as S2 events.
 #
-# This is the only user-mediated capture path: the user tags an /insights entry
-# (or asks Claude to add the tag) when reviewing /insights output. This script
-# ports the tagged entries into corrections.log.
-#
-# Resolution order for the insights source:
-#   1. --insights-file <path>  (explicit override)
-#   2. $INSIGHTS_FILE env var
-#   3. ~/.claude/insights.md (single-file convention)
-#   4. ~/.claude/insights/*.md (per-session convention)
+# /fno:intel step 5 passes its report here (skills/intel/SKILL.md): the
+# "Operator corrections" lines end in #agent-correction and carry the
+# correction text in double quotes plus a signal=<category> pair.
 #
 # Tracks a watermark via a content hash so re-runs do not double-ingest.
-# Watermark file: ~/.claude/.insights-watermark (line-delimited, one hash per line).
+# Watermark file: ~/.fno/corrections.log.wm (line-delimited, one hash per line).
 #
-# Exit 0 when /insights is not available (graceful no-op). Exit non-zero only
-# on actual errors (lock failure, malformed flag, etc).
+# Exit 0 on a graceful no-op. Exit 2 when --insights-file is missing.
+# Exit 1 on actual errors (lock failure, missing path, etc).
 
 set -euo pipefail
 
@@ -30,14 +24,14 @@ TAG_PATTERN="#agent-correction"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: corrections-insights-tag.sh [--insights-file <path>] [--dry-run]
+Usage: corrections-insights-tag.sh --insights-file <path> [--dry-run]
 
-Reads /insights output and emits S2 corrections.log entries for every line
-containing #agent-correction. Watermark prevents re-ingestion of already-seen
-entries.
+Reads the /fno:intel report and emits S2 corrections.log entries for every
+line containing #agent-correction. Watermark prevents re-ingestion of
+already-seen entries.
 
 Options:
-  --insights-file <path>   override default discovery
+  --insights-file <path>   the /fno:intel report to read (required)
   --dry-run                print would-emit lines to stdout, do not write log
 EOF
   exit 2
@@ -52,36 +46,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-CLAUDE_DIR="${CLAUDE_DIR_OVERRIDE:-$HOME/.claude}"
 LOG_PATH="$(corrections_log_path)"
-WATERMARK_PATH="$CLAUDE_DIR/.insights-watermark"
+WATERMARK_PATH="${LOG_PATH}.wm"
 
 if [[ ! -f "$LOG_PATH" && "$DRY_RUN" != "1" ]]; then
   echo "corrections-insights-tag: $LOG_PATH does not exist; run corrections-log-init.sh first" >&2
   exit 0  # graceful: loop not installed, nothing to do
 fi
 
-# Discover the insights source.
-INSIGHTS_FILES=()
-if [[ -n "$INSIGHTS_FILE_ARG" ]]; then
-  if [[ ! -e "$INSIGHTS_FILE_ARG" ]]; then
-    echo "corrections-insights-tag: --insights-file does not exist: $INSIGHTS_FILE_ARG" >&2
-    exit 1
-  fi
-  INSIGHTS_FILES+=("$INSIGHTS_FILE_ARG")
-elif [[ -n "${INSIGHTS_FILE:-}" && -e "$INSIGHTS_FILE" ]]; then
-  INSIGHTS_FILES+=("$INSIGHTS_FILE")
-elif [[ -f "$CLAUDE_DIR/insights.md" ]]; then
-  INSIGHTS_FILES+=("$CLAUDE_DIR/insights.md")
-elif [[ -d "$CLAUDE_DIR/insights" ]]; then
-  while IFS= read -r -d '' f; do
-    INSIGHTS_FILES+=("$f")
-  done < <(find "$CLAUDE_DIR/insights" -maxdepth 1 -type f -name "*.md" -print0 2>/dev/null)
+if [[ -z "$INSIGHTS_FILE_ARG" ]]; then
+  echo "corrections-insights-tag: --insights-file <report> is required; /fno:intel passes its report here" >&2
+  exit 2
 fi
-
-if [[ "${#INSIGHTS_FILES[@]}" -eq 0 ]]; then
-  echo "corrections-insights-tag: no /insights source found; this is a no-op" >&2
-  exit 0
+if [[ ! -e "$INSIGHTS_FILE_ARG" ]]; then
+  echo "corrections-insights-tag: --insights-file does not exist: $INSIGHTS_FILE_ARG" >&2
+  exit 1
 fi
 
 # Watermark format: one md5 hash per line. macOS bash 3.2 doesn't have
@@ -99,35 +78,38 @@ hash_seen() {
 
 NEW_HASHES=()
 EMITTED=0
-for file in "${INSIGHTS_FILES[@]}"; do
-  # grep -n returns "lineno:content" lines.
-  while IFS= read -r match; do
-    [[ -z "$match" ]] && continue
-    line_no="${match%%:*}"
-    content="${match#*:}"
-    entry_key="${file}:${line_no}:${content}"
-    hash="$(hash_of "$entry_key")"
-    if hash_seen "$hash"; then
-      continue  # already ingested in a prior run
-    fi
+file="$INSIGHTS_FILE_ARG"
+# grep -n returns "lineno:content" lines.
+while IFS= read -r match; do
+  [[ -z "$match" ]] && continue
+  line_no="${match%%:*}"
+  content="${match#*:}"
+  # Key on the quoted correction text: reports cover overlapping 14-day
+  # windows, so the same correction reappears on a different line with a new
+  # repeat count. A line with no double quote keys on the whole line.
+  quote="${content#*\"}"
+  quote="${quote%%\"*}"
+  hash="$(hash_of "$quote")"
+  if hash_seen "$hash"; then
+    continue  # already ingested in a prior run
+  fi
 
-    location="${file##*/}:${line_no}"
-    details="$(corrections_escape_details "$content")"
-    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    line="${timestamp} | S2 | insights-tag | ${location} | ${details}"
+  location="${file##*/}:${line_no}"
+  details="$(corrections_escape_details "$content")"
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  line="${timestamp} | S2 | insights-tag | ${location} | ${details}"
 
-    if [[ "$DRY_RUN" == "1" ]]; then
-      printf '%s\n' "$line"
-    else
-      corrections_lock_append "$LOG_PATH" "$line" || {
-        echo "corrections-insights-tag: lock-append failed for $entry_key" >&2
-        continue
-      }
-    fi
-    NEW_HASHES+=("$hash")
-    EMITTED=$((EMITTED + 1))
-  done < <(grep -nF "$TAG_PATTERN" "$file" 2>/dev/null || true)
-done
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf '%s\n' "$line"
+  else
+    corrections_lock_append "$LOG_PATH" "$line" || {
+      echo "corrections-insights-tag: lock-append failed for $location" >&2
+      continue
+    }
+  fi
+  NEW_HASHES+=("$hash")
+  EMITTED=$((EMITTED + 1))
+done < <(grep -nF "$TAG_PATTERN" "$file" 2>/dev/null || true)
 
 # Update watermark unless dry-run.
 if [[ "$DRY_RUN" != "1" && "${#NEW_HASHES[@]}" -gt 0 ]]; then
