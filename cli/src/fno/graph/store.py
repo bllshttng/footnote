@@ -211,10 +211,8 @@ def _worker_binary() -> Path | None:
     """Locate `fno-agents-worker` for an on-demand keeper spawn.
 
     The newest runnable candidate wins among the checkout artifacts and the
-    PATH copy: a five-day-old `debug` build once shadowed a fresh `release`
-    beside it and failed every store read. The env pins below stay ahead of
-    all of it - an explicit operator pin is an instruction, not a candidate.
-    The worker is a sibling of the daemon binary everywhere it ships, and it
+    PATH copy; the env pins above are instructions, not candidates. The
+    worker is a sibling of the daemon binary everywhere it ships, and it
     is never deleted by the smoke shard's @requires_rust clear (which
     removes only `fno-agents`), so the store keeps working where the parity
     suites skip.
@@ -237,10 +235,8 @@ def _worker_binary() -> Path | None:
                 candidates += [base / p / "fno-agents-worker" for p in ("debug", "release")]
             break
     found = shutil.which("fno-agents-worker")
-    if found:
-        candidates.append(Path(found))
-    newest = newest_runnable(candidates)
-    if newest is not None:
+    candidates += [Path(found)] if found else []
+    if (newest := newest_runnable(candidates)) is not None:
         return newest
     try:
         from fno.rust_binary import resolve_binary
@@ -611,7 +607,10 @@ class _ExecClient(_Keeper):
                 raise WriteUnconfirmed(
                     STATE_UNCONFIRMED, f"{detail}; read the graph before retrying"
                 ) from None
-            built = datetime.fromtimestamp(binary.stat().st_mtime, timezone.utc).isoformat()
+            try:
+                built = datetime.fromtimestamp(binary.stat().st_mtime, timezone.utc).isoformat()
+            except OSError:  # the worker vanished mid-exec; the path still names what ran
+                built = "an unstatable path"
             raise StoreUnavailable(
                 STATE_SPAWN_FAILED,
                 f"{detail}; ran {binary} built {built}; is the worker current? `fno doctor` names lag",
