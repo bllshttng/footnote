@@ -52,8 +52,81 @@ pub fn run_op(op: &str, payload: &Value) -> String {
         "status-merge-blocker" => merge_blocker(&RealGhProbe, payload).to_string(),
         "status-failure-cause" => failure_cause(payload).to_string(),
         "status-zero-job-runs" => zero_job_runs_op(&RealGhProbe, payload).to_string(),
+        "status-cache-key" => status_cache_key(payload).to_string(),
         other => json!({"error": format!("unknown op {other}")}).to_string(),
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// status-cache-key
+
+/// The status row's cache key, minted from every fact the merge decision
+/// reads (x-53c5): head sha, PR state, the PR's dispatch-hold word, every
+/// live merge-slot row in the repo's space, and the review-evidence lines
+/// naming this head. A hold release, a slot move, a merge, or a fresh
+/// attestation changes the key, so a row written before the change can
+/// never serve inside the TTL. Falls back to the head-only word on any
+/// ingredient fault: an unreadable ingredient degrades to today's key
+/// shape, never to a wrong one.
+pub(crate) fn status_cache_key(payload: &Value) -> Value {
+    use sha2::{Digest, Sha256};
+    use std::process::Command;
+
+    let cwd = PathBuf::from(payload.get("cwd").and_then(Value::as_str).unwrap_or("."));
+    let pr = payload.get("pr").and_then(Value::as_u64).unwrap_or(0);
+    let head = payload.get("head_sha").and_then(Value::as_str).unwrap_or("");
+    let state = payload.get("pr_state").and_then(Value::as_str).unwrap_or("");
+    let slug = payload.get("slug").and_then(Value::as_str).unwrap_or("");
+
+    let mut material = format!("{head}|{state}|");
+
+    // The PR's dispatch-hold word, through the same probe the merge path
+    // reads: exit 0 clear, 3 held, anything else unreadable.
+    let hold_word = Command::new("fno")
+        .args(["do", "pr", "hold-check", &pr.to_string()])
+        .current_dir(&cwd)
+        .output()
+        .ok()
+        .map(|out| {
+            format!(
+                "{:?}:{}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )
+        })
+        .unwrap_or_else(|| "spawn-failed".to_string());
+    material.push_str(&hold_word);
+    material.push('|');
+
+    // Every live merge-slot row in this repo's space: one store, the db the
+    // claim verb reads, so a take or a move rekeys every queued PR.
+    if let Ok(rows) = crate::claim_store::list_db(Some("merge-slot:"), false, None) {
+        material.push_str(rows.to_string().as_str());
+    }
+    material.push('|');
+
+    // Review-evidence lines at this head (attestations, coverage rows,
+    // findings): a fresh verdict on an unchanged head must rekey.
+    let journal = crate::paths::events_path(&cwd);
+    let text = crate::events_store::review_text(&journal);
+    if !head.is_empty() {
+        let mut count = 0usize;
+        let mut last = String::new();
+        for line in text.lines().filter(|l| l.contains(head)) {
+            count += 1;
+            last = line.to_string();
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(last.as_bytes());
+        let digest = format!("{:x}", hasher.finalize());
+        material.push_str(&format!("{count}|{}", &digest[..12.min(digest.len())]));
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(material.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    json!({"key": format!("{slug}-{pr}-{}", &digest[..12])})
 }
 
 // ---------------------------------------------------------------------------

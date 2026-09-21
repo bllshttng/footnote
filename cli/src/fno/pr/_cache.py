@@ -162,6 +162,10 @@ def _serve(row: dict, *, stale: bool) -> int:
         out["green"] = False
         out["settled"] = False
         out["ready"] = False
+        # The gate answers in a stale row are history, not verdicts (x-53c5):
+        # replaying an old blocker beside an unreadable read names a hold the
+        # world may have already released. One honest word instead.
+        out["ready_blockers"] = ["status_stale"]
         out.pop("failures", None)
         out["stale_reason"] = (
             "secondary rate limit backoff - the check set is unreadable, so "
@@ -192,6 +196,36 @@ def _serve(row: dict, *, stale: bool) -> int:
     failures_note(out)
     rerun_recovery_note(out)
     return code
+
+
+def _merge_decision_key(slug_key: str, pr: str, info: dict, cwd: Optional[str]) -> str:
+    """The row key, minted by the authorized-merge owner from every fact its
+    decision reads (head, PR state, hold word, live merge-slot rows, review
+    evidence at the head). A hold release, a slot move, a merge, or a fresh
+    attestation changes the key, so a pre-change row can never serve inside
+    the TTL (x-53c5). An unreachable owner falls back to the head-only key:
+    the cache keeps working, with today's staleness window and no worse."""
+    from fno.rust_binary import verb_call
+
+    try:
+        out = verb_call(
+            "authorized-merge",
+            {
+                "op": "status-cache-key",
+                "cwd": cwd or os.getcwd(),
+                "pr": int(pr),
+                "head_sha": str(info["head_sha"]),
+                "pr_state": str(info.get("state") or ""),
+                "slug": slug_key,
+            },
+            timeout=60,
+        )
+        key = out.get("key") if isinstance(out, dict) else None
+        if isinstance(key, str) and key:
+            return key
+    except Exception:  # noqa: BLE001 - degraded keying, never a wrong row
+        pass
+    return f"{slug_key}-{pr}-{str(info['head_sha'])[:12]}"
 
 
 def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) -> int:
@@ -239,7 +273,7 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
             if code >= 0:
                 return code
         return run_status(pr, cwd)
-    key = f"{slug_key}-{pr}-{str(info['head_sha'])[:12]}"
+    key = _merge_decision_key(slug_key, pr, info, cwd)
 
     def _servable(row: Optional[dict], at: float) -> int:
         """Fast-path serve: a fresh row answers verbatim; anything staler
