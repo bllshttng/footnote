@@ -1631,30 +1631,27 @@ def _branch_node_ids(head_ref):
     return ids
 
 
-def _body_file_is_unjudgeable(path):
-    """A `--body-file` path this hook cannot judge, which is all of them.
-
-    This used to read the file and deny when its last trailer did not claim
-    every id. That is unsound, because a PreToolUse hook runs BEFORE the
-    command. Two spellings broke on it, both of them the flow
-    skills/pr/references/create.md now prescribes:
-
-      printf '%s\\n' "$BODY" > .fno/pr-body.md && gh pr create --body-file .fno/pr-body.md
-
-    On a first run the path does not exist yet, and reading that as "no claim"
-    denied a body composed correctly one line later. On a LATER run a stale
-    .fno/pr-body.md from a previous PR sits at that fixed, never-cleaned path,
-    and the hook judged the old contents of a file the very same command is
-    about to overwrite. Same defect, opposite symptom.
-
-    The hook cannot distinguish a stale file from a final one, so it never had
-    a sound DENY here. Its contract already names the tradeoff: the only
-    failure mode is a false ALLOW, which CI still catches, and a composed body
-    is never denied. Returning True for every body-file is that contract said
-    plainly, rather than a read that is right only when the file happens to be
-    current. `path` is unused and kept for the caller's readability.
+def _body_file_is_unjudgeable(path, touched_elsewhere=frozenset()):
+    """Decide a `--body-file` this hook CAN judge: True (allow) unless the
+    file exists, reads under a 1 MiB cap, and carries no closure marker -
+    the one case that returns False. Everything else allows, fail-open:
+    a false ALLOW is CI's to catch, a false DENY is the defect. A path
+    another segment of the same command names allows, because PreToolUse
+    runs BEFORE the write-then-create flow, so it would judge the
+    PREVIOUS occupant of that never-cleaned path; so does a file the hook
+    cannot shape-check (missing, a directory, an OSError, oversized, an
+    unexpanded $VAR), and a segment that merely names the path: a token
+    set, not a writer table, so no unlisted writer forges a false deny.
     """
-    return True
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read(1 << 20)
+    except OSError:
+        return True
+    if (os.path.normpath(path) in touched_elsewhere or not os.path.isfile(path)
+            or os.path.getsize(path) > (1 << 20)):
+        return True
+    return bool(re.search(r"CLOSURE_TRAILER|Backlog-Closure", text, re.IGNORECASE))
 
 
 def _pr_create_signals(seg):
@@ -1700,7 +1697,8 @@ def _pr_create_signals(seg):
     return hatch, head, body_files
 
 
-def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=()):
+def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=(),
+                             touched_elsewhere=frozenset()):
     """Deny reason for a `gh pr create` that shows no composed closure trailer.
 
     Measured 2026-08-19: five PRs in one evening red on
@@ -1709,20 +1707,17 @@ def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=()):
     creation paths now call fno.pr.closure.ensure_closure_trailer themselves;
     this covers the prose path, where an agent types the command.
 
-    The ceiling, stated because it decides what this can promise. A `--body`
-    reaches gh as an unexpanded `"$BODY"`, so on that spelling the hook cannot
-    read the string that will be sent; it asserts a POSITIVE marker that the
-    composition STEP ran - a literal trailer key, or the CLOSURE_TRAILER
-    variable skills/pr/references/create.md sets - and never an absence. A
-    `--body-file` names a real path, so that spelling is judged on the file's
-    own trailer instead of on a marker. Either way the only failure mode is a
-    false ALLOW, which CI still catches; a composed body is never denied.
+    The ceiling, stated because it bounds the promise. A `--body` reaches gh
+    as an unexpanded `"$BODY"`, so the hook cannot read the string that will
+    be sent; it asserts a POSITIVE marker that the composition STEP ran, and
+    never an absence. A `--body-file` is judged on the file's own trailer
+    instead (see _body_file_is_unjudgeable). Either way the only failure mode
+    is a false ALLOW, which CI still catches; a composed body is never denied.
 
     The ids come from `--head` when the command names one, and only otherwise
-    from the checkout. The PR closes the node its HEAD ref names, which is what
-    the CI gate reads; judging `gh pr create --head chore/docs` against a
-    node-bearing local branch denied a PR that closes nothing, and told the
-    author to claim a node the PR does not ship.
+    from the checkout: the PR closes the node its HEAD ref names, which is
+    what the CI gate reads. Judging `--head chore/docs` against a node-bearing
+    local branch denied a PR that closes nothing.
     """
     # Both spellings, because only one of them is the one people type. A
     # PreToolUse hook is a SEPARATE PROCESS, so an inline
@@ -1744,9 +1739,11 @@ def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=()):
     # bypassed silently.
     if re.search(r"CLOSURE_TRAILER|Backlog-Closure", command, re.IGNORECASE):
         return None
-    for path in body_files:
-        if _body_file_is_unjudgeable(path):
-            return None
+    judged = [p for p in body_files if not _body_file_is_unjudgeable(p, touched_elsewhere)]
+    if body_files and not judged:
+        return None
+    detail = "" if not judged else (f"the body file {judged[0]} exists and carries "
+        f"no Backlog-Closure line; or open the whole-path door /fno:pr create.\n")
     # This message NAMES candidates and never prescribes a trailer to paste.
     # A refusal is the highest-trust text a blocked agent reads, so advice here
     # is a PRODUCER of claims, and this producer has no graph to check against.
@@ -1760,7 +1757,7 @@ def _closure_trailer_refusal(command="", hatch=False, head=None, body_files=()):
     return (
         f"[fno closure trailer] branch segments that fit the node-id grammar: "
         f"{', '.join(ids)}. check-pr-node-closure reds this PR unless the body "
-        f"claims at least one REAL node.\n"
+        f"claims at least one REAL node.\n{detail}"
         f"Generate the ONE line (graph-checked, with contained_in descendants) "
         f"via `fno do pr closure-trailer <node-id> --extra <id> [...]` and "
         f"paste its output; the gate reads only the last Backlog-Closure "
@@ -2307,14 +2304,16 @@ def main():
         # Judge each create segment on ITS OWN tokens. The legacy fallback
         # below has no tokens at all, so it reads none of the three signals -
         # deny-leaning there, matching that path's stated posture.
+        nz = {t for seg in segments or () for t in seg if seg not in pr_create_segs}
+        touched_elsewhere = nz | frozenset(map(os.path.normpath, nz))
         for seg in pr_create_segs:
             if segments is not None:
                 seg_hatch, seg_head, seg_body_files = _pr_create_signals(seg)
             else:
                 seg_hatch, seg_head, seg_body_files = False, None, []
             closure_reason = _closure_trailer_refusal(
-                command, hatch=seg_hatch, head=seg_head, body_files=seg_body_files
-            )
+                command, hatch=seg_hatch, head=seg_head, body_files=seg_body_files,
+                touched_elsewhere=touched_elsewhere)
             if closure_reason:
                 _emit("deny", closure_reason)
                 _exit_allow()

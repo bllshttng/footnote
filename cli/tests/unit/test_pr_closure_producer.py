@@ -691,9 +691,10 @@ def test_hook_never_denies_on_a_body_file_it_cannot_judge(node_branch_repo, tmp_
     # fixed, never-cleaned path like .fno/pr-body.md holds the PREVIOUS PR's
     # body while the very same command is about to overwrite it. Judging that
     # content denied the compose-then-pass flow skills/pr/references/create.md
-    # prescribes. The hook cannot tell stale from final, so it never had a
-    # sound deny here, and its contract already accepts a false ALLOW that CI
-    # catches while ruling out a false DENY.
+    # prescribes. The no-trailer case on a real file is now decided (and
+    # denied) elsewhere; a STALE file that still carries a trailer remains a
+    # known false ALLOW, the failure mode this hook's contract accepts while
+    # ruling out a false DENY.
     body = tmp_path / "pr-body.md"
     body.write_text("Summary.\n\nBacklog-Closure: x-1111\n")
     payload = _hook_main(f"gh pr create --title t --body-file {body}", node_branch_repo)
@@ -701,8 +702,9 @@ def test_hook_never_denies_on_a_body_file_it_cannot_judge(node_branch_repo, tmp_
 
 
 def test_hook_never_denies_on_a_body_file_that_does_not_exist_yet(node_branch_repo, tmp_path):
-    # The same defect with the opposite symptom, and the reason the sound
-    # answer is "always allow" rather than "read it more carefully".
+    # The same defect with the opposite symptom. A missing path is one of the
+    # shapes the read cannot judge, so it still allows; the file that EXISTS
+    # and carries no trailer is denied by its own case now.
     payload = _hook_main(
         f"gh pr create --title t --body-file {tmp_path / 'not-written-yet.md'}",
         node_branch_repo,
@@ -717,6 +719,253 @@ def test_hook_allows_a_body_file_the_same_command_is_about_to_write(node_branch_
     target = tmp_path / "not-yet.md"
     payload = _hook_main(
         f"printf '%s' \"$B\" > {target}\ngh pr create --title t --body-file {target}",
+        node_branch_repo,
+    )
+    assert payload is None or payload["permissionDecision"] != "deny"
+
+
+# The body-file read judges a file that EXISTS, so the deny case and its
+# false-positive edges all replay the x-eeeb specimen through main(): the
+# guard is the segment list, and a verdict pinned on the predicate alone is
+# the decorative shape this node exists to close.
+
+def test_hook_denies_an_existing_untrailered_body_file(node_branch_repo, tmp_path):
+    # The x-eeeb specimen, real flag order: four worker PRs went red through
+    # this one door on 2026-09-20, because the read answered True for every
+    # path. The file existed and was readable; the guard could have judged it.
+    body = tmp_path / "pr-body.md"
+    body.write_text("Summary only.\n")
+    payload = _hook_main(
+        f"gh pr create --title t --body-file {body} --base main --head feature/x-eeeb",
+        node_branch_repo,
+    )
+    assert payload["permissionDecision"] == "deny"
+
+
+def test_hook_refusal_names_the_judged_path_not_a_missing_verb(node_branch_repo, tmp_path):
+    # The refusal names the file the guard opened. It must NOT name
+    # `fno do pr create`, which does not exist; a refusal naming a missing
+    # verb sends the reader into a second error.
+    body = tmp_path / "pr-body.md"
+    body.write_text("Summary only.\n")
+    payload = _hook_main(
+        f"gh pr create --title t --body-file {body} --head feature/x-eeeb",
+        node_branch_repo,
+    )
+    reason = payload["permissionDecisionReason"]
+    assert str(body) in reason
+    assert "fno do pr create" not in reason
+
+
+def test_hook_refusal_keeps_the_generator_and_still_prescribes_nothing(node_branch_repo, tmp_path):
+    # The producer discipline survives: the refusal points at the
+    # graph-reading generator and never hands over a pasteable trailer,
+    # which is what `bind_closure_claims` voids at merge.
+    body = tmp_path / "pr-body.md"
+    body.write_text("Summary only.\n")
+    payload = _hook_main(
+        f"gh pr create --title t --body-file {body} --head feature/x-eeeb",
+        node_branch_repo,
+    )
+    reason = payload["permissionDecisionReason"]
+    assert "fno do pr closure-trailer" in reason
+    assert "Backlog-Closure: x" not in reason
+
+
+def test_hook_body_file_verdict_needs_a_node_bearing_branch(node_branch_repo, tmp_path):
+    # `_branch_node_ids` returns empty for a branch naming no node, so the
+    # body-file loop is never reached and the same untrailered file allows.
+    body = tmp_path / "pr-body.md"
+    body.write_text("Summary only.\n")
+    payload = _hook_main(
+        f"gh pr create --title t --body-file {body} --head chore/tidy-docs",
+        node_branch_repo,
+    )
+    assert payload is None or payload["permissionDecision"] != "deny"
+
+
+def test_hook_denies_the_untrailered_file_under_the_short_flag(node_branch_repo, tmp_path):
+    # -F is gh's short --body-file; the short spelling must not become the
+    # hole the long one lacks.
+    body = tmp_path / "pr-body.md"
+    body.write_text("Summary only.\n")
+    payload = _hook_main(
+        f"gh pr create --title t -F {body} --head feature/x-eeeb", node_branch_repo
+    )
+    assert payload["permissionDecision"] == "deny"
+
+
+def test_hook_hatch_prefix_allows_an_untrailered_body_file(node_branch_repo, tmp_path):
+    # The deliberate override stays: the assignment prefix is read by
+    # POSITION on the create segment.
+    body = tmp_path / "pr-body.md"
+    body.write_text("Summary only.\n")
+    payload = _hook_main(
+        f"FNO_PR_CLOSURE_OK=1 gh pr create --title t --body-file {body} "
+        f"--head feature/x-eeeb",
+        node_branch_repo,
+    )
+    assert payload is None or payload["permissionDecision"] != "deny"
+
+
+def test_hook_env_hatch_allows_an_untrailered_body_file(node_branch_repo, tmp_path, monkeypatch):
+    # The other hatch spelling, read from the hook process environment.
+    monkeypatch.setenv("FNO_PR_CLOSURE_OK", "1")
+    body = tmp_path / "pr-body.md"
+    body.write_text("Summary only.\n")
+    payload = _hook_main(
+        f"gh pr create --title t --body-file {body} --head feature/x-eeeb",
+        node_branch_repo,
+    )
+    assert payload is None or payload["permissionDecision"] != "deny"
+
+
+def test_hook_ignores_a_create_quoted_inside_a_body_argument(node_branch_repo):
+    # A --body QUOTING the words of a body-file create is one token, never a
+    # second create segment, so the guard must not read /tmp/whatever.md.
+    # The verdict is still deny, because no composition marker runs in the
+    # command - but the reason is the marker's, not a body-file read's.
+    payload = _hook_main(
+        'gh pr create --body "see gh pr create --body-file /tmp/whatever.md next time"',
+        node_branch_repo,
+    )
+    assert payload["permissionDecision"] == "deny"
+    reason = payload["permissionDecisionReason"]
+    assert "/tmp/whatever.md" not in reason
+    assert "no Backlog-Closure line" not in reason
+
+
+def test_hook_heredoc_body_carries_no_body_file_verdict(node_branch_repo):
+    # The command-substitution heredoc shape that once blocked a whole PR:
+    # a heredoc body is not a --body-file value, so no path is judged and
+    # the refusal carries no body-file sentence.
+    payload = _hook_main(
+        'gh pr create --title "t" --body "$(cat <<\'BODY\'\n'
+        "| real `gh pr merge` | deny |\n"
+        "prose mentioning gh pr merge\n"
+        "BODY\n"
+        ')"',
+        node_branch_repo,
+    )
+    assert payload["permissionDecision"] == "deny"
+    reason = payload["permissionDecisionReason"]
+    assert "no Backlog-Closure line" not in reason
+
+
+def test_hook_graphql_exec_matches_no_create_segment(node_branch_repo):
+    # argv[0] is fno, not gh, and the routed tail is `api graphql`, judged by
+    # a different arm. Pin it so a later refactor of the segment matcher
+    # cannot start catching this spelling.
+    payload = _hook_main(
+        "fno do pr graphql-exec --purpose discretionary -- api graphql "
+        "-f query=query { viewer { login } }",
+        node_branch_repo,
+    )
+    assert payload is None
+
+
+def test_hook_allows_the_sanctioned_pr_creator_sequence(node_branch_repo):
+    # The two-command flow skills/pr/agents/pr-creator.md runs: compose the
+    # body ending in a GENERATED trailer (built here by the real producer,
+    # so a grammar change fails here instead of drifting), write it to the
+    # fixed path, then create as a separate command. Allowed on the merits:
+    # the file exists and carries the trailer.
+    (node_branch_repo / ".fno").mkdir()
+    composed = ensure_closure_trailer("Summary.", "feature/x-49ec", known_ids=KNOWN)
+    (node_branch_repo / ".fno" / "pr-body.md").write_text(composed)
+    payload = _hook_main(
+        "gh pr create --title t --body-file .fno/pr-body.md", node_branch_repo
+    )
+    assert payload is None or payload["permissionDecision"] != "deny"
+
+
+def test_hook_allows_an_unexpanded_variable_in_the_body_file_path(node_branch_repo):
+    # Stated ceiling, not a bug: PreToolUse sees the raw token, the variable
+    # resolves to no file on disk, and the read fails open.
+    payload = _hook_main(
+        "gh pr create --title t --body-file $CLAUDE_JOB_DIR/tmp/pr-body.md "
+        "--head feature/x-eeeb",
+        node_branch_repo,
+    )
+    assert payload is None or payload["permissionDecision"] != "deny"
+
+
+def test_hook_allows_a_body_file_over_the_size_cap(node_branch_repo, tmp_path):
+    # The 1 MiB cap bounds a wrong path, and an oversized file allows: the
+    # gate reads only what a PR body needs.
+    body = tmp_path / "pr-body.md"
+    body.write_text("x" * ((1 << 20) + 1))
+    payload = _hook_main(
+        f"gh pr create --title t --body-file {body} --head feature/x-eeeb",
+        node_branch_repo,
+    )
+    assert payload is None or payload["permissionDecision"] != "deny"
+
+
+def test_hook_allows_a_body_file_that_is_a_directory(node_branch_repo, tmp_path):
+    # A directory reads as an OSError on the file read, so it allows and the
+    # hook must not raise (a crashed hook is a silent allow for everything).
+    body = tmp_path / "a-directory"
+    body.mkdir()
+    payload = _hook_main(
+        f"gh pr create --title t --body-file {body} --head feature/x-eeeb",
+        node_branch_repo,
+    )
+    assert payload is None or payload["permissionDecision"] != "deny"
+
+
+def test_hook_allows_a_stale_body_file_the_same_command_rewrites(node_branch_repo, tmp_path):
+    # The docstring's second reason, as ONE command: the file on disk is the
+    # stale PREVIOUS body, but the same command rewrites it before gh reads
+    # it, so judging the bytes on disk would deny a body composed correctly
+    # one step earlier. The rewrite segment names the path; the guard allows.
+    body = tmp_path / "pr-body.md"
+    body.write_text("stale trailer-less body\n")
+    payload = _hook_main(
+        f"printf '%s\\n' \"$BODY\" > {body} && "
+        f"gh pr create --title t --body-file {body} --head feature/x-eeeb",
+        node_branch_repo,
+    )
+    assert payload is None or payload["permissionDecision"] != "deny"
+
+
+def test_hook_denies_the_same_stale_file_with_no_rewrite_segment(node_branch_repo, tmp_path):
+    # The deny-side twin of the case above: same stale trailer-less file on
+    # disk, no segment naming the path, so the bytes gh will read are the
+    # bytes on disk and the guard judges them. Without this twin, the stale
+    # case would pass against a function that never denies.
+    body = tmp_path / "pr-body.md"
+    body.write_text("stale trailer-less body\n")
+    payload = _hook_main(
+        f"gh pr create --title t --body-file {body} --head feature/x-eeeb",
+        node_branch_repo,
+    )
+    assert payload["permissionDecision"] == "deny"
+
+
+def test_hook_second_create_segment_is_not_a_rewrite(node_branch_repo, tmp_path):
+    # Every create segment is excluded from the token set; if only the
+    # CURRENT one were, its own --body-file value would match and every body
+    # file would allow itself. Two creates naming one untrailered file deny.
+    body = tmp_path / "pr-body.md"
+    body.write_text("stale trailer-less body\n")
+    payload = _hook_main(
+        f"gh pr create --title t --body-file {body} && "
+        f"gh pr create --title u --body-file {body} --head feature/x-eeeb",
+        node_branch_repo,
+    )
+    assert payload["permissionDecision"] == "deny"
+
+
+def test_hook_normpath_equates_the_redirect_and_flag_spellings(node_branch_repo, tmp_path):
+    # ./x.md in the redirect and x.md in --body-file are one path; the raw
+    # token comparison alone would let a ./-spelled rewrite deny its own
+    # correctly composed body.
+    body = tmp_path / "x.md"
+    body.write_text("stale trailer-less body\n")
+    payload = _hook_main(
+        f"printf '%s\\n' \"$BODY\" > {tmp_path}/./x.md && "
+        f"gh pr create --title t --body-file {tmp_path}/x.md --head feature/x-eeeb",
         node_branch_repo,
     )
     assert payload is None or payload["permissionDecision"] != "deny"
