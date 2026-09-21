@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, FixedOffset, SecondsFormat, TimeZone, Utc};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, Default)]
@@ -11,8 +11,18 @@ pub struct DayInputs {
     pub now: String,
     pub questions_raw: String,
     pub decisions_raw: String,
+    pub decisions_path: String,
     pub graph_entries: Vec<Value>,
     pub event_journals: Vec<(String, String)>,
+    /// (path, state) pairs parallel to `event_journals`: `read`, `missing` or
+    /// `unreadable`. Empty means every provided journal was read.
+    pub journal_states: Vec<(String, String)>,
+    /// Precomputed `king_history::scan_scopes(paths, None)` payload, read by
+    /// the IO layer. `fold_day` stays pure: it filters this Value to the
+    /// window and never opens a store itself.
+    pub checkin_scan: Option<Value>,
+    /// `read`, `missing` or `unreadable` for the check-in scan itself.
+    pub checkin_state: String,
     pub questions_state: String,
     pub questions_path: String,
 }
@@ -92,39 +102,75 @@ fn question_items(raw: &str) -> Vec<Value> {
 }
 
 fn attention(open: &[Value], history: &[Value]) -> Vec<String> {
-    let mut previously_featured = HashSet::new();
+    // Presentation history from prior boundaries: which ids were featured,
+    // and when they were featured last (the boundary row's ts).
+    let mut last_featured: HashMap<&str, &str> = HashMap::new();
     for row in history {
         if let Some(ids) = row
             .get("data")
             .and_then(|d| d.get("featured"))
             .and_then(Value::as_array)
         {
-            previously_featured.extend(ids.iter().filter_map(Value::as_str).map(str::to_string));
+            let row_ts = stamp(row).unwrap_or("");
+            for id in ids.iter().filter_map(Value::as_str) {
+                let newer = last_featured.get(id).is_none_or(|prior| row_ts >= **prior);
+                if newer {
+                    last_featured.insert(id, row_ts);
+                }
+            }
         }
     }
+    let id_of = |item: &Value| item.get("id").and_then(Value::as_str);
+    // Slots 1-3: the shared rank's own order (needs order, newest first).
     let mut selected: Vec<String> = open
         .iter()
         .take(3)
-        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
+        .filter_map(id_of)
+        .map(str::to_string)
         .collect();
-    for item in open {
+    // Reserved places: never-featured first, oldest ts leading, so old asks
+    // cannot sit unseen forever; then the least recently featured. Ties on id.
+    let mut never: Vec<&Value> = open
+        .iter()
+        .filter(|item| id_of(item).is_some_and(|id| !last_featured.contains_key(id)))
+        .collect();
+    never.sort_by(|a, b| {
+        let key = |item: &Value| (stamp(item).unwrap_or(""), id_of(item).unwrap_or(""));
+        key(a).cmp(&key(b))
+    });
+    let mut carried: Vec<&Value> = open
+        .iter()
+        .filter(|item| id_of(item).is_some_and(|id| last_featured.contains_key(id)))
+        .collect();
+    carried.sort_by(|a, b| {
+        let key = |item: &Value| {
+            (
+                last_featured
+                    .get(id_of(item).unwrap_or(""))
+                    .copied()
+                    .unwrap_or(""),
+                id_of(item).unwrap_or(""),
+            )
+        };
+        key(a).cmp(&key(b))
+    });
+    for item in never.into_iter().chain(carried) {
         if selected.len() >= 5 {
             break;
         }
-        let Some(id) = item.get("id").and_then(Value::as_str) else {
+        let Some(id) = id_of(item) else {
             continue;
         };
-        if !selected.iter().any(|selected_id| selected_id == id)
-            && !previously_featured.contains(id)
-        {
+        if !selected.iter().any(|selected_id| selected_id == id) {
             selected.push(id.to_string());
         }
     }
+    // Any leftover place comes from the shared rank order.
     for item in open {
         if selected.len() >= 5 {
             break;
         }
-        if let Some(id) = item.get("id").and_then(Value::as_str) {
+        if let Some(id) = id_of(item) {
             if !selected.iter().any(|selected_id| selected_id == id) {
                 selected.push(id.to_string());
             }
@@ -158,50 +204,55 @@ fn collect_retractions(raw: &str, kind: &str, out: &mut Vec<Value>) {
     }
 }
 
+/// Filter the precomputed `king_history::scan_scopes(paths, None)` payload to
+/// the window and group its canonical rows by scope. The canonical/legacy
+/// classification stays in king_history: this reads its verdict, never a
+/// second classifier over raw journal text.
 fn checkin_summary(
-    journals: &[(String, String)],
+    scan: Option<&Value>,
+    state: &str,
     from: DateTime<FixedOffset>,
     to: DateTime<FixedOffset>,
 ) -> Value {
-    let mut rejected = 0u64;
     let mut scopes: HashMap<String, (u64, String)> = HashMap::new();
-    for (_path, raw) in journals {
-        for line in raw.lines() {
-            let Ok(row) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
-            };
-            if row.get("type").and_then(Value::as_str) != Some("reign_checkin") {
-                continue;
-            }
-            let Some(fields) = data(&row) else {
-                rejected += 1;
-                continue;
-            };
-            let scope = string(fields, "scope").unwrap_or_default();
-            let canonical = !scope.is_empty()
-                && fields.contains_key("change")
-                && !["crown", "crown_scope", "result"]
-                    .iter()
-                    .any(|key| fields.contains_key(*key));
-            if !canonical {
-                rejected += 1;
-                continue;
-            }
-            let Some(ts) = stamp(&row) else { continue };
-            if !in_window(ts, from, to) {
-                continue;
-            }
-            let change = string(fields, "change").unwrap_or_default();
-            let entry = scopes.entry(scope).or_insert((0, String::new()));
-            entry.0 += 1;
-            if parse_ts(ts).is_some_and(|current| {
-                parse_ts(&entry.1).is_none_or(|previous| current >= previous)
-            }) {
-                entry.1 = change;
-            }
+    let events = scan
+        .and_then(|scan| scan.get("events"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for event in events {
+        let Some(ts) = stamp(&event).or_else(|| event.get("ts").and_then(Value::as_str)) else {
+            continue;
+        };
+        if !in_window(ts, from, to) {
+            continue;
+        }
+        let scope = event
+            .get("data")
+            .and_then(|d| d.get("scope"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let change = event
+            .get("data")
+            .and_then(|d| d.get("change"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let entry = scopes.entry(scope).or_insert((0, String::new()));
+        entry.0 += 1;
+        if parse_ts(ts)
+            .is_some_and(|current| parse_ts(&entry.1).is_none_or(|previous| current >= previous))
+        {
+            entry.1 = change;
         }
     }
+    let rejected = scan
+        .and_then(|scan| scan.get("rejected"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     json!({
+        "state": state,
         "rejected": rejected,
         "scopes": scopes.into_iter().map(|(scope, (count, latest_change))| {
             json!({"scope": scope, "count": count, "latest_change": latest_change})
@@ -244,6 +295,15 @@ pub fn fold_day(inputs: &DayInputs) -> Result<Value, String> {
         "first boundary"
     };
     let projection = crate::feed::project(&inputs.questions_raw, &inputs.graph_entries, &[]);
+    // node_ended rows carry no PR reference; the graph entry does. Join the
+    // completion card to its PR through the entry the feed already walked.
+    let mut pr_by_node: HashMap<&str, Option<i64>> = HashMap::new();
+    for entry in &inputs.graph_entries {
+        let Some(id) = entry.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        pr_by_node.insert(id, entry.get("pr_number").and_then(Value::as_i64));
+    }
     let mut completed_items = Vec::new();
     let mut opened = 0u64;
     let mut closed = 0u64;
@@ -254,7 +314,13 @@ pub fn fold_day(inputs: &DayInputs) -> Result<Value, String> {
     {
         match row.kind.as_str() {
             "node_ended" => completed_items.push(
-                json!({"node": row.node, "title": row.title, "ref": row.r#ref, "ts": row.ts}),
+                json!({
+                    "node": row.node,
+                    "title": row.title,
+                    "ref": row.r#ref,
+                    "pr_number": row.node.as_deref().and_then(|node| pr_by_node.get(node)).cloned().flatten(),
+                    "ts": row.ts
+                }),
             ),
             "question_asked" => opened += 1,
             "question_closed" => closed += 1,
@@ -268,6 +334,22 @@ pub fn fold_day(inputs: &DayInputs) -> Result<Value, String> {
         json!("unknown")
     };
     let featured = attention(&open_items, &history);
+    let first_ask = featured
+        .first()
+        .and_then(|id| {
+            open_items
+                .iter()
+                .find(|item| item.get("id").and_then(Value::as_str) == Some(id.as_str()))
+        })
+        .and_then(|item| item.get("question").and_then(Value::as_str))
+        .map(|ask| {
+            if ask.chars().count() > 80 {
+                ask.chars().take(80).collect::<String>()
+            } else {
+                ask.to_string()
+            }
+        })
+        .unwrap_or_default();
     let mut retractions = Vec::new();
     collect_retractions(&inputs.decisions_raw, "decision", &mut retractions);
     for (_path, raw) in &inputs.event_journals {
@@ -280,11 +362,17 @@ pub fn fold_day(inputs: &DayInputs) -> Result<Value, String> {
     });
     let mut receipts = vec![
         json!({"source":"questions", "path": inputs.questions_path, "state": inputs.questions_state, "scanned": inputs.questions_raw.lines().count(), "matched": open_items.len()}),
-        json!({"source":"decisions", "path":"decisions.jsonl", "state":"read", "scanned": inputs.decisions_raw.lines().count(), "matched": retractions.iter().filter(|r| r["kind"] == "decision").count()}),
+        json!({"source":"decisions", "path": inputs.decisions_path, "state":"read", "scanned": inputs.decisions_raw.lines().count(), "matched": retractions.iter().filter(|r| r["kind"] == "decision").count()}),
         json!({"source":"graph", "path":"graph.json", "state":"read", "scanned": inputs.graph_entries.len(), "matched": completed_items.len()}),
     ];
     for (path, raw) in &inputs.event_journals {
-        receipts.push(json!({"source":"journal", "path":path, "state":"read", "scanned":raw.lines().count(), "matched":raw.lines().filter(|line| line.contains("reign_checkin")).count()}));
+        let state = inputs
+            .journal_states
+            .iter()
+            .find(|(state_path, _)| state_path == path)
+            .map(|(_, state)| state.as_str())
+            .unwrap_or("read");
+        receipts.push(json!({"source":"journal", "path":path, "state":state, "scanned":raw.lines().count(), "matched":raw.lines().filter(|line| line.contains("reign_checkin")).count()}));
     }
     let id = boundary_id(&inputs.kind, now);
     Ok(json!({
@@ -295,11 +383,12 @@ pub fn fold_day(inputs: &DayInputs) -> Result<Value, String> {
         "window": {"from": format_ts(from), "to": format_ts(now), "label": label},
         "prior_boundary_id": newest.and_then(|row| data(row).and_then(|d| d.get("boundary_id")).and_then(Value::as_str)),
         "completed": {"count": completed_items.len(), "items": completed_items.into_iter().take(10).collect::<Vec<_>>()},
-        "questions": {"open": open_count, "opened": opened, "closed": closed, "featured": featured},
+        "questions": {"open": open_count, "opened": opened, "closed": closed, "featured": featured, "first_ask": first_ask},
         "questions_state": inputs.questions_state,
         "questions_path": inputs.questions_path,
+        "questions_rows": inputs.questions_raw.lines().count() as u64,
         "retractions": retractions,
-        "checkins": checkin_summary(&inputs.event_journals, from, now),
+        "checkins": checkin_summary(inputs.checkin_scan.as_ref(), &inputs.checkin_state, from, now),
         "receipts": receipts,
     }))
 }
@@ -318,9 +407,31 @@ fn render(payload: &Value) -> String {
         format!("open questions: unknown (questions store missing: {questions_path})")
     } else {
         match (payload["kind"].as_str(), action) {
-            (Some("start"), Some(id)) => format!("Start: answer {id}"),
-            (Some("end"), Some(id)) => format!("Tomorrow: resume {id}"),
-            _ => format!("Nothing waits on you: {} open questions", questions["open"]),
+            (Some("start"), Some(id)) => {
+                let ask = questions["first_ask"].as_str().unwrap_or("");
+                let ask = if ask.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {ask}")
+                };
+                format!("Start: answer {id}{ask}")
+            }
+            (Some("end"), Some(id)) => {
+                let ask = questions["first_ask"].as_str().unwrap_or("");
+                let ask = if ask.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {ask}")
+                };
+                format!("Tomorrow: {id}{ask}")
+            }
+            _ => format!(
+                "Nothing waits on you: {} open questions ({} {}, {} rows)",
+                questions["open"],
+                questions_path,
+                questions_state,
+                payload["questions_rows"].as_u64().unwrap_or(0)
+            ),
         }
     };
     let mut lines = vec![first];
@@ -335,6 +446,30 @@ fn render(payload: &Value) -> String {
     lines.push(format!(
         "Retractions: {}",
         payload["retractions"].as_array().map_or(0, Vec::len)
+    ));
+    let checkins = &payload["checkins"];
+    let scope_parts: Vec<String> = checkins["scopes"]
+        .as_array()
+        .map(|scopes| {
+            scopes
+                .iter()
+                .map(|scope| {
+                    format!(
+                        "{} {} (latest: {})",
+                        scope["scope"], scope["count"], scope["latest_change"]
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    lines.push(format!(
+        "Check-ins: {} (rejected {})",
+        if scope_parts.is_empty() {
+            "none in window".to_string()
+        } else {
+            scope_parts.join(", ")
+        },
+        checkins["rejected"]
     ));
     lines.push(format!(
         "Window: {} to {} ({})",
@@ -408,34 +543,49 @@ pub fn run_day(rest: &[String], home: &crate::paths::AgentsHome) -> i32 {
             return 1;
         }
     };
-    let decisions_raw =
-        std::fs::read_to_string(state_dir.join("decisions.jsonl")).unwrap_or_default();
+    let decisions_path = state_dir.join("decisions.jsonl");
+    let decisions_raw = std::fs::read_to_string(&decisions_path).unwrap_or_default();
     let graph_entries = match crate::graph_store::read_raw(&graph_path(home)) {
         Ok(crate::graph_store::RawRead::Entries(entries)) => entries,
         _ => Vec::new(),
     };
-    let mut journals = Vec::new();
+    let mut journals: Vec<(String, String)> = Vec::new();
+    let mut journal_states: Vec<(String, String)> = Vec::new();
     for path in event_paths {
         let raw = match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                journal_states.push((path.display().to_string(), "missing".to_string()));
+                String::new()
+            }
             Err(error) => {
-                eprintln!(
-                    "fno-agents day: journal unreadable: {}: {error}",
-                    path.display()
-                );
-                return 1;
+                // A journal that cannot be read is an incomplete source, not
+                // a reason to lose the whole read; the receipt names it.
+                journal_states.push((path.display().to_string(), "unreadable".to_string()));
+                String::new()
             }
         };
         journals.push((path.display().to_string(), raw));
     }
+    let (checkin_scan, checkin_state) = if event_paths.is_empty() {
+        (None, "missing".to_string())
+    } else {
+        match crate::king_history::scan_scopes(&event_paths, None) {
+            Ok(scan) => (Some(scan), "read".to_string()),
+            Err(_) => (None, "unreadable".to_string()),
+        }
+    };
     let input = DayInputs {
         kind,
         now,
         questions_raw,
         decisions_raw,
+        decisions_path: decisions_path.display().to_string(),
         graph_entries,
         event_journals: journals,
+        journal_states,
+        checkin_scan,
+        checkin_state,
         questions_state,
         questions_path: questions_path.display().to_string(),
     };
@@ -570,5 +720,49 @@ mod tests {
         let payload = fold_day(&input).unwrap();
         assert_eq!(payload["questions"]["open"], json!("unknown"));
         assert_eq!(payload["questions_state"], json!("missing"));
+    }
+
+    #[test]
+    fn checkins_group_by_scope_from_the_scan_payload() {
+        let mut input = inputs("start", "2026-09-10T12:00:00Z", "");
+        input.checkin_state = "read".to_string();
+        input.checkin_scan = Some(json!({
+            "matched": 3,
+            "rejected": 1,
+            "events": [
+                {"ts":"2026-09-10T08:10:00Z","type":"reign_checkin","data":{"scope":"fno","change":"green"}},
+                {"ts":"2026-09-10T09:10:00Z","type":"reign_checkin","data":{"scope":"x-a792","change":"stalled"}},
+                {"ts":"2026-09-09T23:00:00Z","type":"reign_checkin","data":{"scope":"fno","change":"early"}}
+            ]
+        }));
+        let payload = fold_day(&input).unwrap();
+        let scopes = payload["checkins"]["scopes"].as_array().unwrap();
+        assert_eq!(scopes.len(), 2);
+        assert_eq!(payload["checkins"]["rejected"], json!(1));
+        let fno_scope = scopes
+            .iter()
+            .find(|scope| scope["scope"] == json!("fno"))
+            .unwrap();
+        assert_eq!(
+            fno_scope["count"],
+            json!(1),
+            "pre-window rows are not counted"
+        );
+        assert_eq!(fno_scope["latest_change"], json!("green"));
+    }
+
+    #[test]
+    fn render_names_the_first_action_within_twelve_lines() {
+        let input = inputs(
+            "start",
+            "2026-09-10T12:00:00Z",
+            r#"{"ts":"2026-09-10T08:00:00Z","type":"operator_question","source":"target","data":{"question_id":"q-1","question":"pick the runner"}}"#,
+        );
+        let payload = fold_day(&input).unwrap();
+        let text = render(&payload);
+        let first = text.lines().next().unwrap();
+        assert!(first.starts_with("Start: answer q-1"), "{first}");
+        assert!(first.contains("pick the runner"), "{first}");
+        assert!(text.lines().count() <= 12, "{text}");
     }
 }

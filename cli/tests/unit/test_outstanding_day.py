@@ -62,3 +62,32 @@ def test_index_failure_names_boundary_id(monkeypatch: pytest.MonkeyPatch) -> Non
     with pytest.raises(day.DayIndexWriteError, match="day-end-20260913-ab12"):
         day._record_boundary("end")
     assert len(captured) == 2
+
+
+def test_append_order_is_project_journal_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fno.outstanding import day
+
+    captured: list[object] = []
+
+    def fake_append(event: dict, events_path=None) -> None:
+        captured.append(str(events_path))
+
+    monkeypatch.setattr(day, "_run_native", lambda kind: {
+        "boundary_id": "day-end-20260913-ab12",
+        "kind": kind,
+        "reused": False,
+        "cutoff": "2026-09-13T18:00:00Z",
+        "window": {"from": "2026-09-13T08:00:00Z", "to": "2026-09-13T18:00:00Z", "label": "since previous boundary"},
+        "prior_boundary_id": None,
+        "completed": {"count": 0, "items": []},
+        "questions": {"open": 0, "opened": 0, "closed": 0, "featured": []},
+        "retractions": [],
+    })
+    monkeypatch.setattr(day, "append_event", fake_append)
+    monkeypatch.setattr(day, "events_path", lambda root: Path("project") / "events.jsonl")
+    monkeypatch.setattr(day, "questions_path", lambda: Path("questions.jsonl"))
+    monkeypatch.setattr(day, "resolve_carveout_root", lambda: Path("project"))
+
+    day._record_boundary("end")
+    assert captured[0] == str(Path("project") / "events.jsonl")
+    assert captured[1] == str(Path("questions.jsonl"))
