@@ -49,7 +49,14 @@ def court(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _seat(name: str, session: str, *, scope: str | None = SCOPE, status: str = "busy"):
+def _seat(
+    name: str,
+    session: str,
+    *,
+    scope: str | None = SCOPE,
+    status: str = "busy",
+    level: int | None = None,
+):
     update_registry(
         lambda rows: rows
         + [
@@ -60,7 +67,7 @@ def _seat(name: str, session: str, *, scope: str | None = SCOPE, status: str = "
                 harness="claude",
                 harness_session_id=session,
                 status=status,
-                crown_level=2 if scope else None,
+                crown_level=level if level is not None else (2 if scope else None),
                 crown_scope=scope,
                 crown_grantor="human" if scope else None,
             )
@@ -355,3 +362,134 @@ def test_an_orphaned_scope_writes_the_manifest_clear_event(court, monkeypatch) -
     assert (event["cause"], event["scope"]) == ("orphan_manifest", "orphaned-scope")
     assert event["holder"] is None
     assert event["holder_session"] == "long-gone"
+
+
+# --- Presiding expiry: a king may expire a DEAD crown one rung below it ----
+
+
+def _stub_graph(monkeypatch, projects: dict[str, str]) -> None:
+    """Feed find_presiding_crown the epic -> project read the real graph
+    gives it; the tmp court has no tracker entries of its own."""
+    import fno.tracker.metadata as metadata
+
+    monkeypatch.setattr(
+        metadata,
+        "read_entries",
+        lambda kind: [
+            {"id": epic, "type": "epic", "project": proj}
+            for epic, proj in projects.items()
+        ],
+    )
+
+
+def test_presiding_king_expires_a_dead_crown_in_its_territory(court, monkeypatch):
+    _seat("l1-king", CALLER_SESSION, scope="fno", level=1)
+    _seat("dead-l2", "dead-session", scope="epic-dead", status="exited")
+    manifest = _manifest(court, scope="epic-dead", session="dead-session")
+    _stub_graph(monkeypatch, {"epic-dead": "fno"})
+
+    result = _done("--scope", "epic-dead")
+
+    assert result.exit_code == 0, result.output
+    assert not manifest.exists(), "the dead crown's manifest must be cleared"
+    dead = _row("dead-l2")
+    assert (dead.crown_level, dead.crown_scope) == (2, "epic-dead")
+    assert "no live holder" in result.output
+    vacates = [e for e in _vacates() if e.get("kind") == "agent_crown_vacated"]
+    assert [(v["cause"], v["scope"]) for v in vacates] == [
+        ("orphan_manifest", "epic-dead")
+    ]
+
+
+def test_presiding_king_expires_a_manifest_only_crown(court, monkeypatch):
+    _seat("l1-king", CALLER_SESSION, scope="fno", level=1)
+    manifest = _manifest(court, scope="epic-orphan", session="gone-session")
+    _stub_graph(monkeypatch, {"epic-orphan": "fno"})
+
+    result = _done("--scope", "epic-orphan")
+
+    assert result.exit_code == 0, result.output
+    assert not manifest.exists()
+
+
+def test_presiding_refuses_a_live_crown_in_its_territory(court, monkeypatch):
+    _seat("l1-king", CALLER_SESSION, scope="fno", level=1)
+    _seat("live-l2", "live-session", scope="epic-live")
+    manifest = _manifest(court, scope="epic-live", session="live-session")
+    _stub_graph(monkeypatch, {"epic-live": "fno"})
+
+    result = _done("--scope", "epic-live")
+
+    assert result.exit_code == 2, result.output
+    assert manifest.exists(), "a live crown's manifest must survive"
+
+
+def test_a_foreign_dead_crown_still_refuses(court, monkeypatch):
+    _seat("l1-king", CALLER_SESSION, scope="fno", level=1)
+    _seat("dead-other", "dead-session", scope="epic-out", status="exited")
+    _stub_graph(monkeypatch, {"epic-out": "other-project"})
+
+    result = _done("--scope", "epic-out")
+
+    assert result.exit_code == 2, result.output
+    assert "only its own crown" in result.output
+
+
+def test_one_member_of_a_dead_set_crown_refuses(court, monkeypatch):
+    _seat("l1-king", CALLER_SESSION, scope="fno", level=1)
+    _seat("dead-set", "dead-session", scope="epic-a,epic-b", status="exited")
+    _stub_graph(monkeypatch, {"epic-a": "fno", "epic-b": "fno"})
+
+    result = _done("--scope", "epic-a")
+
+    assert result.exit_code == 2, result.output
+    assert _row("dead-set").crown_scope == "epic-a,epic-b"
+
+
+def test_a_caller_without_a_level_cannot_preside(court, monkeypatch):
+    _seat("half-crown", CALLER_SESSION, scope="fno", level=None)
+    _seat("dead-l2", "dead-session", scope="epic-dead", status="exited")
+    _stub_graph(monkeypatch, {"epic-dead": "fno"})
+
+    result = _done("--scope", "epic-dead")
+
+    assert result.exit_code == 2, result.output
+
+
+def test_presiding_refuses_a_successor_crowned_mid_call(court, monkeypatch):
+    """The pre-check ran outside the registry lock; the vacate closure must
+    stop a successor that crowned between the two instead of disarming it."""
+    _seat("l1-king", CALLER_SESSION, scope="fno", level=1)
+    manifest = _manifest(court, scope="epic-race", session="gone-session")
+    _stub_graph(monkeypatch, {"epic-race": "fno"})
+    from fno.agents import registry as registry_mod
+
+    real_update = registry_mod.update_registry
+
+    def _crown_successor_then_update(fn):
+        real_update(
+            lambda rows: rows
+            + [
+                AgentEntry(
+                    name="successor",
+                    cwd="/tmp",
+                    log_path="",
+                    harness="claude",
+                    harness_session_id="successor-session",
+                    status="busy",
+                    crown_level=2,
+                    crown_scope="epic-race",
+                    crown_grantor="human",
+                )
+            ]
+        )
+        return real_update(fn)
+
+    monkeypatch.setattr(registry_mod, "update_registry", _crown_successor_then_update)
+
+    result = _done("--scope", "epic-race")
+
+    assert result.exit_code == 1, result.output
+    assert "mid-expiry" in result.output
+    assert _row("successor").crown_scope == "epic-race"
+    assert manifest.exists()
