@@ -266,12 +266,17 @@ pub fn sweep(
     out
 }
 
-/// The locked vacate. Under the manifest flock: re-read the manifest and
-/// refuse a successor armed mid-sweep; under the registry lock: refuse a
-/// non-terminal row that took the scope and clear stale crown fields on
-/// terminal rows; then remove the manifest and its cancel sentinel and
-/// journal one `agent_crown_vacated` with cause `holder_dead`. A refusal
-/// at either re-check writes nothing.
+/// The vacate, in the spawn path's own lock order: REGISTRY FIRST, then the
+/// manifest flock. The crowned spawn path arms its manifest from inside its
+/// `update_registry` closure (`dispatch.py` `_write`), so this reaper must
+/// never hold the manifest lock while waiting for the registry lock - that
+/// AB/BA ordering would deadlock both operations. Under the registry lock a
+/// non-terminal row holding the scope refuses the whole vacate; stale crown
+/// fields on terminal rows clear. Then, under the manifest flock: re-read
+/// the manifest and refuse a successor armed mid-sweep, remove the manifest
+/// and its cancel sentinel, and journal one `agent_crown_vacated` with
+/// cause `holder_dead`. A refusal at the registry write touches nothing; a
+/// refusal at the manifest re-read leaves the manifest standing.
 pub(crate) fn vacate(
     manifest_path: &Path,
     scope: &str,
@@ -281,6 +286,39 @@ pub(crate) fn vacate(
     inheritor: &str,
     events: &crate::events::EventEmitter,
 ) -> Result<Vec<String>, String> {
+    let key = crate::loop_reign::territory_key(scope);
+    let claims = |e: &crate::state::RegistryEntry| {
+        e.crown_scope
+            .as_deref()
+            .map(|s| crate::loop_reign::territory_key(s) == key)
+            .unwrap_or(false)
+    };
+    let mut cleared: Vec<String> = Vec::new();
+    let mut refused: Option<String> = None;
+    let write = crate::state::update_registry(registry_path, |reg| {
+        if let Some(row) = reg
+            .entries
+            .iter()
+            .find(|e| !crate::loop_reign::is_terminal(e) && claims(e))
+        {
+            refused = Some(format!("row {} took the scope mid-sweep", row.name));
+            return;
+        }
+        for row in reg
+            .entries
+            .iter_mut()
+            .filter(|e| crate::loop_reign::is_terminal(e) && claims(e))
+        {
+            row.crown_level = None;
+            row.crown_scope = None;
+            row.crown_grantor = None;
+            cleared.push(row.name.clone());
+        }
+    });
+    if let Some(reason) = refused {
+        return Err(reason);
+    }
+    write.map_err(|e| format!("registry write refused: {e}"))?;
     let lock_path = manifest_path.with_extension("md.lock");
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent)
@@ -306,39 +344,6 @@ pub(crate) fn vacate(
         let grantor = crate::claude_adopt::manifest_field(&content, "crown_grantor");
         let level = crate::claude_adopt::manifest_field(&content, "crown_level")
             .and_then(|v| v.parse::<u32>().ok());
-        let key = crate::loop_reign::territory_key(scope);
-        let claims = |e: &crate::state::RegistryEntry| {
-            e.crown_scope
-                .as_deref()
-                .map(|s| crate::loop_reign::territory_key(s) == key)
-                .unwrap_or(false)
-        };
-        let mut cleared: Vec<String> = Vec::new();
-        let mut refused: Option<String> = None;
-        let write = crate::state::update_registry(registry_path, |reg| {
-            if let Some(row) = reg
-                .entries
-                .iter()
-                .find(|e| !crate::loop_reign::is_terminal(e) && claims(e))
-            {
-                refused = Some(format!("row {} took the scope mid-sweep", row.name));
-                return;
-            }
-            for row in reg
-                .entries
-                .iter_mut()
-                .filter(|e| crate::loop_reign::is_terminal(e) && claims(e))
-            {
-                row.crown_level = None;
-                row.crown_scope = None;
-                row.crown_grantor = None;
-                cleared.push(row.name.clone());
-            }
-        });
-        if let Some(reason) = refused {
-            return Err(reason);
-        }
-        write.map_err(|e| format!("registry write refused: {e}"))?;
         fs::remove_file(manifest_path)
             .map_err(|e| format!("cannot remove {}: {e}", manifest_path.display()))?;
         let cancelled = manifest_path.with_extension("cancelled");
@@ -434,18 +439,6 @@ pub fn production_sweep(home: &crate::paths::AgentsHome, cwd: &Path, apply: bool
         &transcript_age_now,
         Utc::now(),
     )
-}
-
-/// The manual `reap` verb's entry: run the sweep and land the report in the
-/// summary the renderer prints. One line for the bin caller, whose file sits
-/// under a hard line cap; the wiring lives here where it is testable.
-pub fn fill_reap_crowns(
-    summary: &mut crate::gc_sweep::GcSummary,
-    home: &crate::paths::AgentsHome,
-    cwd: &Path,
-    apply: bool,
-) {
-    summary.crowns = Some(production_sweep(home, cwd, apply));
 }
 
 #[cfg(test)]
@@ -815,7 +808,10 @@ mod tests {
             dead_fixture("rewritten", "eeee5555-0000-4000-8000-000000000005");
         let emitter = events_of(&dir);
         // A successor armed between classify and apply: the re-read under the
-        // lock names a different session, so nothing is written.
+        // manifest lock names a different session, so the manifest stands.
+        // The registry leg ran first (the spawn path's own lock order) and
+        // cleared the stale terminal crown fields, which is correct whatever
+        // the manifest now names.
         let err = vacate(
             &manifest,
             "zed",
@@ -827,8 +823,14 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("now names session"), "{err}");
-        assert!(manifest.exists(), "a refused vacate writes nothing");
+        assert!(
+            manifest.exists(),
+            "a refused vacate leaves the manifest standing"
+        );
         assert!(read_events(&dir).is_empty());
+        let rows: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();
+        assert!(rows["agents"][0]["crown_scope"].is_null(), "{rows}");
         fs::remove_dir_all(&dir).ok();
     }
 
