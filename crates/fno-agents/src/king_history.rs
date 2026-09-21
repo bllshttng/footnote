@@ -601,7 +601,7 @@ fn scan_readings(
                     terminations.push(s_str(&data, "reason").unwrap_or("unknown").to_string());
                 }
                 REIGN_CHECKIN => {
-                    let (canonical, _, _) = classify(&event, scope);
+                    let (canonical, _, _) = classify(&event, Some(scope));
                     if canonical
                         && s_str(&event, "source") == Some("loop")
                         && in_tenure(s_str(&event, "ts").unwrap_or(""), crown_start)

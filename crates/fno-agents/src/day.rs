@@ -40,6 +40,14 @@ fn stamp(v: &Value) -> Option<&str> {
     v.get("ts").and_then(Value::as_str)
 }
 
+fn id_of(item: &Value) -> Option<&str> {
+    item.get("id").and_then(Value::as_str)
+}
+
+fn open_sort_key(item: &Value) -> (&str, &str) {
+    (stamp(item).unwrap_or(""), id_of(item).unwrap_or(""))
+}
+
 fn data(v: &Value) -> Option<&serde_json::Map<String, Value>> {
     v.get("data").and_then(Value::as_object)
 }
@@ -114,14 +122,13 @@ fn attention(open: &[Value], history: &[Value]) -> Vec<String> {
         {
             let row_ts = stamp(row).unwrap_or("");
             for id in ids.iter().filter_map(Value::as_str) {
-                let newer = last_featured.get(id).is_none_or(|prior| row_ts >= **prior);
+                let newer = last_featured.get(id).is_none_or(|prior| row_ts >= *prior);
                 if newer {
                     last_featured.insert(id, row_ts);
                 }
             }
         }
     }
-    let id_of = |item: &Value| item.get("id").and_then(Value::as_str);
     // Slots 1-3: the shared rank's own order (needs order, newest first).
     let mut selected: Vec<String> = open
         .iter()
@@ -135,25 +142,17 @@ fn attention(open: &[Value], history: &[Value]) -> Vec<String> {
         .iter()
         .filter(|item| id_of(item).is_some_and(|id| !last_featured.contains_key(id)))
         .collect();
-    never.sort_by(|a, b| {
-        let key = |item: &Value| (stamp(item).unwrap_or(""), id_of(item).unwrap_or(""));
-        key(a).cmp(&key(b))
-    });
+    never.sort_by(|a, b| open_sort_key(a).cmp(&open_sort_key(b)));
     let mut carried: Vec<&Value> = open
         .iter()
         .filter(|item| id_of(item).is_some_and(|id| last_featured.contains_key(id)))
         .collect();
     carried.sort_by(|a, b| {
-        let key = |item: &Value| {
-            (
-                last_featured
-                    .get(id_of(item).unwrap_or(""))
-                    .copied()
-                    .unwrap_or(""),
-                id_of(item).unwrap_or(""),
-            )
-        };
-        key(a).cmp(&key(b))
+        let ia = id_of(a).unwrap_or("");
+        let ib = id_of(b).unwrap_or("");
+        let ta = last_featured.get(ia).copied().unwrap_or("");
+        let tb = last_featured.get(ib).copied().unwrap_or("");
+        (ta, ia).cmp(&(tb, ib))
     });
     for item in never.into_iter().chain(carried) {
         if selected.len() >= 5 {
@@ -557,14 +556,14 @@ pub fn run_day(rest: &[String], home: &crate::paths::AgentsHome) -> i32 {
     };
     let mut journals: Vec<(String, String)> = Vec::new();
     let mut journal_states: Vec<(String, String)> = Vec::new();
-    for path in event_paths {
-        let raw = match std::fs::read_to_string(&path) {
+    for path in &event_paths {
+        let raw = match std::fs::read_to_string(path) {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 journal_states.push((path.display().to_string(), "missing".to_string()));
                 String::new()
             }
-            Err(error) => {
+            Err(_error) => {
                 // A journal that cannot be read is an incomplete source, not
                 // a reason to lose the whole read; the receipt names it.
                 journal_states.push((path.display().to_string(), "unreadable".to_string()));
