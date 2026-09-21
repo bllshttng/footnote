@@ -303,7 +303,6 @@ struct Stamp {
     /// Held as epoch seconds for the recycled-pid compare.
     started_s: Option<i64>,
     machine: String,
-    host: String,
 }
 
 /// A ticket whose stamp cannot be read at all reads as a live waiter, never a
@@ -311,10 +310,11 @@ struct Stamp {
 fn read_stamp(dir: &Path) -> Option<Stamp> {
     let text = std::fs::read_to_string(dir.join("holder")).ok()?;
     let (mut pid, mut create_time, mut started_s) = (None, None, None);
-    let (mut machine, mut host) = (String::new(), String::new());
+    let mut machine = String::new();
     // Two writers, two layouts: the deleted bash queue wrote ONE line of
     // space-separated k=v tokens; this module writes one key per line.
-    // Tokenizing handles both.
+    // Tokenizing handles both. A `host=` token parses into nothing: the
+    // machine field is the only identity the reaper trusts.
     for line in text.lines() {
         for tok in line.split_whitespace() {
             if let Some(v) = tok.strip_prefix("pid=") {
@@ -325,8 +325,6 @@ fn read_stamp(dir: &Path) -> Option<Stamp> {
                 started_s = iso8601_utc_to_epoch_s(v);
             } else if let Some(v) = tok.strip_prefix("machine=") {
                 machine = v.to_string();
-            } else if let Some(v) = tok.strip_prefix("host=") {
-                host = v.to_string();
             }
         }
     }
@@ -335,7 +333,6 @@ fn read_stamp(dir: &Path) -> Option<Stamp> {
         create_time,
         started_s,
         machine,
-        host,
     })
 }
 
