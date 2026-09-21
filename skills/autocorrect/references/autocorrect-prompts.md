@@ -37,7 +37,7 @@ N. Source: <correction class / source field>
    Rationale: <one sentence>
 ```
 
-Group by the SHAPE of the failure, not only by source; if multiple events share a source, generate ONE recommendation that covers all of them. A recurring shape across DIFFERENT sources is the finding worth naming most: four separately-sourced rows that all read "two readers of one fact disagreed and the loser silently stranded work" are ONE recommendation, not four.
+When multiple events share a source, generate ONE recommendation that covers all of them. Group by the SHAPE of the failure, not only by source. A recurring shape across DIFFERENT sources is the finding worth naming most: four separately-sourced rows that all read "two readers of one fact disagreed and the loser silently stranded work" are ONE recommendation, not four.
 
 If the packet contains zero events in a window, output exactly: `No corrections in this window; no patches proposed.`
 
