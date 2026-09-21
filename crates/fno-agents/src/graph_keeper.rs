@@ -1827,6 +1827,18 @@ fn handle_begin(state: &StoreState) -> Result<Value, StoreError> {
 }
 
 fn remember_snapshot(state: &StoreState, version: &str, entries: &Arc<Vec<Value>>) {
+    let bytes = graph_store::serialize_graph_file(entries).len() as u64;
+    remember_snapshot_with_bytes(state, version, entries, bytes);
+}
+
+/// `bytes` is the snapshot's serialized size, handed in by the publish path,
+/// which already serialized the entries for its gate metric.
+fn remember_snapshot_with_bytes(
+    state: &StoreState,
+    version: &str,
+    entries: &Arc<Vec<Value>>,
+    bytes: u64,
+) {
     const SNAPSHOT_RING_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
     let mut snapshots = state
         .snapshots
@@ -1835,7 +1847,6 @@ fn remember_snapshot(state: &StoreState, version: &str, entries: &Arc<Vec<Value>
     if snapshots.iter().any(|(stored, _, _)| stored == version) {
         return;
     }
-    let bytes = graph_store::serialize_graph_file(entries).len() as u64;
     snapshots.push_back((version.to_string(), Arc::clone(entries), bytes));
     // Bound the ring by serialized bytes, not a count: depth adapts to
     // graph size. 64 MB holds four 16 MB snapshots today; tune from the
@@ -1982,16 +1993,23 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
         },
         state.lock_timeout,
     );
-    let bytes = outcome.as_ref().ok().map(outcome_bytes).unwrap_or(0);
+    let mut gate_bytes = 0;
     if let Ok(value) = &outcome {
         refresh_cache_after_publish(state, value);
-        remember_snapshot(state, &value.version, &Arc::new(value.entries.clone()));
+        let (graph, total) = outcome_parts(value);
+        remember_snapshot_with_bytes(
+            state,
+            &value.version,
+            &Arc::new(value.entries.clone()),
+            graph,
+        );
+        gate_bytes = total;
     }
     drop(gate);
     record_gate(
         state,
         waited,
-        bytes,
+        gate_bytes,
         params.get("attempt").and_then(Value::as_u64).unwrap_or(1),
     );
     let outcome = outcome?;
@@ -2160,23 +2178,32 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
         },
         state.lock_timeout,
     );
-    let bytes = outcome.as_ref().ok().map(outcome_bytes).unwrap_or(0);
+    let mut gate_bytes = 0;
     if let Ok(value) = &outcome {
         refresh_cache_after_publish(state, value);
-        remember_snapshot(state, &value.version, &Arc::new(value.entries.clone()));
+        let (graph, total) = outcome_parts(value);
+        remember_snapshot_with_bytes(
+            state,
+            &value.version,
+            &Arc::new(value.entries.clone()),
+            graph,
+        );
+        gate_bytes = total;
     }
     drop(gate);
     record_gate(
         state,
         waited,
-        bytes,
+        gate_bytes,
         params.get("attempt").and_then(Value::as_u64).unwrap_or(1),
     );
     let outcome = outcome?;
     Ok(outcome_json(&outcome))
 }
 
-fn outcome_bytes(outcome: &graph_store::MutateOutcome) -> u64 {
+/// (serialized graph bytes, total gate bytes) from one serialize: the ring
+/// budgets on the graph alone, the gate metric adds the backup.
+fn outcome_parts(outcome: &graph_store::MutateOutcome) -> (u64, u64) {
     let graph = graph_store::serialize_graph_file(&outcome.entries).len() as u64;
     let backup = outcome
         .backup
@@ -2184,7 +2211,7 @@ fn outcome_bytes(outcome: &graph_store::MutateOutcome) -> u64 {
         .and_then(|path| std::fs::metadata(path).ok())
         .map(|meta| meta.len())
         .unwrap_or(0);
-    graph.saturating_add(backup)
+    (graph, graph.saturating_add(backup))
 }
 
 /// The client-supplied node id -> plan rung map (see
