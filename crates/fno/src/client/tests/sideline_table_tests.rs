@@ -4,6 +4,9 @@
 
 use super::*;
 
+#[path = "sideline_name_fit_tests.rs"]
+mod sideline_name_fit_tests;
+
 // ---------------------------------------------------------------------------
 // the table rewrite: the sideline is a Table (status word, name, message, PR, age)
 // ---------------------------------------------------------------------------
