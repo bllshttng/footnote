@@ -442,7 +442,10 @@ impl View {
                 };
                 (
                     vec![
-                        rt_cell(status_word(lat).to_string(), cell_fg, cell_flags_v, false),
+                        // Right-aligned: a short word's blank parks against the
+                        // margin, so the word sits one spacing column from the
+                        // name instead of up to 7 columns away (x-d7e9).
+                        rt_cell(status_word(lat).to_string(), cell_fg, cell_flags_v, true),
                         rt_cell(fit_ellipsis(&name, name_w), cell_fg, cell_flags_v, false),
                         rt_cell(tail, cell_fg, quiet | focus_bit, false),
                         rt_cell(pr, cell_fg, quiet | focus_bit, true),
@@ -503,7 +506,7 @@ impl View {
                             format!("st{}", marker(AgentSortColumn::Status)),
                             Color::Default,
                             cell_flags::DIM,
-                            false,
+                            true,
                         ),
                         rt_cell(
                             format!("agent{}", marker(AgentSortColumn::Agent)),

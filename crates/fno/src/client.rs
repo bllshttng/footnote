@@ -7615,16 +7615,16 @@ impl View {
 }
 
 /// The sideline Table's five columns: status word, name, message, PR, age.
-/// The message carries the grow weight (Fill(3) against the name's Min(12)),
-/// so the surplus lands in the message - the Claude-Code-panel proportions
-/// the operator asked for - instead of the solver's default even split.
-/// Read by the Table and - through [`sideline_column_rects`] - by the two
-/// callers that need the solver's answer beside the paint (the name
-/// ellipsis and the header sort-hit spans), so there is one geometry
-/// authority and it is the solver.
+/// Width ranking (operator, 2026-09-20): name first, message second, status
+/// third - the name takes its Min(16) floor first, the message keeps the
+/// Fill(3) surplus, and the status cell right-aligns inside its fixed 11
+/// (the fleet-locked `Needs input` floor) so a short word's blank parks at
+/// the margin, not between status and name. Read by the Table and - through
+/// [`sideline_column_rects`] - by the callers that need the solver's answer
+/// beside the paint: one geometry authority, and it is the solver.
 const SIDELINE_COLUMNS: [Constraint; 5] = [
     Constraint::Length(11),
-    Constraint::Min(12),
+    Constraint::Min(16),
     Constraint::Fill(3),
     Constraint::Length(6),
     // 6, not the plan's 4: the density button overlays the last two
