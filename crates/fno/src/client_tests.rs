@@ -9032,16 +9032,16 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
     // x-2f99), its two agent rows, a Blank spacer, notes squad, the footer
     // spacer, the "+ new workspace" footer, a spacer, the "~ elsewhere"
     // header, the orphan row. (x-cd67 US1) The sideline owns row 0. The
-    // state glyph is the status WORD now: Blocked reads `Needs input`,
-    // exited reads `Stopped` (x-177c).
+    // state glyph is the status WORD now: Blocked reads `Input`,
+    // exited reads `Stop` (x-177c).
     assert!(lines[0].contains("\u{25be}*footnote"), "{:?}", lines[0]);
     assert!(
-        lines[1].contains("Needs input") && lines[1].contains("peer"),
+        lines[1].contains("Input") && lines[1].contains("peer"),
         "{:?}",
         lines[1]
     );
     assert!(
-        lines[2].contains("Stopped") && lines[2].contains("dead"),
+        lines[2].contains("Stop") && lines[2].contains("dead"),
         "{:?}",
         lines[2]
     );
@@ -9085,7 +9085,7 @@ fn client_agent_row_renders_dnd_as_presence_not_liveness() {
     let text = frame_text(&view.compose());
     let row = text.lines().find(|line| line.contains("dnd")).unwrap();
     assert!(
-        row.contains("[DND]") && row.contains("Working"),
+        row.contains("[DND]") && row.contains("Work"),
         "DND rides the identity without replacing liveness: {row:?}"
     );
 }
@@ -9757,8 +9757,8 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
     // below is unchanged.
     let (word, dim) = probe("z-exited");
     assert!(
-        word.starts_with("Stopped") && dim,
-        "exited: Stopped + DIM: {word:?}"
+        word.starts_with("Stop") && dim,
+        "exited: Stop + DIM: {word:?}"
     );
     let (word, dim) = probe("z-external");
     assert!(word.starts_with('?') && dim, "external: ? + DIM: {word:?}");
@@ -9767,16 +9767,16 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
         word.starts_with('?') && dim,
         "fno-live: ? + DIM (no reading; bright-idle is gone): {word:?}"
     );
-    // AC1-UI: external + Blocked renders `Needs input` in the amber accent,
+    // AC1-UI: external + Blocked renders `Input` in the amber accent,
     // BOLD, and NOT dimmed even though it is external - the accent beats the
     // external DIM.
     let eb_row = lines.iter().position(|l| l.contains("z-extblk")).unwrap();
-    let eb_status: String = frame.cells[eb_row * cols..eb_row * cols + 11]
+    let eb_status: String = frame.cells[eb_row * cols..eb_row * cols + 5]
         .iter()
         .map(|c| c.c)
         .collect();
     assert!(
-        eb_status.starts_with("Needs input"),
+        eb_status.starts_with("Input"),
         "external-blocked: the attention word: {eb_status:?}"
     );
     assert_eq!(

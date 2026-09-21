@@ -77,7 +77,7 @@ fn sideline_status_cell_reads_the_state_word_in_the_lane_color() {
         .iter()
         .map(|c| c.c)
         .collect();
-    assert!(status.trim_start().starts_with("Working"), "{status:?}");
+    assert!(status.trim_start().starts_with("Work"), "{status:?}");
     let want = sideline_color::resolve_lane_color(Some("codex"), None, None, None)
         .unwrap_or(Color::Default);
     let fg = frame.cells[row * cols + rects[0].x as usize].fg;
@@ -235,7 +235,7 @@ fn status_word_sits_one_column_from_the_name_cell_parent_and_child() {
             .collect();
         assert_eq!(
             status.trim(),
-            "Working",
+            "Work",
             "{label} status word reads the state: {status:?}"
         );
         // The acceptance IS the gap: from the word's last glyph to the name
