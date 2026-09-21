@@ -33,6 +33,10 @@ fn row(arm: &str) -> ArmStatus {
         repair: None,
         heal: None,
         upstream: None,
+        arm_key: None,
+        arm_value: None,
+        reader: None,
+        starved: false,
     }
 }
 

@@ -3081,6 +3081,10 @@ mod tests {
             repair: None,
             heal: None,
             upstream: None,
+            arm_key: None,
+            arm_value: None,
+            reader: None,
+            starved: false,
         };
         r.cause = Some("fleet_stop".to_string());
         r.line = format!(
@@ -3152,6 +3156,10 @@ mod tests {
             repair: None,
             heal: None,
             upstream: None,
+            arm_key: None,
+            arm_value: None,
+            reader: None,
+            starved: false,
         };
         kw.cause = Some("tick_overdue".to_string());
         kw.line = format!(

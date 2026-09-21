@@ -1157,6 +1157,41 @@ pub fn notify_arm_failing_after_s(cwd: &Path) -> u64 {
     .unwrap_or(1800)
 }
 
+/// `[notify] arm_starved_after_s` (default 604800, 7 days): how long an armed loop may tick without acting on anything before the arms table calls it starved. `0` or a value that does not parse falls back to the default.
+pub fn notify_arm_starved_after_s(cwd: &Path) -> u64 {
+    resolve(cwd, |t| {
+        t.get("notify")?
+            .as_table()?
+            .get("arm_starved_after_s")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as u64)
+    })
+    .filter(|v| *v > 0)
+    .unwrap_or(604_800)
+}
+
+/// `[auto_heal] enabled` (default false): whether the CI healer drive loop is armed.
+pub fn auto_heal_enabled(cwd: &Path) -> bool {
+    resolve(cwd, |t| {
+        t.get("auto_heal")?
+            .as_table()?
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+    })
+    .unwrap_or(false)
+}
+
+/// `[active_backlog] enabled` (default false): whether the drain loop runs.
+pub fn active_backlog_enabled(cwd: &Path) -> bool {
+    resolve(cwd, |t| {
+        t.get("active_backlog")?
+            .as_table()?
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+    })
+    .unwrap_or(false)
+}
+
 /// `recovery.self_heal.enabled` (default ON): the arm_watch tick runs the
 /// safe repairs (dead flight holds, the launchd refresh, the install from
 /// main) before it pages. Off, the rows still name the repair verb.
