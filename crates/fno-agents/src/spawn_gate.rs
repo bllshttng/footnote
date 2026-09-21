@@ -1839,8 +1839,10 @@ fn decide_gate(
                     // an admit: fail closed (LD3).
                     guard.release();
                     eprintln!(
-                        "spawn-gate: the CPU instrument is unreadable (the payload carries the \
-                         unknown verdict {other:?}); refusing to spawn (--force to bypass)"
+                        "{}",
+                        instrument_refusal_sentence(&format!(
+                            "the payload carries the unknown verdict {other:?}"
+                        ))
                     );
                     return Err(Refusal::with_receipt(
                         EXIT_LOAD_REFUSED,
@@ -2210,6 +2212,16 @@ pub(crate) struct CpuAdmission {
     pub(crate) token: &'static str,
 }
 
+/// The one spelling of the instrument refusal: the condition, the probe's
+/// own words for what it measured, and a verb the reader can run.
+fn instrument_refusal_sentence(why: &str) -> String {
+    format!(
+        "spawn-gate: the CPU instrument is unreadable ({why}); \
+         read the instrument yourself with `fno doctor footprint --json --cause-only`; \
+         refusing to spawn (--force to bypass)"
+    )
+}
+
 /// Read the CPU axis from the prefetched footprint payload (LD3).
 ///
 /// The Python decider `cpu_admission` (doctor_footprint.py) is the ONE
@@ -2225,10 +2237,7 @@ pub(crate) fn check_cpu_axis(prefetched: Option<&str>, probe_err: Option<&str>) 
             payload: AdmissionPayload {
                 verdict: "refuse".to_string(),
                 axis: "cpu_instrument".to_string(),
-                reason: format!(
-                    "spawn-gate: the CPU instrument is unreadable ({why}); \
-                     refusing to spawn (--force to bypass)"
-                ),
+                reason: instrument_refusal_sentence(why),
                 share_low: 0.0,
                 share_high: 0.0,
                 bound: "exact".to_string(),
@@ -3282,9 +3291,10 @@ MemAvailable:    8000000 kB\n";
         }
     }
 
-    /// Junk, an admission-less payload, and no payload at all all refuse as
-    /// the unreadable instrument (LD3) - never as an idle machine; the
-    /// probe's own failure words travel into the sentence.
+    /// Junk, an admission-less payload, an answered failure, and no payload
+    /// at all all refuse as the unreadable instrument (LD3) - never as an
+    /// idle machine; the probe's own failure words travel into the sentence
+    /// and the sentence names the verb that re-reads the instrument.
     #[test]
     fn junk_and_admission_less_payloads_refuse_as_unreadable() {
         let cases = [
@@ -3293,6 +3303,12 @@ MemAvailable:    8000000 kB\n";
             (Some("not json"), None),
             (
                 Some(r#"{"fleet_cpu_cores":0.79,"cpu_capacity_cores":12}"#),
+                None,
+            ),
+            (
+                Some(
+                    r#"{"error":"footprint unavailable: worker root liveness unavailable: registry row w1 carries no pid start token","exit_code":4}"#,
+                ),
                 None,
             ),
         ];
@@ -3304,6 +3320,18 @@ MemAvailable:    8000000 kB\n";
             assert!(
                 cpu.payload.reason.contains("--force to bypass"),
                 "{payload:?}"
+            );
+            if let Some(probe_words) = err {
+                assert!(
+                    cpu.payload.reason.contains(probe_words),
+                    "{}",
+                    cpu.payload.reason
+                );
+            }
+            assert!(
+                cpu.payload.reason.contains("fno doctor footprint"),
+                "{}",
+                cpu.payload.reason
             );
         }
     }
@@ -3331,6 +3359,11 @@ MemAvailable:    8000000 kB\n";
         }
         assert_eq!(fields["detail"], cpu.payload.reason);
         assert_eq!(fields["bound"], "exact");
+        assert!(
+            cpu.payload.reason.contains("fno doctor footprint"),
+            "{}",
+            cpu.payload.reason
+        );
     }
 
     /// The periodic held reprint prints the payload's holder clause
