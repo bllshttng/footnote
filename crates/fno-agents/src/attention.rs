@@ -609,7 +609,7 @@ mod tests {
             json!({"ask": "publish fno-event-store"}),
         );
         // Escalation note with status: open.
-        let note = "# Decide the outage\n\nclass: irreversible\nstatus: open\nnode: x-aaaa\nraised_by: king-fno-g6\nraised_at: 2026-09-18T09:00:00Z\ndeadline: 2026-09-19T09:00:00Z\nrecommend: 1\non_silence: wait\n\n## What is being decided\nThe rollback.\n\n## Options\n- Roll back now\n    What happens next: the fleet restarts\n- Wait an hour\n    What happens next: risk grows\n\n## Recommendation\nOption 1, the narrowest stop.\n\n## If no answer by the deadline\nWe wait.\n";
+        let note = "---\nclass: irreversible\nstatus: open\nnode: x-aaaa\nraised_by: king-fno-g6\nraised_at: 2026-09-18T09:00:00Z\ndeadline: 2026-09-19T09:00:00Z\nrecommend: 1\non_silence: wait\n---\n# Decide the outage\n\n## What is being decided\nThe rollback.\n\n## Options\n- Roll back now\n    What happens next: the fleet restarts\n- Wait an hour\n    What happens next: risk grows\n\n## Recommendation\nOption 1, the narrowest stop.\n\n## If no answer by the deadline\nWe wait.\n";
         let items = project(
             &pin,
             &[("outage".to_string(), note.to_string())],
