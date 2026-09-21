@@ -1497,6 +1497,21 @@ impl Probes for RealProbes {
         Self::fno_strings(cwd, args)
     }
 
+    fn live_lanes(&self, cwd: &Path) -> usize {
+        // The parallel-lane count the Python hold derived (`claims.lanes.
+        // active_lane_count`): live `lane-slot:` claims at the canonical
+        // repo's own claims root. The global root is other repos' lanes and
+        // must not count. A probe miss answers 0 - the Python miss contract
+        // that disarms the overlap hold rather than blocking on our own read.
+        let Some(repo) = canonical_repo_root(cwd) else {
+            return 0;
+        };
+        let dir = repo.join(crate::claims::CLAIMS_DIRNAME);
+        crate::claims::list_in(std::slice::from_ref(&dir), Some("lane-slot:"), false)
+            .map(|records| records.len())
+            .unwrap_or(0)
+    }
+
     fn covered_head(&self, cwd: &Path) -> Option<String> {
         covered_head_from_event(cwd)
     }
@@ -3761,5 +3776,54 @@ mod tests {
         let merge_payload: Value =
             serde_json::from_str(r#"{"cwd": "/tmp", "effect": "merge", "pr": 7}"#).unwrap();
         assert!(!parse_request(&merge_payload).unwrap().require_checks);
+    }
+
+    #[test]
+    fn live_lanes_counts_live_lane_claims_at_the_canonical_root() {
+        // The overlap hold arms on this count; the trait default 0 would
+        // leave it dead in production. The claim is planted through the same
+        // acquire API the lane runtime uses, in a fresh git repo, so the
+        // canonical-root resolution and the claims scan both run for real.
+        let base = std::env::temp_dir().join(format!("x53c5-lanes-{}", std::process::id()));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["init", "-q"])
+            .output()
+            .unwrap();
+        assert!(
+            init.status.success(),
+            "git init failed for the lane-count fixture"
+        );
+        let opts = crate::claims::AcquireOpts {
+            pid: Some(std::process::id()),
+            ttl_ms: Some(60_000),
+            root: Some(repo.clone()),
+            ..Default::default()
+        };
+        let claimed = matches!(
+            crate::claims::acquire("lane-slot:0", "parallel-lane:live-lanes-test", opts),
+            crate::claims::AcquireOutcome::Acquired(_)
+        );
+        assert!(claimed, "the planted lane claim must acquire");
+        assert_eq!(
+            RealProbes.live_lanes(&repo),
+            1,
+            "the live lane claim must count"
+        );
+        let _ = crate::claims::release(
+            "lane-slot:0",
+            "parallel-lane:live-lanes-test",
+            Some(repo.as_path()),
+            None,
+        );
+        assert_eq!(
+            RealProbes.live_lanes(&repo),
+            0,
+            "released lane must not count"
+        );
+        std::fs::remove_dir_all(&base).ok();
     }
 }
