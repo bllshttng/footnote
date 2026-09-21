@@ -47,7 +47,7 @@ READ_ALLOWLIST = (
     "crates/fno-agents/src/gc_sweep.rs",  # the retirement sweep's read-only reverse join (sessions_index + work_state)
     "crates/fno-agents/src/feed.rs",  # the activity feed's read-only lifecycle derivation
     "crates/fno-agents/src/day.rs",  # the day readback's read-only completion join
-    "crates/fno-agents/src/scratch.rs",  # the sweep's read-only node-status lookup feeding the file/fold decision
+    "crates/fno-agents/src/scratch.rs",  # the sweep's status read routes through graph_store::read_rows; the file holds the graph.json path builder at SweepPaths assembly
     "crates/fno-agents/src/route_slot.rs",  # the routing audit's read-only decision projection
     # Not readers: the backend machinery and its names. mod.rs labels the
     # json leg inside the import/export divergence check; note_history.rs
@@ -383,6 +383,16 @@ def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
                 problems.append(
                     f"json-leg reader outside the switch: {rel}:{i + 1}: {line.strip()[:80]}"
                 )
+        if path.name not in ("graph_store.rs", "graph_keeper.rs") and str(
+            path.relative_to(REPO_ROOT)
+        ) not in (
+            "crates/fno-agents/src/backlog/mod.rs",
+            "crates/fno-agents/src/backlog/decisions.rs",
+        ):
+            for i, line in rust_raw_graph_read_sites(text):
+                problems.append(
+                    f"raw graph parse outside the switch: {rel}:{i + 1}: {line.strip()[:80]}"
+                )
     return total, problems
 
 
@@ -440,6 +450,44 @@ def rust_json_leg_reader_sites(text):
             in_test_module = True
         elif stripped:
             pending_cfg_test = False
+    return sites
+
+
+def rust_raw_graph_read_sites(text):
+    """Line sites of a raw `std::fs::read` of the graph in one file.
+
+    Same production cutoff as rust_graph_json_sites. Two edges, because the
+    tree spells the graph path both ways: the variable is named `graph`
+    (scratch.rs reads its SweepPaths field), or it is named `path` from a
+    `graph_json_path(...)` builder line just above (territory.rs,
+    spawn_gate.rs). A name-only regex misses the second shape; a
+    builder-window regex misses the first.
+    """
+    sites = []
+    pending_cfg_test = False
+    in_test_module = False
+    read_call = re.compile(r"std::fs::read(?:_to_string)?\s*\(")
+    graph_named = re.compile(
+        r"std::fs::read(?:_to_string)?\s*\(\s*&?\s*(?:\w+\.)*graph(?:_path)?\s*[,)]"
+    )
+    builder = re.compile(r"graph_json_path\s*\(")
+    recent: list[str] = []
+    for i, line in enumerate(text.splitlines()):
+        stripped = line.strip()
+        if in_test_module:
+            continue
+        if read_call.search(line) and not stripped.startswith("//"):
+            if graph_named.search(line) or builder.search(line) or any(
+                builder.search(prev) for prev in recent[-3:]
+            ):
+                sites.append((i, line))
+        if re.fullmatch(r"#\[cfg\(test\)\]", stripped):
+            pending_cfg_test = True
+        elif pending_cfg_test and re.match(r"mod\s+\w+", stripped):
+            in_test_module = True
+        elif stripped:
+            pending_cfg_test = False
+        recent.append(line)
     return sites
 
 
@@ -512,6 +560,40 @@ def self_test() -> int:
         failures.append("json-leg reader control: production read_defaulted not detected")
     if rust_json_leg_reader_sites(reader_fixt):
         failures.append("json-leg reader control: cfg(test) read_defaulted was not skipped")
+
+    # Raw graph-read detector, both edges: a read of a graph-named variable
+    # and a read of a variable a graph_json_path() builder line above must
+    # both be named, a cfg(test) fixture must be skipped, and a read of an
+    # unrelated path must not fire.
+    raw_prod = (
+        "fn a() {\n"
+        "    let t = std::fs::read_to_string(graph).unwrap();\n"
+        "}\n"
+    )
+    raw_built = (
+        "fn b(c: &Path) {\n"
+        "    let path = graph_json_path(c);\n"
+        "    let raw = std::fs::read_to_string(&path).ok()?;\n"
+        "}\n"
+    )
+    raw_fixt = (
+        "fn h() {}\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    fn a() {\n"
+        "        let t = std::fs::read_to_string(graph).unwrap();\n"
+        "    }\n"
+        "}\n"
+    )
+    raw_other = "fn c() {\n    let t = std::fs::read_to_string(&other).unwrap();\n}\n"
+    if len(rust_raw_graph_read_sites(raw_prod)) != 1:
+        failures.append("raw graph-read control: graph-named read not detected")
+    if len(rust_raw_graph_read_sites(raw_built)) != 1:
+        failures.append("raw graph-read control: graph_json_path-built read not detected")
+    if rust_raw_graph_read_sites(raw_fixt):
+        failures.append("raw graph-read control: cfg(test) raw read was not skipped")
+    if rust_raw_graph_read_sites(raw_other):
+        failures.append("raw graph-read control: unrelated read was detected")
 
     # Raw graph-parse detector, both edges: the config_cli spelling
     # (json.loads over graph_json() bytes) must be detected, gated in by the
