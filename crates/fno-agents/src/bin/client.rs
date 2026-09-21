@@ -925,9 +925,8 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "attach" {
         return fno_agents::attach::run_attach(&args[1..], &AgentsHome::from_env());
     }
-    // `recover`: hidden-but-invocable manual restoration of a recorded
-    // session under its account/route, with explicit two-id selection. Reads
-    // the registry and resolver directly, no daemon RPC.
+    // `recover`: manual restoration of a recorded session under its
+    // account/route; reads the registry and resolver directly, no daemon RPC.
     if verb == "recover" {
         return fno_agents::client_verbs::run_recover(&args[1..], &AgentsHome::from_env());
     }
@@ -935,8 +934,7 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::client_verbs::run_logs(&args[1..], &AgentsHome::from_env()).await;
     }
     // Inside-leg state push (E3.2): a per-turn hook reports {working|blocked|done}.
-    // Dispatched here (no build_request) because it sends to an ALREADY-RUNNING
-    // daemon and must never lazy-start one.
+    // `report`: sends to an ALREADY-RUNNING daemon; must never lazy-start one.
     if verb == "report" {
         return fno_agents::client_verbs::run_report(&args[1..], &AgentsHome::from_env()).await;
     }
@@ -945,16 +943,14 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::wait::run_wait(&args[1..], &AgentsHome::from_env()).await;
     }
 
-    // `pr-heal`: classify a red check, apply the mechanical fix,
-    // binary-direct behind `fno do pr heal` (not routable, daemon-free).
+    // `pr-heal`: classify a red check, apply the mechanical fix; daemon-free.
     if matches!(verb, "pr-heal") {
         return fno_agents::heal::run_heal(&args[1..]);
     }
     if matches!(verb, "pr-push") {
         return fno_agents::pr_push::run_push(&args[1..]);
     }
-    // `pr-body-check`: run the repo's own body guards against a composed
-    // body file before `gh pr create`; binary-direct, daemon-free.
+    // `pr-body-check`: the repo's body guards, run before `gh pr create`.
     if matches!(verb, "pr-body-check") {
         return fno_agents::pr_body_check::run(&args[1..]);
     }
@@ -995,6 +991,14 @@ async fn run(args: Vec<String>) -> i32 {
     // (72% ticks; lifecycle derives from the graph, never copied).
     if verb == "feed" {
         return fno_agents::feed::run_feed(&args[1..], &AgentsHome::from_env()).await;
+    }
+
+    // `day`: daemon-free like `feed`; `--commit` appends the boundary row.
+    // `matches!` treatment as `claim`: the verb is unregistered (the action
+    // list is shrink-only, d-fe66560a); the inbox relay reaches it through
+    // resolve_binary, and no advertised `fno agents day` spelling exists.
+    if matches!(verb, "day") {
+        return fno_agents::day::run_day(&args[1..], &AgentsHome::from_env());
     }
 
     // `status` reports on a *running* daemon: it must NOT lazy-start one just to

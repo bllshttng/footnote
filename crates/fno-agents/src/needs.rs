@@ -200,7 +200,10 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
             let name = node
                 .clone()
                 .or_else(|| str_field(&v, "cwd").map(|c| basename(c).to_string()));
-            let session_id = str_field(&v, "session_id").unwrap_or(qid).to_string();
+            // The item's identity is the question id, matching the fold key
+            // and outstanding/core.py. An asking session_id in the row must
+            // not displace it: `answer <id>` has to name something closable.
+            let session_id = qid.to_string();
             let epoch = to_epoch_lenient(ts).unwrap_or(0);
             seq += 1;
             if questions
@@ -2074,6 +2077,14 @@ mod tests {
         assert_eq!(items[0].kind, "operator_question");
         assert_eq!(items[0].node.as_deref(), Some("x-bbbb"));
         assert!(items[0].evidence.contains("auto-merge or hold?"));
+    }
+
+    #[test]
+    fn question_identity_is_the_question_id_even_when_the_row_names_a_session() {
+        let events = r#"{"ts":"2026-07-03T02:00:00Z","type":"operator_question","source":"target","data":{"question_id":"q-abc","session_id":"sess-123","question":"hold?"}}"#;
+        let items = fold(events, "", ALL, DEFAULT_FIRES_FLOOR);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].session_id, "q-abc");
     }
 
     #[test]

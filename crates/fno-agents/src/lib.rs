@@ -120,6 +120,7 @@ pub mod crown_split;
 pub mod crown_widen;
 pub mod cursor_agent;
 pub mod daemon;
+pub mod day;
 pub mod decision_index;
 pub mod delivery_completion;
 pub mod digest;
