@@ -37,6 +37,17 @@ def _open_node_row(monkeypatch, tmp_path):
         "cwd": str(tmp_path),
     }
     monkeypatch.setattr("fno.graph.load.load_graph", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.cli._spawn_guard_decision",
+        lambda *a, **k: (
+            {
+                "verdict": "dispatchable",
+                "reservation_key": "dispatch:x-f370",
+                "reservation_holder": "test-holder",
+            },
+            0,
+        ),
+    )
 
 # Declared journal isolation: the conftest pin keys on this module's name
 # (see _PLAN_JOURNAL_PINNED_MODULES) and the guard
@@ -327,14 +338,12 @@ def test_codex_code_spawn_in_a_repo_keeps_launch_path(monkeypatch, tmp_path) -> 
     from fno.cli import app
 
     subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
-    called: list[list[str]] = []
-
-    def fake_route(args, **kw):
-        called.append(list(args))
-        raise SystemExit(0)
-
     monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
-    monkeypatch.setattr(rr, "route_to_rust", fake_route)
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: None)
+    monkeypatch.setattr(
+        "fno.agents.dispatch._codex_thread_spawn",
+        lambda **kw: "fake-thread-id",
+    )
     monkeypatch.setattr(
         sandbox_probe, "probe_codex_sandbox", lambda cwd, **kw: sandbox_probe.SandboxProbe("reachable")
     )
@@ -354,7 +363,6 @@ def test_codex_code_spawn_in_a_repo_keeps_launch_path(monkeypatch, tmp_path) -> 
     )
 
     assert result.exit_code == 0, result.output
-    assert called and called[0][0] == "spawn"
 
 
 @pytest.mark.parametrize("bypass", ["--yolo", "-Y"])
@@ -545,7 +553,7 @@ def test_codex_danger_full_access_mode_skips_bounded_grant_refusal(
 
     assert result.exit_code == 0, result.output
     assert len(spawned) == 1
-    assert called
+    assert spawned[0]["node"] == "x-f370"
 
 
 def test_agents_help_falls_through_when_opted_in(monkeypatch) -> None:

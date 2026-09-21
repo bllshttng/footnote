@@ -152,9 +152,9 @@ pub fn decide(payload: &Value) -> Value {
 
     let seed = seed_text(payload);
 
-    // 1b. The nodeless arm: the seed names the node, so derive it.
-    //     Answered as derive/pass; the Python seam applies the answer by
-    //     inserting --node, so both lanes see an explicit node afterwards.
+    // 1b. The nodeless arm: the seed names the node, so derive it and
+    //     answer compose with the flag already inserted; the seam applies
+    //     the argv, so both lanes see an explicit node afterwards.
     if node.is_empty() {
         return derive_from_seed(payload, seed);
     }
@@ -465,22 +465,26 @@ mod tests {
     #[test]
     fn nodeless_family_seed_derives_the_argument() {
         let out = decide_map(base_derive("/fno:target x-aaaa", 1));
-        assert_eq!(out["action"], "derive");
-        assert_eq!(out["node"], "x-aaaa");
+        assert_eq!(out["action"], "compose");
+        let argv = out["argv"].as_array().unwrap();
+        assert_eq!(argv[argv.len() - 2], "--node");
+        assert_eq!(argv[argv.len() - 1], "x-aaaa");
     }
 
     #[test]
     fn nodeless_dollar_seed_derives_too() {
         let out = decide_map(base_derive("$fno:target x-bbbb", 1));
-        assert_eq!(out["action"], "derive");
-        assert_eq!(out["node"], "x-bbbb");
+        assert_eq!(out["action"], "compose");
+        let argv = out["argv"].as_array().unwrap();
+        assert_eq!(argv[argv.len() - 1], "x-bbbb");
     }
 
     #[test]
     fn nodeless_bare_slash_verb_derives() {
-        let out = decide_map(base_derive("/target x-1", 1));
-        assert_eq!(out["action"], "derive");
-        assert_eq!(out["node"], "x-1");
+        let out = decide_map(base_derive("/target x-1111", 1));
+        assert_eq!(out["action"], "compose");
+        let argv = out["argv"].as_array().unwrap();
+        assert_eq!(argv[argv.len() - 1], "x-1111");
     }
 
     #[test]
@@ -489,8 +493,9 @@ mod tests {
             "/fno:target x-cccc. Plan: /plans/x.md. Rebase first.",
             1,
         ));
-        assert_eq!(out["action"], "derive");
-        assert_eq!(out["node"], "x-cccc");
+        assert_eq!(out["action"], "compose");
+        let argv = out["argv"].as_array().unwrap();
+        assert_eq!(argv[argv.len() - 1], "x-cccc");
     }
 
     #[test]
@@ -560,11 +565,12 @@ mod tests {
 
     #[test]
     fn message_eq_seed_derives_the_argument() {
-        let mut p = base_derive("--message=/fno:target x-3", 1);
+        let mut p = base_derive("--message=/fno:target x-3333", 1);
         p["seed_form"] = json!("message_eq");
         let out = decide_map(p);
-        assert_eq!(out["action"], "derive");
-        assert_eq!(out["node"], "x-3");
+        assert_eq!(out["action"], "compose");
+        let argv = out["argv"].as_array().unwrap();
+        assert_eq!(argv[argv.len() - 1], "x-3333");
     }
 
     #[test]

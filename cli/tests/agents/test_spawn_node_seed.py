@@ -500,37 +500,20 @@ def test_seam_derive_names_an_unresolvable_node_as_a_receipt(monkeypatch):
     assert "--node" not in args
 
 
-def test_seam_receipt_degrades_when_the_client_predates_the_flag(
-    monkeypatch, capsys, tmp_path
-):
-    """The skew half: a client binary that predates the receipt flag would
-    die on it as unknown, so the seam skips the insert, says why on stderr,
-    and spawns exactly as before. The stale client is a stand-in that answers
-    the probe with the old binary's refuse."""
-    import stat
-
+def test_seam_degrades_when_the_verb_predates_the_derivation(monkeypatch, capsys):
+    """The skew half: a verb binary that predates the derivation answers the
+    nodeless payload with the row gate's refuse. The seam says so on stderr
+    and spawns exactly as before the derivation existed."""
     monkeypatch.delenv("FNO_AGENTS_RUNTIME", raising=False)
     _stub_row(monkeypatch, None)
-    _stub_verb_seq(monkeypatch, [{"action": "derive", "node": "x-gone"}])
-
-    import fno.rust_binary as rb
-
-    fake = tmp_path / "fno-agents-old"
-    fake.write_text(
-        "#!/bin/sh\ncat >/dev/null\n"
-        "echo '{\"action\": \"refuse\", \"message\": \"names no readable backlog row\"}'\n",
-        encoding="utf-8",
-    )
-    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setattr(rb, "resolve_binary", lambda: fake)
-    monkeypatch.setattr(rb, "find_dev_binary", lambda: None)
+    _stub_verb_seq(monkeypatch, [{"action": "refuse", "message": "names no readable backlog row"}])
     from fno.agents.rust_runtime import _node_seed_at_seam
 
     args, node_verb = _node_seed_at_seam(_seed_args("/fno:target x-gone"))
     assert node_verb is None
     assert "--node-reason" not in args
     assert "--node" not in args
-    assert "x-gone names no readable backlog row" in capsys.readouterr().err
+    assert "predates seed-node derivation" in capsys.readouterr().err
 
 
 @requires_rust
