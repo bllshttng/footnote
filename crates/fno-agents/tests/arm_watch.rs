@@ -478,6 +478,7 @@ fn heal_releases_dead_holder_in_one_tick() {
         &store,
         TS_UNIX,
         || fno_agents::stuck_work::dead_holders(&dirs),
+        || Ok((Vec::new(), String::new())),
         &mut |_| panic!("no launchd repair"),
         |_, body| panic!("nothing left to page: {body}"),
     );
@@ -509,6 +510,7 @@ fn heal_off_leaves_the_hold_and_pages() {
         &store,
         TS_UNIX,
         || fno_agents::stuck_work::dead_holders(&dirs),
+        || Ok((Vec::new(), String::new())),
         &mut |_| panic!("heal is off"),
         |_, body| {
             bodies.push(body.to_string());
@@ -556,6 +558,7 @@ fn a_paused_tier_pages_nothing_and_heals_nothing() {
         &store,
         TS_UNIX,
         || Ok(Vec::new()),
+        || Ok((Vec::new(), String::new())),
         &mut |action| {
             runs += 1;
             assert_ne!(action, "refresh");
@@ -569,4 +572,71 @@ fn a_paused_tier_pages_nothing_and_heals_nothing() {
     assert!(out.detail.starts_with("heal=paused"), "{}", out.detail);
     assert_eq!(sends, 0);
     assert_eq!(runs, 0);
+}
+
+/// The wire: a crown finding alone, with no overdue arms, still sends. The
+/// tick's clear gate is the empty SET, not the empty arm table - this is the
+/// whole point of the chain.
+#[test]
+fn a_crown_finding_alone_still_sends() {
+    let store = temp_store("crown-wire");
+    let finding = fno_agents::stuck_work::Finding {
+        kind: "empty_crown",
+        key: "crown_empty:x-1@1788520000".to_string(),
+        line: "no king on scope x-1: empty 47m against a 30m grace; respawn: \
+               fno agents spawn --crown x-1 --succeed"
+            .to_string(),
+        root: None,
+        holder: None,
+        claim_key: None,
+    };
+    let mut sends: Vec<(String, String)> = Vec::new();
+    let mut rows: Vec<ArmStatus> = Vec::new();
+    let out = tick_with_heal(
+        &mut rows,
+        false,
+        false,
+        1800,
+        &store,
+        TS_UNIX,
+        || Ok(Vec::new()),
+        || Ok((vec![finding], String::new())),
+        &mut |_| panic!("no repair"),
+        |title, body| {
+            sends.push((title.to_string(), body.to_string()));
+            true
+        },
+    );
+    assert_eq!(out.acted, 1);
+    assert_eq!(sends.len(), 1);
+    assert!(sends[0].1.contains("no king on scope"), "{}", sends[0].1);
+    std::fs::remove_file(&store).ok();
+}
+
+/// A crown read that failed names itself in the tick row and never reads as
+/// a clear board.
+#[test]
+fn a_crown_read_failure_notes_crown_unread() {
+    let store = temp_store("crown-err");
+    let mut rows: Vec<ArmStatus> = Vec::new();
+    let out = tick_with_heal(
+        &mut rows,
+        false,
+        false,
+        1800,
+        &store,
+        TS_UNIX,
+        || Ok(Vec::new()),
+        || Err("the court read timed out after 30s".to_string()),
+        &mut |_| panic!("no repair"),
+        |_, body| panic!("no notice claims anything: {body}"),
+    );
+    assert_eq!(out.acted, 0);
+    assert!(
+        out.detail
+            .contains("crown unread: the court read timed out after 30s"),
+        "{}",
+        out.detail
+    );
+    std::fs::remove_file(&store).ok();
 }
