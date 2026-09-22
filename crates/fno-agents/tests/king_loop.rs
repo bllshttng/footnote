@@ -24,6 +24,10 @@ fn make_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     path
 }
 
+fn event_text(path: &Path) -> String {
+    fno_agents::event_store::journal_text(path, &[])
+}
+
 // ── the king driver arm ───────────────────────────────────────────────────────
 //
 // A king has no PR, so none of the target conjuncts above apply. These drive
@@ -442,7 +446,7 @@ fn king_nowork_is_the_clean_terminal_for_an_empty_board() {
     assert_eq!(d["decision"], "allow");
     assert_eq!(d["termination_reason"], "NoWork");
 
-    let journal = fs::read_to_string(&events).unwrap();
+    let journal = event_text(&events);
     let row: serde_json::Value = journal
         .lines()
         .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
@@ -676,7 +680,7 @@ fn a_crown_with_no_checkin_gets_one_hook_row_per_missed_beat() {
     assert_eq!(code2, 0, "fire 2: {d2}");
     assert_eq!(d1["decision"], "block", "fire 1: {d1}");
     assert_eq!(d2["decision"], "block", "fire 2: {d2}");
-    let rows = fs::read_to_string(&events).unwrap();
+    let rows = event_text(&events);
     let checkins: Vec<&str> = rows
         .lines()
         .filter(|l| l.contains("\"reign_checkin\""))
@@ -706,10 +710,7 @@ fn a_cancelled_crown_writes_no_hook_row() {
     let (code, d) = king_fire(&state, cwd, &events, &fno);
     assert_eq!(code, 0);
     assert_eq!(d["termination_reason"], "Interrupted");
-    let wrote_checkin = events.exists()
-        && fs::read_to_string(&events)
-            .map(|rows| rows.contains("\"reign_checkin\""))
-            .unwrap_or(false);
+    let wrote_checkin = event_text(&events).contains("\"reign_checkin\"");
     assert!(
         !wrote_checkin,
         "a cancelled crown writes no reign_checkin row"
@@ -910,7 +911,7 @@ fn a_fire_records_the_actionable_ids_the_next_fire_compares_against() {
 
     king_fire(&state, cwd, &events, &fno);
 
-    let journal = fs::read_to_string(&events).unwrap();
+    let journal = event_text(&events);
     let row: serde_json::Value = journal
         .lines()
         .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
@@ -1562,7 +1563,7 @@ fn an_unreadable_question_source_is_bounded_not_eternal() {
 
     assert_eq!(last.1["decision"], "allow", "{:?}", last.1);
     assert_eq!(last.1["termination_reason"], "NoProgress");
-    let journal = fs::read_to_string(&events).unwrap();
+    let journal = event_text(&events);
     let rows = journal
         .lines()
         .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())

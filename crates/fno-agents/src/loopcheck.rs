@@ -7023,9 +7023,10 @@ struct LoopEventEnvelope<'a> {
 // pub(crate): the `finalize` verb (step 6, ) reuses this so its
 // `session_finalized` events carry the identical RFC3339 timestamp shape.
 pub(crate) fn now_rfc3339_utc() -> String {
-    // Seconds precision, Z suffix, as required by the envelope spec.
+    // Millisecond precision prevents distinct same-second events from sharing
+    // the content-derived id that makes a true byte-identical retry idempotent.
     let now = chrono::Utc::now();
-    now.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 /// Append a target-stream event through the shared Branch-A mkdir mutex.
