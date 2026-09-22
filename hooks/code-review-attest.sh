@@ -311,6 +311,10 @@ if [[ -n "$session" ]]; then
     echo "code-review-attest: review target claim could not be read; refusing attestation; retry from the PR's worktree" >&2
     exit 2
   fi
+  if ! jq -e 'type == "array"' <<<"$claims_json" >/dev/null 2>&1; then
+    echo "code-review-attest: review target claim was malformed; refusing attestation; retry from the PR's worktree" >&2
+    exit 2
+  fi
   held_claim="$(printf '%s' "$claims_json" | jq -c --arg holder "review-session:$session" '
     [ .[] | select(.holder == $holder and ((.expired // false) | not)) ]
     | sort_by(.acquired_at // 0) | .[-1] // empty
