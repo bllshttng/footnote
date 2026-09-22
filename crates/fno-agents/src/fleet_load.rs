@@ -608,12 +608,20 @@ fn merged_count(home: &AgentsHome, floor_ms: i64, now_ms: i64) -> Option<u64> {
                 let ts = classified
                     .get("ship_ts")
                     .and_then(Value::as_str)
-                    .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
-                    .map(|value| value.timestamp_millis())?;
+                    .and_then(parse_timestamp_ms)?;
                 (ts >= floor_ms && ts <= now_ms).then_some(1)
             })
             .sum(),
     )
+}
+
+fn parse_timestamp_ms(raw: &str) -> Option<i64> {
+    if let Ok(value) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Some(value.timestamp_millis());
+    }
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S%.f")
+        .ok()
+        .map(|value| value.and_utc().timestamp_millis())
 }
 
 fn summarize_samples(
