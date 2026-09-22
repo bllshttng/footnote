@@ -154,13 +154,14 @@ def ack_turn(session_id: str, turn_id: str, outcome: str, why: str) -> dict:
     """
     from fno.rust_binary import call_binary_json
 
-    err, payload = call_binary_json(
-        "compaction",
-        ["ack", "--session", session_id, "--turn", turn_id,
-         "--outcome", outcome,
-         *("--why", why) if (why or "").strip() else (),
-         "--capture-dir", str(_capture_dir())],
-    )
+    args = [
+        "ack", "--session", session_id, "--turn", turn_id,
+        "--outcome", outcome,
+    ]
+    if (why or "").strip():
+        args += ["--why", why]
+    args += ["--capture-dir", str(_capture_dir())]
+    err, payload = call_binary_json("compaction", args)
     if err is not None or not isinstance(payload, dict):
         raise OperatorCaptureError(f"the ack write failed: {err or 'no JSON object'}")
     return payload
