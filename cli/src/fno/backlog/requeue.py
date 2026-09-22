@@ -202,9 +202,6 @@ def _unclaim_node(task_id: str) -> None:
 
 def cmd_requeue(node: str, *, json_out: bool = False) -> None:
     """Return a node wedged ``in_progress`` by a dead worker to the queue."""
-    from datetime import datetime, timezone
-
-    from fno.graph.maintain import abandoned_do_rows, do_row_idle_s
     from fno.agents.reachability import REACHABLE, classify_reachability, inference_samples
     from fno.agents.session_truth import _humanize_age, resolve_session_truth
     from fno.claims.core import claim_status
@@ -248,7 +245,6 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
         typer.echo(f"requeue: claim {key} reads {state}{basis_note}{holder_note}; only {' or '.join(_REQUEUEABLE_CLAIM_STATES)} may requeue{grace_note}.", err=True)
         raise typer.Exit(code=3)
 
-    now = datetime.now(timezone.utc)
     open_rows = [r for r in (row.get("sessions") or []) if is_open_do_row(r)]
     pairs = [(r, resolve_session_truth(r.get("session_id") or "")) for r in open_rows]
     for r, truth in pairs:
@@ -261,24 +257,24 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
             # A 429 corpse dies writing its error, so its age is freshest at death.
             observed_model=truth.get("observed_model"),
         )
-        if reach.verdict != REACHABLE:
-            continue
-        try:  # A live session proves only that it lives: the row's idle clock decides, as in the daily sweep.
-            why = next((a.reason for a in abandoned_do_rows([{**row, "locked_by": None}], set()) if a.session_id == r.get("session_id") and a.verdict == "held"), None)
-        except Exception as exc:  # noqa: BLE001 - an unread roster refuses
-            why = f"cannot rule out a worker on {node_id}: {exc}"
-        if why is None:
-            continue
-        # reap-open is NOT named here: this worker reads reachable, so a
-        # death claim would be false. The owner's honest self-close is.
-        typer.echo(
-            f"requeue: {r.get('harness')}:{r.get('session_id')} reads {reach.render()}; "
-            "a reachable worker still owns the do window. If that session is "
-            f"yours and has stopped this node: fno backlog session add {node_id} "
-            f"--phase do --ended-at {now.strftime('%Y-%m-%dT%H:%M:%SZ')}. The do row stays: {why}.",
-            err=True,
-        )
-        raise typer.Exit(code=3)
+        if reach.verdict == REACHABLE:
+            from datetime import datetime, timezone
+            from fno.graph.maintain import abandoned_do_rows, do_row_idle_s
+
+            why = next((a.reason for a in abandoned_do_rows([{**row, "locked_by": None}], set(), strict=False) if a.session_id == r.get("session_id") and a.verdict == "held"), None)
+            if why is None:
+                continue
+            # reap-open is NOT named here: this worker reads reachable, so a
+            # death claim would be false. The owner's honest self-close is.
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            typer.echo(
+                f"requeue: {r.get('harness')}:{r.get('session_id')} reads {reach.render()}; "
+                "a reachable worker still owns the do window. If that session is "
+                f"yours and has stopped this node: fno backlog session add {node_id} "
+                f"--phase do --ended-at {now}. The do row stays: {why}.",
+                err=True,
+            )
+            raise typer.Exit(code=3)
 
     for r in open_rows:
         reap_open_session_record(_graph_path(), node_id, phase="do", harness=r.get("harness") or "", session_id=r.get("session_id") or "")
@@ -295,7 +291,9 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
 
     # `working, 0 samples` names a corpse and `working, 31 samples` names a
     # worker. None is a harness that keeps no transcript, never a zero.
-    settled = [{"harness": r.get("harness"), "session_id": r.get("session_id"), "state": truth.get("state"), "samples": inference_samples(truth.get("observed_model")), "last_event_at": truth.get("last_event_at"), "age": _humanize_age(truth.get("last_activity_age_s")), "row_idle_s": do_row_idle_s(row, r, now.timestamp())} for r, truth in pairs]
+    from datetime import datetime, timezone
+    from fno.graph.maintain import do_row_idle_s
+    settled = [{"harness": r.get("harness"), "session_id": r.get("session_id"), "state": truth.get("state"), "samples": inference_samples(truth.get("observed_model")), "last_event_at": truth.get("last_event_at"), "age": _humanize_age(truth.get("last_activity_age_s")), "row_idle_s": do_row_idle_s(row, r, datetime.now(timezone.utc).timestamp())} for r, truth in pairs]
     receipt = {"node_id": node_id, "status_before": status_before, "status_after": status_after, "settled": settled}
     if json_out:
         typer.echo(json.dumps(receipt, sort_keys=True))

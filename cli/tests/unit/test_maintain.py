@@ -1806,7 +1806,8 @@ def _hours_after_start(hours):
 
 def _detect(nodes, *, hours, claimed=(), engaged_on=None):
     return m.detect_abandoned_do_rows(
-        nodes, live_claimed=set(claimed), engaged_on=engaged_on or {},
+        nodes, live_claimed=set(claimed), live_worked=engaged_on or {},
+        prover=lambda *_a, **_kw: (False, "unused", None),
         now_s=_hours_after_start(hours), quiet_after_s=_BOUND,
     )
 
