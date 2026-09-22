@@ -56,6 +56,7 @@ crossing	crates/fno-agents/src/truth_probe.rs	677	let mut command = std::process
 crossing	crates/fno/src/backlog_view.rs	153	let mut command = crate::process_admission::std_command(crate::server::fno_bin());
 crossing	crates/fno/src/client.rs	2300	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
 crossing	crates/fno/src/client.rs	14079	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+crossing	crates/fno/src/client/agent_launcher.rs	1273	let bin = crate::server::fno_bin().to_string_lossy().into_owned();
 crossing	crates/fno/src/client/node_detail.rs	126	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
 crossing	crates/fno/src/client/update_menu.rs	85	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
 crossing	crates/fno/src/client/update_menu.rs	265	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
