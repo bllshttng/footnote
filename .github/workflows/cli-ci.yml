@@ -784,10 +784,18 @@ jobs:
       - name: cargo test --lib --bins (fno-agents)
         id: lib
         working-directory: crates/fno-agents
+        env:
+          HOME: ${{ runner.temp }}/fno-test-home
+          CARGO_HOME: /home/runner/.cargo
+          FNO_TEST_HERMETIC: "0"
         run: cargo test --lib --bins --no-fail-fast
 
       - name: cargo test --test '*' --test-threads=1 (fno-agents real-process integration)
         working-directory: crates/fno-agents
+        env:
+          HOME: ${{ runner.temp }}/fno-test-home
+          CARGO_HOME: /home/runner/.cargo
+          FNO_TEST_HERMETIC: "0"
         # A lib red must not hide the integration shard: this leg still runs
         # when the lib step fails, so the grok and stop-hook tests report on
         # every round instead of only on green rounds. A red in the build,
