@@ -315,6 +315,56 @@ pub(crate) fn read_pr_gates(
             skipped.join(", ")
         ));
     }
+    // The merge slot is the fact that ORDERS this queue: name its
+    // holder on every row, and when the holder's own row is absent (the
+    // listing filter or a spent gate slice dropped it), carry a synthetic
+    // row so the queue names the PR every queued merge waits behind. One
+    // store: the space db the claim verb reads with no root.
+    match crate::claim_store::list_db(Some("merge-slot:"), false, None) {
+        Ok(rows_json) => {
+            // list_db answers {"rows": [...]}; each row carries the claim's
+            // key and holder, so the stamp names WHICH base's slot it is.
+            let slots: Vec<(u64, String)> = rows_json
+                .get("rows")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|r| {
+                            let holder = r.get("holder").and_then(Value::as_str)?;
+                            let pr = crate::authorized_merge::parse_slot_holder(holder)?;
+                            let key = r.get("key").and_then(Value::as_str).unwrap_or("");
+                            let base = key.strip_prefix("merge-slot:").unwrap_or(key);
+                            Some((pr, base.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (holder, base) in &slots {
+                for row in rows.iter_mut() {
+                    row.as_object_mut().map(|o| {
+                        o.insert(
+                            "merge_slot".to_string(),
+                            json!({ "holder": holder, "base": base }),
+                        )
+                    });
+                }
+                let named = rows
+                    .iter()
+                    .any(|row| row.get("number").and_then(Value::as_u64) == Some(*holder));
+                if !named {
+                    rows.push(json!({
+                        "number": holder,
+                        "merge_slot_holder": true,
+                    }));
+                    warnings.push(format!(
+                        "mergeable_pr: merge slot holder PR {holder} has no gate row in \
+                         this read; carried as a slot row so the queue names what orders it"
+                    ));
+                }
+            }
+        }
+        Err(e) => warnings.push(format!("mergeable_pr: merge slot unreadable: {e}")),
+    }
     (SourceRead::ok(Value::Array(rows)), warnings)
 }
 

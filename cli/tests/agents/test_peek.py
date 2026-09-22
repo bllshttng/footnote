@@ -1716,3 +1716,82 @@ def test_peek_all_without_grep_reads_every_session(tmp_path, monkeypatch):
     assert rc == 0
     assert "alpha" in out.getvalue() and "beta" in out.getvalue()
     assert "2 session(s) read" in err.getvalue()
+
+
+# --------------------------------------------------------------------------
+# the record reader's bounded tail (x-5f26)
+# --------------------------------------------------------------------------
+
+
+def _num(rec):
+    return rec["n"]
+
+
+def _numbered_jsonl(tmp_path, records):
+    path = tmp_path / "t.jsonl"
+    path.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_records_reader_tail_returns_the_records_a_full_pass_returns(
+    tmp_path, monkeypatch
+):
+    # AC4-HP: a transcript larger than the tail window answers identically
+    # while parsing only the window.
+    from fno.agents import peek as peek_mod
+
+    monkeypatch.setattr(peek_mod, "_TAIL_BYTES", 4096)
+    path = _numbered_jsonl(tmp_path, [{"n": i, "pad": "x" * 64} for i in range(500)])
+    assert path.stat().st_size > 4096
+
+    seen: list = []
+
+    def parse(rec):
+        seen.append(rec["n"])
+        return rec["n"]
+
+    tail = peek_mod._records_from_jsonl(path, 40, parse)
+    full = peek_mod._records_from_jsonl(path, 40, _num, tail=False)
+    assert tail == full
+    assert len(tail) == 40 and tail[-1] == 499
+    assert len(seen) < 500, "the tail read must not parse every record"
+
+
+def test_records_reader_falls_back_to_the_whole_file_when_the_tail_is_thin(
+    tmp_path, monkeypatch
+):
+    # AC4-EDGE: the window holds one oversized record; the fallback answers
+    # exactly what a whole-file read answers.
+    from fno.agents import peek as peek_mod
+
+    monkeypatch.setattr(peek_mod, "_TAIL_BYTES", 4096)
+    records = [{"n": i, "pad": "x" * 64} for i in range(499)]
+    records.append({"n": 499, "pad": "x" * 8192})
+    path = _numbered_jsonl(tmp_path, records)
+
+    tail = peek_mod._records_from_jsonl(path, 40, _num)
+    full = peek_mod._records_from_jsonl(path, 40, _num, tail=False)
+    assert tail == full
+    assert len(tail) == 40 and tail[-1] == 499
+
+
+def test_records_reader_tolerates_a_seek_inside_a_line_or_character(tmp_path, monkeypatch):
+    # AC4-ERR: the seek lands mid-line and mid-multibyte-character; the
+    # fragment parses as nothing and the answer is unchanged.
+    from fno.agents import peek as peek_mod
+
+    records = [{"n": i, "pad": "x" * 32} for i in range(50)]
+    records.insert(25, {"n": -1, "pad": "é" * 40})
+    path = _numbered_jsonl(tmp_path, records)
+    raw = path.read_bytes()
+    # Seek onto the SECOND byte of the two-byte é: a torn, undecodable fragment.
+    landing = raw.index("é".encode()) + 1
+    monkeypatch.setattr(peek_mod, "_TAIL_BYTES", len(raw) - landing)
+
+    tail = peek_mod._records_from_jsonl(path, 40, _num)
+    full = peek_mod._records_from_jsonl(path, 40, _num, tail=False)
+    assert tail == full
+    assert len(tail) == 40

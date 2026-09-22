@@ -182,7 +182,7 @@ def test_reign_branches_on_harness_capability_before_arming():
     arm = text[text.index("## Arm the beat") :]
     assert "Branch once on what the harness supports" in arm
     assert "On Claude, arm ONE monitor, not six" in arm
-    assert "Fleet settled-PR wake" in arm
+    assert "Nudge-escalation wake" in arm
     assert "arm nothing native" in arm
     assert "wake arm" in arm  # the codex beat is the external wake contract
 

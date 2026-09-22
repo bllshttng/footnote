@@ -516,8 +516,7 @@ Read `spawn.sh`'s single outcome line and relay it faithfully:
   `fno agents reconcile`. The `short_id` on this line is the requested **name**,
   not a session handle, so do NOT present it as one and do NOT offer `resume`
   or a session-keyed peek until it is bound.
-- `result=already-running ...` -> a worker already exists for this node/name; no
-  second loop was created. Point at its logs.
+- `result=already-running ...` -> a worker already exists for this node/name and no second loop was created. Point at its logs. To replace a stuck worker, run `fno agents stop <worker>`. Then spawn again with `--node <node>` (add `--resume <old session id>` on claude to carry the old transcript). The stop frees the node at once, so neither step needs `rm --force`.
 - `result=self-handoff name=<n> reason="<...>"` -> **you** already hold the claim on
   that node, so `/fno:agent` cannot reassign it from here and nothing was launched.
   Relay the reason and the two real exits it names: hand off via `/fno:target`

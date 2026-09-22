@@ -1175,11 +1175,11 @@ fn at_opens_the_node_picker_and_picking_inserts_the_id() {
         l.focus = Focus::Message;
     }
     // One backlog card for the picker to list (the fixture ships none).
-    v.layout.backlog = vec![BacklogCard {
+    v.backlog = vec![crate::proto::BacklogCard {
         id: "x-6233".into(),
         slug: "a-node".into(),
         priority: "p1".into(),
-        state: CardState::Ready,
+        state: crate::proto::CardState::Ready,
         pane_id: None,
         attach_id: None,
         where_hint: None,

@@ -24,10 +24,18 @@ pub(super) enum ModalKey {
 pub(super) const MAX_ESC_CARRY: usize = 16;
 /// Fold raw modal-mode bytes into [`ModalKey`]s, carrying escape state in `esc`
 /// ACROSS reads (same split-arrow safety as [`fold_selector_keys`]). Arrows and
-/// PageUp/PageDown become navigation tokens; a bare Esc (a lone `0x1b` chunk is
-/// special-cased by the caller for instant close) becomes `Esc`; every other
-/// printable byte is `Byte`, resolved by the caller through the chord table.
+/// PageUp/PageDown become navigation tokens; a bare Esc becomes `Esc` - the
+/// next byte decides it, or an empty read (the client's quiet-window flush)
+/// releases it; every other printable byte is `Byte`, resolved by the caller
+/// through the chord table.
 pub(super) fn fold_modal_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<ModalKey> {
+    if bytes.is_empty() {
+        return if crate::keys::take_lone_esc(esc) {
+            vec![ModalKey::Esc]
+        } else {
+            Vec::new()
+        };
+    }
     let mut out = Vec::new();
     for &b in bytes {
         if !esc.is_empty() {
@@ -124,10 +132,18 @@ pub(super) enum SearchKey {
 /// in `esc` ACROSS reads (gemini medium: an arrow sequence split at a read
 /// boundary must neither close the selector nor leak its tail into the
 /// pane). Arrows map to their hjkl twins; unknown escape tails are
-/// swallowed. A lone ESC stays pending until the next byte decides it - a
+/// swallowed. A lone ESC stays pending until the next byte decides it, or
+/// an empty read (the client's quiet-window flush) releases it at once - a
 /// bare-Esc close lands on the following keypress (which is swallowed);
 /// `q` closes instantly.
 pub(super) fn fold_selector_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
+    if bytes.is_empty() {
+        return if crate::keys::take_lone_esc(esc) {
+            vec![0x1b]
+        } else {
+            Vec::new()
+        };
+    }
     let mut keys = Vec::new();
     for &b in bytes {
         if !esc.is_empty() {
@@ -214,6 +230,13 @@ pub(super) fn fold_selector_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
     keys
 }
 pub(super) fn fold_search_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<SearchKey> {
+    if bytes.is_empty() {
+        return if crate::keys::take_lone_esc(esc) {
+            vec![SearchKey::Esc]
+        } else {
+            Vec::new()
+        };
+    }
     let mut keys = Vec::new();
     for &b in bytes {
         match esc.as_slice() {
@@ -253,6 +276,97 @@ pub(super) fn fold_search_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<SearchKe
                     esc.clear();
                     esc.push(0x1b);
                 } else if (0x40..=0x7e).contains(&b) || esc.len() >= 16 {
+                    esc.clear();
+                } else {
+                    esc.push(b);
+                }
+            }
+        }
+    }
+    keys
+}
+
+/// Navigator fold keys. Superset of [`SearchKey`]: the same split-arrow escape
+/// fold, but a completed CSI whose final byte is Up/Down/Shift-Tab surfaces as a
+/// motion token instead of being swallowed. Every other CSI is
+/// still consumed whole, so no escape tail leaks into the query or the pane.
+pub(super) enum NavKey {
+    Byte(u8),
+    Esc,
+    Up,
+    Down,
+    /// Bare Right: reach the selected row (the Enter/goto arm).
+    Right,
+    /// Bare Left: close (the Esc arm) - back to the pane you came
+    /// from. The overlay owns every keystroke, so a bare arrow is free.
+    Left,
+    ShiftTab,
+}
+
+/// Fold navigator-mode bytes. Identical escape-carry semantics to
+/// [`fold_search_input`] (whole CSI consumed, split sequences carried across
+/// reads via `esc`), except the arrow-Up `ESC [ A`, arrow-Down `ESC [ B`,
+/// arrow-Right/Left `ESC [ C`/`ESC [ D`, and Shift-Tab `ESC [ Z` finals become
+/// [`NavKey::Up`]/[`Down`]/[`Right`]/[`Left`]/[`ShiftTab`] so the navigator can
+/// move its cursor, goto, close, and reverse-cycle the state chip. A modified
+/// arrow (`ESC [ 1; 5 A`) shares the final byte and maps to the same motion -
+/// harmless. All other finals are swallowed, same leak-safety as search.
+pub(super) fn fold_nav_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<NavKey> {
+    if bytes.is_empty() {
+        return if crate::keys::take_lone_esc(esc) {
+            vec![NavKey::Esc]
+        } else {
+            Vec::new()
+        };
+    }
+    let mut keys = Vec::new();
+    for &b in bytes {
+        match esc.as_slice() {
+            [] => {
+                if b == 0x1b {
+                    esc.push(0x1b);
+                } else {
+                    keys.push(NavKey::Byte(b));
+                }
+            }
+            [0x1b] => {
+                if b == b'[' {
+                    esc.push(b);
+                } else {
+                    esc.clear();
+                    keys.push(NavKey::Esc);
+                    if b == 0x1b {
+                        esc.push(0x1b);
+                    } else {
+                        keys.push(NavKey::Byte(b));
+                    }
+                }
+            }
+            _ => {
+                if b == 0x1b {
+                    esc.clear();
+                    esc.push(0x1b);
+                } else if (0x40..=0x7e).contains(&b) {
+                    // CSI complete. Surface the three motion finals; swallow the
+                    // rest. Only a BARE `ESC [ X` counts: a parameterised
+                    // sequence is a MODIFIED key (Ctrl-Up is `ESC [ 1; 5 A`),
+                    // and aliasing it onto the unmodified one silently
+                    // reinterprets a chord the operator meant as something else.
+                    // This fold serves prefix+f, the navigator this change
+                    // promotes to the primary route, so it is the last place
+                    // that should guess.
+                    if esc.len() == 2 {
+                        match b {
+                            b'A' => keys.push(NavKey::Up),
+                            b'B' => keys.push(NavKey::Down),
+                            b'C' => keys.push(NavKey::Right),
+                            b'D' => keys.push(NavKey::Left),
+                            b'Z' => keys.push(NavKey::ShiftTab),
+                            _ => {}
+                        }
+                    }
+                    esc.clear();
+                } else if esc.len() >= MAX_ESC_CARRY {
                     esc.clear();
                 } else {
                     esc.push(b);

@@ -2635,11 +2635,10 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         .as_ref()
         .is_some_and(|p| matches!(p.mechanism.as_str(), "respawn" | "bg-resume"))
     {
-        return run_and_confirm_respawn(
+        return crate::resume_wake::respawn_and_deliver(
             reentry_plan.as_ref().unwrap(),
             &name,
-            "resume",
-            "agent_resumed",
+            message.as_deref(),
             home,
         );
     }

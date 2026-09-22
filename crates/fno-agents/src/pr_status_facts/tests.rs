@@ -38,6 +38,37 @@ const REQUIRED_CHECKS_RULE: &str = r#"[
 // --- AC1-HP .. AC4-EDGE: merge_blocker --------------------------------------
 
 #[test]
+fn not_mergeable_conflicting_blocks_and_null_fails_closed() {
+    let probes = FakeGh {
+        ok: true,
+        output: String::new(),
+        review_decision: String::new(),
+        calls: RefCell::new(Vec::new()),
+    };
+    let out = merge_blocker(
+        &probes,
+        &json!({"merge_state": "clean", "mergeable": "CONFLICTING", "cwd": "/repo"}),
+    );
+    assert_eq!(out["blockers"], json!(["not_mergeable_conflicting"]));
+
+    // Still computing: fail closed, exactly like the pre-port conjunction.
+    let out = merge_blocker(
+        &probes,
+        &json!({"merge_state": "clean", "mergeable": null, "cwd": "/repo"}),
+    );
+    assert_eq!(out["blockers"], json!(["not_mergeable_unknown"]));
+
+    // The one positive answer adds nothing; an absent key adds nothing.
+    let out = merge_blocker(
+        &probes,
+        &json!({"merge_state": "clean", "mergeable": "MERGEABLE", "cwd": "/repo"}),
+    );
+    assert!(out["blockers"].as_array().unwrap().is_empty());
+    let out = merge_blocker(&probes, &json!({"merge_state": "clean", "cwd": "/repo"}));
+    assert!(out["blockers"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn ac1_blocked_state_names_the_missing_required_check() {
     let probes = FakeGh {
         ok: true,

@@ -2,15 +2,81 @@
 from __future__ import annotations
 
 import json
+import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
+from fno.agents.reachability import REACHABLE, UNREACHABLE
 from fno.claims.cli import RosterReading, cli
+from fno.claims.roster import _worker_reachability
 from fno.graph.statuses import live_worked_node_ids as _real_live_worked_node_ids
 
 
 runner = CliRunner()
+
+
+def _stop_row(stopped_at=None, state="working") -> dict:
+    return {
+        "name": "stop-worker",
+        "state": state,
+        "cwd": "/worktrees/ac1-node",
+        "row_id": "session-stop",
+        "stopped_at": stopped_at,
+    }
+
+
+def _fresh_tail(monkeypatch, last_event_epoch: float) -> None:
+    from fno.agents.watchdog import TailFacts
+
+    monkeypatch.setattr(
+        "fno.agents.watchdog.tail_facts",
+        lambda *_a, **_kw: TailFacts(
+            records=None,
+            last_event_epoch=last_event_epoch,
+            tail_text="progress update",
+            last_role="assistant",
+            last_text="progress update",
+        ),
+    )
+    monkeypatch.setattr(
+        "fno.agents.watchdog.harness_for_session", lambda *_a, **_kw: "claude"
+    )
+
+
+def test_a_stop_newer_than_the_tail_falsifies_liveness(monkeypatch):
+    """A claude row fno just stopped keeps a seconds-old tail; the stop stamp
+    must outrank the fresh-tail cancel so the node reads free at once."""
+    now = time.time()
+    _fresh_tail(monkeypatch, now - 30)
+    stamp = datetime.fromtimestamp(now - 10, timezone.utc).isoformat()
+
+    verdict = _worker_reachability(_stop_row(stopped_at=stamp))
+
+    assert verdict.verdict == UNREACHABLE
+    assert verdict.basis.startswith("stopped:")
+
+
+def test_a_tail_event_after_the_stop_still_reads_reachable(monkeypatch):
+    """A tail event strictly after the stop is a resumed session; the stop
+    stamp does not condemn it."""
+    now = time.time()
+    _fresh_tail(monkeypatch, now - 5)
+    stamp = datetime.fromtimestamp(now - 10, timezone.utc).isoformat()
+
+    verdict = _worker_reachability(_stop_row(stopped_at=stamp))
+
+    assert verdict.verdict == REACHABLE
+
+
+def test_a_missing_or_unparseable_stop_stamp_changes_nothing(monkeypatch):
+    """No stop record (or a torn one) leaves origin/main behavior intact."""
+    now = time.time()
+    _fresh_tail(monkeypatch, now - 5)
+    for stopped_at in (None, "", "not-a-date"):
+        verdict = _worker_reachability(_stop_row(stopped_at=stopped_at))
+        assert verdict.verdict == REACHABLE, stopped_at
 
 
 def _graph_entry(monkeypatch, node_id: str = "ac1-node", session_id: str = "session-1") -> None:

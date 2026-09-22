@@ -15,12 +15,13 @@ def compile_scope_ids(scope: str, entries: list[dict], *, resolve=None) -> set[s
     """Compile a canonical crown scope into the graph node ids it contains."""
     from fno.agents.crown import _canonical_project, resolve_crown, split_scope
 
-    resolver = resolve or resolve_crown
+    by_id = {row.get("id"): row for row in entries if isinstance(row, dict)}
+    # Resolve against the rows in hand: resolve_crown alone re-reads the whole graph.
+    resolver = resolve or (lambda members: resolve_crown(members, graph_entry=by_id.get))
     level, canonical = resolver(split_scope(scope))
     if level == 2:
         from fno.graph._intake import descendants_of
 
-        by_id = {row.get("id"): row for row in entries if isinstance(row, dict)}
         # A rung-2 scope is a SET of epics; the king's board sees the nodes
         # under EVERY member, not just the first.
         ids: set[str] = set()

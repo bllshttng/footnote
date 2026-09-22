@@ -525,8 +525,7 @@ fn fold_pick_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<PickKey> {
 /// (terminals emit an arrow as one write) and low-stakes pre-attach.
 fn pick_keys_from_read(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<PickKey> {
     let mut keys = fold_pick_keys(esc, bytes);
-    if esc.as_slice() == [0x1b] {
-        esc.clear();
+    if crate::keys::take_lone_esc(esc) {
         keys.push(PickKey::Esc);
     }
     keys

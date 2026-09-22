@@ -144,3 +144,31 @@ async fn a_confirmed_stop_releases_the_stopped_holders_dead_claims() {
     std::env::remove_var("FNO_SPACES_DIR");
     std::fs::remove_dir_all(home.root()).ok();
 }
+
+/// The claude stop's registry write is the row's memory that fno did the
+/// stop: Exited, an exit stamp, and the stop record the reachability gate
+/// reads. A write failure surfaces as the verb's error, never as a clean
+/// stop over a registry row that still reads live.
+#[tokio::test]
+async fn claude_stop_stamps_the_stop_record_and_exit() {
+    let home = short_home("claude-stop-record");
+    let mut row = claude_rm_row("w1", "aaabbb31", "aaabbb31-1111-2222-3333-444444444444");
+    row.status = AgentStatus::Live;
+    state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
+    let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+    let request = Request::new(1, "agent.stop", json!({"name": "w1"}));
+
+    crate::daemon::claude_stop::mark_claude_stopped(&ctx, &request, "w1")
+        .await
+        .expect("the registry write succeeds");
+
+    let registry = state::load_registry(&home.registry_json()).unwrap();
+    let entry = registry.find("w1").unwrap();
+    assert_eq!(entry.status, AgentStatus::Exited);
+    assert!(entry.exited_at.is_some(), "an exit stamp is set");
+    let stop = entry.stop.as_ref().expect("the stop record is set");
+    assert_eq!(stop.by, "stop-verb");
+    assert_eq!(stop.reason.as_deref(), Some("claude"));
+    assert!(!stop.at.is_empty(), "the stop instant is set");
+    std::fs::remove_dir_all(home.root()).ok();
+}
