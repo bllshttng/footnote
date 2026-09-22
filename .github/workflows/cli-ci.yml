@@ -603,7 +603,6 @@ jobs:
         run: |
           echo "FNO_HOME=$RUNNER_TEMP/fno" >> "$GITHUB_ENV"
           echo "FNO_AGENTS_HOME=$RUNNER_TEMP/fno-agents" >> "$GITHUB_ENV"
-          echo "FNO_CLAIMS_ROOT=$RUNNER_TEMP/fno-claims" >> "$GITHUB_ENV"
 
       - name: PROTO_VERSION monotonic bump guard
         # Runs before the Rust build so a version collision fails in seconds
