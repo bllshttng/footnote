@@ -210,10 +210,21 @@ pub fn top_by_rss(table: &[ProcRow], owners: &HashMap<u32, String>, limit: usize
 pub fn footprint_mb(pids: &[u32]) -> (Option<f64>, u64) {
     #[cfg(target_os = "macos")]
     {
-        // The rusage ABI is intentionally kept behind this platform gate. A
-        // Linux process table has no comparable physical-footprint field.
-        let _ = pids;
-        (None, 0)
+        let mut total_bytes = 0u64;
+        let mut unread = 0u64;
+        for pid in pids {
+            let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+            let mut buffer: libc::rusage_info_t = (&mut info as *mut libc::rusage_info_v4).cast();
+            let result = unsafe {
+                libc::proc_pid_rusage(*pid as libc::c_int, libc::RUSAGE_INFO_V4, &mut buffer)
+            };
+            if result == 0 {
+                total_bytes = total_bytes.saturating_add(info.ri_phys_footprint);
+            } else {
+                unread = unread.saturating_add(1);
+            }
+        }
+        (Some(total_bytes as f64 / 1024.0 / 1024.0), unread)
     }
     #[cfg(not(target_os = "macos"))]
     {
