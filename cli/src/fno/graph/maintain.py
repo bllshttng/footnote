@@ -2133,32 +2133,34 @@ def detect_abandoned_do_rows(
             harness, sid = row.get("harness"), row.get("session_id")
             if nid in live_claimed or live_worked.get(nid):
                 why = ("live claim" if nid in live_claimed
-                       else f"live roster worker {', '.join(live_worked[nid])}")
+                       else f"reachable worker on node {', '.join(live_worked[nid])}")
                 out.append(AbandonedDoRow(nid, harness, sid, "held", why, None))
             else:
-                gone, reason, epoch = prover(harness, sid, e.get("cwd"),
-                                             quiet_after_s=quiet_after_s, now_s=now_s)
-                out.append(AbandonedDoRow(nid, harness, sid,
-                                          "gone" if gone else "held", reason, epoch))
+                idle = do_row_idle_s(e, row, now_s)
+                gone = idle is not None and idle > quiet_after_s
+                reason, epoch = (f"row idle {idle // 3600}h, no reachable worker on the node", None) if gone else (f"row idle {'?' if idle is None else idle // 3600}h, inside the {int(quiet_after_s // 3600)}h bound", None)
+                out.append(AbandonedDoRow(nid, harness, sid, "gone" if gone else "held", reason, epoch))
     return out
 
 
+def do_row_idle_s(entry, row, now_s) -> Optional[int]:
+    return int(now_s - max(stamps)) if (stamps := [s.timestamp() for s in map(_parse_ts, [row.get("started_at")] + [n.get("ts") for n in entry.get("progress_notes") or [] if isinstance(n, dict) and n.get("source_session_id") == row.get("session_id")]) if s]) else None
+
+def abandoned_do_rows(entries, claimed, *, strict=True):
+    from fno.config import load_settings
+    from fno.claims.roster import classify_workers, read_roster
+    from fno.graph.statuses import is_open_do_row
+    now_s, bound = datetime.now(timezone.utc).timestamp(), load_settings().backlog.maintain.abandoned_do_row_hours * 3600
+    reading = read_roster(require_live_probe=False) if any((do_row_idle_s(e, r, now_s) or 0) > bound for e in entries for r in e.get("sessions") or [] if is_open_do_row(r)) else None
+    if reading is not None and not reading.consulted:
+        if not strict:
+            return [AbandonedDoRow(e.get("id"), r.get("harness"), r.get("session_id"), "held", f"roster unread ({reading.reason})", None) for e in entries for r in e.get("sessions") or [] if is_open_do_row(r)]
+        raise RuntimeError(f"roster unread ({reading.reason})")
+    return detect_abandoned_do_rows(entries, live_claimed=claimed, live_worked={n: [str(w.get("name")) for w in classify_workers(ws)[0]] for n, ws in (reading.workers_by_node if reading else {}).items()}, prover=do_row_session_gone, now_s=now_s, quiet_after_s=bound)
 def abandoned_leg(entries, claimed, graph_path, apply):
     """Detect + reap + render for cmd_maintain; returns ``(lines, warning)``."""
     try:
-        from fno.config import load_settings
-        hours = load_settings().backlog.maintain.abandoned_do_row_hours
-    except Exception:
-        hours = 24
-    try:
-        from fno.graph.statuses import live_worked_node_ids
-        rows = detect_abandoned_do_rows(
-            entries, live_claimed=claimed,
-            live_worked=live_worked_node_ids(strict=True, entries=entries),
-            prover=do_row_session_gone,
-            now_s=datetime.now(timezone.utc).timestamp(),
-            quiet_after_s=hours * 3600,
-        )
+        rows = abandoned_do_rows(entries, claimed)
     except Exception as exc:  # noqa: BLE001 - one leg must not kill the sweep
         return [], f"abandoned-do-row leg skipped: {exc}"
 
