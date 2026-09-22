@@ -591,7 +591,7 @@ def _codex_app_server_serve(snapshot_pids: set[int] | None) -> tuple[set[int], s
 
 def _live_shared_serve_root_pids(
     *, snapshot_pids: set[int] | None = None
-) -> tuple[set[int], str | None]:
+) -> tuple[set[int], str | AttributionGap | None]:
     """Return the confirmed PID of the detached shared opencode serve."""
     roots: set[int] = set()
     try:
@@ -601,7 +601,7 @@ def _live_shared_serve_root_pids(
             (paths.agents_home_dir() / "opencode-serve.json").read_text(encoding="utf-8")
         )
         if not isinstance(record, dict):
-            return roots, "shared serve root discovery unavailable: opencode-serve.json is not a mapping"
+            return roots, AttributionGap("shared opencode serve root unattributed: opencode-serve.json is not a mapping")
         pid = record.get("pid")
         pid_start = record.get("pid_start")
         if (
@@ -612,15 +612,15 @@ def _live_shared_serve_root_pids(
             or isinstance(pid_start, bool)
             or pid_start <= 0
         ):
-            return roots, "shared serve root liveness unavailable: opencode-serve.json carries no usable pid and pid_start pair"
+            return roots, AttributionGap("shared opencode serve root unattributed: opencode-serve.json carries no usable pid and pid_start pair")
         root_live = _root_pid_is_live(pid, pid_start)
         if root_live is None:
-            return roots, f"shared serve root liveness unavailable: pid {pid} start time could not be read"
+            return roots, AttributionGap(f"shared opencode serve root unattributed: pid {pid} start time could not be read")
         if root_live:
             roots.add(pid)
         elif snapshot_pids is not None and pid in snapshot_pids:
             if not _pid_recycled(pid, pid_start):
-                return roots, f"shared serve root liveness unavailable: pid {pid} is dead, sits in the ps snapshot, and recycling is unproven"
+                return roots, AttributionGap(f"shared opencode serve root unattributed: pid {pid} is dead, sits in the ps snapshot, and recycling is unproven")
     except FileNotFoundError:
         return roots, None
     except Exception as exc:
@@ -653,7 +653,8 @@ def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None
     shared_serve_pids, shared_serve_error = _live_shared_serve_root_pids(
         snapshot_pids=snapshot_pids
     )
-    if shared_serve_error is not None:
+    serve_gap = shared_serve_error.text if isinstance(shared_serve_error, AttributionGap) else None
+    if shared_serve_error is not None and serve_gap is None:
         return None, f"footprint unavailable: {shared_serve_error}"
     codex_roots, codex_verdict = _codex_app_server_serve(snapshot_pids)
     root_pids, root_error = _live_root_pids(
@@ -697,6 +698,8 @@ def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None
                 f"footprint unavailable: all {reading.unparsed_lines} ps row(s) "
                 "failed to parse" + _unparsed_sample_evidence(reading)
             )
+    if serve_gap is not None:
+        attribution_gap = "; ".join(text for text in (attribution_gap, serve_gap) if text)
     if attribution_gap is not None:
         reading = reading._replace(attribution_gap=attribution_gap)
     return reading, None
