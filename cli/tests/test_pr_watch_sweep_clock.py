@@ -323,3 +323,4 @@ class TestSweepBoundedByPhaseClock:
             listing=self._listing(set()), deadline=None,
         )
         assert d.SCAN_PROGRESS["sweep"] == "scanned=1 of 2 read_failed=1"
+        d.SCAN_PROGRESS.pop("sweep", None)  # module global: leave it as found
