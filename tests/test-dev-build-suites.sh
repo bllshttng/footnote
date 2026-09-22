@@ -16,16 +16,8 @@ fi
 # Two door tests journal through the native event store, whose client resolves
 # FNO_BIN or the checkout's own crates/fno build (store_client.py). The court
 # fixture pins PATH to a fake bin, so a PATH fno cannot answer at test time.
-fno_bin=${FNO_BIN:-}
-if [ -z "$fno_bin" ]; then
-  for profile in debug release; do
-    if [ -x "../crates/fno/target/$profile/fno" ]; then
-      fno_bin="../crates/fno/target/$profile/fno"
-      break
-    fi
-  done
-fi
-if [ -z "$fno_bin" ]; then
+if [ -z "${FNO_BIN:-}" ] && [ ! -x "../crates/fno/target/debug/fno" ] \
+   && [ ! -x "../crates/fno/target/release/fno" ]; then
   echo "test-dev-build-suites: no fno front-door build; run: cargo build --manifest-path crates/fno/Cargo.toml" >&2
   exit 1
 fi
