@@ -955,7 +955,7 @@ pub(crate) async fn launcher_keys(
                         open_picker_at(
                             l,
                             &view.launcher_catalog,
-                            &view.layout.backlog,
+                            &view.backlog,
                             Some(anchor),
                             l.focus,
                         );
@@ -1057,13 +1057,7 @@ pub(crate) async fn launcher_keys(
                     f if is_picker_chip(f) => {
                         let anchor = view.launcher.as_ref().and_then(|l| picker_anchor(l, view));
                         if let Some(l) = view.launcher.as_mut() {
-                            open_picker_at(
-                                l,
-                                &view.launcher_catalog,
-                                &view.layout.backlog,
-                                anchor,
-                                f,
-                            );
+                            open_picker_at(l, &view.launcher_catalog, &view.backlog, anchor, f);
                         }
                     }
                     _ => {}
@@ -1084,7 +1078,7 @@ pub(crate) async fn launcher_keys(
                             open_picker_at(
                                 l,
                                 &view.launcher_catalog,
-                                &view.layout.backlog,
+                                &view.backlog,
                                 at_anchor,
                                 Focus::Message,
                             );
@@ -1351,7 +1345,7 @@ pub(crate) fn open_picker(l: &mut Launcher, view: &View) -> bool {
     open_picker_at(
         l,
         &view.launcher_catalog,
-        &view.layout.backlog,
+        &view.backlog,
         Some(anchor),
         l.focus,
     )
@@ -2242,13 +2236,7 @@ pub(crate) async fn launcher_mouse(
     if is_picker_chip(focus) && focus != Focus::Project {
         let anchor = view.launcher.as_ref().and_then(|l| picker_anchor(l, view));
         if let Some(l) = view.launcher.as_mut() {
-            open_picker_at(
-                l,
-                &view.launcher_catalog,
-                &view.layout.backlog,
-                anchor,
-                focus,
-            );
+            open_picker_at(l, &view.launcher_catalog, &view.backlog, anchor, focus);
         }
     }
     if focus == Focus::Launch {

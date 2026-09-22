@@ -22,7 +22,7 @@ use crate::store_client;
 /// --snapshot`) on a bounded refresh clock and caches its payload; both
 /// modes feed the SAME ReaderState, so the last-good retention, the
 /// stale-after-3-failures marker, and the pure derivations (cards, lanes,
-/// prs, missions) are unchanged. A snapshot exec failure is a read failure
+/// prs) are unchanged. A snapshot exec failure is a read failure
 /// like any other - never a fallback to the graph store (which would
 /// resurrect stale graph-only rows the external backend no longer owns).
 pub(crate) fn spawn(
@@ -170,8 +170,7 @@ pub(crate) fn spawn(
                 };
                 (stamp, raw)
             };
-            if let Some((queue, prs, drivers, missions)) =
-                state.tick(stamp, move || raw, last_live.as_ref())
+            if let Some((queue, prs, drivers)) = state.tick(stamp, move || raw, last_live.as_ref())
             {
                 let holders = last_live.clone().unwrap_or_default();
                 if core_tx
@@ -182,7 +181,6 @@ pub(crate) fn spawn(
                         holders,
                         prs,
                         drivers,
-                        missions,
                     })
                     .await
                     .is_err()
