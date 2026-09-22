@@ -151,8 +151,8 @@ fn launcher_one_esc_closes_the_dock() {
     // R1 (x-5026): one Esc press must close the composer dock. The chord
     // scanner already holds the lone byte and flushes it after the 40ms quiet
     // window, so a trailing lone ESC at the end of a launcher chunk is always
-    // a bare Esc press - the rule pick_keys_from_read and node_detail_keys
-    // already apply. On main the dock's own carry re-buffers the flushed byte
+    // a bare Esc press - the rule pick_keys_from_read already applies.
+    // On main the dock's own carry re-buffers the flushed byte
     // and the dock survives both the Esc and the next key.
     //
     // Every screen match here is `contains`, never line-exact: at 120 columns
