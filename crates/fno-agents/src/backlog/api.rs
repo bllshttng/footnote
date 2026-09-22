@@ -1110,6 +1110,61 @@ pub fn session_append(
     }
 }
 
+/// The deferred sessions-row open (the `pending-session-row` transport arm).
+/// Appends the parked record idempotently on `(phase, session_id)` - a
+/// claim-path open that already won leaves one row - and answers whether
+/// the node was found at all. The caller clears the registry park AFTER
+/// this returns Ok, so a failed graph write keeps the payload.
+#[allow(clippy::too_many_arguments)]
+pub fn session_open_parked(
+    store: &Store,
+    node_id: &str,
+    phase: &str,
+    harness: &str,
+    session_id: &str,
+    effort: Option<&str>,
+    merge_grant: Option<Value>,
+    started_at: &str,
+) -> Result<bool, ApiError> {
+    let record = json!({
+        "phase": phase,
+        "harness": harness,
+        "session_id": session_id,
+        "started_at": started_at,
+        "effort": effort,
+        "merge_grant": merge_grant,
+    });
+    let mut found = false;
+    mutate(store, "session_append", |rows| {
+        for row_json in rows.iter_mut() {
+            if crate::graph_store::entry_id(row_json) != Some(node_id) {
+                continue;
+            }
+            found = true;
+            let Some(obj) = row_json.as_object_mut() else {
+                return Ok(false);
+            };
+            let sessions = obj
+                .entry("sessions".to_string())
+                .or_insert_with(|| Value::Array(vec![]));
+            if !sessions.is_array() {
+                *sessions = Value::Array(vec![]);
+            }
+            let already = sessions.as_array().unwrap().iter().any(|r| {
+                r.get("phase").and_then(Value::as_str) == Some(phase)
+                    && r.get("session_id").and_then(Value::as_str) == Some(session_id)
+            });
+            if already {
+                return Ok(false);
+            }
+            sessions.as_array_mut().unwrap().push(record.clone());
+            return Ok(true);
+        }
+        Ok(false)
+    })?;
+    Ok(found)
+}
+
 pub fn session_end(
     store: &Store,
     id: &str,

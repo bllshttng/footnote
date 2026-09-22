@@ -2448,6 +2448,8 @@ def restamp_harness_session_id(
         return entries
 
     update_registry(_updater, path=registry_path)
+    for filled in restamped:
+        _flush_pending_session_row(filled, session_id)
     return restamped[0] if restamped else None
 
 
@@ -2591,6 +2593,20 @@ SESSION_OBSERVATION_OUTCOMES = (
     "succession",  # a dead predecessor retired; the primary advanced to B
     "branch",  # a live predecessor kept its row; B minted its own
 )
+
+
+def _flush_pending_session_row(entry: AgentEntry, session_id: str) -> None:
+    """Hand a parked row to the fno-agents binary; it opens and clears."""
+    if not entry.pending_session_row:
+        return
+    from fno.rust_binary import verb_call
+
+    try:
+        verb_call("pending-session-row", {
+            "action": "open", "name": entry.name, "session_id": session_id,
+        })
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the stamp
+        print(f"registry: deferred row open skipped: {exc}", file=sys.stderr)
 
 
 def record_session_observation(
@@ -2783,6 +2799,8 @@ def record_session_observation(
     outcome = (
         "primary" if observed[0].harness_session_id == session_id else "related"
     )
+    if outcome == "primary":
+        _flush_pending_session_row(observed[0], session_id)
     return observed[0], outcome
 
 

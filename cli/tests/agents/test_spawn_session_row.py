@@ -227,11 +227,12 @@ def test_stamp_duplicate_fill_keeps_one_row(workdir_claude, resolvable_uuid) -> 
     assert rows[0]["session_id"] == FULL_UUID
 
 
-def test_spawn_without_uuid_skips_named(workdir_claude) -> None:
-    """No resolvable full uuid (the autouse stub answers None): no row, named
-    skip. The message names a review verb, so the x-007c label gate passes and
-    this exercises the uuid-miss skip, not the refusal."""
+def test_spawn_without_uuid_parks_the_row(workdir_claude) -> None:
+    """No resolvable full uuid (the autouse stub answers None): no node row
+    opens at spawn, and the owed payload parks on the worker's registry row
+    for SessionStart's first id observation to open. The spawn stays silent."""
     from fno.agents.cli import agents_app
+    from fno.agents.registry import load_registry
 
     result = CliRunner().invoke(
         agents_app,
@@ -243,7 +244,23 @@ def test_spawn_without_uuid_skips_named(workdir_claude) -> None:
     )
     assert result.exit_code == 0, result.output
     assert _node_rows() == []
-    assert "session row open skipped" in result.stderr
+    assert "session row open skipped" not in result.stderr
+    row = next(r for r in load_registry() if r.name == "nouuid-worker")
+    assert row.pending_session_row == {"phase": "review", "merge_grant": None}
+
+
+def test_stamp_no_worker_name_skips_named(workdir_claude, capsys) -> None:
+    """With no worker_name there is no registry row to park on: today's named
+    skip, and nothing written."""
+    from fno.agents.cli import _stamp_spawned_session_row
+
+    _stamp_spawned_session_row(
+        node=NODE, message="", phase="review",
+        worker_name=None, worker_harness="claude",
+        worker_session_uuid=None,
+    )
+    assert "session row open skipped" in capsys.readouterr().err
+    assert _node_rows() == []
 
 
 # ---------------------------------------------------------------------------

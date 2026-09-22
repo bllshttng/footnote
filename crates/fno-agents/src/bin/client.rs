@@ -183,6 +183,13 @@ fn main() {
     if args.first().map(String::as_str) == Some("worktree-reapable") {
         std::process::exit(fno_agents::worktree_reapable::run_client(&args[1..]));
     }
+    // `pending-session-row`: the deferred sessions-row park and open (see
+    // pending_session_row.rs). Transport-only like worktree-reapable; Python's
+    // `verb_call` is the caller (spawn_lineage and the registry flush), and it
+    // registers no client action (the shrink law allows none).
+    if args.first().map(String::as_str) == Some("pending-session-row") {
+        std::process::exit(fno_agents::pending_session_row::run(&args[1..]));
+    }
     // hooks/context-run.sh is the only caller.
     if args.first().map(String::as_str) == Some("context-run") {
         std::process::exit(fno_agents::context_run::run_context_run(&args[1..]));
