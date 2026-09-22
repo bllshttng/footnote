@@ -296,7 +296,7 @@ mod tests {
         // the squad-cwd-basename fallback decides the node id.
         core.session.add_squad(
             1,
-            vec!["/tmp/worktrees/x-aff6".into()],
+            vec!["/tmp/worktrees/x-cccc".into()],
             None,
             Tab {
                 name: None,
@@ -317,8 +317,8 @@ mod tests {
             },
         );
         let (node, cwd) = core.pane_touch_provenance(7);
-        assert_eq!(node.as_deref(), Some("x-aff6"));
-        assert_eq!(cwd.as_deref(), Some("/tmp/worktrees/x-aff6"));
+        assert_eq!(node.as_deref(), Some("x-cccc"));
+        assert_eq!(cwd.as_deref(), Some("/tmp/worktrees/x-cccc"));
         // Unshaped basename: no node (the emit carries resolution=failed,
         // never a drop - AC4-FR), but the squad cwd still routes the event.
         let (node, cwd) = core.pane_touch_provenance(8);
@@ -349,7 +349,7 @@ mod tests {
             "ok",
             Some("ccccdddd-1111-2222-3333-444455556666"),
             Some("claude"),
-            Some("t-x-1f9f-worker"),
+            Some("t-cccc-worker"),
         );
         assert_eq!(row["type"], "operator_submit");
         assert_eq!(row["source"], "daemon");
@@ -363,7 +363,7 @@ mod tests {
             "ccccdddd-1111-2222-3333-444455556666"
         );
         assert_eq!(data["harness"], "claude");
-        assert_eq!(data["fno_id"], "t-x-1f9f-worker");
+        assert_eq!(data["fno_id"], "t-cccc-worker");
         assert!(
             data["submit_ms"].as_u64().is_some(),
             "submit_ms is the millisecond join key"
@@ -394,7 +394,7 @@ mod tests {
             cwd: "/fixture".into(),
             mux: Some(("test".into(), pane)),
             harness: Some("claude".into()),
-            session_id: Some("t-x-1f9f-worker".into()),
+            session_id: Some("t-cccc-worker".into()),
             harness_session_id: Some("ccccdddd-1111-2222-3333-444455556666".into()),
             ..Default::default()
         }];
@@ -455,7 +455,7 @@ mod tests {
             "ccccdddd-1111-2222-3333-444455556666"
         );
         assert_eq!(data["harness"], "claude");
-        assert_eq!(data["fno_id"], "t-x-1f9f-worker");
+        assert_eq!(data["fno_id"], "t-cccc-worker");
 
         std::env::remove_var("FNO_AGENTS_HOME");
         drop(guard);
