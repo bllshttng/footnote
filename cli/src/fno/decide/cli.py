@@ -334,8 +334,8 @@ def _record(
     # recoverable exactly like one that does.
     if result["node_id"] is None:
         typer.echo(
-            f"decide: recorded {did}; subject names no graph node, so no "
-            f"projection was written (the event and the index are the record). "
+            f"decide: recorded {did}; no projection was written because "
+            f"{result['projection']} (the event and the index are the record). "
             f"Recover with: fno backlog decisions {subject}",
             err=True,
         )
