@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -635,6 +636,120 @@ def test_live_root_pids_attributes_routed_row_through_roster_pid(monkeypatch) ->
     )
 
     assert doctor_footprint._live_root_pids() == ({903}, None)
+
+
+def test_live_root_pids_reads_the_roster_after_lsof_spends_the_deadline(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="alive123",
+        name="hosted",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+
+    def spend_deadline(**_kwargs):
+        time.sleep(0.05)
+        return {}
+
+    monkeypatch.setattr("fno.agents.session_procs.bg_socket_pid_map", spend_deadline)
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: {"alive123": 903}
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: pid == 903,
+    )
+
+    roots, error = doctor_footprint._live_root_pids(
+        deadline=time.monotonic() + 0.01
+    )
+
+    assert roots == {903}
+    assert error is None
+
+
+def test_live_root_pids_skips_lsof_but_reads_the_roster_on_a_spent_deadline(
+    monkeypatch,
+) -> None:
+    from fno import doctor_footprint
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="alive123",
+        name="hosted",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("lsof called")),
+    )
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: {"alive123": 903}
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: pid == 903,
+    )
+
+    roots, error = doctor_footprint._live_root_pids(deadline=time.monotonic() - 1)
+
+    assert roots == {903}
+    assert error is None
+
+
+def test_live_root_pids_names_a_blind_sweep_and_an_unreadable_roster(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="alive123",
+        name="hosted",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: None
+    )
+
+    roots, error = doctor_footprint._live_root_pids(deadline=time.monotonic() - 1)
+
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "bg-socket resolution timed out" in error.text
+    assert "(roster oracle unavailable)" in error.text
+
+
+def test_live_root_pids_keeps_a_socket_blind_row_absent_from_the_roster(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="alive123",
+        name="hosted",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: {}
+    )
+
+    roots, error = doctor_footprint._live_root_pids(deadline=time.monotonic() - 1)
+
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "1 bg-socket row(s)" in error.text
+    assert "bg-socket resolution timed out" in error.text
 
 
 def test_live_root_pids_joins_a_full_uuid_short_id_through_the_derived_key(
