@@ -69,7 +69,7 @@ fn run_git(
 }
 
 /// Currently-conflicting paths: `git diff --name-only --diff-filter=U`.
-fn conflict_files(git_bin: &str, cwd: &Path) -> Vec<String> {
+pub(crate) fn conflict_files(git_bin: &str, cwd: &Path) -> Vec<String> {
     let (_, out, _) = match run_git(
         git_bin,
         &["diff", "--name-only", "--diff-filter=U"],
