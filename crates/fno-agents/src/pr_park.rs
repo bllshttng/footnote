@@ -230,11 +230,11 @@ fn node_for(entries: &[Value], slug: &str, pr: u64) -> (String, String) {
     (String::new(), String::new())
 }
 
-/// The newest `merge_grant_execution` row for this PR in the journal tail,
-/// or the newest err-log line naming it, or empty. Both reads are bounded:
-/// the journal grows without limit and the king reads this list every beat.
+/// The newest `merge_grant_execution` row for this PR in the store, or the
+/// newest err-log line naming it, or empty. Both reads are bounded: the
+/// keyed store query is indexed, and the king reads this list every beat.
 fn reason_detail(paths: &Paths, pr: u64) -> String {
-    if let Some(detail) = tail_detail(&paths.events, pr, &["merge_grant_execution"], |data| {
+    if let Some(detail) = grant_detail(&paths.events, pr, |data| {
         let mut bits = Vec::new();
         if let Some(p) = data.get("phase").and_then(Value::as_str) {
             bits.push(p.to_string());
@@ -249,7 +249,7 @@ fn reason_detail(paths: &Paths, pr: u64) -> String {
     }) {
         return detail;
     }
-    tail_detail(&paths.err_log, pr, &[], |data| {
+    tail_detail(&paths.err_log, pr, |data| {
         data.get("reason")
             .and_then(Value::as_str)
             .unwrap_or_default()
@@ -258,14 +258,31 @@ fn reason_detail(paths: &Paths, pr: u64) -> String {
     .unwrap_or_default()
 }
 
-/// The newest JSON line naming `pr` whose `type` (when `kinds` is non-empty)
-/// is in `kinds`, mapped through `pick`. Reads at most the last 1 MiB.
-fn tail_detail(
-    path: &Path,
-    pr: u64,
-    kinds: &[&str],
-    pick: impl Fn(&Value) -> String,
-) -> Option<String> {
+/// The newest committed `merge_grant_execution` row for `pr`, mapped through
+/// `pick`; the first non-empty detail wins (newest first).
+fn grant_detail(events: &Path, pr: u64, pick: impl Fn(&Value) -> String) -> Option<String> {
+    let q = crate::event_store::EventQuery {
+        types: vec!["merge_grant_execution".into()],
+        pr_number: Some(pr as i64),
+        ..Default::default()
+    };
+    let rows = crate::event_store::query_events(events, &q).ok()?;
+    for row in rows.iter().rev() {
+        let Ok(Value::Object(entry)) = serde_json::from_str::<Value>(&row.line) else {
+            continue;
+        };
+        let data = entry.get("data").cloned().unwrap_or(entry.clone().into());
+        let detail = pick(&data);
+        if !detail.is_empty() {
+            return Some(detail);
+        }
+    }
+    None
+}
+
+/// The newest JSON line naming `pr` in the err-log tail, mapped through
+/// `pick`. Reads at most the last 1 MiB.
+fn tail_detail(path: &Path, pr: u64, pick: impl Fn(&Value) -> String) -> Option<String> {
     let Ok(meta) = std::fs::metadata(path) else {
         return None;
     };
@@ -280,9 +297,6 @@ fn tail_detail(
         let Ok(Value::Object(row)) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
-        if !kinds.is_empty() && !kinds.iter().any(|k| row.get("type") == Some(&json!(k))) {
-            continue;
-        }
         let data = row.get("data").cloned().unwrap_or(row.clone().into());
         if data.get("pr").and_then(Value::as_u64) != Some(pr) {
             continue;

@@ -325,9 +325,11 @@ fn expand_tilde(p: &Path) -> PathBuf {
 }
 
 /// Read every journal into raw envelope rows with the input-integrity
-/// coverage the Python fold reported. A missing journal is a positive zero;
-/// unreadable ones and malformed lines surface in the coverage.
-fn read_journals(paths: &[PathBuf]) -> (Vec<Value>, Coverage) {
+/// coverage the Python fold reported. A path with neither a live file nor a
+/// store is a positive zero; unreadable ones and malformed lines surface in
+/// the coverage. The store read is windowed by the `--since` cutoff, so the
+/// read covers the window and not the whole history.
+fn read_journals(paths: &[PathBuf], cutoff_ms: i64) -> (Vec<Value>, Coverage) {
     let mut rows = Vec::new();
     let mut seen_events: HashSet<String> = HashSet::new();
     let mut seen_paths: HashSet<PathBuf> = HashSet::new();
@@ -341,11 +343,18 @@ fn read_journals(paths: &[PathBuf]) -> (Vec<Value>, Coverage) {
             continue;
         }
         let key_str = key.display().to_string();
-        if !expanded.exists() {
+        if !expanded.exists() && !crate::event_store::store_path(&expanded).exists() {
             path_coverage.push(json!({"path": key_str, "status": "missing", "malformed_lines": 0}));
             continue;
         }
-        let content = match std::fs::read_to_string(&expanded) {
+        let content = match crate::event_store::journal_text_checked(
+            &expanded,
+            &crate::event_store::EventQuery {
+                since_ms: Some(cutoff_ms),
+                include_rejected: true,
+                ..Default::default()
+            },
+        ) {
             Ok(c) => c,
             Err(e) => {
                 unreadable_paths += 1;
@@ -777,7 +786,7 @@ the Python surface resolves the journal defaults",
             return EXIT_NO_SUCH_TOPIC;
         }
     };
-    let (raw_rows, cov) = read_journals(&events);
+    let (raw_rows, cov) = read_journals(&events, cutoff.timestamp_millis());
     let (mut rows, coverage) = filter_since(raw_rows, cutoff, cov);
     ordered(&mut rows);
     let sessions = sessions_map(&rows);
@@ -1111,13 +1120,43 @@ mod tests {
             ),
         )
         .unwrap();
-        let (raw, cov) = read_journals(&[journal]);
+        let (raw, cov) = read_journals(
+            &[journal],
+            parse_since("2026-09-01").unwrap().timestamp_millis(),
+        );
         let cutoff = parse_since("2026-09-01").unwrap();
         let (rows, coverage) = filter_since(raw, cutoff, cov);
         assert_eq!(rows.len(), 2);
         assert_eq!(coverage.malformed_lines, 1);
         assert_eq!(coverage.invalid_timestamps, Some(2));
         assert!(!coverage.complete);
+    }
+
+    #[test]
+    fn evals_reads_a_store_committed_row_inside_the_window() {
+        // AC9-EVALS: a store-only termination shows up on the leaderboard,
+        // and an imported live line reads once, never twice.
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("events.jsonl");
+        let cutoff = parse_since("1h").unwrap();
+        let ts = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let line = json!({
+            "ts": ts, "type": "termination", "source": "hook", "data": {"reason": "NoProgress"}
+        })
+        .to_string();
+        crate::event_store::append_envelope(&journal, &line, None).unwrap();
+        let (raw, cov) = read_journals(&[journal.clone()], cutoff.timestamp_millis());
+        let (rows, coverage) = filter_since(raw, cutoff, cov);
+        assert!(coverage.complete);
+        let board = build_leaderboard(&rows, false);
+        assert!(
+            board.iter().any(|(p, _)| p == "termination:NoProgress"),
+            "the store-only termination pattern is on the board"
+        );
+        std::fs::write(&journal, format!("{line}\n")).unwrap();
+        let (raw, cov) = read_journals(&[journal], cutoff.timestamp_millis());
+        let (rows, _) = filter_since(raw, cutoff, cov);
+        assert_eq!(rows.len(), 1, "the imported live line reads once");
     }
 
     #[test]
