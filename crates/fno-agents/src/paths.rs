@@ -94,23 +94,26 @@ pub(crate) fn pin_test_claims_root(dir: &std::path::Path) {
 ///
 /// Both raw and canonical forms of the temp dir are compared: macOS reports it
 /// as `/var/folders/...` while `canonicalize` yields `/private/var/...`.
-fn fence_declared_root(claimed: bool, root: &Path) {
-    if !cfg!(test) || !claimed {
-        return;
-    }
+pub(crate) fn under_temp_dir(path: &Path) -> bool {
     let tmp = std::env::temp_dir();
     let tmp_forms = [
         std::fs::canonicalize(&tmp).unwrap_or_else(|_| tmp.clone()),
         tmp,
     ];
     let root_forms = [
-        std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
-        root.to_path_buf(),
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
+        path.to_path_buf(),
     ];
-    if root_forms
+    root_forms
         .iter()
         .any(|r| tmp_forms.iter().any(|t| r.starts_with(t)))
-    {
+}
+
+fn fence_declared_root(claimed: bool, root: &Path) {
+    if !cfg!(test) || !claimed {
+        return;
+    }
+    if under_temp_dir(root) {
         return;
     }
     panic!(

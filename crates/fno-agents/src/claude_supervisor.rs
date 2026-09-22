@@ -105,6 +105,25 @@ where
         .map(|(_, v)| PathBuf::from(v))
 }
 
+fn addressed_config_dir(overlay_dir: Option<&Path>) -> Option<PathBuf> {
+    if let Some(dir) = overlay_dir {
+        return Some(dir.to_path_buf());
+    }
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        if !dir.to_string_lossy().trim().is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude"))
+}
+
+fn birth_allowed(hermetic: bool, config_dir: Option<&Path>, claude_bin: Option<&Path>) -> bool {
+    if claude_bin.is_some_and(crate::paths::under_temp_dir) {
+        return true;
+    }
+    !hermetic && !config_dir.is_some_and(crate::paths::under_temp_dir)
+}
+
 fn supervisor_birth_command(config_dir: Option<&Path>) -> std::process::Command {
     let mut cmd = std::process::Command::new("claude");
     cmd.args(["daemon", "run"]);
@@ -192,13 +211,44 @@ fn wait_for_supervisor(config_dir: Option<&Path>) -> bool {
 ///
 /// Every failure degrades to silence and lets the client run: a guard that
 /// refused here would break a working lane over a condition the client cannot
-/// fix from inside itself.
+/// fix from inside itself. Test-owned temp config dirs are refused before the
+/// probe because no process owns the detached supervisor after the test exits.
 pub fn guard_birth<'a, I>(overlay: I)
 where
     I: IntoIterator<Item = (&'a str, &'a str)>,
 {
     let config_dir = overlay_config_dir(overlay);
     let config_dir = config_dir.as_deref();
+    if cfg!(test) {
+        return;
+    }
+    let addressed_dir = addressed_config_dir(config_dir);
+    let hermetic = std::env::var("FNO_TEST_HERMETIC").ok().as_deref() == Some("1");
+    let claude_bin = crate::loop_dispatch::which_binary("claude");
+    if !birth_allowed(hermetic, addressed_dir.as_deref(), claude_bin.as_deref()) {
+        let dir = addressed_dir
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let binary = claude_bin
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<not found>".to_string());
+        if hermetic
+            && !addressed_dir
+                .as_deref()
+                .is_some_and(crate::paths::under_temp_dir)
+        {
+            eprintln!(
+                "fno: no claude supervisor born for {dir}: hermetic test run does not own a real supervisor"
+            );
+        } else {
+            eprintln!(
+                "fno: no claude supervisor born for {dir}: it lies under the temp dir and {binary} is not a test fixture, so nothing would own it"
+            );
+        }
+        return;
+    }
     if supervisor_running(config_dir) {
         return;
     }
@@ -373,5 +423,46 @@ mod tests {
         // a blank overlay value is no dir
         let got = overlay_config_dir([("CLAUDE_CONFIG_DIR", "  ")]);
         assert_eq!(got, None);
+    }
+
+    #[test]
+    fn a_temp_config_dir_refuses_a_real_binary() {
+        let config_dir = std::env::temp_dir().join("fno-supervisor-test/.claude");
+        let claude_bin = Path::new("/usr/local/bin/claude");
+
+        assert!(!birth_allowed(false, Some(&config_dir), Some(claude_bin)));
+    }
+
+    #[test]
+    fn a_temp_fixture_binary_still_births() {
+        let config_dir = std::env::temp_dir().join("fno-supervisor-test/.claude");
+        let claude_bin = std::env::temp_dir().join("fno-supervisor-test/bin/claude");
+
+        assert!(birth_allowed(false, Some(&config_dir), Some(&claude_bin)));
+    }
+
+    #[test]
+    fn a_real_config_dir_keeps_the_guard() {
+        let config_dir = Path::new("/Users/someone/.claude");
+        let claude_bin = Path::new("/usr/local/bin/claude");
+
+        assert!(birth_allowed(false, Some(config_dir), Some(claude_bin)));
+    }
+
+    #[test]
+    fn no_claude_on_path_under_a_temp_dir_is_refused() {
+        let config_dir = std::env::temp_dir().join("fno-supervisor-test/.claude");
+
+        assert!(!birth_allowed(false, Some(&config_dir), None));
+    }
+
+    #[test]
+    fn a_hermetic_run_refuses_a_real_binary_for_a_real_dir() {
+        let config_dir = Path::new("/Users/someone/.claude");
+        let claude_bin = Path::new("/usr/local/bin/claude");
+        let fixture_bin = std::env::temp_dir().join("fno-supervisor-test/bin/claude");
+
+        assert!(!birth_allowed(true, Some(config_dir), Some(claude_bin)));
+        assert!(birth_allowed(true, Some(config_dir), Some(&fixture_bin)));
     }
 }
