@@ -869,7 +869,14 @@ pub(crate) async fn launcher_keys(
                         l.picker = Some(picker);
                     }
                     LKey::Enter => {
-                        let action = picker.actions.get(picker.popup.sel).cloned().flatten();
+                        // sel indexes the popup's SELECTABLE targets (headers,
+                        // rules and greyed rows are skipped); the commit
+                        // action lives at the ROW index those targets point
+                        // at, so resolve through selected(), never raw sel.
+                        let action = picker
+                            .popup
+                            .selected()
+                            .and_then(|(ri, _)| picker.actions.get(ri).cloned().flatten());
                         if let Some(action) = action {
                             apply_picker_action(l, &catalog, action, portal);
                         }
@@ -1159,17 +1166,30 @@ fn clear_unoffered_pins(draft: &mut LaunchDraft, catalog: &Option<CatalogOutcome
             draft.bump();
         }
     }
-    if let Some(efforts) = &row.efforts {
-        if !efforts.is_empty() && !efforts.iter().any(|e| *e == draft.effort) {
+    // A missing axis (None) clears any pin outright: the new harness has no
+    // surface for it, so the value is stale by definition. Some([]) keeps
+    // free text; a filled list keeps only its own values.
+    match &row.efforts {
+        Some(efforts) if !efforts.is_empty() && !efforts.iter().any(|e| *e == draft.effort) => {
             draft.effort.clear();
             draft.bump();
         }
+        None => {
+            draft.effort.clear();
+            draft.bump();
+        }
+        _ => {}
     }
-    if let Some(modes) = &row.permission_modes {
-        if !modes.is_empty() && !modes.iter().any(|m| *m == draft.permission) {
+    match &row.permission_modes {
+        Some(modes) if !modes.is_empty() && !modes.iter().any(|m| *m == draft.permission) => {
             draft.permission.clear();
             draft.bump();
         }
+        None => {
+            draft.permission.clear();
+            draft.bump();
+        }
+        _ => {}
     }
 }
 
@@ -1291,7 +1311,12 @@ pub(crate) async fn load_catalog() -> CatalogOutcome {
                     models_err = None;
                     map
                 }
-                None => std::collections::HashMap::new(),
+                // The read succeeded but carried no model list: name the
+                // shape, not the transport.
+                None => {
+                    models_err = Some("routing inventory response unreadable".to_string());
+                    std::collections::HashMap::new()
+                }
             }
         }
         _ => std::collections::HashMap::new(),

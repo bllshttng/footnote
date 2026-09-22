@@ -1136,6 +1136,34 @@ fn typing_in_an_open_picker_filters_the_rows() {
 }
 
 #[test]
+fn enter_commits_the_highlighted_row_under_an_active_filter() {
+    // The picker's sel indexes SELECTABLE targets (the filter header is
+    // skipped); Enter must resolve the commit through the row that target
+    // points at. The regression: actions.get(sel) read the header's None and
+    // the highlighted codex row never committed.
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true), ("codex", true, true)]);
+    sync_catalog(&mut v);
+    let mut l = v.launcher.take().unwrap();
+    l.focus = Focus::Harness;
+    assert!(super::agent_launcher::open_picker(&mut l, &v));
+    v.launcher = Some(l);
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    // `co` leaves header + codex; the selection sits on codex (target 0).
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"co", &mut sock).await;
+    });
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, &[0x0d], &mut sock).await;
+    });
+    let l = v.launcher.as_ref().unwrap();
+    assert!(l.picker.is_none(), "Enter commits and closes the picker");
+    assert_eq!(l.draft.harness(), "codex", "the highlighted row committed");
+}
+
+#[test]
 fn at_opens_the_node_picker_and_picking_inserts_the_id() {
     // Change 7: `@` in the message opens a node picker over the layout's
     // backlog cards; the glyph never lands in the draft; the pick inserts

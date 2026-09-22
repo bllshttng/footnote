@@ -816,6 +816,46 @@ mod tests {
                 && argv.contains(&"glm-5.3-flash[1m]".to_string()),
             "the model id rides: {argv:?}"
         );
+        // Thread new tab: the placement rides --tab new through the
+        // request's portal, beside the explicit thread lane.
+        let new_tab = AgentLaunchRequest {
+            request_id: 4,
+            revision: 1,
+            cwd: "/tmp/p4".into(),
+            harness: "claude".into(),
+            substrate: "thread".into(),
+            model: None,
+            model_names_harness: false,
+            effort: None,
+            permission_mode: None,
+            placement: Some("new".into()),
+            portal: Some(2),
+            split: None,
+            message: String::new(),
+        };
+        assert_eq!(
+            launch_spawn_argv("fno", &new_tab, "s"),
+            vec![
+                "fno",
+                "agents",
+                "spawn",
+                "--harness",
+                "claude",
+                "--cwd",
+                "/tmp/p4",
+                "--substrate",
+                "thread",
+                "--mux-session",
+                "s",
+                "--no-wait",
+                "--tab",
+                "new",
+                "--portal",
+                "2",
+                "--prompt-file",
+                "-",
+            ]
+        );
     }
 
     #[test]
