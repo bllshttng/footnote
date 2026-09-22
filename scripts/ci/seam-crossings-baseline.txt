@@ -71,15 +71,15 @@ crossing	crates/fno/src/needs_overlay.rs	122	let mut command = crate::process_ad
 crossing	crates/fno/src/needs_overlay.rs	144	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
 crossing	crates/fno/src/needs_overlay.rs	209	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
 crossing	crates/fno/src/needs_overlay.rs	257	let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
-crossing	crates/fno/src/server.rs	2272	pub(crate) fn fno_bin() -> PathBuf {
-crossing	crates/fno/src/server.rs	2313	let mut command = crate::process_admission::std_command(fno_bin());
-crossing	crates/fno/src/server.rs	2460	let mut command = crate::process_admission::tokio_command(fno_bin());
-crossing	crates/fno/src/server.rs	2492	let mut command = crate::process_admission::tokio_command(fno_bin());
-crossing	crates/fno/src/server.rs	10073	let mut cmd = crate::process_admission::tokio_command(fno_bin());
-crossing	crates/fno/src/server.rs	10167	let mut command = crate::process_admission::tokio_command(fno_bin());
+crossing	crates/fno/src/server.rs	2247	pub(crate) fn fno_bin() -> PathBuf {
+crossing	crates/fno/src/server.rs	2288	let mut command = crate::process_admission::std_command(fno_bin());
+crossing	crates/fno/src/server.rs	2435	let mut command = crate::process_admission::tokio_command(fno_bin());
+crossing	crates/fno/src/server.rs	2467	let mut command = crate::process_admission::tokio_command(fno_bin());
+crossing	crates/fno/src/server.rs	10051	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/server/agent_actions.rs	428	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/server/agent_launch.rs	33	let fno = super::fno_bin().display().to_string();
 crossing	crates/fno/src/server/agent_launch.rs	293	let fno = super::fno_bin().display().to_string();
+crossing	crates/fno/src/server/human_input.rs	157	let mut cmd = crate::process_admission::tokio_command(super::fno_bin());
 crossing	crates/fno/src/yard_overlay.rs	49	fn fno_bin() -> PathBuf {
 crossing	crates/fno/src/yard_overlay.rs	50	crate::server::fno_bin()
 crossing	crates/fno/src/yard_overlay.rs	57	let mut command = crate::process_admission::tokio_command(fno_bin());
@@ -108,5 +108,5 @@ resolver	crates/fno-agents/src/scrape.rs	174	pub fn fno_bin() -> std::ffi::OsStr
 resolver	crates/fno-agents/src/scrape.rs	212	fn fno_py_in_tools_dir(base: &std::path::Path) -> Option<std::path::PathBuf> {
 resolver	crates/fno/src/bootstrap.rs	1116	fn diagnose_locate_failure() -> Option<String> {
 resolver	crates/fno/src/mux_cli.rs	4924	fn prepare_pane_bytes(
-resolver	crates/fno/src/server.rs	2272	pub(crate) fn fno_bin() -> PathBuf {
+resolver	crates/fno/src/server.rs	2247	pub(crate) fn fno_bin() -> PathBuf {
 resolver	crates/fno/src/squad_store_tests.rs	1580	fn build_tree_marker_detection_is_pure_over_path() {
