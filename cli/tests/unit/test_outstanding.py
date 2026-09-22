@@ -345,6 +345,8 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
             "index",
             "--option",
             "journal",
+            "--node",
+            "x-one",
             "--blocks",
             "x-one",
             "--blocks",
@@ -462,12 +464,14 @@ class TestAskReceiptNamesVisibility:
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
         """AC10-EDGE (x-0dc5): the receipt is best-effort side work; a broken
-        read never fails the durable write."""
+        read never fails the durable write. The position read now lives in the
+        Rust intake, so the seam here is the transport answer, which may name
+        no position at all."""
 
-        def broken(*_a, **_k):
-            raise RuntimeError("index unreadable")
+        def positionless(*_a, **_k):
+            return {"qid": "q-positionless", "exit_code": 0, "truncated": False}
 
-        monkeypatch.setattr("fno.outstanding.core.read_open_questions", broken)
+        monkeypatch.setattr("fno.rust_binary.verb_call", positionless)
         result = runner.invoke(outstanding_app, ["ask", "record me anyway"])
 
         assert result.exit_code == 0, result.output

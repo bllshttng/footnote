@@ -24,6 +24,15 @@ const SECTION_OPTIONS: &str = "Options";
 const SECTION_RECOMMENDATION: &str = "Recommendation";
 const SECTION_ON_DEADLINE: &str = "If no answer by the deadline";
 const NEXT_SPLIT: &str = "What happens next:";
+// Question-file sections (the ask intake reads them; escalation notes leave
+// them empty). Names match docs/architecture/attention-items.md.
+const SECTION_BLOCKED_BECAUSE: &str = "Blocked because";
+const SECTION_WHY_THESE: &str = "Why these options";
+const SECTION_DOWNSIDE: &str = "Downside";
+const SECTION_UNKNOWNS: &str = "Not thought through";
+const SECTION_REVERSIBLE: &str = "Reversible";
+const SECTION_COST_IF_WRONG: &str = "Cost if wrong";
+const SECTION_MEANWHILE: &str = "Meanwhile";
 
 #[derive(Default, Clone, PartialEq, Debug)]
 pub struct EscalationOption {
@@ -49,6 +58,14 @@ pub struct Escalation {
     pub options: Vec<EscalationOption>,
     pub recommendation: String,
     pub on_deadline: String,
+    // Question-file context fields; empty for an escalation note.
+    pub blocked_because: String,
+    pub options_rationale: String,
+    pub downside: String,
+    pub unknowns: String,
+    pub reversible: String,
+    pub cost_if_wrong: String,
+    pub meanwhile: String,
 }
 
 /// The project's escalations directory: `<vault>/internal/<project>/escalations`
@@ -126,6 +143,13 @@ pub fn parse(text: &str) -> Escalation {
     esc.options = parse_options(&section(SECTION_OPTIONS));
     esc.recommendation = section(SECTION_RECOMMENDATION);
     esc.on_deadline = section(SECTION_ON_DEADLINE);
+    esc.blocked_because = section(SECTION_BLOCKED_BECAUSE);
+    esc.options_rationale = section(SECTION_WHY_THESE);
+    esc.downside = section(SECTION_DOWNSIDE);
+    esc.unknowns = section(SECTION_UNKNOWNS);
+    esc.reversible = section(SECTION_REVERSIBLE);
+    esc.cost_if_wrong = section(SECTION_COST_IF_WRONG);
+    esc.meanwhile = section(SECTION_MEANWHILE);
     esc
 }
 

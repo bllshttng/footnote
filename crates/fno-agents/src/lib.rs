@@ -248,6 +248,7 @@ pub mod provider_cap;
 pub mod provider_cap_verbs;
 pub mod publish_review;
 pub mod quarantine;
+pub mod question_intake;
 pub mod question_sweep;
 pub mod quiet_retire;
 pub mod readiness;
