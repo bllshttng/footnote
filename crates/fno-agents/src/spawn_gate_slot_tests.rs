@@ -31,12 +31,10 @@ fn slot_refusal_line_names_the_release_remedy() {
         "the clause keeps the reason template: {line}"
     );
 
-    // All-live reservations still get a name (the first counted).
+    // All-live reservations name no remedy: releasing a live worker's slot
+    // would leave it running uncounted.
     let line = slot_refusal_line(4, 3, 3, &[live], 0, "tail.");
-    assert!(
-        line.contains("fno agents claim release worker:w-res --force"),
-        "{line}"
-    );
+    assert!(!line.contains("claim release"), "{line}");
 
     // Registry-only saturation names no remedy.
     let line = slot_refusal_line(3, 3, 3, &[], 0, "tail.");

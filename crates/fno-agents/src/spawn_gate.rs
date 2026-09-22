@@ -599,7 +599,7 @@ pub(crate) fn slot_reading(
 /// its own tail (`refusing (--no-wait).`, or the queue line's advice). The
 /// rows are named by the probe's `slot_rows` field (`fno agents gate-status`),
 /// never by a second walk. When a reservation is counted, the sentence names
-/// the release verb for the first suspect one (else the first counted).
+/// the release verb for the first suspect one; all-live saturation names none.
 fn slot_refusal_line(
     slots: usize,
     cap: usize,
@@ -613,11 +613,10 @@ fn slot_refusal_line(
     } else {
         String::new()
     };
-    let remedy = match claims
-        .iter()
-        .find(|r| r.state == "suspect")
-        .or_else(|| claims.first())
-    {
+    // Name the remedy only for a SUSPECT reservation: a live one still holds
+    // its slot on purpose, and releasing it would leave the worker running
+    // uncounted. All-live saturation names no release target.
+    let remedy = match claims.iter().find(|r| r.state == "suspect") {
         Some(r) => format!(
             "; free a dead reservation: fno agents claim release worker:{} --force \
              --reason \"<why>\"",
