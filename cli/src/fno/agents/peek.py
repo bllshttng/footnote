@@ -122,7 +122,6 @@ def _records_from_jsonl(
     Streams line-by-line into a bounded deque so memory stays O(n). A torn or
     non-JSON line (mid-write tail, AC2-EDGE) is skipped, never raised. ``n`` of
     0 or negative returns ``[]``; ``None`` returns every record.
-
     Seeks to the last ``_TAIL_BYTES``, reading the whole file when the tail is short.
     """
     import collections
