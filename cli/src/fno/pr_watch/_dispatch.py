@@ -299,6 +299,8 @@ _SPAWN_TIMEOUT_GRACE = 30.0
 # the dispatch (never the scan) and let the next tick re-decide.
 _READ_FLOOR_S = 15.0
 _FIRE_FLOOR_S = 30.0
+# one ritual completion at 96s vs 62 timeouts (2026-09-20/21): a merge needs 100s.
+_RITUAL_FLOOR_S = 100.0
 
 
 def _admission_refused_rcs() -> tuple[int, ...]:
@@ -708,7 +710,7 @@ def _run_tick(
     from fno.pr_watch._state import WatermarkStore, make_watermark_key
 
     gpath = graph_path or default_graph_json()
-    set_tick_phase("discover")
+    set_tick_phase("sweep:discover")
 
     # PR discovery needs the done-at-PR-green grace window (recently closed
     # nodes still watched through merge), which list_open() cannot serve -
@@ -768,7 +770,7 @@ def _run_tick(
     query_keys = batch_keys | candidate_keys
     sweep_failures = 0
     batch_states: dict[str, str] = {}
-    set_tick_phase("sweep")
+    set_tick_phase("sweep:listing")
     if query_keys:
         try:
             # The seam returns (states, sweep_failures): a swallowed repo
@@ -856,6 +858,13 @@ def _run_tick(
     # Rich reads completed: separates "the scan reached nothing" from "the
     # scan found nothing" (scanned=0 alone cannot).
     merge_scan_scanned = 0
+    read_failures = 0
+
+    def _scan_note() -> str:
+        note = f"scanned={merge_scan_scanned} of {len(candidates)}"
+        if read_failures:
+            note += f" read_failed={read_failures}"
+        return note
 
     # GraphQL budget preflight. The dispatch pass below spends gh pr view,
     # which bills the shared per-user GraphQL pool by point cost; with the
@@ -880,7 +889,7 @@ def _run_tick(
             quota_reset=quota_reset,
         )
 
-    set_tick_phase("dispatch")
+    set_tick_phase("sweep:dispatch")
     for cand in candidates:
         pr = cand.pr_number
         slug = cand.repo_slug
@@ -953,13 +962,13 @@ def _run_tick(
                 obs = read_pr_state_fn(cand, reviewers=reviewers)
                 swept.add(key)
                 merge_scan_scanned += 1
-                SCAN_PROGRESS["sweep"] = (
-                    f"scanned={merge_scan_scanned} of {len(candidates)}"
-                )
+                SCAN_PROGRESS["sweep"] = _scan_note()
                 failed.discard(key)
             except ReconcileError as exc:
                 log.warning("pr-watch: gh query failed for PR #%d: %s", pr, exc)
                 failed.add(key)
+                read_failures += 1
+                SCAN_PROGRESS["sweep"] = _scan_note()
                 stale = state.get(key)
                 if isinstance(stale, dict):
                     stale["last_seen_state"] = "UNKNOWN"
@@ -1065,7 +1074,12 @@ def _run_tick(
                     _mark_handled(delivery_state, key, obs.state)
                 emit("pr_watch_parked", {"pr": pr, "reason": decision.reason})
 
-            elif decision.kind in ("merge", "review") and _ritual_timeout() >= _FIRE_FLOOR_S:
+            elif (
+                decision.kind in ("merge", "review")
+                and _ritual_timeout() >= (
+                    _RITUAL_FLOOR_S if decision.kind == "merge" else _FIRE_FLOOR_S
+                )
+            ):
                 dispatch_ok = False
                 refused = False
                 dispatch_extra: dict[str, Any] = {}
@@ -1478,7 +1492,10 @@ def _default_read_pr_state(
     """
     from fno.pr_watch._discover import read_pr_state
 
-    return read_pr_state(candidate, reviewers=reviewers, timeout_s=timeout_s)
+    # never outlive the slice: the alarm would cut the post-loop persist.
+    return read_pr_state(
+        candidate, reviewers=reviewers, timeout_s=min(timeout_s, max(1.0, _ritual_timeout())),
+    )
 
 
 def _noop_read_state(
