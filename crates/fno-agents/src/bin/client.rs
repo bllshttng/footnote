@@ -386,17 +386,15 @@ async fn run(args: Vec<String>) -> i32 {
     // out of the file-budget-gated Python `fno.decide.evidence` module. Reads
     // one JSON request on stdin (lane, text, reads, root, timeout) and prints
     // one JSON answer on stdout; a refusal is data (`ok: false`), not a
-    // process error. Same `matches!` treatment as `component-verdict` so the
-    // routable-verb parity guard does not see it - no advertised fno verb is
-    // added.
+    // process error. Same `matches!` treatment as `component-verdict`, so no
+    // advertised fno verb is added.
     if matches!(verb, "evidence-gate") {
         return fno_agents::evidence::run_evidence_gate(&args[1..]);
     }
 
     // `law-match` is the hidden binary-direct transport for the question-to-law
-    // matcher. Same `matches!` treatment as `evidence-gate`: it stays
-    // out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the parity guard, so no
-    // advertised fno verb is added.
+    // matcher. Same `matches!` treatment as `evidence-gate`, so no advertised
+    // fno verb is added.
     if matches!(verb, "law-match") {
         return fno_agents::law_match::run_law_match(&args[1..]);
     }
