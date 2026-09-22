@@ -292,13 +292,12 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             .unwrap_or(0);
         let journals = crate::tick_ledger::journals(&home);
         // Arm values ride the read: an arm whose switch is off is a
-        // configuration, and the pager must never wake on its silence.
+        // configuration, and the pager must never wake on its silence. The
+        // values answer for the daemon's own config root, the same root the
+        // thresholds below read.
         let mut rows = {
             let mut rows = crate::tick_ledger::read_arms(&journals, now_unix);
-            crate::tick_ledger::fill_arm_values(
-                &mut rows,
-                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-            );
+            crate::tick_ledger::fill_arm_values(&mut rows, &config_cwd);
             rows
         };
         let trace = crate::tick_ledger::read_tick_trace_live(&journals, &rows, now_unix);

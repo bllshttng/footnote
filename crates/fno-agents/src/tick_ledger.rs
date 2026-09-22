@@ -926,25 +926,26 @@ pub struct LaunchdFold {
     pub dead: Vec<LaunchdLabelFacts>,
 }
 
-/// Run the fold live. `None` off macOS or when `launchctl list` fails.
+/// Run the fold live. `None` off macOS or when `launchctl list` fails or
+/// outlives its 5s bound - a wedged launchctl must not wedge the readout.
 pub fn launchd_fold_live() -> Option<LaunchdFold> {
     if !cfg!(target_os = "macos") {
         return None;
     }
-    let output = std::process::Command::new("launchctl")
-        .arg("list")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(parse_launchctl_list(&String::from_utf8_lossy(
-        &output.stdout,
-    )))
+    let cmd = vec!["launchctl".to_string(), "list".to_string()];
+    let stdout = crate::king_board::budget::run_with_timeout(
+        &cmd,
+        Path::new("."),
+        std::time::Duration::from_secs(5),
+    )
+    .ok()?;
+    Some(parse_launchctl_list(&String::from_utf8_lossy(&stdout)))
 }
 
 /// Pure fold so tests run without launchctl. Loaded = the label appeared in
-/// `launchctl list`; last exit is column 2; a `-` is no measured exit.
+/// `launchctl list`; last exit is column 2; a `-` is no measured exit. The
+/// header row is skipped by name, not by position, so a header-less listing
+/// never loses its first label.
 pub(crate) fn parse_launchctl_list(text: &str) -> LaunchdFold {
     let mut labels: Vec<LaunchdLabelFacts> = LAUNCHD_LABELS
         .iter()
@@ -954,9 +955,9 @@ pub(crate) fn parse_launchctl_list(text: &str) -> LaunchdFold {
             last_exit: None,
         })
         .collect();
-    for line in text.lines().skip(1) {
+    for line in text.lines() {
         let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() < 3 {
+        if cols.len() < 3 || cols[0].trim() == "PID" {
             continue;
         }
         let label = cols[2].trim();
@@ -967,10 +968,9 @@ pub(crate) fn parse_launchctl_list(text: &str) -> LaunchdFold {
     }
     let dead: Vec<LaunchdLabelFacts> = text
         .lines()
-        .skip(1)
         .filter_map(|line| {
             let cols: Vec<&str> = line.split('\t').collect();
-            if cols.len() < 3 {
+            if cols.len() < 3 || cols[0].trim() == "PID" {
                 return None;
             }
             let label = cols[2].trim();

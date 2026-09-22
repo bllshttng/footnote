@@ -1236,10 +1236,12 @@ def _launch_agent_failures() -> dict[str, Any]:
         payload = json.loads(proc.stdout or "{}")
     except ValueError:
         return {"applicable": False, "dead": []}
-    if not isinstance(payload, dict):
+    section = payload.get("launchd") if isinstance(payload, dict) else None
+    if not isinstance(section, dict):
         return {"applicable": False, "dead": []}
-    section = payload.get("launchd") or {}
-    dead = section.get("dead") or []
+    dead = section.get("dead")
+    if not isinstance(dead, list):
+        dead = []
     return {"applicable": bool(section.get("applicable")), "dead": list(dead)}
 
 
