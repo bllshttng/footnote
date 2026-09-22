@@ -1696,6 +1696,8 @@ check_code_index_file() {
             ' <<< "$block")
             status=$(sed -n 's/^[[:space:]]*status:[[:space:]]*//p' <<< "$entry" | head -1)
             fresh=$(sed -n 's/^[[:space:]]*fresh:[[:space:]]*//p' <<< "$entry" | head -1)
+            # finalize re-serializes YAML, so a bare yes or no comes back as true or false.
+            case "$fresh" in true) fresh=yes ;; false) fresh=no ;; esac
             if [[ ! "$status" =~ ^(answered|unavailable|error)$ ]]; then
                 findings+=("provider $rname has no readable status: - set status: answered, unavailable or error")
             fi

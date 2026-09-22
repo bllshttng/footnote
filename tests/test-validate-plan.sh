@@ -1583,6 +1583,28 @@ else
     fail "AC13k: expected the dead-cwd WARN without a present-index ERROR: $CIA_OUT"
 fi
 
+# AC13l/m: finalize re-serializes the frontmatter through PyYAML, where a
+# bare yes round-trips as true, so the gate reads the value finalize wrote.
+PLAN_CIA_L="$CIA_REPO/cia_l.md"
+sed 's/^      fresh: yes$/      fresh: true/' "$PLAN_CIA_A" > "$PLAN_CIA_L"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_CIA_L" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if [[ -z "$CIA_OUT" ]]; then
+    pass "AC13l: a finalized fresh: true leaves the section clean"
+else
+    fail "AC13l: expected a clean section: $CIA_OUT"
+fi
+
+PLAN_CIA_M="$CIA_REPO/cia_m.md"
+sed 's/^      fresh: yes$/      fresh: maybe/' "$PLAN_CIA_A" > "$PLAN_CIA_M"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_CIA_M" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "provider codegraph has no readable fresh" <<< "$CIA_OUT"; then
+    pass "AC13m: an unreadable fresh value still errors"
+else
+    fail "AC13m: expected the fresh ERROR: $CIA_OUT"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Test Results ==="
