@@ -4419,7 +4419,7 @@ fn format_success(
             if let Some(outcome) = outcome {
                 line.push_str(&format!(" (turn {outcome})"));
             }
-            line.push_str(&fno_agents::rm_receipt::claims_release_suffix(result));
+            line.push_str(&fno_agents::rm_receipt::stop_receipt_suffix(result));
             Some(line)
         }
         "rm" => fno_agents::rm_receipt::receipt(name, result),

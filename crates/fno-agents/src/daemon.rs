@@ -29,6 +29,7 @@ use serde_json::{json, Map, Value};
 use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership check
 
 mod blocking_bound;
+mod claude_stop;
 mod rm_codex_rollback;
 mod rm_refusal_detail;
 mod rm_teardown;
@@ -38,6 +39,7 @@ pub(crate) mod store_socket_sweep;
 pub(crate) mod worktree_sweep;
 pub(crate) use self::blocking_bound::directory_bytes;
 use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
+use self::claude_stop::{end_survivors, stop_claude};
 use self::roster_death::claude_row_provably_absent;
 pub(crate) use self::roster_death::{claude_row_id, pid_is_gone};
 pub(crate) use self::store_socket_sweep::store_socket_sweep;
@@ -1079,6 +1081,39 @@ async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
                     // retired-ok: a daemon log line naming its own teardown call.
                     Err(_) => eprintln!("daemon: claude stop {short} timed out (retry next tick)"),
                     Ok(Ok(o)) if o.status.success() => {
+                        // A stop exit is a receipt, not a proof. The marker is
+                        // only spent on a proved end: a survivor keeps its
+                        // marker, so the next tick retries instead of the row
+                        // reading stopped over a live process. No proof at
+                        // all (roster unreadable, no worker named) refuses
+                        // the same way: no record, no marker spend.
+                        match claude_stop::prove_target(&short, Some(marker.uuid.as_str())) {
+                            Ok(members) => {
+                                let (_signalled, survivors) = end_survivors(&members).await;
+                                if !survivors.is_empty() {
+                                    let listed = survivors
+                                        .iter()
+                                        .map(|pid| pid.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    eprintln!(
+                                        // retired-ok: a daemon log line naming its own teardown call.
+                                        "daemon: terminal-stop sweep: claude stop {short} returned \
+                                         but pid {listed} survived the signal; the marker stays for \
+                                         the next tick. The override for a session claude's own \
+                                         supervisor respawns is `fno agents rm`."
+                                    );
+                                    continue;
+                                }
+                            }
+                            Err(reason) => {
+                                eprintln!(
+                                    "daemon: terminal-stop sweep: no process proof for \
+                                     {short} ({reason}); the marker stays for the next tick"
+                                );
+                                continue;
+                            }
+                        }
                         let _ = emitter.emit(
                             "bg_worker_terminal_stopped",
                             &json!({
@@ -5285,9 +5320,6 @@ async fn worker_down_within(sock: &std::path::Path, budget: Duration) -> bool {
     }
 }
 
-/// Stop a Claude agent (AC7-EDGE). Claude is shellout-managed (LD8): there is no
-/// worker PTY to signal, so the daemon shells out to the claude supervisor's
-/// `stop` on the agent's short id and marks the registry row exited on success.
 /// Whether `pid` is confirmed GONE, as opposed to merely unreachable.
 ///
 /// `pid_is_ours` answers "may I treat this as my worker", and returns false for
@@ -5348,154 +5380,6 @@ pub(crate) async fn pid_gone_within(
             return false;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-/// Stop a claude row that has a recorded pid but no transport id, with the same
-/// SIGTERM -> SIGKILL escalation `stop_worker_confirmed` uses. Returns true iff
-/// the process is confirmed gone.
-///
-/// A row can carry a live process and no short id at all when the spawn receipt
-/// never yielded one. Refusing there left the operator with a running worker and
-/// no verb that addressed it -- the duplicate-worker half of the wave-boundary
-/// handoff failure, which had to be killed by hand to restore one-writer
-/// semantics. Unlike a PTY worker there is no socket to probe, so `pid_is_ours`
-/// (which rejects pid <= 1, treats an unsignalable pid as not ours, and compares
-/// the recorded start time) is both the liveness oracle and the recycle guard.
-/// It is re-proved before EVERY signal so a pid recycled inside the grace window
-/// is never killed.
-async fn stop_claude_pid_confirmed(entry: &RegistryEntry) -> bool {
-    let Some(pid) = entry.pid else {
-        return false;
-    };
-    // Require the incarnation token. Without it `pid_is_ours` falls back to bare
-    // liveness, which cannot tell our worker from an unrelated process that
-    // inherited the pid after it died. That is tolerable for a probe; it is not
-    // tolerable as the sole basis for SIGKILL. Refusing costs a legacy row an
-    // honest "cannot stop" message. Guessing costs someone else's process.
-    if entry.pid_start_time.is_none() {
-        return false;
-    }
-    if !pid_is_ours(pid, entry.pid_start_time) {
-        return false;
-    }
-    // SAFETY: pid ownership proved directly above; SIGTERM to our own worker.
-    unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGTERM);
-    }
-    if pid_gone_within(pid, entry.pid_start_time, Duration::from_secs(5)).await {
-        return true;
-    }
-    if pid_is_ours(pid, entry.pid_start_time) {
-        // SAFETY: ownership re-proved after the grace window, so a pid recycled
-        // during it takes no signal.
-        unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGKILL);
-        }
-    }
-    pid_gone_within(pid, entry.pid_start_time, Duration::from_secs(2)).await
-}
-
-async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry) -> Response {
-    let short = match entry
-        .transport_short()
-        .or(entry.session_id.as_deref())
-        .filter(|s| !s.is_empty())
-    {
-        Some(s) => s.to_string(),
-        None => {
-            // No transport id: fall back to signalling the recorded pid rather
-            // than refusing a row whose process is still running.
-            if stop_claude_pid_confirmed(entry).await {
-                let claude_name = name.to_string();
-                if let Err(e) = update_registry_offloaded(ctx.home.registry_json(), move |r| {
-                    if let Some(e) = r.find_mut(&claude_name) {
-                        e.status = AgentStatus::Exited;
-                    }
-                })
-                .await
-                {
-                    return Response::err(
-                        req.id,
-                        state_error_code(&e),
-                        format!("claude {name} stopped but registry write failed: {e}"),
-                    );
-                }
-                let _ = ctx.emitter.emit(
-                    "agent_stopped",
-                    &json!({"name": name, "backend": "claude", "stopped_by": "pid"}),
-                );
-                return Response::ok(
-                    req.id,
-                    json!({"stopped": true, "backend": "claude", "pid": entry.pid}),
-                );
-            }
-            return Response::err(
-                req.id,
-                ErrorCode::InvalidStatus,
-                format!(
-                    "agent {name} is claude but has no short id and no live process \
-                     to stop. `rm` will refuse this row too while it is stored live, so \
-                     stopping has no exit here: the row can neither prove liveness \
-                     nor be addressed. The override for that case is documented in \
-                     `fno agents rm --help`, not here."
-                ),
-            );
-        }
-    };
-    // Bound the subprocess so a hung `claude` can never wedge this RPC
-    // handler, the same way the background-sweep twin above is bounded.
-    match crate::lifecycle_child::bounded_claude_stop(&short, Duration::from_secs(15)).await {
-        Err(_) => Response::err(
-            req.id,
-            ErrorCode::Internal,
-            // retired-ok: reports which shellout timed out, not a step to run.
-            format!("claude stop {short} timed out"),
-        ),
-        Ok(Ok(o)) if o.status.success() => {
-            // Surface a persist failure rather than reporting a clean stop while
-            // the registry still reads live (silent-failure review).
-            let claude_name = name.to_string();
-            if let Err(e) = update_registry_offloaded(ctx.home.registry_json(), move |r| {
-                if let Some(e) = r.find_mut(&claude_name) {
-                    e.status = AgentStatus::Exited;
-                }
-            })
-            .await
-            {
-                return Response::err(
-                    req.id,
-                    state_error_code(&e),
-                    format!("claude {name} stopped but registry write failed: {e}"),
-                );
-            }
-            let _ = ctx
-                .emitter
-                .emit("agent_stopped", &json!({"name": name, "backend": "claude"}));
-            // Report the id we actually stopped with (`short`), not
-            // `entry.short_id`: a row with only a generic session_id and an empty
-            // short_id would otherwise print `stopped: <name> ()` and break the
-            // stop output
-            // contract for exactly the rows makes readable (Codex P2).
-            Response::ok(
-                req.id,
-                json!({"stopped": true, "backend": "claude", "short_id": short}),
-            )
-        }
-        Ok(Ok(o)) => Response::err(
-            req.id,
-            ErrorCode::Internal,
-            format!(
-                // retired-ok: reports which shellout failed, not a step to run.
-                "claude stop {short} failed: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            ),
-        ),
-        Ok(Err(e)) => Response::err(
-            req.id,
-            ErrorCode::Internal,
-            format!("could not exec `claude stop`: {e}"),
-        ),
     }
 }
 
