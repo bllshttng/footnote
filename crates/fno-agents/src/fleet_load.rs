@@ -561,6 +561,7 @@ pub(crate) fn analyze(inputs: &Inputs) -> FleetReport {
         floor_ms,
         now_ms,
         inputs.window_days,
+        &inputs.home,
     );
     with_threshold_curve_cap(
         &mut report,
@@ -580,12 +581,48 @@ fn median_f64(values: &mut [f64]) -> Option<f64> {
     Some(values[values.len() / 2])
 }
 
+fn merged_count(home: &AgentsHome, floor_ms: i64, now_ms: i64) -> Option<u64> {
+    let path = crate::gc_sweep::graph_path(home);
+    if !path.exists() {
+        return Some(0);
+    }
+    let rows = crate::backlog::api::rows(&crate::backlog::api::Store::new(&path)).ok()?;
+    let empty: Vec<String> = Vec::new();
+    let vocab = crate::scoreboard::TerminalVocabulary {
+        doc: &empty,
+        delivery: &empty,
+        ship: &empty,
+    };
+    Some(
+        rows.iter()
+            .filter_map(|row| {
+                let object = row.as_object()?;
+                let id = row
+                    .get("id")
+                    .or_else(|| row.get("slug"))
+                    .and_then(Value::as_str)?;
+                let classified = crate::scoreboard::classify_node(Some(object), id, &[], &vocab);
+                if classified.get("class").and_then(Value::as_str) != Some("merged") {
+                    return None;
+                }
+                let ts = classified
+                    .get("ship_ts")
+                    .and_then(Value::as_str)
+                    .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+                    .map(|value| value.timestamp_millis())?;
+                (ts >= floor_ms && ts <= now_ms).then_some(1)
+            })
+            .sum(),
+    )
+}
+
 fn summarize_samples(
     report: &mut FleetReport,
     samples: &[SamplePoint],
     floor_ms: i64,
     now_ms: i64,
     window_days: u64,
+    home: &AgentsHome,
 ) {
     let samples: Vec<&SamplePoint> = samples
         .iter()
@@ -674,8 +711,15 @@ fn summarize_samples(
     } else {
         Some(workers.iter().sum::<f64>() / workers.len() as f64)
     };
+    report.shape.merges = merged_count(home, floor_ms, now_ms);
+    report.shape.merges_per_worker_seat_day = report
+        .shape
+        .merges
+        .zip(report.shape.worker_seats_mean)
+        .and_then(|(merges, seats)| {
+            (seats > 0.0 && window_days > 0).then_some(merges as f64 / window_days as f64 / seats)
+        });
     report.shape.reason = format!("{} sample rows", samples.len());
-    let _ = window_days;
 }
 
 /// Threshold from the slowdown nearest-readings, then the capacity curve and
