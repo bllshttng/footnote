@@ -313,12 +313,13 @@ pub(crate) fn relaunch_on_pane(
         expected_mux,
         events,
         home,
+        || crate::resume_gate::admit_revival(home, verb, row_name),
     )
 }
 
 /// [`relaunch_on_pane`] with the proof window and poll injected, so tests run
 /// a zero window instead of waiting out the real one.
-pub(crate) fn relaunch_on_pane_with(
+pub(crate) fn relaunch_on_pane_with<A>(
     window: Duration,
     poll: Duration,
     verb: &str,
@@ -332,7 +333,17 @@ pub(crate) fn relaunch_on_pane_with(
     expected_mux: Option<&crate::state::MuxRef>,
     events: (&str, &str),
     home: &crate::paths::AgentsHome,
-) -> i32 {
+    admit: A,
+) -> i32
+where
+    A: FnOnce() -> Result<crate::spawn_gate::GateGuard, i32>,
+{
+    // Hold admission through the pane proof so the slot count cannot miss
+    // the row before it becomes visible.
+    let _admission = match admit() {
+        Ok(guard) => guard,
+        Err(code) => return code,
+    };
     // Launch. stdin null so a pane run that reads stdin cannot stall against
     // the caller's terminal; stdout piped (the pane id); stderr inherited.
     let mut command = std::process::Command::new("fno");
@@ -1087,6 +1098,15 @@ mod tests {
     /// stub on PATH, and the row already in the registry. `expected` is the
     /// mux ref the caller claims the row still carries.
     fn run_relaunch(home: &AgentsHome, expected: Option<&MuxRef>) -> i32 {
+        run_relaunch_with_admit(home, expected, || {
+            Ok(crate::spawn_gate::GateGuard::default())
+        })
+    }
+
+    fn run_relaunch_with_admit<A>(home: &AgentsHome, expected: Option<&MuxRef>, admit: A) -> i32
+    where
+        A: FnOnce() -> Result<crate::spawn_gate::GateGuard, i32>,
+    {
         relaunch_on_pane_with(
             Duration::ZERO,
             Duration::ZERO,
@@ -1101,12 +1121,55 @@ mod tests {
             expected,
             ("agent_resumed", "agent_resume_failed"),
             home,
+            admit,
         )
     }
 
     fn events_of(home: &AgentsHome) -> String {
         let p = crate::client_verbs::trace_events_path(home);
         fs::read_to_string(p).unwrap_or_default()
+    }
+
+    #[test]
+    fn relaunch_on_pane_gate_refusal_skips_the_pane_launch() {
+        let _path_guard = crate::PATH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env_guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = AgentsHome::at(dir.path().join("agents"));
+        home.ensure_root().unwrap();
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(pane_row("repro", "main", 2179))
+        })
+        .unwrap();
+        stub_fno(
+            dir.path(),
+            "4242",
+            &format!(
+                "[{{\"pane_id\":4242,\"child_pid\":{}}}]",
+                std::process::id()
+            ),
+            "{\"text\":\"codex 5.0\"}",
+            "11",
+        );
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", crate::path_with(dir.path()));
+        let expected = MuxRef {
+            session: "main".into(),
+            pane_id: 2179,
+        };
+        let code = run_relaunch_with_admit(&home, Some(&expected), || Err(83));
+        match old_path {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+        assert_eq!(code, 83);
+        assert!(events_of(&home).is_empty());
+        let row = &state::load_registry(&home.registry_json()).unwrap().entries[0];
+        assert_eq!(row.mux.as_ref().unwrap().pane_id, 2179);
     }
 
     #[test]

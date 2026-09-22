@@ -335,6 +335,78 @@ pub(crate) fn gone_cwd_refusal(cwd: &str, name: &str) -> i32 {
     13
 }
 
+/// Ask the spawn gate before a revival launches. A revival counts against the
+/// revived row's own parent, never whoever runs the verb.
+pub(crate) fn admit_revival(
+    home: &AgentsHome,
+    verb: &str,
+    row_name: &str,
+) -> Result<crate::spawn_gate::GateGuard, i32> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    admit_revival_with(home, verb, row_name, |input| {
+        crate::spawn_gate::run_gate(&cwd, &home.registry_json(), input)
+    })
+}
+
+pub(crate) fn admit_revival_with<G>(
+    home: &AgentsHome,
+    verb: &str,
+    row_name: &str,
+    gate: G,
+) -> Result<crate::spawn_gate::GateGuard, i32>
+where
+    G: FnOnce(
+        crate::spawn_gate::GateInput,
+    ) -> Result<crate::spawn_gate::GateGuard, crate::spawn_gate::Refusal>,
+{
+    let row = state::load_registry(&home.registry_json())
+        .ok()
+        .and_then(|registry| {
+            registry
+                .entries
+                .into_iter()
+                .find(|entry| entry.name == row_name)
+        });
+    let input = crate::spawn_gate::GateInput {
+        name: row_name.to_string(),
+        substrate: "bg".to_string(),
+        account: row.as_ref().and_then(|entry| entry.launch_account.clone()),
+        caller_session: row
+            .as_ref()
+            .and_then(|entry| entry.spawned_by_session.clone()),
+        ..Default::default()
+    };
+    match gate(input) {
+        Ok(guard) => Ok(guard),
+        Err(refusal) => {
+            if let Some(receipt) = &refusal.receipt {
+                println!("{receipt}");
+            }
+            eprintln!(
+                "fno agents {verb}: the spawn gate refused reviving {row_name}; nothing was launched. FNO_SPAWN_GATE=0 skips the gate for one run."
+            );
+            let mut fields: Vec<(String, Value)> = refusal.event.into_iter().collect();
+            fields.extend([
+                ("name".to_string(), Value::String(row_name.to_string())),
+                ("verb".to_string(), Value::String(verb.to_string())),
+                ("substrate".to_string(), Value::String("bg".to_string())),
+                ("gate".to_string(), Value::String("revival".to_string())),
+                ("exit_code".to_string(), Value::from(refusal.exit_code)),
+            ]);
+            let event_fields: Vec<(&str, Value)> = fields
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.clone()))
+                .collect();
+            crate::client_verbs::append_agents_event(
+                &crate::client_verbs::trace_events_path(home),
+                "spawn_gate_refused",
+                &event_fields,
+            );
+            Err(refusal.exit_code)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,5 +787,67 @@ mod tests {
             None
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn admit_revival_charges_the_row_parent_and_account() {
+        let (home, dir) = registry_home("admit-input");
+        crate::state::update_registry(&home.registry_json(), |registry| {
+            registry.entries.push(crate::state::RegistryEntry {
+                name: "w1".to_string(),
+                harness: Some("claude".to_string()),
+                harness_session_id: Some("sess-uuid".to_string()),
+                launch_account: Some("makers".to_string()),
+                spawned_by_session: Some("k1-parent".to_string()),
+                ..Default::default()
+            });
+        })
+        .unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let capture = seen.clone();
+        assert!(admit_revival_with(&home, "resume", "w1", move |input| {
+            *capture.lock().unwrap() = Some(input);
+            Ok(crate::spawn_gate::GateGuard::default())
+        })
+        .is_ok());
+        let input = seen.lock().unwrap().take().unwrap();
+        assert_eq!(input.name, "w1");
+        assert_eq!(input.substrate, "bg");
+        assert_eq!(input.account.as_deref(), Some("makers"));
+        assert_eq!(input.caller_session.as_deref(), Some("k1-parent"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn admit_revival_asks_without_parent_when_row_is_missing() {
+        let (home, dir) = registry_home("admit-missing");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let capture = seen.clone();
+        assert!(admit_revival_with(&home, "recover", "w1", move |input| {
+            *capture.lock().unwrap() = Some(input);
+            Ok(crate::spawn_gate::GateGuard::default())
+        })
+        .is_ok());
+        let input = seen.lock().unwrap().take().unwrap();
+        assert_eq!(input.caller_session, None);
+        assert_eq!(input.account, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn admit_revival_records_refusal_and_returns_gate_code() {
+        let (home, dir) = registry_home("admit-refusal");
+        let code = admit_revival_with(&home, "resume", "w1", |_| {
+            Err(crate::spawn_gate::Refusal::code(83).ev("axis", Value::String("slots".to_string())))
+        })
+        .unwrap_err();
+        assert_eq!(code, 83);
+        let events =
+            std::fs::read_to_string(crate::client_verbs::trace_events_path(&home)).unwrap();
+        assert!(events.contains("\"kind\":\"spawn_gate_refused\""));
+        assert!(events.contains("\"name\":\"w1\""));
+        assert!(events.contains("\"verb\":\"resume\""));
+        assert!(events.contains("\"gate\":\"revival\""));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
