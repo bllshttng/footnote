@@ -129,6 +129,8 @@ Read a ruling back with `fno backlog decisions <subject>` or `fno inbox decision
 
 The tenured reign does not dispatch. A `--once` pass dispatches only through its kickoff and its court, as [the one-wave pass](references/once.md) says. The single exception: `fno agents status` shows the dispatching arm red, and the spawn is journaled `reign_dispatch_exception` naming the arm and the node BEFORE the spawn fires. A spawn without that row is a defect. Journal it with:
 
+Before a crowned king launches a blueprint on a node, write its confirmed scope and known files or verbs into the node: `fno backlog update <node> --dispatch-brief "<scope; known files and verbs>"`. The brief is a starting point, not a fence, and never lists what to ignore. The blueprint prompt remains `$fno:blueprint <node>`; the brief travels on the node so every launcher gets the same scope.
+
 `fno doctor event emit -t reign_dispatch_exception -s loop -d '{"scope":"<scope>","arm":"<arm>","node":"<id>"}'`
 
 The `-s loop` source keeps the row out of the `test` default, so a king's exception does not masquerade as test output.
