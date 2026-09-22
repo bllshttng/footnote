@@ -1863,9 +1863,13 @@ mod tests {
         let qp_row = row_with(&qp, serde_json::Map::new());
         let reply = serve_effective_verb(&json!({"entries": [research_row, qp_row]})).unwrap();
         assert_eq!(reply["verb"], json!("/blueprint"));
-        assert!(reply["note"].as_str().unwrap().contains(
-            "verb=declared(/blueprint; lifecycle answers /target: plan ready not a blueprint)"
-        ));
+        // Declared /blueprint agrees with the not-a-blueprint answer, so the
+        // note takes the lifecycle form; the declared form is for a
+        // disagreement (the declared_blueprint_on_ready test above).
+        assert!(reply["note"]
+            .as_str()
+            .unwrap()
+            .contains("verb=lifecycle(plan ready not a blueprint -> /blueprint)"));
         assert_eq!(
             serve_effective_verb(&json!({"entries": [qp_row]})).unwrap()["verb"],
             json!("/target")
