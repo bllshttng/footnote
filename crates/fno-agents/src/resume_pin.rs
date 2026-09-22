@@ -716,7 +716,7 @@ mod tests {
         let lookup: RouteProviderOf<'_> =
             &|m| (m == Some("glm-5.3-flash[1m]")).then(|| "zai".to_string());
         let answer = resolve(
-            None,
+            row(Some("glm-5.3-flash[1m]"), Some("anthropic")),
             None,
             false,
             "a1b2c3d4-0001-4000-8000-000000000001",
@@ -757,7 +757,21 @@ mod tests {
     #[test]
     fn ac1_edge_decide_emits_lost_route_object() {
         // AC1-EDGE: decide answers lost_route as {provider, model} JSON, null
-        // when no provider is known.
+        // when no provider is known. The route dir is empty here, so the row
+        // arm of the lookup-miss refusal fires and names the provider.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let route_dir = std::env::temp_dir().join(format!(
+            "resume-pin-routes-lost-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&route_dir).unwrap();
+        std::env::set_var("FNO_ROUTE_SETTINGS_DIR", &route_dir);
         let decided = decide(&json!({"session_id": "", "routed": false, "row": {
             "requested_model": "glm-5.3-flash[1m]", "provider": "zai"}}));
         assert_eq!(
@@ -775,6 +789,8 @@ mod tests {
             .unwrap_or_default()
             .contains("records no model"));
         assert!(rowless["lost_route"].is_null());
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+        std::fs::remove_dir_all(&route_dir).ok();
     }
 
     #[test]

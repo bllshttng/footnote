@@ -401,7 +401,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            projects.join("uuid-glm-1.jsonl"),
+            projects.join("a1b2c3d4-1111-4111-8111-111111111111.jsonl"),
             r#"{"type":"attachment","attachment":{"type":"model","identity":{"modelId":"glm-5.3-flash[1m]","marketingName":null}}}"#,
         )
         .unwrap();
@@ -412,7 +412,7 @@ mod tests {
         );
 
         let reg = Registry::default();
-        let err = stream_child_argv("uuid-glm-1", &reg).unwrap_err();
+        let err = stream_child_argv("a1b2c3d4-1111-4111-8111-111111111111", &reg).unwrap_err();
         assert!(err.contains("-P zai -m 'glm-5.3-flash[1m]'"), "{err}");
         std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
         std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
@@ -426,7 +426,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let (routes, projects) = hermetic_routes_and_projects("rowless-opus");
         std::fs::write(
-            projects.join("uuid-opus-9.jsonl"),
+            projects.join("a1b2c3d4-1111-4222-8222-222222222222.jsonl"),
             r#"{"type":"attachment","attachment":{"type":"model","identity":{"modelId":"claude-opus-5","marketingName":"Opus 5"}}}"#,
         )
         .unwrap();
@@ -437,7 +437,7 @@ mod tests {
         );
 
         let reg = Registry::default();
-        let argv = stream_child_argv("uuid-opus-9", &reg).unwrap();
+        let argv = stream_child_argv("a1b2c3d4-1111-4222-8222-222222222222", &reg).unwrap();
         assert!(argv.contains(&"--model".to_string()));
         assert!(argv.contains(&"claude-opus-5".to_string()));
         std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
