@@ -629,6 +629,19 @@ def validate(event: dict[str, Any]) -> None:
                     f"unknown human_touch data.{field}: {data.get(field)!r} (allowed: {allowed})"
                 )
 
+    # Same chokepoint rationale: the mux appends operator_submit rows straight
+    # to the journal, so a typo'd via/resolution must fail validation rather
+    # than land as an unrecognized bucket the fold cannot join.
+    if type_name == "operator_submit":
+        type_props = type_spec["data"]["properties"]
+        for field in ("via", "resolution"):
+            allowed = type_props[field]["enum"]
+            if data.get(field) not in allowed:
+                raise ValidationError(
+                    f"unknown operator_submit data.{field}: {data.get(field)!r} "
+                    f"(allowed: {allowed})"
+                )
+
     # Same chokepoint rationale: skill_eval_finding's dimension/verdict drive
     # downstream ranking logic, so a typo'd enum value must fail here
     # rather than silently landing as an unrecognized bucket.

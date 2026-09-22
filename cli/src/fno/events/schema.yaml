@@ -4010,6 +4010,39 @@ event_types:
           description: "Optional (pane-send floor). The verb's own exit code the outcome word came from."
     consumers: [operator]
 
+  - name: operator_submit
+    retention: durable
+    description: "A human pressed Enter in a mux pane or portal: the positive witness that a person typed the next turn. Written at the CoreMsg::Input choke point, after the relay bounce and the passive-client drop, so machine transports (pane send, control.sock mail, codex turn/start) never reach it. Records WHERE and WHEN only - no typed text is ever recorded. The intel fold joins submits to transcript turns by session and submit_ms; a turn with no submit and no injected shape reads unknown, never operator."
+    sources: [daemon, test]
+    data:
+      required: [mux_session, pane, via, submit_ms, resolution]
+      properties:
+        mux_session:
+          type: string
+          description: "The mux server's session name the pane belongs to."
+        pane:
+          type: integer
+          description: "The pane id the Enter landed on."
+        via:
+          enum: [pane, portal, shell]
+          description: "pane: a pane hosting a registry row. portal: a pane seating a portal. shell: a pane with no registry or portal row (a hand-started harness)."
+        submit_ms:
+          type: integer
+          description: "Epoch milliseconds the Enter reached the server. The join key to transcript turns: the envelope ts is second precision, this is not."
+        resolution:
+          enum: [ok, unresolved]
+          description: "ok: a registry or portal row bound the pane, so turns in its session can join. unresolved: no row bound (shell pane); the submit still counts, nothing joins to it."
+        harness_session:
+          type: [string, "null"]
+          description: "The bound row's harness_session_id, else its effective identity - the id transcripts are named by. Null when no row binds or the row carries no id."
+        harness:
+          type: [string, "null"]
+          description: "The bound row's harness axis. Null when no row binds."
+        fno_id:
+          type: [string, "null"]
+          description: "The bound row's own fno session id (the durable identity). Null when no row binds."
+    consumers: [operator]
+
   - name: mail_origin_classified
     retention: durable
     description: "Positive measurement of the origin classified at the mail send chokepoint, emitted before delivery or enforcement narrows the path."
