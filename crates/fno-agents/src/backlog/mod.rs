@@ -241,9 +241,14 @@ fn archive_import_if_needed(connection: &mut Connection, graph: &Path) -> Result
         let Some(id) = row.get("id").and_then(Value::as_str) else {
             continue;
         };
+        // BOTH tables count as live: the working import parks an
+        // unrepresentable seed row in nodes_raw, and a check against `nodes`
+        // alone would fold the archived copy over it - the live row lost and
+        // archived residency stamped onto an id that was still working.
         let exists: i64 = transaction
             .query_row(
-                "SELECT COUNT(*) FROM nodes WHERE id = ?1",
+                "SELECT (SELECT COUNT(*) FROM nodes WHERE id = ?1)
+                      + (SELECT COUNT(*) FROM nodes_raw WHERE id = ?1)",
                 params![id],
                 |row| row.get(0),
             )
