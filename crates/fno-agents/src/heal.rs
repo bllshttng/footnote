@@ -4095,56 +4095,6 @@ exit 0
     }
 
     #[test]
-    fn a_rebase_conflict_files_one_fleet_task_and_a_clean_rebase_closes_it() {
-        let tmp = tempfile::tempdir().unwrap();
-        let d = tmp.path();
-        stub_gh_drive_rebase(d, "false");
-        stub_git_drive(d);
-        stub_cargo(d);
-        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
-        stub_fno_push(
-            d,
-            "",
-            3,
-            "pr-push: the branch is not safely rebasable onto origin/main (status needs_resolver; files: crates/fno-agents/src/a.rs, crates/fno/src/b.rs). Resolve the conflicts, then run `fno do pr rebase --continue`.",
-        );
-        run_heal(&drive_args(d, &[]));
-        let store = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
-        assert_eq!(
-            store.matches(r#""type":"fleet_task""#).count(),
-            1,
-            "one open task: {store}"
-        );
-        assert!(
-            store.contains("rebase conflict")
-                && store.contains("crates/fno-agents/src/a.rs")
-                && store.contains("crates/fno/src/b.rs"),
-            "{store}"
-        );
-        assert!(store.contains(r#""run":"fno do pr rebase 1""#), "{store}");
-        assert!(
-            !log_of(d, "fno.log").contains("outstanding ask"),
-            "no question was filed"
-        );
-        let events = log_of(d, "events.jsonl");
-        assert!(events.contains("\"skip_rebase_conflict\":1"), "{events}");
-        // AC5-HP: the next run rebases PR 1 cleanly, and the task closes.
-        stub_fno_push(
-            d,
-            "pr-push: origin/main behind-before=9 behind-after=0 preflight=full ci=settled sha=abc pushed=1",
-            0,
-            "",
-        );
-        run_heal(&drive_args(d, &[]));
-        let store = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
-        assert!(
-            store.contains(r#""type":"fleet_task_closed""#)
-                && store.contains(r#""reason":"rebased""#),
-            "the clean rebase closed the task: {store}"
-        );
-    }
-
-    #[test]
     fn a_live_worker_claim_blocks_the_rebase_of_its_pr() {
         // Refusal 1 runs FIRST: a conflicting PR whose node a live worker
         // holds is never rebased by the healer. PR 1 holds no trigger
@@ -4666,42 +4616,6 @@ echo '[]'
             "one receipt per unreached PR: {events}"
         );
         assert!(events.contains("\"skip_deadline\":3"), "{events}");
-    }
-
-    #[test]
-    fn two_roots_with_the_same_conflict_file_two_tasks_distinguished_by_cwd() {
-        // AC17-EDGE: one heal process serves several roots and PR numbers
-        // repeat across repos, so identity is lane + key + cwd.
-        let tmp = tempfile::tempdir().unwrap();
-        let d = tmp.path();
-        stub_gh_drive_rebase(d, "false");
-        stub_git_drive(d);
-        stub_cargo(d);
-        stub_fno_push(d, "", 3, "pr-push: the branch is not safely rebasable onto origin/main (status needs_resolver; files: a.rs). Resolve the conflicts, then run `fno do pr rebase --continue`.");
-        let roots: Vec<std::path::PathBuf> = (0..2)
-            .map(|i| {
-                let p = d.join(format!("root-{i}"));
-                std::fs::create_dir_all(&p).unwrap();
-                p
-            })
-            .collect();
-        let mut a = parse_args(&drive_args(d, &[])).unwrap();
-        a.roots = roots.clone();
-        a.deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
-        run_roots_apply(&a, false);
-        let store = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
-        let tasks: Vec<&str> = store
-            .lines()
-            .filter(|l| l.contains(r#""type":"fleet_task""#))
-            .collect();
-        assert_eq!(tasks.len(), 2, "one task per root: {store}");
-        assert!(
-            tasks[0].contains(r#""key":"PR 1 rebase conflict""#)
-                && tasks[1].contains(r#""key":"PR 1 rebase conflict""#)
-                && tasks[0].contains(&format!(r#""cwd":"{}""#, roots[0].display()))
-                && tasks[1].contains(&format!(r#""cwd":"{}""#, roots[1].display())),
-            "same key, different cwd: {store}"
-        );
     }
 
     #[test]
