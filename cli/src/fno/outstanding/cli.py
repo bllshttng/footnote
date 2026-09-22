@@ -193,10 +193,9 @@ def ask(
 ) -> None:
     """Record a question for the operator so it survives the next turn.
 
-    The capture is the point: `session_truth` classifies from the transcript
-    tail, so an unrecorded question stops existing the moment another turn
-    lands. The leg is the Rust `question-intake` transport; this side keeps
-    identity resolution, the law-row read, and the flag surface.
+    The capture is the point: the leg is the Rust `question-intake` transport,
+    which owns the law refusal, the context parse, the writes and the receipt;
+    this side keeps identity, the law-row read, and the flag surface.
     """
     from fno.claims.self_identity import resolve_self_identity
     from fno.harness_identity import canonical_handle
@@ -221,27 +220,18 @@ def ask(
             err=True,
         )
         laws = []
+    asker = (
+        canonical_handle(ident.session_id) if ident.session_id and ident.harness else None
+    )
     answer = verb_call(
         "question-intake",
         {
-            "question": question,
-            "ask": ask,
-            "options": option,
-            "blocks": blocks,
-            "node": node,
-            "subject": subject,
-            "session_id": _session_id(),
-            "cwd": str(Path.cwd()),
-            "asker": canonical_handle(ident.session_id)
-            if ident.session_id and ident.harness
-            else None,
-            "laws": laws,
+            "question": question, "ask": ask, "options": option, "blocks": blocks,
+            "node": node, "subject": subject, "session_id": _session_id(),
+            "cwd": str(Path.cwd()), "asker": asker, "laws": laws,
             "storage_root": str(_storage_root()),
-            # The caller's resolved index: the sandbox stays the single path
-            # authority under test.
             "index_path": str(questions_jsonl()),
-            "display_name": display_name(),
-            "render_cap": QUESTION_RENDER_CAP,
+            "display_name": display_name(), "render_cap": QUESTION_RENDER_CAP,
         },
     )
     # Every human word rides the answer's lines, composed Rust-side; the shim
