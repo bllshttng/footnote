@@ -95,6 +95,22 @@ pub(crate) fn holder_verdict(
     }
 }
 
+/// Has the crown outlived the window? `None` when the manifest has no
+/// parsable `created_at`, which the reaper keeps and the court lists.
+pub(crate) fn crown_outlived_window(
+    content: &str,
+    now: DateTime<Utc>,
+    window_s: i64,
+) -> Option<bool> {
+    crate::claude_adopt::manifest_field(content, "created_at")
+        .and_then(|c| DateTime::parse_from_rfc3339(&c).ok())
+        .map(|c| {
+            now.signed_duration_since(c.with_timezone(&Utc))
+                .num_seconds()
+                > window_s
+        })
+}
+
 /// One pass of the dead-crown sweep. Every candidate lands in exactly one
 /// bucket: `vacated` (applied when `apply`, projected only otherwise),
 /// `kept` with its reason, or the whole sweep lands in `unread` when the
@@ -210,13 +226,7 @@ pub fn sweep(
                 continue;
             }
         };
-        let crown_age = crate::claude_adopt::manifest_field(content, "created_at")
-            .and_then(|c| DateTime::parse_from_rfc3339(&c).ok())
-            .map(|c| {
-                now.signed_duration_since(c.with_timezone(&Utc))
-                    .num_seconds()
-                    > window_s
-            });
+        let crown_age = crown_outlived_window(content, now, window_s);
         match crown_age {
             Some(true) => {}
             Some(false) => {
