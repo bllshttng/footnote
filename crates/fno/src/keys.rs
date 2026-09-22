@@ -526,6 +526,18 @@ impl Default for Scanner {
 /// tail matches after consuming `b`. The only self-overlap in either marker
 /// is a fresh ESC, so the KMP fallback table collapses to "mismatch: retry
 /// as position 0, i.e. matched-1 iff b is ESC".
+/// A carry holding exactly one ESC is a bare Esc press once input has gone
+/// quiet: a whole CSI arrives in one write, so nothing legitimately follows
+/// a lone `0x1b` after the flush window. Clears the carry and answers true;
+/// any other carry (a partial sequence) is left untouched.
+pub fn take_lone_esc(esc: &mut Vec<u8>) -> bool {
+    let lone = esc.as_slice() == [0x1b];
+    if lone {
+        esc.clear();
+    }
+    lone
+}
+
 fn roll(idx: usize, b: u8, marker: &[u8]) -> usize {
     if b == marker[idx] {
         idx + 1

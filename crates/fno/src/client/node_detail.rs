@@ -200,12 +200,16 @@ pub(crate) fn open_for(view: &mut View, node_id: String) {
         gen,
         sel,
     });
+    // A fresh open starts with a fresh esc carry: a lone ESC stranded by a
+    // mouse close must never fire on the reopened overlay's first window.
+    view.node_detail_esc.clear();
 }
 
 /// Close the overlay. The selector (if one is open underneath) stays put -
 /// Esc unwinds one layer, exactly as peek does.
 pub(crate) fn close(view: &mut View) {
     view.node_detail = None;
+    view.node_detail_esc.clear();
 }
 
 /// The fold result channel the run loop hands [`maybe_kick`] and reads in
@@ -481,13 +485,6 @@ pub(crate) async fn detail_keys(
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
-    // A lone-Esc chunk closes instantly: the modal fold would hold the byte
-    // pending a possible escape sequence (the contract its doc names, the
-    // drag guards mirror).
-    if bytes == [0x1b] && view.node_detail_esc.is_empty() {
-        close(view);
-        return Ok(StdinFlow::Continue);
-    }
     let mut esc = std::mem::take(&mut view.node_detail_esc);
     let toks = fold_modal_keys(&mut esc, bytes);
     view.node_detail_esc = esc;
