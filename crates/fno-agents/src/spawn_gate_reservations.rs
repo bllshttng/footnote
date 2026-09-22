@@ -139,8 +139,9 @@ mod tests {
         std::fs::write(
             &reg,
             format!(
-                r#"{{"schema_version":1,"entries":[
-                    {{"name":"w1","provider":"zai","cwd":"/tmp","status":"live","pid":{me},"pid_start_time":{start},"created_at":"2026-01-01T00:00:00Z"}}]}}"#
+                r#"{{"schema_version":{},"entries":[
+                    {{"name":"w1","provider":"zai","cwd":"/tmp","status":"live","pid":{me},"pid_start_time":{start},"created_at":"2026-01-01T00:00:00Z"}}]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION
             ),
         )
         .unwrap();

@@ -1373,10 +1373,9 @@ mod tests {
         );
         assert_eq!(reading.counted, vec!["good".to_string()]);
         assert_eq!(reading.parked, vec![("a".to_string(), "q-1".to_string())]);
-        assert_eq!(
-            reading.reserved.len(),
-            1,
-            "the worker:a slot claim is counted and named"
+        assert!(
+            reading.reserved.is_empty(),
+            "the parked row's own claim is deduped, not counted and not named"
         );
         std::env::remove_var("FNO_CLAIMS_ROOT");
         std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);

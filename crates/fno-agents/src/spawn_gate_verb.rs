@@ -1513,6 +1513,11 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("fno-verb-resv-ok-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        // lanes_answer resolves the agents home; a test run must declare a
+        // hermetic root, never the real $HOME.
+        let agents_home = dir.join("agents-home");
+        std::fs::create_dir_all(&agents_home).unwrap();
+        std::env::set_var(crate::paths::HOME_ENV, &agents_home);
         let root = dir.join("claims-root");
         let claims_dir = root.join(".fno").join("claims");
         std::fs::create_dir_all(&claims_dir).unwrap();
@@ -1563,6 +1568,7 @@ mod tests {
         let (state, rec) = crate::claims::status("worker:t-reserved-x-4444", Some(&root));
         let rec = rec.expect("the minted claim exists");
         std::env::remove_var("FNO_CLAIMS_ROOT");
+        std::env::remove_var(crate::paths::HOME_ENV);
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(code, 0);
         assert_eq!(state, crate::claims::ClaimState::Live);
