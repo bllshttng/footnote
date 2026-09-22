@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from types import MappingProxyType
 from typing import Mapping, NamedTuple
 
@@ -109,18 +110,6 @@ def classify_workers(workers: list) -> tuple[list, list, dict]:
     )
 
 
-def _stopped_epoch(value: object) -> float | None:
-    """Epoch seconds for a registry stop stamp, or None when absent/unparseable."""
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        from datetime import datetime
-
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
-
-
 def _worker_reachability(worker: dict):
     """One roster row through the ONE shared predicate (task 1.1).
 
@@ -157,12 +146,13 @@ def _worker_reachability(worker: dict):
     falsifier = pid_falsifier(pid, worker.get("pid_start_time")) if proven else None
     if falsifier is None:
         falsifier = pane_falsifier(worker.get("mux"))
-    stop_epoch = _stopped_epoch(worker.get("stopped_at"))
+    try:
+        stop_epoch = datetime.fromisoformat(worker.get("stopped_at").replace("Z", "+00:00")).timestamp() if worker.get("stopped_at") else None
+    except (AttributeError, ValueError):
+        stop_epoch = None
     if facts is None:
         # No transcript: the supervisor word is the only evidence. An active
         # word stays reachable; a terminal word positively ended the row.
-        if falsifier is None and stop_epoch is not None:
-            falsifier = f"stopped:{worker.get('stopped_at')}"
         if falsifier is not None:
             return classify_reachability(truth_state=None, age_s=None, falsifier=falsifier)
         if state in ("working", "watching", "your-move"):
@@ -178,10 +168,6 @@ def _worker_reachability(worker: dict):
     if falsifier is not None and age <= TRANSCRIPT_EVIDENCE_S:
         falsifier = None
     if stop_epoch is not None and facts.last_event_epoch <= stop_epoch:
-        # A stop fno itself stamped outranks a tail that stopped at the stop:
-        # the fresh-tail cancel above cannot resurrect liveness over it.
-        # A tail event strictly after the stop is a resumed session, and the
-        # rules above apply to it unchanged.
         falsifier = f"stopped:{worker.get('stopped_at')}"
     if falsifier is None and age > TRANSCRIPT_EVIDENCE_S and state in _finished_row_states():
         # A terminal word with a silent tail is positive evidence of the end.

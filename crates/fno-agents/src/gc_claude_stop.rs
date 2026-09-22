@@ -67,6 +67,7 @@ pub(crate) fn stop_claude_confirmed(e: &state::RegistryEntry) -> bool {
         &|_| true, // the real stop already ran; the core must not run it twice
         &roster_lists,
         &agents_roster_row,
+        &roster_proc_start,
         &std::thread::sleep,
         15,
     );
@@ -102,6 +103,7 @@ pub(crate) fn stop_claude_confirmed_with(
     stop: &dyn Fn(&str) -> bool,
     listed: &dyn Fn(&str, Option<&str>) -> Option<bool>,
     agents_row: &dyn Fn(&str) -> Option<ClaudeAgentRow>,
+    roster_start: &dyn Fn(&str, u32) -> Option<u64>,
     sleep: &dyn Fn(std::time::Duration),
     polls: u32,
 ) -> bool {
@@ -135,14 +137,22 @@ pub(crate) fn stop_claude_confirmed_with(
         // A `stopped` row that still names a pid: the survivor path. One
         // signal, a re-read, and an honest refusal while a live pid is still
         // reported (a respawn reads the same refusal as an ignored signal).
+        // The signal rests on the recorded incarnation: the roster's
+        // procStart for that pid must equal the live start time, or nothing
+        // is signalled and the row holds.
         let pid = row.pid.unwrap();
-        if pid > 1 {
-            // SAFETY: the pid is claude's own report of this session's
-            // worker, taken while the process lives; SIGTERM to the survivor
-            // the ask left behind.
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        match (
+            roster_start(short, pid),
+            crate::daemon::process_start_time(pid),
+        ) {
+            (Some(recorded), Some(live)) if live == recorded && pid > 1 => {
+                // SAFETY: start-time equality proves the incarnation; SIGTERM
+                // to the survivor the ask left behind.
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                }
             }
+            _ => return false,
         }
         sleep(std::time::Duration::from_secs(2));
         return match agents_row(short) {
@@ -164,6 +174,17 @@ pub(crate) fn stop_claude_confirmed_with(
 /// an unread witness never confirms.
 fn agents_roster_row(short: &str) -> Option<ClaudeAgentRow> {
     crate::claude_roster::read_all_agents().find(short).cloned()
+}
+
+/// The recorded start token for a survivor's pid: the roster's `procStart`
+/// for the session, read only when the roster worker's pid matches. None
+/// means no record, and a signal never rests on no record.
+fn roster_proc_start(short: &str, pid: u32) -> Option<u64> {
+    let roster = crate::claude_roster::ClaudeRoster::load_default().ok()?;
+    roster
+        .find(short)
+        .filter(|worker| worker.pid == Some(pid))
+        .and_then(|worker| worker.proc_start)
 }
 
 /// Whether the live roster still lists the session, by short id or session
@@ -277,6 +298,7 @@ mod tests {
             &|_| true,
             &listed,
             &|_| None,
+            &|_, _| None,
             &|_| {},
             15,
         );
@@ -305,6 +327,7 @@ mod tests {
             &stop,
             &listed,
             &|_| row("working", None),
+            &|_, _| None,
             &|_| {},
             3,
         );
@@ -333,6 +356,7 @@ mod tests {
             &stop,
             &listed,
             &|_| row("working", None),
+            &|_, _| None,
             &|_| {},
             5,
         );
@@ -351,6 +375,7 @@ mod tests {
                 &|_| true,
                 &|_, _| Some(true),
                 &|_| row(state, None),
+                &|_, _| None,
                 &|_| {},
                 15,
             );
@@ -368,6 +393,7 @@ mod tests {
             &|_| true,
             &|_, _| Some(true),
             &|_| row("stopped", None),
+            &|_, _| None,
             &|_| {},
             15,
         );
@@ -376,10 +402,24 @@ mod tests {
 
     /// The survivor path: a `stopped` row still naming a pid takes ONE
     /// signal, and when the re-read stops reporting the pid the end is
-    /// confirmed. The fixture pid is a real, unused pid number, so the test
-    /// signals nothing that exists.
+    /// confirmed. The signalled process is one the test itself spawned, with
+    /// the roster-start closure answering its true start time, so the
+    /// incarnation proof passes against a real, owned process.
     #[test]
     fn a_surviving_pid_signals_once_and_confirms_when_it_dies() {
+        use std::process::{Command, Stdio};
+
+        let sleeper = Command::new("sleep")
+            .arg("60")
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("spawn owned sleeper");
+        let pid = sleeper.id();
+        let Some(start) = crate::daemon::process_start_time(pid) else {
+            let _ = sleeper.kill();
+            let _ = sleeper.wait();
+            return;
+        };
         let reads = std::cell::Cell::new(0u32);
         let confirmed = stop_claude_confirmed_with(
             "ee99ff00",
@@ -390,32 +430,71 @@ mod tests {
                 let n = reads.get();
                 reads.set(n + 1);
                 if n == 0 {
-                    row("stopped", Some(999_999_999))
+                    row("stopped", Some(pid))
                 } else {
                     row("stopped", None)
                 }
             },
+            &|_, probed| (probed == pid).then_some(start),
             &|_| {},
             15,
         );
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
         assert!(confirmed, "the re-read without a pid is the proof");
         assert_eq!(reads.get(), 2, "one signal, one re-read");
     }
 
     /// The refusal: a survivor still reported after the signal holds the
-    /// row, honestly.
+    /// row, honestly. The fixture spawns a TERM-ignoring process the test
+    /// owns and kills it before returning.
     #[test]
     fn a_pid_still_reported_after_the_signal_refuses() {
+        use std::process::{Command, Stdio};
+
+        let sleeper = Command::new("sh")
+            .args(["-c", "trap '' TERM; sleep 60"])
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("spawn owned TERM-ignoring sleeper");
+        let pid = sleeper.id();
+        let Some(start) = crate::daemon::process_start_time(pid) else {
+            let _ = sleeper.kill();
+            let _ = sleeper.wait();
+            return;
+        };
+        let confirmed = stop_claude_confirmed_with(
+            "ee99ff00",
+            None,
+            &|_| true,
+            &|_, _| Some(true),
+            &|_| row("stopped", Some(pid)),
+            &|_, probed| (probed == pid).then_some(start),
+            &|_| {},
+            15,
+        );
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+        assert!(!confirmed, "a respawn reads as an ignored signal");
+    }
+
+    /// Doubt refuses: with no recorded start token for the survivor's pid,
+    /// nothing is signalled and the row holds.
+    #[test]
+    fn an_unprovable_pid_refuses_without_a_signal() {
+        let reads = std::cell::Cell::new(0u32);
         let confirmed = stop_claude_confirmed_with(
             "ee99ff00",
             None,
             &|_| true,
             &|_, _| Some(true),
             &|_| row("stopped", Some(999_999_999)),
+            &|_, _| None,
             &|_| {},
             15,
         );
-        assert!(!confirmed, "a respawn reads as an ignored signal");
+        assert!(!confirmed, "no record, no signal");
+        assert_eq!(reads.get(), 1, "one witness read, no re-read");
     }
 
     /// The early return stands: a session the roster already stopped
@@ -432,6 +511,7 @@ mod tests {
             },
             &|_, _| Some(false),
             &|_| None,
+            &|_, _| None,
             &|_| {},
             15,
         );

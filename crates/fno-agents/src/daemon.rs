@@ -39,8 +39,6 @@ pub(crate) mod store_socket_sweep;
 pub(crate) mod worktree_sweep;
 pub(crate) use self::blocking_bound::directory_bytes;
 use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
-#[cfg(test)]
-use self::claude_stop::stop_claude_pid_confirmed;
 use self::claude_stop::{end_survivors, stop_claude};
 use self::roster_death::claude_row_provably_absent;
 pub(crate) use self::roster_death::{claude_row_id, pid_is_gone};
@@ -1086,23 +1084,32 @@ async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
                         // A stop exit is a receipt, not a proof. The marker is
                         // only spent on a proved end: a survivor keeps its
                         // marker, so the next tick retries instead of the row
-                        // reading stopped over a live process.
-                        if let Ok(members) =
-                            claude_stop::prove_target(&short, Some(marker.uuid.as_str()))
-                        {
-                            let (_signalled, survivors) = end_survivors(&members).await;
-                            if !survivors.is_empty() {
-                                let listed = survivors
-                                    .iter()
-                                    .map(|pid| pid.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join(", ");
+                        // reading stopped over a live process. No proof at
+                        // all (roster unreadable, no worker named) refuses
+                        // the same way: no record, no marker spend.
+                        match claude_stop::prove_target(&short, Some(marker.uuid.as_str())) {
+                            Ok(members) => {
+                                let (_signalled, survivors) = end_survivors(&members).await;
+                                if !survivors.is_empty() {
+                                    let listed = survivors
+                                        .iter()
+                                        .map(|pid| pid.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    eprintln!(
+                                        // retired-ok: a daemon log line naming its own teardown call.
+                                        "daemon: terminal-stop sweep: claude stop {short} returned \
+                                         but pid {listed} survived the signal; the marker stays for \
+                                         the next tick. The override for a session claude's own \
+                                         supervisor respawns is `fno agents rm`."
+                                    );
+                                    continue;
+                                }
+                            }
+                            Err(reason) => {
                                 eprintln!(
-                                    // retired-ok: a daemon log line naming its own teardown call.
-                                    "daemon: terminal-stop sweep: claude stop {short} returned \
-                                     but pid {listed} survived the signal; the marker stays for \
-                                     the next tick. The override for a session claude's own \
-                                     supervisor respawns is `fno agents rm`."
+                                    "daemon: terminal-stop sweep: no process proof for \
+                                     {short} ({reason}); the marker stays for the next tick"
                                 );
                                 continue;
                             }

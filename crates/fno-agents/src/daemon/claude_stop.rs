@@ -8,7 +8,7 @@
 //! out of `daemon.rs` for the file budget, beside `rm_teardown`.
 
 use serde_json::json;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::blocking_bound::off_executor;
 use super::{
@@ -124,40 +124,58 @@ pub(super) fn prove_target(
     })
 }
 
-/// End whatever survived the ask. Waits out the grace for each member, then
-/// escalates SIGTERM -> SIGKILL with the ownership proof re-run before EVERY
-/// signal, so a pid recycled inside a window takes nothing. Returns whether
-/// any signal was sent and the pids still proved ours at the end.
+/// End whatever survived the ask. The grace phase runs against the whole
+/// set at once (a member that exits inside the grace costs the grace once,
+/// not once per member); the escalation phase then runs per survivor,
+/// SIGTERM -> SIGKILL with the ownership proof re-run before EVERY signal,
+/// so a pid recycled inside a window takes nothing. Returns whether any
+/// signal was sent and the pids still proved ours at the end.
 pub(super) async fn end_survivors(members: &[(u32, u64)]) -> (bool, Vec<u32>) {
+    // Grace: the set-level wait. A pid that dies or is recycled counts as
+    // gone, the same rule pid_gone_within applies to a single member.
+    let deadline = Instant::now() + STOP_ASK_GRACE;
+    let mut alive: Vec<(u32, u64)> = members.to_vec();
+    while !alive.is_empty() && Instant::now() < deadline {
+        alive.retain(|(pid, start)| {
+            !super::pid_confirmed_dead(*pid) && !super::pid_recycled(*pid, Some(*start))
+        });
+        if !alive.is_empty() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    alive.retain(|(pid, start)| {
+        !super::pid_confirmed_dead(*pid) && !super::pid_recycled(*pid, Some(*start))
+    });
+    if alive.is_empty() {
+        return (false, Vec::new());
+    }
+    // Escalation: only actual survivors pay the per-member waits.
     let mut signalled = false;
     let mut survivors = Vec::new();
-    for (pid, start) in members {
-        if pid_gone_within(*pid, Some(*start), STOP_ASK_GRACE).await {
-            continue;
-        }
-        if !proved_ours(*pid, *start) {
+    for (pid, start) in alive {
+        if !proved_ours(pid, start) {
             // Died in the gap between the wait and the proof: gone, honestly.
             continue;
         }
         signalled = true;
         // SAFETY: ownership proved directly above; SIGTERM to our own worker.
         unsafe {
-            libc::kill(*pid as libc::pid_t, libc::SIGTERM);
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
         }
-        if pid_gone_within(*pid, Some(*start), Duration::from_secs(5)).await {
+        if pid_gone_within(pid, Some(start), Duration::from_secs(5)).await {
             continue;
         }
-        if proved_ours(*pid, *start) {
+        if proved_ours(pid, start) {
             // SAFETY: ownership re-proved after the grace, so a pid recycled
             // during it takes no signal.
             unsafe {
-                libc::kill(*pid as libc::pid_t, libc::SIGKILL);
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
             }
         }
-        if !pid_gone_within(*pid, Some(*start), Duration::from_secs(2)).await
-            && proved_ours(*pid, *start)
+        if !pid_gone_within(pid, Some(start), Duration::from_secs(2)).await
+            && proved_ours(pid, start)
         {
-            survivors.push(*pid);
+            survivors.push(pid);
         }
     }
     (signalled, survivors)
@@ -335,6 +353,7 @@ pub(super) async fn stop_claude(
                 req.id,
                 ErrorCode::InvalidStatus,
                 format!(
+                    // retired-ok: reports the shellout that returned, not a step to run.
                     "claude stop {short} returned but pid {listed} for {name} survived \
                      SIGTERM and SIGKILL; the row stays live. The documented override \
                      for a row whose process survives every stop is `fno agents rm`."
@@ -539,13 +558,17 @@ mod tests {
             .collect();
         let (host, child) = (fields[0], fields[1]);
         let start_of = |pid: u32| process_start_time(pid);
-        let Some(host_start) = start_of(host) else {
+        // Both starts must read, or the test reaps both sleepers and skips:
+        // an unreadable start would put a bogus token on a member, and that
+        // member would then be skipped by the proof at signal time and LEAK.
+        let (Some(host_start), Some(child_start)) = (start_of(host), start_of(child)) else {
             unsafe {
                 libc::kill(host as libc::pid_t, libc::SIGKILL);
+                libc::kill(child as libc::pid_t, libc::SIGKILL);
             }
             return;
         };
-        let members = vec![(host, host_start), (child, start_of(child).unwrap_or(1))];
+        let members = vec![(host, host_start), (child, child_start)];
 
         let (signalled, survivors) = end_survivors(&members).await;
 
