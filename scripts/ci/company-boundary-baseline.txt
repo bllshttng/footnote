@@ -37,12 +37,12 @@ cli/src/fno/claims/cli.py:1464: L1 core -> L5 runtime / from fno.agents.truth_st
 # or opencode worker). tail_facts IS the transcript reader; there is no
 # lower-layer copy to call instead, and the same shape as the two entries
 # above it.
-cli/src/fno/claims/roster.py:34: L1 core -> L5 runtime / from fno.agents.watchdog import fleet_rows
-cli/src/fno/claims/roster.py:40: L1 core -> L5 runtime / from fno.agents.watchdog import ADVISORY_WARNING_PREFIX, UNMEASURABLE_ROW_PREFIX
-cli/src/fno/claims/roster.py:94: L1 core -> L5 runtime / from fno.agents.watchdog import _TERMINAL_STATES, _WAKE_STATES
-cli/src/fno/claims/roster.py:101: L1 core -> L5 runtime / from fno.agents.reachability import REACHABLE, UNKNOWN
-cli/src/fno/claims/roster.py:119: L1 core -> L5 runtime / from fno.agents.reachability import (
-cli/src/fno/claims/roster.py:130: L1 core -> L5 runtime / from fno.agents.watchdog import classify_tail, harness_for_session, tail_facts
+cli/src/fno/claims/roster.py:35: L1 core -> L5 runtime / from fno.agents.watchdog import fleet_rows
+cli/src/fno/claims/roster.py:41: L1 core -> L5 runtime / from fno.agents.watchdog import ADVISORY_WARNING_PREFIX, UNMEASURABLE_ROW_PREFIX
+cli/src/fno/claims/roster.py:96: L1 core -> L5 runtime / from fno.agents.watchdog import _TERMINAL_STATES, _WAKE_STATES
+cli/src/fno/claims/roster.py:103: L1 core -> L5 runtime / from fno.agents.reachability import REACHABLE, UNKNOWN
+cli/src/fno/claims/roster.py:121: L1 core -> L5 runtime / from fno.agents.reachability import (
+cli/src/fno/claims/roster.py:132: L1 core -> L5 runtime / from fno.agents.watchdog import classify_tail, harness_for_session, tail_facts
 #
 # Added 2026-09-11 (the liveness-readers node). Every roster row, the status
 # crosscheck and the graph's worked overlay now classify through the ONE
