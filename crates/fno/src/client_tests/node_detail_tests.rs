@@ -56,11 +56,22 @@ async fn esc_closes_and_selector_survives() {
     node_detail::open_for(&mut view, "x-1".into());
 
     let mut sock = Vec::new();
+    // The lone ESC byte is carried across reads (split-arrow safety); the
+    // overlay closes on the quiet-window flush, whose empty read releases
+    // the carry as the Esc action.
     node_detail::detail_keys(&mut view, &[0x1b], &mut sock)
         .await
         .unwrap();
+    assert!(
+        view.node_detail.is_some(),
+        "the lone ESC waits in the carry"
+    );
+    assert_eq!(view.node_detail_esc, vec![0x1b]);
 
-    assert!(view.node_detail.is_none(), "Esc closed the overlay");
+    node_detail::detail_keys(&mut view, &[], &mut sock)
+        .await
+        .unwrap();
+    assert!(view.node_detail.is_none(), "the flush closed the overlay");
     assert!(view.selector.is_some(), "the selector survives underneath");
 }
 

@@ -2212,9 +2212,11 @@ mod update_menu;
 mod agent_launcher;
 mod input_folds;
 mod mail_input;
+mod overlay_keys;
 
 use input_folds::{
-    fold_modal_keys, fold_search_input, fold_selector_keys, ModalKey, SearchKey, MAX_ESC_CARRY,
+    fold_modal_keys, fold_nav_input, fold_search_input, fold_selector_keys, ModalKey, NavKey,
+    SearchKey,
 };
 
 use mail_input::peek_input_keys;
@@ -9879,6 +9881,10 @@ async fn attach_and_run(
     // truth for WHETHER digits are held; this remembers SINCE WHEN, so a
     // number typed and then left alone still lands.
     let mut digits_since: Option<Instant> = None;
+    // When the last stdin chunk whose final byte was ESC arrived: the
+    // raw-fed overlays hold a lone ESC in their carry exactly then, and
+    // the quiet-window flush releases it as the Esc action.
+    let mut esc_tail_since: Option<Instant> = None;
     // Carries a partial SGR mouse report split across reads (mouse.rs).
     let mut mouse_carry: Vec<u8> = Vec::new();
     // Clipboard delivery runs on a blocking thread and reports its outcome back
@@ -10149,6 +10155,9 @@ async fn attach_and_run(
         // pending after this window is a lone Esc (or a torn write older than
         // the window) and must not wait for the next keypress.
         let chord_flush_deadline = chord_since.map(|t| t + CHORD_FLUSH_AFTER);
+        // The raw-fed overlays' quiet-window flush deadline, the same
+        // window as the scanner's chord arm above.
+        let esc_tail_deadline = esc_tail_since.map(|t| t + CHORD_FLUSH_AFTER);
         // The held tab number's quiet-window deadline; Enter and the
         // non-digit terminator resolve sooner, this only covers
         // number-then-nothing.
@@ -10489,6 +10498,16 @@ async fn attach_and_run(
                             } else {
                                 digits_since = None;
                             }
+                            // The overlays' lone-ESC carry holds exactly
+                            // when a chunk's last byte is ESC (the mouse
+                            // pre-pass never keeps a trailing one). Re-arm on
+                            // every ESC-ending chunk so the clock measures
+                            // quiet since the LAST ESC byte.
+                            esc_tail_since = if bytes.last() == Some(&0x1b) {
+                                Some(Instant::now())
+                            } else {
+                                None
+                            };
                             if let Err(e) = compositor.draw(&view.compose()) {
                                 break Err(format!("draw: {e}"));
                             }
@@ -10856,6 +10875,32 @@ async fn attach_and_run(
                 }
                 // A flush can change client-local state (the launcher's
                 // lone-Esc close): draw here, no pane repaint covers it.
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            _ = async {
+                match esc_tail_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if esc_tail_deadline.is_some() => {
+                // The overlays' quiet window elapsed: a lone ESC left in the
+                // top overlay's carry is a bare Esc press.
+                esc_tail_since = None;
+                match overlay_keys::flush_lone_esc(&mut view, &mut scanner, &mut sock_w).await {
+                    Ok(StdinFlow::Continue) => {}
+                    Ok(StdinFlow::Detach) => {
+                        // stamp the detach time so the next attach can
+                        // gate the catch-up digest on how long we were away.
+                        crate::digest_overlay::record_detach(&view.session);
+                        let _ = write_msg(&mut sock_w, &ClientMsg::Detach).await;
+                        break Ok(exit_with_notice("detached; run fno to reattach".into()));
+                    }
+                    Err(e) => break Err(e),
+                }
+                // A flush can close the top overlay: draw here, no pane
+                // repaint covers it.
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -11798,117 +11843,18 @@ async fn handle_stdin(
         view.cancel_row_drag();
         return Ok(StdinFlow::Continue);
     }
-    if view.digest.is_some() {
-        // any key dismisses the catch-up digest into the normal view.
-        // Same whole-chunk swallow as the key-table overlay below.
-        view.digest = None;
+    // A chunk the mouse pre-pass consumed whole carries no key bytes: the
+    // folds must not see an empty read here, or a lone ESC in the owning
+    // overlay's carry would flush on the mouse's clock instead of the
+    // quiet window's. The deadline's flush enters through flush_lone_esc.
+    if passthrough.is_empty() {
         return Ok(StdinFlow::Continue);
     }
-    if view.keys_modal.is_some() {
-        // US3 which-key: a bound key executes through the shared dispatch,
-        // arrows/pgup scroll+select, Enter runs the selected row, Esc/unbound
-        // dismiss. Routed here (same precedence as the old poster) so its keys
-        // never leak to a pane.
-        return keys_modal_keys(view, scanner, &passthrough, sock_w).await;
-    }
-    if view.row_menu.is_some() {
-        // US2: the row context menu consumes keys while open (arrows walk
-        // the entries + grid, Enter runs, Esc/q close) - never leaks to a pane.
-        return row_menu_keys(view, &passthrough, sock_w).await;
-    }
-    if view.aux.is_some() {
-        // US4/US5: the MENU popup / settings modal consumes keys.
-        return aux_keys(view, &passthrough, sock_w).await;
-    }
-    if view.connections.is_some() {
-        // the Connections modal consumes all keys while open (Tab
-        // switches tabs, j/k move, R refreshes, Esc closes) - never leaks to a
-        // pane. Routed here (top-level modal, like the MENU it opened from).
-        return connections_keys(view, &passthrough, sock_w).await;
-    }
-    if view.confirm.is_some() {
-        return confirm_keys(view, &passthrough, sock_w).await;
-    }
-    if view.move_pick.is_some() {
-        // Modal like confirm: a single digit/Esc resolves it. Ahead of
-        // the selector (which it replaced on open) so its keys can't leak there.
-        return move_pick_keys(view, &passthrough, sock_w).await;
-    }
-    if view.attach_place.is_some() {
-        return attach_place_keys(view, &passthrough, sock_w).await;
-    }
-    if view.portal_pick.is_some() {
-        // The portal picker consumes keys while open, ahead of the
-        // selector it replaced - same precedence slot as its sibling.
-        return portal_pick_keys(view, &passthrough, sock_w).await;
-    }
-    if view.node_detail.is_some() {
-        // Node detail (Enter on a card): peek's precedence slot - its keys
-        // never leak to the selector underneath; Esc drops back one layer.
-        return node_detail::detail_keys(view, &passthrough, sock_w).await;
-    }
-    if view.peek.is_some() {
-        // peek sits ON TOP of the selector; routed BEFORE it so its keys
-        // (j/k, Esc, later digit/attach) never leak to the selector underneath.
-        return peek_keys(view, &passthrough, sock_w).await;
-    }
-    // A hover-armed selector is motion-fresh: only the action-verb set
-    // acts on the pointed-at row; the first key OUTSIDE it disarms the arm and
-    // falls through to the pane, so a pointer parked over the sideline never
-    // swallows typing into the focused shell (AC2-EDGE). An explicitly-opened
-    // selector (sel_hover_armed=false) stays fully modal below.
-    if view.selector.is_some() && view.sel_hover_armed {
-        if passthrough.first().is_some_and(|&b| is_sideline_verb(b)) {
-            return selector_keys(view, &passthrough, sock_w).await;
-        }
-        view.selector = None;
-        view.sel_hover_armed = false;
-        // fall through: forward this chunk to the focused pane.
-    }
-    if view.selector.is_some() {
-        return selector_keys(view, &passthrough, sock_w).await;
-    }
-    if view.answers.is_some() {
-        return answer_keys(view, &passthrough, sock_w).await;
-    }
-    if view.yard.is_some() {
-        return yard_keys(view, &passthrough, sock_w).await;
-    }
-    // The feed panel is chrome and consumes no keys UNTIL the
-    // operator focuses it with `E`, or opens a row's provenance. Both are
-    // explicit, and both release back to the pane on Esc, so the property
-    // this slot protects - typing reaches the focused pane - holds by
-    // default and is set aside only on request.
-    if view.feed_detail_of.is_some() || view.feed.as_ref().is_some_and(|f| f.focused) {
-        return feed_view::feed_keys(view, &passthrough, sock_w).await;
-    }
-    if view.create.is_some() {
-        return create_keys(view, &passthrough, sock_w).await;
-    }
-    if view.rename.is_some() {
-        // Same precedence slot as create_keys: AFTER selector/answers, so a
-        // lingering overlay never swallows the typed name (finding).
-        return rename_keys(view, &passthrough, sock_w).await;
-    }
-    if view.move_to.is_some() {
-        // Same precedence slot as the rename overlay it mirrors.
-        return move_to_keys(view, &passthrough, sock_w).await;
-    }
-    if view.recruit.is_some() {
-        return recruit_keys(view, &passthrough, sock_w).await;
-    }
-    if view.search.is_some() {
-        return search_keys(view, &passthrough, sock_w).await;
-    }
-    if view.nav.is_some() {
-        return nav_keys(view, &passthrough, sock_w).await;
-    }
-    if view.launcher.is_some() {
-        // The composer is a modal like every other: prefix chords still
-        // resolve while it holds the keyboard (which-key parity), so the
-        // chunk scans first and only the plain-byte chunks feed the
-        // composer's own folder. Nothing here reaches a pane.
-        return sideline::route_launcher_keys(view, scanner, &passthrough, sock_w).await;
+    // The overlay chain lives in overlay_keys::route: the one precedence
+    // list, plus the quiet-window flush entry (`flush_lone_esc`). `None`
+    // here means no overlay owns the keyboard.
+    if let Some(flow) = overlay_keys::route(view, scanner, &passthrough, sock_w).await {
+        return flow;
     }
     for event in scanner.scan(&passthrough, Instant::now()) {
         match dispatch_event(view, event, sock_w).await? {
@@ -13415,9 +13361,11 @@ async fn execute_aux_action(
         AuxAction::OpenSettings => {
             view.lane.reset();
             view.aux = Some(view.build_settings_modal());
+            view.aux_esc.clear();
         }
         AuxAction::OpenUpdate => {
             view.aux = Some(build_update_modal(view.update_outcome.as_ref()));
+            view.aux_esc.clear();
         }
         AuxAction::OpenSweep => {
             view.aux = None;
@@ -13571,11 +13519,13 @@ async fn execute_aux_action(
         }
         AuxAction::LaneColorAdd(axis) => {
             view.lane.axis = Some(axis.clone());
+            view.lane.entry_esc.clear();
             view.lane.key_entry = Some((axis, String::new()));
             view.reopen_settings_keeping_sel();
         }
         AuxAction::LaneColorCustom(axis, key) => {
             view.lane.pick = Some((axis.clone(), key.clone()));
+            view.lane.entry_esc.clear();
             view.lane.custom_entry = Some(String::new());
             view.reopen_settings_keeping_sel();
         }
@@ -14860,90 +14810,6 @@ async fn move_pick_keys(
 /// cost against a held key or a paste. (gemini review, MEDIUM)
 const MAX_SEARCH_QUERY: usize = 256;
 
-/// Navigator fold keys. Superset of [`SearchKey`]: the same split-arrow escape
-/// fold, but a completed CSI whose final byte is Up/Down/Shift-Tab surfaces as a
-/// motion token instead of being swallowed. Every other CSI is
-/// still consumed whole, so no escape tail leaks into the query or the pane.
-enum NavKey {
-    Byte(u8),
-    Esc,
-    Up,
-    Down,
-    /// Bare Right: reach the selected row (the Enter/goto arm).
-    Right,
-    /// Bare Left: close (the Esc arm) - back to the pane you came
-    /// from. The overlay owns every keystroke, so a bare arrow is free.
-    Left,
-    ShiftTab,
-}
-
-/// Fold navigator-mode bytes. Identical escape-carry semantics to
-/// [`fold_search_input`] (whole CSI consumed, split sequences carried across
-/// reads via `esc`), except the arrow-Up `ESC [ A`, arrow-Down `ESC [ B`,
-/// arrow-Right/Left `ESC [ C`/`ESC [ D`, and Shift-Tab `ESC [ Z` finals become
-/// [`NavKey::Up`]/[`Down`]/[`Right`]/[`Left`]/[`ShiftTab`] so the navigator can
-/// move its cursor, goto, close, and reverse-cycle the state chip. A modified
-/// arrow (`ESC [ 1; 5 A`) shares the final byte and maps to the same motion -
-/// harmless. All other finals are swallowed, same leak-safety as search.
-fn fold_nav_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<NavKey> {
-    let mut keys = Vec::new();
-    for &b in bytes {
-        match esc.as_slice() {
-            [] => {
-                if b == 0x1b {
-                    esc.push(0x1b);
-                } else {
-                    keys.push(NavKey::Byte(b));
-                }
-            }
-            [0x1b] => {
-                if b == b'[' {
-                    esc.push(b);
-                } else {
-                    esc.clear();
-                    keys.push(NavKey::Esc);
-                    if b == 0x1b {
-                        esc.push(0x1b);
-                    } else {
-                        keys.push(NavKey::Byte(b));
-                    }
-                }
-            }
-            _ => {
-                if b == 0x1b {
-                    esc.clear();
-                    esc.push(0x1b);
-                } else if (0x40..=0x7e).contains(&b) {
-                    // CSI complete. Surface the three motion finals; swallow the
-                    // rest. Only a BARE `ESC [ X` counts: a parameterised
-                    // sequence is a MODIFIED key (Ctrl-Up is `ESC [ 1; 5 A`),
-                    // and aliasing it onto the unmodified one silently
-                    // reinterprets a chord the operator meant as something else.
-                    // This fold serves prefix+f, the navigator this change
-                    // promotes to the primary route, so it is the last place
-                    // that should guess.
-                    if esc.len() == 2 {
-                        match b {
-                            b'A' => keys.push(NavKey::Up),
-                            b'B' => keys.push(NavKey::Down),
-                            b'C' => keys.push(NavKey::Right),
-                            b'D' => keys.push(NavKey::Left),
-                            b'Z' => keys.push(NavKey::ShiftTab),
-                            _ => {}
-                        }
-                    }
-                    esc.clear();
-                } else if esc.len() >= MAX_ESC_CARRY {
-                    esc.clear();
-                } else {
-                    esc.push(b);
-                }
-            }
-        }
-    }
-    keys
-}
-
 /// Search-mode keys (v12). Typing: printable append, Backspace pops,
 /// Enter submits (send [`ClientMsg::SearchOpen`]), Esc cancels locally. Browsing
 /// (post-submit): `n`/`N` send [`ClientMsg::SearchStep`] (older/newer), Esc sends
@@ -15882,6 +15748,10 @@ mod court_block_tests;
 #[cfg(test)]
 #[path = "client_tests/update_modal_tests.rs"]
 mod update_modal_tests;
+
+#[cfg(test)]
+#[path = "client_tests/esc_quiet_tests.rs"]
+mod esc_quiet_tests;
 
 #[cfg(test)]
 #[path = "client_tests/node_detail_tests.rs"]

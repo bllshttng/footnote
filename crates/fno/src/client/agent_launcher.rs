@@ -402,6 +402,9 @@ pub(crate) fn open(view: &mut View) {
         }
     }
     view.launcher = Some(launcher);
+    // A fresh open starts with a fresh esc carry: a lone ESC stranded in the
+    // retained dock's carry must never close the reopened dock.
+    view.launcher_esc = Default::default();
     // A catalog read already in hand syncs the (retained) draft's harness
     // names immediately; a first open kicks the probe and the field renders
     // "<catalog...>" until it lands.
@@ -753,11 +756,9 @@ impl LauncherEsc {
         // A lone ESC left at the END of a read is a bare Esc press, never a
         // torn sequence prefix: every launcher chunk has already passed the
         // chord scanner, which rejoins split CSI sequences and releases this
-        // byte only after its 40ms quiet window. Same rule pick_keys_from_read
-        // (mux_cli) and node_detail_keys already apply at their read
-        // boundaries; without it one Esc press waits forever for a second key.
-        if self.paste.is_none() && self.esc.as_slice() == [0x1b] {
-            self.esc.clear();
+        // byte only after its 40ms quiet window. Without it one Esc press
+        // waits forever for a second key.
+        if self.paste.is_none() && crate::keys::take_lone_esc(&mut self.esc) {
             keys.push(LKey::Esc);
         }
         keys
