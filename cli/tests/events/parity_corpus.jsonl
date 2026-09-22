@@ -263,3 +263,4 @@
 {"expect":"invalid","reason":"fleet_task missing the required task_id","event":{"ts":"2026-09-22T10:00:01Z","type":"fleet_task","source":"daemon","data":{"lane":"heal","key":"PR 2226 rebase conflict","text":"chore","cwd":"/repo/a"}}}
 {"expect":"valid","reason":"fleet_task_closed happy path: the condition cleared","event":{"ts":"2026-09-22T10:00:02Z","type":"fleet_task_closed","source":"daemon","data":{"task_id":"ft-1a2b3c4d","reason":"rebased","closed_by":"heal"}}}
 {"expect":"invalid","reason":"fleet_task_closed missing the required task_id","event":{"ts":"2026-09-22T10:00:03Z","type":"fleet_task_closed","source":"daemon","data":{"reason":"rebased","closed_by":"heal"}}}
+{"expect":"valid","reason":"machine sample carries the verdict and nullable measurements","event":{"ts":"2026-09-21T22:00:00Z","type":"machine_sample","source":"loop","data":{"sample_id":"ms-1-2","verdict":"unreadable","took_ms":4,"unresolved":[]}}}
