@@ -471,7 +471,12 @@ mod tests {
     fn a_noop_self_edit_carries_the_self_declared_refusal() {
         // AC2-ERR: requested == held adds and drops nothing; the moved
         // crown.py text names the self-grantor claim it prevents.
-        let out = resolve(&payload("e-1", "e-1", json!([]))).unwrap();
+        let out = resolve(&payload(
+            "e-1",
+            "e-1",
+            json!([{"id": "e-1", "type": "epic", "status": "ready"}]),
+        ))
+        .unwrap();
         assert_eq!(out["widen"], false);
         let hint = out["hint"].as_str().unwrap();
         assert!(hint.contains("never self-declared"), "{hint}");
