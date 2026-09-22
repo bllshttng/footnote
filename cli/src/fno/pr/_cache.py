@@ -21,7 +21,6 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
-
 from fno.pr._proc import ToolMissing
 
 # Defaults named in the PR body: change them here, never in the
@@ -308,8 +307,6 @@ def _cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False)
                 code = run_status(pr, cwd, prior=(row or {}).get("output"))
             finally:
                 sys.stdout = real_stdout
-                # Written in the finally: a payload built before a crash still
-                # reaches the caller instead of dying in the buffer (x-4c00).
                 line = buf.getvalue()
                 sys.stdout.write(line)
             try:
@@ -339,12 +336,6 @@ def _cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False)
 
 
 def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) -> int:
-    """The CLI entry: `_cached_status` plus the reader-failure contract.
-
-    A reader crash is exit 4, never red's exit 1, and stdout still carries
-    exactly one JSON line - the payload the read did build, else a verdict
-    error shape (docs/architecture/pr-status-verdict.md, exit alphabet).
-    """
     buf, real_stdout = io.StringIO(), sys.stdout
     sys.stdout = buf
     try:
@@ -357,13 +348,7 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
         try:
             payload = json.loads(buf.getvalue().strip().splitlines()[-1])
         except (IndexError, ValueError):
-            payload = {
-                "pr": pr,
-                "verdict": "error",
-                "settled": False,
-                "green": False,
-                "reason": why,
-            }
+            payload = dict(pr=pr, verdict="error", settled=False, green=False, reason=why)
         payload["reader_error"] = why
         buf, code = io.StringIO(json.dumps(payload) + "\n"), 4
     finally:
