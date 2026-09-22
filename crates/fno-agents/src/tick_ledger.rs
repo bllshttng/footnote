@@ -5,7 +5,10 @@
 //! one `control_plane_tick` row to the journal it already uses, saying what it
 //! did or why it did nothing. The reader folds every journal into one row per
 //! arm: last tick, last action, last skip reason, and a stale verdict when the
-//! last tick is older than twice the arm's interval. An arm whose journals
+//! last tick is older than twice the arm's interval. The fold reads each
+//! journal's committed store rows plus its live bytes
+//! (`event_store::journal_text`): writers commit to the store only, so a fold
+//! over the raw file stops at the store cutover. An arm whose journals
 //! hold no tick row at all reads UNOBSERVED, never STALE: the absence of a
 //! producer receipt cannot say whether a producer exists, and only an
 //! observed receipt is a measurement.
@@ -18,7 +21,6 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use crate::loop_runtime::Journal;
@@ -356,19 +358,35 @@ pub fn journals(home: &AgentsHome) -> Vec<PathBuf> {
     vec![home.events_jsonl(), global]
 }
 
-/// Fold every journal (plus `.1` rotations) into one row per known arm.
-/// Unknown arms seen in the journals are appended after the known ones, so a
-/// new emitter deploys before its reader does.
+/// The row types the arms folds read: arm ticks and the healer's receipts.
+const ARM_ROW_TYPES: &[&str] = &[EVENT_TYPE, "pr_heal_tick"];
+/// The row types the pr-watch tick trace reads.
+const TICK_TRACE_TYPES: &[&str] = &["pr_watch_tick_attempt", "pr_watch_tick_end"];
+
+/// Every parsed row of `types` the journals hold: the store's committed rows,
+/// then the live file's bytes. Writers commit to the store only, so a fold
+/// over the raw file alone stops at the store cutover.
+fn journal_rows(journals: &[PathBuf], types: &[&str]) -> Vec<Value> {
+    journals
+        .iter()
+        .flat_map(|j| {
+            crate::event_store::journal_text(j, types)
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Fold every journal into one row per known arm, reading each journal's
+/// committed store rows plus its live bytes. Unknown arms seen in the
+/// journals are appended after the known ones, so a new emitter deploys
+/// before its reader does.
 pub fn read_arms(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
     let mut newest: HashMap<String, NewestTick> = HashMap::new();
     let mut newest_ok: HashMap<String, NewestTick> = HashMap::new();
-    let mut paths: Vec<PathBuf> = Vec::new();
-    for journal in journals {
-        paths.push(journal.clone());
-        paths.push(rotation_path(journal));
-    }
-    for path in &paths {
-        scan_journal(path, &mut newest, &mut newest_ok);
+    for value in journal_rows(journals, ARM_ROW_TYPES) {
+        fold_arm_row(value, &mut newest, &mut newest_ok);
     }
 
     // The static spec facts ride the fold; the runtime arm value is filled
@@ -409,70 +427,54 @@ struct NewestTick {
     data: Value,
 }
 
-fn rotation_path(path: &Path) -> PathBuf {
-    let mut s = path.as_os_str().to_os_string();
-    s.push(".1");
-    PathBuf::from(s)
-}
-
-fn scan_journal(
-    path: &Path,
+fn fold_arm_row(
+    value: Value,
     newest: &mut HashMap<String, NewestTick>,
     newest_ok: &mut HashMap<String, NewestTick>,
 ) {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return,
+    // The healer's receipt type folds into the `heal` arm here too, so
+    // both journal folds agree on what a heal receipt looks like.
+    let value = if value.get("type").and_then(Value::as_str) == Some("pr_heal_tick") {
+        heal_tick_as_arm_row(value)
+    } else {
+        value
     };
-    for line in std::io::BufReader::new(file).lines() {
-        let Ok(line) = line else { continue };
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        // The healer's receipt type folds into the `heal` arm here too, so
-        // both journal folds agree on what a heal receipt looks like.
-        let value = if value.get("type").and_then(Value::as_str) == Some("pr_heal_tick") {
-            heal_tick_as_arm_row(value)
-        } else {
-            value
-        };
-        if value.get("type").and_then(Value::as_str) != Some(EVENT_TYPE) {
-            continue;
-        }
-        let Some(data) = value.get("data").and_then(Value::as_object) else {
-            continue;
-        };
-        let Some(arm) = data.get("arm").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(ts_unix) = value
+    if value.get("type").and_then(Value::as_str) != Some(EVENT_TYPE) {
+        return;
+    }
+    let Some(data) = value.get("data").and_then(Value::as_object) else {
+        return;
+    };
+    let Some(arm) = data.get("arm").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(ts_unix) = value
+        .get("ts")
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_unix)
+    else {
+        return;
+    };
+    let row = NewestTick {
+        ts_unix,
+        ts: value
             .get("ts")
             .and_then(Value::as_str)
-            .and_then(parse_rfc3339_unix)
-        else {
-            continue;
-        };
-        let row = NewestTick {
-            ts_unix,
-            ts: value
-                .get("ts")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            data: Value::Object(data.clone()),
-        };
-        if fresher_than(newest, arm, ts_unix) {
-            newest.insert(arm.to_string(), row.clone());
-        }
-        // The newest run that did NOT fail anchors `failing_for_s`: how long
-        // the arm has been failing, not merely how long since it last spoke.
-        let ok = !data
-            .get("skip_reason")
-            .and_then(Value::as_str)
-            .is_some_and(|r| FAILURE_SKIPS.contains(&r));
-        if ok && fresher_than(newest_ok, arm, ts_unix) {
-            newest_ok.insert(arm.to_string(), row);
-        }
+            .unwrap_or_default()
+            .to_string(),
+        data: Value::Object(data.clone()),
+    };
+    if fresher_than(newest, arm, ts_unix) {
+        newest.insert(arm.to_string(), row.clone());
+    }
+    // The newest run that did NOT fail anchors `failing_for_s`: how long
+    // the arm has been failing, not merely how long since it last spoke.
+    let ok = !data
+        .get("skip_reason")
+        .and_then(Value::as_str)
+        .is_some_and(|r| FAILURE_SKIPS.contains(&r));
+    if ok && fresher_than(newest_ok, arm, ts_unix) {
+        newest_ok.insert(arm.to_string(), row);
     }
 }
 
@@ -526,14 +528,7 @@ fn heal_tick_as_arm_row(value: Value) -> Value {
 /// never via an input probe.
 pub fn mark_starved(journals: &[PathBuf], rows: &mut [ArmStatus], now_unix: u64, threshold_s: u64) {
     let mut history: HashMap<String, Vec<(u64, u64, bool)>> = HashMap::new();
-    let mut paths: Vec<PathBuf> = Vec::new();
-    for journal in journals {
-        paths.push(journal.clone());
-        paths.push(rotation_path(journal));
-    }
-    for path in &paths {
-        collect_tick_history(path, &mut history);
-    }
+    collect_tick_history(journal_rows(journals, ARM_ROW_TYPES), &mut history);
     for row in rows.iter_mut() {
         if row_is_unarmed(row)
             || row.producer_evidence == ProducerEvidence::Unobserved
@@ -584,17 +579,9 @@ pub fn read_arms_starved(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> 
 }
 
 /// One fold collecting every `(ts, acted, skip_explains)` triple an arm's
-/// journal holds.
-fn collect_tick_history(path: &Path, history: &mut HashMap<String, Vec<(u64, u64, bool)>>) {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    for line in std::io::BufReader::new(file).lines() {
-        let Ok(line) = line else { continue };
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
+/// rows hold.
+fn collect_tick_history(rows: Vec<Value>, history: &mut HashMap<String, Vec<(u64, u64, bool)>>) {
+    for value in rows {
         let value = if value.get("type").and_then(Value::as_str) == Some("pr_heal_tick") {
             heal_tick_as_arm_row(value)
         } else {
@@ -802,53 +789,38 @@ pub struct TickTrace {
 }
 
 /// Fold the newest `pr_watch_tick_attempt` / `pr_watch_tick_end` records out
-/// of the journals (plus `.1` rotations). Absent records leave defaults: the
-/// trace never invents a tick.
+/// of each journal's committed store rows plus its live bytes. Absent
+/// records leave defaults: the trace never invents a tick.
 pub fn read_tick_trace(journals: &[PathBuf], now_unix: u64) -> TickTrace {
-    let mut paths: Vec<PathBuf> = Vec::new();
-    for journal in journals {
-        paths.push(journal.clone());
-        paths.push(rotation_path(journal));
-    }
     let mut trace = TickTrace::default();
-    for path in &paths {
-        let file = match std::fs::File::open(path) {
-            Ok(f) => f,
-            Err(_) => continue,
+    for value in journal_rows(journals, TICK_TRACE_TYPES) {
+        let typ = value.get("type").and_then(Value::as_str).unwrap_or("");
+        if typ != "pr_watch_tick_attempt" && typ != "pr_watch_tick_end" {
+            continue;
+        }
+        let Some(ts_unix) = value
+            .get("ts")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_unix)
+        else {
+            continue;
         };
-        for line in std::io::BufReader::new(file).lines() {
-            let Ok(line) = line else { continue };
-            let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            let typ = value.get("type").and_then(Value::as_str).unwrap_or("");
-            if typ != "pr_watch_tick_attempt" && typ != "pr_watch_tick_end" {
-                continue;
+        let data = value.get("data").cloned().unwrap_or(Value::Null);
+        if typ == "pr_watch_tick_attempt" {
+            if trace.attempt_ts_unix.is_none_or(|prev| ts_unix >= prev) {
+                trace.attempt_ts_unix = Some(ts_unix);
+                trace.attempt_age_s = Some(now_unix.saturating_sub(ts_unix));
             }
-            let Some(ts_unix) = value
-                .get("ts")
-                .and_then(Value::as_str)
-                .and_then(parse_rfc3339_unix)
-            else {
-                continue;
-            };
-            let data = value.get("data").cloned().unwrap_or(Value::Null);
-            if typ == "pr_watch_tick_attempt" {
-                if trace.attempt_ts_unix.is_none_or(|prev| ts_unix >= prev) {
-                    trace.attempt_ts_unix = Some(ts_unix);
-                    trace.attempt_age_s = Some(now_unix.saturating_sub(ts_unix));
-                }
-            } else if trace.end_ts_unix.is_none_or(|prev| ts_unix >= prev) {
-                trace.end_ts_unix = Some(ts_unix);
-                trace.end_age_s = Some(now_unix.saturating_sub(ts_unix));
-                trace.end_phase = str_field(&data, "phase");
-                trace.end_outcome = str_field(&data, "outcome");
-                trace.end_cut = data.get("cut").and_then(Value::as_array).map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                });
-            }
+        } else if trace.end_ts_unix.is_none_or(|prev| ts_unix >= prev) {
+            trace.end_ts_unix = Some(ts_unix);
+            trace.end_age_s = Some(now_unix.saturating_sub(ts_unix));
+            trace.end_phase = str_field(&data, "phase");
+            trace.end_outcome = str_field(&data, "outcome");
+            trace.end_cut = data.get("cut").and_then(Value::as_array).map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            });
         }
     }
     trace
@@ -1809,8 +1781,143 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    fn commit_row(journal: &Path, row: &Value) {
+        crate::event_store::append_envelope(journal, &serde_json::to_string(row).unwrap(), None)
+            .unwrap();
+    }
+
     #[test]
-    fn newest_row_per_arm_wins_across_journals_and_rotation() {
+    fn a_row_committed_only_to_the_store_reads_fresh() {
+        let dir = temp_dir();
+        let journal = dir.join("events.jsonl");
+        std::fs::create_dir_all(&dir).unwrap();
+        let row = tick_envelope(
+            "2026-09-22T08:27:07Z",
+            "king_wake",
+            SCHED_DAEMON,
+            1,
+            json!(null),
+            900,
+        );
+        commit_row(&journal, &row);
+        let now = parse_rfc3339_unix("2026-09-22T08:27:17Z").unwrap();
+        let rows = read_arms(&[journal.clone()], now);
+        let king = rows
+            .iter()
+            .find(|r| r.arm == "king_wake")
+            .expect("king_wake row");
+        assert_eq!(king.producer_evidence, ProducerEvidence::Observed);
+        assert_eq!(king.age_s, Some(10));
+        assert!(!king.stale);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unreadable_store_falls_back_to_the_live_rows() {
+        let dir = temp_dir();
+        let journal = dir.join("events.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-22T05:00:00Z",
+                "king_wake",
+                SCHED_DAEMON,
+                1,
+                json!(null),
+                900,
+            )],
+        );
+        std::fs::write(dir.join("events.db"), b"not a sqlite database").unwrap();
+        let now = parse_rfc3339_unix("2026-09-22T05:00:10Z").unwrap();
+        let rows = read_arms(&[journal], now);
+        let king = rows
+            .iter()
+            .find(|r| r.arm == "king_wake")
+            .expect("king_wake row");
+        assert_eq!(king.acted, Some(1));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_newer_store_row_outranks_a_frozen_live_row() {
+        let dir = temp_dir();
+        let journal = dir.join("events.jsonl");
+        let frozen = tick_envelope(
+            "2026-09-22T04:51:51Z",
+            "king_wake",
+            SCHED_DAEMON,
+            1,
+            json!(null),
+            900,
+        );
+        let fresh = tick_envelope(
+            "2026-09-22T08:27:07Z",
+            "king_wake",
+            SCHED_DAEMON,
+            0,
+            json!("no_trigger"),
+            900,
+        );
+        write_rows(&journal, &[frozen.clone()]);
+        commit_row(&journal, &frozen);
+        commit_row(&journal, &fresh);
+        let now = parse_rfc3339_unix("2026-09-22T08:27:17Z").unwrap();
+        let rows = read_arms(&[journal], now);
+        let king = rows
+            .iter()
+            .find(|r| r.arm == "king_wake")
+            .expect("king_wake row");
+        assert_eq!(king.skip_reason.as_deref(), Some("no_trigger"));
+        assert_eq!(king.age_s, Some(10));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn store_committed_no_op_ticks_mark_the_arm_starved() {
+        let dir = temp_dir();
+        let journal = dir.join("events.jsonl");
+        std::fs::create_dir_all(&dir).unwrap();
+        for ts in [
+            "2026-09-22T08:20:00Z",
+            "2026-09-22T08:25:00Z",
+            "2026-09-22T08:30:00Z",
+        ] {
+            let row = tick_envelope(ts, "watchdog", SCHED_DAEMON, 0, json!(null), 600);
+            commit_row(&journal, &row);
+        }
+        let now = parse_rfc3339_unix("2026-09-22T08:30:10Z").unwrap();
+        let mut rows = read_arms(&[journal.clone()], now);
+        mark_starved(&[journal], &mut rows, now, 3_600);
+        let wd = rows
+            .iter()
+            .find(|r| r.arm == "watchdog")
+            .expect("watchdog row");
+        assert!(wd.starved);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_tick_trace_reads_a_store_committed_end() {
+        let dir = temp_dir();
+        let journal = dir.join("events.jsonl");
+        std::fs::create_dir_all(&dir).unwrap();
+        let row = json!({
+            "ts": "2026-09-22T08:27:07Z",
+            "type": "pr_watch_tick_end",
+            "source": "pr-watch",
+            "data": {"phase": "merge", "outcome": "ok", "cut": ["merge"]},
+        });
+        commit_row(&journal, &row);
+        let now = parse_rfc3339_unix("2026-09-22T08:27:17Z").unwrap();
+        let trace = read_tick_trace(&[journal], now);
+        assert_eq!(trace.end_phase.as_deref(), Some("merge"));
+        assert_eq!(trace.end_outcome.as_deref(), Some("ok"));
+        assert_eq!(trace.end_cut, Some(vec!["merge".to_string()]));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn newest_row_per_arm_wins_across_journals() {
         let dir = temp_dir();
         let a = dir.join("global.jsonl");
         let a_rotated = dir.join("global.jsonl.1");
