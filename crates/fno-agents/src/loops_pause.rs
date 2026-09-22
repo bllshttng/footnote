@@ -811,6 +811,31 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn the_launchd_parse_folds_labels_and_the_dead_list() {
+        let listing = "PID\tStatus\tLabel\n\
+                       -\t0\tsh.fno.groom\n\
+                       -\t78\tsh.fno.pr-watcher\n\
+                       412\t0\tsh.fno.mux\n\
+                       -\t127\tcom.user.autocorrect-watcher\n\
+                       -\t-\tsh.fno.idle\n";
+        let fold = crate::tick_ledger::parse_launchctl_list(listing);
+        assert!(fold.applicable);
+        let groom = fold
+            .labels
+            .iter()
+            .find(|f| f.label == "sh.fno.groom")
+            .unwrap();
+        assert!(groom.loaded);
+        assert_eq!(groom.last_exit, Some(0));
+        let dead: Vec<&str> = fold.dead.iter().map(|f| f.label.as_str()).collect();
+        assert_eq!(
+            dead,
+            vec!["sh.fno.pr-watcher", "com.user.autocorrect-watcher"],
+            "the autocorrect labels the sh.fno. prefix filter missed now count"
+        );
+    }
+
+    #[test]
     fn missing_sentinel_is_clear() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(

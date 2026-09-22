@@ -931,7 +931,7 @@ pub fn launchd_fold_live() -> Option<LaunchdFold> {
 
 /// Pure fold so tests run without launchctl. Loaded = the label appeared in
 /// `launchctl list`; last exit is column 2; a `-` is no measured exit.
-fn parse_launchctl_list(text: &str) -> LaunchdFold {
+pub(crate) fn parse_launchctl_list(text: &str) -> LaunchdFold {
     let mut labels: Vec<LaunchdLabelFacts> = LAUNCHD_LABELS
         .iter()
         .map(|l| LaunchdLabelFacts {
