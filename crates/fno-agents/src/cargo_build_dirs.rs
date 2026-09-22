@@ -512,10 +512,11 @@ fn live_cargo_cwds() -> Result<Vec<PathBuf>, ()> {
 /// cannot answer its manifests: either way the returned set may be missing
 /// entries, so the caller must fail closed rather than trust an empty one.
 fn live_shards(trees: &[PathBuf], fno_base: &Path) -> Result<BTreeSet<PathBuf>, ()> {
+    let phys_trees: Vec<PathBuf> = trees.iter().map(|t| phys(t)).collect();
     let mut shards = BTreeSet::new();
     for cwd in live_cargo_cwds()? {
         let cwd = phys(&cwd);
-        let Some(tree) = owning_tree(&cwd, trees) else {
+        let Some(tree) = owning_tree(&cwd, &phys_trees) else {
             continue;
         };
         let answer = answer_tree(tree, fno_base).map_err(|_| ())?;
@@ -524,15 +525,16 @@ fn live_shards(trees: &[PathBuf], fno_base: &Path) -> Result<BTreeSet<PathBuf>, 
     Ok(shards)
 }
 
-/// The registered tree `path` falls under: the LONGEST match wins, so a
-/// worktree nested inside its own checkout owns its own rows, never the
-/// outer checkout `git worktree list` happens to print first.
-fn owning_tree<'a>(path: &Path, trees: &'a [PathBuf]) -> Option<&'a PathBuf> {
+/// The registered tree (already phys) that `path` falls under: the LONGEST
+/// match wins, so a worktree nested inside its own checkout owns its own
+/// rows, never the outer checkout `git worktree list` happens to print
+/// first. Callers phys their tree list once, never per element.
+fn owning_tree<'a>(path: &Path, phys_trees: &'a [PathBuf]) -> Option<&'a PathBuf> {
     let p = phys(path);
-    trees
+    phys_trees
         .iter()
-        .filter(|t| p.starts_with(phys(t)))
-        .max_by_key(|t| phys(t).as_os_str().len())
+        .filter(|t| p.starts_with(*t))
+        .max_by_key(|t| t.as_os_str().len())
 }
 
 // --- free space --------------------------------------------------------------
@@ -614,12 +616,13 @@ fn session_join(
     trees: &[PathBuf],
     registry: &crate::state::Registry,
 ) -> BTreeMap<PathBuf, Holders> {
+    let phys_trees: Vec<PathBuf> = trees.iter().map(|t| phys(t)).collect();
     let mut join: BTreeMap<PathBuf, Holders> = BTreeMap::new();
     for entry in &registry.entries {
-        let Some(tree) = owning_tree(Path::new(&entry.cwd), trees) else {
+        let Some(tree) = owning_tree(Path::new(&entry.cwd), &phys_trees) else {
             continue;
         };
-        let holders = join.entry(phys(tree)).or_default();
+        let holders = join.entry(tree.clone()).or_default();
         if let Some(node) = &entry.node {
             holders.nodes.insert(node.clone());
         }
