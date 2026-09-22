@@ -188,19 +188,7 @@ fn main() {
     }
     // A fire answers in microseconds; the runtime never builds for one.
     if args.first().map(String::as_str) == Some("hook") {
-        let code = match args.get(1).map(String::as_str) {
-            Some("king-guard") => fno_agents::hook::king_guard::run(&args[2..]),
-            Some("prompt") => fno_agents::hook::prompt::run(&args[2..]),
-            Some("test-run-guard") => fno_agents::hook::test_run_guard::run(&args[2..]),
-            Some("stop") => fno_agents::hook::stop::run(&args[2..]),
-            other => {
-                eprintln!(
-                    "fno-agents hook: unknown entry {other:?}; expected king-guard, prompt, test-run-guard or stop"
-                );
-                2
-            }
-        };
-        std::process::exit(code);
+        std::process::exit(fno_agents::hook::dispatch(&args[1..]));
     }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

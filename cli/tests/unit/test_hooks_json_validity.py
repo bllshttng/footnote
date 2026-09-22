@@ -520,7 +520,7 @@ def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> Non
     guards = [
         ("hooks/git-protection.py", "python3"),
         ("hooks/bg-process-guard.py", "python3"),
-        ("hooks/truncation-guard.py", "python3"),
+        ("hooks/pipe-guard.sh", "bash"),
         ("hooks/recursive-grep-guard.py", "python3"),
         ("hooks/test-run-guard.sh", "bash"),
     ]

@@ -187,7 +187,7 @@ pub fn run(_args: &[String]) -> i32 {
     };
 
     // 11. Telemetry: one row, one file, failure ignored.
-    emit_telemetry(&cwd, tool, denied.is_some());
+    super::emit_guard_decision(&cwd, "king-delegation-guard", tool, denied.is_some());
 
     let Some(denied) = denied else {
         return allow("");
@@ -209,19 +209,6 @@ fn deny_text(target: &str, repo_root: &Path) -> String {
          A king operates the machine and does not author it: deploy and repair verbs (fno config plugin install, fno doctor update) run, build output and everything outside the repo allow, repo source does not. Delegate the edit or escalate. An operator can list an in-repo path in config.king.write_roots.\n",
         repo = repo_root.display(),
     )
-}
-
-/// One `guard_decision` row into the space events file, the bounded appender
-/// `emit_to_both` uses, one file only (as `hooks/lib/guard-mark.sh` did).
-fn emit_telemetry(cwd: &Path, tool: &str, denied: bool) {
-    let path = crate::paths::events_path(cwd);
-    let event = serde_json::json!({
-        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "type": "guard_decision",
-        "data": {"guard": "king-delegation-guard", "decision": if denied { "block" } else { "allow" }, "tool": tool},
-        "source": "hook"
-    });
-    let _ = crate::claims::append_event_line(&path, &event, std::time::Duration::from_secs(2));
 }
 
 // ── Shell write classification (the tokenizer port) ──────────────────────────

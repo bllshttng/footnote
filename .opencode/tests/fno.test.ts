@@ -447,7 +447,7 @@ test("tool matching mirrors the claude matchers (AC8-HP)", () => {
   expect(protectionScriptsFor("bash").map((e) => e.script)).toEqual([
     "graph-write-protect.sh",
     "git-protection.py",
-    "truncation-guard.py",
+    "pipe-guard.sh",
     "recursive-grep-guard.py",
   ])
   expect(protectionScriptsFor("write").map((e) => e.script)).toContain("plan-location-guard.sh")

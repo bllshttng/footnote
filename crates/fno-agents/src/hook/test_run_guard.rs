@@ -28,14 +28,13 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
 use super::king_guard::lex;
 
 /// Wrappers that are transparent to command position: `sudo pytest ...`
 /// still runs the pytest. Shell keywords that open a body are here too, so
 /// `do pytest ...; done` inside a `for` resolves to the pytest.
-const TRANSPARENT: &[&str] = &[
+pub(super) const TRANSPARENT: &[&str] = &[
     "nohup",
     "setsid",
     "exec",
@@ -64,11 +63,11 @@ const TRANSPARENT: &[&str] = &[
 
 /// Wrappers whose own positional operand sits BEFORE the wrapped command:
 /// `timeout 300 pytest ...` spends `300` before the pytest ever appears.
-const POSITIONAL_LEAD: &[&str] = &["timeout", "gtimeout"];
+pub(super) const POSITIONAL_LEAD: &[&str] = &["timeout", "gtimeout"];
 
 /// Wrapper flags that swallow the next token, so the value is not mistaken
 /// for the command (`sudo -u me pytest ...`). Read PER WRAPPER.
-fn wrapper_takes_value(wrapper: &str, flag: &str) -> bool {
+pub(super) fn wrapper_takes_value(wrapper: &str, flag: &str) -> bool {
     matches!(wrapper, "sudo" if matches!(flag, "-u" | "-g" | "-C" | "-U" | "-p" | "-D" | "-R" | "-T" | "-h"))
         || matches!(wrapper, "nice" if flag == "-n")
         || matches!(wrapper, "ionice" if matches!(flag, "-c" | "-n" | "-p"))
@@ -141,17 +140,17 @@ pub fn run(_args: &[String]) -> i32 {
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let Some(root) = repo_root(&cwd) else {
-        emit_telemetry(&cwd, false);
+        super::emit_guard_decision(&cwd, "test-run-guard", "Bash", false);
         return allow("no-repo");
     };
 
     match decide_at(cmd, Some(&root)) {
         Some(reason) => {
-            emit_telemetry(&cwd, true);
+            super::emit_guard_decision(&cwd, "test-run-guard", "Bash", true);
             super::emit_block(&reason)
         }
         None => {
-            emit_telemetry(&cwd, false);
+            super::emit_guard_decision(&cwd, "test-run-guard", "Bash", false);
             allow("no-raw-run")
         }
     }
@@ -177,7 +176,7 @@ fn decide_at(command: &str, root: Option<&Path>) -> Option<String> {
     Some(reason.replace("{cmd}", &shown))
 }
 
-fn basename(tok: &str) -> &str {
+pub(super) fn basename(tok: &str) -> &str {
     tok.rsplit('/').next().unwrap_or(tok)
 }
 
@@ -305,13 +304,14 @@ fn refused_head(head: &str, argv: &[String]) -> Option<Kind> {
 }
 
 /// True when this token ends one command and starts the next. Redirect
-/// machinery (`2>&` as one token, `|&`) never separates.
-fn is_separator(tok: &str) -> bool {
-    matches!(tok, ";" | ";;" | "&" | "&&" | "\n" | ")")
+/// machinery (`2>&` as one token, `|&`) never separates. `||` separates:
+/// the or-list right side is its own command, not an operand of the left.
+pub(super) fn is_separator(tok: &str) -> bool {
+    matches!(tok, ";" | ";;" | "&" | "&&" | "||" | "\n" | ")")
 }
 
 /// Split a token list on command separators.
-fn segments(tokens: &[String]) -> Vec<Vec<String>> {
+pub(super) fn segments(tokens: &[String]) -> Vec<Vec<String>> {
     let mut out = Vec::new();
     let mut current: Vec<String> = Vec::new();
     for tok in tokens {
@@ -329,13 +329,19 @@ fn segments(tokens: &[String]) -> Vec<Vec<String>> {
     out
 }
 
-/// The command-position token of `segment`, plus its remaining argv.
-/// `greedy` reads an UNLISTED wrapper flag as value-taking (`caffeinate -t
-/// 3600 pytest`). Neither reading is safe alone, so the caller reads BOTH
-/// and refuses when either lands on a raw run.
-fn head_of(segment: &[String], greedy: bool) -> Option<(String, Vec<String>)> {
+/// The command-position token of `segment`, its remaining argv, and the
+/// basenames of the wrappers skipped on the way (change readers use them:
+/// the pipe guard reads `timeout` here). `greedy` reads an UNLISTED wrapper
+/// flag as value-taking (`caffeinate -t 3600 pytest`). Neither reading is
+/// safe alone, so the caller reads BOTH and refuses when either lands on a
+/// raw run.
+pub(super) fn head_of(
+    segment: &[String],
+    greedy: bool,
+) -> Option<(String, Vec<String>, Vec<String>)> {
     let mut i = 0;
     let mut saw_wrapper = "";
+    let mut wrappers: Vec<String> = Vec::new();
     while i < segment.len() {
         let tok = &segment[i];
         if tok.bytes().all(|b| b"();<>|&\n".contains(&b)) {
@@ -344,6 +350,7 @@ fn head_of(segment: &[String], greedy: bool) -> Option<(String, Vec<String>)> {
         }
         let base = basename(tok);
         if TRANSPARENT.contains(&base) {
+            wrappers.push(base.to_string());
             saw_wrapper = base;
             i += 1;
             if POSITIONAL_LEAD.contains(&base) {
@@ -384,7 +391,7 @@ fn head_of(segment: &[String], greedy: bool) -> Option<(String, Vec<String>)> {
             };
             continue;
         }
-        return Some((base.to_string(), segment[i + 1..].to_vec()));
+        return Some((base.to_string(), segment[i + 1..].to_vec(), wrappers));
     }
     None
 }
@@ -408,6 +415,26 @@ fn shell_payload(head: &str, argv: &[String]) -> Option<String> {
         .and_then(|(i, _)| argv.get(i + 1).cloned())
 }
 
+/// Split a segment on the pipeline operator: each stage is judged in its
+/// own command position.
+pub(super) fn stages(segment: &[String]) -> Vec<Vec<String>> {
+    let mut parts: Vec<Vec<String>> = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    for tok in segment {
+        if tok == "|" {
+            if !current.is_empty() {
+                parts.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(tok.clone());
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
 /// (kind, command text) of the first raw run in command position, or None.
 /// Read per pipeline stage, with both wrapper-flag readings. A `bash -c`
 /// payload recurses as its own command text, bounded by depth. A pytest fed
@@ -418,25 +445,9 @@ fn refused_segment(tokens: &[String], depth: usize) -> Option<(Kind, String)> {
         return None;
     }
     for segment in segments(tokens) {
-        // Split the segment on the pipeline operator: each stage is judged
-        // in its own command position.
-        let mut parts: Vec<Vec<String>> = Vec::new();
-        let mut current: Vec<String> = Vec::new();
-        for tok in &segment {
-            if tok == "|" {
-                if !current.is_empty() {
-                    parts.push(std::mem::take(&mut current));
-                }
-            } else {
-                current.push(tok.clone());
-            }
-        }
-        if !current.is_empty() {
-            parts.push(current);
-        }
-        for part in &parts {
-            for reading in [head_of(part, false), head_of(part, true)] {
-                let Some((head, argv)) = reading else {
+        for part in stages(&segment) {
+            for reading in [head_of(&part, false), head_of(&part, true)] {
+                let Some((head, argv, _wrappers)) = reading else {
                     continue;
                 };
                 if let Some(kind) = refused_head(&head, &argv) {
@@ -477,19 +488,6 @@ fn repo_root(cwd: &Path) -> Option<PathBuf> {
 fn is_footnote_checkout(root: &Path) -> bool {
     root.join("cli").join("src").join("fno").is_dir()
         && root.join("hooks").join("hooks.json").is_file()
-}
-
-/// One `guard_decision` row into the space events file, the bounded
-/// appender `emit_to_both` uses (as the king guard does).
-fn emit_telemetry(cwd: &Path, denied: bool) {
-    let path = crate::paths::events_path(cwd);
-    let event = serde_json::json!({
-        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "type": "guard_decision",
-        "data": {"guard": "test-run-guard", "decision": if denied { "block" } else { "allow" }, "tool": "Bash"},
-        "source": "hook"
-    });
-    let _ = crate::claims::append_event_line(&path, &event, Duration::from_secs(2));
 }
 
 #[cfg(test)]
@@ -689,6 +687,15 @@ mod tests {
         assert!(decide("command -V cargo", root.path()).is_none());
         assert!(decide("P=$(command -v pytest)", root.path()).is_none());
         assert!(decide("command pytest -q", root.path()).is_some());
+    }
+
+    #[test]
+    fn or_list_pytest_refused() {
+        // `||` ends a command: the right side is judged in its own command
+        // position, never as an operand of the left segment.
+        let root = footnote_root();
+        let refusal = decide("false || pytest -q", root.path());
+        assert!(refusal.unwrap().contains("fno doctor test"));
     }
 
     #[test]
