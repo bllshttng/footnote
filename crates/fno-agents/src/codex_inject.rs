@@ -1784,6 +1784,21 @@ async fn round_trip(
     read_until_id(stream, &serde_json::json!(id)).await
 }
 
+/// Whether `thread_id`'s registry row records a full-access posture. A `None`
+/// home (tests, stray callers), an unreadable registry, and a row miss all
+/// read `false`, so every miss keeps today's probe frame.
+fn recorded_posture_is_full_access(thread_id: &str) -> bool {
+    let Some(home) = crate::paths::AgentsHome::from_env_opt() else {
+        return false;
+    };
+    let Ok(registry) = crate::state::load_registry(&home.registry_json()) else {
+        return false;
+    };
+    registry
+        .find_name_or_full_session_id(thread_id)
+        .is_some_and(crate::codex_posture::entry_posture_is_full_access)
+}
+
 /// The connect + initialize handshake + the posture read + `turn/start`.
 /// Split out so [`deliver_via_codex_daemon`] can wrap it in a total timeout.
 ///
@@ -1793,46 +1808,53 @@ async fn round_trip(
 /// this lane never narrows a thread. A failed read is NOT a delivery failure:
 /// the turn still goes out, policy-less. Measured 2026-09-14 on codex 0.154.0:
 /// resume on a loaded thread answers Ok carrying `sandbox`, and the rollout
-/// does not grow.
+/// does not grow. A registry row recording full access re-asserts it instead:
+/// the turn carries `{"type":"dangerFullAccess"}` and the probe is skipped,
+/// so an out-of-band narrowing is healed by the next delivered turn.
 async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
+    let reassert = recorded_posture_is_full_access(thread_id);
     let (mut sink, mut stream) = connect_app_server(sock)
         .await
         .map_err(ReviewStartError::Reason)?;
 
-    let cwd = match round_trip(
-        &mut sink,
-        &mut stream,
-        THREAD_READ_ID,
-        thread_read_request_json(THREAD_READ_ID, thread_id),
-    )
-    .await
-    {
-        Ok(raw) => parse_thread_read_cwd(&raw).unwrap_or_default(),
-        Err(_) => String::new(),
-    };
     let mut policy = None;
-    if !cwd.is_empty() {
-        let roots = crate::provider::codex_writable_roots(Path::new(&cwd));
-        if !roots.is_empty() {
-            if let Ok(raw) = round_trip(
-                &mut sink,
-                &mut stream,
-                THREAD_RESUME_ID,
-                thread_resume_probe_json(THREAD_RESUME_ID, thread_id),
-            )
-            .await
-            {
-                if let Some(sandbox) = crate::codex_thread::parse_resolved_sandbox(&raw) {
-                    // This lane never narrows: only a resolved workspaceWrite
-                    // posture is widened. A dangerFullAccess or readOnly
-                    // posture goes policy-less, which leaves the thread on
-                    // whatever the server already had.
-                    if sandbox.get("type").and_then(serde_json::Value::as_str)
-                        == Some("workspaceWrite")
-                    {
-                        policy = Some(crate::codex_thread::sandbox_policy_with_roots(
-                            &sandbox, &roots,
-                        ));
+    if reassert {
+        policy = Some(json!({"type": "dangerFullAccess"}));
+    } else {
+        let cwd = match round_trip(
+            &mut sink,
+            &mut stream,
+            THREAD_READ_ID,
+            thread_read_request_json(THREAD_READ_ID, thread_id),
+        )
+        .await
+        {
+            Ok(raw) => parse_thread_read_cwd(&raw).unwrap_or_default(),
+            Err(_) => String::new(),
+        };
+        if !cwd.is_empty() {
+            let roots = crate::provider::codex_writable_roots(Path::new(&cwd));
+            if !roots.is_empty() {
+                if let Ok(raw) = round_trip(
+                    &mut sink,
+                    &mut stream,
+                    THREAD_RESUME_ID,
+                    thread_resume_probe_json(THREAD_RESUME_ID, thread_id),
+                )
+                .await
+                {
+                    if let Some(sandbox) = crate::codex_thread::parse_resolved_sandbox(&raw) {
+                        // This lane never narrows: only a resolved workspaceWrite
+                        // posture is widened. A dangerFullAccess or readOnly
+                        // posture goes policy-less, which leaves the thread on
+                        // whatever the server already had.
+                        if sandbox.get("type").and_then(serde_json::Value::as_str)
+                            == Some("workspaceWrite")
+                        {
+                            policy = Some(crate::codex_thread::sandbox_policy_with_roots(
+                                &sandbox, &roots,
+                            ));
+                        }
                     }
                 }
             }
@@ -2958,6 +2980,49 @@ mod tests {
         assert!(result.is_ok());
         let turn = daemon.first_params("turn/start").expect("turn ran");
         assert!(turn.get("sandboxPolicy").is_none());
+    }
+
+    /// A registry row recording full access re-asserts it: the turn carries
+    /// `{"type":"dangerFullAccess"}` and no `thread/resume` probe runs, even
+    /// when the live posture reads workspaceWrite.
+    #[tokio::test]
+    async fn deliver_reasserts_a_recorded_full_access_posture_without_the_probe() {
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        crate::state::update_registry(
+            &crate::paths::AgentsHome::at(temp.path()).registry_json(),
+            |registry| {
+                let mut entry = crate::state::RegistryEntry::default();
+                entry.name = "t-yolo".to_string();
+                entry.cwd = "/repo".to_string();
+                entry.harness = Some("codex".to_string());
+                entry.harness_session_id = Some("thread-t".to_string());
+                entry.sandbox_posture = Some("danger-full-access".to_string());
+                registry.entries.push(entry);
+            },
+        )
+        .unwrap();
+        let saved_home = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("FNO_AGENTS_HOME", temp.path());
+        let daemon = crate::codex_fake_daemon::FakeDaemon::start(
+            crate::codex_fake_daemon::Behavior::quick().with_thread_sandbox(json!({
+                "type": "workspaceWrite", "writableRoots": ["/tmp/fno-t13-own"]
+            })),
+        );
+        let result = deliver_via_codex_daemon("thread-t", "hello REASSERT").await;
+        assert!(result.is_ok(), "delivery must succeed: {result:?}");
+        match saved_home {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        let turn = daemon.first_params("turn/start").expect("turn ran");
+        assert_eq!(turn["sandboxPolicy"], json!({"type": "dangerFullAccess"}));
+        assert!(
+            daemon.received().iter().all(|frame| {
+                frame.get("method").and_then(serde_json::Value::as_str) != Some("thread/resume")
+            }),
+            "no resume probe may run when the row records full access"
+        );
     }
 
     /// A reply with no posture key sends no policy either.
