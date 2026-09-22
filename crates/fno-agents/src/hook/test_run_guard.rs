@@ -12,8 +12,9 @@
 //!
 //! A refusal is read in SHELL COMMAND POSITION, per pipeline stage, through
 //! the same `lex` the king guard uses: transparent wrappers (`env pytest`,
-//! `timeout 30 cargo test`), env-assignment prefixes, full paths, and one
-//! level of `bash -c` payloads. The other uv doors are covered because they
+//! `timeout 30 cargo test`), env-assignment prefixes, full paths, every
+//! command-substitution body (each one is lexed as its own command), and
+//! one level of `bash -c` payloads. The other uv doors are covered because they
 //! are the same raw run: `uv run pytest`, `uvx pytest`, `uv tool run
 //! pytest`, and `python -m pytest` in both `-m` spellings.
 //!
@@ -369,6 +370,12 @@ fn head_of(segment: &[String], greedy: bool) -> Option<(String, Vec<String>)> {
             continue;
         }
         if !saw_wrapper.is_empty() && tok.starts_with('-') {
+            // `command -v NAME` / `-V` is a lookup, not a run: the guard has
+            // nothing to judge, and `P=$(command -v pytest)` is the common
+            // idiom this extends to substitutions.
+            if saw_wrapper == "command" && matches!(tok.as_str(), "-v" | "-V") {
+                return None;
+            }
             let takes_value = greedy || wrapper_takes_value(saw_wrapper, tok);
             i += if takes_value && i + 1 < segment.len() {
                 2
@@ -652,6 +659,36 @@ mod tests {
     fn unbalanced_quotes_fail_open() {
         let root = footnote_root();
         assert!(decide("pytest -q 'unclosed", root.path()).is_none());
+    }
+
+    #[test]
+    fn substitution_wrapped_test_run_refused() {
+        // The capture spellings run the suite just the same; the body of a
+        // substitution is one more command since the shared lexer changed.
+        let root = footnote_root();
+        assert!(decide("N=$(pytest -q)", root.path()).is_some());
+        assert!(decide("OUT=\"$(uv run pytest -q 2>&1)\"", root.path()).is_some());
+        assert!(decide("echo \"$(cargo test)\"", root.path()).is_some());
+        assert!(decide("N=`pytest -q`", root.path()).is_some());
+    }
+
+    #[test]
+    fn quoted_substitution_test_mention_allows() {
+        // Quoted and heredoc-transported mentions are inert text.
+        let root = footnote_root();
+        let cmd = "git commit -m \"$(cat <<'EOF'\nrun pytest -q\nEOF\n)\"";
+        assert!(decide(cmd, root.path()).is_none());
+        assert!(decide("echo '$(pytest)'", root.path()).is_none());
+    }
+
+    #[test]
+    fn command_v_lookup_allows() {
+        // `command -v` prints where a name resolves and runs nothing.
+        let root = footnote_root();
+        assert!(decide("command -v pytest", root.path()).is_none());
+        assert!(decide("command -V cargo", root.path()).is_none());
+        assert!(decide("P=$(command -v pytest)", root.path()).is_none());
+        assert!(decide("command pytest -q", root.path()).is_some());
     }
 
     #[test]
