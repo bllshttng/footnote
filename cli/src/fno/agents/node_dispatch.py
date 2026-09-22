@@ -118,11 +118,8 @@ def resolve_node_spawn(
     declared_verb = str(node.get("dispatch_verb") or "").strip()
     # the effective workflow verb. Reconcile bypasses (its explicit
     # command spells the de-stub pass).
-    lifecycle = None
-    effective_verb: Optional[str] = None
-    if not is_reconcile:
-        lifecycle = _verb_answer(node)
-        effective_verb = lifecycle[0]
+    lifecycle = None if is_reconcile else _verb_answer(node)
+    effective_verb: Optional[str] = lifecycle[0] if lifecycle else None
     # x-aaaa: the verb code resolves (and refuses) BEFORE the resolver.
     verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb or declared_verb)
     # A node's own raw pin is a sanctioned source (route_resolve reads the same
@@ -225,8 +222,7 @@ def resolve_node_spawn(
             )
     else:
         if isinstance(node, dict):
-            resolve_kwargs["lifecycle"] = lifecycle
-            resolve_kwargs["verb"] = node_verb or declared_verb or None
+            resolve_kwargs.update(lifecycle=lifecycle, verb=node_verb or declared_verb or None)
     resolved = harness_map.resolve_dispatch(**resolve_kwargs)
     substrate = resolved["substrate"]
     target_cmd = resolved["command"]
@@ -430,8 +426,7 @@ def _verb_answer(row: Optional[dict], *, node_id: Optional[str] = None) -> tuple
     from fno.graph.store import GRAPH_JSON, _client_for
     payload = dict(row or {}, id=(row or {}).get("id") or node_id)
     try:
-        client = _client_for(GRAPH_JSON)
-        answer = client.request("effective_verb", {"entries": [payload]})
+        answer = _client_for(GRAPH_JSON).request("effective_verb", {"entries": [payload]})
         return answer["verb"], answer["note"]
     except RuntimeError as exc:
         raise DispatchResolveError(str(exc).replace("store error (invalid): ", "")) from exc

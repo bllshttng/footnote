@@ -443,8 +443,8 @@ class PlanFrontmatter(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _fill_node_from_claims(cls, data: Any) -> Any:
-        if isinstance(data, dict) and not str(data.get("node") or "").strip():
-            data["node"] = data.get("claims") or data.get("node")
+        if isinstance(data, dict) and data.get("claims") and not data.get("node"):
+            data["node"] = data["claims"]
         return data
 
     @field_validator("created", mode="before")
