@@ -1629,6 +1629,10 @@ fn decide_gate(
                      (--force); provider cap remains enforced"
                 );
                 if substrate == "headless" {
+                    // A forced spawn of the reserved name redeems too: force
+                    // speaks for the machine being busy, never for keeping a
+                    // reservation the spawn itself was promised.
+                    release_redeemed_reservation(name, guard.root.as_deref());
                     // A worker-slot claim fault is not the gate mutex; name the site.
                     if let Err(fault) = acquire_worker_slot(
                         &mut guard,

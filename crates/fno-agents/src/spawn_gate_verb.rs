@@ -89,10 +89,23 @@ pub(crate) fn reserve_spawn_gate(config_cwd: &std::path::Path, args: &[String]) 
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--provider" => provider = it.next().cloned(),
-            "--ttl" => ttl_arg = it.next().cloned(),
-            "--reason" => reason = it.next().cloned(),
-            "--node" => node = it.next().cloned(),
+            "--provider" | "--ttl" | "--reason" | "--node" => {
+                let flag = arg.as_str();
+                let Some(value) = it.next() else {
+                    eprintln!("spawn-gate: {flag} needs a value");
+                    return 2;
+                };
+                if value.starts_with("--") {
+                    eprintln!("spawn-gate: {flag} needs a value, got the flag {value:?}");
+                    return 2;
+                }
+                match flag {
+                    "--provider" => provider = Some(value.clone()),
+                    "--ttl" => ttl_arg = Some(value.clone()),
+                    "--reason" => reason = Some(value.clone()),
+                    _ => node = Some(value.clone()),
+                }
+            }
             a if a.starts_with("--") => {
                 eprintln!("spawn-gate: unknown reserve flag {a:?}");
                 return 2;
