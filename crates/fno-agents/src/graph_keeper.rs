@@ -1449,6 +1449,12 @@ pub(crate) fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         // rows in, a per-node delivery classification out. Pure; the
         // scoreboard views are the callers, so seven views read one decision.
         "scoreboard_classify" => crate::scoreboard::classify(&params).map_err(StoreError::Invalid),
+        // The lifecycle verb decision (backlog_ready::effective_verb) over
+        // client-shipped rows: one answer per row, in order. A refusal rides
+        // its own row instead of failing the call, so a batch answers per
+        // node. Pure: the decision reads the shipped rows and their linked
+        // plan docs, never the graph this keeper owns.
+        "effective_verb" => handle_effective_verb(&params),
         // One named op applied over client-shipped rows, no file I/O and no
         // publish: `set_related`, `plan_path_owner_conflict`, and friends
         // run INSIDE a client mutator on an in-hand snapshot, where a full
@@ -1726,6 +1732,28 @@ fn handle_plan_refs(state: &StoreState) -> Result<Value, StoreError> {
         })
         .collect();
     Ok(json!({ "entries": refs }))
+}
+
+/// One row's ported lifecycle verb decision
+/// (`backlog_ready::effective_verb`): `{"verb": str|null, "note": str|null,
+/// "refusal": str|null}` per shipped row, in order. Pure over the client's
+/// rows and their linked plan docs; no file I/O, no publish.
+fn handle_effective_verb(params: &Value) -> Result<Value, StoreError> {
+    let entries = params
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or_else({
+            let msg = "effective_verb needs entries".to_string();
+            move || StoreError::Invalid(msg)
+        })?;
+    let answers: Vec<Value> = entries
+        .iter()
+        .map(|entry| match crate::backlog_ready::effective_verb(entry) {
+            Ok((verb, note)) => json!({"verb": verb, "note": note, "refusal": Value::Null}),
+            Err(refusal) => json!({"verb": Value::Null, "note": Value::Null, "refusal": refusal}),
+        })
+        .collect();
+    Ok(json!({ "answers": answers }))
 }
 
 fn read_state(
@@ -3645,6 +3673,75 @@ mod tests {
         let rows = graph_store::read_defaulted(&graph, false).unwrap();
         assert_eq!(rows[0]["title"], json!("left changed"));
         assert_eq!(rows[1]["title"], json!("right changed"));
+    }
+
+    #[test]
+    fn effective_verb_answers_one_row_per_entry_and_a_refusal_rides_its_own_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let research = dir.path().join("research.md");
+        std::fs::write(
+            &research,
+            "---\nkind: research\nstatus: ready\n---\n# findings\n",
+        )
+        .unwrap();
+        let qp = dir.path().join("qp.md");
+        std::fs::write(
+            &qp,
+            "---\nkind: quick-plan\nstatus: ready\n---\n# contract\n",
+        )
+        .unwrap();
+        let research_row = json!({
+            "id": "x-research",
+            "plan_path": research.to_str().unwrap(),
+            "cwd": dir.path().to_str().unwrap(),
+            "dispatch_verb": "/fno:blueprint",
+        });
+        let qp_row = json!({
+            "id": "x-qp",
+            "plan_path": qp.to_str().unwrap(),
+            "cwd": dir.path().to_str().unwrap(),
+        });
+        let think_row = json!({"id": "x-think", "dispatch_verb": "/fno:think"});
+        let planless = json!({"id": "x-planless", "difficulty": "spicy"});
+        let reply = handle_request(
+            &row_commit_state(dir.path().join("graph.json")),
+            json!({
+                "id": 1,
+                "method": "effective_verb",
+                "params": {"entries": [research_row, qp_row, think_row, planless]}
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let answers = reply["result"]["answers"]
+            .as_array()
+            .expect("answers array");
+        assert_eq!(answers.len(), 4);
+        assert_eq!(answers[0]["verb"], json!("/blueprint"));
+        assert!(
+            answers[0]["note"].as_str().unwrap().contains(
+                "verb=declared(/blueprint; lifecycle answers /target: plan ready not a blueprint)"
+            ),
+            "{}",
+            answers[0]["note"]
+        );
+        assert_eq!(answers[1]["verb"], json!("/target"));
+        assert!(answers[1]["refusal"].is_null());
+        assert!(answers[2]["verb"].is_null());
+        assert!(answers[2]["note"]
+            .as_str()
+            .unwrap()
+            .contains("out-of-family /think"));
+        assert!(answers[2]["refusal"].is_null());
+        assert!(answers[3]["verb"].is_null());
+        assert!(
+            answers[3]["refusal"]
+                .as_str()
+                .unwrap()
+                .starts_with("dispatch verb cannot be derived for node x-planless:"),
+            "{}",
+            answers[3]["refusal"]
+        );
     }
 
     #[test]
