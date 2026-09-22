@@ -287,6 +287,21 @@ pub fn apply(
         now,
         &mut *runner,
     );
+    // The saved state read escalated and the decided state does not: activity
+    // or a new red head reset the ladder, so the escalation's fleet task
+    // closes. A task the ladder no longer argues for must not sit open.
+    if state_param.escalated && !state.escalated {
+        if let Err(e) = crate::fleet_task::close(
+            &crate::provider_cap::questions_path(home),
+            "pr-nudge",
+            &format!("PR #{} on {}", row.pr, row.node),
+            &row.cwd,
+            "activity",
+            "pr-nudge",
+        ) {
+            eprintln!("pr-nudge: task close refused: {e}");
+        }
+    }
     match action {
         NudgeAction::Wait => {
             if &state != state_param {
@@ -316,19 +331,19 @@ pub fn apply(
             }
         }
         NudgeAction::Escalate => {
-            let marker = format!("pr-nudge: PR #{} on {}", row.pr, row.node);
-            if !open_questions_mention(marker.as_str()) {
-                let text = escalation_text(&marker, &row.session_id, state.undelivered);
-                let argv = vec![
-                    "fno".to_string(),
-                    "inbox".to_string(),
-                    "outstanding".to_string(),
-                    "ask".to_string(),
-                    text,
-                    "--node".to_string(),
-                    row.node.clone(),
-                ];
-                let _ = runner(&argv, "");
+            let key = format!("PR #{} on {}", row.pr, row.node);
+            let marker = format!("pr-nudge: {key}");
+            let text = escalation_text(&marker, &row.session_id, state.undelivered);
+            if let Err(e) = crate::fleet_task::file_once(
+                &crate::provider_cap::questions_path(home),
+                "pr-nudge",
+                &key,
+                &row.cwd,
+                &text,
+                Some(&format!("fno agents resume {}", row.session_id)),
+                Some(&row.node),
+            ) {
+                eprintln!("pr-nudge: task refused: {e}");
             }
             state.escalated = true;
             save_state(home, &row.session_id, &state);
@@ -671,36 +686,6 @@ fn clean_label(label: &str) -> String {
         .map(|l| l.trim().replace('`', ""))
         .find(|l| !l.is_empty())
         .unwrap_or_default()
-}
-
-/// Does an already-open operator question carry this marker? Same read the
-/// heal arm makes, so dedupe cannot drift from the board.
-fn open_questions_mention(marker: &str) -> bool {
-    let out = crate::loopcheck::bounded_read(
-        "fno".as_ref(),
-        &["inbox", "outstanding", "--json"],
-        std::path::Path::new("."),
-        "pr-nudge",
-        RUN_TIMEOUT,
-    );
-    let Ok(out) = out else {
-        return false;
-    };
-    if !out.status.success() {
-        return false;
-    }
-    let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) else {
-        return false;
-    };
-    v.get("questions")
-        .and_then(Value::as_array)
-        .is_some_and(|qs| {
-            qs.iter().any(|q| {
-                q.get("question")
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| s.contains(marker))
-            })
-        })
 }
 
 /// The merge-order pause (the only allowed one): a live decision with the
@@ -1624,6 +1609,112 @@ mod tests {
         let saved = load_state(&home, &r.session_id);
         assert_eq!(saved.attempts, 0);
         assert!(!saved.escalated);
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn the_escalate_rung_files_one_fleet_task_and_never_an_ask() {
+        // AC6-HP: two passes over a spent, quiet row file exactly one open
+        // fleet task naming the resume; the runner never sees an inbox ask.
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-task-file").join("agents"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        // The store sits above the home root: start each run from empty.
+        let store = crate::provider_cap::questions_path(&home);
+        let _ = std::fs::remove_file(&store);
+        let r = row(false);
+        let spent = LadderState {
+            attempts: 3,
+            last_nudge_at: Some(900),
+            escalated: false,
+            ..Default::default()
+        };
+        let mut asks: Vec<Vec<String>> = Vec::new();
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
+            if argv.contains(&"inbox".to_string()) {
+                asks.push(argv.to_vec());
+            }
+            (0, String::new(), String::new())
+        };
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        apply(&home, &emitter, &r, &spent, false, 900, 1900, &mut runner);
+        let escalated = LadderState {
+            attempts: 3,
+            last_nudge_at: Some(900),
+            escalated: true,
+            ..Default::default()
+        };
+        apply(
+            &home,
+            &emitter,
+            &r,
+            &escalated,
+            false,
+            900,
+            1900,
+            &mut runner,
+        );
+        assert!(asks.is_empty(), "no ask: {asks:?}");
+        let open = crate::fleet_task::open_tasks(&store).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].lane, "pr-nudge");
+        assert_eq!(open[0].run, format!("fno agents resume {}", r.session_id));
+        assert_eq!(open[0].node, "x-node");
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn an_activity_reset_closes_the_open_escalation_task() {
+        // AC16-EDGE: the session answered, so the fleet task the Escalate
+        // rung filed closes with reason `activity`.
+        let home = AgentsHome::at(
+            std::env::temp_dir()
+                .join("fno-pn-task-close")
+                .join("agents"),
+        );
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        // The store sits above the home root: start each run from empty.
+        let store = crate::provider_cap::questions_path(&home);
+        let _ = std::fs::remove_file(&store);
+        let r = row(false);
+        let spent = LadderState {
+            attempts: 3,
+            last_nudge_at: Some(100),
+            escalated: true,
+            ..Default::default()
+        };
+        let store = crate::provider_cap::questions_path(&home);
+        crate::fleet_task::file_once(
+            &store,
+            "pr-nudge",
+            &format!("PR #{} on {}", r.pr, r.node),
+            &r.cwd,
+            "text",
+            Some("run"),
+            Some(&r.node),
+        )
+        .unwrap();
+        let mut quiet_row = r.clone();
+        // The write is inside the grace: the pass waits, the reset stands.
+        quiet_row.transcript_age_s = Some(10);
+        let mut runner = |_argv: &[String], _cwd: &str| -> (i32, String, String) {
+            (0, String::new(), String::new())
+        };
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        apply(
+            &home,
+            &emitter,
+            &quiet_row,
+            &spent,
+            false,
+            900,
+            1900,
+            &mut runner,
+        );
+        let raw = std::fs::read_to_string(&store).unwrap();
+        assert!(
+            raw.contains(r#""type":"fleet_task_closed""#) && raw.contains(r#""reason":"activity""#),
+            "{raw}"
+        );
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
     }
 

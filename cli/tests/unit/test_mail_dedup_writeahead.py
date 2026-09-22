@@ -291,6 +291,10 @@ def test_live_recipient_hosted_writes_audit_only_outbox_row(
         "web", recipient, "send", "hosted"
     )
     assert audit.body == injected[0]
+    assert audit.meta == {
+        "to_session": "abcd1234-1111-7222-8333-444455556666",
+        "to_harness": "claude",
+    }
     assert scan_unread(recipient) == []
 
     sent = runner.invoke(app, ["mail", "sent", "--from-name", "web", "--json"])

@@ -31,6 +31,9 @@ use crate::spawn_gate_lanes;
 use crate::spawn_gate_lanes::{
     check_account_login, check_account_quota_lock, check_lane_quota_lock, check_registry_schema,
 };
+use crate::spawn_gate_reservations::{
+    release_redeemed_reservation, reserved_note, reserved_receipt, RESERVATION_RULE,
+};
 use crate::state::{load_registry, Registry, RegistryEntry};
 use crate::AgentStatus;
 use std::collections::HashMap;
@@ -1563,24 +1566,31 @@ fn decide_gate(
                 match spawn_gate_lanes::provider_live_count(
                     registry_path,
                     route_provider.unwrap_or_default(),
+                    Some(name),
                     &mut lane_warnings,
                 ) {
-                    Ok((live, _counted, parked)) => {
+                    Ok(reading) => {
+                        let live = reading.count;
                         for w in &lane_warnings {
                             eprintln!("{w}");
                         }
                         if live >= cap_value {
                             guard.release_gate_mutex();
                             let parked_names: Vec<String> =
-                                parked.iter().map(|(n, _)| n.clone()).collect();
-                            let wait_note = if parked.is_empty() {
+                                reading.parked.iter().map(|(n, _)| n.clone()).collect();
+                            let wait_note = if reading.parked.is_empty() {
                                 String::new()
                             } else {
-                                format!("; {} waiting on the operator, not counted", parked.len())
+                                format!(
+                                    "; {} waiting on the operator, not counted",
+                                    parked_names.len()
+                                )
                             };
+                            let reserved_note = reserved_note(&reading.reserved);
                             eprintln!(
                                 "spawn-gate: provider {}, cap {cap_value}, current count \
-                                 {live}{wait_note}; refusing; no worker launched",
+                                 {live}{wait_note}{reserved_note}; refusing; no worker launched. \
+                                 {RESERVATION_RULE}",
                                 route_provider.unwrap_or("unknown")
                             );
                             return Err(Refusal::with_receipt(
@@ -1593,6 +1603,7 @@ fn decide_gate(
                                     "count": live,
                                     "current_count": live,
                                     "parked": parked_names,
+                                    "reserved": reserved_receipt(&reading.reserved),
                                 }),
                             ));
                         }
@@ -1618,6 +1629,10 @@ fn decide_gate(
                      (--force); provider cap remains enforced"
                 );
                 if substrate == "headless" {
+                    // A forced spawn of the reserved name redeems too: force
+                    // speaks for the machine being busy, never for keeping a
+                    // reservation the spawn itself was promised.
+                    release_redeemed_reservation(name, guard.root.as_deref());
                     // A worker-slot claim fault is not the gate mutex; name the site.
                     if let Err(fault) = acquire_worker_slot(
                         &mut guard,
@@ -1795,6 +1810,11 @@ fn decide_gate(
                                 eprintln!("{receipt}");
                                 return Err(blueprint_refusal(&receipt));
                             }
+                            // Redemption sits after every refusing axis and
+                            // at the point of admission, just before the spawn
+                            // takes its own slot claim: earlier would burn the
+                            // reservation on an unrelated CPU or RAM refusal.
+                            release_redeemed_reservation(name, guard.root.as_deref());
                             if substrate == "headless" {
                                 if let Err(fault) = acquire_worker_slot(
                                     &mut guard,
@@ -2579,7 +2599,7 @@ fn acquire_worker_slot(
 
 /// The claims-layer fault refusal: the gate could not serialize the decision
 /// or take a lane reservation, so no count was measured and no cap may be
-/// named. The reason names the faulted site, never a cap.
+/// named. The reason is the faulted site, never a cap.
 fn gate_fault_refusal(provider: Option<&str>, reason: &str, error: &str) -> Refusal {
     Refusal::with_receipt(
         EXIT_PROVIDER_CAP,

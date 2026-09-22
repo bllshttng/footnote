@@ -148,6 +148,7 @@ pub mod finalize_run_summary;
 pub mod fleet_incident;
 pub mod fleet_load;
 pub mod fleet_page;
+pub mod fleet_task;
 pub mod flight_gate;
 pub mod gc;
 pub mod gc_claude_stop;
@@ -248,6 +249,7 @@ pub mod provider_cap;
 pub mod provider_cap_verbs;
 pub mod publish_review;
 pub mod quarantine;
+pub mod question_intake;
 pub mod question_sweep;
 pub mod quiet_retire;
 pub mod readiness;
@@ -295,6 +297,7 @@ pub mod spawn_contract;
 pub mod spawn_edge;
 pub mod spawn_gate;
 pub mod spawn_gate_lanes;
+pub mod spawn_gate_reservations;
 pub mod spawn_gate_verb;
 pub mod spawn_lineage;
 pub mod spawn_overlay;
@@ -1059,6 +1062,9 @@ mod tests {
 /// output; only include kinds that appear as the first string argument to an
 /// emit call in non-test production code.
 pub const KNOWN_EVENT_KINDS: &[&str] = &[
+    // The question intake's journal write (the ask port): the durable half
+    // of `fno inbox outstanding ask`.
+    "operator_question",
     // Agent lifecycle (daemon-emitted)
     "agent_spawned",
     // Spawn coordinator: the durable accepted record written BEFORE
@@ -1159,9 +1165,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // so a quiet repo cannot be mistaken for a sweep that never ran.
     "worktree_sweep",
     // Stale-question reconcile (daemon-emitted): `fno agents stale-escalate`
-    // ran on its 6h floor and reconciled the durable [watchdog-stale:*]
-    // operator question to the measured fleet. Report-only: rows past the
-    // wake ceiling are the needs-human bucket no action lane may take.
+    // ran on its 6h floor and reconciled the lane's fleet tasks (the former
+    // [watchdog-stale:*] operator question) to the measured fleet through
+    // the Rust fleet-task door. Report-only: a king reads open tasks on the
+    // board's fleet_task queue.
     // Emitted even on outcome none/duplicate, so a quiet run cannot be
     // mistaken for a sweep that never ran.
     "stale_sweep",

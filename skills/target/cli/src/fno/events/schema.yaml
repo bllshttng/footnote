@@ -3035,7 +3035,7 @@ event_types:
           type: string
 
   - name: stale_sweep
-    description: "The daemon's stale-question reconcile: `fno agents stale-escalate` ran on its 6h floor and reconciled the durable [watchdog-stale:*] operator question to the measured fleet. Report-only by construction: rows past the wake ceiling are the needs-human bucket no action lane may take, so the question channel is the only surface they reach. Emitted for every run including outcome none and duplicate, so a quiet run is never mistaken for a sweep that did not run. `outcome` carries the verb's own word verbatim - on `refused` the stale_count is NOT a real reading and must never be read as a measured zero. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."
+    description: "The daemon's stale-row reconcile: `fno agents stale-escalate` ran on its 6h floor and reconciled the lane's fleet tasks (the former [watchdog-stale:*] operator question, now filed in the fleet-task channel) to the measured fleet. Report-only by construction: a king reads open tasks on the board's fleet_task queue. Emitted for every run including outcome none and duplicate, so a quiet run is never mistaken for a sweep that did not run. `outcome` carries the verb's own word verbatim - on `refused` the stale_count is NOT a real reading and must never be read as a measured zero. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."
     sources: [daemon]
     data:
       required: []
@@ -3730,8 +3730,17 @@ event_types:
           description: "Optional. One line naming the action that closes the question."
         options:
           type: array
-          items: { type: string }
-          description: "Optional choices when the question is a pick rather than free text."
+          items:
+            oneOf:
+              - type: string
+              - type: object
+                properties:
+                  n: { type: integer }
+                  text: { type: string }
+                  next: { type: string }
+                  pros: { type: array, items: { type: string } }
+                  cons: { type: array, items: { type: string } }
+          description: "Optional choices when the question is a pick rather than free text; the Rust intake writes objects carrying each option's next."
         blocks:
           type: array
           items: { type: string }
@@ -3739,7 +3748,56 @@ event_types:
         subject:
           type: string
           description: "Optional. The decision subject the question is about; the ask verb refuses it when live law rules that subject."
+        context:
+          type: object
+          description: "Optional. The structured context the Rust intake writes: blocked_because, options_rationale, recommendation {option, why, downside}, unknowns, reversible, cost_if_wrong, meanwhile. Keys are open; the attention projection reads each by name."
     consumers: [operator, fno-agents needs]
+
+  - name: fleet_task
+    description: "A machine chore that names its own clearing command, filed by a lane writer (heal, pr-nudge, the daemon reconcile lanes) instead of an operator_question, so the operator's question list carries only rows needing a human ruling. Written only by Rust (fleet_task.rs); never written by Python. A king reads open tasks on the board's fleet_task queue, report-only; the operator question surfaces never show one."
+    sources: [daemon, test]
+    data:
+      required: [task_id]
+      properties:
+        task_id:
+          type: string
+          description: "Stable id for this task (ft-<hex>), what a fleet_task_closed row names to close it."
+        lane:
+          type: string
+          description: "The writer family that owns the chore: heal, pr-nudge, watchdog-stale, reap-hold, king-escalation, watchdog-unfinished-work, watchdog-friction."
+        key:
+          type: string
+          description: "The dedup key within the lane, e.g. 'PR 2226 rebase conflict'."
+        text:
+          type: string
+          description: "The human-readable chore text, including the command that clears it."
+        run:
+          type: string
+          description: "Optional. The command that clears the chore."
+        node:
+          type: string
+          description: "Optional. The backlog node the task is about, when the writer knows one; the sweep closes the task when that node closes."
+        cwd:
+          type: string
+          description: "The repo root the writer ran in; one heal process serves several repos, so identity is lane + key + cwd."
+    consumers: [fno-agents needs, king board]
+
+  - name: fleet_task_closed
+    description: "A fleet_task was closed: its condition cleared (rebased, activity), its node closed, its lane reconciled empty or superseded, or the sweep retired it. Written only by Rust. Append-only with a last-writer-wins fold; a double close is a no-op."
+    sources: [daemon, test]
+    data:
+      required: [task_id]
+      properties:
+        task_id:
+          type: string
+          description: "The fleet_task this closes."
+        reason:
+          type: string
+          description: "Why it closed: rebased, activity, node-closed, set-empty, superseded, moved-to-fleet-task."
+        closed_by:
+          type: string
+          description: "The writer that closed it: heal, pr-nudge, question-sweep, or the lane marker."
+    consumers: [fno-agents needs, king board]
 
   - name: operator_question_closed
     description: "An operator_question was answered or withdrawn. Explicit close only: there is no auto-expiry and no transcript-derived auto-resolution, because peek.Record carries role and text but no timestamp, so answering 'is there a user turn newer than this question' would need a new timestamped reader in every harness arm. An explicit clear costs nothing and never lies about whether an answer actually arrived. A question going quiet with age is the exact failure being fixed, so age never closes one. Append-only with a last-writer-wins fold: a double close is a no-op, not an error."
@@ -3798,6 +3856,30 @@ event_types:
         decision_id:
           type: string
           description: "Optional. The operator_decision id the subsequent clear records, joined by the reader."
+    consumers: [operator, fno-agents needs]
+
+  - name: user_ask_answered
+    retention: durable
+    description: "A question the user asked a session was answered: the ack (fno inbox user ack --outcome answer:<text>) records what the answer was, beside the turn that asked. The attention arm folds these rows into the questions file as closed lines, so the thread survives outside chat. Written by the Rust ack (compaction ack); the asker is the user, so no authority lane applies."
+    sources: [target, test]
+    data:
+      required: [session_id, turn_id, answer]
+      properties:
+        session_id:
+          type: string
+          description: "The session the user asked."
+        turn_id:
+          type: string
+          description: "The acked user turn."
+        excerpt:
+          type: string
+          description: "Optional. The turn's rendered excerpt from the scan cursor; empty when the cursor has rotated."
+        answer:
+          type: string
+          description: "The answer text after the answer: prefix."
+        answered_at:
+          type: string
+          description: "Optional. When the ack recorded it."
     consumers: [operator, fno-agents needs]
 
   - name: day_boundary

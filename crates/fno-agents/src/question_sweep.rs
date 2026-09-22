@@ -100,12 +100,18 @@ pub fn question_sweep_in(
     let (statuses, raw) = read(&cwd, home);
     let statuses: std::collections::BTreeMap<String, String> = statuses.into_iter().collect();
     let ids = crate::needs::node_closed_question_ids(&raw, &statuses);
-    if ids.is_empty() {
-        let _ = emitter.emit("question_sweep", &json!({"closed": 0, "outcome": "none"}));
+    let task_ids = crate::fleet_task::node_closed_task_ids(&raw, &statuses);
+    let legacy_ids = crate::fleet_task::legacy_question_ids(&raw);
+    if ids.is_empty() && task_ids.is_empty() && legacy_ids.is_empty() {
+        let _ = emitter.emit(
+            "question_sweep",
+            &json!({"closed": 0, "tasks_closed": 0, "legacy_moved": 0, "outcome": "none"}),
+        );
     } else {
+        let store = crate::provider_cap::questions_path(home);
         for qid in &ids {
             crate::provider_cap::append_questions_row(
-                &crate::provider_cap::questions_path(home),
+                &store,
                 &json!({
                     "ts": crate::provider_cap::epoch_to_rfc3339(now),
                     "type": "operator_question_closed",
@@ -122,13 +128,54 @@ pub fn question_sweep_in(
                 }),
             );
         }
+        for tid in &task_ids {
+            crate::provider_cap::append_questions_row(
+                &store,
+                &json!({
+                    "ts": crate::provider_cap::epoch_to_rfc3339(now),
+                    "type": "fleet_task_closed",
+                    "source": "daemon",
+                    "data": {
+                        "task_id": tid,
+                        "reason": "node-closed",
+                        "closed_by": "question-sweep",
+                    },
+                }),
+            );
+        }
+        for qid in &legacy_ids {
+            crate::provider_cap::append_questions_row(
+                &store,
+                &json!({
+                    "ts": crate::provider_cap::epoch_to_rfc3339(now),
+                    "type": "operator_question_closed",
+                    "source": "daemon",
+                    "data": {
+                        "question_id": qid,
+                        // Empty answer for the same reason as node-closed
+                        // above: nobody made this decision.
+                        "answer": "",
+                        "reason": "moved-to-fleet-task",
+                        "closed_by": "question-sweep",
+                    },
+                }),
+            );
+        }
         let _ = emitter.emit(
             "question_sweep",
-            &json!({"closed": ids.len(), "outcome": "closed", "ids": ids}),
+            &json!({
+                "closed": ids.len(),
+                "tasks_closed": task_ids.len(),
+                "legacy_moved": legacy_ids.len(),
+                "outcome": "closed",
+                "ids": ids,
+                "task_ids": task_ids,
+                "legacy_ids": legacy_ids,
+            }),
         );
     }
     let _ = std::fs::write(&stamp, now.to_string());
-    if ids.is_empty() {
+    if ids.is_empty() && task_ids.is_empty() && legacy_ids.is_empty() {
         0
     } else {
         1
@@ -151,7 +198,10 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let home = AgentsHome::at(&p);
+        // The question store resolves one level ABOVE the home root, so the
+        // home gets an "agents" child: the store then lands beside it, in
+        // this test's own unique directory instead of the shared temp root.
+        let home = AgentsHome::at(p.join("agents"));
         home.ensure_root().unwrap();
         home
     }
@@ -198,5 +248,79 @@ mod tests {
         let questions =
             std::fs::read_to_string(crate::provider_cap::questions_path(&home)).unwrap_or_default();
         assert!(!questions.contains("q-live"));
+    }
+
+    #[test]
+    fn closes_a_node_closed_task_and_carries_the_count() {
+        // AC11-HP: a fleet task whose node reads done closes with reason
+        // node-closed, and the event carries tasks_closed.
+        let home = tmp_home("task-close");
+        let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
+        let raw = format!(
+            "{}\n{}\n",
+            open_row("q-live", "x-live"),
+            r#"{"ts":"2026-09-22T10:00:00Z","type":"fleet_task","source":"daemon","data":{"task_id":"ft-done","lane":"heal","key":"PR 7 rebase conflict","cwd":"/r","node":"x-done"}}"#
+        );
+        let read = fixture_read(
+            vec![
+                ("x-live".to_string(), "in_progress".to_string()),
+                ("x-done".to_string(), "done".to_string()),
+            ],
+            raw,
+        );
+        assert_eq!(question_sweep_in(&home, &emitter, 1_000_000, &read), 1);
+        let questions =
+            std::fs::read_to_string(crate::provider_cap::questions_path(&home)).unwrap_or_default();
+        assert!(
+            questions.contains(r#""type":"fleet_task_closed""#)
+                && questions.contains("ft-done")
+                && questions.contains("node-closed"),
+            "{questions}"
+        );
+        let events = crate::events::committed_journal_text(&home.events_jsonl());
+        assert!(events.contains(r#""tasks_closed":1"#), "{events}");
+    }
+
+    #[test]
+    fn retires_legacy_machine_questions_and_leaves_agent_asks_open() {
+        // AC12-HP + AC13-EDGE + AC14-EDGE: each legacy-marker row closes
+        // with an empty answer, reason moved-to-fleet-task; an agent ask
+        // quoting a marker mid-text stays open, as do the markers this plan
+        // did not move.
+        let home = tmp_home("legacy-retire");
+        let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
+        let raw = [
+            r#"{"ts":"t","type":"operator_question","source":"daemon","data":{"question_id":"q-heal","question":"heal: PR 9 rebase conflict. Resolve with x"}}"#,
+            r#"{"ts":"t","type":"operator_question","source":"daemon","data":{"question_id":"q-hold","question":"[reap-hold: x] held"}}"#,
+            r#"{"ts":"t","type":"operator_question","source":"daemon","data":{"question_id":"q-agent","question":"PR 9 failed and the log quotes heal: PR 9 mid-sentence"}}"#,
+            r#"{"ts":"t","type":"operator_question","source":"daemon","data":{"question_id":"q-branch","question":"[session-transition-branch: keep or clean?]"}}"#,
+        ]
+        .join("\n");
+        let read = fixture_read(vec![], raw);
+        assert_eq!(question_sweep_in(&home, &emitter, 1_000_000, &read), 1);
+        let questions =
+            std::fs::read_to_string(crate::provider_cap::questions_path(&home)).unwrap_or_default();
+        // The store beside the temp home is shared by sibling tests, so the
+        // count is scoped per seeded id, never global.
+        let moved = |qid: &str| {
+            questions
+                .lines()
+                .filter(|l| l.contains(qid) && l.contains("moved-to-fleet-task"))
+                .count()
+        };
+        assert_eq!(moved("q-heal"), 1, "q-heal retired: {questions}");
+        assert_eq!(moved("q-hold"), 1, "q-hold retired: {questions}");
+        assert_eq!(
+            moved("q-agent"),
+            0,
+            "the agent ask quoting a marker mid-text stays open: {questions}"
+        );
+        assert_eq!(
+            moved("q-branch"),
+            0,
+            "the markers this plan did not move stay open: {questions}"
+        );
+        let events = crate::events::committed_journal_text(&home.events_jsonl());
+        assert!(events.contains(r#""legacy_moved":2"#), "{events}");
     }
 }

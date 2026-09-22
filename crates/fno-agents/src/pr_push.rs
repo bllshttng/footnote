@@ -388,53 +388,14 @@ pub(crate) enum PushOutcome {
 /// the verb derives it from `@{u}`). Empty `head` skips the read: a branch
 /// with no upstream has nothing in flight anywhere.
 pub(crate) fn guarded_push(ctx: &PushCtx, head: &str) -> PushOutcome {
-    if !ctx.force && !head.is_empty() {
-        match crate::pr_push::read_checks_rows(&ctx.gh_bin, &ctx.cwd, head) {
-            Ok(rows) => {
-                // Empty rows read two ways: nothing was ever queued, or
-                // GitHub has not registered the last push's run yet. The
-                // stamp clock covers the second window, the same instrument
-                // and threshold the hook uses for hand pushes; registered
-                // and settled rows always outrank the clock.
-                if rows.is_empty() {
-                    if let Some(age) = stamp_age_secs(ctx) {
-                        if age < PUSH_DEBOUNCE_SECS {
-                            return PushOutcome::InFlight {
-                                check: format!(
-                                    "last push {age}s ago, its run may not be registered yet"
-                                ),
-                                job: None,
-                            };
-                        }
-                    }
-                }
-                let arr = Value::Array(rows);
-                if any_pending(&arr) {
-                    let row = crate::check_supersession::latest_per_name(&arr)
-                        .as_array()
-                        .and_then(|rows| {
-                            rows.iter().find(|row| {
-                                !matches!(
-                                    row.get("bucket").and_then(|v| v.as_str()).unwrap_or(""),
-                                    "pass" | "fail" | "skipping" | "cancel"
-                                )
-                            })
-                        })
-                        .cloned()
-                        .unwrap_or(Value::Null);
-                    let check = row
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let job = job_id(row.get("link").and_then(|v| v.as_str()).unwrap_or(""));
-                    return PushOutcome::InFlight { check, job };
-                }
-            }
+    if ctx.force {
+        emit_bypass_row(ctx);
+    } else {
+        match in_flight(ctx, &current_branch_quoted(ctx), head) {
+            Ok(Some((check, job))) => return PushOutcome::InFlight { check, job },
+            Ok(None) => {}
             Err(msg) => return PushOutcome::Unreadable(msg),
         }
-    } else if ctx.force {
-        emit_bypass_row(ctx);
     }
     // Push exactly once, to the same-name remote branch, upstream or not.
     // A bare `git push` cannot be used here: push.default=simple refuses
@@ -509,16 +470,7 @@ fn stamp_push(ctx: &PushCtx) {
 /// Age in seconds of this branch's last-push stamp, the same file the hook
 /// writes and reads. An absent or unreadable stamp answers None: the clock
 /// is a proxy and, like the hook's, it fails open.
-fn stamp_age_secs(ctx: &PushCtx) -> Option<u64> {
-    let branch = run_labeled(
-        "pr-push",
-        &ctx.git_bin,
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        &ctx.cwd,
-        READ_TIMEOUT,
-    )
-    .map(|(_, out, _)| out.trim().to_string())
-    .ok()?;
+fn stamp_age_secs(ctx: &PushCtx, branch: &str) -> Option<u64> {
     let safe: String = branch
         .chars()
         .map(|c| {
@@ -533,6 +485,67 @@ fn stamp_age_secs(ctx: &PushCtx) -> Option<u64> {
     let modified = stamp.modified().ok()?;
     let age = std::time::SystemTime::now().duration_since(modified).ok()?;
     Some(age.as_secs())
+}
+
+/// Read whether a remote head would be cancelled by a push. `None` means the
+/// head has no registered pending check; errors stay distinct so callers can
+/// fail open only at the hand-push hook, never in the guarded verb.
+pub(crate) fn in_flight(
+    ctx: &PushCtx,
+    branch: &str,
+    head: &str,
+) -> Result<Option<(String, Option<String>)>, String> {
+    if head.is_empty() {
+        return Ok(None);
+    }
+    let rows = read_checks_rows(&ctx.gh_bin, &ctx.cwd, head)?;
+    if rows.is_empty() {
+        if let Some(age) = stamp_age_secs(ctx, branch) {
+            if age < PUSH_DEBOUNCE_SECS {
+                return Ok(Some((
+                    format!("last push {age}s ago, its run may not be registered yet"),
+                    None,
+                )));
+            }
+        }
+    }
+    let arr = Value::Array(rows);
+    if !any_pending(&arr) {
+        return Ok(None);
+    }
+    let row = crate::check_supersession::latest_per_name(&arr)
+        .as_array()
+        .and_then(|rows| {
+            rows.iter().find(|row| {
+                !matches!(
+                    row.get("bucket").and_then(|v| v.as_str()).unwrap_or(""),
+                    "pass" | "fail" | "skipping" | "cancel"
+                )
+            })
+        })
+        .cloned()
+        .unwrap_or(Value::Null);
+    let check = row
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let job = job_id(row.get("link").and_then(|v| v.as_str()).unwrap_or(""));
+    Ok(Some((check, job)))
+}
+
+fn print_in_flight(branch: &str, head: &str, check: &str, job: Option<&str>) -> i32 {
+    println!(
+        "{}",
+        json!({
+            "branch": branch,
+            "head": head,
+            "in_flight": true,
+            "check": check,
+            "job": job,
+        })
+    );
+    2
 }
 
 /// The `push_debounce_bypass` journal row, one per --force-ci-cancel.
@@ -575,6 +588,7 @@ fn current_branch_quoted(ctx: &PushCtx) -> String {
 /// Parsed verb arguments.
 struct VerbArgs {
     force: bool,
+    in_flight: Option<String>,
     no_preflight: bool,
     git_bin: String,
     gh_bin: String,
@@ -586,6 +600,7 @@ struct VerbArgs {
 fn parse_verb_args(argv: &[String]) -> Result<VerbArgs, String> {
     let mut a = VerbArgs {
         force: false,
+        in_flight: None,
         no_preflight: false,
         git_bin: "git".to_string(),
         gh_bin: "gh".to_string(),
@@ -607,6 +622,10 @@ fn parse_verb_args(argv: &[String]) -> Result<VerbArgs, String> {
         };
         match arg {
             "--force-ci-cancel" => a.force = true,
+            "--in-flight" => {
+                a.in_flight = Some(take("--in-flight")?);
+                i += 1;
+            }
             "--no-preflight" => a.no_preflight = true,
             "--git-bin" => {
                 a.git_bin = take("--git-bin")?;
@@ -784,6 +803,64 @@ pub fn run_push(argv: &[String]) -> i32 {
     };
     let cwd = a.cwd.clone();
     let git = a.git_bin.clone();
+
+    if let Some(probe_branch) = a.in_flight.as_deref() {
+        let remote_ref = format!("refs/remotes/origin/{probe_branch}");
+        let (ok, head, _err) = match run_labeled(
+            "pr-push-in-flight",
+            &git,
+            &["rev-parse", "--verify", "--quiet", remote_ref.as_str()],
+            &cwd,
+            READ_TIMEOUT,
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                println!(
+                    "{}",
+                    json!({"branch": probe_branch, "head": "", "error": err})
+                );
+                return 4;
+            }
+        };
+        let head = if ok {
+            head.trim().to_string()
+        } else {
+            String::new()
+        };
+        if head.is_empty() {
+            println!(
+                "{}",
+                json!({"branch": probe_branch, "head": head, "in_flight": false})
+            );
+            return 0;
+        }
+        let ctx = PushCtx {
+            git_bin: git,
+            gh_bin: a.gh_bin,
+            fno_bin: a.fno_bin,
+            cwd,
+            stamps_dir: a.stamps_dir,
+            force: false,
+            lease: None,
+        };
+        return match in_flight(&ctx, probe_branch, &head) {
+            Ok(Some((check, job))) => print_in_flight(probe_branch, &head, &check, job.as_deref()),
+            Ok(None) => {
+                println!(
+                    "{}",
+                    json!({"branch": probe_branch, "head": head, "in_flight": false})
+                );
+                0
+            }
+            Err(error) => {
+                println!(
+                    "{}",
+                    json!({"branch": probe_branch, "head": head, "error": error})
+                );
+                4
+            }
+        };
+    }
 
     // (1) Protected-branch and dirty-tree refusals, exit 3.
     let branch = run_labeled(
@@ -1006,7 +1083,37 @@ pub fn run_push(argv: &[String]) -> i32 {
         lease = Some(remote_head.clone());
     }
 
-    // (7) Preflight.
+    let ctx = PushCtx {
+        git_bin: git.clone(),
+        gh_bin: a.gh_bin.clone(),
+        fno_bin: a.fno_bin.clone(),
+        cwd: cwd.clone(),
+        stamps_dir: a.stamps_dir.clone(),
+        force: a.force,
+        lease,
+    };
+
+    // (7) Read the in-flight state before preflight: a doomed push must not
+    // first spend a rehearsal of up to an hour.
+    if !a.force {
+        match in_flight(&ctx, &branch, &remote_head) {
+            Ok(Some((check, job))) => {
+                eprintln!(
+                    "pr-push: a run is in flight on the remote head, nothing pushed: \
+                     check '{check}' job {}.",
+                    job.as_deref().unwrap_or("?")
+                );
+                return 2;
+            }
+            Ok(None) => {}
+            Err(msg) => {
+                eprintln!("pr-push: could not read checks ({msg}); nothing pushed");
+                return 4;
+            }
+        }
+    }
+
+    // (8) Preflight.
     let (mode, preflight_ok) = if a.no_preflight {
         (PreflightMode::Skipped, true)
     } else {
@@ -1034,17 +1141,8 @@ pub fn run_push(argv: &[String]) -> i32 {
         return 1;
     }
 
-    // (8) In-flight read + the push, leased against the fetched remote sha
+    // (9) In-flight read + the push, leased against the fetched remote sha
     // when the branch was rebased.
-    let ctx = PushCtx {
-        git_bin: git.clone(),
-        gh_bin: a.gh_bin.clone(),
-        fno_bin: a.fno_bin.clone(),
-        cwd: cwd.clone(),
-        stamps_dir: a.stamps_dir.clone(),
-        force: a.force,
-        lease,
-    };
     let outcome = guarded_push(&ctx, &remote_head);
     match outcome {
         PushOutcome::Pushed { sha } => {

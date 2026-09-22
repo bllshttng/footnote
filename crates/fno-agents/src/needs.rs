@@ -744,12 +744,15 @@ fn run_items(home: &AgentsHome, cwd: &Path) -> i32 {
             String::new()
         }
     };
-    let items = crate::attention::project(
+    let mut items = crate::attention::project(
         &journals_raw,
         &notes,
         &lane_text,
         crate::claims::now_ms() as u64 / 1000,
     );
+    if let Ok(registry) = crate::state::load_registry(&home.registry_json()) {
+        crate::attention::attach_reach(&mut items, &registry);
+    }
     let as_of = now_secs();
     let payload = json!({
         "as_of": as_of,

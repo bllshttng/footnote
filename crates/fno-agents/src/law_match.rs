@@ -62,27 +62,29 @@ struct ValidateRequest {
     supersedes: Option<String>,
 }
 
+// pub(crate): question_intake builds one of these from the transport request
+// and reuses the matcher, so the ask refusal logic lives in exactly one place.
 #[derive(Deserialize)]
-struct AskRequest {
-    question: String,
+pub(crate) struct AskRequest {
+    pub(crate) question: String,
     #[serde(default)]
-    subject: Option<String>,
+    pub(crate) subject: Option<String>,
     #[serde(default)]
-    node: Option<String>,
-    laws: Vec<LawRow>,
+    pub(crate) node: Option<String>,
+    pub(crate) laws: Vec<LawRow>,
 }
 
-#[derive(Deserialize, Serialize)]
-struct LawRow {
-    decision_id: String,
+#[derive(Clone, Deserialize, Serialize)]
+pub struct LawRow {
+    pub decision_id: String,
     // Option, not String+default: Python rows carry null for a missing
     // decision body or ts, and serde's `default` covers absent keys only.
     #[serde(default)]
-    subject: Option<String>,
+    pub subject: Option<String>,
     #[serde(default)]
-    decision: Option<String>,
+    pub decision: Option<String>,
     #[serde(default)]
-    ts: Option<String>,
+    pub ts: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -109,26 +111,26 @@ struct OpenQuestion {
 }
 
 #[derive(Serialize)]
-struct ExactHit {
-    subject: String,
-    ids: Vec<String>,
+pub(crate) struct ExactHit {
+    pub(crate) subject: String,
+    pub(crate) ids: Vec<String>,
 }
 
 #[derive(Serialize)]
-struct NearbyHit {
-    decision_id: String,
-    subject: String,
-    decision: String,
-    shared: Vec<String>,
+pub(crate) struct NearbyHit {
+    pub(crate) decision_id: String,
+    pub(crate) subject: String,
+    pub(crate) decision: String,
+    pub(crate) shared: Vec<String>,
 }
 
 #[derive(Serialize)]
-struct AskAnswer {
-    ok: bool,
-    exact: Vec<ExactHit>,
-    nearby: Vec<NearbyHit>,
-    uncited: Vec<String>,
-    nearby_refusal: Option<String>,
+pub(crate) struct AskAnswer {
+    pub(crate) ok: bool,
+    pub(crate) exact: Vec<ExactHit>,
+    pub(crate) nearby: Vec<NearbyHit>,
+    pub(crate) uncited: Vec<String>,
+    pub(crate) nearby_refusal: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -249,7 +251,7 @@ fn b_ts<'a>(laws: &'a [LawRow], id: &str) -> &'a str {
         .unwrap_or("")
 }
 
-fn ask_answer(req: &AskRequest) -> AskAnswer {
+pub(crate) fn ask_answer(req: &AskRequest) -> AskAnswer {
     let exact = exact_tier(req);
     let nearby = nearby_tier(req, &exact);
     let uncited: Vec<String> = nearby
@@ -547,16 +549,20 @@ fn stage_matching_lines(
 /// Node subjects for a stage payload that names a node: the node id itself,
 /// its epic id (the graph row's `parent`) and the project slug, read through
 /// the crate's graph read. An unreadable graph degrades to node-id-only
-/// matching; the node id alone never needs the graph.
-fn node_subject_idents(node_id: &str, graph_path: Option<&std::path::Path>) -> Vec<String> {
+/// matching and returns the reason so the stage answer can name the missing scope.
+fn node_subject_idents(
+    node_id: &str,
+    graph_path: Option<&std::path::Path>,
+) -> (Vec<String>, Option<String>) {
     let mut idents = vec![node_id.to_lowercase()];
     let default_path = crate::graph_get::default_graph_path();
     let path = graph_path.unwrap_or(&default_path);
     if graph_path.is_none() && crate::graph_get::external_backend_selected() {
-        return idents;
+        return (idents, Some("graph: external backend selected".to_owned()));
     }
-    let Ok(entries) = crate::backlog::api::rows(&crate::backlog::api::Store::new(path)) else {
-        return idents;
+    let entries = match crate::backlog::api::rows(&crate::backlog::api::Store::new(path)) {
+        Ok(entries) => entries,
+        Err(error) => return (idents, Some(format!("graph: {}", error.0))),
     };
     if let Some(entry) = crate::graph_get::find_entry(&entries, node_id) {
         for field in ["parent", "project"] {
@@ -570,13 +576,18 @@ fn node_subject_idents(node_id: &str, graph_path: Option<&std::path::Path>) -> V
     }
     idents.sort();
     idents.dedup();
-    idents
+    (idents, None)
 }
 
 /// The context block for a stage with laws: cap 2000 bytes, first law line
 /// always renders, and every law past the cap keeps a short id line the
 /// validator parses, so overflow law is acknowledged, not hidden.
-fn render_stage_block(stage: &str, matching: &[String], damaged: usize) -> String {
+fn render_stage_block(
+    stage: &str,
+    matching: &[String],
+    damaged: usize,
+    unread: &[String],
+) -> String {
     let mut text = format!(
         "## Law governing {stage}\n\nThese live operator rulings govern the {stage} you are starting. Act inside them. Do not re-derive them.\n"
     );
@@ -599,11 +610,20 @@ fn render_stage_block(stage: &str, matching: &[String], damaged: usize) -> Strin
             text.push('\n');
         }
     }
+    text.push_str(&render_read_receipt(damaged, unread));
+    text
+}
+
+fn render_read_receipt(damaged: usize, unread: &[String]) -> String {
+    let mut text = String::new();
     if damaged > 0 {
         text.push_str(&format!(
             "{} index row(s) could not be parsed, so this list may be incomplete.\n",
             damaged
         ));
+    }
+    for reason in unread {
+        text.push_str(&format!("Unread: {reason}\n"));
     }
     text
 }
@@ -629,6 +649,7 @@ fn stage_answer_with(
 ) -> Value {
     let stage = classify_stage(&req.hook);
     let mut hook_output = None;
+    let mut unread = Vec::new();
     if let Some(stage_name) = stage {
         let keywords = STAGES
             .iter()
@@ -636,10 +657,13 @@ fn stage_answer_with(
             .map(|(_, k)| *k)
             .unwrap_or(&[]);
         let node_id = payload_node_id(&req.hook);
-        let idents = node_id
+        let (idents, graph_unread) = node_id
             .as_deref()
             .map(|id| node_subject_idents(id, graph_path))
             .unwrap_or_default();
+        if let Some(reason) = graph_unread {
+            unread.push(format!("the node's epic and project ({reason})"));
+        }
         let laws = match index_path {
             Some(p) => decision_index::live_laws(p),
             // The default path is the STORE read: graph.db plus the JSONL
@@ -656,18 +680,25 @@ fn stage_answer_with(
                     &idents,
                     node_id.as_deref().unwrap_or(""),
                 );
-                if !matching.is_empty() {
+                if !matching.is_empty() || !unread.is_empty() || index.damaged > 0 {
+                    let additional_context = if matching.is_empty() {
+                        render_read_receipt(index.damaged, &unread)
+                    } else {
+                        render_stage_block(stage_name, &matching, index.damaged, &unread)
+                    };
                     hook_output = Some(json!({
                         "hookSpecificOutput": {
                             "hookEventName": req.hook.get("hook_event_name").cloned().unwrap_or(Value::Null),
-                            "additionalContext": render_stage_block(stage_name, &matching, index.damaged),
+                            "additionalContext": additional_context,
                         }
                     }));
                 }
             }
             Err(reason) => {
+                unread.push(format!("the decision index ({reason})"));
                 let text = format!(
-                    "## Law governing {stage_name}\n\nThe decision index could not be read ({reason}), so the rulings that govern this {stage_name} are unknown. Run fno backlog decisions --lane law --state live before you act on {stage_name} policy.\n"
+                    "The decision index could not be read ({reason}), so the rulings that govern this {stage_name} are unknown. Run fno backlog decisions --lane law --state live before you act on {stage_name} policy.\n{}",
+                    render_read_receipt(0, &unread)
                 );
                 hook_output = Some(json!({
                     "hookSpecificOutput": {
@@ -678,7 +709,7 @@ fn stage_answer_with(
             }
         }
     }
-    json!({"ok": true, "stage": stage, "hook_output": hook_output})
+    json!({"ok": true, "stage": stage, "hook_output": hook_output, "unread": unread})
 }
 
 /// The statement validator, a word-for-word port of
@@ -1588,9 +1619,121 @@ mod tests {
             .to_string(),
         )
         .expect("writes");
-        let idents = node_subject_idents("x-aaaa", Some(&graph));
+        let (idents, unread) = node_subject_idents("x-aaaa", Some(&graph));
         assert_eq!(idents, vec!["fno", "x-aaaa", "x-bbbb"]);
-        let missing = node_subject_idents("x-ffff", Some(&graph));
+        assert!(unread.is_none());
+        let (missing, missing_unread) = node_subject_idents("x-ffff", Some(&graph));
         assert_eq!(missing, vec!["x-ffff"]);
+        assert!(missing_unread.is_none());
+    }
+
+    #[test]
+    fn ac1_readable_graph_has_no_unread_receipt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index = write_index(
+            dir.path(),
+            &[stage_row(
+                "d-epic0001",
+                "x-bbbb",
+                "The epic ruling is readable.",
+            )],
+        );
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            serde_json::json!({
+                "entries": [{"id": "x-aaaa", "parent": "x-bbbb", "project": "fno"}]
+            })
+            .to_string(),
+        )
+        .expect("writes");
+        let hook = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "/fno:blueprint x-aaaa"
+        });
+        let answer = stage_answer_with(StageRequest { hook }, Some(&index), Some(&graph));
+        assert_eq!(answer["unread"], serde_json::json!([]));
+        assert!(
+            answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .expect("context")
+                .contains("d-epic0001")
+        );
+    }
+
+    #[test]
+    fn ac1_unreadable_graph_names_scope_and_keeps_node_id_matching() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index = write_index(
+            dir.path(),
+            &[stage_row(
+                "d-node0001",
+                "x-aaaa-context",
+                "The node context ruling is readable.",
+            )],
+        );
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, "not json").expect("writes");
+        let hook = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "/fno:blueprint x-aaaa"
+        });
+        let answer = stage_answer_with(StageRequest { hook }, Some(&index), Some(&graph));
+        let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("context");
+        assert!(
+            ctx.contains("Unread: the node's epic and project (graph:"),
+            "{ctx}"
+        );
+        assert!(ctx.contains("d-node0001"), "{ctx}");
+        assert_eq!(answer["unread"].as_array().expect("unread").len(), 1);
+    }
+
+    #[test]
+    fn ac2_unreadable_graph_and_index_keep_both_reasons() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, "not json").expect("writes");
+        let index = dir.path().join("missing-decisions.jsonl");
+        let hook = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "/fno:blueprint x-aaaa"
+        });
+        let answer = stage_answer_with(StageRequest { hook }, Some(&index), Some(&graph));
+        let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("context");
+        assert!(
+            ctx.contains("Unread: the node's epic and project (graph:"),
+            "{ctx}"
+        );
+        assert!(ctx.contains("Unread: the decision index ("), "{ctx}");
+        assert!(!ctx.contains("These live operator rulings govern"), "{ctx}");
+        assert_eq!(answer["unread"].as_array().expect("unread").len(), 2);
+    }
+
+    #[test]
+    fn ac2_empty_match_with_unread_graph_has_no_empty_law_block() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index = write_index(
+            dir.path(),
+            &[stage_row("d-other0001", "unrelated", "not for this stage")],
+        );
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, "not json").expect("writes");
+        let hook = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "/fno:blueprint x-aaaa"
+        });
+        let answer = stage_answer_with(StageRequest { hook }, Some(&index), Some(&graph));
+        let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("context");
+        assert!(
+            ctx.contains("Unread: the node's epic and project (graph:"),
+            "{ctx}"
+        );
+        assert!(!ctx.contains("These live operator rulings govern"), "{ctx}");
     }
 }

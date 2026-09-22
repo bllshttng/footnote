@@ -1072,6 +1072,38 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let stranded = read_stranded_trees(&repos, &candidates, &mut budget);
     mark(&mut sources, "stranded", &stranded, false);
 
+    // The fleet-task read: a local questions.jsonl fold, sub-millisecond,
+    // so it runs inline instead of taking a budget slice or a thread. An
+    // unreadable store degrades the queue, never the board; catch_unwind
+    // for the same reason held_nodes above wraps its fold - from_env
+    // panics under a test process with no declared root.
+    let tasks = std::panic::catch_unwind(|| {
+        let home = crate::paths::AgentsHome::from_env();
+        let store = crate::provider_cap::questions_path(&home);
+        match crate::fleet_task::open_tasks(&store) {
+            Ok(tasks) => SourceRead::ok(Value::Array(
+                tasks
+                    .iter()
+                    .map(|t| {
+                        json!({
+                            "id": t.id,
+                            "lane": t.lane,
+                            "key": t.key,
+                            "cwd": t.cwd,
+                            "text": t.text,
+                            "run": t.run,
+                            "node": t.node,
+                            "ts": t.ts,
+                        })
+                    })
+                    .collect(),
+            )),
+            Err(e) => SourceRead::err(e),
+        }
+    })
+    .unwrap_or_else(|_| SourceRead::err("tasks: reader panicked"));
+    mark(&mut sources, "tasks", &tasks, false);
+
     let inputs = BoardInputs {
         ready,
         claims,
@@ -1085,7 +1117,9 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         pr_gates,
         outstanding,
         needs,
+        tasks,
         lane,
+        repo_root: cwd.to_string_lossy().into_owned(),
         undispatched,
         blocked_child,
         stranded,
@@ -1386,6 +1420,8 @@ mod tests {
 
     fn inputs_with(ready: Value, claims: Value, claimed_nodes: Value) -> BoardInputs {
         BoardInputs {
+            tasks: SourceRead::ok(json!([])),
+            repo_root: String::new(),
             ready: ok_read(ready),
             claims: ok_read(claims),
             worked: ok_read(Value::Array(Vec::new())),
@@ -1539,6 +1575,80 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["id"], "x-pr2");
         assert_eq!(rows[0]["pr_number"], 1895);
+    }
+
+    #[test]
+    fn the_fleet_task_queue_lists_open_tasks_report_only() {
+        // AC9-HP: open tasks list with their run commands, actionable false,
+        // beside an operator_question queue that keeps its own rows.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.outstanding = ok_read(json!({"questions": [
+            {"id": "q-1", "question": "a real ruling", "ts": "t", "session_id": "s"}
+        ]}));
+        inputs.tasks = ok_read(json!([
+            {"id": "ft-a", "lane": "heal", "cwd": "/x", "text": "rebase", "run": "fno do pr rebase 1", "node": "x-1", "ts": "t"},
+            {"id": "ft-b", "lane": "pr-nudge", "cwd": "/x", "text": "nudge", "run": "fno agents resume s", "node": "", "ts": "t"}
+        ]));
+        let board = build_board(&inputs);
+        let queues = board["queues"].as_array().unwrap();
+        let task_q = queues
+            .iter()
+            .find(|q| q["name"] == "fleet_task")
+            .unwrap_or_else(|| panic!("no fleet_task queue: {board}"));
+        assert_eq!(task_q["status"], "ok");
+        assert_eq!(task_q["actionable"], json!(false));
+        assert_eq!(task_q["count"], json!(2));
+        assert_eq!(task_q["rows"][0]["run"], json!("fno do pr rebase 1"));
+        let op_q = queues
+            .iter()
+            .find(|q| q["name"] == "operator_question")
+            .unwrap();
+        assert_eq!(op_q["count"], json!(1));
+    }
+
+    #[test]
+    fn an_unreadable_task_store_reads_unreadable_never_ok_empty() {
+        // AC10-ERR: silence and a real answer are different boards.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.tasks = SourceRead::err("fleet task store unreadable");
+        let board = build_board(&inputs);
+        let task_q = board["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|q| q["name"] == "fleet_task")
+            .unwrap();
+        assert_eq!(task_q["status"], "unreadable");
+        assert_eq!(task_q["count"], Value::Null);
+    }
+
+    #[test]
+    fn a_task_for_another_repo_rides_the_note_not_the_rows() {
+        // AC18-EDGE: identity is lane + key + cwd; a task filed for another
+        // repo never lands in this repo's rows and never vanishes silently.
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.repo_root = "/repo/a".into();
+        inputs.tasks = ok_read(json!([
+            {"id": "ft-mine", "lane": "heal", "cwd": "/repo/a/wt", "text": "t", "run": "r", "node": "", "ts": "t"},
+            {"id": "ft-theirs", "lane": "heal", "cwd": "/repo/b", "text": "t", "run": "r", "node": "", "ts": "t"}
+        ]));
+        let board = build_board(&inputs);
+        let task_q = board["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|q| q["name"] == "fleet_task")
+            .unwrap();
+        assert_eq!(task_q["count"], json!(1));
+        assert_eq!(task_q["rows"][0]["id"], json!("ft-mine"));
+        assert!(
+            task_q["note"]
+                .as_str()
+                .unwrap()
+                .contains("held for another repo"),
+            "{}",
+            task_q["note"]
+        );
     }
 
     fn write_hold_plan(dir: &std::path::Path, hold_frontmatter: &str) -> String {
@@ -2811,7 +2921,7 @@ mod tests {
         });
         std::env::remove_var("FNO_AGENTS_HOME");
         let queues = payload.get("queues").and_then(Value::as_array).unwrap();
-        assert_eq!(queues.len(), 15, "{payload}");
+        assert_eq!(queues.len(), 16, "{payload}");
         assert_eq!(payload["exit_code"], 1, "{payload}");
         assert!(payload["unreadable"].as_i64().unwrap() > 0);
         let names: Vec<&str> = queues
@@ -2832,6 +2942,7 @@ mod tests {
                 "mergeable_pr",
                 "stale_claim",
                 "operator_question",
+                "fleet_task",
                 "carveout_pending",
                 "capture_pending",
                 "failed_verdict",

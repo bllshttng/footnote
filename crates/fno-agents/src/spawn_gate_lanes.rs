@@ -192,6 +192,7 @@ fn pid_liveness(pid: u32, recorded: Option<u64>) -> Result<bool, ()> {
 
 /// One lane's count could not be proved: the probe's unknown verdict, with
 /// the lane and the fault named.
+#[derive(Debug)]
 pub(crate) struct LaneFault {
     pub(crate) provider: String,
     pub(crate) error: String,
@@ -369,19 +370,32 @@ pub(crate) fn read_awaiting_operator(
     awaiting_operator(rows, &raw, transcript_age_s)
 }
 
+/// One provider lane reading: the count the gate refuses on, the registry row
+/// names it counted, the parked pairs it left out, and the slot claims it
+/// counted. A claude row with an open operator question and a quiet
+/// transcript holds its process and its slot but spends nothing on the lane,
+/// so it stops counting against the provider cap.
+#[derive(Debug)]
+pub(crate) struct LaneReading {
+    pub count: usize,
+    pub counted: Vec<String>,
+    pub parked: Vec<(String, String)>,
+    /// The `(name, expires_at)` pairs of the slot claims the count included:
+    /// the lane's held-by-claim share, reservations named.
+    pub reserved: Vec<(String, i64)>,
+}
+
 /// Count rows of ONE provider only when status and positive liveness agree
-/// (the port of `spawn_gate.provider_live_count`). Returns the count, the
-/// names of the rows it included, and the parked pairs it left out: a claude
-/// row with an open operator question and a quiet transcript holds its process
-/// and its slot but spends nothing on the lane, so it stops counting against
-/// the provider cap. Every unreadable source is an `Err`, never a zero.
+/// (the port of `spawn_gate.provider_live_count`). Every unreadable source is
+/// an `Err`, never a zero.
 pub(crate) fn provider_live_count(
     registry_path: &Path,
     provider: &str,
+    redeemer: Option<&str>,
     warnings: &mut Vec<String>,
-) -> Result<(usize, Vec<String>, Vec<(String, String)>), String> {
+) -> Result<LaneReading, String> {
     let questions_raw = read_questions_journal(registry_path, warnings);
-    provider_live_count_with_questions(registry_path, provider, &questions_raw, warnings)
+    provider_live_count_with_questions(registry_path, provider, &questions_raw, redeemer, warnings)
 }
 
 /// The same count over a pre-read journal, so a caller counting MANY providers
@@ -390,8 +404,9 @@ pub(crate) fn provider_live_count_with_questions(
     registry_path: &Path,
     provider: &str,
     questions_raw: &str,
+    redeemer: Option<&str>,
     warnings: &mut Vec<String>,
-) -> Result<(usize, Vec<String>, Vec<(String, String)>), String> {
+) -> Result<LaneReading, String> {
     let registry =
         load_registry(registry_path).map_err(|e| format!("fno registry unreadable: {e}"))?;
     let live_rows: Vec<&RegistryEntry> = registry
@@ -511,8 +526,15 @@ pub(crate) fn provider_live_count_with_questions(
     // claims dedup sees both lists.
     let mut claim_seen = counted_names.clone();
     claim_seen.extend(parked.iter().map(|(n, _)| n.clone()));
-    count += provider_live_slot_claims(provider, &claim_seen, warnings)?;
-    Ok((count, counted_names, parked))
+    let (claim_count, reserved) =
+        provider_live_slot_claims(provider, &claim_seen, redeemer, warnings)?;
+    count += claim_count;
+    Ok(LaneReading {
+        count,
+        counted: counted_names,
+        parked,
+        reserved,
+    })
 }
 
 /// Pane liveness for one row: `Some(bool)` decided, `None` when the row
@@ -529,26 +551,32 @@ fn pane_state(row: &RegistryEntry) -> Result<Option<bool>, String> {
 /// Provider-tagged headless reservations not represented by rows
 /// (`_provider_live_slot_claims`). A Suspect reservation (dead pid inside its
 /// TTL) counts as live, as `live_worker_slot_claims` counts it. A corrupted
-/// one refuses.
-fn provider_live_slot_claims(
+/// one refuses. Returns the count beside the `(name, expires_at)` pairs it
+/// counted, so a refusal can name who holds the lane. `redeemer` skips that
+/// one name when its claim carries the `reserved_by` key: a reserved spawn is
+/// not charged for its own reservation, and a live worker's plain slot claim
+/// is never skipped by borrowing its name.
+pub(crate) fn provider_live_slot_claims(
     provider: &str,
     counted_names: &[String],
+    redeemer: Option<&str>,
     warnings: &mut Vec<String>,
-) -> Result<usize, String> {
+) -> Result<(usize, Vec<(String, i64)>), String> {
     let root = match claims::global_claims_root() {
         Some(root) => root,
-        None => return Ok(0),
+        None => return Ok((0, Vec::new())),
     };
     let dir = match claims::claims_dir_for(Some(&root)) {
         Some(dir) => dir,
-        None => return Ok(0),
+        None => return Ok((0, Vec::new())),
     };
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
-        Err(_) => return Ok(0),
+        Err(_) => return Ok((0, Vec::new())),
     };
     let counted: HashSet<&str> = counted_names.iter().map(String::as_str).collect();
     let mut count = 0usize;
+    let mut reserved: Vec<(String, i64)> = Vec::new();
     for entry in entries.flatten() {
         let fname = entry.file_name();
         let fname = fname.to_string_lossy().into_owned();
@@ -569,6 +597,12 @@ fn provider_live_slot_claims(
             ClaimState::Corrupted => return Err(format!("worker reservation {key} is corrupted")),
             _ => {}
         }
+        let is_reservation = record
+            .as_ref()
+            .is_some_and(|rec| rec.metadata.get("reserved_by").is_some());
+        if redeemer == Some(name) && is_reservation {
+            continue;
+        }
         let model_provider = record.as_ref().and_then(|rec| {
             rec.metadata
                 .get("model_provider")
@@ -588,11 +622,17 @@ fn provider_live_slot_claims(
             continue;
         }
         match state {
-            ClaimState::Live | ClaimState::Suspect => count += 1,
+            ClaimState::Live | ClaimState::Suspect => {
+                count += 1;
+                reserved.push((
+                    name.to_string(),
+                    record.as_ref().and_then(|rec| rec.expires_at).unwrap_or(0),
+                ));
+            }
             _ => {}
         }
     }
-    Ok(count)
+    Ok((count, reserved))
 }
 
 /// Minimal percent-decoder for claim filenames (inverse of
@@ -1042,10 +1082,17 @@ mod tests {
             ],
         );
         let mut warnings = Vec::new();
-        let (count, counted, parked) = provider_live_count(&reg, "zai", &mut warnings).unwrap();
-        assert_eq!(count, 2, "two live zai rows");
-        assert_eq!(counted, vec!["a".to_string(), "b".to_string()]);
-        assert!(parked.is_empty(), "no parked rows in the plain fixture");
+        let reading = provider_live_count(&reg, "zai", None, &mut warnings).unwrap();
+        assert_eq!(reading.count, 2, "two live zai rows");
+        assert_eq!(reading.counted, vec!["a".to_string(), "b".to_string()]);
+        assert!(
+            reading.parked.is_empty(),
+            "no parked rows in the plain fixture"
+        );
+        assert!(
+            reading.reserved.is_empty(),
+            "no slot claims in the plain fixture"
+        );
         std::env::remove_var("FNO_CLAIMS_ROOT");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1075,10 +1122,17 @@ mod tests {
             ],
         );
         let mut warnings = Vec::new();
-        let (count, counted, parked) = provider_live_count(&reg, "zai", &mut warnings).unwrap();
-        assert_eq!(count, 1, "the recycled incarnation must not count");
-        assert_eq!(counted, vec!["good".to_string()]);
-        assert!(parked.is_empty(), "no parked rows in the plain fixture");
+        let reading = provider_live_count(&reg, "zai", None, &mut warnings).unwrap();
+        assert_eq!(reading.count, 1, "the recycled incarnation must not count");
+        assert_eq!(reading.counted, vec!["good".to_string()]);
+        assert!(
+            reading.parked.is_empty(),
+            "no parked rows in the plain fixture"
+        );
+        assert!(
+            reading.reserved.is_empty(),
+            "no slot claims in the plain fixture"
+        );
         std::env::remove_var("FNO_CLAIMS_ROOT");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1236,10 +1290,17 @@ mod tests {
             ],
         );
         let mut warnings = Vec::new();
-        let (count, counted, parked) = provider_live_count(&reg, "zai", &mut warnings).unwrap();
-        assert_eq!(count, 1, "the waiting worker stops holding the lane");
-        assert_eq!(counted, vec!["b".to_string()]);
-        assert_eq!(parked, vec![("a".to_string(), "q-1".to_string())]);
+        let reading = provider_live_count(&reg, "zai", None, &mut warnings).unwrap();
+        assert_eq!(
+            reading.count, 1,
+            "the waiting worker stops holding the lane"
+        );
+        assert_eq!(reading.counted, vec!["b".to_string()]);
+        assert_eq!(reading.parked, vec![("a".to_string(), "q-1".to_string())]);
+        assert!(
+            reading.reserved.is_empty(),
+            "no slot claims in the plain fixture"
+        );
         std::env::remove_var("FNO_CLAIMS_ROOT");
         std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1305,13 +1366,17 @@ mod tests {
             &[claude_row_json("a", a), live_row("good", "zai", Some(me))],
         );
         let mut warnings = Vec::new();
-        let (count, counted, parked) = provider_live_count(&reg, "zai", &mut warnings).unwrap();
+        let reading = provider_live_count(&reg, "zai", None, &mut warnings).unwrap();
         assert_eq!(
-            count, 1,
+            reading.count, 1,
             "the reservation must not count the parked row back"
         );
-        assert_eq!(counted, vec!["good".to_string()]);
-        assert_eq!(parked, vec![("a".to_string(), "q-1".to_string())]);
+        assert_eq!(reading.counted, vec!["good".to_string()]);
+        assert_eq!(reading.parked, vec![("a".to_string(), "q-1".to_string())]);
+        assert!(
+            reading.reserved.is_empty(),
+            "the parked row's own claim is deduped, not counted and not named"
+        );
         std::env::remove_var("FNO_CLAIMS_ROOT");
         std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1329,7 +1394,7 @@ mod tests {
         let reg = dir.join("registry.json");
         std::fs::write(&reg, "{ not json").unwrap();
         let mut warnings = Vec::new();
-        let err = provider_live_count(&reg, "zai", &mut warnings).unwrap_err();
+        let err = provider_live_count(&reg, "zai", None, &mut warnings).unwrap_err();
         assert!(err.contains("fno registry unreadable"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1360,7 +1425,7 @@ mod tests {
         )
         .unwrap();
         let mut warnings = Vec::new();
-        let n = provider_live_slot_claims("zai", &[], &mut warnings).unwrap();
+        let (n, named) = provider_live_slot_claims("zai", &[], None, &mut warnings).unwrap();
         assert_eq!(n, 0);
         assert!(
             warnings
@@ -1368,8 +1433,11 @@ mod tests {
                 .any(|w| w.contains("without model_provider")),
             "{warnings:?}"
         );
+        assert!(named.is_empty(), "nothing counted, nothing named");
 
-        // Tagged reservation held by THIS live process: counted for zai.
+        // Tagged reservation held by THIS live process: counted for zai, and
+        // the counted pair names it. This fixture writes no expires_at, so
+        // the pair carries 0.
         let tagged = claims_dir.join(format!("{}.lock", claims::encode_key("worker:tagged")));
         std::fs::write(
             &tagged,
@@ -1377,8 +1445,11 @@ mod tests {
         )
         .unwrap();
         warnings.clear();
-        let n = provider_live_slot_claims("zai", &[], &mut warnings).unwrap();
+        let (n, named) = provider_live_slot_claims("zai", &[], None, &mut warnings).unwrap();
         assert_eq!(n, 1, "a live zai-tagged claim counts");
+        assert_eq!(named.len(), 1, "the counted claim is named");
+        assert_eq!(named[0].0, "tagged");
+        assert_eq!(named[0].1, 0, "no expires_at on the fixture, so 0");
 
         // A Suspect reservation (dead pid inside its TTL) counts too, so one
         // orphaned probe row cannot wedge the whole lane count behind an Err.
@@ -1393,13 +1464,154 @@ mod tests {
             claims::ClaimState::Suspect
         ));
         warnings.clear();
-        let n = provider_live_slot_claims("zai", &[], &mut warnings).unwrap();
+        let (n, named) = provider_live_slot_claims("zai", &[], None, &mut warnings).unwrap();
         assert_eq!(n, 2, "a suspect zai-tagged claim counts as one slot");
+        assert_eq!(named.len(), 2, "both counted claims are named");
+        assert!(
+            named
+                .iter()
+                .any(|(name, exp)| name == "suspect" && *exp > now),
+            "the suspect pair carries the fixture's expiry"
+        );
 
         // Another provider's tag never counts for zai.
-        let n = provider_live_slot_claims("codex", &[], &mut warnings).unwrap();
+        let (n, named) = provider_live_slot_claims("codex", &[], None, &mut warnings).unwrap();
         assert_eq!(n, 0);
+        assert!(named.is_empty());
 
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A worker reservation claim holds a provider lane slot with no registry
+    /// row and no process behind it (AC1-HP), and the count names it beside
+    /// its expiry.
+    #[test]
+    fn provider_reservation_counts_toward_the_provider_lane() {
+        let _guard = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-lanes-resv-{}", std::process::id()));
+        let root = dir.join("claims-root");
+        let claims_dir = root.join(".fno").join("claims");
+        std::fs::create_dir_all(&claims_dir).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let lock = claims_dir.join(format!(
+            "{}.lock",
+            claims::encode_key("worker:t-reserved-x-4444")
+        ));
+        std::fs::write(
+            &lock,
+            format!(
+                "schema_version: {}\nkey: worker:t-reserved-x-4444\nholder: king-1\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {}\nmetadata:\n  model_provider: zai\n  reserved_by: king-1\n",
+                claims::SCHEMA_VERSION,
+                now + 600_000,
+                dead_pid(),
+                claims::hostname()
+            ),
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let (n, named) = provider_live_slot_claims("zai", &[], None, &mut warnings).unwrap();
+        assert_eq!(n, 1, "a live reservation spends a lane slot");
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0].0, "t-reserved-x-4444");
+        assert_eq!(named[0].1, now + 600_000);
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reserved spawn is not charged for its own reservation (AC1-EDGE /
+    /// AC2-HP), but a live worker's plain slot claim (no `reserved_by`) is
+    /// never skipped by a spawn borrowing its name (AC2-ERR).
+    #[test]
+    fn provider_count_skips_the_redeemers_reservation_only() {
+        let _guard = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-lanes-redeem-{}", std::process::id()));
+        let root = dir.join("claims-root");
+        let claims_dir = root.join(".fno").join("claims");
+        std::fs::create_dir_all(&claims_dir).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let host = claims::hostname();
+        for (key, holder, reserved) in [
+            ("worker:t-reserved-x-4444", "king-1", true),
+            ("worker:t-live-worker", "live-holder", false),
+        ] {
+            let reserved_line = reserved
+                .then_some("  reserved_by: king-1\n")
+                .unwrap_or_default();
+            let lock = claims_dir.join(format!("{}.lock", claims::encode_key(key)));
+            std::fs::write(
+                &lock,
+                format!(
+                    "schema_version: {}\nkey: {key}\nholder: {holder}\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n{reserved_line}",
+                    claims::SCHEMA_VERSION,
+                    now + 600_000,
+                    std::process::id()
+                ),
+            )
+            .unwrap();
+        }
+        let mut warnings = Vec::new();
+        let (n, _) = provider_live_slot_claims("zai", &[], None, &mut warnings).unwrap();
+        assert_eq!(n, 2, "both claims count with no redeemer");
+        let (n, _) =
+            provider_live_slot_claims("zai", &[], Some("t-reserved-x-4444"), &mut warnings)
+                .unwrap();
+        assert_eq!(n, 1, "the redeemer skips its own reservation");
+        let (n, _) =
+            provider_live_slot_claims("zai", &[], Some("t-live-worker"), &mut warnings).unwrap();
+        assert_eq!(n, 2, "a live worker's claim is never skipped by name");
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An expired reservation reads Stale and is already skipped (AC1-ERR):
+    /// the starvation floor the TTL ceiling builds on.
+    #[test]
+    fn provider_count_skips_an_expired_reservation() {
+        let _guard = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-lanes-expired-{}", std::process::id()));
+        let root = dir.join("claims-root");
+        let claims_dir = root.join(".fno").join("claims");
+        std::fs::create_dir_all(&claims_dir).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let lock = claims_dir.join(format!(
+            "{}.lock",
+            claims::encode_key("worker:t-expired-x-4444")
+        ));
+        std::fs::write(
+            &lock,
+            format!(
+                "schema_version: {}\nkey: worker:t-expired-x-4444\nholder: king-1\nacquired_at: {}\nexpires_at: {}\npid: {}\nhost: {}\nmetadata:\n  model_provider: zai\n  reserved_by: king-1\n",
+                claims::SCHEMA_VERSION,
+                now - 700_000,
+                now - 100_000,
+                dead_pid(),
+                claims::hostname()
+            ),
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let (n, named) = provider_live_slot_claims("zai", &[], None, &mut warnings).unwrap();
+        assert_eq!(n, 0, "an expired reservation is Stale and skipped");
+        assert!(named.is_empty());
         std::env::remove_var("FNO_CLAIMS_ROOT");
         let _ = std::fs::remove_dir_all(&dir);
     }

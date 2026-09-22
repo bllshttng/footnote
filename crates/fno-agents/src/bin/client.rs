@@ -137,14 +137,13 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // Transport-only early dispatches, before the runtime builds: every arm
-    // in `run` is a client verb the verb-surface ratchet enumerates against
-    // ALL_CLIENT_ACTIONS, and the shrink law (d-fe66560a) bars adding one, so
-    // these arms register no verb and no advertised spelling exists. Callers
-    // reach them through resolve_binary or the hook wrappers; each module's
-    // own doc carries the shape it answers.
+    // Transport-only early dispatches, before the runtime builds: the shrink
+    // law (d-fe66560a) bars new client verbs; each module's doc carries its shape.
     if args.first().map(String::as_str) == Some("backlog-update") {
         std::process::exit(fno_agents::backlog::patch::run_update(&args[1..]));
+    }
+    if args.first().map(String::as_str) == Some("question-intake") {
+        std::process::exit(fno_agents::question_intake::run_question_intake());
     }
     // The SessionStart reconcile sweep execs here; see backlog::orphan_plans.
     if args.first().map(String::as_str) == Some("backlog-orphan-plans") {
@@ -191,11 +190,12 @@ fn main() {
     if args.first().map(String::as_str) == Some("hook") {
         let code = match args.get(1).map(String::as_str) {
             Some("king-guard") => fno_agents::hook::king_guard::run(&args[2..]),
+            Some("prompt") => fno_agents::hook::prompt::run(&args[2..]),
             Some("test-run-guard") => fno_agents::hook::test_run_guard::run(&args[2..]),
             Some("stop") => fno_agents::hook::stop::run(&args[2..]),
             other => {
                 eprintln!(
-                    "fno-agents hook: unknown entry {other:?}; expected king-guard, test-run-guard or stop"
+                    "fno-agents hook: unknown entry {other:?}; expected king-guard, prompt, test-run-guard or stop"
                 );
                 2
             }
@@ -383,40 +383,37 @@ async fn run(args: Vec<String>) -> i32 {
     // out of the file-budget-gated Python `fno.decide.evidence` module. Reads
     // one JSON request on stdin (lane, text, reads, root, timeout) and prints
     // one JSON answer on stdout; a refusal is data (`ok: false`), not a
-    // process error. Same `matches!` treatment as `component-verdict` so the
-    // routable-verb parity guard does not see it - no advertised fno verb is
-    // added.
+    // process error. Same `matches!` treatment as `component-verdict`, so no
+    // advertised fno verb is added.
     if matches!(verb, "evidence-gate") {
         return fno_agents::evidence::run_evidence_gate(&args[1..]);
     }
 
     // `law-match` is the hidden binary-direct transport for the question-to-law
-    // matcher. Same `matches!` treatment as `evidence-gate`: it stays
-    // out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the parity guard, so no
-    // advertised fno verb is added.
+    // matcher. Same `matches!` treatment as `evidence-gate`, so no advertised
+    // fno verb is added.
     if matches!(verb, "law-match") {
         return fno_agents::law_match::run_law_match(&args[1..]);
     }
 
     // `king-escalation-text` is the hidden binary-direct transport for the
-    // king escalation renderer: the question/mail text renderer
-    // ported out of `fno.king.escalate`. Python keeps the question fold and
-    // the liveness read; this side only renders. Same `matches!` treatment
-    // as `law-match` so the routable-verb parity guard does not see it - no
-    // advertised fno verb is added.
+    // king escalation renderer (ported out of `fno.king.escalate`): Python
+    // keeps the question fold and the liveness read, this side only renders.
+    // Same `matches!` treatment as `law-match`, so no advertised fno verb is
+    // added.
     if matches!(verb, "king-escalation-text") {
         return fno_agents::king_escalation::run_king_escalation_text(&args[1..]);
     }
 
-    // `review-start` is the hidden codex review-forcing verb (node): the
-    // app-server `review/start` RPC is the codex counterpart of claude's
-    // `--raw /code-review` (the Python raw router sends exact review verbs here;
-    // codex's turn/start lane still cannot parse arbitrary slash payloads).
-    // Structured targets + an outcome receipt (a Turn + a reviewThreadId),
-    // strictly better than keystroke faking. Same `matches!`
-    // treatment as `mail-inject` so it stays out of
-    // CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the parity guard - no advertised
-    // fno verb is added. The socket round-trip needs the user's daemon.
+    // `fleet-task` is the hidden binary-direct transport the Python reconcile
+    // lanes ride through verb_call (fleet_task.rs). Same `matches!` treatment
+    // as `law-match`: no advertised fno verb.
+    if matches!(verb, "fleet-task") {
+        return fno_agents::fleet_task::run_fleet_task(&args[1..]);
+    }
+
+    // `review-start` (hidden codex review verb, node): the app-server
+    // `review/start` RPC; claude's `--raw /code-review` counterpart; no advertised verb.
     if matches!(verb, "review-start") {
         return fno_agents::codex_inject::run_review_start(&args[1..]).await;
     }
