@@ -433,6 +433,14 @@ pub(crate) struct BoardInputs {
     pub(crate) pr_gates: SourceRead,
     pub(crate) outstanding: SourceRead,
     pub(crate) needs: SourceRead,
+    /// The open fleet tasks, folded in-process off questions.jsonl. A
+    /// report-only queue for kings; an unreadable store degrades this
+    /// queue, never the board.
+    pub(crate) tasks: SourceRead,
+    /// The board's repo root: a task whose cwd is empty or inside it lists;
+    /// the rest ride the queue note so a task filed for another repo is
+    /// never silently dropped.
+    pub(crate) repo_root: String,
     pub(crate) lane: SourceRead,
     pub(crate) undispatched: SourceRead,
     /// Pre-computed blocked_child candidates: one row per session with an
@@ -1170,6 +1178,36 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         })
         .unwrap_or_default();
 
+    // The fleet-task queue: report-only. A task whose cwd is empty or
+    // inside the board's repo root lists; the rest ride the note, so a task
+    // filed for another repo is never silently dropped.
+    let repo_root = std::path::Path::new(&inputs.repo_root);
+    let mut held_for_other_repo: usize = 0;
+    let fleet_task_rows: Vec<Value> = inputs
+        .tasks
+        .rows()
+        .into_iter()
+        .filter(|t| {
+            let cwd = t.get("cwd").and_then(Value::as_str).unwrap_or("");
+            let keep = cwd.is_empty() || std::path::Path::new(cwd).starts_with(repo_root);
+            if !keep {
+                held_for_other_repo += 1;
+            }
+            keep
+        })
+        .map(|t| {
+            json!({
+                "id": t.get("id"),
+                "lane": t.get("lane"),
+                "text": t.get("text"),
+                "run": t.get("run"),
+                "node": t.get("node"),
+                "cwd": t.get("cwd"),
+                "ts": t.get("ts"),
+            })
+        })
+        .collect();
+
     let carveout_stream = outstanding
         .get("carveouts")
         .cloned()
@@ -1546,6 +1584,22 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             question_rows,
             false,
             "report-only: a human answers these, so counting them would hold the loop open forever".to_string(),
+            "",
+            None,
+        ),
+        queue(
+            "fleet_task",
+            SRC_QUESTIONS.to_string(),
+            &inputs.tasks,
+            fleet_task_rows,
+            false,
+            if held_for_other_repo > 0 {
+                format!(
+                    "report-only: a lane runs each row's command; the row closes when its condition clears or its node closes; {held_for_other_repo} held for another repo"
+                )
+            } else {
+                "report-only: a lane runs each row's command; the row closes when its condition clears or its node closes".to_string()
+            },
             "",
             None,
         ),
