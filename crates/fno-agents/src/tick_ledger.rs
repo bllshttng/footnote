@@ -226,14 +226,6 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         arm_key: Some("auto_heal.enabled"),
         reader: Some("fno do pr watch status"),
     },
-    ArmSpec {
-        arm: "blueprinter",
-        default_interval_s: 300,
-        scheduler: SCHED_DAEMON,
-        upstream: None,
-        arm_key: None,
-        reader: Some("fno agents blueprint-feed --scope <s>"),
-    },
 ];
 
 /// Build the `data` object of one tick row. `skip_reason` is a single token
@@ -524,12 +516,15 @@ fn heal_tick_as_arm_row(value: Value) -> Value {
 }
 
 /// Mark rows whose arm is armed, ticking, and producing nothing: every
-/// observed tick inside `threshold_s` carried `acted=0` while the newest
-/// stayed fresh. A heuristic with a ceiling - it reads a run of zeroes over
-/// time, not the arm's input, so it tunes via the threshold knob, never via
-/// an input probe.
+/// observed tick inside `threshold_s` carried `acted=0` with no skip reason
+/// while the newest stayed fresh. A skip token that explains the idleness
+/// (`calm`, `off_cadence`, a configured-off switch) is the arm stating its
+/// own state, not starvation; and a stale or failing row keeps its louder
+/// verdict. A heuristic with a ceiling - it reads a run of silent zeroes
+/// over time, not the arm's input, so it tunes via the threshold knob,
+/// never via an input probe.
 pub fn mark_starved(journals: &[PathBuf], rows: &mut [ArmStatus], now_unix: u64, threshold_s: u64) {
-    let mut history: HashMap<String, Vec<(u64, u64)>> = HashMap::new();
+    let mut history: HashMap<String, Vec<(u64, u64, bool)>> = HashMap::new();
     let mut paths: Vec<PathBuf> = Vec::new();
     for journal in journals {
         paths.push(journal.clone());
@@ -539,25 +534,33 @@ pub fn mark_starved(journals: &[PathBuf], rows: &mut [ArmStatus], now_unix: u64,
         collect_tick_history(path, &mut history);
     }
     for row in rows.iter_mut() {
-        if row_is_unarmed(row) || row.producer_evidence == ProducerEvidence::Unobserved || row.stale
+        if row_is_unarmed(row)
+            || row.producer_evidence == ProducerEvidence::Unobserved
+            || row.stale
+            || row.failing
         {
             continue;
         }
         let Some(ticks) = history.get(&row.arm) else {
             continue;
         };
-        let window: Vec<&(u64, u64)> = ticks
+        let window: Vec<&(u64, u64, bool)> = ticks
             .iter()
-            .filter(|(ts, _)| *ts > now_unix.saturating_sub(threshold_s))
+            .filter(|(ts, _, _)| *ts > now_unix.saturating_sub(threshold_s))
             .collect();
-        if !window.is_empty() && window.iter().all(|(_, acted)| *acted == 0) {
+        if !window.is_empty()
+            && window
+                .iter()
+                .all(|(_, acted, explained)| *acted == 0 && !explained)
+        {
             row.starved = true;
         }
     }
 }
 
-/// One fold collecting every `(ts, acted)` pair an arm's journal holds.
-fn collect_tick_history(path: &Path, history: &mut HashMap<String, Vec<(u64, u64)>>) {
+/// One fold collecting every `(ts, acted, skip_explains)` triple an arm's
+/// journal holds.
+fn collect_tick_history(path: &Path, history: &mut HashMap<String, Vec<(u64, u64, bool)>>) {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return,
@@ -588,9 +591,14 @@ fn collect_tick_history(path: &Path, history: &mut HashMap<String, Vec<(u64, u64
         else {
             continue;
         };
+        let skip_explains = data
+            .get("skip_reason")
+            .map(|v| !v.is_null())
+            .unwrap_or(false);
         history.entry(arm.to_string()).or_default().push((
             ts_unix,
             data.get("acted").and_then(Value::as_u64).unwrap_or(0),
+            skip_explains,
         ));
     }
 }
@@ -1326,15 +1334,13 @@ fn cause_hint(cause: &str, daemon: &DaemonFacts) -> String {
 /// expected and absence of receipts is not staleness, failure, or ok.
 /// UNOBSERVED follows it. STALE when stale, FAIL when failing, pending when
 /// the cause is daemon_young, else ok. UPSTREAM outranks STALE and FAIL:
-/// the arm is waiting on a red arm, not broken. starved sits between
-/// UPSTREAM and STALE: the arm runs on a fresh receipt but produced nothing
-/// inside the threshold window. The `cause=...` suffix is appended by
-/// `explain`.
+/// the arm is waiting on a red arm, not broken. starved claims only
+/// otherwise-ok rows: an arm running on a fresh receipt that produced
+/// nothing inside the threshold window, and whose ticks never named a skip
+/// reason. The `cause=...` suffix is appended by `explain`.
 pub fn render_row(row: &ArmStatus) -> String {
     let verdict = if row_is_unarmed(row) {
         "unarmed"
-    } else if row.starved {
-        "starved"
     } else if row.producer_evidence == ProducerEvidence::Unobserved {
         "UNOBSERVED"
     } else if row.cause.as_deref() == Some("upstream_down") {
@@ -1350,6 +1356,8 @@ pub fn render_row(row: &ArmStatus) -> String {
         Some("fleet_stop") | Some("loops_paused")
     ) {
         "PAUSED"
+    } else if row.starved {
+        "starved"
     } else {
         "ok"
     };
@@ -1462,7 +1470,7 @@ mod tests {
     /// `KNOWN_ARMS` row, daemon scheduler, the 900s beat for merge_close.
     #[test]
     fn arm_watch_is_the_eleventh_known_arm_merge_close_the_thirteenth() {
-        assert_eq!(KNOWN_ARMS.len(), 19);
+        assert_eq!(KNOWN_ARMS.len(), 18);
         let attention = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "attention")
@@ -1646,6 +1654,76 @@ mod tests {
         mark_starved(&journals, &mut rows, now, 604_800);
         let heal = rows.iter().find(|r| r.arm == "heal").expect("heal row");
         assert!(!heal.starved);
+    }
+
+    #[test]
+    fn an_explained_skip_or_a_failing_row_never_reads_starved() {
+        let dir = temp_dir();
+        let path = dir.join("events.jsonl");
+        // Every in-window tick idles, but each names its skip reason: the arm
+        // states its own idleness, which is not starvation.
+        write_rows(
+            &path,
+            &[
+                tick_envelope(
+                    "2026-09-20T12:00:00Z",
+                    "heal",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!("calm"),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-21T09:00:00Z",
+                    "heal",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!("calm"),
+                    600,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-21T12:00:00Z").unwrap();
+        let journals = vec![path.clone()];
+        let mut rows = read_arms(&journals, now);
+        mark_starved(&journals, &mut rows, now, 604_800);
+        let heal = rows.iter().find(|r| r.arm == "heal").expect("heal row");
+        assert!(!heal.starved);
+    }
+
+    #[test]
+    fn a_failing_arm_keeps_fail_and_never_reads_starved() {
+        let dir = temp_dir();
+        let path = dir.join("events.jsonl");
+        write_rows(
+            &path,
+            &[
+                tick_envelope(
+                    "2026-09-20T12:00:00Z",
+                    "heal",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+                tick_envelope(
+                    "2026-09-21T09:00:00Z",
+                    "heal",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!("timeout"),
+                    600,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-21T12:00:00Z").unwrap();
+        let journals = vec![path.clone()];
+        let mut rows = read_arms(&journals, now);
+        mark_starved(&journals, &mut rows, now, 604_800);
+        let heal = rows.iter().find(|r| r.arm == "heal").expect("heal row");
+        assert!(heal.failing);
+        assert!(!heal.starved);
+        assert_eq!(render_row(heal).split_whitespace().nth(1), Some("FAIL"));
     }
 
     #[test]

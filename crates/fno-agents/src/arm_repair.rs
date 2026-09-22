@@ -671,14 +671,13 @@ mod tests {
 
     #[test]
     fn starved_rows_carry_their_reader_verb() {
-        let mut r = row("blueprinter", "daemon");
+        let mut r = row("heal", "daemon");
         r.starved = true;
-        r.reader = Some("fno agents blueprint-feed --scope <s>".to_string());
+        r.reader = Some("fno do pr watch status".to_string());
         classify(&mut r, &facts(false));
         assert_eq!(r.cause.as_deref(), Some("starved"));
         assert!(
-            r.line
-                .contains("repair: fno agents blueprint-feed --scope <s>"),
+            r.line.contains("repair: fno do pr watch status"),
             "{}",
             r.line
         );

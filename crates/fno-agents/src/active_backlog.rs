@@ -1209,58 +1209,18 @@ fn run_blueprint_feed(cfg: &DrainConfig, extra: &[String]) -> Option<serde_json:
 /// recorded as a repair and the ideas stay preserved for the next tick.
 fn blueprinter_tick(cfg: &DrainConfig, journal: &Journal) {
     if cfg.scope.is_empty() {
-        // A silent return must state its silence: this loop is off (the
-        // receipt carries no territory scope), and the reason token is the
-        // same word the arms table prints.
-        let _ = journal.append(
-            "blueprinter_status_skip",
-            json!({"scope": "", "reason": "unarmed", "detail": "receipt carries no territory scope"}),
-        );
-        crate::tick_ledger::emit_tick(
-            journal,
-            "blueprinter",
-            "daemon",
-            0,
-            Some("unarmed"),
-            Some("receipt carries no territory scope"),
-            300,
-        );
-        return;
+        return; // legacy receipt: no territory, no blueprinter
     }
     let Some(raw) = run_blueprint_feed(cfg, &[]) else {
         let _ = journal.append(
             "blueprinter_status_skip",
             json!({"scope": cfg.scope, "reason": "feed verb failed or unparseable"}),
         );
-        crate::tick_ledger::emit_tick(
-            journal,
-            "blueprinter",
-            "daemon",
-            0,
-            Some("error"),
-            Some("feed verb failed or unparseable"),
-            300,
-        );
         return;
     };
     let status: BlueprinterStatus = serde_json::from_value(raw).unwrap_or_default();
     if status.ideas.is_empty() {
-        // Armed, fed, nothing to do: the same `starved` word the table
-        // prints, so one vocabulary covers both the row and the receipt.
-        let _ = journal.append(
-            "blueprinter_status_skip",
-            json!({"scope": cfg.scope, "reason": "starved", "detail": "feed returned no unfed ideas"}),
-        );
-        crate::tick_ledger::emit_tick(
-            journal,
-            "blueprinter",
-            "daemon",
-            0,
-            Some("starved"),
-            Some("feed returned no unfed ideas"),
-            300,
-        );
-        return;
+        return; // nothing to feed: never spawn a worker without work
     }
     let needs_worker = status.worker.as_ref().map(|w| !w.live).unwrap_or(true);
     if needs_worker {
@@ -1328,15 +1288,6 @@ fn blueprinter_tick(cfg: &DrainConfig, journal: &Journal) {
     };
     let delivery: BlueprinterDelivery = serde_json::from_value(raw).unwrap_or_default();
     if delivery.delivered.is_empty() && delivery.failed.is_empty() {
-        crate::tick_ledger::emit_tick(
-            journal,
-            "blueprinter",
-            "daemon",
-            0,
-            Some("idle"),
-            Some("nothing due to deliver"),
-            300,
-        );
         return; // blocked receipt or nothing due: the verb recorded its own state
     }
     let worker_name = status
@@ -1353,19 +1304,6 @@ fn blueprinter_tick(cfg: &DrainConfig, journal: &Journal) {
             "delivered": delivery.delivered,
             "failed": delivery.failed.len(),
         }),
-    );
-    crate::tick_ledger::emit_tick(
-        journal,
-        "blueprinter",
-        "daemon",
-        1,
-        None,
-        Some(&format!(
-            "delivered={} failed={}",
-            delivery.delivered.len(),
-            delivery.failed.len()
-        )),
-        300,
     );
 }
 
@@ -1965,14 +1903,7 @@ fn drain_config_for(
         fno_bin: fno_bin.to_string(),
         mission: target.mission.clone().unwrap_or_else(|| key.clone()),
         project: target.project.clone(),
-        // A legacy receipt carries no scope; fall back to the same key
-        // territory_key answered so one resolver answer keys the loop and
-        // the blueprinter alike, instead of silently disarming it.
-        scope: if target.scope.is_empty() {
-            key.clone()
-        } else {
-            target.scope.clone()
-        },
+        scope: target.scope.clone(),
         kingless: target.kingless,
         members,
         failure_limit: target.failure_limit,
@@ -4597,49 +4528,6 @@ mod tests {
         legacy.scope = String::new();
         blueprinter_tick(&legacy, &journal);
         assert!(journal_lines(&record2).is_empty());
-    }
-
-    #[test]
-    fn an_empty_scope_journals_one_unarmed_skip_row() {
-        let _env = env_guard();
-        let tmp = tempfile::TempDir::new().unwrap();
-        let record = tmp.path().join("argv.log");
-        let fno = stub_fno_blueprint_feed(
-            &tmp.path().join("bin"),
-            &record,
-            r#"{"action":"status","ideas":[{"id":"x-1"}]}"#,
-            false,
-        );
-        let cfg = territory_cfg(tmp.path(), fno);
-        let (journal, project_journal) = test_journal(tmp.path());
-        let mut unarmed = cfg.clone();
-        unarmed.scope = String::new();
-        blueprinter_tick(&unarmed, &journal);
-        let rows = journal_rows(&project_journal, "blueprinter_status_skip");
-        assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(rows[0]["data"]["reason"], "unarmed");
-        // The unarmed return never reaches the feed verb.
-        assert!(journal_lines(&record).is_empty());
-    }
-
-    #[test]
-    fn an_empty_feed_journals_one_starved_skip_row_and_spawns_nothing() {
-        let _env = env_guard();
-        let tmp = tempfile::TempDir::new().unwrap();
-        let record = tmp.path().join("argv.log");
-        let fno = stub_fno_blueprint_feed(
-            &tmp.path().join("bin"),
-            &record,
-            r#"{"action":"status","ideas":[]}"#,
-            false,
-        );
-        let cfg = territory_cfg(tmp.path(), fno);
-        let (journal, project_journal) = test_journal(tmp.path());
-        blueprinter_tick(&cfg, &journal);
-        let rows = journal_rows(&project_journal, "blueprinter_status_skip");
-        assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(rows[0]["data"]["reason"], "starved");
-        assert!(journal_rows(&project_journal, "blueprinter_spawned").is_empty());
     }
 
     #[test]
