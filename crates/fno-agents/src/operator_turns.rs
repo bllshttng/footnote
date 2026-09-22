@@ -430,6 +430,137 @@ pub fn run(args: &[String]) -> i32 {
     }
 }
 
+/// CLI entry: `fno-agents compaction ack --session <id> --turn <id>
+/// --outcome <o> [--why <w>] --capture-dir <dir>`. Session resolution stays
+/// in Python; this binary resolves nothing.
+pub fn run_ack(args: &[String]) -> i32 {
+    let (Some(session), Some(turn), Some(outcome), Some(capture_dir)) = (
+        crate::compaction::flag_value(args, "--session"),
+        crate::compaction::flag_value(args, "--turn"),
+        crate::compaction::flag_value(args, "--outcome"),
+        crate::compaction::flag_value(args, "--capture-dir"),
+    ) else {
+        eprintln!("usage: compaction ack --session <id> --turn <id> --outcome <o> [--why <w>] --capture-dir <dir>");
+        return 2;
+    };
+    // The id lands in a path join; a crafted id must not escape the capture dir.
+    if session.contains('/') || session.contains('\\') || session.contains("..") {
+        eprintln!("compaction ack: --session must be a bare id (no '/', '\\', '..'): {session}");
+        return 2;
+    }
+    let why = crate::compaction::flag_value(args, "--why").unwrap_or_default();
+    let home = crate::paths::AgentsHome::from_env();
+    match ack_turn(
+        &home,
+        Path::new(&capture_dir),
+        &session,
+        &turn,
+        &outcome,
+        &why,
+    ) {
+        Ok(row) => {
+            println!("{}", serde_json::to_string(&row).unwrap_or_default());
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
+/// The write behind `fno inbox user ack`. The kinds are law, capture, node
+/// and answer; `nothing` stands alone. An answer ack also records one
+/// `user_ask_answered` row in the machine question index, which is what the
+/// attention arm folds into the file sink as a closed line.
+pub fn ack_turn(
+    home: &crate::paths::AgentsHome,
+    capture_dir: &Path,
+    session: &str,
+    turn_id: &str,
+    outcome: &str,
+    why: &str,
+) -> Result<Value, String> {
+    const KINDS: [&str; 4] = ["law", "capture", "node", "answer"];
+    let (kind, ref_part) = match outcome.trim().split_once(':') {
+        Some((k, r)) => (k.trim().to_string(), r.trim().to_string()),
+        None => (outcome.trim().to_string(), String::new()),
+    };
+    let outcome = if kind == "nothing" && ref_part.is_empty() {
+        "nothing".to_string()
+    } else if KINDS.contains(&kind.as_str()) && !ref_part.is_empty() {
+        outcome.trim().to_string()
+    } else {
+        let legal = KINDS
+            .iter()
+            .map(|k| format!("{k}:<ref>"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "invalid --outcome {outcome:?}. Must be nothing or {legal}"
+        ));
+    };
+    let row = json!({
+        "turn_id": turn_id,
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "outcome": outcome,
+        "ref": if ref_part.is_empty() { None } else { Some(ref_part.clone()) },
+        "why": if why.trim().is_empty() { None } else { Some(why.trim().to_string()) },
+    });
+    let path = ledger_path(capture_dir, session);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    writeln!(f, "{row}").map_err(|e| e.to_string())?;
+
+    if kind == "answer" {
+        let answered = json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "type": "user_ask_answered",
+            "source": "target",
+            "data": {
+                "session_id": session,
+                "turn_id": turn_id,
+                "excerpt": excerpt_of(capture_dir, session, turn_id),
+                "answer": ref_part,
+                "answered_at": chrono::Utc::now().to_rfc3339(),
+            }
+        });
+        crate::provider_cap::append_questions_row(
+            &crate::provider_cap::questions_path(home),
+            &answered,
+        );
+    }
+    Ok(row)
+}
+
+/// Best-effort: the scan cursor's stored text for the acked turn, cut to the
+/// excerpt width. A rotated or never-scanned turn answers empty.
+fn excerpt_of(capture_dir: &Path, session: &str, turn_id: &str) -> String {
+    let Ok(raw) = std::fs::read_to_string(scan_path(capture_dir, session)) else {
+        return String::new();
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+        return String::new();
+    };
+    v.get("turns")
+        .and_then(Value::as_array)
+        .and_then(|turns| {
+            turns
+                .iter()
+                .find(|t| t.get("turn_id").and_then(Value::as_str) == Some(turn_id))
+        })
+        .and_then(|t| t.get("text").and_then(Value::as_str))
+        .map(|text| text.chars().take(EXCERPT_CHARS).collect())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -907,6 +1038,53 @@ mod tests {
                 "t".to_string(),
             ]),
             2
+        );
+    }
+
+    #[test]
+    fn ac14_hp_answer_ack_records_the_answered_row() {
+        let dir = tmp_dir("ac14-hp");
+        let home = crate::paths::AgentsHome::at(&dir.join("home"));
+        let capture = dir.join("capture");
+        std::fs::create_dir_all(&capture).unwrap();
+        let row = ack_turn(
+            &home,
+            &capture,
+            "s",
+            "u-1",
+            "answer:use the narrow reading",
+            "",
+        )
+        .unwrap();
+        assert_eq!(row["outcome"], "answer:use the narrow reading");
+        assert_eq!(row["ref"], "use the narrow reading");
+        // The durable answered row: the fold the attention arm reads.
+        let index =
+            std::fs::read_to_string(crate::provider_cap::questions_path(&home)).unwrap_or_default();
+        assert!(
+            index.contains("\"user_ask_answered\""),
+            "index carries the answered row: {index}"
+        );
+        assert!(index.contains("use the narrow reading"));
+    }
+
+    #[test]
+    fn ac14_err_empty_answer_ref_refuses_and_writes_nothing() {
+        let dir = tmp_dir("ac14-err");
+        let home = crate::paths::AgentsHome::at(&dir.join("home"));
+        let capture = dir.join("capture");
+        std::fs::create_dir_all(&capture).unwrap();
+        let err = ack_turn(&home, &capture, "s", "u-1", "answer:", "").unwrap_err();
+        assert!(err.contains("invalid --outcome"), "{err}");
+        assert!(
+            !capture.join("s.jsonl").exists(),
+            "the refusal writes no ledger"
+        );
+        let index =
+            std::fs::read_to_string(crate::provider_cap::questions_path(&home)).unwrap_or_default();
+        assert!(
+            !index.contains("user_ask_answered"),
+            "the refusal writes no answered row: {index}"
         );
     }
 }
