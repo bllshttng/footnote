@@ -231,6 +231,9 @@ jobs:
   guards:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -372,19 +375,19 @@ jobs:
         run: bash scripts/ci/check-preamble-budget.sh
 
       # A tracked source file over 5,000 lines is shrink-only relative to the
-      # merge base; the refusal names the module-per-question remedy. On a
-      # push to main the merge base IS HEAD, so the gate would diff nothing;
-      # FILE_BUDGET_BASE_SHA pins the diff to the previous tip and turns a
-      # growth that slipped past a pre-gate PR head into a red alarm.
+      # merge base; the refusal names the module-per-question remedy. The
+      # waiver is read live from the PR that owns the checked commit, so push,
+      # pull_request, and re-run events all see the operator's current label.
       - name: Oversized files are shrink-only
         if: ${{ !cancelled() }}
         timeout-minutes: 5
         env:
           PR_BASE_REF: ${{ github.base_ref || 'main' }}
           FILE_BUDGET_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
-          # Operator-applied only; an agent never sets it. It waives the
-          # Python tree allowance alone, never a per-file grow.
-          FILE_BUDGET_EXCEPTION_LABEL: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'file-budget-exception') && 'file-budget-exception' || '' }}
+          # The PR that owns this commit carries the operator's waiver, read
+          # live: the head on a PR run, the merge commit on a push.
+          FILE_BUDGET_LABEL_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: bash scripts/ci/check-file-budget.sh
 
       - name: File budget gate selftest
