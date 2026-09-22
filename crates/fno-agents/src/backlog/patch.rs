@@ -119,6 +119,7 @@ enum Kind {
     Float,
     Flag,
     DeferredKind,
+    ClearOnly,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -241,7 +242,7 @@ const FIELD_POLICY: &[(&str, Policy)] = &[
     ("pr_number", Policy::Owned("--pr-number")),
     ("pr_url", Policy::Owned("--pr-number")),
     ("additional_prs", Policy::Owned("--pr-number")),
-    ("merge_status", Policy::Owned("--pr-number")),
+    ("merge_status", Policy::Settable(Kind::ClearOnly)),
     ("parent", Policy::Owned("--parent")),
     (
         "blocked_by",
@@ -370,6 +371,11 @@ fn coerce(id: &str, field: &str, kind: Kind, raw: &str) -> Result<Value, PatchRe
                     DEFERRED_KINDS.join(", ")
                 )));
             }
+        }
+        Kind::ClearOnly => {
+            return Err(refused(format!(
+                "merge_status is written from forge state by fno do pr merge and reconcile; only --set merge_status=null clears it"
+            )));
         }
     })
 }
@@ -1354,6 +1360,43 @@ mod tests {
         assert!(children.contains("--parent"), "{children}");
         let completed = refusal_of(&graph, &req("x-1", None, &[("completed_at", "2026-09-13")]));
         assert!(completed.contains("fno backlog done"), "{completed}");
+    }
+
+    #[test]
+    fn merge_status_can_be_cleared_without_changing_pr_identity_or_status() {
+        let victim = node(
+            "x-1",
+            json!({
+                "pr_number": 1060,
+                "pr_url": "https://github.com/o/r/pull/1060",
+                "merge_status": "merged",
+            }),
+        );
+        let (_d, graph) = write_graph(&[victim]);
+
+        let receipt =
+            apply(&graph, &req("x-1", None, &[("merge_status", "null")])).expect("clear applied");
+        assert_eq!(receipt.status.from, "in_review");
+        assert_eq!(receipt.status.to, "in_review");
+        let rows = read_defaulted(&graph, false).unwrap();
+        let row = rows.iter().find(|e| field_eq(e, "id", "x-1")).unwrap();
+        assert_eq!(row.get("merge_status"), Some(&Value::Null));
+        assert_eq!(row.get("pr_number"), Some(&json!(1060)));
+        assert_eq!(
+            row.get("pr_url"),
+            Some(&json!("https://github.com/o/r/pull/1060"))
+        );
+    }
+
+    #[test]
+    fn merge_status_refuses_any_value_other_than_null() {
+        let (_d, graph) = write_graph(&[node("x-1", json!({}))]);
+        let message = refusal_of(&graph, &req("x-1", None, &[("merge_status", "merged")]));
+        assert!(
+            message.contains("fno do pr merge and reconcile"),
+            "{message}"
+        );
+        assert!(message.contains("--set merge_status=null"), "{message}");
     }
 
     // AC3-EDGE
