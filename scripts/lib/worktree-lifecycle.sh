@@ -419,6 +419,7 @@ _reap_jobs() {
         if [[ $# -gt 0 ]]; then printf '%s\n' "$@"; fi
     } | sort -u | while IFS= read -r job; do
         [[ -z "$job" ]] && continue
+        # retired-ok: the reaper's own shellout to the harness; no reader copies it
         if claude rm "$job" >/dev/null 2>&1; then
             echo "  reaped bg-job record $job (worktree archived)" >&2
         else

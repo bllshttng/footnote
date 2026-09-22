@@ -191,9 +191,8 @@ fn save_cache(cache: &Path, cursors: &BTreeMap<String, Cursor>, activity: &Activ
 fn list_files(roots: &Roots, now: DateTime<Utc>, window_days: u64) -> Vec<Listed> {
     let mut out = Vec::new();
     let claude = ClaudeSource {
-        cwd: PathBuf::new(),
-        all_projects: true,
         projects_dir: roots.claude_projects.clone(),
+        roots: None,
     };
     for s in claude.sessions(window_days) {
         out.push(Listed {
@@ -253,7 +252,7 @@ fn list_files(roots: &Roots, now: DateTime<Utc>, window_days: u64) -> Vec<Listed
     }
     let codex = CodexSource {
         sessions_dir: roots.codex_sessions.clone(),
-        cwd: None,
+        roots: None,
     };
     for s in codex.sessions(window_days) {
         out.push(Listed {

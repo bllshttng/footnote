@@ -101,8 +101,8 @@ set_knob() { # empty -> unset (refuse default); else refuse|warn|off
   fi
 }
 clear_knob() {
-  sed -i '' '/implementation_guard/d; /^\[king\]$/d' "$TMP/repo/.fno/config.toml" 2>/dev/null \
-    || sed -i '/implementation_guard/d; /^\[king\]$/d' "$TMP/repo/.fno/config.toml"
+  sed -i '' '/implementation_guard/d; /write_roots/d; /^\[king\]$/d' "$TMP/repo/.fno/config.toml" 2>/dev/null \
+    || sed -i '/implementation_guard/d; /write_roots/d; /^\[king\]$/d' "$TMP/repo/.fno/config.toml"
 }
 
 run_guard() { # $1 = payload JSON; stderr lands in $ERR via RUN_GUARD_ERR
@@ -181,6 +181,24 @@ ERR="$(cat "$TMP/stderr.txt")"
   && pass "AC2: knob warn names the path on stderr and allows" \
   || fail "AC2: knob warn rc=$RC out=$OUT err=$ERR"
 clear_knob
+
+# ── AC2b-HP: a listed write root allows its subtree; source still denies ─────
+registry_fixture "$CROWNED"
+manifest_fixture court
+printf '[king]\nwrite_roots = ["docs"]\n' >> "$TMP/repo/.fno/config.toml"
+OUT="$(run_guard "$(edit_payload "$TMP/repo/docs/guide.md")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "AC2b: listed write root allows docs/guide.md" \
+  || fail "AC2b: listed write root rc=$RC out=$OUT"
+OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
+ERR="$(cat "$TMP/stderr.txt")"
+[[ $RC -eq 0 && "$OUT" == *'"block"'* && "$OUT" == *"config.king.write_roots"* ]] \
+  && pass "AC2b: source still denies and names the key" \
+  || fail "AC2b: source deny rc=$RC out=${OUT:0:200} err=$ERR"
+clear_knob
+OUT="$(run_guard "$(edit_payload "$TMP/repo/docs/guide.md")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == *'"block"'* ]] \
+  && pass "AC2b: docs edit denies again with the root cleared" \
+  || fail "AC2b: docs deny after clear rc=$RC out=$OUT"
 
 # ── AC3-EDGE: pass shape, uncrowned row, no row, unreadable registry ─────────
 registry_fixture "$CROWNED"

@@ -721,8 +721,10 @@ wake_debounce_seconds = 900
 wake_backstop_seconds = 1800
 # Minutes a blocked distress row may sit unanswered before the blocked_child board queue surfaces it (default 30). An answer is mail to that session, a claim release on the node, or the node closing.
 blocked_child_grace_minutes = 30
-# What a crowned court session may write through the king-delegation-guard hook: refuse (default) denies a write whose target resolves outside the plans directory and the crown handoff doc, naming the rejected path, warn prints the refusal on stderr and allows (adopt the guard mid-reign without a surprise), off silences the guard. An unknown value degrades to refuse.
+# What a crowned court session may write through the king-delegation-guard hook. refuse (default) denies a write whose target resolves inside the repo, outside its .fno state tree, build output and any king.write_roots entry, and names the rejected path. warn prints the refusal on stderr and allows, so a reign adopts the guard without a surprise. off silences the guard. An unknown value degrades to refuse.
 implementation_guard = "refuse"
+# In-repo paths a crowned court session may still write through the king-delegation-guard hook. A relative entry resolves against the repo root, and a leading ~/ against $HOME. The match is by realpath, so a symlinked entry covers its target. Default empty: every in-repo path outside .fno and build output is source and refused. A blank entry is dropped. '.' allows the whole repo, the same as implementation_guard = off. Paths outside the repo always allow and need no entry.
+write_roots = []
 # The /loop interval a reign self-injects (default 4h heartbeat). Fail-safe: a value that is not <digits>[smhd] degrades to 4h at load, never raises.
 checkin_interval = "4h"
 # The /loop prompt text a reign self-injects at each check-in (default: run fno agents king checkin, which gathers the readings, diffs the last beat, and journals reign_checkin; print 'no change' when idle).

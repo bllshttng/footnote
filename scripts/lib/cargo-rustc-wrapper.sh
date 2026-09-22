@@ -44,6 +44,13 @@ admit() {
 # cargo exit; a signal that stops the wait stops the compile or run too.
 if [[ "${1:-}" == "--run" ]]; then
     shift
+    # A worktree nested inside another checkout reads both .cargo/config.toml
+    # files, and cargo joins runner arrays, so the program can be this wrapper
+    # again under a path relative to the wrong directory. Drop the repeat:
+    # one admission, one exec.
+    while [[ "${1:-}" == *cargo-rustc-wrapper.sh && "${2:-}" == "--run" ]]; do
+        shift 2
+    done
     if [[ $# -eq 0 ]]; then
         echo "cargo-rustc-wrapper: --run needs a program" >&2
         exit 2

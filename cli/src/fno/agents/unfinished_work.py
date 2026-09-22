@@ -397,7 +397,7 @@ def classify(
                         f"merge explains it innocently, nothing else does"
                     ),
                     clear_command=(
-                        f"cd {wt.repo_root} && fno workspace worktree "
+                        f"cd {wt.repo_root} && fno agents workspace worktree "
                         f"stranded --apply"
                     ),
                     node_id=node.node_id,
