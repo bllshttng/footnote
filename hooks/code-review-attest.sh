@@ -307,7 +307,10 @@ cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
 session="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
 held_claim=""
 if [[ -n "$session" ]]; then
-  claims_json="$("${FNO:-fno}" agents claim list --prefix review:branch: --json 2>/dev/null || true)"
+  if ! claims_json="$("${FNO:-fno}" agents claim list --prefix review:branch: --json 2>/dev/null)"; then
+    echo "code-review-attest: review target claim could not be read; refusing attestation; retry from the PR's worktree" >&2
+    exit 2
+  fi
   held_claim="$(printf '%s' "$claims_json" | jq -c --arg holder "review-session:$session" '
     [ .[] | select(.holder == $holder and ((.expired // false) | not)) ]
     | sort_by(.acquired_at // 0) | .[-1] // empty

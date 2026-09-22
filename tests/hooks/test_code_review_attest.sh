@@ -131,6 +131,7 @@ if [[ "\${1:-}" == "doctor" && "\${2:-}" == "event" && "\${3:-}" == "emit" ]]; t
   exit 0
 fi
 if [[ "\${1:-}" == "agents" && "\${2:-}" == "claim" && "\${3:-}" == "list" ]]; then
+  [[ "\${FNO_TEST_CLAIM_LIST_FAIL:-}" == "1" ]] && exit 19
   cat "$CLAIM_JSON"
   exit 0
 fi
@@ -749,6 +750,23 @@ else
 fi
 git -C "$WORK" worktree remove -f "$TMP/held" >/dev/null 2>&1
 printf '%s\n' '[]' > "$CLAIM_JSON"
+
+: > "$EMITTED"
+: > "$CLASSIFY_MARKER"
+set +e
+printf '%s' "$(subagent_stop "" "$PARTIAL_FINDINGS" S)" \
+  | FNO="$BIN/fno-stub" FNO_TEST_CLAIM_LIST_FAIL=1 bash "$HOOK" \
+    >"$HOOK_STDOUT" 2>"$HOOK_STDERR"
+CLAIM_READ_RC=$?
+set -e
+if [[ "$CLAIM_READ_RC" == "2" ]] \
+  && [[ ! -s "$EMITTED" ]] \
+  && [[ ! -s "$CLASSIFY_MARKER" ]] \
+  && grep -q 'claim could not be read' "$HOOK_STDERR"; then
+  pass "claim-reader failure refuses before wrong-checkout attestation"
+else
+  fail "claim-reader failure was not fail-closed: rc=$CLAIM_READ_RC emitted=$(cat "$EMITTED") stderr=$(cat "$HOOK_STDERR")"
+fi
 
 echo ""
 echo "PASS=$PASS FAIL=$FAIL"
