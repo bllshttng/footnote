@@ -220,6 +220,10 @@ def test_on_confirmed_merge_syncs_status_and_closes_node(tmp_path, monkeypatch):
     g = _make_graph(tmp_path, [{"id": "ab-conf001", "title": "t",
                                 "pr_number": 556, "pr_url": url}])
     _patch(monkeypatch, g)
+    monkeypatch.setattr(
+        "fno.graph._reconcile.resolve_current_repo_slug",
+        lambda cwd: "bllshttng/footnote",
+    )
     _clear_env(monkeypatch)
     import fno.pr._merge as M
     monkeypatch.setattr(M, "_gh", _fake_gh_url(url))

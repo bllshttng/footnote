@@ -126,7 +126,7 @@ fn all_three_pass_exit_0() {
     );
     assert_eq!(code, 0, "{out}\n{err}");
     assert_eq!(out.matches("pass check-").count(), 3, "{out}");
-    assert!(out.contains("3 ran, 0 failed"), "{out}");
+    assert!(out.contains("4 ran, 0 failed"), "{out}");
 }
 
 #[test]
@@ -142,7 +142,7 @@ fn a_failing_guard_carries_its_own_output_and_exits_1() {
     assert!(out.contains("fail check-no-session-urls.sh"), "{out}");
     assert!(out.contains("pass check-pr-node-closure.sh"), "{out}");
     assert!(err.contains("stub violation in the body"), "{err}");
-    assert!(out.contains("3 ran, 1 failed"), "{out}");
+    assert!(out.contains("4 ran, 1 failed"), "{out}");
     assert!(
         err.contains("the PR body is not a commit"),
         "the remedy line: {err}"
@@ -161,7 +161,7 @@ fn all_guards_run_even_after_a_failure() {
     assert_eq!(code, 1, "{out}\n{err}");
     assert!(out.contains("fail check-no-session-urls.sh"), "{out}");
     assert!(out.contains("fail check-oos-tracked.sh"), "{out}");
-    assert!(out.contains("3 ran, 2 failed"), "{out}");
+    assert!(out.contains("4 ran, 2 failed"), "{out}");
 }
 
 #[test]
@@ -172,7 +172,7 @@ fn a_repo_with_no_guards_skips_all_three() {
     let (code, out, err) = run_verb(&work, &["--body-file", body.to_str().unwrap()]);
     assert_eq!(code, 0, "{out}\n{err}");
     assert_eq!(out.matches("skip check-").count(), 3, "{out}");
-    assert!(out.contains("0 ran, 0 failed"), "{out}");
+    assert!(out.contains("1 ran, 0 failed"), "{out}");
 }
 
 #[test]
@@ -257,7 +257,7 @@ fn dash_reads_the_body_from_stdin() {
         Some("stdin body\n"),
     );
     assert_eq!(code, 0, "{out}\n{err}");
-    assert!(out.contains("3 ran, 0 failed"), "{out}");
+    assert!(out.contains("4 ran, 0 failed"), "{out}");
 }
 
 #[test]
@@ -278,4 +278,63 @@ fn a_missing_body_file_flag_is_a_usage_error() {
     let (code, out, err) = run_verb(&work, &[]);
     assert_eq!(code, 2, "{out}\n{err}");
     assert!(err.contains("--body-file is required"), "{err}");
+}
+
+/// A seeded FNO_HOME: one live decision id, so a body citing it passes and
+/// a body citing any other id is refused. Integration tests run the binary
+/// as its own process, so the env change cannot race other tests.
+fn seed_fno_home(tmp: &Path) -> PathBuf {
+    let home = tmp.join("fno-home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("decisions.jsonl"),
+        "{\"type\":\"operator_decision\",\"ts\":\"2026-09-12T00:00:00Z\",\"data\":\
+         {\"decision_id\":\"d-aaaa0001\",\"subject\":\"s\",\"decision\":\"R.\",\
+         \"text\":\"R.\",\"authority_source\":\"operator\"}}\n",
+    )
+    .unwrap();
+    home
+}
+
+fn run_verb_with_fno_home(cwd: &Path, fno_home: &Path, extra: &[&str]) -> (i32, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+        .envs(fno_agents::test_run::self_owner_env())
+        .env("FNO_HOME", fno_home)
+        .args(["pr-body-check"])
+        .arg("--cwd")
+        .arg(cwd)
+        .args(extra)
+        .output()
+        .expect("run fno-agents");
+    (
+        out.status.code().unwrap_or(1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn a_body_citing_an_unknown_ruling_id_fails_ruling_citations() {
+    let tmp = tempfile::tempdir().unwrap();
+    let work = init_repo_with_origin(tmp.path());
+    let home = seed_fno_home(tmp.path());
+    let body = body_file(&work, "per d-deadbeef we ruled\n");
+    let (code, out, err) =
+        run_verb_with_fno_home(&work, &home, &["--body-file", body.to_str().unwrap()]);
+    assert_eq!(code, 1, "{out}\n{err}");
+    assert!(out.contains("fail ruling-citations"), "{out}");
+    assert!(out.contains("d-deadbeef"), "{out}");
+    assert!(out.contains("1 failed"), "{out}");
+}
+
+#[test]
+fn a_body_citing_a_live_ruling_id_passes_ruling_citations() {
+    let tmp = tempfile::tempdir().unwrap();
+    let work = init_repo_with_origin(tmp.path());
+    let home = seed_fno_home(tmp.path());
+    let body = body_file(&work, "per d-aaaa0001 we ruled\n");
+    let (code, out, err) =
+        run_verb_with_fno_home(&work, &home, &["--body-file", body.to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("pass ruling-citations"), "{out}");
 }

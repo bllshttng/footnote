@@ -392,7 +392,7 @@ mod tests {
             let p = crate::provenance::classify_turn(&turn.obj, &BusIndex::empty(), "s1");
             *counters.entry(p.label()).or_insert(0) += 1;
         }
-        assert_eq!(counters.get("operator"), Some(&1), "typed text part");
+        assert_eq!(counters.get("unknown"), Some(&1), "typed text part");
         assert_eq!(
             counters.get("harness_synthetic"),
             Some(&1),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -200,15 +201,17 @@ def test_live_root_pids_includes_live_detached_opencode_serve(monkeypatch, tmp_p
         json.dumps({"pid": 901, "pid_start": 123}), encoding="utf-8"
     )
     err = doctor_footprint._live_shared_serve_root_pids()[1]
-    assert err is not None and err.startswith("shared serve root liveness unavailable: ")
-    assert "pid 901" in err and "start time could not be read" in err, err
+    assert isinstance(err, doctor_footprint.AttributionGap)
+    assert err.text.startswith("shared opencode serve root unattributed: ")
+    assert "pid 901" in err.text and "start time could not be read" in err.text, err
 
     (tmp_path / "opencode-serve.json").write_text(
         json.dumps({"pid": 900, "pid_start": None}), encoding="utf-8"
     )
     err = doctor_footprint._live_shared_serve_root_pids()[1]
-    assert err is not None and err.startswith("shared serve root liveness unavailable: ")
-    assert "carries no usable pid and pid_start pair" in err, err
+    assert isinstance(err, doctor_footprint.AttributionGap)
+    assert err.text.startswith("shared opencode serve root unattributed: ")
+    assert "carries no usable pid and pid_start pair" in err.text, err
 
 
 def _assert_named_cause(error: str, expect: str) -> None:
@@ -524,7 +527,7 @@ def test_live_root_pids_includes_roster_resolved_claude_bg_worker(monkeypatch) -
     assert doctor_footprint._live_root_pids() == ({902}, None)
 
 
-def test_shared_serve_root_refuses_root_that_dies_after_snapshot(monkeypatch, tmp_path) -> None:
+def test_shared_serve_root_gaps_root_that_dies_after_snapshot(monkeypatch, tmp_path) -> None:
     from fno import doctor_footprint
 
     (tmp_path / "opencode-serve.json").write_text(
@@ -545,9 +548,10 @@ def test_shared_serve_root_refuses_root_that_dies_after_snapshot(monkeypatch, tm
 
     roots, err = doctor_footprint._live_shared_serve_root_pids(snapshot_pids={900})
     assert roots == set()
-    assert err is not None and err.startswith("shared serve root liveness unavailable: ")
-    assert "pid 900 is dead, sits in the ps snapshot" in err, err
-    assert "recycling is unproven" in err, err
+    assert isinstance(err, doctor_footprint.AttributionGap)
+    assert err.text.startswith("shared opencode serve root unattributed: ")
+    assert "pid 900 is dead, sits in the ps snapshot" in err.text, err
+    assert "recycling is unproven" in err.text, err
 
 
 def test_live_root_pids_refuses_unavailable_pidless_worker_discovery(monkeypatch) -> None:
@@ -632,6 +636,120 @@ def test_live_root_pids_attributes_routed_row_through_roster_pid(monkeypatch) ->
     )
 
     assert doctor_footprint._live_root_pids() == ({903}, None)
+
+
+def test_live_root_pids_reads_the_roster_after_lsof_spends_the_deadline(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="alive123",
+        name="hosted",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+
+    def spend_deadline(**_kwargs):
+        time.sleep(0.05)
+        return {}
+
+    monkeypatch.setattr("fno.agents.session_procs.bg_socket_pid_map", spend_deadline)
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: {"alive123": 903}
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: pid == 903,
+    )
+
+    roots, error = doctor_footprint._live_root_pids(
+        deadline=time.monotonic() + 0.01
+    )
+
+    assert roots == {903}
+    assert error is None
+
+
+def test_live_root_pids_skips_lsof_but_reads_the_roster_on_a_spent_deadline(
+    monkeypatch,
+) -> None:
+    from fno import doctor_footprint
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="alive123",
+        name="hosted",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("lsof called")),
+    )
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: {"alive123": 903}
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda pid, _start: pid == 903,
+    )
+
+    roots, error = doctor_footprint._live_root_pids(deadline=time.monotonic() - 1)
+
+    assert roots == {903}
+    assert error is None
+
+
+def test_live_root_pids_names_a_blind_sweep_and_an_unreadable_roster(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="alive123",
+        name="hosted",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: None
+    )
+
+    roots, error = doctor_footprint._live_root_pids(deadline=time.monotonic() - 1)
+
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "bg-socket resolution timed out" in error.text
+    assert "(roster oracle unavailable)" in error.text
+
+
+def test_live_root_pids_keeps_a_socket_blind_row_absent_from_the_roster(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    row = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="alive123",
+        name="hosted",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.roster_pid_map", lambda: {}
+    )
+
+    roots, error = doctor_footprint._live_root_pids(deadline=time.monotonic() - 1)
+
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "1 bg-socket row(s)" in error.text
+    assert "bg-socket resolution timed out" in error.text
 
 
 def test_live_root_pids_joins_a_full_uuid_short_id_through_the_derived_key(
@@ -1704,6 +1822,88 @@ def test_cause_reading_keeps_the_reading_over_a_recycled_pid(monkeypatch) -> Non
     assert reading.attribution_gap is not None
     assert "bp-recycled-worker" in reading.attribution_gap
     assert "worker root liveness unavailable" not in reading.attribution_gap
+
+
+def test_cause_reading_keeps_the_reading_over_an_unconfirmed_serve(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_live_shared_serve_root_pids",
+        lambda **_kwargs: (
+            set(),
+            doctor_footprint.AttributionGap(
+                "shared opencode serve root unattributed: pid 900 start time could not be read"
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_live_root_pids",
+        lambda **_kwargs: (
+            set(),
+            doctor_footprint.AttributionGap(
+                "1 live row(s) whose pid was reused: w (pid=902)"
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_codex_app_server_serve",
+        lambda _snapshot: (set(), "absent"),
+    )
+    _fake_runner(
+        monkeypatch,
+        _ps_with(
+            "PID PPID ELAPSED %CPU RSS COMMAND",
+            "501 1 01:00:00 0.5 1024 /usr/bin/tool",
+        ),
+        [],
+        [],
+    )
+
+    reading, error = doctor_footprint.cause_reading()
+
+    assert error is None
+    assert reading is not None
+    assert reading.attribution_gap is not None
+    assert reading.attribution_gap.startswith("1 live row(s)")
+    assert "pid 900" in reading.attribution_gap
+    assert (
+        doctor_footprint.cpu_admission(
+            reading, capacity_cores=8, share_ceiling=0.9
+        ).verdict
+        == "admit"
+    )
+
+
+def test_cause_reading_still_voids_on_serve_discovery_exception(monkeypatch) -> None:
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_live_shared_serve_root_pids",
+        lambda **_kwargs: (
+            set(),
+            "shared serve root discovery unavailable: OSError",
+        ),
+    )
+    _fake_runner(
+        monkeypatch,
+        _ps_with(
+            "PID PPID ELAPSED %CPU RSS COMMAND",
+            "501 1 01:00:00 0.5 1024 /usr/bin/tool",
+        ),
+        [],
+        [],
+    )
+
+    reading, error = doctor_footprint.cause_reading()
+
+    assert reading is None
+    assert error == (
+        "footprint unavailable: shared serve root discovery unavailable: OSError"
+    )
 
 
 def test_cause_reading_keeps_the_reading_over_a_dead_socket_pid(monkeypatch) -> None:

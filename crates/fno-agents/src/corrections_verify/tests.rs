@@ -188,6 +188,8 @@ fn markdown_maps_verdicts_to_verbs() {
         ts: parse_ts("2026-09-10T12:00:00Z").unwrap(),
         file: "rules/style.md".into(),
         details: "d".into(),
+        sha: None,
+        reference: None,
         before: 1.0,
         after: 0.5,
         ratio: Some(0.5),
@@ -203,6 +205,48 @@ fn markdown_maps_verdicts_to_verbs() {
         "{text}"
     );
     assert_eq!(markdown(&[]), "no applied corrections in window\n");
+}
+
+#[test]
+fn skill_commit_rows_score_and_carry_their_link() {
+    let log = concat!(
+        "2026-09-10T12:00:00Z | S1 | skill-commit | skills/target/SKILL.md | autocorrect r1#1: fix skill sha=abc123def456 ref=r1#1\n",
+        "2026-09-10T12:00:00Z | S1 | git-rule-edit | rules/style.md | enforce emdash ban\n",
+    );
+    let rows = read_corrections(log, parse_ts("2026-01-01T00:00:00Z").unwrap());
+    assert_eq!(rows.len(), 2, "skill-commit scores beside git-rule-edit");
+    assert_eq!(rows[0].sha.as_deref(), Some("abc123def456"));
+    assert_eq!(rows[0].reference.as_deref(), Some("r1#1"));
+    assert_eq!(rows[1].sha, None, "no tokens reads null");
+    assert_eq!(rows[1].reference, None);
+    // The --json row carries both fields; the markdown line names the ref.
+    let verdicts = score(&rows, &[]);
+    let json = json_rows(&verdicts);
+    assert_eq!(json[0]["sha"], json!("abc123def456"));
+    assert_eq!(json[0]["ref"], json!("r1#1"));
+    assert_eq!(json[1]["sha"], serde_json::Value::Null);
+    assert_eq!(json[1]["ref"], serde_json::Value::Null);
+    let mut worse = verdicts[0].clone();
+    worse.verdict = "worse";
+    let text = markdown(std::slice::from_ref(&worse));
+    assert!(
+        text.contains("git revert abc123def456"),
+        "the parsed sha drives the roll-back verb: {text}"
+    );
+    assert!(text.contains("ref=r1#1"), "{text}");
+}
+
+#[test]
+fn a_subject_embedded_token_does_not_shadow_the_hook_token() {
+    let log = "2026-09-10T12:00:00Z | S1 | skill-commit | skills/target/SKILL.md | see sha=deadbeefdead docs sha=abc123def456 ref=r1#1\n";
+    let rows = read_corrections(log, parse_ts("2026-01-01T00:00:00Z").unwrap());
+    assert_eq!(
+        rows[0].sha.as_deref(),
+        Some("abc123def456"),
+        "the hook appends last, so its sha wins: {:?}",
+        rows[0].sha
+    );
+    assert_eq!(rows[0].reference.as_deref(), Some("r1#1"));
 }
 
 #[test]

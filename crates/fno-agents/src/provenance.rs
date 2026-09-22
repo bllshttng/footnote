@@ -268,15 +268,17 @@ impl HarnessKind {
     }
 }
 
-/// The provenance of one user-shaped transcript row. Operator is the residual
-/// after every injected shape is named; claude records no positive typed-turn
-/// marker (the mux `operator_submit` event is the close).
+/// The provenance of one user-shaped transcript row. Operator is witnessed:
+/// the mux wrote an `operator_submit` row the fold bound to this turn.
+/// Everything unshaped - a typed turn outside the mux, a seed prompt, a new
+/// injected envelope - reads `unknown`, the residual's honest name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub(crate) enum Provenance {
     Operator,
     Relay(RelayKind),
     Harness(HarnessKind),
     Keepalive,
+    Unknown,
 }
 
 impl Provenance {
@@ -287,12 +289,17 @@ impl Provenance {
             Provenance::Relay(k) => k.label(),
             Provenance::Harness(k) => k.label(),
             Provenance::Keepalive => "keepalive",
+            Provenance::Unknown => "unknown",
         }
     }
 
     /// Every counter the fold emits, including the ones that may stay zero.
     pub(crate) fn all_labels() -> Vec<&'static str> {
-        let mut labels = vec![Provenance::Operator.label(), Provenance::Keepalive.label()];
+        let mut labels = vec![
+            Provenance::Operator.label(),
+            Provenance::Keepalive.label(),
+            Provenance::Unknown.label(),
+        ];
         labels.extend(
             [
                 RelayKind::FnoMail,
@@ -330,7 +337,7 @@ pub(crate) fn classify_turn(obj: &Value, bus: &BusIndex, session: &str) -> Prove
         return meta_kind(&turn_text(obj));
     }
     match classify_text(&turn_text(obj), Some((bus, session))) {
-        Verdict::Operator(_) => Provenance::Operator,
+        Verdict::Operator(_) => Provenance::Unknown,
         Verdict::Injected(reason) => kind_from_reason(reason),
         Verdict::BusRow => Provenance::Relay(RelayKind::BusRow),
     }
@@ -908,12 +915,13 @@ mod tests {
             classify_turn(&row, &bus, "cccc-dddd"),
             Provenance::Relay(RelayKind::BusRow)
         );
-        // Same body, different recipient: the operator typed it themselves.
-        assert_eq!(classify_turn(&row, &bus, "eeee-ffff"), Provenance::Operator);
-        // No bus at all: today's residual, counted as operator.
+        // Same body, different recipient: unshaped, so unknown until the
+        // witness join binds a submit to it.
+        assert_eq!(classify_turn(&row, &bus, "eeee-ffff"), Provenance::Unknown);
+        // No bus at all: unshaped reads unknown, never operator.
         assert_eq!(
             classify_turn(&row, &BusIndex { rows: Vec::new() }, "cccc-dddd"),
-            Provenance::Operator
+            Provenance::Unknown
         );
     }
 
@@ -940,7 +948,7 @@ mod tests {
                 .entry(classify_turn(row, &bus, "s").label().to_string())
                 .or_insert(0) += 1;
         }
-        assert_eq!(counters.get("operator"), Some(&3));
+        assert_eq!(counters.get("unknown"), Some(&3));
         assert_eq!(counters.get("relay_fno_mail"), Some(&1));
         assert_eq!(counters.get("relay_teammate_message"), Some(&1));
         assert_eq!(counters.get("keepalive"), Some(&1));

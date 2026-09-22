@@ -151,6 +151,7 @@ if [[ "${#ITEMS[@]}" -eq 0 ]]; then
 fi
 
 ACCEPTED_PATCHES=()
+FILED_PATCHES=()
 QUIT=0
 
 # Check every `--- a/X` / `+++ b/X` path in the diff against the allowlist.
@@ -243,6 +244,89 @@ handle_convert_to_verifier_invariant() {
   return 0
 }
 
+# The review id the acceptance trail names: --review-id when given, else
+# the patch file stem (the final commit prompt resolves the same way).
+_ref_review_id() {
+  if [[ -n "$REVIEW_ID" ]]; then
+    printf '%s\n' "$REVIEW_ID"
+  else
+    basename "$PATCH_FILE" .md
+  fi
+}
+
+# Decimal item number from an item-NNNN.txt path.
+_item_number() {
+  local stem
+  stem="$(basename "$1" .txt)"
+  stem="${stem#item-}"
+  printf '%d\n' "$((10#$stem))"
+}
+
+# Print the fno backlog idea invocation that files a shipped-skill item.
+_file_by_hand_line() {
+  echo "  fno backlog idea \"autocorrect ${1}: ${2} SKILL.md\" --source-kind operator_request --origin-evidence \"autocorrect:${1}\""
+}
+
+# What an accepted item does. A diff aimed at a shipped skill in this repo
+# is not applied locally: git apply inside TARGET_DIR fails the check (the
+# file is not there) or, worse, patches a same-named user skill. The item
+# becomes a backlog node a worker ships through the normal PR path.
+# Emits one word on stdout: "filed" (node minted), "apply" (route to
+# apply_diff_block), or "defer" (nothing applied; reason already printed).
+_accept_route() {
+  local item_file="$1"
+  local target_path skill_name shipped_file local_file ref repo_root
+  target_path="$(grep -E '^[[:space:]]*Target file:' "$item_file" | head -1 | sed -E 's/^[[:space:]]*Target file:[[:space:]]*//')"
+  case "$target_path" in
+    skills/*/SKILL.md) ;;
+    *) printf 'apply\n'; return 0 ;;
+  esac
+  skill_name="${target_path#skills/}"
+  skill_name="${skill_name%/SKILL.md}"
+  shipped_file="$SCRIPT_DIR/../skills/$skill_name/SKILL.md"
+  local_file="$TARGET_DIR/skills/$skill_name/SKILL.md"
+  if [[ -f "$shipped_file" && -f "$local_file" ]]; then
+    echo "autocorrect-triage: $target_path exists both shipped ($shipped_file) and under TARGET_DIR ($local_file)" >&2
+    echo "autocorrect-triage: deferring rather than guessing which one to patch" >&2
+    printf 'defer\n'
+    return 0
+  fi
+  if [[ ! -f "$shipped_file" ]]; then
+    printf 'apply\n'
+    return 0
+  fi
+  ref="$(_ref_review_id)#$(_item_number "$item_file")"
+  repo_root="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -z "$repo_root" ]] || ! command -v fno >/dev/null 2>&1; then
+    echo "autocorrect-triage: shipped-skill item needs a backlog node; file this by hand:" >&2
+    _file_by_hand_line "$ref" "$skill_name" >&2
+    cat "$item_file" >&2
+    printf 'defer\n'
+    return 0
+  fi
+  local details_file out minted
+  details_file="$TMPDIR_T/details-$(basename "$item_file")"
+  { cat "$item_file"; printf '%s\n' "Commit this edit with the trailer: Autocorrect-Ref: ${ref}"; } > "$details_file"
+  if out="$( cd "$repo_root" && fno backlog idea "autocorrect ${ref}: ${skill_name} SKILL.md" \
+      --details-file "$details_file" --source-kind operator_request \
+      --origin-evidence "autocorrect:${ref}" --json 2>/dev/null )"; then
+    minted="$(printf '%s\n' "$out" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("id") or "")
+except Exception: print("")' 2>/dev/null)" || minted=""
+    if [[ -n "$minted" ]]; then
+      echo "autocorrect-triage: shipped-skill diff filed as ${minted} (${ref}); a worker ships it through a PR" >&2
+    else
+      echo "autocorrect-triage: shipped-skill diff filed (${ref}); receipt: ${out}" >&2
+    fi
+    printf 'filed\n'
+  else
+    echo "autocorrect-triage: fno backlog idea refused; file this by hand:" >&2
+    _file_by_hand_line "$ref" "$skill_name" >&2
+    cat "$item_file" >&2
+    printf 'defer\n'
+  fi
+}
+
 for item_file in "${ITEMS[@]}"; do
   [[ "$QUIT" == "1" ]] && break
 
@@ -270,12 +354,20 @@ for item_file in "${ITEMS[@]}"; do
 
   case "${REPLY:0:1}" in
     a|A)
-      if apply_diff_block "$item_file"; then
-        ACCEPTED_PATCHES+=("$(basename "$item_file")")
-      else
-        echo "autocorrect-triage: no clean diff block found; manual apply required" >&2
-        cat "$item_file" >&2
-      fi
+      case "$(_accept_route "$item_file")" in
+        filed)
+          FILED_PATCHES+=("$(basename "$item_file")")
+          ;;
+        apply)
+          if apply_diff_block "$item_file"; then
+            ACCEPTED_PATCHES+=("$(basename "$item_file")")
+          else
+            echo "autocorrect-triage: no clean diff block found; manual apply required" >&2
+            cat "$item_file" >&2
+          fi
+          ;;
+        *) : ;;  # nothing applied; _accept_route printed the reason
+      esac
       ;;
     r|R)
       TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -322,6 +414,10 @@ if [[ "${#ACCEPTED_PATCHES[@]}" -gt 0 ]]; then
   else
     echo "autocorrect-triage: leaving changes staged in $TARGET_DIR for manual commit" >&2
   fi
+fi
+
+if [[ "${#FILED_PATCHES[@]}" -gt 0 ]]; then
+  echo "autocorrect-triage: ${#FILED_PATCHES[@]} shipped-skill item(s) filed as backlog node(s); nothing staged for them" >&2
 fi
 
 echo "autocorrect-triage: done" >&2

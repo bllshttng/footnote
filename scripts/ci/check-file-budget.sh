@@ -50,9 +50,11 @@
 #                      `fno config get blueprint.python_repair_added_lines`,
 #                      then 30.
 #   FILE_BUDGET_EXCEPTION_LABEL  name of the operator-applied PR label that
-#                      waives the tree allowance (guards.yml passes it only
-#                      when the PR carries the label). Waives the tree tally
-#                      alone. Default: empty.
+#                      waives the tree allowance. Waives the tree tally alone.
+#                      Default: empty.
+#   FILE_BUDGET_LABEL_SHA  commit whose pull request carries the waiver;
+#                      when set, the gate reads the label live from GitHub
+#                      only if the tree is over the added-line allowance.
 #   PR_BASE_REF        base branch name, no remote prefix. Default: main.
 #   PR_REMOTE          remote holding the base. Default: origin.
 #   FILE_BUDGET_BASE_SHA  explicit base sha to diff instead of the merge base;
@@ -108,6 +110,20 @@ esac
 REMOTE="${PR_REMOTE:-origin}"
 BASE_REF="${PR_BASE_REF:-main}"
 EXC_LABEL="${FILE_BUDGET_EXCEPTION_LABEL:-}"
+
+# The waiver lives on the PR, not in the event payload: a payload is a
+# snapshot, so a push run or a re-run after labeling never sees it there.
+label_live() {
+    local sha="${FILE_BUDGET_LABEL_SHA:-}" repo="${GITHUB_REPOSITORY:-}" out=""
+    [[ -n "$sha" ]] || return 1
+    if [[ -z "$repo" ]] || ! out="$(gh api "repos/$repo/commits/$sha/pulls" \
+            --jq '[.[].labels[].name] | index("file-budget-exception") != null' 2>&1)"; then
+        echo "check-file-budget: WARN could not read the file-budget-exception label for $sha (${out:-GITHUB_REPOSITORY is unset}); judging with no waiver" >&2
+        return 1
+    fi
+    [[ "$out" == "true" ]]
+}
+
 # The source types this gate measures. The diffs and the uncommitted-work check
 # read this one list, so a new type cannot reach one and miss the other.
 GATED=('*.rs' '*.py' '*.sh' '*.ts' '*.tsx')
@@ -270,10 +286,11 @@ done < <(git diff --numstat -z --no-renames "$BASE"..HEAD -- 'cli/src/fno/*.py')
 
 exc_waived=0
 if [[ "$py_added" -gt "$PY_ADDED_BUDGET" ]]; then
-    if [[ -n "$EXC_LABEL" ]]; then
+    if [[ -n "$EXC_LABEL" ]] || label_live; then
+        EXC_LABEL="${EXC_LABEL:-file-budget-exception}"
         exc_waived=1
     else
-        echo "check-file-budget: cli/src/fno added +$py_added lines (added-line budget $PY_ADDED_BUDGET, config blueprint.python_repair_added_lines). The ceiling is on ADDED lines; deletions do not offset it, so a branch cannot buy growth with a rewrite. Port the verb you touched to crates/ or cut the added growth away in THIS PR. The one escape is an operator-applied file-budget-exception label on the PR; agents never apply it." >> "$findings"
+        echo "check-file-budget: cli/src/fno added +$py_added lines (added-line budget $PY_ADDED_BUDGET, config blueprint.python_repair_added_lines). The ceiling is on ADDED lines; deletions do not offset it, so a branch cannot buy growth with a rewrite. Port the verb you touched to crates/ or cut the added growth away in THIS PR. The one escape is an operator-applied file-budget-exception label on the PR; agents never apply it. The label is read from the PR when the check runs, so re-run the check after labeling." >> "$findings"
         fails=1
     fi
 fi

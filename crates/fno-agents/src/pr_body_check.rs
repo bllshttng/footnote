@@ -120,6 +120,16 @@ fn git(git_bin: &str, cwd: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// The text the ruling-citation check scans: the title when present, then
+/// the body, so an id cited in either is checked.
+fn titled_body(title: &str, body: &str) -> String {
+    if title.is_empty() {
+        body.to_string()
+    } else {
+        format!("{title}\n{body}")
+    }
+}
+
 pub fn run(argv: &[String]) -> i32 {
     let a = match parse_args(argv) {
         Ok(a) => a,
@@ -225,6 +235,23 @@ pub fn run(argv: &[String]) -> i32 {
         }
     }
 
+    // The ruling-citation check is in-process, not a scripts/ci/ guard: the
+    // decision store is local, so a CI copy would refuse every real
+    // citation. The check itself reads nothing when the body and title cite
+    // no id.
+    ran += 1;
+    let titled = titled_body(&a.title, &body);
+    let ruling_failures = crate::evidence::check_decision_citations(&titled);
+    if ruling_failures.is_empty() {
+        println!("pass ruling-citations");
+    } else {
+        failed += 1;
+        println!("fail ruling-citations");
+        for failure in &ruling_failures {
+            println!("{failure}");
+        }
+    }
+
     println!("pr-body-check: {ran} ran, {failed} failed");
     if failed > 0 {
         eprintln!("the PR body is not a commit: fix the body file, rerun this verb, then create or edit the PR");
@@ -286,5 +313,13 @@ mod tests {
     fn a_missing_body_file_names_the_path() {
         let err = read_body("/nonexistent/pr-body.md").unwrap_err();
         assert!(err.contains("/nonexistent/pr-body.md"), "{err}");
+    }
+
+    // The scan covers the title plus the body: an id cited in either is
+    // checked. Pure, so no store read.
+    #[test]
+    fn the_ruling_citation_scan_covers_title_plus_body() {
+        assert_eq!(titled_body("t", "b"), "t\nb");
+        assert_eq!(titled_body("", "body only"), "body only");
     }
 }
