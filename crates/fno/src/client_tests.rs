@@ -7895,8 +7895,8 @@ fn every_overlay_constructor_wears_chrome_matching_its_anchor() {
     // asserts each renders a border (positive marker) at the level its
     // anchor dictates (Centered -> Full, anchored -> Bare).
     //
-    // The full set of fourteen: family A (7) = keys modal, row menu, card
-    // menu, section menu, sideline MENU, mini-kanban, settings; family B
+    // The full set of twelve: family A (5) = keys modal, row menu,
+    // section menu, sideline MENU, settings; family B
     // (7) = the seven draw_lines_overlay callers (catch-up, needs-me,
     // move-pick, attach-place, connections, peek, navigator), verified by
     // draw_lines_overlay_centers_within_viewport and the chrome::frame tests.
@@ -11336,8 +11336,8 @@ async fn selector_enter_refusal_keeps_selector_open() {
         .iter_mut()
         .find(|a| a.name == "bg-other")
         .unwrap()
-        .exited = true; // the dead paneless row
-    for row in [9usize] {
+        .exited = true; // the dead paneless row (bg-other, row 8)
+    for row in [8usize] {
         v.selector = Some(row);
         v.notice = None;
         let mut buf: Vec<u8> = Vec::new();
@@ -11885,13 +11885,20 @@ async fn nav_goto_same_squad_is_a_bare_focus() {
 
 #[tokio::test]
 async fn nav_goto_refusal_keeps_navigator_open() {
-    // AC4-FR + Locked 6: Enter on a Blocked card shows a notice, sends
-    // nothing, and the navigator stays open.
+    // AC4-FR + Locked 6: Enter on a row whose only answer is a notice
+    // (the dead paneless row) shows a notice, sends nothing, and the
+    // navigator stays open.
     let mut v = unified_rows_view();
+    v.layout
+        .agents
+        .iter_mut()
+        .find(|a| a.name == "bg-other")
+        .unwrap()
+        .exited = true;
     let idx = v
         .nav_rows()
         .iter()
-        .position(|r| r.label.starts_with("x-blk"))
+        .position(|r| r.label.contains("bg-other"))
         .unwrap();
     v.nav = Some(NavView {
         query: String::new(),
@@ -11939,10 +11946,16 @@ async fn nav_keys_bare_right_gotos_and_left_closes() {
     // sends nothing - the Notice path is nav_goto's, not new logic), and
     // bare Left closes like Esc. Bare arrows never leak to the pane.
     let mut v = unified_rows_view();
+    v.layout
+        .agents
+        .iter_mut()
+        .find(|a| a.name == "bg-other")
+        .unwrap()
+        .exited = true;
     let idx = v
         .nav_rows()
         .iter()
-        .position(|r| r.label.starts_with("x-blk"))
+        .position(|r| r.label.contains("bg-other"))
         .unwrap();
     v.nav = Some(NavView {
         query: String::new(),
