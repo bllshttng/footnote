@@ -970,6 +970,19 @@ mod tests {
         // AC2-EDGE: a retired id is known, and the capitals form escapes.
         assert!(check_decision_citations("per d-eeee0005 and D-DEADBEEF").is_empty());
 
+        // AC3-ERR: against the seeded store the ruling lane refuses, names
+        // the id, and no read runs past the refusal.
+        let mut ran = false;
+        let mut runner = |_cmd: &str, _root: &Path| {
+            ran = true;
+            ok_run("1\n", 0)
+        };
+        let err = check_ruling_evidence("per d-deadbeef we ruled", &[], seeded.path(), &mut runner)
+            .expect_err("unknown id refuses");
+        assert_eq!(err.kind, "citation");
+        assert!(err.message.contains("d-deadbeef"), "{}", err.message);
+        assert!(!ran, "no read ran past the refusal");
+
         // An empty FNO_HOME: no id never reads the store, an id names the
         // read error instead of passing.
         let empty = tempfile::tempdir().expect("tmp");
@@ -978,18 +991,6 @@ mod tests {
         let failures = check_decision_citations("per d-deadbeef");
         assert_eq!(failures.len(), 1, "{failures:?}");
         assert!(failures[0].contains("could not be read"), "{}", failures[0]);
-
-        // AC3-ERR: the ruling lane refuses before any read runs.
-        let mut ran = false;
-        let mut runner = |_cmd: &str, _root: &Path| {
-            ran = true;
-            ok_run("1\n", 0)
-        };
-        let err = check_ruling_evidence("per d-deadbeef we ruled", &[], empty.path(), &mut runner)
-            .expect_err("unknown id refuses");
-        assert_eq!(err.kind, "citation");
-        assert!(err.message.contains("d-deadbeef"), "{}", err.message);
-        assert!(!ran, "no read ran past the refusal");
 
         match old_home {
             Some(v) => std::env::set_var("FNO_HOME", v),
