@@ -216,8 +216,16 @@ fn title_of(text: &str, parsed_title: &str) -> String {
     if !parsed_title.trim().is_empty() {
         return parsed_title.trim().to_string();
     }
-    text.lines()
-        .map(str::trim)
+    let mut lines = text.lines().map(str::trim).peekable();
+    if lines.peek() == Some(&"---") {
+        // Skip a leading frontmatter block; the title is the first prose line.
+        for line in lines.by_ref() {
+            if line == "---" {
+                break;
+            }
+        }
+    }
+    lines
         .find(|l| !l.is_empty() && !l.starts_with("---"))
         .unwrap_or("")
         .to_string()
@@ -518,7 +526,10 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let home = AgentsHome::at(&p);
+        // Mirror the prod shape (<home>/.fno/agents): questions_path reads
+        // root.parent(), and a home rooted at p itself would land the index
+        // in the shared temp dir.
+        let home = AgentsHome::at(&p.join(".fno").join("agents"));
         home.ensure_root().unwrap();
         home
     }
