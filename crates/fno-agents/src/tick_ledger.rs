@@ -371,7 +371,9 @@ pub fn read_arms(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
         scan_journal(path, &mut newest, &mut newest_ok);
     }
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // The static spec facts ride the fold; the runtime arm value is filled
+    // by [`fill_arm_values`] at the readout layer, so this fold stays
+    // machine-independent (and unit-testable without a config).
     let mut rows: Vec<ArmStatus> = KNOWN_ARMS
         .iter()
         .map(|spec| {
@@ -385,7 +387,6 @@ pub fn read_arms(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
             );
             row.arm_key = spec.arm_key.map(str::to_string);
             row.reader = spec.reader.map(str::to_string);
-            row.arm_value = spec.arm_key.map(|k| arm_key_value(&cwd, k));
             row
         })
         .collect();
@@ -558,12 +559,25 @@ pub fn mark_starved(journals: &[PathBuf], rows: &mut [ArmStatus], now_unix: u64,
     }
 }
 
-/// [`read_arms`] plus the starved mark: the one read every arms readout
-/// makes, so the table and the status arms never disagree about the
-/// vocabulary. The threshold comes from `notify.arm_starved_after_s`.
+/// Resolve every keyed row's `arm_value` against this machine's config. The
+/// pure fold stays free of config reads; the readout layer owns them, so a
+/// row's unarmed verdict reflects the config the reader actually runs.
+pub fn fill_arm_values(rows: &mut [ArmStatus], cwd: &Path) {
+    for row in rows.iter_mut() {
+        if let Some(key) = row.arm_key.as_deref() {
+            row.arm_value = Some(arm_key_value(cwd, key));
+        }
+    }
+}
+
+/// [`read_arms`] plus the arm values and the starved mark: the one read
+/// every arms readout makes, so the table and the status arms never
+/// disagree about the vocabulary. The threshold comes from
+/// `notify.arm_starved_after_s`.
 pub fn read_arms_starved(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
     let mut rows = read_arms(journals, now_unix);
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    fill_arm_values(&mut rows, &cwd);
     let threshold = crate::agents_config::notify_arm_starved_after_s(&cwd);
     mark_starved(journals, &mut rows, now_unix, threshold);
     rows
@@ -1603,7 +1617,7 @@ mod tests {
                     600,
                 ),
                 tick_envelope(
-                    "2026-09-21T09:00:00Z",
+                    "2026-09-21T11:59:00Z",
                     "heal",
                     SCHED_LAUNCHD,
                     0,
@@ -1650,7 +1664,7 @@ mod tests {
                     600,
                 ),
                 tick_envelope(
-                    "2026-09-21T09:00:00Z",
+                    "2026-09-21T11:59:00Z",
                     "heal",
                     SCHED_LAUNCHD,
                     0,
@@ -1685,7 +1699,7 @@ mod tests {
                     600,
                 ),
                 tick_envelope(
-                    "2026-09-21T09:00:00Z",
+                    "2026-09-21T11:59:00Z",
                     "heal",
                     SCHED_LAUNCHD,
                     0,
@@ -1718,7 +1732,7 @@ mod tests {
                     600,
                 ),
                 tick_envelope(
-                    "2026-09-21T09:00:00Z",
+                    "2026-09-21T11:59:00Z",
                     "heal",
                     SCHED_LAUNCHD,
                     0,
