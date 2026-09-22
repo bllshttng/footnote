@@ -428,7 +428,6 @@ def find_node_row(node: str) -> Optional[dict]:
 def _verb_answer(row: Optional[dict], *, node_id: Optional[str] = None) -> tuple:
     from fno.agents.harness_map import DispatchResolveError
     from fno.graph.store import GRAPH_JSON, _client_for
-
     payload = dict(row or {}, id=(row or {}).get("id") or node_id)
     try:
         answer = _client_for(GRAPH_JSON).request(
