@@ -74,6 +74,19 @@ fi
 grep -q 'reign watch probe failed:' "$MAIL_LOG"
 
 : > "$CALL_LOG"
+cat > "$EVENT_JSON" <<'EOF'
+{"matches":[],"unreadable_files":[{"path":"events.jsonl","error":"permission denied"}]}
+EOF
+if PATH="$tmp/bin:$PATH" FNO_REIGN_WATCH_DIR="$WATCH_STATE" "$WATCH" scope-1 king-1 0; then
+  echo "expected unreadable event failure" >&2
+  exit 1
+fi
+grep -q 'reign watch probe failed: unreadable_files=1' "$MAIL_LOG"
+cat > "$EVENT_JSON" <<'EOF'
+{"matches":[{"data":{"node":"x-1","pr":42}}],"unreadable_files":[]}
+EOF
+
+: > "$CALL_LOG"
 export WATCH_MODE=ok
 sleep 60 & holder=$!
 mkdir "$WATCH_STATE/scope-1.pid.lock"
