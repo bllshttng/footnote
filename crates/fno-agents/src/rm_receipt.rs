@@ -34,6 +34,33 @@ pub fn claims_release_suffix(result: &Value) -> String {
     suffix
 }
 
+/// The stop receipt's tail: the pid escalation the daemon performed, then the
+/// claims-release note. `stopped_by == "pid"` means the stop ask alone did not
+/// end the worker and the daemon ended the proved process set itself, so the
+/// printed line names that second leg; every other stop prints the plain
+/// claims suffix unchanged.
+pub fn stop_receipt_suffix(result: &Value) -> String {
+    let mut suffix = String::new();
+    if result.get("stopped_by").and_then(Value::as_str) == Some("pid") {
+        let pids = result
+            .get("pids")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(Value::as_u64)
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        if !pids.is_empty() {
+            suffix.push_str(&format!(" (ended pid {pids} after the stop ask)"));
+        }
+    }
+    suffix.push_str(&claims_release_suffix(result));
+    suffix
+}
+
 /// The receipt for one `agent.rm` result: `removed: <name>` when every
 /// surface confirmed, and the surfaces plus refusals spelled out when they
 /// did not. `None` when the result carries no receipt.
@@ -165,4 +192,31 @@ pub fn receipt(name: &str, result: &Value) -> Option<String> {
         adopt_hint.unwrap_or_default(),
         claims_release_suffix(result)
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::stop_receipt_suffix;
+
+    #[test]
+    fn stop_receipt_suffix_names_the_ended_pids_after_an_escalation() {
+        let result = json!({"stopped": true, "stopped_by": "pid", "pids": [4242]});
+        assert_eq!(
+            stop_receipt_suffix(&result),
+            " (ended pid 4242 after the stop ask)"
+        );
+    }
+
+    #[test]
+    fn stop_receipt_suffix_is_claims_only_without_an_escalation() {
+        // A shellout stop (the ask alone ended the worker) prints exactly
+        // today's line; the escalation suffix never appears.
+        assert_eq!(
+            stop_receipt_suffix(&json!({"stopped_by": "shellout", "pids": [4242]})),
+            ""
+        );
+        assert_eq!(stop_receipt_suffix(&json!({})), "");
+    }
 }

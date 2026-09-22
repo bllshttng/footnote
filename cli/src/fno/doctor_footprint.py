@@ -346,6 +346,7 @@ def _live_root_pids(
     """Return positively live worker PIDs that may have detached children."""
     roots: set[int] = set()
     recycled_rows: list[Any] = []
+    dead_rows: list[str] = []
     try:
         from fno.agents.registry import load_registry
         from fno.agents.session_procs import bg_socket_pid_map, roster_pid_map
@@ -438,7 +439,9 @@ def _live_root_pids(
             pid = codex_pids.get(sid)
             if pid is not None:
                 if _root_pid_is_live(pid, None) is not True:
-                    return roots, f"worker root liveness unavailable: codex rollout root pid {pid} for row {getattr(row, 'name', '?')} is not live"
+                    dead_rows.append(f"{getattr(row, 'name', '?')} (codex rollout pid={pid})")
+                    resolved_codex_ids.add(id(row))  # named here; keep it out of the pidless gap below
+                    continue
                 roots.add(pid)
                 resolved_codex_ids.add(id(row))
         # a routless row is a NAMED gap, not a dead reading -:
@@ -477,6 +480,9 @@ def _live_root_pids(
                     f"{getattr(row, 'name', '?')} (pid={row.pid})" for row in recycled_rows
                 ))
             )
+        if dead_rows:
+            gap_rows.append(f"{len(dead_rows)} live row(s) whose resolved pid is not live: " + ", ".join(sorted(dead_rows)))
+            dead_rows.clear()
         if not routed_rows:
             return roots, AttributionGap("; ".join(gap_rows)) if gap_rows else None
         if deadline is not None and time.monotonic() >= deadline:
@@ -501,7 +507,8 @@ def _live_root_pids(
                     still_missing.append(row)
                     continue
                 if not _root_pid_is_live(pid, None):
-                    return roots, f"worker root liveness unavailable: roster-resolved pid {pid} for row {getattr(row, 'name', '?')} is not live"
+                    dead_rows.append(f"{getattr(row, 'name', '?')} (roster pid={pid})")
+                    continue
                 roots.add(pid)
             missing = still_missing
         if missing:
@@ -514,12 +521,12 @@ def _live_root_pids(
             if pid is None:
                 continue
             root_live = _root_pid_is_live(pid, None)
-            if root_live is None:
-                return roots, f"worker root liveness unavailable: socket-resolved pid {pid} start time could not be read for row {getattr(row, 'name', '?')}"
             if root_live:
                 roots.add(pid)
             else:
-                return roots, f"worker root liveness unavailable: socket-resolved pid {pid} for row {getattr(row, 'name', '?')} is not live"
+                dead_rows.append(f"{getattr(row, 'name', '?')} (socket pid={pid})")
+        if dead_rows:
+            gap_rows.append(f"{len(dead_rows)} live row(s) whose resolved pid is not live: " + ", ".join(sorted(dead_rows)))
         return roots, AttributionGap("; ".join(gap_rows)) if gap_rows else None
     except ImportError:
         raise

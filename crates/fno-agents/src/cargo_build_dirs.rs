@@ -512,20 +512,29 @@ fn live_cargo_cwds() -> Result<Vec<PathBuf>, ()> {
 /// cannot answer its manifests: either way the returned set may be missing
 /// entries, so the caller must fail closed rather than trust an empty one.
 fn live_shards(trees: &[PathBuf], fno_base: &Path) -> Result<BTreeSet<PathBuf>, ()> {
+    let phys_trees: Vec<PathBuf> = trees.iter().map(|t| phys(t)).collect();
     let mut shards = BTreeSet::new();
     for cwd in live_cargo_cwds()? {
         let cwd = phys(&cwd);
-        let tree = trees
-            .iter()
-            .filter(|t| cwd.starts_with(phys(t)))
-            .max_by_key(|t| phys(t).as_os_str().len());
-        let Some(tree) = tree else {
+        let Some(tree) = owning_tree(&cwd, &phys_trees) else {
             continue;
         };
         let answer = answer_tree(tree, fno_base).map_err(|_| ())?;
         shards.extend(answer.dirs.iter().map(|d| phys(d)));
     }
     Ok(shards)
+}
+
+/// The registered tree (already phys) that `path` falls under: the LONGEST
+/// match wins, so a worktree nested inside its own checkout owns its own
+/// rows, never the outer checkout `git worktree list` happens to print
+/// first. Callers phys their tree list once, never per element.
+fn owning_tree<'a>(path: &Path, phys_trees: &'a [PathBuf]) -> Option<&'a PathBuf> {
+    let p = phys(path);
+    phys_trees
+        .iter()
+        .filter(|t| p.starts_with(*t))
+        .max_by_key(|t| t.as_os_str().len())
 }
 
 // --- free space --------------------------------------------------------------
@@ -587,6 +596,89 @@ struct Row {
     quiet: Duration,
     under_fno: bool,
     membership: bool,
+    /// The registered tree whose manifests resolve to this dir; `None` when
+    /// no tree did (what the orphan lane acts on).
+    owner: Option<PathBuf>,
+}
+
+/// Registry rows whose cwd falls under one tree.
+#[derive(Debug, Default)]
+struct Holders {
+    nodes: BTreeSet<String>,
+    sessions: BTreeSet<String>,
+}
+
+/// Pure join: every registry entry's cwd picks its tree by `owning_tree`;
+/// the entry's node (when set) lands in `nodes` and, unless the row is
+/// terminal, its name lands in `sessions` - `session=` must mean a session
+/// that may still be using the tree.
+fn session_join(
+    trees: &[PathBuf],
+    registry: &crate::state::Registry,
+) -> BTreeMap<PathBuf, Holders> {
+    let phys_trees: Vec<PathBuf> = trees.iter().map(|t| phys(t)).collect();
+    let mut join: BTreeMap<PathBuf, Holders> = BTreeMap::new();
+    for entry in &registry.entries {
+        let Some(tree) = owning_tree(Path::new(&entry.cwd), &phys_trees) else {
+            continue;
+        };
+        let holders = join.entry(tree.clone()).or_default();
+        if let Some(node) = &entry.node {
+            holders.nodes.insert(node.clone());
+        }
+        if !matches!(
+            entry.status,
+            crate::AgentStatus::Failed
+                | crate::AgentStatus::Exited
+                | crate::AgentStatus::PermanentDead
+        ) {
+            holders.sessions.insert(entry.name.clone());
+        }
+    }
+    join
+}
+
+/// The registry join a row line renders from. `Unread` when the registry
+/// could not be read at all: `none` is what the orphan lane and a person
+/// act on, so a read failure must never wear it.
+enum HolderView<'a> {
+    Read(&'a BTreeMap<PathBuf, Holders>),
+    Unread,
+}
+
+fn joined_or_none(set: &BTreeSet<String>) -> String {
+    if set.is_empty() {
+        "none".to_string()
+    } else {
+        set.iter().cloned().collect::<Vec<_>>().join(",")
+    }
+}
+
+/// One row line, the single form every lane prints. `path=` stays last so a
+/// reader that splits on `path=` keeps working.
+fn row_line(verb: &str, lane: &str, row: &Row, holders: &HolderView) -> String {
+    let owner = match &row.owner {
+        Some(tree) => tree.display().to_string(),
+        None => "none".to_string(),
+    };
+    let (nodes, sessions) = match holders {
+        HolderView::Read(join) => {
+            let empty = Holders::default();
+            let h = row
+                .owner
+                .as_ref()
+                .and_then(|t| join.get(&phys(t)))
+                .unwrap_or(&empty);
+            (joined_or_none(&h.nodes), joined_or_none(&h.sessions))
+        }
+        HolderView::Unread => ("unread".to_string(), "unread".to_string()),
+    };
+    format!(
+        "cargo-build-dir {verb} lane={lane} bytes={} quiet_h={:.1} owner={owner} node={nodes} session={sessions} path={}",
+        row.bytes,
+        row.quiet.as_secs_f64() / 3600.0,
+        row.path.display()
+    )
 }
 
 /// Classify and (on `apply`) reap both build bases' tagged hash dirs. Dry run
@@ -601,13 +693,26 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
     rep.effective_cap_bytes = effective_cap_bytes(root);
 
     let mut names: BTreeSet<String> = BTreeSet::new();
-    let mut resolved: BTreeSet<PathBuf> = BTreeSet::new();
+    // phys dir -> the tree whose manifests resolve to it (phys tree). When
+    // two trees resolve the same dir the LONGER tree path wins, the same
+    // rule `owning_tree` applies.
+    let mut owner_of: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
     for tree in &trees {
         match answer_tree(tree, &fno_base) {
             Ok(answer) => {
                 rep.trees_resolved += 1;
                 names.extend(answer.names);
-                resolved.extend(answer.dirs.iter().map(|d| phys(d)));
+                let tree_phys = phys(tree);
+                for d in &answer.dirs {
+                    let dir = phys(d);
+                    let longer_wins = match owner_of.get(&dir) {
+                        Some(existing) => existing.as_os_str().len() >= tree_phys.as_os_str().len(),
+                        None => false,
+                    };
+                    if !longer_wins {
+                        owner_of.insert(dir, tree_phys.clone());
+                    }
+                }
             }
             Err(manifest) => {
                 rep.orphan_lane.get_or_insert(manifest);
@@ -629,6 +734,16 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
         Err(()) => (BTreeSet::new(), false),
     };
 
+    // One registry read per sweep, never per row; either step giving nothing
+    // (no home under test, a read error) leaves the join unread.
+    let holders_join = crate::paths::AgentsHome::from_env_opt()
+        .and_then(|home| crate::state::load_registry(&home.registry_json()).ok())
+        .map(|registry| session_join(&trees, &registry));
+    let holders_view = match &holders_join {
+        Some(join) => HolderView::Read(join),
+        None => HolderView::Unread,
+    };
+
     let mut rows: Vec<Row> = Vec::new();
     for base in &bases {
         let (paths, _) = inventory(base);
@@ -638,6 +753,7 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
             let membership = has_membership(&path, &names);
             rows.push(Row {
                 under_fno: phys(&path).starts_with(phys(&fno_base)),
+                owner: owner_of.get(&phys(&path)).cloned(),
                 path,
                 bytes,
                 quiet,
@@ -666,7 +782,7 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
         } else if row.quiet < Duration::from_secs(FRESH_SECS) {
             Decision::Keep("fresh")
         } else if rep.orphan_lane.is_none()
-            && !resolved.contains(&phys(&row.path))
+            && !owner_of.contains_key(&phys(&row.path))
             && row.membership
         {
             rep.orphans += 1;
@@ -695,24 +811,14 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
             Decision::Keep(_) => unreachable!("planned rows are reaps"),
         };
         if !apply {
-            let line = format!(
-                "cargo-build-dir would-reap lane={lane} bytes={} quiet_h={:.1} path={}",
-                row.bytes,
-                row.quiet.as_secs_f64() / 3600.0,
-                row.path.display()
-            );
+            let line = row_line("would-reap", lane, row, &holders_view);
             println!("{line}");
             rep.lines.push(line);
             continue;
         }
         match guard_remove(&row.path, SystemTime::now(), true) {
             Ok(()) => {
-                let line = format!(
-                    "cargo-build-dir reaped lane={lane} bytes={} quiet_h={:.1} path={}",
-                    row.bytes,
-                    row.quiet.as_secs_f64() / 3600.0,
-                    row.path.display()
-                );
+                let line = row_line("reaped", lane, row, &holders_view);
                 println!("{line}");
                 rep.lines.push(line);
                 rep.reaped += 1;
@@ -723,12 +829,7 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
             }
             Err(reason) => {
                 refusal_of.insert(i, reason);
-                let line = format!(
-                    "cargo-build-dir kept lane={reason} bytes={} quiet_h={:.1} path={}",
-                    row.bytes,
-                    row.quiet.as_secs_f64() / 3600.0,
-                    row.path.display()
-                );
+                let line = row_line("kept", reason, row, &holders_view);
                 println!("{line}");
                 rep.lines.push(line);
             }
@@ -800,12 +901,7 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
                     remaining -= row.bytes;
                     decisions[i] = Decision::Reap("cap");
                     let verb = if apply { "reaped" } else { "would-reap" };
-                    let line = format!(
-                        "cargo-build-dir {verb} lane=cap bytes={} quiet_h={:.1} path={}",
-                        row.bytes,
-                        row.quiet.as_secs_f64() / 3600.0,
-                        row.path.display()
-                    );
+                    let line = row_line(verb, "cap", row, &holders_view);
                     println!("{line}");
                     rep.lines.push(line);
                     if apply {
@@ -818,12 +914,7 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
                 }
                 Err(reason) => {
                     refusal_of.insert(i, reason);
-                    let line = format!(
-                        "cargo-build-dir kept lane={reason} bytes={} quiet_h={:.1} path={}",
-                        row.bytes,
-                        row.quiet.as_secs_f64() / 3600.0,
-                        row.path.display()
-                    );
+                    let line = row_line("kept", reason, row, &holders_view);
                     println!("{line}");
                     rep.lines.push(line);
                 }
@@ -835,12 +926,7 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
     // reads as kept.
     for (i, row) in rows.iter().enumerate() {
         if let Decision::Keep(lane) = &decisions[i] {
-            let line = format!(
-                "cargo-build-dir kept lane={lane} bytes={} quiet_h={:.1} path={}",
-                row.bytes,
-                row.quiet.as_secs_f64() / 3600.0,
-                row.path.display()
-            );
+            let line = row_line("kept", lane, row, &holders_view);
             println!("{line}");
             rep.lines.push(line);
         }
@@ -1600,5 +1686,289 @@ mod tests {
         assert!(aged.exists(), "a dry run deletes nothing");
         assert_eq!(rep.projected_bytes, unit, "{rep:?}");
         assert_eq!(rep.after_bytes, 0, "after_bytes is the bytes left");
+    }
+
+    fn sj_entry(
+        name: &str,
+        cwd: &Path,
+        node: Option<&str>,
+        status: crate::AgentStatus,
+    ) -> crate::state::RegistryEntry {
+        crate::state::RegistryEntry {
+            name: name.to_string(),
+            cwd: cwd.display().to_string(),
+            node: node.map(str::to_string),
+            status,
+            ..Default::default()
+        }
+    }
+
+    fn sj_registry(entries: Vec<crate::state::RegistryEntry>) -> crate::state::Registry {
+        crate::state::Registry {
+            entries,
+            ..Default::default()
+        }
+    }
+
+    /// AC2-HP: a busy registry row whose cwd sits in tree T joins T to the
+    /// row's node and name.
+    #[test]
+    fn session_join_maps_a_busy_row_to_its_tree() {
+        let root = temp_root("sjhp");
+        let tree = root.join("wt/a");
+        std::fs::create_dir_all(&tree).unwrap();
+        let reg = sj_registry(vec![sj_entry(
+            "w1",
+            &tree,
+            Some("x-test"),
+            crate::AgentStatus::Busy,
+        )]);
+
+        let join = session_join(&[root.clone(), tree.clone()], &reg);
+
+        let h = join.get(&phys(&tree)).expect("the tree joins");
+        assert!(h.nodes.contains("x-test"), "{h:?}");
+        assert!(h.sessions.contains("w1"), "{h:?}");
+        assert!(
+            !join.contains_key(&phys(&root)),
+            "no row's cwd falls in root, so root holds nobody"
+        );
+    }
+
+    /// AC2-EDGE: a terminal row contributes its node but never its name; a
+    /// cwd nested inside root joins the NESTED tree, not the outer root.
+    #[test]
+    fn session_join_drops_terminal_names_and_joins_nested_cwds_to_the_nested_tree() {
+        let root = temp_root("sjedge");
+        let tree = root.join("wt/a");
+        let nested = root.join("wt/a/wt/nested");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        let reg = sj_registry(vec![
+            sj_entry("done1", &tree, Some("x-done"), crate::AgentStatus::Exited),
+            sj_entry("w1", &tree, Some("x-test"), crate::AgentStatus::Busy),
+            sj_entry("w2", &nested, Some("x-nested"), crate::AgentStatus::Busy),
+        ]);
+
+        let join = session_join(&[root.clone(), tree.clone(), nested.clone()], &reg);
+
+        let h = join.get(&phys(&tree)).expect("the tree joins");
+        assert!(
+            h.nodes.contains("x-done") && h.nodes.contains("x-test"),
+            "{h:?}"
+        );
+        assert!(h.sessions.contains("w1"), "{h:?}");
+        assert!(
+            !h.sessions.contains("done1"),
+            "a terminal row never reads as a live session: {h:?}"
+        );
+        let hn = join.get(&phys(&nested)).expect("the nested tree joins");
+        assert!(
+            hn.sessions.contains("w2") && hn.nodes.contains("x-nested"),
+            "{hn:?}"
+        );
+        assert!(
+            !hn.sessions.contains("w1"),
+            "the outer tree's session must not leak into the nested tree"
+        );
+        assert!(!join.contains_key(&phys(&root)), "{join:?}");
+    }
+
+    /// AC1-HP: a row of a resolved tree prints `owner=<tree>`.
+    #[test]
+    fn a_resolved_row_prints_its_owner() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("ownerhp", "never-broken");
+        plant(&env.fno_base, "00", "aaaa11", seven_h(), true);
+
+        let rep = sweep(&env.root, false, SystemTime::now());
+
+        let owner = phys(&env.root).display().to_string();
+        assert!(
+            rep.lines
+                .iter()
+                .any(|l| { l.contains("path=") && l.contains(&format!("owner={owner}")) }),
+            "{:?}",
+            rep.lines
+        );
+    }
+
+    /// AC2-ERR: an unread join prints `node=unread session=unread`, never
+    /// `none` - `none` is what the orphan lane and a person act on.
+    #[test]
+    fn an_unread_join_prints_unread_never_none() {
+        let dir = temp_root("unread");
+        std::fs::create_dir_all(&dir).unwrap();
+        let row = Row {
+            path: dir.join("base/00/cafe0001"),
+            bytes: 1,
+            quiet: Duration::from_secs(7 * 3600),
+            under_fno: false,
+            owner: None,
+            membership: false,
+        };
+
+        let line = row_line("kept", "within-age", &row, &HolderView::Unread);
+
+        assert!(line.contains("owner=none"), "{line}");
+        assert!(line.contains("node=unread session=unread"), "{line}");
+        assert!(!line.contains("node=none"), "{line}");
+    }
+
+    /// AC1-ERR: a dir no tree resolves still reaps by the orphan lane and its
+    /// line reads `owner=none`.
+    #[test]
+    fn an_orphan_row_prints_owner_none() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("ownernone", "never-broken");
+        plant(&env.fb_base, "00", "cafefe12", seven_h(), true);
+
+        let rep = sweep(&env.root, false, SystemTime::now());
+
+        assert_eq!(rep.orphans, 1);
+        assert!(
+            rep.lines
+                .iter()
+                .any(|l| { l.contains("would-reap lane=orphan") && l.contains("owner=none") }),
+            "{:?}",
+            rep.lines
+        );
+    }
+
+    /// AC1-EDGE: with the orphan lane disabled by one failing manifest, rows
+    /// of the tree that did resolve still print their owner and unresolved
+    /// rows still print `owner=none`.
+    #[test]
+    fn a_disabled_orphan_lane_still_prints_owners() {
+        if !git_available() {
+            return;
+        }
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The outer tree's manifest (crates/fake) fails ONLY its fno-base
+        // answer, so the tree fails and the orphan lane disables while the
+        // env-free answer still admits the fallback base. The nested tree's
+        // crates/real resolves both ways.
+        let env = setup("owneredge", "never-broken");
+        std::fs::write(
+            env.root.join("bin/cargo"),
+            "#!/bin/sh\n\
+             manifest=\"\"\n\
+             prev=\"\"\n\
+             for a in \"$@\"; do\n\
+             if [ \"$prev\" = \"--manifest-path\" ]; then manifest=\"$a\"; fi\n\
+             prev=\"$a\"\n\
+             done\n\
+             case \"$manifest\" in\n\
+             *fake*) [ -n \"$CARGO_BUILD_BUILD_DIR\" ] && exit 1 ;;\n\
+             esac\n\
+             if [ -n \"$CARGO_BUILD_BUILD_DIR\" ]; then\n\
+             printf '{\"build_directory\":\"%s\",\"packages\":[{\"name\":\"fakepkg\"}]}\\n' \"$CBD_FNO_ANSWER\"\n\
+             else\n\
+             printf '{\"build_directory\":\"%s\",\"packages\":[{\"name\":\"fakepkg\"}]}\\n' \"$CBD_FB_ANSWER\"\n\
+             fi\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            env.root.join("bin/cargo"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        git(&env.root, &["init", "-q"]);
+        git(&env.root, &["config", "user.email", "t@t"]);
+        git(&env.root, &["config", "user.name", "t"]);
+        git(&env.root, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let nested = env.root.join("wt/nested");
+        git(
+            &env.root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                nested.to_str().unwrap(),
+                "-b",
+                "nested-owner",
+            ],
+        );
+        std::fs::create_dir_all(nested.join("crates/real")).unwrap();
+        std::fs::write(
+            nested.join("crates/real/Cargo.toml"),
+            "[package]\nname = 'realpkg'\nversion = '0.1.0'\n",
+        )
+        .unwrap();
+        let resolved = plant(&env.fno_base, "00", "aaaa11", seven_h(), true);
+        let unresolved = plant(&env.fb_base, "00", "cafefe12", seven_h(), true);
+
+        let rep = sweep(&env.root, false, SystemTime::now());
+
+        assert!(rep.orphan_lane.is_some(), "the outer manifest failed");
+        let nested_owner = phys(&nested).display().to_string();
+        assert!(
+            rep.lines
+                .iter()
+                .any(|l| { l.contains("path=") && l.contains(&format!("owner={nested_owner}")) }),
+            "the resolved tree's row names its owner: {:?}",
+            rep.lines
+        );
+        let unresolved_line = rep
+            .lines
+            .iter()
+            .find(|l| l.contains("cafefe12"))
+            .expect("the unresolved row still prints");
+        assert!(unresolved_line.contains("owner=none"), "{unresolved_line}");
+        assert!(
+            resolved.exists() && unresolved.exists(),
+            "a dry run deletes nothing"
+        );
+    }
+
+    /// AC3-HP + AC3-ERR: source dirs named `target` that carry a CACHEDIR.TAG
+    /// survive a maximum-pressure apply sweep and remove_for, and no row line
+    /// names any of them.
+    #[test]
+    fn sweep_never_touches_a_source_dir_named_target() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("safetargets", "never-broken");
+        // Cap of 1 byte: every lane is under maximum pressure.
+        std::env::set_var("FNO_CARGO_FREE_BYTES", "1");
+        let sources = [
+            env.root.join("cli/src/fno/target"),
+            env.root.join("skills/target"),
+            env.root.join("tests/target"),
+        ];
+        for src in &sources {
+            std::fs::create_dir_all(src).unwrap();
+            std::fs::write(
+                src.join(CACHEDIR_TAG),
+                b"Signature: 8a477f597d28d172789f068868ba2775\n",
+            )
+            .unwrap();
+            std::fs::write(src.join("payload"), vec![0u8; 4096]).unwrap();
+            age_every(src, seven_h());
+        }
+        // Real build rows so the lanes have work to do under the 1-byte cap.
+        let under_fno = plant(&env.fno_base, "00", "aaaa11", seven_h(), true);
+        let under_fb = plant(&env.fb_base, "00", "bbbb22", seven_h(), true);
+
+        let rep = sweep(&env.root, true, SystemTime::now());
+        let _ = remove_for(&env.root);
+
+        for src in &sources {
+            assert!(src.exists(), "{} must survive", src.display());
+            assert!(
+                src.join("payload").is_file(),
+                "{} payload must survive",
+                src.display()
+            );
+        }
+        assert!(
+            !under_fno.exists() && !under_fb.exists(),
+            "the lanes actually ran under the 1-byte cap"
+        );
+        assert!(
+            rep.lines.iter().all(|l| !l.contains("/target")),
+            "no row line names a source dir named target: {:?}",
+            rep.lines
+        );
     }
 }
