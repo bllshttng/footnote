@@ -734,8 +734,11 @@ fn commit_citation_failures(log: &str) -> Vec<String> {
     for record in log.split('\u{1e}').map(str::trim).filter(|r| !r.is_empty()) {
         let mut parts = record.splitn(2, '\u{1f}');
         let short = parts.next().unwrap_or("?").trim();
-        let message = parts.next().unwrap_or("");
-        let bad = crate::evidence::check_decision_citations(message);
+        // The whole record is scanned, not only the message half: a body
+        // carrying a literal \x1e would otherwise put its tail in the short
+        // field, which no real short sha can (hex only, never a hyphen), so
+        // scanning it cannot fabricate a hit but can catch a hidden one.
+        let bad = crate::evidence::check_decision_citations(record);
         if !bad.is_empty() {
             failures.push(format!(
                 "commit {short} cites a decision id no ruling carries: {}. \
