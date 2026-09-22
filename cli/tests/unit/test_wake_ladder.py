@@ -668,3 +668,139 @@ def test_wake_if_asleep_propagates_the_refusal_detail(monkeypatch):
         dispatch, "wake_drain_agent", lambda u, **k: (False, "wake-unpinned(no model)")
     )
     assert dispatch.wake_if_asleep_claude("tok") == (False, "wake-unpinned(no model)")
+
+
+# lost-route rebuild (x-20ac change 4): the rowless wake composes what the
+# resume-pin refusal names ---------------------------------------------------
+def _lost_route_axes(payload):
+    return {
+        "refusal": "session u last ran glm-5.3-flash[1m], which only route zai serves",
+        "lost_route": {"provider": "zai", "model": "glm-5.3-flash[1m]"},
+    }
+
+
+def test_rowless_wake_rebuilds_the_lost_route(monkeypatch):
+    # AC2-HP: a rowless wake whose resume_pin answer names a lost route
+    # rebuilds it from config: the gate and the fork both carry zai.
+    monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: None)
+    import fno.agents.registry as registry_mod
+
+    monkeypatch.setattr(registry_mod, "load_registry", lambda *a, **k: [])
+    import fno.agents.fork_lineage as fork_lineage
+
+    monkeypatch.setattr(fork_lineage, "spawn_axes_call", _lost_route_axes)
+    monkeypatch.setattr(
+        "fno.agents.model_routing.resolve_explicit_route",
+        lambda provider, model, **k: {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"},
+    )
+    events = []
+
+    class _Gate:
+        def release(self):
+            events.append("release")
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate.run_gate",
+        lambda name, substrate, **kwargs: events.append(
+            ("gate", name, substrate, kwargs)
+        )
+        or _Gate(),
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **kwargs: events.append(("dispatch", kwargs))
+        or SimpleNamespace(short_id="FORK"),
+    )
+
+    ok, detail = wake_and_deliver("uuid-full", "wake")
+
+    assert ok is True and detail == "FORK"
+    assert events[0][2:] == ("bg", {"route_provider": "zai", "account": None})
+    assert events[1][1]["route_provider"] == "zai"
+    assert events[1][1]["route_env"].provider == "zai"
+    assert events[2] == "release"
+
+
+def test_keyless_lost_route_launches_nothing_and_refuses_as_today(monkeypatch):
+    # AC2-ERR: resolve_explicit_route answers None (a keyless or unknown
+    # provider): no gate runs, and the fork's refusal reaches the receipt as
+    # wake-unpinned(...) exactly as today.
+    monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: None)
+    import fno.agents.fork_lineage as fork_lineage
+
+    monkeypatch.setattr(fork_lineage, "spawn_axes_call", _lost_route_axes)
+    monkeypatch.setattr(
+        "fno.agents.model_routing.resolve_explicit_route", lambda *a, **k: None
+    )
+
+    def _no_gate(*args, **kwargs):
+        raise AssertionError("no gate must run for a keyless lost route")
+
+    monkeypatch.setattr("fno.agents.spawn_gate.run_gate", _no_gate)
+
+    def _unpinned(**kwargs):
+        raise fork_lineage.ResumeUnpinned(
+            "session u last ran glm-5.3-flash[1m], which only route zai serves",
+            exit_code=2,
+        )
+
+    monkeypatch.setattr(dispatch, "dispatch_spawn", _unpinned)
+    ok, reason = wake_and_deliver("uuid-full", "wake")
+    assert ok is False and reason.startswith("wake-unpinned(")
+    assert "route zai serves" in reason
+
+
+def test_recorded_route_wake_asks_spawn_axes_nothing(monkeypatch):
+    # AC2-EDGE: a row recording route_settings_path: wake_route asks spawn-axes
+    # nothing, and the gate and dispatch receive the row's provider with
+    # route_env None (dispatch_spawn restores the recorded file).
+    monkeypatch.setattr(
+        dispatch,
+        "_roster_entry_for_session",
+        lambda u: _entry("live", provider="zai", route_settings_path="/route.json"),
+    )
+    import fno.agents.fork_lineage as fork_lineage
+
+    def _must_not_ask(payload):
+        raise AssertionError("a recorded route needs no spawn-axes ask")
+
+    monkeypatch.setattr(fork_lineage, "spawn_axes_call", _must_not_ask)
+    captured = []
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **kwargs: captured.append(kwargs)
+        or SimpleNamespace(short_id="FORK"),
+    )
+
+    ok, detail = wake_and_deliver("uuid-full", "wake")
+
+    assert ok is True and detail == "FORK"
+    assert captured[0]["route_provider"] == "zai"
+    assert captured[0]["route_env"] is None
+
+
+def test_stale_binary_without_lost_route_keeps_todays_refusal(monkeypatch):
+    # AC2-EDGE: a spawn-axes answer with no lost_route key (a binary older
+    # than the change) reads as today: no gate, the refusal rides the fork.
+    monkeypatch.setattr(dispatch, "_roster_entry_for_session", lambda u: None)
+    import fno.agents.fork_lineage as fork_lineage
+
+    monkeypatch.setattr(
+        fork_lineage,
+        "spawn_axes_call",
+        lambda payload: {"refusal": "session u last ran glm, which only route zai serves"},
+    )
+
+    def _no_gate(*args, **kwargs):
+        raise AssertionError("no gate without a rebuilt route")
+
+    monkeypatch.setattr("fno.agents.spawn_gate.run_gate", _no_gate)
+
+    def _unpinned(**kwargs):
+        raise fork_lineage.ResumeUnpinned("session u last ran glm", exit_code=2)
+
+    monkeypatch.setattr(dispatch, "dispatch_spawn", _unpinned)
+    ok, reason = wake_and_deliver("uuid-full", "wake")
+    assert ok is False and reason.startswith("wake-unpinned(")
