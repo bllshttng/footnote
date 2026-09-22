@@ -13,6 +13,23 @@ if ! uv run python -c 'import sys; from fno.rust_binary import find_dev_binary; 
   exit 1
 fi
 
+# Two door tests journal through the native event store, whose client resolves
+# FNO_BIN or the checkout's own crates/fno build (store_client.py). The court
+# fixture pins PATH to a fake bin, so a PATH fno cannot answer at test time.
+fno_bin=${FNO_BIN:-}
+if [ -z "$fno_bin" ]; then
+  for profile in debug release; do
+    if [ -x "../crates/fno/target/$profile/fno" ]; then
+      fno_bin="../crates/fno/target/$profile/fno"
+      break
+    fi
+  done
+fi
+if [ -z "$fno_bin" ]; then
+  echo "test-dev-build-suites: no fno front-door build; run: cargo build --manifest-path crates/fno/Cargo.toml" >&2
+  exit 1
+fi
+
 # Select by the fixture name, so a new file that takes it joins with no edit.
 # grep exits 1 on no candidate and pytest exits 5 on an empty -m selection;
 # both fail this harness.
