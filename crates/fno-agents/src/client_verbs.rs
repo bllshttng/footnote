@@ -2479,7 +2479,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // `--print-command` returned earlier and stays pure inspection.
     if harness != "claude" || claim_uuid.is_some() {
         let gate_id = claim_uuid.as_deref().unwrap_or(session_id);
-        if let Some(code) = crate::resume_gate::gate_and_reserve(home, session_id, &name, gate_id) {
+        if let Some(code) = crate::resume_gate::gate_and_reserve(home, &name, gate_id) {
             return code;
         }
     }

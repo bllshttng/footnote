@@ -46,9 +46,7 @@ from typing import Optional
 import typer
 
 #: Ack outcomes: ``nothing``, or ``<kind>:<ref>`` naming what the turn made.
-_ACK_KINDS = ("law", "capture", "node")
-
-
+#: The kinds (law, capture, node, answer) are validated by the Rust write.
 class OperatorCaptureError(Exception):
     """A resolution or validation refusal, surfaced as a non-zero exit."""
 
@@ -150,25 +148,14 @@ def _ledger_path(session_id: str) -> Path:
 
 def ack_turn(session_id: str, turn_id: str, outcome: str, why: str) -> dict:
     """Append one ack row; the file is the receipt and the watermark at once."""
-    kind, _, ref = (outcome or "").strip().partition(":")
-    kind, ref = kind.strip(), ref.strip()
-    if kind == "nothing" and not ref:
-        outcome = "nothing"
-    elif not (kind in _ACK_KINDS and ref):
-        legal = ", ".join(f"{k}:<ref>" for k in _ACK_KINDS)
-        raise OperatorCaptureError(f"invalid --outcome {outcome!r}. Must be nothing or {legal}")
-    row = {
-        "turn_id": turn_id,
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "outcome": outcome,
-        "ref": ref or None,
-        "why": (why or "").strip() or None,
-    }
-    path = _ledger_path(session_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row) + "\n")
-    return row
+    from fno.rust_binary import call_binary_json
+
+    args = ["ack", "--session", session_id, "--turn", turn_id, "--outcome", outcome]
+    args += ["--why", why, "--capture-dir", str(_capture_dir())]
+    err, payload = call_binary_json("compaction", args)
+    if err is not None or not isinstance(payload, dict):
+        raise OperatorCaptureError(f"the ack write failed: {err or 'no JSON object'}")
+    return payload
 
 
 def _resolve_or_fail(require_transcript: bool = True) -> tuple[str, Optional[Path]]:
@@ -218,7 +205,7 @@ def cmd_ack(
     outcome: str = typer.Option(
         ...,
         "--outcome",
-        help="nothing | law:<decision-id> | capture:<fu-id> | node:<node-id>",
+        help="nothing | law:<decision-id> | capture:<fu-id> | node:<node-id> | answer:<the answer>",
     ),
     why: str = typer.Option(None, "--why", help="One-line reason, kept in the ledger."),
 ) -> None:

@@ -62,27 +62,29 @@ struct ValidateRequest {
     supersedes: Option<String>,
 }
 
+// pub(crate): question_intake builds one of these from the transport request
+// and reuses the matcher, so the ask refusal logic lives in exactly one place.
 #[derive(Deserialize)]
-struct AskRequest {
-    question: String,
+pub(crate) struct AskRequest {
+    pub(crate) question: String,
     #[serde(default)]
-    subject: Option<String>,
+    pub(crate) subject: Option<String>,
     #[serde(default)]
-    node: Option<String>,
-    laws: Vec<LawRow>,
+    pub(crate) node: Option<String>,
+    pub(crate) laws: Vec<LawRow>,
 }
 
-#[derive(Deserialize, Serialize)]
-struct LawRow {
-    decision_id: String,
+#[derive(Clone, Deserialize, Serialize)]
+pub struct LawRow {
+    pub decision_id: String,
     // Option, not String+default: Python rows carry null for a missing
     // decision body or ts, and serde's `default` covers absent keys only.
     #[serde(default)]
-    subject: Option<String>,
+    pub subject: Option<String>,
     #[serde(default)]
-    decision: Option<String>,
+    pub decision: Option<String>,
     #[serde(default)]
-    ts: Option<String>,
+    pub ts: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -109,26 +111,26 @@ struct OpenQuestion {
 }
 
 #[derive(Serialize)]
-struct ExactHit {
-    subject: String,
-    ids: Vec<String>,
+pub(crate) struct ExactHit {
+    pub(crate) subject: String,
+    pub(crate) ids: Vec<String>,
 }
 
 #[derive(Serialize)]
-struct NearbyHit {
-    decision_id: String,
-    subject: String,
-    decision: String,
-    shared: Vec<String>,
+pub(crate) struct NearbyHit {
+    pub(crate) decision_id: String,
+    pub(crate) subject: String,
+    pub(crate) decision: String,
+    pub(crate) shared: Vec<String>,
 }
 
 #[derive(Serialize)]
-struct AskAnswer {
-    ok: bool,
-    exact: Vec<ExactHit>,
-    nearby: Vec<NearbyHit>,
-    uncited: Vec<String>,
-    nearby_refusal: Option<String>,
+pub(crate) struct AskAnswer {
+    pub(crate) ok: bool,
+    pub(crate) exact: Vec<ExactHit>,
+    pub(crate) nearby: Vec<NearbyHit>,
+    pub(crate) uncited: Vec<String>,
+    pub(crate) nearby_refusal: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -249,7 +251,7 @@ fn b_ts<'a>(laws: &'a [LawRow], id: &str) -> &'a str {
         .unwrap_or("")
 }
 
-fn ask_answer(req: &AskRequest) -> AskAnswer {
+pub(crate) fn ask_answer(req: &AskRequest) -> AskAnswer {
     let exact = exact_tier(req);
     let nearby = nearby_tier(req, &exact);
     let uncited: Vec<String> = nearby

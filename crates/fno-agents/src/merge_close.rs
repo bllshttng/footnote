@@ -129,15 +129,16 @@ pub fn outcome_from_reconcile(run: Result<String, String>) -> CloseOutcome {
             .get("node_id")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("?");
-        let pr = first
-            .get("pr_number")
-            .and_then(serde_json::Value::as_u64)
-            .map_or("?".to_string(), |n| n.to_string());
+        let pr = match first.get("pr_number").and_then(serde_json::Value::as_u64) {
+            Some(0) => "-".to_string(),
+            Some(n) => format!("#{n}"),
+            None => "?".to_string(),
+        };
         let why = first
             .get("error")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("?");
-        detail.push_str(&format!("; first: {node} PR #{pr}: {why}"));
+        detail.push_str(&format!("; first: {node} PR {pr}: {why}"));
     }
     let catchup = parsed.get("sync_catchup");
     let outcome = catchup
@@ -364,6 +365,22 @@ mod tests {
         assert_eq!(
             o.detail,
             "closed=0 promise_unmet=0 failures=1; first: x-1 PR #1: gh down"
+        );
+    }
+
+    #[test]
+    fn a_reverse_map_failure_without_a_pr_reads_pr_dash_not_pr_zero() {
+        let stdout = r#"{
+  "closed": [],
+  "promise_unmet": [],
+  "failures": [{"node_id": "x-1", "pr_number": 0, "error": "reverse-map gh query failed: not a git repository", "kind": "gh", "remedy": "retry"}]
+}"#;
+        let o = outcome_from_reconcile(Ok(stdout.to_string()));
+        assert_eq!(o.acted, 0);
+        assert_eq!(o.skip_reason.as_deref(), Some("failures"));
+        assert_eq!(
+            o.detail,
+            "closed=0 promise_unmet=0 failures=1; first: x-1 PR -: reverse-map gh query failed: not a git repository"
         );
     }
 

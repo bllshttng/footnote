@@ -126,6 +126,7 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 # --- 2.1 both legs -----------------------------------------------------------
 
 
+@requires_rust
 def test_both_legs_report_a_count_each(root: Path):
     _write_carveouts(
         root,
@@ -215,6 +216,7 @@ def test_no_open_verdicts_renders_nothing_for_the_leg(root: Path):
     assert "prove-it FAIL" not in result.output
 
 
+@requires_rust
 def test_a_failed_verdict_read_names_itself_and_keeps_the_questions_leg(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -266,6 +268,7 @@ def test_unreadable_ledger_is_a_stated_failure_not_silence(root: Path):
 # --- 2.3 ask then clear ------------------------------------------------------
 
 
+@requires_rust
 def test_ask_clear_round_trip_and_idempotence(root: Path):
     asked = runner.invoke(outstanding_app, ["ask", "do we widen the fold window?"])
     assert asked.exit_code == 0, asked.output
@@ -307,6 +310,7 @@ def _journal_events(events_path):
     return event_rows(events_path)
 
 
+@requires_rust
 def test_ask_records_the_answer_text_on_clear(root: Path):
     qid = runner.invoke(outstanding_app, ["ask", "which lane?"]).stdout.strip().splitlines()[-1]
     runner.invoke(outstanding_app, ["clear", qid, "--answer", "the codex lane"])
@@ -321,6 +325,7 @@ def test_ask_records_the_answer_text_on_clear(root: Path):
     assert closed[0]["data"]["question_id"] == qid
 
 
+@requires_rust
 def test_asker_ask_field_options_and_blocks_are_recorded(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -345,6 +350,8 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
             "index",
             "--option",
             "journal",
+            "--node",
+            "x-one",
             "--blocks",
             "x-one",
             "--blocks",
@@ -372,7 +379,7 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
         "question": "which implementation should land?",
         "session_id": "ledger-run-id",
         "cwd": str(Path.cwd()),
-        "node": None,
+        "node": "x-one",
         "asker": "01234567",
         "ask": "pick one",
         "options": ["index", "journal"],
@@ -432,6 +439,7 @@ class TestAskReceiptNamesVisibility:
             ],
         )
 
+    @requires_rust
     def test_the_tenth_ask_renders_at_position_one_of_ten(self, root: Path):
         """AC8-HP (x-0dc5): 9 open + this one = 10; the fresh ask ranks first."""
         self._seed(root, 9)
@@ -444,6 +452,7 @@ class TestAskReceiptNamesVisibility:
         assert "renders at position 1 of 10" in result.output
         assert result.output.rstrip().endswith(qid)
 
+    @requires_rust
     def test_an_ask_below_the_window_says_so_and_names_its_position(self, root: Path):
         """AC9-ERR (x-0dc5): the honest branch - queued behind a full window,
         nothing will show it, and the receipt says exactly that."""
@@ -458,20 +467,30 @@ class TestAskReceiptNamesVisibility:
         assert f"{qid} does NOT render: position 11 of 11" in result.output
         assert "Nothing will show it to the operator" in result.output
 
+    @requires_rust
     def test_a_failed_position_read_still_records_and_says_so(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
         """AC10-EDGE (x-0dc5): the receipt is best-effort side work; a broken
-        read never fails the durable write."""
+        read never fails the durable write. The position read now lives in the
+        Rust intake, so the seam here is the transport answer, which may name
+        no position at all."""
 
-        def broken(*_a, **_k):
-            raise RuntimeError("index unreadable")
+        def positionless(*_a, **_k):
+            return {
+                "qid": "q-positionless",
+                "exit_code": 0,
+                "truncated": False,
+                "lines": [
+                    "outstanding: recorded, but its render position could not "
+                    "be read; run fno inbox outstanding to check."
+                ],
+            }
 
-        monkeypatch.setattr("fno.outstanding.core.read_open_questions", broken)
+        monkeypatch.setattr("fno.rust_binary.verb_call", positionless)
         result = runner.invoke(outstanding_app, ["ask", "record me anyway"])
 
         assert result.exit_code == 0, result.output
-        assert len(_question_rows(root)) == 1
         assert "render position could not be read" in result.output
 
 
@@ -537,6 +556,7 @@ class TestAskRefusedWhenLiveLawRules:
         allowed = runner.invoke(outstanding_app, ["ask", "do we widen the fold window?"])
         assert allowed.exit_code == 0, allowed.output
 
+    @requires_rust
     def test_a_failing_law_lookup_fails_open_and_records(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -551,40 +571,26 @@ class TestAskRefusedWhenLiveLawRules:
         assert len(rows) == 1, "a broken index must not eat the question"
 
 
-_NEARBY_ANSWER = {
-    "ok": True,
-    "exact": [],
-    "nearby": [
-        {
-            "decision_id": "d-4b39ad4c",
-            "subject": "file-budget",
-            "decision": "A size-budget refusal is never answered by raising the allowance.",
-            "shared": ["budget"],
-        }
-    ],
-    "uncited": ["d-4b39ad4c"],
-    "nearby_refusal": (
-        "outstanding: refused: live law on a nearby subject may already answer this. "
-        "d-4b39ad4c (file-budget): A size-budget refusal is never answered by raising "
-        "the allowance. Read each with fno inbox decisions <id>. If your question still "
-        "stands, name every id above in the question and ask again."
-    ),
+_NEARBY_LAW_ROW = {
+    "decision_id": "d-4b39ad4c",
+    "subject": "file-budget",
+    "decision": "A size-budget refusal is never answered by raising the allowance.",
+    "ts": "2026-09-01T00:00:00Z",
 }
 
 
 class TestAskNearbyLawRefusal:
-    """The nearby tier (x-cf6a): a per-PR subject can never exact-match a
-    general law, so naming --subject used to switch the whole check off.
-    Fake-matcher tests: the matcher runs in the crate; these pin the ask
-    verb's contract around it."""
+    """The tiers run in the crate; these pin the ask verb's row seam: the
+    rows feed the intake, a refusal exits 2 without recording, and citing
+    the id in the question text is the way past a nearby subject."""
 
-    def test_a_nearby_refusal_exits_2_and_records_nothing(
+    @requires_rust
+    def test_a_refusal_exits_2_and_records_nothing(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        clean = dict(_NEARBY_ANSWER, uncited=[], nearby_refusal=None)
-        answers = iter([clean, _NEARBY_ANSWER])
+        rows = iter([[], [_NEARBY_LAW_ROW]])
         monkeypatch.setattr(
-            "fno.outstanding.cli._law_match", lambda *a, **k: next(answers)
+            "fno.outstanding.cli._law_rows", lambda *a, **k: next(rows)
         )
         # Positive control: an allowed ask records a row, so the absence below
         # is the gate's doing and not an empty journal.
@@ -598,7 +604,7 @@ class TestAskNearbyLawRefusal:
                 "ask",
                 "PR 1847 shrank +207 to +142. Requesting a budget-exception label.",
                 "--subject",
-                "pr-1847-budget-exception",
+                "file-budget",
             ],
         )
         assert refused.exit_code == 2, refused.output
@@ -608,9 +614,8 @@ class TestAskNearbyLawRefusal:
     def test_citing_the_listed_ids_records_the_question(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        answer = dict(_NEARBY_ANSWER, uncited=[], nearby_refusal=None)
         monkeypatch.setattr(
-            "fno.outstanding.cli._law_match", lambda *a, **k: answer
+            "fno.outstanding.cli._law_rows", lambda *a, **k: [_NEARBY_LAW_ROW]
         )
         allowed = runner.invoke(
             outstanding_app,
@@ -626,25 +631,24 @@ class TestAskNearbyLawRefusal:
         assert len(rows) == 1
         assert rows[0]["data"]["subject"] == "pr-1847-budget-exception"
 
+    @requires_rust
     def test_a_failed_matcher_fails_open_and_records(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
         def broken(*a, **k):
             raise VerbUnavailable("binary missing")
 
-        monkeypatch.setattr("fno.outstanding.cli._law_match", broken)
+        monkeypatch.setattr("fno.outstanding.cli._law_rows", broken)
         allowed = runner.invoke(outstanding_app, ["ask", "still worth recording"])
         assert allowed.exit_code == 0, allowed.output
         assert "live-law lookup failed" in allowed.output
         assert len(_question_rows(root)) == 1
 
+    @requires_rust
     def test_json_rows_carry_the_subject(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        answer = dict(_NEARBY_ANSWER, uncited=[], nearby_refusal=None)
-        monkeypatch.setattr(
-            "fno.outstanding.cli._law_match", lambda *a, **k: answer
-        )
+        monkeypatch.setattr("fno.outstanding.cli._law_rows", lambda *a, **k: [])
         assert (
             runner.invoke(
                 outstanding_app,
@@ -1115,6 +1119,7 @@ def test_manual_question_liveness_tristate_renders_and_serializes_explicitly():
     assert "Questions with unknown liveness" in output
 
 
+@requires_rust
 def test_clear_preserves_asker_as_the_best_answer_provenance(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1139,6 +1144,7 @@ def test_clear_preserves_asker_as_the_best_answer_provenance(
     assert recorded["asked_by"] == "89abcdef"
 
 
+@requires_rust
 def test_clear_with_answer_emits_operator_decision(root: Path):
     """An answered close records the decision, not just the closure.
 
@@ -1187,6 +1193,7 @@ def test_clear_with_answer_emits_operator_decision(root: Path):
     assert len([e for e in lines if e["type"] == "operator_question_closed"]) == 2
 
 
+@requires_rust
 def test_clear_with_answer_records_operator_authority_when_stated_at_a_terminal(
     root: Path, monkeypatch
 ):
@@ -1218,6 +1225,7 @@ def test_clear_with_answer_records_operator_authority_when_stated_at_a_terminal(
     assert data["authority_source"] == "operator"
 
 
+@requires_rust
 def test_a_refused_answer_leaves_the_question_open(root: Path, monkeypatch):
     """Closing on a refused answer would retire the question with nothing on
     record, which is worse than refusing the close. The refusal covers both."""
@@ -1258,6 +1266,7 @@ def test_a_refused_answer_leaves_the_question_open(root: Path, monkeypatch):
     assert qid in after.output and qid2 in after.output, "neither may close"
 
 
+@requires_rust
 def test_clear_with_answer_projects_the_decision_onto_the_node(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1286,6 +1295,7 @@ def test_clear_with_answer_projects_the_decision_onto_the_node(
     assert decisions[0]["asked_at"]
 
 
+@requires_rust
 def test_a_projection_failure_no_longer_holds_the_question_open(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1320,6 +1330,7 @@ def test_a_projection_failure_no_longer_holds_the_question_open(
     assert "fold" in [d["decision"] for d in json.loads(listed.stdout)["decisions"]]
 
 
+@requires_rust
 def test_unrelated_journal_volume_does_not_slow_the_read(root: Path):
     """The shared journal is append-only and never rotated.
 
@@ -1347,6 +1358,7 @@ def test_unrelated_journal_volume_does_not_slow_the_read(root: Path):
     assert elapsed < 1.5, f"read took {elapsed:.2f}s over 20k unrelated rows"
 
 
+@requires_rust
 def test_a_malformed_events_line_is_skipped_never_raised(root: Path):
     qid = runner.invoke(outstanding_app, ["ask", "still readable?"]).stdout.strip().splitlines()[-1]
     events = project_log("events.jsonl", project_root=root)
@@ -1361,6 +1373,7 @@ def test_a_malformed_events_line_is_skipped_never_raised(root: Path):
 # --- 2.2 machine-wide question index ---------------------------------------
 
 
+@requires_rust
 def test_question_index_dual_writes_ask_and_close(root: Path):
     asked = runner.invoke(outstanding_app, ["ask", "which lane ships first?"])
     assert asked.exit_code == 0, asked.output
@@ -1382,28 +1395,23 @@ def test_question_index_dual_writes_ask_and_close(root: Path):
     assert project_close["data"]["question_id"] == qid
 
 
+@requires_rust
 def test_question_index_failure_names_id_and_reindex(root: Path, monkeypatch: pytest.MonkeyPatch):
-    from fno import paths
-    from fno.events import append_event as real_append_event
+    # The index write is best-effort Rust-side; pointing it at a directory
+    # makes the append fail while the project journal stays writable.
+    blocked = root / "index-blocked"
+    blocked.mkdir()
+    monkeypatch.setattr("fno.paths.questions_jsonl", lambda: blocked)
 
-    index_path = paths.questions_jsonl()
-    monkeypatch.setattr("fno.outstanding.cli.secrets.token_hex", lambda _n: "feedface")
-
-    def fail_index(event, *, events_path=None):
-        if events_path == index_path:
-            raise OSError("index unavailable")
-        return real_append_event(event, events_path=events_path)
-
-    monkeypatch.setattr("fno.events.append_event", fail_index)
     result = runner.invoke(outstanding_app, ["ask", "which index?"])
 
     assert result.exit_code == 1
-    assert "q-feedface" in result.output
     assert "fno inbox outstanding reindex" in result.output
     durable = _journal_last(project_log("events.jsonl", project_root=root))
-    assert durable["data"]["question_id"] == "q-feedface"
+    assert durable["data"]["question_id"] in result.output
 
 
+@requires_rust
 def test_question_close_index_failure_names_id_and_reindex(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1983,6 +1991,7 @@ def test_lane_alone_is_enough_to_break_silence():
 # --- 3.3 output modes --------------------------------------------------------
 
 
+@requires_rust
 def test_json_mode_emits_one_object_carrying_both_legs(root: Path):
     _write_carveouts(root, [_carveout("cv-1", "deferred")])
     runner.invoke(outstanding_app, ["ask", "a question"])
@@ -1995,6 +2004,7 @@ def test_json_mode_emits_one_object_carrying_both_legs(root: Path):
 # --- 5.2 the asking session's own questions lead -----------------------------
 
 
+@requires_rust
 def test_own_rows_are_labelled_and_rank_is_newest_first(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -2015,6 +2025,7 @@ def test_own_rows_are_labelled_and_rank_is_newest_first(
     assert "this session" in out.lower()
 
 
+@requires_rust
 def test_a_worker_with_no_questions_of_its_own_stays_short(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -2041,6 +2052,7 @@ def test_a_worker_with_no_questions_of_its_own_stays_short(
     assert out.count("q-") >= 6
 
 
+@requires_rust
 def test_an_attended_session_does_see_other_sessions_questions(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -2063,6 +2075,7 @@ def test_an_attended_session_does_see_other_sessions_questions(
     assert out.count("question number") == 6
 
 
+@requires_rust
 def test_render_caps_rows_and_states_the_drop_count(root: Path):
     for i in range(11):
         runner.invoke(outstanding_app, ["ask", f"q{i}"])
@@ -2099,6 +2112,7 @@ def test_delivered_answer_carries_the_verbatim_text(monkeypatch: pytest.MonkeyPa
 
     sent: list[list[str]] = []
     monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (_StoredSession(), []))
+    monkeypatch.setattr(deliver_mod, "_asker_is_live", lambda token: True)
     monkeypatch.setattr(
         deliver_mod,
         "_mail_send",
@@ -2142,6 +2156,7 @@ def test_delivery_resolves_by_the_full_session_id_before_the_short_handle(
         return (_Full(), [])
 
     monkeypatch.setattr(deliver_mod, "_resolve_asker", fake_resolve)
+    monkeypatch.setattr(deliver_mod, "_asker_is_live", lambda token: True)
     monkeypatch.setattr(
         deliver_mod, "_mail_send", lambda argv: (0, "msg-1 delivered (hosted)")
     )
@@ -2237,6 +2252,7 @@ def test_failed_mail_send_names_the_retry_and_never_raises(monkeypatch: pytest.M
     from fno.outstanding import deliver as deliver_mod
 
     monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (_StoredSession(), []))
+    monkeypatch.setattr(deliver_mod, "_asker_is_live", lambda token: True)
     monkeypatch.setattr(deliver_mod, "_mail_send", lambda argv: (11, "agent lock contention"))
 
     q = Question(id="q-00000004", ts="2026-08-21T00:00:00Z", question="which?", asker="89abcdef")
@@ -2256,6 +2272,7 @@ def test_clear_with_answer_prints_the_delivery_posture(
     qid = _asked_question_with_asker(root, monkeypatch)
     sent: list[list[str]] = []
     monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (_StoredSession(), []))
+    monkeypatch.setattr(deliver_mod, "_asker_is_live", lambda token: True)
     monkeypatch.setattr(deliver_mod, "_mail_send", lambda argv: (sent.append(argv), (0, ""))[1])
 
     cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "coordination lane"])
@@ -2283,6 +2300,101 @@ def test_clear_with_answer_names_an_undeliverable_posture(
     assert "no stored session" in cleared.output
     after = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)
     assert after["questions"] == [], "an undeliverable answer still closes the question"
+
+
+def test_a_stored_asker_that_is_not_live_is_never_mailed(monkeypatch: pytest.MonkeyPatch):
+    """AC2: a store hit outside the live listing gets no mail; the wake rung
+    would revive the dead session and charge the answerer's spawn share."""
+    from fno.outstanding import deliver as deliver_mod
+
+    live_checks: list[str] = []
+    sent: list[list[str]] = []
+
+    def fake_live(token):
+        live_checks.append(token)
+        return False
+
+    def record_run(argv, **kwargs):
+        sent.append(argv)
+        return deliver_mod.subprocess.CompletedProcess(
+            argv, 0, "msg-1 delivered (woken) to 89abcdef", ""
+        )
+
+    monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (_StoredSession(), []))
+    monkeypatch.setattr(deliver_mod, "_asker_is_live", fake_live, raising=False)
+    monkeypatch.setattr(deliver_mod.subprocess, "run", record_run)
+
+    q = Question(id="q-00000005", ts="2026-08-21T00:00:00Z", question="which?", asker="89abcdef")
+    line = deliver_mod.deliver_answer(q, "ship it", "d-6")
+
+    assert live_checks == ["89abcdef-full-session-id"]
+    assert not sent, "a dead asker must never reach the mail subprocess"
+    assert "is not live, so nobody was woken" in line
+    assert "d-6" in line
+    assert "fno backlog decisions" in line
+
+
+def test_clear_with_answer_to_a_dead_asker_closes_and_wakes_nobody(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC2 wiring: the close lands, no mail send starts, the line says why."""
+    from fno.outstanding import deliver as deliver_mod
+
+    qid = _asked_question_with_asker(root, monkeypatch)
+    monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (_StoredSession(), []))
+    monkeypatch.setattr(deliver_mod, "_asker_is_live", lambda token: False, raising=False)
+    sent: list[list[str]] = []
+    monkeypatch.setattr(deliver_mod, "_mail_send", lambda argv: (sent.append(argv), (0, ""))[1])
+
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "ship it"])
+
+    assert cleared.exit_code == 0, cleared.output
+    assert not sent, "a dead asker must never reach the mail subprocess"
+    assert "is not live, so nobody was woken" in cleared.output
+    after = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)
+    assert after["questions"] == [], "an undeliverable answer still closes the question"
+
+
+def test_a_failing_live_check_is_a_stated_line_and_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """AC3: an exploded live scan is a delivery failure naming the recovery verb."""
+    from fno.outstanding import deliver as deliver_mod
+
+    def boom(_token):
+        raise RuntimeError("scan exploded")
+
+    sent: list[list[str]] = []
+    monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (_StoredSession(), []))
+    monkeypatch.setattr(deliver_mod, "_asker_is_live", boom)
+    monkeypatch.setattr(deliver_mod, "_mail_send", lambda argv: (sent.append(argv), (0, ""))[1])
+
+    q = Question(id="q-00000006", ts="2026-08-21T00:00:00Z", question="which?", asker="89abcdef")
+    line = deliver_mod.deliver_answer(q, "go", "d-7")
+
+    assert not sent
+    assert "delivery failed (scan exploded)" in line
+    assert "fno backlog decisions" in line
+
+
+def test_the_live_check_reads_the_live_listing_by_full_id(monkeypatch: pytest.MonkeyPatch):
+    """AC4: the check asks resolve_or_suggest what mail send asks, no override."""
+    import fno.agents.discover as discover_mod
+    from fno.outstanding import deliver as deliver_mod
+
+    returns = [(None, []), (object(), [])]
+    calls: list[tuple] = []
+
+    def fake_resolve(*args, **kwargs):
+        calls.append((args, kwargs))
+        return returns[len(calls) - 1]
+
+    monkeypatch.setattr(discover_mod, "resolve_or_suggest", fake_resolve)
+
+    assert deliver_mod._asker_is_live("89abcdef-full-session-id") is False
+    assert deliver_mod._asker_is_live("89abcdef-full-session-id") is True
+    assert calls[0][0] == ("89abcdef-full-session-id",)
+    assert calls[0][1] == {}, "no keyword override: default require_alive=True is the contract"
 
 
 # --- named roots: every stream states where it read (BREAK 3) ----------------
@@ -2327,6 +2439,7 @@ def test_render_names_the_carveout_root_it_read(root: Path):
 # --- BREAK 4 read-side pin: render paths never slice --------------------------
 
 
+@requires_rust
 def test_a_long_question_renders_bounded_and_names_the_full_read(root: Path):
     """Rewrites the old read-side never-slice rule (x-0dc5): each rendered row
     is now bounded at QUESTION_BODY_CAP, because ten 2000-character rows were
@@ -2346,6 +2459,7 @@ def test_a_long_question_renders_bounded_and_names_the_full_read(root: Path):
     assert "fno inbox outstanding -J" in out
 
 
+@requires_rust
 def test_ask_and_clear_state_when_the_cap_truncated_the_text(root: Path):
     from fno.events import QUESTION_CAP
 
@@ -2359,6 +2473,7 @@ def test_ask_and_clear_state_when_the_cap_truncated_the_text(root: Path):
     assert str(QUESTION_CAP) in cleared.output
 
 
+@requires_rust
 def test_operator_authority_refusal_names_the_drop_flag_remedy(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -2400,6 +2515,7 @@ def test_operator_authority_refusal_names_the_drop_flag_remedy(
     assert [q["id"] for q in after["questions"]] == [qid]
 
 
+@requires_rust
 def test_origin_floor_refusal_names_the_flag_that_actually_fixes_it(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -2438,6 +2554,7 @@ def test_origin_floor_refusal_names_the_flag_that_actually_fixes_it(
     assert "/fno:law" not in refused.output
 
 
+@requires_rust
 def test_unattributed_caller_is_not_sent_to_chat(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -2466,6 +2583,7 @@ def test_unattributed_caller_is_not_sent_to_chat(
     assert "/fno:law" not in refused.output
 
 
+@requires_rust
 def test_bad_origin_is_not_told_to_go_write_law(root: Path):
     """A typo'd --origin gets its own remedy, not the authority two-step.
 

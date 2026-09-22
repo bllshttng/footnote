@@ -3730,8 +3730,17 @@ event_types:
           description: "Optional. One line naming the action that closes the question."
         options:
           type: array
-          items: { type: string }
-          description: "Optional choices when the question is a pick rather than free text."
+          items:
+            oneOf:
+              - type: string
+              - type: object
+                properties:
+                  n: { type: integer }
+                  text: { type: string }
+                  next: { type: string }
+                  pros: { type: array, items: { type: string } }
+                  cons: { type: array, items: { type: string } }
+          description: "Optional choices when the question is a pick rather than free text; the Rust intake writes objects carrying each option's next."
         blocks:
           type: array
           items: { type: string }
@@ -3739,6 +3748,9 @@ event_types:
         subject:
           type: string
           description: "Optional. The decision subject the question is about; the ask verb refuses it when live law rules that subject."
+        context:
+          type: object
+          description: "Optional. The structured context the Rust intake writes: blocked_because, options_rationale, recommendation {option, why, downside}, unknowns, reversible, cost_if_wrong, meanwhile. Keys are open; the attention projection reads each by name."
     consumers: [operator, fno-agents needs]
 
   - name: fleet_task
@@ -3844,6 +3856,30 @@ event_types:
         decision_id:
           type: string
           description: "Optional. The operator_decision id the subsequent clear records, joined by the reader."
+    consumers: [operator, fno-agents needs]
+
+  - name: user_ask_answered
+    retention: durable
+    description: "A question the user asked a session was answered: the ack (fno inbox user ack --outcome answer:<text>) records what the answer was, beside the turn that asked. The attention arm folds these rows into the questions file as closed lines, so the thread survives outside chat. Written by the Rust ack (compaction ack); the asker is the user, so no authority lane applies."
+    sources: [target, test]
+    data:
+      required: [session_id, turn_id, answer]
+      properties:
+        session_id:
+          type: string
+          description: "The session the user asked."
+        turn_id:
+          type: string
+          description: "The acked user turn."
+        excerpt:
+          type: string
+          description: "Optional. The turn's rendered excerpt from the scan cursor; empty when the cursor has rotated."
+        answer:
+          type: string
+          description: "The answer text after the answer: prefix."
+        answered_at:
+          type: string
+          description: "Optional. When the ack recorded it."
     consumers: [operator, fno-agents needs]
 
   - name: day_boundary

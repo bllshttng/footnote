@@ -4521,7 +4521,7 @@ def cmd_sent(
             elif verdict is False:
                 state = f"handed {age_minutes(m.ts) or 0}m ago, not in transcript"
             else:
-                state = "handed, transcript unreadable"
+                state = "handed, landing unknown"
         # `typed`: a PTY prompt can discard bytes, so never claim it was consumed.
         elif m.delivery == TYPED_DELIVERY:
             state = "typed (unconfirmed)"

@@ -5,10 +5,12 @@ Questions and pins reach a user away from a terminal, and the answer returns. On
 Setup is one sentence to your agent: "send my questions to my notes file". The agent writes:
 
 ```toml
-[[reach_me]]
+[[attention]]
 type = "md"
 path = "~/c3po/me/inbox/jc-todos.md"
 ```
+
+The key was named `[[reach_me]]`. That name still reads for one release, and loading it warns and names this key.
 
 `path` is the only required key. `type` defaults to `md`.
 
@@ -47,6 +49,52 @@ The eight context fields are:
 Two routing fields complete the set. `reversible` is `yes`, `costly` or `no`, and `cost_if_wrong` names the cost in one line. `meanwhile` says what the asker does while it waits: stops, or proceeds.
 
 A question missing a required field is `ready: false`. A sink with `ready_only = true` never delivers it. `fno-agents needs --items --json` prints the `missing` list so the asker can re-ask with the fields. `ready_only` defaults to false for one release. Machine writers cannot supply the fields until the Rust intake ships.
+
+## Asking with context
+
+The ten fields ride the question file you hand `--question-file`:
+
+```markdown
+---
+recommend: 1
+---
+Is a net-zero Python repair legal with no grant?
+
+## Options
+1. Yes, net zero or less needs no grant.
+    What happens next: unblocks four fixes today
+2. Stay strict.
+    What happens next: every Python fix waits on a grant
+
+## Blocked because
+the reconcile fix and the merge fix are both Python edits
+
+## Why these options
+the three readings kings have acted on
+
+## Downside
+a repair can hide a feature
+
+## Not thought through
+whether a net-zero move between files counts
+
+## Reversible
+costly
+
+## Cost if wrong
+the push allowance drops to 0
+
+## Meanwhile
+stops
+```
+
+The first line after the frontmatter is the question. Each numbered option carries a `What happens next:` clause. Run:
+
+```
+fno inbox outstanding ask --question-file q.md --node <node-id> --subject <subject> --blocks <blocked-node-id>
+```
+
+When options are present, `--node` is required: an ask is one line plus a node pointer. A question missing a context field is not delivered, and its asker is mailed once, naming the missing fields.
 
 ## The `md` sink
 
