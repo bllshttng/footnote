@@ -2324,27 +2324,19 @@ def test_a_stored_asker_that_is_not_live_is_never_mailed(monkeypatch: pytest.Mon
 def test_clear_with_answer_to_a_dead_asker_closes_and_wakes_nobody(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """AC2 wiring: the close lands, no mail subprocess starts, the line says why."""
+    """AC2 wiring: the close lands, no mail send starts, the line says why."""
     from fno.outstanding import deliver as deliver_mod
 
     qid = _asked_question_with_asker(root, monkeypatch)
     monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (_StoredSession(), []))
     monkeypatch.setattr(deliver_mod, "_asker_is_live", lambda token: False, raising=False)
     sent: list[list[str]] = []
-
-    def record_run(argv, **kwargs):
-        sent.append(argv)
-        return deliver_mod.subprocess.CompletedProcess(argv, 0, "msg-1 delivered (woken)", "")
-
-    monkeypatch.setattr(deliver_mod.subprocess, "run", record_run)
+    monkeypatch.setattr(deliver_mod, "_mail_send", lambda argv: (sent.append(argv), (0, ""))[1])
 
     cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "ship it"])
 
     assert cleared.exit_code == 0, cleared.output
-    # `clear` shells out for journal reads, so the recorder holds more than
-    # mail; what must never appear is a mail send to the dead asker.
-    mail_sends = [argv for argv in sent if argv[1:3] == ["mail", "send"]]
-    assert not mail_sends, "a dead asker must never reach the mail subprocess"
+    assert not sent, "a dead asker must never reach the mail subprocess"
     assert "is not live, so nobody was woken" in cleared.output
     after = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)
     assert after["questions"] == [], "an undeliverable answer still closes the question"
