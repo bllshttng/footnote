@@ -7,7 +7,14 @@
 //! roster still lists the session, and the row held as `stop refused` for
 //! another tick. Both witnesses answer the same question, so the first one
 //! that says gone confirms.
+//!
+//! A `stopped` word is a receipt, not a proof: claude reports the worker pid
+//! only while the process lives, so a `stopped` row that still names a pid is
+//! a survivor of the ask. It takes ONE signal, a re-read, and an honest
+//! refusal while anything live is still reported (the same shape the stop
+//! verb applies).
 
+use crate::claude_roster::ClaudeAgentRow;
 use crate::state;
 
 /// Stop a claude row's session before the row drops. The roster is the exited
@@ -54,28 +61,47 @@ pub(crate) fn stop_claude_confirmed(e: &state::RegistryEntry) -> bool {
     if !stopped {
         return false;
     }
-    stop_claude_confirmed_with(
+    let confirmed = stop_claude_confirmed_with(
         &short,
         sid,
         &|_| true, // the real stop already ran; the core must not run it twice
         &roster_lists,
-        &agents_roster_state,
+        &agents_roster_row,
         &std::thread::sleep,
         15,
-    )
+    );
+    if !confirmed {
+        // The honest refusal names the remedy that can actually retire a
+        // session whose process survives every stop ask.
+        if let Some(row) = agents_roster_row(&short) {
+            if row.state.as_deref() == Some("stopped") && row.pid.is_some() {
+                eprintln!(
+                    "gc: claude session {short} survived the stop ask and claude still \
+                     reports its pid; the row stays. The override for a session \
+                     claude's supervisor respawns is `fno agents rm`."
+                );
+            }
+        }
+    }
+    confirmed
 }
 
 /// The injectable stop-confirmation core (change 1b). The stop ran
 /// when `stop` answers true; after it, poll up to `polls` times, one second
 /// apart, and confirm on the first poll where the roster stops listing the
-/// session or the `claude agents` state reads terminal. A stop that did not
+/// session or the `claude agents` row reads terminal. A stop that did not
 /// run returns false with no poll.
+///
+/// The terminal arm reads the whole row, not just the state word: `done` and
+/// `failed` are real ends, but `stopped` needs the process to agree. A
+/// `stopped` row still naming a pid is a survivor: signal once, re-read, and
+/// confirm only when nothing live is reported afterwards.
 pub(crate) fn stop_claude_confirmed_with(
     short: &str,
     sid: Option<&str>,
     stop: &dyn Fn(&str) -> bool,
     listed: &dyn Fn(&str, Option<&str>) -> Option<bool>,
-    agents_state: &dyn Fn(&str) -> Option<String>,
+    agents_row: &dyn Fn(&str) -> Option<ClaudeAgentRow>,
     sleep: &dyn Fn(std::time::Duration),
     polls: u32,
 ) -> bool {
@@ -92,12 +118,43 @@ pub(crate) fn stop_claude_confirmed_with(
         if listed(short, sid) == Some(false) {
             return true;
         }
-        if agents_state(short)
-            .as_deref()
-            .is_some_and(crate::claude_roster::is_terminal_roster_state)
-        {
+        let Some(row) = agents_row(short) else {
+            continue;
+        };
+        let Some(state_word) = row.state.as_deref() else {
+            continue;
+        };
+        if !crate::claude_roster::is_terminal_roster_state(state_word) {
+            continue;
+        }
+        if state_word != "stopped" || row.pid.is_none() {
+            // done / failed are real ends; a stopped word with no pid named
+            // is all the evidence there is, so it stands.
             return true;
         }
+        // A `stopped` row that still names a pid: the survivor path. One
+        // signal, a re-read, and an honest refusal while a live pid is still
+        // reported (a respawn reads the same refusal as an ignored signal).
+        let pid = row.pid.unwrap();
+        if pid > 1 {
+            // SAFETY: the pid is claude's own report of this session's
+            // worker, taken while the process lives; SIGTERM to the survivor
+            // the ask left behind.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+        sleep(std::time::Duration::from_secs(2));
+        return match agents_row(short) {
+            // Off the agents list entirely: gone.
+            None => true,
+            Some(reread) => match reread.pid {
+                // claude reports the pid only while the process lives, so no
+                // pid after the signal is the death proof.
+                None => true,
+                Some(_) => false,
+            },
+        };
     }
     false
 }
@@ -105,10 +162,8 @@ pub(crate) fn stop_claude_confirmed_with(
 /// The second witness: the terminal-state reader over one live
 /// `claude agents --json --all` snapshot. A read that fails answers None -
 /// an unread witness never confirms.
-fn agents_roster_state(short: &str) -> Option<String> {
-    crate::claude_roster::read_all_agents()
-        .find(short)
-        .and_then(|row| row.state.clone())
+fn agents_roster_row(short: &str) -> Option<ClaudeAgentRow> {
+    crate::claude_roster::read_all_agents().find(short).cloned()
 }
 
 /// Whether the live roster still lists the session, by short id or session
@@ -164,6 +219,12 @@ mod tests {
         let path = dir.join("roster.json");
         std::fs::write(&path, ONE_WORKER_ROSTER).unwrap();
         path
+    }
+
+    /// An agents row fixture: state word plus the pid claude reports only
+    /// while the process lives.
+    fn row(state: &str, pid: Option<u32>) -> Option<ClaudeAgentRow> {
+        Some(ClaudeAgentRow::new("ee99ff00", Some(state)).with_pid(pid))
     }
 
     #[test]
@@ -243,7 +304,7 @@ mod tests {
             None,
             &stop,
             &listed,
-            &|_| Some("working".into()),
+            &|_| row("working", None),
             &|_| {},
             3,
         );
@@ -266,26 +327,95 @@ mod tests {
             }
             Some(true)
         };
-        let confirmed =
-            stop_claude_confirmed_with("ee99ff00", None, &stop, &listed, &|_| None, &|_| {}, 5);
+        let confirmed = stop_claude_confirmed_with(
+            "ee99ff00",
+            None,
+            &stop,
+            &listed,
+            &|_| row("working", None),
+            &|_| {},
+            5,
+        );
         assert!(!confirmed);
         assert_eq!(polls.get(), 0, "no poll after a failed stop");
     }
 
     /// AC2-EDGE: the roster still lists the session but `claude agents`
-    /// already reads a terminal state - confirmed on that state.
+    /// reads a real end - confirmed on that state.
     #[test]
-    fn a_terminal_agents_state_confirms_without_a_roster_drop() {
+    fn a_done_or_failed_witness_confirms_without_a_roster_drop() {
+        for state in ["done", "failed"] {
+            let confirmed = stop_claude_confirmed_with(
+                "ee99ff00",
+                None,
+                &|_| true,
+                &|_, _| Some(true),
+                &|_| row(state, None),
+                &|_| {},
+                15,
+            );
+            assert!(confirmed, "{state} is a real end");
+        }
+    }
+
+    /// A `stopped` word with no pid named is all the evidence there is; it
+    /// stands without a process proof.
+    #[test]
+    fn a_stopped_word_without_a_pid_still_confirms() {
         let confirmed = stop_claude_confirmed_with(
             "ee99ff00",
             None,
             &|_| true,
             &|_, _| Some(true),
-            &|_| Some("stopped".into()),
+            &|_| row("stopped", None),
             &|_| {},
             15,
         );
-        assert!(confirmed, "the terminal state is the confirmation");
+        assert!(confirmed, "no pid named: the word is the evidence");
+    }
+
+    /// The survivor path: a `stopped` row still naming a pid takes ONE
+    /// signal, and when the re-read stops reporting the pid the end is
+    /// confirmed. The fixture pid is a real, unused pid number, so the test
+    /// signals nothing that exists.
+    #[test]
+    fn a_surviving_pid_signals_once_and_confirms_when_it_dies() {
+        let reads = std::cell::Cell::new(0u32);
+        let confirmed = stop_claude_confirmed_with(
+            "ee99ff00",
+            None,
+            &|_| true,
+            &|_, _| Some(true),
+            &|_| {
+                let n = reads.get();
+                reads.set(n + 1);
+                if n == 0 {
+                    row("stopped", Some(999_999_999))
+                } else {
+                    row("stopped", None)
+                }
+            },
+            &|_| {},
+            15,
+        );
+        assert!(confirmed, "the re-read without a pid is the proof");
+        assert_eq!(reads.get(), 2, "one signal, one re-read");
+    }
+
+    /// The refusal: a survivor still reported after the signal holds the
+    /// row, honestly.
+    #[test]
+    fn a_pid_still_reported_after_the_signal_refuses() {
+        let confirmed = stop_claude_confirmed_with(
+            "ee99ff00",
+            None,
+            &|_| true,
+            &|_, _| Some(true),
+            &|_| row("stopped", Some(999_999_999)),
+            &|_| {},
+            15,
+        );
+        assert!(!confirmed, "a respawn reads as an ignored signal");
     }
 
     /// The early return stands: a session the roster already stopped
