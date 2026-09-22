@@ -176,6 +176,18 @@ impl SubmitIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    /// A unique scratch dir per call: parallel tests share one process pid,
+    /// and one shared dir would let a rebuild race another test's load.
+    fn test_dir(tag: &str) -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "fno-witness-test-{}-{}-{tag}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
+    }
 
     fn write_journal(path: &Path, rows: &[serde_json::Value]) {
         if let Some(parent) = path.parent() {
@@ -192,7 +204,7 @@ mod tests {
     fn submit_row(session: Option<&str>, submit_ms: i64) -> serde_json::Value {
         serde_json::json!({
             "ts": "2026-09-21T18:00:00Z",
-            "type": "junk",
+            "type": "operator_submit",
             "source": "daemon",
             "data": {
                 "mux_session": "main",
@@ -207,7 +219,7 @@ mod tests {
 
     #[test]
     fn load_keeps_only_ok_rows_with_a_session() {
-        let dir = std::env::temp_dir().join(format!("fno-witness-test-{}", std::process::id()));
+        let dir = test_dir("load");
         let _ = std::fs::remove_dir_all(&dir);
         let journal = dir.join("events.jsonl");
         write_journal(
@@ -230,7 +242,7 @@ mod tests {
 
     #[test]
     fn bind_consumes_one_submit_per_turn_inside_the_window() {
-        let dir = std::env::temp_dir().join(format!("fno-witness-test-{}", std::process::id()));
+        let dir = test_dir("bind");
         let _ = std::fs::remove_dir_all(&dir);
         let journal = dir.join("events.jsonl");
         write_journal(&journal, &[submit_row(Some("s1"), 1_000)]);
@@ -241,7 +253,7 @@ mod tests {
 
     #[test]
     fn bind_refuses_a_submit_outside_the_window() {
-        let dir = std::env::temp_dir().join(format!("fno-witness-test-{}", std::process::id()));
+        let dir = test_dir("refuse");
         let journal = dir.join("events.jsonl");
         write_journal(&journal, &[submit_row(Some("s1"), 1_000)]);
         let mut index = SubmitIndex::load(&journal);

@@ -915,12 +915,13 @@ mod tests {
             classify_turn(&row, &bus, "cccc-dddd"),
             Provenance::Relay(RelayKind::BusRow)
         );
-        // Same body, different recipient: the operator typed it themselves.
-        assert_eq!(classify_turn(&row, &bus, "eeee-ffff"), Provenance::Operator);
-        // No bus at all: today's residual, counted as operator.
+        // Same body, different recipient: unshaped, so unknown until the
+        // witness join binds a submit to it.
+        assert_eq!(classify_turn(&row, &bus, "eeee-ffff"), Provenance::Unknown);
+        // No bus at all: unshaped reads unknown, never operator.
         assert_eq!(
             classify_turn(&row, &BusIndex { rows: Vec::new() }, "cccc-dddd"),
-            Provenance::Operator
+            Provenance::Unknown
         );
     }
 
@@ -947,7 +948,7 @@ mod tests {
                 .entry(classify_turn(row, &bus, "s").label().to_string())
                 .or_insert(0) += 1;
         }
-        assert_eq!(counters.get("operator"), Some(&3));
+        assert_eq!(counters.get("unknown"), Some(&3));
         assert_eq!(counters.get("relay_fno_mail"), Some(&1));
         assert_eq!(counters.get("relay_teammate_message"), Some(&1));
         assert_eq!(counters.get("keepalive"), Some(&1));

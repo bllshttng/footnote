@@ -1144,7 +1144,14 @@ mod tests {
     /// set_var here would leak into unrelated tests (the heal suite's
     /// hermetic fence panics on a foreign CODEX_HOME).
     fn fold_fixture() -> (Fixture, Vec<SessionRow>) {
-        let fx = build_fixture("folded");
+        // A unique tag per call: parallel tests share the process, and one
+        // shared fixture dir would let a rebuild race another test's fold.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tag = format!(
+            "folded-{}",
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let fx = build_fixture(&tag);
         let bus = BusIndex::load(&fx.dir.join("bus").join("messages.jsonl"));
         let mut ctx = FoldCtx {
             bus,
