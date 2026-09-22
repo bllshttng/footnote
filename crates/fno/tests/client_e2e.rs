@@ -185,10 +185,10 @@ fn launcher_one_esc_closes_the_dock() {
         "client input never became ready\n{}",
         h.diagnostics()
     );
-    // prefix+i opens the composer. The dock-open marker is the Launch chip:
-    // spelled `[Launch]` today and `Launch` after the x-5026 restyle, and
-    // ellipsized (`[Lau…`) on a 27-column panel, so match any of those.
-    let dock_open = |s: &str| s.contains("[Lau") || s.contains("Launch");
+    // prefix+i opens the composer. The dock-open marker is its footer:
+    // `tab: next field` exists only while the dock is painted, and the chip
+    // row's own labels ellipsize (`La…`) on the 27-column panel.
+    let dock_open = |s: &str| s.contains("tab: next field");
     h.type_bytes(b"\x02i");
     h.wait_screen(15, |s| dock_open(s));
     let before = h.screen();
@@ -196,6 +196,19 @@ fn launcher_one_esc_closes_the_dock() {
     // (the after render; the before render is the recorded main failure).
     if std::env::var("R1_DUMP").is_ok() {
         eprintln!("--- x-5026 dock render (open, after) ---\n{before}");
+        // Change 7's render: the harness picker, open on the first field
+        // (dock focus starts at Harness), filtered to `co`. The catalog's
+        // inventory read is bounded at 5s; let it settle so the picker lists
+        // real rows instead of the `reading...` placeholder. Esc then closes
+        // ONLY the picker, so the lone-Esc proof below stays one Esc.
+        std::thread::sleep(Duration::from_secs(6));
+        h.type_bytes(&[0x0d]); // enter: open the picker on Harness
+        std::thread::sleep(Duration::from_millis(500));
+        h.type_bytes(b"co");
+        std::thread::sleep(Duration::from_millis(500));
+        eprintln!("--- x-5026 picker render (filter: co) ---\n{}", h.screen());
+        h.type_bytes(&[0x1b]); // close the picker, dock stays
+        std::thread::sleep(Duration::from_millis(500));
     }
     // Exactly one Esc byte, then silence.
     h.type_bytes(&[0x1b]);

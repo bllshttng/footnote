@@ -44,8 +44,11 @@ echo "not json at all"
 
 fn attach_and_launch(scratch: &Scratch, sock: &PathBuf) -> FakeClient {
     let mut client = FakeClient::attach(sock, 24, 80, &scratch.home_cwd());
-    // Let the attach settle so the launch reply is attributable.
-    client.wait(5, "attach layout", |c| c.layout.as_ref().map(|_| ()));
+    // Let the attach settle so the launch reply is attributable. The same
+    // 15s budget as every other wait here: the server boots while a dozen
+    // other worktrees' cargo runs hold the machine, and a 5s budget read as
+    // a product failure under exactly that load.
+    client.wait(15, "attach layout", |c| c.layout.as_ref().map(|_| ()));
     client
 }
 
@@ -293,7 +296,9 @@ fn launcher_journey_refusal_and_unknown_are_named() {
     let sock2 = scratch.0.join("ambiguous.sock");
     let _server2 = spawn_server(&sock2, &[("FNO_BIN", door2.to_string_lossy().as_ref())]);
     let mut client2 = FakeClient::attach(&sock2, 24, 80, &scratch.home_cwd());
-    client2.wait(5, "attach layout", |c| c.layout.as_ref().map(|_| ()));
+    // Same load budget as attach_and_launch: a second server booting on a
+    // busy machine starved 5s once already.
+    client2.wait(15, "attach layout", |c| c.layout.as_ref().map(|_| ()));
     send_launch(&mut client2, &scratch, 1, "hi");
     wait_terminal(&mut client2, "launch terminal state (expected Unknown)");
     match &client2.launch_updates.last().unwrap().state {

@@ -1103,9 +1103,24 @@ fn typing_in_an_open_picker_filters_the_rows() {
         picker.popup.rows.first(),
         Some(crate::popup::PopupRow::Header(h)) if h.contains("cod")
     ));
-    // Backspace once: `co` still filters; clearing fully restores.
+    // Backspace once: the query `co` still narrows to codex.
     rt.block_on(async {
         let _ = super::agent_launcher::launcher_keys(&mut v, &[0x7f], &mut sock).await;
+    });
+    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
+    let still: Vec<&str> = picker
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Entry { label, .. } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(still, vec!["codex"], "`co` still filters: {still:?}");
+    // Clearing the query fully restores every row.
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, &[0x7f, 0x7f], &mut sock).await;
     });
     let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
     let labels: Vec<&str> = picker
@@ -1131,8 +1146,21 @@ fn at_opens_the_node_picker_and_picking_inserts_the_id() {
     if let Some(l) = v.launcher.as_mut() {
         l.focus = Focus::Message;
     }
+    // One backlog card for the picker to list (the fixture ships none).
+    v.layout.backlog = vec![BacklogCard {
+        id: "x-6233".into(),
+        slug: "a-node".into(),
+        priority: "p1".into(),
+        state: CardState::Ready,
+        pane_id: None,
+        attach_id: None,
+        where_hint: None,
+        project: None,
+        lane: None,
+        plan_path: None,
+        head: false,
+    }];
     type_message(&mut v, "plan ");
-    // The layout fixture's backlog: whatever cards two_pane_view carries.
     let sock: Vec<u8> = Vec::new();
     let mut sock = sock;
     let rt = tokio::runtime::Runtime::new().unwrap();
