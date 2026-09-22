@@ -1786,17 +1786,24 @@ async fn round_trip(
 
 /// Whether `thread_id`'s registry row records a full-access posture. A `None`
 /// home (tests, stray callers), an unreadable registry, and a row miss all
-/// read `false`, so every miss keeps today's probe frame.
-fn recorded_posture_is_full_access(thread_id: &str) -> bool {
-    let Some(home) = crate::paths::AgentsHome::from_env_opt() else {
-        return false;
-    };
-    let Ok(registry) = crate::state::load_registry(&home.registry_json()) else {
-        return false;
-    };
-    registry
-        .find_name_or_full_session_id(thread_id)
-        .is_some_and(crate::codex_posture::entry_posture_is_full_access)
+/// read `false`, so every miss keeps today's probe frame. The read is
+/// offloaded: `load_registry` takes the registry flock, and a blocking wait
+/// does not belong on the async delivery path.
+async fn recorded_posture_is_full_access(thread_id: &str) -> bool {
+    let thread_id = thread_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let Some(home) = crate::paths::AgentsHome::from_env_opt() else {
+            return false;
+        };
+        let Ok(registry) = crate::state::load_registry(&home.registry_json()) else {
+            return false;
+        };
+        registry
+            .find_name_or_full_session_id(&thread_id)
+            .is_some_and(crate::codex_posture::entry_posture_is_full_access)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// The connect + initialize handshake + the posture read + `turn/start`.
@@ -1812,7 +1819,7 @@ fn recorded_posture_is_full_access(thread_id: &str) -> bool {
 /// the turn carries `{"type":"dangerFullAccess"}` and the probe is skipped,
 /// so an out-of-band narrowing is healed by the next delivered turn.
 async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
-    let reassert = recorded_posture_is_full_access(thread_id);
+    let reassert = recorded_posture_is_full_access(thread_id).await;
     let (mut sink, mut stream) = connect_app_server(sock)
         .await
         .map_err(ReviewStartError::Reason)?;
