@@ -237,7 +237,12 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
     verdict_map = verdicts(
         (idn, reg_nodes.get(idn)) for idn in registry_ids
     )
-    rss = _tree_rss([w.session_pid or w.pid for w in workers])
+    roots: list[int] = []
+    for worker in workers:
+        pid = worker.session_pid or worker.pid
+        if pid is not None:
+            roots.append(pid)
+    rss = _tree_rss(roots)
     rows = []
     for w in workers:
         # A foreign claude row (no registry entry) still gets age and reach;
@@ -250,6 +255,7 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
         handle = handles.get(w.session_id or "")
         reg_name = handle or w.name
         v = verdict_map.get(reg_name)
+        pid = w.session_pid or w.pid
         rows.append(
             {
                 "source": w.source,
@@ -263,8 +269,8 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 "king": (w.spawned_by or "")[:8] or None,
                 # The process that IS the session (W2): a bg row's
                 # recorded pid names the PTY HOST, not the worker.
-                "pid": w.session_pid or w.pid,
-                "rss_mb": rss.get(w.session_pid or w.pid),
+                "pid": pid,
+                "rss_mb": rss.get(pid) if pid is not None else None,
                 # (AC7) Served activity from the one truth read the
                 # progress axis uses; the stored token rides `stored_status`.
                 "status": activity,
