@@ -156,9 +156,7 @@ fn rust_headless_slot_claim_stamps_holder_pid_and_provenance() {
     )
     .unwrap();
 
-    let claim_path = root
-        .join(".fno/claims")
-        .join(format!("{}.lock", claims::encode_key("worker:stamp-check")));
+    let claim_path = claims::claim_path("worker:stamp-check", Some(&root)).unwrap();
     let raw = std::fs::read_to_string(claim_path).unwrap();
     let record: claims::ClaimRecord = serde_yaml_ng::from_str(&raw).unwrap();
     assert_eq!(record.pid, Some(holder_pid as i32), "{record:?}");
@@ -266,11 +264,10 @@ fn corrupted_slot_claim_is_skipped_and_warned() {
     let dir = std::env::temp_dir().join(format!("fno-gate-corrupt-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let root = dir.join("claims-root");
-    std::fs::create_dir_all(root.join(".fno/claims")).unwrap();
+    let claims_dir = claims::claims_dir_for(Some(&root)).unwrap();
+    std::fs::create_dir_all(&claims_dir).unwrap();
     std::env::set_var("FNO_CLAIMS_ROOT", &root);
-    let claim_path = root
-        .join(".fno/claims")
-        .join(format!("{}.lock", claims::encode_key("worker:broken")));
+    let claim_path = claims_dir.join(format!("{}.lock", claims::encode_key("worker:broken")));
     std::fs::write(&claim_path, "{ not yaml").unwrap();
 
     let mut warnings = Vec::new();
