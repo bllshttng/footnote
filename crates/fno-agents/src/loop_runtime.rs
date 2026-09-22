@@ -45,8 +45,6 @@ use crate::interrupt_classify::{
 use crate::loopcheck::TerminationReason;
 use chrono::Utc;
 use serde_json::{json, Value};
-use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -517,15 +515,14 @@ impl Journal {
     /// Returns `None` if not found in either journal or on read errors (fail
     /// tolerant: unreadable journal = no pre-existing termination).
     ///
-    /// Uses `BufReader` + `.lines()` to stream files rather than loading them
-    /// entirely; the journal rotates at 8 MB but can grow to that before
-    /// rotation, so streaming avoids a large allocation on hot paths.
+    /// Each journal reads through the store-aware `journal_text`: the
+    /// committed rows plus the unseen live lines, in commit order.
     ///
     /// Unknown reason strings are treated as no-match (warn to stderr).
-    /// Unreadable lines (I/O errors from `.lines()`) are skipped silently.
+    /// Unreadable lines are skipped silently.
     pub fn find_termination(&self, session_key: &str) -> Result<Option<Evidence>, LoopError> {
         // Scan project journal first.
-        if let Some(ev) = Self::scan_journal_with_rotation(&self.project_path, session_key) {
+        if let Some(ev) = Self::scan_journal(&self.project_path, session_key) {
             return Ok(Some(ev));
         }
 
@@ -534,7 +531,7 @@ impl Journal {
         // megawalk case where worker termination events land in a different
         // worktree's journal but are mirrored to the global file.
         if self.project_path != self.global_path {
-            if let Some(ev) = Self::scan_journal_with_rotation(&self.global_path, session_key) {
+            if let Some(ev) = Self::scan_journal(&self.global_path, session_key) {
                 return Ok(Some(ev));
             }
         }
@@ -545,9 +542,8 @@ impl Journal {
     /// Strict termination lookup for accounting decisions.
     ///
     /// Unlike `find_termination`, an unreadable existing journal or matching
-    /// corrupt termination is an error, not evidence of absence. Missing files
-    /// remain a clean no-match. The retained `.1` generation is searched after
-    /// the active file so completed sessions survive rotation.
+    /// corrupt termination is an error, not evidence of absence. A journal
+    /// with neither a live file nor a store remains a clean no-match.
     pub fn find_termination_strict(
         &self,
         session_key: &str,
@@ -558,14 +554,19 @@ impl Journal {
             paths.push(self.global_path.clone());
         }
         for path in paths {
-            for candidate in [path.clone(), rotated_journal_path(&path)] {
-                match Self::scan_journal_strict(&candidate, session_key) {
-                    Ok(Some(ev)) => return Ok(Some(ev)),
-                    Ok(None) => {}
-                    Err(err) => {
-                        if first_error.is_none() {
-                            first_error = Some(err);
-                        }
+            let text = crate::event_store::journal_text_checked(
+                &path,
+                &crate::event_store::EventQuery::of_types(&["termination"]),
+            )
+            .map_err(|err| {
+                LoopError::Journal(format!("could not read journal {}: {err}", path.display()))
+            })?;
+            match last_termination(&text, &path, session_key, true) {
+                Ok(Some(ev)) => return Ok(Some(ev)),
+                Ok(None) => {}
+                Err(err) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
                     }
                 }
             }
@@ -576,136 +577,81 @@ impl Journal {
         }
     }
 
-    fn scan_journal_with_rotation(path: &Path, session_key: &str) -> Option<Evidence> {
-        Self::scan_journal(path, session_key)
-            .or_else(|| Self::scan_journal(&rotated_journal_path(path), session_key))
-    }
-
-    fn scan_journal_strict(path: &Path, session_key: &str) -> Result<Option<Evidence>, LoopError> {
-        let file = match fs::File::open(path) {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => {
-                return Err(LoopError::Journal(format!(
-                    "could not read journal {}: {err}",
-                    path.display()
-                )))
-            }
-        };
-        let mut last_match = None;
-        for line_result in BufReader::new(file).lines() {
-            let raw = line_result.map_err(|err| {
-                LoopError::Journal(format!("read journal {}: {err}", path.display()))
-            })?;
-            let line = raw.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let value: Value = match serde_json::from_str(line) {
-                Ok(value) => value,
-                Err(_) => continue,
-            };
-            if value["type"].as_str() != Some("termination")
-                || value["data"]["session_id"].as_str() != Some(session_key)
-            {
-                continue;
-            }
-            let reason_raw = value["data"]["reason"].as_str().ok_or_else(|| {
-                LoopError::Journal(format!(
-                    "termination event for {session_key} in {} has no reason",
-                    path.display()
-                ))
-            })?;
-            let reason = parse_termination_reason(reason_raw).ok_or_else(|| {
-                LoopError::Journal(format!(
-                    "termination event for {session_key} in {} has unknown reason {reason_raw}",
-                    path.display()
-                ))
-            })?;
-            let message = value["data"]["message"].as_str().unwrap_or("").to_string();
-            last_match = Some(Evidence { reason, message });
-        }
-        Ok(last_match)
-    }
-
-    /// Scan a single journal file for the LAST termination event matching
-    /// `session_key`.  Returns `None` on missing file, read errors, or no
-    /// matching event (all fail-tolerant).
+    /// Scan a single journal for the LAST termination event matching
+    /// `session_key`. Returns `None` on no matching event and on read errors
+    /// (fail-tolerant: the reader falls back to the live file).
     fn scan_journal(path: &Path, session_key: &str) -> Option<Evidence> {
-        if !path.exists() {
-            return None;
-        }
-
-        let file = match fs::File::open(path) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!(
-                    "loop-runtime: could not read journal {}: {e}",
-                    path.display()
-                );
-                return None;
-            }
-        };
-
-        let mut last_match: Option<Evidence> = None;
-
-        for line_result in BufReader::new(file).lines() {
-            // Unreadable line (I/O error mid-file) -> skip silently.
-            let raw = match line_result {
-                Ok(l) => l,
-                Err(_) => continue,
-            };
-            let line = raw.trim();
-            if line.is_empty() {
-                continue;
-            }
-            // Skip unparseable lines silently.
-            let v: Value = match serde_json::from_str(line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            // Match type == "termination" && data.session_id == session_key.
-            if v["type"].as_str() != Some("termination") {
-                continue;
-            }
-            if v["data"]["session_id"].as_str() != Some(session_key) {
-                continue;
-            }
-
-            let reason_str = match v["data"]["reason"].as_str() {
-                Some(s) => s,
-                None => {
-                    // F1: missing reason field is authoritative-record corruption; warn loudly.
-                    eprintln!(
-                        "loop-runtime: termination event for {session_key} missing 'reason' field, skipping"
-                    );
-                    continue;
-                }
-            };
-            let reason = match parse_termination_reason(reason_str) {
-                Some(r) => r,
-                None => {
-                    // Unknown reason: warn and skip (fail tolerant).
-                    eprintln!(
-                        "loop-runtime: unknown TerminationReason '{reason_str}' in journal, skipping"
-                    );
-                    continue;
-                }
-            };
-            let message = v["data"]["message"].as_str().unwrap_or("").to_string();
-
-            last_match = Some(Evidence { reason, message });
-        }
-
-        last_match
+        let text = crate::event_store::journal_text(path, &["termination"]);
+        last_termination(&text, path, session_key, false).unwrap_or(None)
     }
 }
 
-fn rotated_journal_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(".1");
-    PathBuf::from(name)
+/// The last termination for `session_key` in one journal's text. Strict: a
+/// matching row with no reason or an unknown reason is an error naming
+/// `path`; tolerant: warn on stderr and skip it (today's messages).
+fn last_termination(
+    text: &str,
+    path: &Path,
+    session_key: &str,
+    strict: bool,
+) -> Result<Option<Evidence>, LoopError> {
+    let mut last_match: Option<Evidence> = None;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Skip unparseable lines silently.
+        let v: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        // Match type == "termination" && data.session_id == session_key.
+        if v["type"].as_str() != Some("termination")
+            || v["data"]["session_id"].as_str() != Some(session_key)
+        {
+            continue;
+        }
+
+        let reason_str = match v["data"]["reason"].as_str() {
+            Some(s) => s,
+            None => {
+                if strict {
+                    return Err(LoopError::Journal(format!(
+                        "termination event for {session_key} in {} has no reason",
+                        path.display()
+                    )));
+                }
+                // F1: missing reason field is authoritative-record corruption; warn loudly.
+                eprintln!(
+                    "loop-runtime: termination event for {session_key} missing 'reason' field, skipping"
+                );
+                continue;
+            }
+        };
+        let reason = match parse_termination_reason(reason_str) {
+            Some(r) => r,
+            None => {
+                if strict {
+                    return Err(LoopError::Journal(format!(
+                        "termination event for {session_key} in {} has unknown reason {reason_str}",
+                        path.display()
+                    )));
+                }
+                // Unknown reason: warn and skip (fail tolerant).
+                eprintln!(
+                    "loop-runtime: unknown TerminationReason '{reason_str}' in journal, skipping"
+                );
+                continue;
+            }
+        };
+        let message = v["data"]["message"].as_str().unwrap_or("").to_string();
+
+        last_match = Some(Evidence { reason, message });
+    }
+
+    Ok(last_match)
 }
 
 /// Parse a reason string into TerminationReason. Returns None for unknown values.
