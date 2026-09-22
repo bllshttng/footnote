@@ -1446,9 +1446,13 @@ pub(crate) fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         // store's constant), never a re-typed copy.
         "canonical_field_order" => Ok(json!({ "fields": graph_store::CANONICAL_FIELD_ORDER })),
         // The one delivery classifier (scoreboard.rs): graph nodes + ledger
-        // rows in, a per-node delivery classification out. Pure; the
-        // scoreboard views are the callers, so seven views read one decision.
+        // rows in, a per-node delivery classification out.
         "scoreboard_classify" => crate::scoreboard::classify(&params).map_err(StoreError::Invalid),
+        // The lifecycle verb decision (backlog_ready::serve_effective_verb):
+        // one answer per shipped row; a refusal rides its own row.
+        "effective_verb" => {
+            crate::backlog_ready::serve_effective_verb(&params).map_err(StoreError::Invalid)
+        }
         // One named op applied over client-shipped rows, no file I/O and no
         // publish: `set_related`, `plan_path_owner_conflict`, and friends
         // run INSIDE a client mutator on an in-hand snapshot, where a full

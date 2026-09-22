@@ -1710,7 +1710,7 @@ def test_ready_target_node_keeps_the_zai_lane_and_refuses_an_opus_row(
     import fno.agents.retask as retask
 
     plan = tmp_path / "plan.md"
-    plan.write_text("---\nstatus: ready\n---\n")
+    plan.write_text("---\nstatus: ready\nkind: quick-plan\n---\n")
     monkeypatch.setattr(
         "fno.graph.load.load_graph",
         lambda: [{

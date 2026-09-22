@@ -17,7 +17,7 @@
 //! never the process cwd, and answers UNREADABLE - which fails open - when
 //! there is no anchor; staleness degrades to 21 days on any config problem.
 
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -346,6 +346,136 @@ pub fn plan_rung(entry: &Value) -> &'static str {
     crate::graph_store::plan_rung_from_status(&s)
 }
 
+// ---------------------------------------------------------------------------
+// The lifecycle verb decision (harness_map.resolve_effective_verb, ported)
+// ---------------------------------------------------------------------------
+
+/// The frontmatter kinds a build rung may advance on, read across both
+/// `kind` and `type` (migrated plans spell `type: quick-plan`).
+const BLUEPRINT_DOC_KINDS: &[&str] = &["quick-plan", "plan", "implementation-plan", "blueprint"];
+/// A declared non-blueprint kind is a hard no above every body marker.
+const NON_BLUEPRINT_DOC_KINDS: &[&str] = &["research", "findings", "think", "stub"];
+
+/// Whether the linked doc is a blueprint: an executable plan
+/// (`ladder.is_blueprint_doc`, ported). Never panics; every unanswerable
+/// shape (no probe, unreadable probe, missing file, unreadable frontmatter)
+/// is false. Deliberately does NOT read `status`: the rung stays
+/// [`plan_rung`]'s answer, and the rung-authority CI guards that read.
+pub fn is_blueprint_doc(entry: &Value) -> bool {
+    if !is_dict(entry) {
+        return false;
+    }
+    let Some(probe) = resolve_plan_probe(entry) else {
+        return false;
+    };
+    let Some(fm) = read_frontmatter(&probe) else {
+        return false;
+    };
+    for key in ["kind", "type"] {
+        let Some(raw) = fm.get(key) else {
+            continue;
+        };
+        let kind = yaml_scalar_string(raw).trim().to_lowercase();
+        if NON_BLUEPRINT_DOC_KINDS.contains(&kind.as_str()) {
+            return false;
+        }
+        if BLUEPRINT_DOC_KINDS.contains(&kind.as_str()) {
+            return true;
+        }
+    }
+    // No declared kind on either key: the body marker decides.
+    match std::fs::read_to_string(&probe) {
+        Ok(text) => text
+            .lines()
+            .any(|line| line.trim() == "## Execution Strategy"),
+        Err(_) => false,
+    }
+}
+
+/// The ported lifecycle table (`harness_map.resolve_effective_verb`):
+/// `(verb, note)` per node row, or a refusal string. Order: refusals fire
+/// BEFORE the declared verb; a declared target-family verb WINS and is
+/// returned as declared (d-834b6ff1); an out-of-family verb abstains
+/// (`None`) to declared precedence, so the command still routes through the
+/// allowlist-checked `verb` rung. The word "reconciled" never appears.
+pub fn effective_verb(entry: &Value) -> Result<(Option<String>, String), String> {
+    let node_id = get_str(entry, "id").unwrap_or("unknown");
+    let raw = get_str(entry, "dispatch_verb")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let canonical = |tok: &str| match crate::provider::parse_verb_token(tok) {
+        Some((verb, _namespaced)) => format!("/{verb}"),
+        None => tok.to_string(),
+    };
+    let declared = raw.as_deref().map(canonical);
+    if let Some(declared) = &declared {
+        if declared != "/target" && declared != "/blueprint" {
+            return Ok((
+                None,
+                format!("verb=lifecycle(out-of-family {declared}; declared precedence holds)"),
+            ));
+        }
+    }
+    let refusal = |rung: &str, difficulty: &str| {
+        format!(
+            "dispatch verb cannot be derived for node {node_id}: plan rung \
+             {rung:?} with difficulty {difficulty:?} answers no lifecycle rung"
+        )
+    };
+    let rung = plan_rung(entry);
+    let difficulty = get_str(entry, "difficulty")
+        .map(|d| d.trim().to_lowercase())
+        .unwrap_or_default();
+    let answer = match rung {
+        "none" => match difficulty.as_str() {
+            "low" => ("/target", format!("intake difficulty=low")),
+            "medium" => ("/blueprint", format!("intake difficulty=medium")),
+            "high" => ("/blueprint", format!("intake difficulty=high")),
+            _ => return Err(refusal(rung, &difficulty)),
+        },
+        "idea" | "design" => ("/blueprint", format!("plan {rung}")),
+        "ready" | "in_progress" | "in_review" => {
+            if is_blueprint_doc(entry) {
+                ("/target", format!("plan {rung}"))
+            } else {
+                ("/blueprint", format!("plan {rung} not a blueprint"))
+            }
+        }
+        _ => return Err(refusal(rung, &difficulty)),
+    };
+    if let Some(declared) = &declared {
+        if declared != answer.0 {
+            return Ok((
+                Some(declared.clone()),
+                format!(
+                    "verb=declared({declared}; lifecycle answers {}: {})",
+                    answer.0, answer.1
+                ),
+            ));
+        }
+    }
+    Ok((
+        Some(answer.0.to_string()),
+        format!("verb=lifecycle({} -> {})", answer.1, answer.0),
+    ))
+}
+
+/// The keeper's `effective_verb` body: one row in, its ported lifecycle
+/// verb decision out (`{"verb", "note"}`), the refusal as the error so the
+/// Python client raises without an unwrapping layer. Pure over the shipped
+/// row and its linked plan doc. Kept beside the table so the decision and
+/// its serving live in one file.
+pub(crate) fn serve_effective_verb(params: &Value) -> Result<Value, String> {
+    let entry = params
+        .get("entries")
+        .and_then(Value::as_array)
+        .and_then(|entries| entries.first())
+        .ok_or_else(|| "effective_verb needs entries[0]".to_string())?;
+    let (verb, note) = effective_verb(entry)?;
+    Ok(json!({ "verb": verb, "note": note }))
+}
+
 /// A plan-less idea the autonomous drain may dispatch without a plan
 /// (`ladder.is_cold_dispatchable`): `status == "idea"` AND rung `none`, so
 /// a linked decompose stub (rung `idea`) stays behind --include-ideas.
@@ -353,8 +483,8 @@ fn is_cold_dispatchable(e: &Value) -> bool {
     get_str(e, "status") == Some("idea") && plan_rung(e) == "none"
 }
 
-/// `harness_map.resolve_effective_verb` answers a planless node only from
-/// these bands, trimmed and lowercased; any other value refuses at spawn.
+/// The ported lifecycle table ([`effective_verb`]) answers a planless node
+/// only from these bands, trimmed and lowercased; any other value refuses.
 fn has_intake_difficulty(e: &Value) -> bool {
     matches!(
         get_str(e, "difficulty")
@@ -1529,5 +1659,228 @@ mod tests {
         assert_eq!(reply.rows.len(), 1);
         assert_eq!(reply.rows[0].get("id"), Some(&json!("x-c")));
         assert!(reply.drops.iter().all(|d| d.reason != "no-difficulty"));
+    }
+
+    // -- the ported lifecycle table (effective_verb) + is_blueprint_doc --
+
+    fn plan_at(dir: &std::path::Path, name: &str, body: &str) -> String {
+        let probe = dir.join(name);
+        std::fs::write(&probe, body).unwrap();
+        probe.to_str().unwrap().to_string()
+    }
+
+    fn row_with(plan_path: &str, extra: serde_json::Map<String, Value>) -> Value {
+        let mut row = serde_json::Map::new();
+        row.insert("id".into(), json!("x-test"));
+        row.insert("plan_path".into(), json!(plan_path));
+        if let Some(cwd) = std::path::Path::new(plan_path)
+            .parent()
+            .map(|d| d.to_str().unwrap().to_string())
+        {
+            row.insert("cwd".into(), json!(cwd));
+        }
+        for (k, v) in extra {
+            row.insert(k, v);
+        }
+        Value::Object(row)
+    }
+
+    #[test]
+    fn blueprint_doc_answers_true_for_declared_blueprint_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, fm) in [
+            ("qp-kind.md", "kind: quick-plan\nstatus: ready\n"),
+            ("qp-type.md", "type: quick-plan\n"),
+            ("plan.md", "kind: plan\n"),
+            ("impl.md", "kind: implementation-plan\n"),
+            ("bp.md", "type: blueprint\n"),
+        ] {
+            let probe = plan_at(dir.path(), name, &format!("---\n{fm}---\n\n# Doc\n"));
+            let row = row_with(&probe, serde_json::Map::new());
+            assert!(is_blueprint_doc(&row), "{name} should read as a blueprint");
+        }
+    }
+
+    #[test]
+    fn execution_strategy_heading_alone_is_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = plan_at(
+            dir.path(),
+            "body.md",
+            "# No frontmatter\n\n## Execution Strategy\n\n- step\n",
+        );
+        let row = row_with(&probe, serde_json::Map::new());
+        assert!(is_blueprint_doc(&row));
+    }
+
+    #[test]
+    fn declared_research_kind_is_a_hard_no_above_the_heading() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = plan_at(
+            dir.path(),
+            "research.md",
+            "---\nkind: research\nstatus: ready\n---\n\n## Execution Strategy\n\n- step\n",
+        );
+        let row = row_with(&probe, serde_json::Map::new());
+        assert!(!is_blueprint_doc(&row));
+    }
+
+    #[test]
+    fn type_feature_with_strategy_heading_is_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = plan_at(
+            dir.path(),
+            "feature.md",
+            "---\ntype: feature\n---\n\n## Execution Strategy\n\n- step\n",
+        );
+        let row = row_with(&probe, serde_json::Map::new());
+        assert!(is_blueprint_doc(&row));
+    }
+
+    #[test]
+    fn unanswerable_docs_read_false_without_panicking() {
+        // A non-dict row, a row with no plan_path, a relative probe with no
+        // cwd, a missing file, and a non-UTF8 file all read false.
+        assert!(!is_blueprint_doc(&json!("not-an-entry")));
+        assert!(!is_blueprint_doc(&json!({"id": "x-test"})));
+        assert!(!is_blueprint_doc(
+            &json!({"id": "x-test", "plan_path": "d.md"})
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let missing = row_with(
+            dir.path().join("absent.md").to_str().unwrap(),
+            serde_json::Map::new(),
+        );
+        assert!(!is_blueprint_doc(&missing));
+        assert!(!is_blueprint_doc(&json!({"id": "x-test", "plan_path": 42})));
+        let binary = dir.path().join("binary.md");
+        std::fs::write(&binary, b"\xff\xfe\x00\x80 not utf-8").unwrap();
+        let binary_row = row_with(binary.to_str().unwrap(), serde_json::Map::new());
+        assert!(!is_blueprint_doc(&binary_row));
+    }
+
+    #[test]
+    fn ready_rung_research_doc_derives_blueprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = plan_at(
+            dir.path(),
+            "research.md",
+            "---\nkind: research\nstatus: ready\n---\n# findings\n",
+        );
+        let row = row_with(&probe, serde_json::Map::new());
+        let (verb, note) = effective_verb(&row).unwrap();
+        assert_eq!(verb.as_deref(), Some("/blueprint"));
+        assert!(
+            note.contains("plan ready not a blueprint -> /blueprint"),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn ready_rung_quick_plan_derives_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = plan_at(
+            dir.path(),
+            "qp.md",
+            "---\nkind: quick-plan\nstatus: ready\n---\n# contract\n",
+        );
+        let row = row_with(&probe, serde_json::Map::new());
+        let (verb, note) = effective_verb(&row).unwrap();
+        assert_eq!(verb.as_deref(), Some("/target"));
+        assert!(note.contains("plan ready -> /target"), "{note}");
+    }
+
+    #[test]
+    fn declared_blueprint_on_ready_blueprint_doc_wins_naming_lifecycle_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = plan_at(
+            dir.path(),
+            "qp.md",
+            "---\nkind: quick-plan\nstatus: ready\n---\n# contract\n",
+        );
+        let row = row_with(
+            &probe,
+            serde_json::Map::from_iter([("dispatch_verb".to_string(), json!("/fno:blueprint"))]),
+        );
+        let (verb, note) = effective_verb(&row).unwrap();
+        assert_eq!(verb.as_deref(), Some("/blueprint"));
+        assert!(
+            note.contains("verb=declared(/blueprint; lifecycle answers /target: plan ready)"),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn declared_think_abstains_with_the_out_of_family_note() {
+        let row = json!({"id": "x-test", "difficulty": "high", "dispatch_verb": "/fno:think"});
+        let (verb, note) = effective_verb(&row).unwrap();
+        assert!(verb.is_none());
+        assert!(note.contains("out-of-family /think"), "{note}");
+    }
+
+    #[test]
+    fn planless_node_without_valid_difficulty_refuses_naming_the_node() {
+        let row = json!({"id": "x-noplan", "difficulty": "spicy"});
+        let refusal = effective_verb(&row).unwrap_err();
+        assert!(
+            refusal.starts_with("dispatch verb cannot be derived for node x-noplan:"),
+            "{refusal}"
+        );
+        assert!(!refusal.contains("(x-"), "{refusal}");
+    }
+
+    #[test]
+    fn dollar_namespaced_declared_verb_canonicalizes_like_the_slash_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = plan_at(dir.path(), "idea.md", "---\nstatus: idea\n---\n# idea\n");
+        for spelling in ["/fno:blueprint", "$fno:blueprint"] {
+            let row = row_with(
+                &probe,
+                serde_json::Map::from_iter([("dispatch_verb".to_string(), json!(spelling))]),
+            );
+            let (verb, _note) = effective_verb(&row).unwrap();
+            assert_eq!(verb.as_deref(), Some("/blueprint"), "{spelling}");
+        }
+    }
+
+    #[test]
+    fn serve_effective_verb_answers_the_row_and_the_refusal_is_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let research = plan_at(
+            dir.path(),
+            "research.md",
+            "---\nkind: research\nstatus: ready\n---\n# findings\n",
+        );
+        let qp = plan_at(
+            dir.path(),
+            "qp.md",
+            "---\nkind: quick-plan\nstatus: ready\n---\n# contract\n",
+        );
+        let research_row = row_with(
+            &research,
+            serde_json::Map::from_iter([("dispatch_verb".to_string(), json!("/fno:blueprint"))]),
+        );
+        let qp_row = row_with(&qp, serde_json::Map::new());
+        let reply = serve_effective_verb(&json!({"entries": [research_row, qp_row]})).unwrap();
+        assert_eq!(reply["verb"], json!("/blueprint"));
+        // Declared /blueprint agrees with the not-a-blueprint answer, so the
+        // note takes the lifecycle form; the declared form is for a
+        // disagreement (the declared_blueprint_on_ready test above).
+        assert!(reply["note"]
+            .as_str()
+            .unwrap()
+            .contains("verb=lifecycle(plan ready not a blueprint -> /blueprint)"));
+        assert_eq!(
+            serve_effective_verb(&json!({"entries": [qp_row]})).unwrap()["verb"],
+            json!("/target")
+        );
+        let refusal = serve_effective_verb(&json!({"entries": [
+            json!({"id": "x-planless", "difficulty": "spicy"})
+        ]}))
+        .unwrap_err();
+        assert!(
+            refusal.starts_with("dispatch verb cannot be derived for node x-planless:"),
+            "{refusal}"
+        );
     }
 }

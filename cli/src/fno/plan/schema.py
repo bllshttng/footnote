@@ -440,6 +440,12 @@ class PlanFrontmatter(BaseModel):
     dispatch_hold: DispatchHoldBlock | None = None
     company_work: CompanyWorkRefs | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_node_from_claims(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("claims") and not data.get("node"):
+            data["node"] = data["claims"]
+        return data
     @field_validator("created", mode="before")
     @classmethod
     def _created_must_be_dateable(cls, v: Any) -> Any:

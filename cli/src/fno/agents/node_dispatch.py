@@ -115,13 +115,13 @@ def resolve_node_spawn(
     verb_source = (
         "declared" if str(node.get("dispatch_verb") or "").strip() else "none-declared"
     )
+    declared_verb = str(node.get("dispatch_verb") or "").strip()
     # the effective workflow verb. Reconcile bypasses (its explicit
     # command spells the de-stub pass).
-    effective_verb: Optional[str] = None
-    if not is_reconcile:
-        effective_verb = node_effective_verb(node)
+    lifecycle = None if is_reconcile else _verb_answer(node)
+    effective_verb: Optional[str] = lifecycle[0] if lifecycle else None
     # x-aaaa: the verb code resolves (and refuses) BEFORE the resolver.
-    verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb)
+    verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb or declared_verb)
     # A node's own raw pin is a sanctioned source (route_resolve reads the same
     # field), so fold it in before the grid consult: the gate below must see
     # every pin the node carries, whatever its door passed.
@@ -202,7 +202,7 @@ def resolve_node_spawn(
     launch_axis = _launch_harness_axis(launch, node_cwd)
     # The receipt names the RESOLVED verb; verb_source keeps the
     # RAW state, canonicalized so receipt and command agree on the spelling.
-    receipt_verb = effective_verb or node_verb or "builtin"
+    receipt_verb = effective_verb or node_verb or declared_verb or "builtin"
     if parse_verb_token(receipt_verb):
         receipt_verb = canonical_verb_key(receipt_verb)
     resolve_kwargs: dict = {
@@ -221,14 +221,8 @@ def resolve_node_spawn(
                 resolve_kwargs["command"]
             )
     else:
-        # the node's lifecycle context rides so the resolver derives
         if isinstance(node, dict):
-            from fno.graph.ladder import plan_rung as _node_plan_rung
-
-            resolve_kwargs["difficulty"] = node.get("difficulty")
-            resolve_kwargs["plan_rung"] = _node_plan_rung(node).value
-        if node_verb:
-            resolve_kwargs["verb"] = node_verb
+            resolve_kwargs.update(lifecycle=lifecycle, verb=node_verb or declared_verb or None)
     resolved = harness_map.resolve_dispatch(**resolve_kwargs)
     substrate = resolved["substrate"]
     target_cmd = resolved["command"]
@@ -427,22 +421,24 @@ def find_node_row(node: str) -> Optional[dict]:
     return None
 
 
+def _verb_answer(row: Optional[dict], *, node_id: Optional[str] = None) -> tuple:
+    from fno.agents.harness_map import DispatchResolveError
+    from fno.graph.store import GRAPH_JSON, _client_for
+    payload = dict(row or {}, id=(row or {}).get("id") or node_id)
+    try:
+        answer = _client_for(GRAPH_JSON).request("effective_verb", {"entries": [payload]})
+        return answer["verb"], answer["note"]
+    except RuntimeError as exc:
+        raise DispatchResolveError(str(exc).replace("store error (invalid): ", "")) from exc
+
+
 def node_effective_verb(
     row: Optional[dict], *, node_id: Optional[str] = None
 ) -> Optional[str]:
     """The lifecycle table's answer for a node row, or None on abstain:
     one answer per node, shared by every door. Accepts a None row; raises
     DispatchResolveError on an unanswerable node."""
-    from fno.agents import harness_map
-    from fno.graph.ladder import plan_rung
-
-    verb, _note = harness_map.resolve_effective_verb(
-        verb=((row or {}).get("dispatch_verb") or "").strip() or None,
-        difficulty=(row or {}).get("difficulty"),
-        plan_rung=plan_rung(row).value,
-        node_id=node_id if node_id is not None else (row or {}).get("id"),
-    )
-    return verb
+    return _verb_answer(row, node_id=node_id)[0]
 
 
 def render_node_seed(node: str, *, harness: Optional[str]) -> Optional[NodeSeed]:
@@ -453,7 +449,6 @@ def render_node_seed(node: str, *, harness: Optional[str]) -> Optional[NodeSeed]
     or an over-budget brief) - a truncated brief is never seeded.
     """
     from fno.agents.harness_map import DispatchResolveError, resolve_dispatch
-    from fno.graph.ladder import plan_rung as _node_plan_rung
     from fno.provenance.autobrief import resolve_dispatch_brief
 
     seed_rec: Optional[dict] = find_node_row(node)
@@ -473,8 +468,7 @@ def render_node_seed(node: str, *, harness: Optional[str]) -> Optional[NodeSeed]
             harness=harness,
             node_id=str(seed_node_id),
             verb=str(seed_rec.get("dispatch_verb")).strip(),
-            difficulty=seed_rec.get("difficulty"),
-            plan_rung=_node_plan_rung(seed_rec).value,
+            lifecycle=_verb_answer(seed_rec),
             brief=node_brief,
             trigger="autonomous",
         )
