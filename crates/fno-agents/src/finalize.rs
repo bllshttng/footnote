@@ -2067,9 +2067,7 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
 /// (fall back to the per-app check).
 fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
     let path = crate::paths::events_path(cwd);
-    let Ok(content) = fs::read_to_string(&path) else {
-        return false;
-    };
+    let content = crate::event_store::journal_text(&path, &["review_coverage"]);
     // Pin to the current HEAD: a coverage event for a prior commit doesn't
     // describe what finalize is about to arm. (finding 2.)
     let head = std::process::Command::new("git")
@@ -4838,6 +4836,31 @@ mod tests {
         assert!(
             !interp.starts_with(foreign.to_str().unwrap()),
             "must not pick the foreign venv, got {interp}"
+        );
+    }
+
+    #[test]
+    fn coverage_satisfied_reads_a_store_committed_covered_row() {
+        // AC5-EDGE: an older imported row with count 0 and a newer covered
+        // store-only row — the newest committed row answers.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let old = serde_json::json!({
+            "ts": "2026-09-17T11:00:00Z", "type": "review_coverage", "source": "review",
+            "data": {"head_sha": "h0", "coverage": "covered", "reviewed_count": 0}
+        })
+        .to_string();
+        let new = serde_json::json!({
+            "ts": "2026-09-17T12:00:00Z", "type": "review_coverage", "source": "review",
+            "data": {"head_sha": "h1", "coverage": "covered", "reviewed_count": 3}
+        })
+        .to_string();
+        let events = crate::paths::events_path(cwd);
+        crate::event_store::append_envelope(&events, &old, None).unwrap();
+        crate::event_store::append_envelope(&events, &new, None).unwrap();
+        assert!(
+            coverage_satisfied_in_latest_event(cwd),
+            "the store-only covered row satisfies"
         );
     }
 
