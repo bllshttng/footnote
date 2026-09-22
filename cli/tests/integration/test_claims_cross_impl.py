@@ -11,10 +11,11 @@ The Rust side is driven through the hidden ``fno-agents claim`` debug verb.
 The Python side uses the library directly (the installed ``fno`` binary may be
 stale relative to this checkout; ``cli/src`` is authoritative).
 
-Binary resolution: ``$FNO_AGENTS_BIN``, else the repo debug build. Without a
-binary the module SKIPS - except when ``FNO_CLAIMS_COMPAT_REQUIRED=1`` (set by
-the CI job that builds both toolchains), where a missing binary FAILS loudly
-so the gate cannot silently soften into a skip.
+Binary resolution: this checkout's build, through
+``fno.rust_binary.find_dev_binary``. No ``$FNO_AGENTS_BIN`` or installed copy
+answers for it. Without a build the module SKIPS. The merge gate is
+``tests/test-claims-compat-matrix.sh``: smoke runs it after its build step,
+and it fails when there is no build, so the gate cannot soften into a skip.
 """
 from __future__ import annotations
 
@@ -33,48 +34,14 @@ from fno.claims.core import ClaimHeldByOther, acquire_claim, claim_status, relea
 from fno.claims.hostid import machine_id as py_machine_id
 from fno.claims.io import claim_path, encode_key, read_claim_file, serialize_claim
 from fno.claims.types import Claim
+from fno.rust_binary import find_dev_binary
 
+RUST_BIN = find_dev_binary()
 
-def _find_repo_root(start: Path) -> Path | None:
-    for parent in [start, *start.parents]:
-        if (parent / "crates" / "fno-agents").is_dir():
-            return parent
-    return None
-
-
-def _rust_bin() -> Path | None:
-    env = os.environ.get("FNO_AGENTS_BIN", "")
-    if env:
-        p = Path(env)
-        return p if p.exists() else None
-    root = _find_repo_root(Path(__file__).resolve().parent)
-    if root is None:
-        return None
-    for profile in ("debug", "release"):
-        p = root / "crates" / "fno-agents" / "target" / profile / "fno-agents"
-        if p.exists():
-            return p
-    return None
-
-
-RUST_BIN = _rust_bin()
-COMPAT_REQUIRED = os.environ.get("FNO_CLAIMS_COMPAT_REQUIRED") == "1"
-
-if RUST_BIN is None and not COMPAT_REQUIRED:
+if RUST_BIN is None:
     pytestmark = pytest.mark.skip(
-        reason="fno-agents binary not built (cargo build -p fno-agents); "
-        "set FNO_AGENTS_BIN or build the debug profile"
+        reason="fno-agents binary not built (cargo build -p fno-agents)"
     )
-
-
-def test_required_mode_has_a_binary() -> None:
-    """On the designated CI job the matrix must RUN, never skip (AC3-FR)."""
-    if COMPAT_REQUIRED:
-        assert RUST_BIN is not None, (
-            "FNO_CLAIMS_COMPAT_REQUIRED=1 but no fno-agents binary was found: "
-            "the compat gate would silently skip. Build crates/fno-agents or "
-            "set FNO_AGENTS_BIN."
-        )
 
 
 # --------------------------------------------------------------------------

@@ -292,7 +292,7 @@ def test_planned_step_lines_round_trip_through_the_parser() -> None:
     per step, so a name containing a comma survives (a joined list would not)."""
     from fno.test_cmd import _planned_step_lines
 
-    commad = "Cross-impl claims compat matrix (merge gate; fails loudly, never skips here)"
+    commad = "Verb-surface ratchet (real count, both binaries)"
     steps = [("Lint", ".", "x"), ("Pytest (unit + integration)", ".", "y"), (commad, ".", "z")]
     lines = _planned_step_lines(steps, [0, 1, 2])
     assert _failures.unreached_runner_steps("\n".join(lines)) == [

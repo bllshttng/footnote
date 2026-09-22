@@ -206,12 +206,6 @@ _ENVIRONMENT: tuple[str, ...] = (
 )
 
 # Set deliberately by a CI workflow, not inherited from a developer's shell.
-# This is the ONE place a runner-configured FNO_* var is exempted; a step that
-# needs a new one adds it here with a comment naming the workflow line, and
-# until then it is dropped and the step fails loudly rather than reading a
-# developer's value. (Vars set inline in a smoke step's own command, e.g.
-# ``FNO_CLAIMS_COMPAT_REQUIRED=1 uv run pytest ...``, are set inside the child
-# and never travel this path.)
 _RUNNER_PASSTHROUGH = (
     # Native claim-door tests pin the checkout binary; without this runner
     # channel hermetic children resolve an older PATH binary.

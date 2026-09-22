@@ -731,8 +731,6 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("Keyless dispatch-to-terminal smoke (binary present)", "cli",
      "uv run pytest --tb=short -q tests/unit/test_keyless_smoke.py"),
     ("registry-miss heal across the Rust/Python seam", ".", "bash tests/test-agents-heal-token.sh"),
-    ("Cross-impl claims compat matrix (merge gate; fails loudly, never skips here)", "cli",
-     "FNO_CLAIMS_COMPAT_REQUIRED=1 uv run pytest --tb=short -q tests/integration/test_claims_cross_impl.py"),
     ("loop-check journey tests (e2e + emission-schema + backstop-subprocess)", ".",
      "bash tests/hooks/test_loop_check_e2e.sh\n"
      "bash tests/events/test-loop-check-emission-schema.sh\n"
