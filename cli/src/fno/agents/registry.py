@@ -696,6 +696,8 @@ class AgentEntry:
     # rows. ABSENCE MEANS UNKNOWN, the `origin` discipline; Rust mirrors it
     # as additive-optional passthrough.
     launch_account_source: Optional[str] = None
+    # The sessions row a spawn owed but could not open (no id yet); SessionStart's first observation consumes and clears it.
+    pending_session_row: Optional[dict] = None
 
     @property
     def session_id(self) -> Optional[str]:
