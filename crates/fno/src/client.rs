@@ -6233,31 +6233,15 @@ impl View {
         } else if let Some(m) = &self.keys_modal {
             // US3: the centered which-key modal replaces the old top-left
             // key-table poster (opaque, sectioned, scrollable).
-            popup::draw(
-                &mut cells,
-                rows,
-                cols,
-                &m.popup.render(self.term),
-                &self.theme,
-            );
+            draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
         } else if let Some(m) = &self.row_menu {
             // US2: the anchored row context menu, drawn at the pointer.
-            popup::draw(
-                &mut cells,
-                rows,
-                cols,
-                &m.popup.render(self.term),
-                &self.theme,
-            );
+            draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
         } else if let Some(m) = &self.aux {
             // US4/US5: the sideline MENU popup or settings modal.
-            popup::draw(
-                &mut cells,
-                rows,
-                cols,
-                &m.popup.render(self.term),
-                &self.theme,
-            );
+            draw_popup_overlay(&mut cells, rows, cols, &m.popup, self.term, &self.theme);
+        } else if let Some(pk) = self.launcher.as_ref().and_then(|l| l.picker.as_ref()) {
+            draw_popup_overlay(&mut cells, rows, cols, &pk.popup, self.term, &self.theme);
         } else if let Some(sel) = self.answers {
             // needs-me queue (grown from the answer overlay,
             // folded MINE in as the first lane): MINE then the
@@ -9042,6 +9026,18 @@ fn draw_overlay_layout(
     chrome::blit(cells, rows, cols, layout.origin, &layout.framed, theme);
 }
 
+/// Draw one popup overlay (which-key modal, row menu, aux popup, the dock's child picker).
+fn draw_popup_overlay(
+    cells: &mut [Cell],
+    rows: usize,
+    cols: usize,
+    popup: &popup::Popup,
+    term: (u16, u16),
+    theme: &Theme,
+) {
+    popup::draw(cells, rows, cols, &popup.render(term), theme);
+}
+
 /// Draw overlay lines centered in the content viewport (right of the sideline,
 /// above any splits), framed with `chrome` and colored by `theme`. The seven
 /// family-B overlays (catch-up, needs-me, move-pick, attach-place, connections,
@@ -10120,7 +10116,7 @@ async fn attach_and_run(
             view.catalog_inflight = true;
             let tx = catalog_tx.clone();
             tokio::spawn(async move {
-                let outcome = agent_launcher::load_catalog();
+                let outcome = agent_launcher::load_catalog().await;
                 let _ = tx.send(outcome);
             });
         }
@@ -10727,7 +10723,7 @@ async fn attach_and_run(
                 // popup's harness names (first landing or a retained draft)
                 // and redraw so an open popup shows the fresh field.
                 view.catalog_inflight = false;
-                if let agent_launcher::CatalogOutcome::Ok(rows) = &outcome {
+                if let agent_launcher::CatalogOutcome::Ok(rows, _) = &outcome {
                     if let Some(l) = view.launcher.as_mut() {
                         if l.draft.harnesses.is_empty() && !rows.is_empty() {
                             l.draft.harnesses = rows.iter().map(|r| r.name.clone()).collect();
@@ -10829,8 +10825,7 @@ async fn attach_and_run(
                 }
             }, if chord_flush_deadline.is_some() => {
                 // (fix) Quiet window elapsed with a candidate still
-                // held: release it to the pane. No redraw needed beyond the
-                // send - the pane's own output will repaint when it reacts.
+                // held: release it to the pane.
                 chord_since = None;
                 if let Some(event) = scanner.flush_chord() {
                     // The composer holds the keyboard while open: a flushed
@@ -10858,6 +10853,11 @@ async fn attach_and_run(
                     } else if let Err(e) = dispatch_event(&mut view, event, &mut sock_w).await {
                         break Err(e);
                     }
+                }
+                // A flush can change client-local state (the launcher's
+                // lone-Esc close): draw here, no pane repaint covers it.
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
                 }
             }
             _ = async {

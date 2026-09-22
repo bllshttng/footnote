@@ -227,13 +227,20 @@ pub struct ClientHarness {
 
 impl ClientHarness {
     pub fn spawn(scratch: &Scratch) -> Self {
-        Self::spawn_full(scratch, &[], &[])
+        Self::spawn_sized_full(scratch, 24, 60, &[], &[])
+    }
+
+    /// The sideline-visible size (panel 28 + min content 40 needs >68 cols):
+    /// chrome tests that assert on sideline rows spawn at 24x120.
+    #[allow(dead_code)]
+    pub fn spawn_sized(scratch: &Scratch, rows: u16, cols: u16) -> Self {
+        Self::spawn_sized_full(scratch, rows, cols, &[], &[])
     }
 
     /// Like [`ClientHarness::spawn`] with extra environment on the client
     /// process (the nested-guard cases need `FNO_SESSION` preset).
     pub fn spawn_with(scratch: &Scratch, envs: &[(&str, &str)]) -> Self {
-        Self::spawn_full(scratch, envs, &[])
+        Self::spawn_sized_full(scratch, 24, 60, envs, &[])
     }
 
     /// Like [`ClientHarness::spawn`] but attaching an explicit `--session`.
@@ -243,20 +250,27 @@ impl ClientHarness {
     /// the session outright and bypasses the picker (AC5-FR).
     #[allow(dead_code)]
     pub fn spawn_session(scratch: &Scratch, session: &str) -> Self {
-        Self::spawn_full(scratch, &[], &["--session", session])
+        Self::spawn_sized_full(scratch, 24, 60, &[], &["--session", session])
     }
 
-    fn spawn_full(scratch: &Scratch, envs: &[(&str, &str)], args: &[&str]) -> Self {
-        // 60 columns: below the sideline's auto-hide threshold (panel 28 +
-        // min content 40), so the panel stays hidden and Phase-1-era screen
-        // assertions see bare content lines under the 1-row tab bar. The
+    fn spawn_sized_full(
+        scratch: &Scratch,
+        rows: u16,
+        cols: u16,
+        envs: &[(&str, &str)],
+        args: &[&str],
+    ) -> Self {
+        // The default 60 columns sit below the sideline's auto-hide threshold
+        // (panel 28 + min content 40), so the panel stays hidden and Phase-1-era
+        // screen assertions see bare content lines under the 1-row tab bar. The
         // sideline-visible chrome has its own compose unit tests + the
         // layout e2e suite; here it would only salt every line with the
-        // divider column.
+        // divider column. Sizes that show the sideline opt in via
+        // [`ClientHarness::spawn_sized`].
         let pty = native_pty_system()
             .openpty(PtySize {
-                rows: 24,
-                cols: 60,
+                rows,
+                cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
@@ -304,7 +318,7 @@ impl ClientHarness {
             writer,
             output,
             consumed: 0,
-            pane: Pane::new(24, 60),
+            pane: Pane::new(rows, cols),
             scratch_dir: scratch.0.clone(),
             reader_done: done_rx,
             _master: pty.master,
