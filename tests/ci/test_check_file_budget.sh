@@ -17,7 +17,7 @@ GATE="$(cd "${SCRIPT_DIR}/../.." && pwd)/scripts/ci/check-file-budget.sh"
 # The caller's git config (signing, hooks) must not reach the scratch repos.
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
-unset FILE_BUDGET_LINES PY_ADDED_BUDGET PR_BASE_REF PR_REMOTE FILE_BUDGET_BASE_SHA FILE_BUDGET_EXCEPTION_LABEL
+unset FILE_BUDGET_LINES PY_ADDED_BUDGET PR_BASE_REF PR_REMOTE FILE_BUDGET_BASE_SHA FILE_BUDGET_EXCEPTION_LABEL FILE_BUDGET_LABEL_SHA GITHUB_REPOSITORY
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -116,6 +116,72 @@ check 'the config key moves the budget' 1 'budget 5' PATH="$CONFIGBIN:$PATH"
 rm -rf "$CONFIGBIN"
 
 # --- the operator label exception ---------------------------------------------
+# The live-read cases use a PATH stub so the selftest proves the route and the
+# no-call-on-pass contract without depending on a GitHub credential.
+GHBIN="$(mktemp -d)"
+GH_MARKER="$TMP/gh-called"
+cat > "$GHBIN/gh" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" != "api" || "${2:-}" != repos/o/r/commits/*/pulls ]]; then
+  echo "unexpected gh route" >&2
+  exit 2
+fi
+printf '%s\n' called >> "${GH_STUB_MARKER:?}"
+if [[ "${GH_STUB_RESULT:-}" == fail ]]; then
+  echo "stubbed gh failure" >&2
+  exit 1
+fi
+printf '%s\n' "${GH_STUB_RESULT:-false}"
+STUB
+chmod +x "$GHBIN/gh"
+
+fresh; lines 150 grow >> cli/src/fno/keep.py; commit
+check 'the live label waives the push-path tree allowance' 0 \
+  'label file-budget-exception waives the tree allowance' \
+  PATH="$GHBIN:$PATH" GH_STUB_RESULT=true GH_STUB_MARKER="$GH_MARKER" \
+  GITHUB_REPOSITORY=o/r FILE_BUDGET_BASE_SHA="$(git rev-parse main)" \
+  FILE_BUDGET_LABEL_SHA="$(git rev-parse HEAD)"
+
+fresh; lines 150 grow >> cli/src/fno/keep.py; commit
+check 'a live read without the label refuses' 1 \
+  'added +150 lines (added-line budget 30' \
+  PATH="$GHBIN:$PATH" GH_STUB_RESULT=false GH_STUB_MARKER="$GH_MARKER" \
+  GITHUB_REPOSITORY=o/r FILE_BUDGET_BASE_SHA="$(git rev-parse main)" \
+  FILE_BUDGET_LABEL_SHA="$(git rev-parse HEAD)"
+
+fresh; lines 150 grow >> cli/src/fno/keep.py; commit
+check 'a failed live label read refuses with a warning' 1 \
+  'could not read the file-budget-exception label' \
+  PATH="$GHBIN:$PATH" GH_STUB_RESULT=fail GH_STUB_MARKER="$GH_MARKER" \
+  GITHUB_REPOSITORY=o/r FILE_BUDGET_BASE_SHA="$(git rev-parse main)" \
+  FILE_BUDGET_LABEL_SHA="$(git rev-parse HEAD)"
+
+fresh; lines 20 grow >> cli/src/fno/keep.py; commit
+rm -f "$GH_MARKER"
+out="$(PATH="$GHBIN:$PATH" GH_STUB_RESULT=true GH_STUB_MARKER="$GH_MARKER" \
+  GITHUB_REPOSITORY=o/r FILE_BUDGET_BASE_SHA="$(git rev-parse main)" \
+  FILE_BUDGET_LABEL_SHA="$(git rev-parse HEAD)" bash "$GATE" 2>&1)"; got=$?
+if [[ "$got" -eq 0 && "$out" == *'added +20, budget 30'* && ! -e "$GH_MARKER" ]]; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  printf 'FAIL: an in-budget tree must not make a live label read\nexit %s\n%s\n' "$got" "$out"
+fi
+
+fresh; lines 150 grow >> cli/src/fno/keep.py; commit
+rm -f "$GH_MARKER"
+out="$(PATH="$GHBIN:$PATH" GH_STUB_RESULT=true GH_STUB_MARKER="$GH_MARKER" \
+  GITHUB_REPOSITORY=o/r FILE_BUDGET_BASE_SHA="$(git rev-parse main)" \
+  bash "$GATE" 2>&1)"; got=$?
+if [[ "$got" -eq 1 && "$out" == *'added +150 lines (added-line budget 30'* \
+      && "$out" != *'could not read the file-budget-exception label'* \
+      && ! -e "$GH_MARKER" ]]; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  printf 'FAIL: an unset label sha must preserve the existing refusal without a call\nexit %s\n%s\n' "$got" "$out"
+fi
+
 fresh; lines 150 grow >> cli/src/fno/keep.py; commit
 check 'the label waives the tree allowance and names itself' 0 \
   'label file-budget-exception waives the tree allowance' \
