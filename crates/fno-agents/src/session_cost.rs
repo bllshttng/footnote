@@ -263,10 +263,55 @@ pub fn session_roots(home: &crate::paths::AgentsHome, table: &[ProcRow]) -> Vec<
     roots.into_values().collect()
 }
 
+fn phase_rows(home: &crate::paths::AgentsHome) -> Result<Vec<PhaseRow>, String> {
+    let path = crate::gc_sweep::graph_path(home);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let rows = crate::backlog::api::rows(&crate::backlog::api::Store::new(&path))
+        .map_err(|error| format!("{}: {}", path.display(), error.0))?;
+    let mut phases = Vec::new();
+    for row in rows {
+        for phase in ["think", "blueprint", "do", "review", "ship"] {
+            if !crate::graph_store::is_open_phase_row(&row, phase) {
+                continue;
+            }
+            let Some(session_id) = row.get("session_id").and_then(Value::as_str) else {
+                continue;
+            };
+            phases.push(PhaseRow {
+                session_id: session_id.to_string(),
+                node: row.get("node").and_then(Value::as_str).map(str::to_string),
+                stage: Some(phase.to_string()),
+            });
+        }
+    }
+    Ok(phases)
+}
+
+fn test_pids() -> HashSet<u32> {
+    crate::claims::list(Some("test:"), None, false)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|claim| {
+            claim
+                .holder
+                .strip_prefix("test-run:")?
+                .split(':')
+                .next()?
+                .parse()
+                .ok()
+        })
+        .collect()
+}
+
 pub fn price(home: &Path, table: &[ProcRow]) -> Result<Value, String> {
-    let roots = session_roots(&crate::paths::AgentsHome::from_env(), table);
+    let agents_home = crate::paths::AgentsHome::from_env();
+    let roots = session_roots(&agents_home, table);
+    let phases = phase_rows(&agents_home)?;
+    let test_pids = test_pids();
     let _ = home;
-    let out = attribute(table, &roots, &[], &HashSet::new());
+    let out = attribute(table, &roots, &phases, &test_pids);
     Ok(json!({ "sessions": out.sessions, "unresolved": out.unresolved, "top_rss": out.top_rss }))
 }
 
