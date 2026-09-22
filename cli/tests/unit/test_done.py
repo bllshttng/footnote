@@ -14,6 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.graph.store import read_graph_strict
 
 # The done shim drives CliRunner captures that break when a loaded xdist
 # worker interleaves them with unrelated files: the deprecation line leaks
@@ -86,6 +87,16 @@ def _seed_ledger(ledger: Path, entries: list[dict]) -> None:
 def _seed(g: Path, entries: list[dict]) -> None:
     """Rows the way the store writes them: the typed api drops a row the
     model cannot parse, so seeds carry the stamped fields."""
+    # A re-seed must reset the store too: graph.db outlives the json seed, so
+    # a second _seed into the same path would read the first seed's rows.
+    for sidecar in (
+        g.parent / (g.name + ".store.sock"),
+        g.parent / (g.name + ".store.sock.lock"),
+        g.with_suffix(".db"),
+        g.with_name(g.stem + ".db-shm"),
+        g.with_name(g.stem + ".db-wal"),
+    ):
+        sidecar.unlink(missing_ok=True)
     complete = []
     for e in entries:
         row = {"type": "feature", "priority": "p2", "status": "idea", **e}
@@ -100,7 +111,7 @@ def _seed(g: Path, entries: list[dict]) -> None:
 
 
 def _read(g: Path) -> list[dict]:
-    return json.loads(g.read_text()).get("entries", [])
+    return read_graph_strict(g)
 
 
 def _stub_subprocess(
@@ -498,7 +509,7 @@ def test_rollup_empty_ledger_leaves_fields_null(tmp_graph, tmp_ledger, monkeypat
     entry = _read(tmp_graph)[0]
     assert entry["cost_usd"] is None
     assert entry["cost_sessions"] == []
-    assert entry["points"] is None
+    assert entry.get("points") is None
     assert entry["session_id"] is None
 
 
@@ -571,7 +582,8 @@ def test_rollup_handles_ledger_entry_with_no_sessions(tmp_graph, tmp_ledger, mon
     entry = _read(tmp_graph)[0]
     assert entry["cost_usd"] == 3.0
     assert len(entry["cost_sessions"]) == 1
-    assert entry["cost_sessions"][0]["session_id"] is None
+    # A null session id exports as an absent key (the store strips nulls).
+    assert entry["cost_sessions"][0].get("session_id") is None
 
 
 # -- Backfill tests --

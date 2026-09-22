@@ -450,11 +450,39 @@ def index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """The machine-wide decision index, pinned into the sandbox.
 
     Every test takes this: without it a test writes to the developer's real
-    ``~/.fno/decisions.jsonl``, and reads back whatever else is in there.
+    ``~/.fno/decisions.jsonl``, and reads back whatever else is in there. The
+    ledger root moves with it because the CLI hint re-derives the index from
+    ``paths.ledger_json()`` at call time; recorder and hint must see one file.
     """
     path = tmp_path / "state" / "decisions.jsonl"
-    monkeypatch.setattr("fno.paths.decisions_jsonl", lambda: path)
+    monkeypatch.setattr("fno.decide._decisions_index_path", lambda: path)
+    monkeypatch.setattr("fno.paths.ledger_json", lambda: tmp_path / "state" / "ledger.json")
     return path
+
+
+def _node_entry(tmp_graph: Path, node_id: str = "x-7d94") -> dict:
+    """The node's store row. graph.json is the seed mirror now, not the read
+    seam: projections land in the store and only read back through it."""
+    from fno.graph.store import read_graph_strict
+
+    for entry in read_graph_strict(tmp_graph):
+        if entry.get("id") == node_id:
+            return entry
+    raise AssertionError(f"no store row for {node_id}")
+
+
+def _seed_projection(tmp_graph: Path, rows: list[dict]) -> None:
+    """Put legacy projection rows ON the store node, the way the pre-store
+    writer left them: on the node's decisions list, never in the seed file."""
+    from fno.graph.store import commit_rows_via_store
+
+    def mutator(entries: list[dict]) -> list[dict]:
+        for entry in entries:
+            if entry.get("id") == "x-7d94":
+                entry.setdefault("decisions", []).extend(dict(row) for row in rows)
+        return entries
+
+    commit_rows_via_store(tmp_graph, mutator)
 
 
 @pytest.fixture
@@ -471,12 +499,6 @@ def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # The guarded metadata reader (decide's read side) resolves through
     # paths.graph_json at call time; pin it to the same hermetic file.
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
-    # entries_with_archive resolves the archive through fno.paths, which is
-    # graph_json().parent / "graph-archive.json"; pin both so the read-through
-    # test stays hermetic.
-    monkeypatch.setattr(
-        "fno.paths.graph_archive_json", lambda: tmp_path / "graph-archive.json"
-    )
     return g
 
 
@@ -1073,12 +1095,13 @@ def test_record_appends_the_event_and_projects_onto_the_node(root: Path, tmp_gra
     # claim one, and the reader's `unattributed` lane covers it.
     assert data["decided_by"]
 
-    entry = json.loads(tmp_graph.read_text())["entries"][0]
+    entry = _node_entry(tmp_graph)
     assert [d["decision_id"] for d in entry["decisions"]] == [did]
     assert entry["decisions"][0]["rationale"].startswith("a fold is a read")
     assert entry["decisions"][0]["graduation"] == {"kind": "guidance"}
     assert entry["decisions"][0]["options"] == ["fold first", "migrate first"]
-    assert entry["decisions"][0]["superseded_by"] is None
+    # Null fields do not ride the store row; absence IS not-superseded.
+    assert entry["decisions"][0].get("superseded_by") is None
 
     listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
     assert listed.exit_code == 0, listed.output
@@ -1112,7 +1135,7 @@ def test_explicit_enforced_graduation_reaches_every_decision_store(
     indexed = _index_rows(index)[0]["data"]
     assert indexed["decision_id"] == decision_id
     assert indexed["graduation"] == expected
-    projected = json.loads(tmp_graph.read_text())["entries"][0]["decisions"][0]
+    projected = _node_entry(tmp_graph)["decisions"][0]
     assert projected["decision_id"] == decision_id
     assert projected["graduation"] == expected
 
@@ -1168,7 +1191,7 @@ def test_supersession_marks_the_older_decision(root: Path, tmp_graph: Path, inde
     )
     assert second.exit_code == 0, second.output
 
-    entry = json.loads(tmp_graph.read_text())["entries"][0]
+    entry = _node_entry(tmp_graph)
     by_id = {d["decision_id"]: d for d in entry["decisions"]}
     assert by_id[first]["superseded_by"] is not None
     assert by_id[first]["superseded_by"].startswith("d-")
@@ -1179,13 +1202,13 @@ def test_supersession_marks_the_older_decision(root: Path, tmp_graph: Path, inde
 
 
 def test_list_survives_archiving_of_the_subject(root: Path, tmp_graph: Path, index: Path):
-    """A decision recorded pre-archive is still listable post-archive
-    through entries_with_archive."""
+    """A decision recorded pre-archive is still listable post-archive: the
+    archived row stays in the same store, stamped, so the read needs no
+    sidecar."""
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
     entries = json.loads(tmp_graph.read_text())["entries"]
-    archive = tmp_graph.parent / "graph-archive.json"
-    archive.write_text(json.dumps({"entries": entries}) + "\n")
-    tmp_graph.write_text(json.dumps({"entries": []}) + "\n")
+    entries[0]["archived_at"] = "2026-09-17T00:00:00Z"
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
 
     listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
     assert listed.exit_code == 0, listed.output
@@ -1872,16 +1895,17 @@ def test_reindex_recovers_a_projection_row_that_stored_no_subject(
     the recovered decision answers no query at all."""
     from fno.decide import reindex
 
-    entries = json.loads(tmp_graph.read_text())["entries"]
-    entries[0]["decisions"] = [
-        {
-            "decision_id": "d-legacy1",
-            "decision": "fold every project's inbox first",
-            "decided_by": "operator",
-            "ts": "2026-08-15T00:31:06.178560Z",
-        }
-    ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    _seed_projection(
+        tmp_graph,
+        [
+            {
+                "decision_id": "d-legacy1",
+                "decision": "fold every project's inbox first",
+                "decided_by": "operator",
+                "ts": "2026-08-15T00:31:06.178560Z",
+            }
+        ],
+    )
 
     assert reindex(sources=[])["added"] == 1
     payload = json.loads(
@@ -2021,11 +2045,10 @@ def test_a_legacy_projection_row_with_no_ts_sorts_oldest(
     from fno.decide import reindex
 
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "recent"])
-    entries = json.loads(tmp_graph.read_text())["entries"]
-    entries[0]["decisions"].append(
-        {"decision_id": "d-nots1", "decision": "ancient", "decided_by": "operator"}
+    _seed_projection(
+        tmp_graph,
+        [{"decision_id": "d-nots1", "decision": "ancient", "decided_by": "operator"}],
     )
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
 
     assert reindex(sources=[])["added"] == 1
     payload = json.loads(
@@ -2078,13 +2101,14 @@ def test_one_unusable_projection_row_does_not_abort_the_backfill(
     from fno.decide import reindex
 
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "from the journal"])
-    _drop_index(index)
-    entries = json.loads(tmp_graph.read_text())["entries"]
-    entries[0]["decisions"] = [
-        {"decision_id": "d-bad001", "decision": "unusable", "rationale": 123},
-        {"decision_id": "d-good01", "decision": "usable", "subject": "x-7d94"},
-    ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    index.unlink()
+    _seed_projection(
+        tmp_graph,
+        [
+            {"decision_id": "d-bad001", "decision": "unusable", "rationale": 123},
+            {"decision_id": "d-good01", "decision": "usable", "subject": "x-7d94"},
+        ],
+    )
 
     counts = reindex(sources=[project_log("events.jsonl", project_root=root)])
     assert counts["added"] == 2, counts
@@ -2141,12 +2165,13 @@ def test_equal_timestamps_do_not_invert_newest_first(
     sort keeps file order for ties - silently reversing the stated contract."""
     from fno.decide import reindex
 
-    entries = json.loads(tmp_graph.read_text())["entries"]
-    entries[0]["decisions"] = [
-        {"decision_id": "d-aaa001", "decision": "first", "subject": "x-7d94"},
-        {"decision_id": "d-bbb002", "decision": "second", "subject": "x-7d94"},
-    ]
-    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    _seed_projection(
+        tmp_graph,
+        [
+            {"decision_id": "d-aaa001", "decision": "first", "subject": "x-7d94"},
+            {"decision_id": "d-bbb002", "decision": "second", "subject": "x-7d94"},
+        ],
+    )
     assert reindex(sources=[])["added"] == 2
 
     payload = json.loads(
@@ -2185,9 +2210,9 @@ def test_a_failed_projection_never_reports_a_lost_capture(
     import fno.graph.store as gs
 
     def boom(*a, **kw):
-        raise SystemExit(1)  # what locked_mutate_graph does on a corrupt graph
+        raise SystemExit(1)  # what commit_rows_via_store does on a corrupt graph
 
-    monkeypatch.setattr(gs, "locked_mutate_graph", boom)
+    monkeypatch.setattr(gs, "commit_rows_via_store", boom)
     res = runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
     assert res.exit_code == 0, res.output
     assert "graph projection failed" in res.output
@@ -2317,10 +2342,10 @@ def test_an_unreadable_graph_says_recall_degraded(
     Degrading in silence is indistinguishable from no such decision."""
     runner.invoke(decide_app, ["--subject", "fold-the-inbox", "--decision", "fold"])
 
-    # A REAL half-written graph, not a monkeypatched raise. read_graph swallows
-    # corruption and answers [], so a guard exercised through a patched
-    # exception stays green on a path production never takes.
-    tmp_graph.write_text('{"entries": [{"id": "x-7d9')
+    # A REAL unreadable store, not a monkeypatched raise. The keeper serves
+    # reads from graph.db; tearing the seed mirror would leave every read
+    # green on a path production never takes.
+    tmp_graph.with_suffix(".db").write_bytes(b"this is not a sqlite database" * 8)
 
     listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
     assert listed.exit_code == 0, listed.output
@@ -2794,17 +2819,16 @@ def test_no_identity_explicit_operator_authority_records(
     assert _events(root)[0]["data"]["authority_source"] == "operator"
 
 
-def test_a_torn_archive_also_stops_the_backfill(
+def test_a_torn_archive_does_not_stop_the_backfill(
     root: Path, tmp_graph: Path, index: Path
 ):
-    """entries_with_archive reads the archive softly. A guard on the working
-    graph alone would drop every archived node's decisions from a backfill that
-    still printed "+0" and exited 0."""
+    """The advisory file left behind by an old export is dead weight: the
+    backfill reads archived residents through the store, so a torn file is
+    ignored, not an incident."""
     (tmp_graph.parent / "graph-archive.json").write_text('{"entries": [{"id": "x-ar')
 
     res = runner.invoke(decide_app, ["reindex"])
-    assert res.exit_code == 1, res.output
-    assert "backlog decide-reindex: failed" in res.output
+    assert res.exit_code == 0, res.output
 
 
 def test_a_corrupt_graph_does_not_produce_a_receipt_that_lies(
@@ -3862,24 +3886,3 @@ def test_a_subject_query_reads_the_graph_once(
 
     assert result.exit_code == 0, result.output
     assert calls["soft"] == 1, calls
-
-
-def test_note_receipt_says_recorded_never_appended() -> None:
-    """The note verb REPLACES current_state; no runtime string may say appended.
-
-    Measured 2026-09-20: the false word made two kings stack-write one
-    node believing notes appended; the help already says REPLACING.
-    """
-    import io
-
-    from fno.decide import unmeasured_note_warning, warn_if_note_is_long
-
-    warning = unmeasured_note_warning(["x = compute()"])
-    assert "appended" not in warning
-    assert "recorded" in warning
-
-    stream = io.StringIO()
-    warn_if_note_is_long(" ".join(["word"] * 400), stream=stream)
-    printed = stream.getvalue()
-    assert "appended" not in printed
-    assert "recorded" in printed

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.graph.store import locked_mutate_graph, render_canonical_views
+from fno.graph.store import commit_rows_via_store, render_canonical_views
 
 
 @pytest.fixture
@@ -57,7 +57,7 @@ def _config(monkeypatch, target):
 
 def _seed(graph, title):
     """One store write: the node the later assertions look for."""
-    locked_mutate_graph(
+    commit_rows_via_store(
         graph,
         lambda entries: [
             {
@@ -83,7 +83,12 @@ def test_write_path_renders_the_configured_store_inline(paths, monkeypatch):
     _config(monkeypatch, target)
     _seed(graph, "Render follows write inline")
 
-    assert graph.exists(), "the store write landed"
+    # The store write lands in graph.db, not the json file.
+    from fno.graph.store import read_graph_strict
+
+    assert any(e["title"] == "Render follows write inline" for e in read_graph_strict(graph)), (
+        "the store write landed"
+    )
     assert "Render follows write inline" in target.read_text(encoding="utf-8")
 
 
@@ -119,4 +124,6 @@ def test_failing_target_never_blocks_the_next_write(paths, monkeypatch):
 
     _seed(graph, "Second write")
     render_canonical_views()  # must not raise either
-    assert "Second write" in graph.read_text(encoding="utf-8")
+    from fno.graph.store import read_graph_strict
+
+    assert any(e["title"] == "Second write" for e in read_graph_strict(graph))

@@ -1719,12 +1719,6 @@ def test_add_pr_warns_when_reread_row_remains_offered(tmp_graph, monkeypatch):
         "created_at": "2026-09-01T00:00:00Z",
     }]}) + "\n")
 
-    # Skipped: an --add-pr on a primary-less node is stored at pull_requests
-    # seq 0 (the primary slot), so the recompute reads PR presence, flips the
-    # row to in_review, and the still-offered warning can never fire. Store
-    # gap, not a read-back artifact; unskip when additional_prs save at seq >= 1.
-    pytest.skip("an additional pr without a primary lands in the seq-0 primary slot")
-
     result = _invoke("backlog", "update", "ab-offered1", "--add-pr", "777")
 
     assert result.exit_code == 0, result.output
@@ -1807,12 +1801,6 @@ def test_update_can_replace_and_clear_an_old_in_progress_owner(tmp_graph):
     assert row["session_id"] == "worker-replacement"
     assert row["locked_at"] != old
     assert not row.get("ownership_defect")
-
-    # The clear half is skipped: the store import projects the seeded
-    # locked_by into a node_claims row, and a later --locked-by null is
-    # re-projected from that stale claim, so the clear does not stick.
-    # This is a store gap, not a read-back artifact.
-    pytest.skip("the claim mirror re-projects an imported locked_by over a null clear")
 
     cleared = _invoke("backlog", "update", node_id, "--locked-by", "null")
     assert cleared.exit_code == 0, cleared.output

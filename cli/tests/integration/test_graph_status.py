@@ -114,15 +114,6 @@ def test_idea_status_overridden_by_blocked_at_read_time(tmp_graph):
     )
 
 
-@pytest.mark.skip(
-    reason=(
-        "the store write path no longer derives plan-based statuses: the "
-        "plan-rung map was a client-side input to the python recompute that "
-        "ran inside every commit, and the keeper-side commit recompute keeps "
-        "stored statuses, so intake-minted nodes read idea and never surface "
-        "in ready/next. Store gap, not a read-back artifact."
-    )
-)
 def test_node_with_plan_path_derives_to_ready(tmp_graph, tmp_path):
     """A node with a plan_path (via intake) derives to ready, not idea."""
     plan = tmp_path / "fake-plan.md"
@@ -168,13 +159,6 @@ def _seed_linked_idea_stub(tmp_graph, tmp_path) -> str:
     return stub["id"]
 
 
-@pytest.mark.skip(
-    reason=(
-        "same store gap as test_node_with_plan_path_derives_to_ready: with no "
-        "ready row derivable, next answers null and the exclusion cannot be "
-        "observed."
-    )
-)
 def test_linked_idea_stub_excluded_from_next_by_default(tmp_graph, tmp_path):
     """`backlog next` returns ready rows (and plan-less ideas); a LINKED idea
     stub (Rung.IDEA) stays gated behind --include-ideas (x-e24a)."""
@@ -534,12 +518,6 @@ def test_global_settings_consulted_when_inside_project(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason=(
-        "same store gap as test_node_with_plan_path_derives_to_ready: the "
-        "intake-minted row reads idea, so no ready row exists for -A to list."
-    )
-)
 def test_dash_a_is_shorthand_for_all_in_ready(tmp_graph, tmp_path):
     """`backlog ready -A` is equivalent to `--all`."""
     plan = tmp_path / "p.md"
@@ -551,12 +529,6 @@ def test_dash_a_is_shorthand_for_all_in_ready(tmp_graph, tmp_path):
     assert isinstance(listing, list) and len(listing) == 1
 
 
-@pytest.mark.skip(
-    reason=(
-        "same store gap as test_node_with_plan_path_derives_to_ready: the "
-        "intake-minted row reads idea, so next answers null instead of it."
-    )
-)
 def test_dash_a_is_shorthand_for_all_in_next(tmp_graph, tmp_path):
     """`backlog next -A` is equivalent to `--all`."""
     plan = tmp_path / "p.md"
@@ -637,16 +609,6 @@ def _archive_node(tmp_path, nid: str) -> None:
     )
 
 
-@pytest.mark.skip(
-    reason=(
-        "the write snapshot includes archived residents (the keeper's "
-        "whole-graph export does not filter archived_at) while reads hide "
-        "them, so update finds the archived row in its mutator and applies "
-        "the change instead of refusing. Store gap, not a read-back "
-        "artifact; the archived refusal is unreachable until the write "
-        "snapshot excludes the archive."
-    )
-)
 def test_update_on_archived_node_names_the_remedy(tmp_graph, tmp_path):
     """'not found' for a node sitting in graph-archive.json is the message a
     typo gets; the refusal must name archived and the verb that reverses it."""

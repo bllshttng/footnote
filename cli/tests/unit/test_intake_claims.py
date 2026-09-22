@@ -23,6 +23,7 @@ from fno.graph._intake import (
     _refuse_surfaceless_intake, _resolve_claim, _warn_similar_nodes,
 )
 from fno.graph.cli import _create_node_impl, _do_intake_multi, _intake_impl
+from fno.graph.store import commit_rows_via_store, read_graph_strict
 
 
 # -- fixtures --
@@ -92,13 +93,12 @@ def fixture_graph(tmp_path: Path):
     graph_file.write_text(json.dumps({"entries": entries}) + "\n")
 
     with patch("fno.graph.cli._graph_path", return_value=graph_file), \
-         patch("fno.graph._intake._git_repo_root", return_value=str(tmp_path)), \
-         patch("fno.paths.graph_archive_json", return_value=tmp_path / "graph-archive.json"):
+         patch("fno.graph._intake._git_repo_root", return_value=str(tmp_path)):
         yield graph_file
 
 
 def _read_entries(graph_file: Path) -> list[dict]:
-    return json.loads(graph_file.read_text())["entries"]
+    return read_graph_strict(graph_file)
 
 
 # Every plan fixture in this file carries a file surface: intake refuses a
@@ -385,7 +385,7 @@ def test_multi_intake_exempts_already_intaked_surfaceless_plan(
         _node("ab-b0nd0001", title="Owner of the surfaceless plan",
               plan_path=str(bound), status="ready")
     )
-    fixture_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    commit_rows_via_store(fixture_graph, lambda _e: entries)
     (tmp_path / "fresh").mkdir()
     fresh = _write_quick_plan(tmp_path / "fresh", title="Fresh surface plan")
 
@@ -415,7 +415,7 @@ def test_multi_intake_exempts_bound_surfaceless_plan_across_roadmaps(
         _node("ab-r0ad0001", title="Owner under another roadmap",
               plan_path=str(bound), status="ready", roadmap_id="roadmap-a")
     )
-    fixture_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    commit_rows_via_store(fixture_graph, lambda _e: entries)
     (tmp_path / "fresh2").mkdir()
     fresh = _write_quick_plan(tmp_path / "fresh2", title="Cross roadmap fresh")
 
@@ -448,7 +448,7 @@ def test_multi_intake_exemption_matches_absolute_graph_spelling(
         _node("ab-abs00001", title="Owner abs spelling", plan_path=str(plan),
               status="ready")
     )
-    fixture_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    commit_rows_via_store(fixture_graph, lambda _e: entries)
     (tmp_path / "fresh3").mkdir()
     fresh = _write_quick_plan(tmp_path / "fresh3", title="Relative spelling fresh")
 
@@ -728,13 +728,13 @@ def test_intake_claim_blueprint_confirmation_still_appends(fixture_graph, tmp_pa
     filed-versus-revised delta undercounts agreement if confirmations are
     dropped."""
     graph_file = fixture_graph
-    entries = json.loads(graph_file.read_text())["entries"]
+    entries = read_graph_strict(graph_file)
     filed = next(e for e in entries if e["id"] == "ab-1dea1234")
     filed["difficulty"] = "medium"
     filed["difficulty_history"] = [
         {"value": "medium", "source": "filed", "ts": "2026-08-26T00:00:00+00:00"}
     ]
-    graph_file.write_text(json.dumps({"entries": entries}) + "\n")
+    commit_rows_via_store(graph_file, lambda _e: entries)
 
     plan = _write_quick_plan(
         tmp_path,
@@ -772,11 +772,11 @@ def test_intake_claim_drains_retired_model_tier_key(fixture_graph, tmp_path, cap
     claim onto a both-spellings row cannot re-leave the key behind (the same
     drain cmd_update got)."""
     graph_file = fixture_graph
-    entries = json.loads(graph_file.read_text())["entries"]
+    entries = read_graph_strict(graph_file)
     filed = next(e for e in entries if e["id"] == "ab-1dea1234")
     filed["model_tier"] = "high"
     filed["difficulty"] = "high"
-    graph_file.write_text(json.dumps({"entries": entries}) + "\n")
+    commit_rows_via_store(graph_file, lambda _e: entries)
 
     plan = _write_quick_plan(
         tmp_path, title="Drain on claim", claims="ab-1dea1234", difficulty="high"
@@ -908,7 +908,7 @@ def test_reintake_of_already_intaked_plan_stays_idempotent(
     entries = _read_entries(fixture_graph)
     owner = next(e for e in entries if e["id"] == "ab-1dea1234")
     owner["plan_path"] = str(plan)
-    fixture_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    commit_rows_via_store(fixture_graph, lambda _e: entries)
 
     _intake_impl(plan_paths=[str(plan)])
     out = capsys.readouterr().out
@@ -976,7 +976,7 @@ def test_intake_claims_non_idea_nodes(fixture_graph, tmp_path, capsys):
         )
     )
     entries.append(_node("ab-b10cced1", title="Parked feature", status="blocked"))
-    graph_file.write_text(json.dumps({"entries": entries}) + "\n")
+    commit_rows_via_store(graph_file, lambda _e: entries)
 
     in_flight_dir = tmp_path / "in_flight"
     parked_dir = tmp_path / "parked"
@@ -1101,7 +1101,7 @@ def test_claim_lane_flows_declared_type_doc_to_graph(tmp_path, monkeypatch):
         app, ["backlog", "intake", str(plan), "--claims", "ab-1dea1234"]
     )
     assert result.exit_code == 0, result.output
-    after = json.loads(g.read_text())["entries"]
+    after = read_graph_strict(g)
     assert next(e for e in after if e["id"] == "ab-1dea1234")["type"] == "bug"
 
 
@@ -1124,7 +1124,7 @@ def test_claim_lane_respects_the_epic_nesting_cap(tmp_path, monkeypatch):
         _node("ab-e2222222", title="Nested epic", type="epic", parent="ab-m1111111"),
         _node("ab-1dea1234", title="Idea", status="idea", parent="ab-e2222222"),
     ]
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    commit_rows_via_store(g, lambda _e: entries)
     ledger = tmp_path / "ledger.json"
     ledger.write_text('{"entries": []}\n')
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -1141,7 +1141,7 @@ def test_claim_lane_respects_the_epic_nesting_cap(tmp_path, monkeypatch):
         app, ["backlog", "intake", str(plan), "--claims", "ab-1dea1234"]
     )
     assert result.exit_code == 0, result.output  # the claim itself still lands
-    after = json.loads(g.read_text())["entries"]
+    after = read_graph_strict(g)
     target = next(e for e in after if e["id"] == "ab-1dea1234")
     assert target["type"] == "feature"  # promotion refused
     assert target["plan_path"] == str(plan)  # the rest of the claim applied
@@ -1160,7 +1160,7 @@ def test_claim_lane_allows_an_epic_under_a_top_level_mission(tmp_path, monkeypat
         _node("ab-m1111111", title="Mission", type="epic"),
         _node("ab-1dea1234", title="Idea", status="idea", parent="ab-m1111111"),
     ]
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    commit_rows_via_store(g, lambda _e: entries)
     ledger = tmp_path / "ledger.json"
     ledger.write_text('{"entries": []}\n')
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -1177,7 +1177,7 @@ def test_claim_lane_allows_an_epic_under_a_top_level_mission(tmp_path, monkeypat
         app, ["backlog", "intake", str(plan), "--claims", "ab-1dea1234"]
     )
     assert result.exit_code == 0, result.output
-    after = json.loads(g.read_text())["entries"]
+    after = read_graph_strict(g)
     assert next(e for e in after if e["id"] == "ab-1dea1234")["type"] == "epic"
 
 
@@ -1204,7 +1204,7 @@ def test_claim_lane_leaves_type_alone_when_doc_declares_none(tmp_path, monkeypat
         app, ["backlog", "intake", str(plan), "--claims", "ab-1dea1234"]
     )
     assert result.exit_code == 0, result.output
-    after = json.loads(g.read_text())["entries"]
+    after = read_graph_strict(g)
     assert next(e for e in after if e["id"] == "ab-1dea1234")["type"] == "epic"
 
 
@@ -1223,7 +1223,7 @@ def test_cli_runner_intake_with_claims_flag(tmp_path, monkeypatch):
 
     g = tmp_path / "graph.json"
     entries = [_node("ab-1dea1234", title="Idea title", status="idea")]
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    commit_rows_via_store(g, lambda _e: entries)
     ledger = tmp_path / "ledger.json"
     ledger.write_text('{"entries": []}\n')
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
@@ -1239,7 +1239,7 @@ def test_cli_runner_intake_with_claims_flag(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "linked plan to ab-1dea1234 via cli" in result.output
     assert "fno do target start ab-1dea1234" in result.output
-    after = json.loads(g.read_text())["entries"]
+    after = read_graph_strict(g)
     target = next(e for e in after if e["id"] == "ab-1dea1234")
     assert target["plan_path"] == str(plan)
     assert target["title"] == "Real Typer plan"
@@ -1300,7 +1300,7 @@ def unscoped_node_graph(tmp_path: Path):
         ),
     ]
     graph_file = tmp_path / "graph.json"
-    graph_file.write_text(json.dumps({"entries": entries}) + "\n")
+    commit_rows_via_store(graph_file, lambda _e: entries)
     with patch("fno.graph.cli._graph_path", return_value=graph_file), \
          patch("fno.graph._intake._git_repo_root", return_value=str(tmp_path)):
         yield graph_file
@@ -1364,7 +1364,7 @@ def test_intake_claim_backfills_only_null_fields(tmp_path, capsys):
         ),
     ]
     graph_file = tmp_path / "graph.json"
-    graph_file.write_text(json.dumps({"entries": entries}) + "\n")
+    commit_rows_via_store(graph_file, lambda _e: entries)
 
     with patch("fno.graph.cli._graph_path", return_value=graph_file), \
          patch("fno.graph._intake._git_repo_root", return_value=str(tmp_path)):
@@ -1375,7 +1375,7 @@ def test_intake_claim_backfills_only_null_fields(tmp_path, capsys):
         )
         _intake_impl(plan_paths=[str(plan)])
 
-        result_entries = json.loads(graph_file.read_text())["entries"]
+        result_entries = read_graph_strict(graph_file)
         target = next(e for e in result_entries if e["id"] == "ab-aaa00002")
         # project preserved (was non-null).
         assert target["project"] == "some-other-project"
@@ -1636,7 +1636,7 @@ def test_multi_intake_dry_run_previews_refusals_not_would_intake(
     # "already intaked ab-alr0001" and intakes nothing for it.
     entries = _read_entries(fixture_graph)
     entries.append(_node("ab-alr0001", title="Owner of the already plan", plan_path=str(already)))
-    fixture_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    commit_rows_via_store(fixture_graph, lambda _e: entries)
 
     args = SimpleNamespace(
         # priority None so the PLAN frontmatter supplies it (a cli priority
@@ -1903,7 +1903,7 @@ def test_idea_path_survives_scorer_failure_exit_zero(tmp_path, monkeypatch):
 
     result = CliRunner().invoke(cli, ["idea", "Backlog dedup gate filings", "--difficulty", "low"])
     assert result.exit_code == 0, result.output
-    assert len(json.loads(g.read_text())["entries"]) == 1  # node persisted
+    assert len(read_graph_strict(g)) == 1  # node persisted
     # CliRunner mixes stderr into output; pin the dedup warning text (not just
     # any single warning line) and that it is the only one.
     assert "post-file dedup check skipped" in result.output
@@ -1912,17 +1912,24 @@ def test_idea_path_survives_scorer_failure_exit_zero(tmp_path, monkeypatch):
 
 def test_warn_similar_nodes_includes_archived_nodes(monkeypatch, tmp_path, capsys):
     # codex P2: a shipped-and-archived node is the answer to a duplicate filing,
-    # but once `archive --apply` moves it to graph-archive.json the working graph
-    # alone no longer sees it. The dedup scan must read the archive too.
-    archive = tmp_path / "graph-archive.json"
-    archive.write_text(
+    # but once the sweep stamps `archived_at` the default reads no longer see
+    # it. The dedup scan must read the store's archived residents too.
+    from fno.graph.store import _worker_binary
+
+    graph = tmp_path / "graph.json"
+    graph.write_text(
         json.dumps({"entries": [
-            _node("arch1", title="dedup gate for backlog filings", status="done", pr_number=99),
+            _node(
+                "arch1", title="dedup gate for backlog filings", status="done",
+                completed_at="2026-07-01T00:00:00Z",
+                pr_number=99, archived_at="2026-08-01T00:00:00Z",
+            ),
         ]})
         + "\n"
     )
-    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: archive)
-    # Working graph is empty; the only candidate lives in the archive.
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
+    # Working graph is empty; the only candidate is an archived resident.
     new = _node("new", title="dedup gate for backlog node filings", status="idea")
     _warn_similar_nodes(new, [], intake_hint=False)
     err = capsys.readouterr().err
@@ -1947,8 +1954,6 @@ def test_new_birth_path_warns_on_near_duplicate(tmp_path, monkeypatch):
         + "\n"
     )
     monkeypatch.setattr(gc, "GRAPH_JSON", g)
-    # Isolate from the real archive so only the working-graph candidate is seen.
-    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: tmp_path / "no-archive.json")
     result = CliRunner().invoke(
         cli, ["new", "Already shipped feature refactor", "--unscoped", "--force-domain"],
     )
@@ -1971,18 +1976,15 @@ def test_safe_stderr_warn_swallows_broken_stream(monkeypatch):
 
 
 def test_entries_with_archive_degrades_when_archive_read_raises(monkeypatch, tmp_path):
-    # codex P2: a malformed/unreadable archive must not suppress scoring of the
+    # codex P2: an unreadable store read must not suppress scoring of the
     # valid working graph; the contract is best-effort degrade.
+    import fno.graph.api as api
     from fno.graph import store
 
-    bad_archive = tmp_path / "graph-archive.json"
-    bad_archive.write_text('{"entries": []}\n')
-    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: bad_archive)
+    def boom(**_kwargs):
+        raise RuntimeError("store unreadable")
 
-    def boom(_path=None):
-        raise RuntimeError("archive unreadable")
-
-    monkeypatch.setattr(store, "read_graph", boom)
+    monkeypatch.setattr(api, "wire_rows", boom)
     working = [_node("live1", title="some live node", status="idea")]
     assert store.entries_with_archive(working) == working  # degraded, did not raise
 

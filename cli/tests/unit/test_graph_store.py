@@ -408,8 +408,6 @@ def test_canonical_auto_render_keeps_archive_only_rows(tmp_path, monkeypatch):
     import fno.graph._constants as gc
     from fno.graph.store import _worker_binary
 
-    if _worker_binary() is None:
-        pytest.skip("no fno-agents-worker binary; build with `cargo build -p fno-agents`")
 
     state_dir = tmp_path / "state"
     state_dir.mkdir()

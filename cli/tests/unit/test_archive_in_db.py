@@ -54,8 +54,6 @@ def world(tmp_path, monkeypatch):
     can spawn."""
     from fno.graph.store import _worker_binary
 
-    if _worker_binary() is None:
-        pytest.skip("no fno-agents-worker binary; build with `cargo build -p fno-agents`")
     graph = tmp_path / "graph.json"
     _seed(
         graph,
@@ -114,8 +112,6 @@ def test_import_skips_an_id_reuse_and_the_live_row_wins(tmp_path, monkeypatch):
     from fno.graph.api import wire_rows
     from fno.graph.store import _client_for, _worker_binary
 
-    if _worker_binary() is None:
-        pytest.skip("no fno-agents-worker binary; build with `cargo build -p fno-agents`")
     graph = tmp_path / "graph.json"
     _seed(graph, _row("x-dup", title="already here"))
     (tmp_path / "graph-archive.json").write_text(
@@ -145,7 +141,6 @@ def test_import_without_a_file_stamps_nothing_and_folds_later(tmp_path, monkeypa
     from fno.graph import store as store_mod
 
     if store_mod._worker_binary() is None:
-        pytest.skip("no fno-agents-worker binary; build with `cargo build -p fno-agents`")
     graph = tmp_path / "graph.json"
     _seed(graph, _row("x-live", title="here"))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
@@ -179,7 +174,6 @@ def test_a_v1_poisoned_stamp_voids_and_the_file_folds(tmp_path, monkeypatch):
     from fno.graph import store as store_mod
 
     if store_mod._worker_binary() is None:
-        pytest.skip("no fno-agents-worker binary; build with `cargo build -p fno-agents`")
     graph = tmp_path / "graph.json"
     _seed(graph, _row("x-live", title="here"))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)

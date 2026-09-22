@@ -734,15 +734,6 @@ def test_reconcile_happy_path_then_noop(cli_env, monkeypatch):
     assert node2["completed_at"] == first_ts
 
 
-@pytest.mark.skip(
-    reason=(
-        "same store gap as the plan-rung derivation: the drift the sweep "
-        "reports is healed by the python recompute that used to run inside "
-        "every commit; the keeper-side commit keeps stored statuses, so the "
-        "reclaim receipt prints but the row never moves. Store gap, not a "
-        "read-back artifact."
-    )
-)
 def test_reconcile_reclaims_status_drift_from_container_rollup(cli_env):
     """A fresh status derivation is applied even when no PR close is pending."""
     graph_path, _sentinel_dir = cli_env

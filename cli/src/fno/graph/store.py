@@ -1065,6 +1065,25 @@ def _graph_lock_path(path: Path) -> Path:
 # Reads
 # ---------------------------------------------------------------------------
 
+def read_graph(path: Path = GRAPH_JSON) -> list[dict]:
+    """Read graph.json through the keeper, defaults applied. No lock needed.
+
+    Swallows corruption on the read path -- commands like `status` and `ready`
+    should not crash a user's terminal when graph.json is wedged. An
+    UNREACHABLE store is different: it raises StoreUnavailable, never an
+    empty graph.
+    """
+    try:
+        result = _client_for(path).read(path)
+    except GraphCorruptError:
+        # Name the backup that exists: keepers pre-backups/ wrote the sibling.
+        backup = path.parent / "backups" / (path.name + ".bak")
+        print(f"Warning: {path} is corrupt, backup saved to "
+              f"{backup if backup.exists() else path.with_suffix('.json.bak')}", file=sys.stderr)
+        return []
+    return result["entries"]
+
+
 def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
     """The whole-graph read, defaults applied. Raises when the store cannot
     be read cleanly, so "node absent" stays apart from "graph unreadable"."""

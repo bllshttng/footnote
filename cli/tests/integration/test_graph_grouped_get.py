@@ -72,14 +72,6 @@ def test_grouped_view_is_opt_in_and_preserves_flat_default(tmp_graph):
     assert "human details" in grouped.output
 
 
-@pytest.mark.skip(
-    reason=(
-        "the store schema gained archived_at and the grouped view never "
-        "classified it: GROUPED_SCHEMA_FIELDS - GROUPED_ASSIGNED_FIELDS == "
-        "['archived_at']. Classify it in grouped.py (a group or the residual "
-        "set), then remove this skip. Store-side display gap."
-    )
-)
 def test_grouped_schema_fields_are_explicitly_assigned():
     grouped_fields = [field for _, fields in GROUPED_FIELD_GROUPS for field in fields]
 

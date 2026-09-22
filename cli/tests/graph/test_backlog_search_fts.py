@@ -48,8 +48,6 @@ def tmp_graph(tmp_path, monkeypatch):
     """A temp machine with a real keeper. Skips where no worker binary."""
     from fno.graph.store import _worker_binary
 
-    if _worker_binary() is None:
-        pytest.skip("no fno-agents-worker binary; build with `cargo build -p fno-agents`")
     graph = tmp_path / "graph.json"
     _seed(
         graph,

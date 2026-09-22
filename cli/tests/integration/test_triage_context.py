@@ -320,15 +320,6 @@ def test_cli_context_idea_branch_also_enriched(tmp_graph):
     assert "ship_state" in i
 
 
-@pytest.mark.skip(
-    reason=(
-        "the typed store import drops rows the model cannot represent: a "
-        "legacy dict-shaped cost_sessions fails Node::from_json and the row "
-        "is skipped, so the candidate never surfaces. The tolerant-read "
-        "contract this test pinned needs a store-side decision (derive or "
-        "keep legacy rows) before it can be restored."
-    )
-)
 def test_cli_context_tolerates_legacy_dict_cost_sessions(tmp_graph):
     """Real graphs in the wild may carry a dict-shaped cost_sessions on
     older nodes; the CLI must not crash, and must report zero cost.

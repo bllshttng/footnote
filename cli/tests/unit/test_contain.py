@@ -21,6 +21,7 @@ import typer
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.graph.store import commit_rows_via_store, read_graph_strict
 
 runner = CliRunner()
 
@@ -46,11 +47,21 @@ def _invoke(*args):
 
 
 def _read_entries(g: Path) -> list[dict]:
-    return json.loads(g.read_text()).get("entries", [])
+    return read_graph_strict(g)
 
 
 def _by_id(g: Path) -> dict:
     return {e["id"]: e for e in _read_entries(g)}
+
+
+def _write_rows(g: Path, rows: dict) -> None:
+    """Replace the graph's rows through the store: a json rewrite would be
+    ignored, because the db outlives the file it was imported from."""
+
+    def mutator(_entries):
+        return list(rows.values())
+
+    commit_rows_via_store(g, mutator)
 
 
 def _seed_idea(g: Path, title: str, *extra: str) -> str:
@@ -126,7 +137,7 @@ def test_contain_refuses_a_done_owner_and_stamps_nothing(tmp_graph):
     assert r.exit_code == 2, r.output
     assert "is done" in r.output
     rows = _by_id(tmp_graph)
-    assert all("contained_in" not in rows[k] for k in kids)
+    assert all(rows[k].get("contained_in") is None for k in kids)
 
 
 def test_contain_refuses_a_deferred_owner_and_stamps_nothing(tmp_graph):
@@ -135,7 +146,7 @@ def test_contain_refuses_a_deferred_owner_and_stamps_nothing(tmp_graph):
     r = _invoke("backlog", "contain", owner, *kids)
     assert r.exit_code == 2, r.output
     assert "is deferred" in r.output
-    assert "contained_in" not in _by_id(tmp_graph)[kids[0]]
+    assert _by_id(tmp_graph)[kids[0]].get("contained_in") is None
 
 
 def test_contain_refuses_a_missing_owner(tmp_graph):
@@ -143,7 +154,7 @@ def test_contain_refuses_a_missing_owner(tmp_graph):
     r = _invoke("backlog", "contain", "x-dead0001", kid)
     assert r.exit_code == 3, r.output
     assert "owner not found" in r.output
-    assert "contained_in" not in _by_id(tmp_graph)[kid]
+    assert _by_id(tmp_graph)[kid].get("contained_in") is None
 
 
 def test_contain_refuses_the_owner_naming_itself(tmp_graph):
@@ -181,12 +192,12 @@ def test_contain_refuses_a_target_with_an_open_pr_and_stamps_nothing_in_the_batc
     owner, kids = _seed_owner_with_children(tmp_graph, 2)
     rows = _by_id(tmp_graph)
     rows[kids[0]]["pr_number"] = 4242
-    tmp_graph.write_text(json.dumps({"entries": list(rows.values())}))
+    _write_rows(tmp_graph, rows)
     r = _invoke("backlog", "contain", owner, *kids)
     assert r.exit_code == 2, r.output
     assert "own delivery unit mid-flight" in r.output
     fresh = _by_id(tmp_graph)
-    assert all("contained_in" not in fresh[k] for k in kids)
+    assert all(fresh[k].get("contained_in") is None for k in kids)
 
 
 def test_contain_refuses_a_target_with_a_live_claim(tmp_graph, monkeypatch):
@@ -197,7 +208,7 @@ def test_contain_refuses_a_target_with_a_live_claim(tmp_graph, monkeypatch):
     r = _invoke("backlog", "contain", owner, *kids)
     assert r.exit_code == 2, r.output
     assert "being built right now by worker-7" in r.output
-    assert "contained_in" not in _by_id(tmp_graph)[kids[0]]
+    assert _by_id(tmp_graph)[kids[0]].get("contained_in") is None
 
 
 def test_contain_live_worker_positive_control_on_an_unclaimed_node(tmp_graph):
@@ -217,12 +228,12 @@ def test_contain_withholds_containment_for_a_done_target_with_a_pr(tmp_graph):
     rows = _by_id(tmp_graph)
     assert not rows[owner].get("completed_at"), "owner must stay open"
     rows[kid]["pr_number"] = 4243
-    tmp_graph.write_text(json.dumps({"entries": list(rows.values())}))
+    _write_rows(tmp_graph, rows)
     r = _invoke("backlog", "contain", owner, kid)
     assert r.exit_code == 0, r.output
     row = _by_id(tmp_graph)[kid]
     assert row["parent"] == owner
-    assert "contained_in" not in row
+    assert row.get("contained_in") is None
     assert "did NOT mark it contained" in r.output
 
 

@@ -74,8 +74,6 @@ def _archived_at(graph: Path, node_id: str):
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     from fno.graph.store import _worker_binary
-    if _worker_binary() is None:
-        pytest.skip("no fno-agents-worker binary; build with `cargo build -p fno-agents`")
     graph = tmp_path / "graph.json"
     _seed(graph)  # empty import source; the store folds it on first open
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)

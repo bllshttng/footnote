@@ -1100,6 +1100,48 @@ def _groom_health() -> dict[str, Any]:
         return {"state": "unknown", "hours": None, "stale": False, "agent_installed": False}
 
 
+def _archive_id_collisions() -> dict[str, Any]:
+    """Ids present in BOTH the working graph and the archive.
+
+    Each is a real collision, not a duplicate: the id generator only checked
+    the working graph, so a freed id gets reminted while the archive still
+    holds a different node under the same id. A repeat sweep frees more ids,
+    so this count grows on its own; it changes doctor's exit code rather than
+    reporting quietly.
+
+    The archive is read via ``_read_json``, NOT ``read_graph``: the read path
+    swallows corruption to an empty list, which would report 0 collisions and
+    exit green in exactly the state where the ids cannot be checked.
+    """
+    try:
+        from fno.graph.store import GraphCorruptError, _apply_graph_defaults, _read_json
+        from fno.paths import graph_archive_json
+        from fno.tracker.metadata import read_entries
+
+        archive_path = graph_archive_json()
+        if not archive_path.exists():
+            return {"count": 0, "ids": []}
+        # Guarded metadata read: this alarm compares the LOCAL store against
+        # its LOCAL archive, which is default-backend machinery; an external
+        # selection degrades to the silent count-0 path through the except.
+        working_ids = {
+            nid for e in read_entries("doctor")
+            if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
+        }
+        try:
+            archive_entries = _apply_graph_defaults(_read_json(archive_path))
+        except GraphCorruptError:
+            return {"count": 0, "ids": [], "unreadable": True}
+        archive_ids = {
+            nid for e in archive_entries
+            if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
+        }
+        collisions = sorted(working_ids & archive_ids)
+        return {"count": len(collisions), "ids": collisions}
+    except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
+        return {"count": 0, "ids": []}
+
+
 def _post_merge_sync_health() -> dict[str, Any]:
     """Is the canonical checkout current with recently-merged PRs?
 
@@ -4113,6 +4155,7 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     from fno.doctor_graph import export_health
     result["graph_export"] = export_health()
     result["groom"] = _groom_health()
+    result["archive_id_collisions"] = _archive_id_collisions()
     result["post_merge_sync"] = _post_merge_sync_health()
     try:
         from fno.evals.report import evals_health_summary
