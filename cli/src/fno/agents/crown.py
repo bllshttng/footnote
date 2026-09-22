@@ -751,18 +751,21 @@ def plan_spawn_crown(
     return answer.get("refusal"), answer
 
 
-def _widen_answer(scope: str, caller) -> dict:
+def _widen_answer(scope: str, caller, target_name: str) -> dict:
     """Rust's crown-widen answer; a missing/old binary answers ``{}`` (fails closed)."""
     from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
 
     by_id = _graph_index() or {}
-    fields = ("name", "status", "crown_scope", "harness_session_id", "cc_session_id")
+    fields = ("name", "status", "crown_scope", "crown_grantor",
+              "harness_session_id", "cc_session_id")
+    member_ids = dict.fromkeys(split_scope(scope) + split_scope(getattr(caller, "crown_scope", None)))
     try:
         return spawn_overlay_call({
             "kind": "crown-widen",
             "requested": scope,
+            "target": target_name,
             "caller": {f: getattr(caller, f, None) for f in fields},
-            "members": [by_id.get(m) for m in split_scope(scope)],
+            "members": [by_id.get(m) for m in member_ids],
         })
     except SpawnOverlayUnavailable:
         return {}
@@ -1040,12 +1043,23 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
 
     # Resolved before update_registry, never inside _stamp: this reads the
     # registry itself, and the closure runs under its lock.
+    from fno.agents.registry import AgentResolutionError, TERMINAL_STATUSES, resolve_agent, update_registry
     caller = calling_agent_row()
+    try:
+        target_name = resolve_agent(handle).entry.name
+    except AgentResolutionError as exc:
+        raise CrownPromotionError(
+            f"{exc}. `fno agents list` shows every handle you can crown."
+        ) from exc
     denial = grant_error(scope, caller, allow_succession=True)
-    widen = _widen_answer(scope, caller) if denial is not None else {}
-    if denial is not None and widen.get("widen") is not True:
-        raise CrownPromotionError(" ".join(filter(None, (denial, widen.get("hint")))))
-    grantor = "human" if caller is None else caller.name
+    widen = _widen_answer(scope, caller, target_name) if caller is not None else {}
+    if widen.get("widen") is not True and (denial is not None or (caller is not None and target_name == caller.name)):
+        raise CrownPromotionError(" ".join(filter(None, (denial, widen.get("hint"))))
+            or "crown self-edit refused: the crown-widen answer was unavailable")
+    if widen.get("widen") is True and target_name == caller.name and not widen.get("grantor"):
+        raise CrownPromotionError("crown self-edit admitted with no grantor in the answer; update the fno-agents binary (`fno doctor update --rust`)")
+    grantor_name = "human" if caller is None else caller.name
+    recorded_grantor = widen.get("grantor") or grantor_name
     # `grant_error` blesses an equal scope because SPAWN succession vacates the
     # caller and stamps the heir in one write; this path only stamps the target,
     # so letting it through would leave two live crowns and the holder scan
@@ -1069,35 +1083,6 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     # mid-call cannot bestow what it no longer holds.
     granting_scope = None if caller is None else getattr(caller, "crown_scope", None)
 
-    from fno.agents.registry import (
-        AgentResolutionError,
-        TERMINAL_STATUSES,
-        resolve_agent,
-        update_registry,
-    )
-
-    try:
-        target_name = resolve_agent(handle).entry.name
-    except AgentResolutionError as exc:
-        raise CrownPromotionError(
-            f"{exc}. `fno agents list` shows every handle you can crown."
-        ) from exc
-
-    # Never self-declared: once a king may grant, the grantor recorded on the
-    # row could be the row itself. The succession refusal above fires only on
-    # an EQUAL scope, so narrowing to a strict SUBSET would sail past it -
-    # identity, not territory, is the test.
-    if widen.get("widen") is True and target_name != grantor:
-        raise CrownPromotionError(denial)
-    if caller is not None and target_name == grantor and widen.get("widen") is not True:
-        raise CrownPromotionError(
-            f"refusing to crown {target_name!r}: that is this session, and a "
-            "crown is stamped by a grantor, never self-declared. The row would "
-            "record itself as its own grantor, which is exactly the claim an "
-            "external reader cannot verify. Ask a king whose scope contains "
-            f"{scope!r}, or crown a different row."
-        )
-
     receipt: dict[str, Any] = {}
     vacated_manifest_owner = ""
     vacated_owner_cwd = ""
@@ -1105,7 +1090,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     def _stamp(rows: list) -> list:
         nonlocal vacated_manifest_owner, vacated_owner_cwd
         if caller is not None:
-            live_caller = next((row for row in rows if row.name == grantor), None)
+            live_caller = next((row for row in rows if row.name == grantor_name), None)
             if live_caller is not None and live_caller.status in TERMINAL_STATUSES:
                 raise CrownPromotionError(
                     f"refusing to crown {target_name!r}: the grantor's STORED "
@@ -1173,7 +1158,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         # caller is not a second ruler; every other RIVAL live row is. Rivalry
         # is ladder-aware, not bare overlap: a live portfolio over the scope's
         # project is the new king's court, not a second ruler of it.
-        delegating = {target.name} | ({grantor} if caller is not None else set())
+        delegating = {target.name} | ({grantor_name} if caller is not None else set())
         holder = next(
             (
                 row
@@ -1208,7 +1193,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                 owner_cwd=target.cwd,
                 crown_level=level,
                 crown_scope=scope,
-                crown_grantor=grantor,
+                crown_grantor=recorded_grantor,
                 model=getattr(target, "requested_model", None),
             )
         except (OSError, ValueError) as exc:
@@ -1222,14 +1207,14 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                     row,
                     crown_level=level,
                     crown_scope=scope,
-                    crown_grantor=grantor,
+                    crown_grantor=recorded_grantor,
                 )
                 break
         receipt.update(
             crowned=target.name,
             level=level,
             scope=scope,
-            grantor=grantor,
+            grantor=recorded_grantor,
             vacated_scope=vacated_scope,
             vacated_level=vacated_level,
             king_loop_armed=manifest_path is not None,
@@ -1280,7 +1265,10 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         verb = normalize_command(f"/fno:reign {scope}", target_harness or "")
     except DispatchResolveError:
         verb = f"/fno:reign {scope}"
-    receipt["reign_delivery"] = _send_reign_verb(address, verb)
+    if caller is not None and target_name == caller.name:
+        receipt["reign_delivery"] = "skipped: self-edit, this session already reigns"
+    else:
+        receipt["reign_delivery"] = _send_reign_verb(address, verb)
     return receipt
 
 

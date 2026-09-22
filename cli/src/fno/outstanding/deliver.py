@@ -30,6 +30,17 @@ def _resolve_asker(asker: str) -> "tuple[Optional[Any], list[str]]":
     return resolve_reachable(asker)
 
 
+def _asker_is_live(token: str) -> bool:
+    """True when the asker is in the live listing mail send reads first.
+
+    A miss there sends mail down the token ladder, whose wake rung revives the
+    session and charges the answerer's spawn share.
+    """
+    from fno.agents.discover import resolve_or_suggest
+
+    return resolve_or_suggest(token)[0] is not None
+
+
 def _mail_send(argv: "list[str]") -> "tuple[int, str]":
     """Run one ``fno agents mail send``. Every failure arrives as (code, detail)."""
     try:
@@ -117,6 +128,12 @@ def _deliver_answer(
         )
 
     full_id = getattr(session, "session_id", None) or token
+    if not _asker_is_live(full_id):
+        return (
+            f"outstanding: {qid} answered; asker {asker} is not live, so nobody "
+            f"was woken. Decision {did}; recover it via: fno backlog decisions"
+        )
+
     body = f'Answer to your question {qid} "{question.question}": {answer}.'
     argv = [
         *_fno_argv(),
