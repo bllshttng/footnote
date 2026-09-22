@@ -1028,7 +1028,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         # rung, so the receipt carries null rather than a verdict).
         "review_posture": None,
         "merge_authority": {
-            "auto_merge_enabled": False,
+            "config_auto_merge_enabled": False,
             "grant": "none",
             "mergeable_autonomously": False,
         },
