@@ -131,15 +131,16 @@ require "$REPO_ROOT/crates/fno-agents/src/codex_ask.rs" "the exchange finished" 
 require "$REPO_ROOT/crates/fno-agents/src/gemini_ask.rs" "the exchange finished" "teardown(gemini): states the exchange finished first"
 
 # --- 5. the claude stop rm runs itself, and stop_claude's dead end ------------
-DM="$REPO_ROOT/crates/fno-agents/src/daemon.rs"
 # The two rm refusal texts live in the builder module the file-budget gate
-# moved them into; the stop_claude claim still lives in the handler. rm
-# stopped telling the caller to stop (law: remove needs no prior stop) - it
-# runs the claude stop itself and reports the roster evidence.
+# moved them into; the stop_claude claim moved beside them into the claude
+# stop submodule (same file-budget motion). rm stopped telling the caller to
+# stop (law: remove needs no prior stop) - it runs the claude stop itself and
+# reports the roster evidence.
 RR="$REPO_ROOT/crates/fno-agents/src/daemon/rm_refusal_detail.rs"
+CS="$REPO_ROOT/crates/fno-agents/src/daemon/claude_stop.rs"
 require "$RR" "rm ran \`claude stop\`" "rm(live): names the stop rm ran itself"
 require "$RR" "rm could not run its claude stop" "rm(idless): says rm could not run its claude stop"
-require "$DM" "stopping has no exit here" "stop_claude(idless): no false rm-clears claim"
+require "$CS" "stopping has no exit here" "stop_claude(idless): no false rm-clears claim"
 
 if [[ "$FAILURES" -gt 0 ]]; then
     echo "$FAILURES check(s) failed"
