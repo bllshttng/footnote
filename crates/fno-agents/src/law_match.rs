@@ -662,9 +662,15 @@ fn stage_answer_with(
         if let Some(reason) = graph_unread {
             unread.push(format!("the node's epic and project ({reason})"));
         }
-        let default_index = decision_index::default_state_path("decisions.jsonl");
-        let index_path = index_path.unwrap_or(&default_index);
-        match decision_index::live_laws(index_path) {
+        let laws = match index_path {
+            Some(p) => decision_index::live_laws(p),
+            // The default path is the STORE read: graph.db plus the JSONL
+            // rows the db lacks. A JSONL default refused d-608344c1, a live
+            // law cited across the fleet, while graph.db held 95 laws to the
+            // JSONL's 9.
+            None => decision_index::default_store_live().map(decision_index::laws_of),
+        };
+        match laws {
             Ok(index) => {
                 let matching = stage_matching_lines(
                     &index,
@@ -826,11 +832,10 @@ fn near_law_lines_from(index: &decision_index::Index, law: &LawRow) -> Vec<Strin
     lines
 }
 
-/// The disk-reading variant: an unreadable index is a one-line report, so a
+/// The store-reading variant: an unreadable store is a one-line report, so a
 /// recording against a damaged store still completes.
 fn near_law_lines(law: &LawRow) -> Vec<String> {
-    let path = decision_index::default_state_path("decisions.jsonl");
-    match decision_index::live_laws(&path) {
+    match decision_index::default_store_live() {
         Ok(index) => near_law_lines_from(&index, law),
         Err(reason) => vec![format!("law: near-law check skipped ({reason})")],
     }

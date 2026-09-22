@@ -395,14 +395,14 @@ fn row_for(
     })
 }
 
-/// The machine-wide decision index, read through the shared module
-/// (`decision_index`) so every Rust reader flattens and retires the same way.
-/// The retirement key is the report PATH in a ruling's text, which needs no
-/// subject resolution. A missing or damaged index reads as no rulings: a
-/// maybe-ruled FAIL re-surfaces, a live one is never hidden.
+/// The machine-wide decision store, read through the shared module
+/// (`decision_index`) so every Rust reader flattens and retires the same way
+/// over graph.db plus the JSONL rows the db lacks. The retirement key is the
+/// report PATH in a ruling's text, which needs no subject resolution. An
+/// unreadable store reads as no rulings: a maybe-ruled FAIL re-surfaces, a
+/// live one is never hidden.
 fn load_rulings() -> Vec<Value> {
-    let path = decision_index::default_state_path("decisions.jsonl");
-    match decision_index::read_live(&path) {
+    match decision_index::default_store_live() {
         Ok(index) => index
             .rows
             .into_iter()
