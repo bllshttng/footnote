@@ -278,6 +278,31 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
                 &[],
             );
         }
+        // A readable quiet-undelivered fire is the one park edge. Codex owns
+        // the preserved objective, so pause it once and finish this fire on
+        // NoWork; any provider refusal keeps the existing bounded block.
+        if history.last_undelivered.is_none() && manifest.harness.as_deref() == Some("codex") {
+            if let Ok(provider_receipt) =
+                crate::king_termination::pause_codex_reign_goal(&manifest, &parsed.cwd)
+            {
+                emit(
+                    "quiet-undelivered",
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "scope": manifest.scope,
+                        "undelivered": undelivered,
+                        "provider_receipt": provider_receipt,
+                    }),
+                );
+                return terminate(
+                    TerminationReason::NoWork,
+                    "board quiet; provider goal paused with undelivered scope delivery",
+                    0,
+                    dry,
+                    &[],
+                );
+            }
+        }
         let message =
             crate::king_termination::king_quiet_message(undelivered, drain_error.as_ref());
         let shrank = undelivered != i64::MAX

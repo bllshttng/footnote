@@ -263,6 +263,109 @@ pub(crate) fn king_undelivered_body(session_id: &str, undelivered: i64, shrank: 
     })
 }
 
+/// The receipt written beside a quiet-undelivered park. The objective and
+/// continuation owner are copied from the verified provider goal; neither is
+/// regenerated from the scope after the provider has acknowledged the pause.
+pub(crate) fn pause_reign_goal_receipt(
+    thread_id: &str,
+    scope: &str,
+    continuation_owner: &str,
+    objective: &str,
+) -> Result<Value, String> {
+    if thread_id.trim().is_empty()
+        || scope.trim().is_empty()
+        || continuation_owner.trim().is_empty()
+        || objective.trim().is_empty()
+    {
+        return Err("provider goal receipt is missing identity".to_string());
+    }
+    Ok(serde_json::json!({
+        "provider": "codex",
+        "thread_id": thread_id,
+        "scope": scope,
+        "objective": objective,
+        "status": "paused",
+        "continuation_owner": continuation_owner,
+    }))
+}
+
+/// Read and pause the native Codex reign goal without clearing or replacing
+/// it. This is reached only after the board and delivery reads both proved a
+/// readable quiet-undelivered state; every provider failure is a refusal and
+/// leaves the existing quiet-board block in charge.
+pub(crate) fn pause_codex_reign_goal(manifest: &KingManifest, cwd: &Path) -> Result<Value, String> {
+    if manifest.harness.as_deref() != Some("codex") {
+        return Err("provider goal belongs to a non-Codex reign".to_string());
+    }
+    let thread_id = manifest
+        .harness_session_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| "Codex provider goal has no session id".to_string())?;
+    let scope = manifest.scope.trim();
+    if scope.is_empty() {
+        return Err("Codex provider goal has no scope".to_string());
+    }
+    let owner = format!("king:{scope}");
+    let expected = crate::codex_thread::reign_objective(scope);
+    let thread_id = thread_id.to_string();
+    let cwd = cwd.to_path_buf();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("Codex provider goal runtime unavailable: {error}"))?;
+    runtime.block_on(async move {
+        let mut thread = crate::codex_thread::CodexThread::resume(
+            cwd,
+            &thread_id,
+            None,
+            &crate::codex_posture::CodexPosture::bounded(),
+            None,
+            None,
+        )
+        .await
+        .map_err(|error| format!("Codex provider goal unreadable: {error}"))?;
+        let current = thread
+            .goal_get_typed()
+            .await
+            .map_err(|error| format!("Codex provider goal unreadable: {error}"))?
+            .ok_or_else(|| "Codex provider goal unreadable: no goal".to_string())?;
+        if current.status != crate::codex_thread::GoalStatus::Active {
+            return Err(format!(
+                "Codex provider goal is not active: {:?}",
+                current.status
+            ));
+        }
+        if current.objective != expected {
+            return Err(format!(
+                "Codex provider goal objective does not match reign: {:?}",
+                current.objective
+            ));
+        }
+        if current.continuation_owner.as_deref() != Some(owner.as_str()) {
+            return Err(format!(
+                "Codex provider goal owner does not match reign: {:?}",
+                current.continuation_owner
+            ));
+        }
+        let paused = thread
+            .goal_set_typed(
+                &current.objective,
+                crate::codex_thread::GoalStatus::Paused,
+                current.continuation_owner.as_deref(),
+            )
+            .await
+            .map_err(|error| format!("Codex provider goal pause refused: {error}"))?;
+        if paused.status != crate::codex_thread::GoalStatus::Paused
+            || paused.objective != current.objective
+            || paused.continuation_owner.as_deref() != Some(owner.as_str())
+        {
+            return Err("Codex provider goal pause receipt did not preserve the reign".to_string());
+        }
+        pause_reign_goal_receipt(&thread_id, scope, &owner, &paused.objective)
+    })
+}
+
 /// The drain-reserve journal row: what the fire's last, reserved read cost
 /// against the bound it was granted and the budget it started with. The
 /// reserve is silent by design; this row is its series.
@@ -967,5 +1070,18 @@ mod tests {
         let scope = "x-aaaa";
         let row = crate::king_escalation::reading_undelivered(scope);
         assert_eq!(row, "reading:undelivered:x-aaaa");
+    }
+
+    #[test]
+    fn readable_codex_reign_goal_pauses_without_replacing_its_receipt() {
+        let receipt =
+            pause_reign_goal_receipt("thread-1", "x-aaaa", "king:x-aaaa", "$fno:reign x-aaaa")
+                .expect("the matching active goal can be parked");
+        assert_eq!(receipt["provider"], "codex");
+        assert_eq!(receipt["thread_id"], "thread-1");
+        assert_eq!(receipt["objective"], "$fno:reign x-aaaa");
+        assert_eq!(receipt["status"], "paused");
+        assert_eq!(receipt["continuation_owner"], "king:x-aaaa");
+        assert_eq!(receipt["scope"], "x-aaaa");
     }
 }

@@ -488,6 +488,20 @@ def graph_entries(path: Optional[Path] = None) -> list:
         return []
 
 
+def _resume_codex_reign_goal(target: CrownTarget, reason: str) -> Optional[dict[str, Any]]:
+    from fno.king.state import parse_manifest; manifest = parse_manifest(target.manifest)
+    session_id = str(manifest.get("harness_session_id") or "").strip()
+    if manifest.get("harness") != "codex" or not session_id:
+        return None
+    binary = os.environ.get("FNO_AGENTS_BIN") or shutil.which("fno-agents") or ""
+    try:
+        completed = subprocess.run([binary, "mail-inject", "--session", session_id, "--harness", "codex"], input="continue\n", cwd=str(target.root), capture_output=True, text=True, timeout=15, check=False)
+        receipt = json.loads(completed.stdout.strip().splitlines()[-1])
+    except (OSError, IndexError, ValueError, subprocess.TimeoutExpired):
+        return None
+    return {"provider": "codex", "thread_id": session_id, "scope": target.scope, "objective": f"$fno:reign {target.scope}", "status": "active", "continuation_owner": f"king:{target.scope}", "reason": reason, "transport_receipt": receipt} if completed.returncode == 0 and receipt.get("delivered") is True else None
+
+
 def run_king_wake(
     settings,
     *,
@@ -502,6 +516,7 @@ def run_king_wake(
     scope_resolver: Optional[Callable] = None,
     admit_fn: Optional[Callable] = None,
     dispatch_fn: Optional[Callable] = None,
+    resume_fn: Optional[Callable] = None,
     ask_fn: Optional[Callable] = None,
     seconds_left_fn: Optional[Callable[[], Optional[float]]] = None,
     on_step: Optional[Callable[[str], None]] = None,
@@ -732,6 +747,16 @@ def run_king_wake(
             summary["evaluated"] += 1
             continue
         window_count = verdict.count
+        try:
+            provider_receipt = (resume_fn or _resume_codex_reign_goal)(target, reason)
+        except Exception:  # noqa: BLE001 - a refusal keeps the existing wake path
+            provider_receipt = None
+        if isinstance(provider_receipt, dict):
+            receipt = {"scope": target.scope, "reason": reason, "address": wake_address, "successor": False, "resumed": True, "provider_receipt": provider_receipt}
+            emit("king_goal_resumed", {**receipt, "window_count": window_count, "ceiling": ceiling})
+            summary["woke"].append(receipt)
+            summary["evaluated"] += 1
+            continue
         if dispatch_fn is not None:
             dispatch_fn(target, reason, wake_address, wake_detail, holder_gone)
             spawned = True
