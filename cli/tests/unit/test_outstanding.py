@@ -2099,6 +2099,7 @@ def test_delivered_answer_carries_the_verbatim_text(monkeypatch: pytest.MonkeyPa
 
     sent: list[list[str]] = []
     monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (_StoredSession(), []))
+    monkeypatch.setattr(deliver_mod, "_asker_is_live", lambda token: True)
     monkeypatch.setattr(
         deliver_mod,
         "_mail_send",
@@ -2142,6 +2143,7 @@ def test_delivery_resolves_by_the_full_session_id_before_the_short_handle(
         return (_Full(), [])
 
     monkeypatch.setattr(deliver_mod, "_resolve_asker", fake_resolve)
+    monkeypatch.setattr(deliver_mod, "_asker_is_live", lambda token: True)
     monkeypatch.setattr(
         deliver_mod, "_mail_send", lambda argv: (0, "msg-1 delivered (hosted)")
     )
@@ -2237,6 +2239,7 @@ def test_failed_mail_send_names_the_retry_and_never_raises(monkeypatch: pytest.M
     from fno.outstanding import deliver as deliver_mod
 
     monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (_StoredSession(), []))
+    monkeypatch.setattr(deliver_mod, "_asker_is_live", lambda token: True)
     monkeypatch.setattr(deliver_mod, "_mail_send", lambda argv: (11, "agent lock contention"))
 
     q = Question(id="q-00000004", ts="2026-08-21T00:00:00Z", question="which?", asker="89abcdef")
@@ -2256,6 +2259,7 @@ def test_clear_with_answer_prints_the_delivery_posture(
     qid = _asked_question_with_asker(root, monkeypatch)
     sent: list[list[str]] = []
     monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (_StoredSession(), []))
+    monkeypatch.setattr(deliver_mod, "_asker_is_live", lambda token: True)
     monkeypatch.setattr(deliver_mod, "_mail_send", lambda argv: (sent.append(argv), (0, ""))[1])
 
     cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "coordination lane"])
@@ -2283,6 +2287,106 @@ def test_clear_with_answer_names_an_undeliverable_posture(
     assert "no stored session" in cleared.output
     after = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)
     assert after["questions"] == [], "an undeliverable answer still closes the question"
+
+
+def test_a_stored_asker_that_is_not_live_is_never_mailed(monkeypatch: pytest.MonkeyPatch):
+    """AC2: a store hit outside the live listing gets no mail; the wake rung
+    would revive the dead session and charge the answerer's spawn share."""
+    from fno.outstanding import deliver as deliver_mod
+
+    live_checks: list[str] = []
+    sent: list[list[str]] = []
+
+    def fake_live(token):
+        live_checks.append(token)
+        return False
+
+    def record_run(argv, **kwargs):
+        sent.append(argv)
+        return deliver_mod.subprocess.CompletedProcess(
+            argv, 0, "msg-1 delivered (woken) to 89abcdef", ""
+        )
+
+    monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (_StoredSession(), []))
+    monkeypatch.setattr(deliver_mod, "_asker_is_live", fake_live, raising=False)
+    monkeypatch.setattr(deliver_mod.subprocess, "run", record_run)
+
+    q = Question(id="q-00000005", ts="2026-08-21T00:00:00Z", question="which?", asker="89abcdef")
+    line = deliver_mod.deliver_answer(q, "ship it", "d-6")
+
+    assert live_checks == ["89abcdef-full-session-id"]
+    assert not sent, "a dead asker must never reach the mail subprocess"
+    assert "is not live, so nobody was woken" in line
+    assert "d-6" in line
+    assert "fno backlog decisions" in line
+
+
+def test_clear_with_answer_to_a_dead_asker_closes_and_wakes_nobody(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC2 wiring: the close lands, no mail subprocess starts, the line says why."""
+    from fno.outstanding import deliver as deliver_mod
+
+    qid = _asked_question_with_asker(root, monkeypatch)
+    monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (_StoredSession(), []))
+    monkeypatch.setattr(deliver_mod, "_asker_is_live", lambda token: False, raising=False)
+    sent: list[list[str]] = []
+
+    def record_run(argv, **kwargs):
+        sent.append(argv)
+        return deliver_mod.subprocess.CompletedProcess(argv, 0, "msg-1 delivered (woken)", "")
+
+    monkeypatch.setattr(deliver_mod.subprocess, "run", record_run)
+
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "ship it"])
+
+    assert cleared.exit_code == 0, cleared.output
+    assert not sent, "a dead asker must never reach the mail subprocess"
+    assert "is not live, so nobody was woken" in cleared.output
+    after = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)
+    assert after["questions"] == [], "an undeliverable answer still closes the question"
+
+
+def test_a_failing_live_check_is_a_stated_line_and_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """AC3: an exploded live scan is a delivery failure naming the recovery verb."""
+    from fno.outstanding import deliver as deliver_mod
+
+    def boom(_token):
+        raise RuntimeError("scan exploded")
+
+    sent: list[list[str]] = []
+    monkeypatch.setattr(deliver_mod, "_resolve_asker", lambda a: (_StoredSession(), []))
+    monkeypatch.setattr(deliver_mod, "_asker_is_live", boom)
+    monkeypatch.setattr(deliver_mod, "_mail_send", lambda argv: (sent.append(argv), (0, ""))[1])
+
+    q = Question(id="q-00000006", ts="2026-08-21T00:00:00Z", question="which?", asker="89abcdef")
+    line = deliver_mod.deliver_answer(q, "go", "d-7")
+
+    assert not sent
+    assert "delivery failed (scan exploded)" in line
+    assert "fno backlog decisions" in line
+
+
+def test_the_live_check_reads_the_live_listing_by_full_id(monkeypatch: pytest.MonkeyPatch):
+    """AC4: the check asks resolve_or_suggest what mail send asks, no override."""
+    import fno.agents.discover as discover_mod
+    from fno.outstanding import deliver as deliver_mod
+
+    returns = [(None, []), (object(), [])]
+    calls: list[tuple] = []
+
+    def fake_resolve(*args, **kwargs):
+        calls.append((args, kwargs))
+        return returns[len(calls) - 1]
+
+    monkeypatch.setattr(discover_mod, "resolve_or_suggest", fake_resolve)
+
+    assert deliver_mod._asker_is_live("89abcdef-full-session-id") is False
+    assert deliver_mod._asker_is_live("89abcdef-full-session-id") is True
+    assert calls[0][0] == ("89abcdef-full-session-id",)
+    assert calls[0][1] == {}, "no keyword override: default require_alive=True is the contract"
 
 
 # --- named roots: every stream states where it read (BREAK 3) ----------------
