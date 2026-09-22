@@ -426,62 +426,61 @@ fn audit_event_cohort(
     now: chrono::DateTime<chrono::Utc>,
     since_secs: u64,
 ) {
-    let active = home.events_jsonl();
-    let rotated = crate::events::rotated_path(&active);
-    for file in [rotated, active] {
-        let raw = match std::fs::read_to_string(&file) {
-            Ok(raw) => raw,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => {
-                report.problems.push(VerifyProblem {
-                    receipt: file.to_string_lossy().to_string(),
-                    reason: format!("events log unreadable: {err}"),
-                });
-                continue;
-            }
+    let file = home.events_jsonl();
+    let raw = match crate::event_store::journal_text_checked(
+        &file,
+        &crate::event_store::EventQuery::of_types(&["agent_row_reaped"]),
+    ) {
+        Ok(raw) => raw,
+        Err(err) => {
+            report.problems.push(VerifyProblem {
+                receipt: file.to_string_lossy().to_string(),
+                reason: format!("events log unreadable: {err}"),
+            });
+            return;
+        }
+    };
+    for line in raw.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
         };
-        for line in raw.lines() {
-            let Ok(event) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if event.get("type").and_then(Value::as_str) != Some("agent_row_reaped") {
-                continue;
-            }
-            let Some(ts) = event
-                .get("ts")
-                .and_then(Value::as_str)
-                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-            else {
-                continue;
-            };
-            if (now - ts).num_seconds() > since_secs as i64 {
-                continue; // outside the window: not this report's population
-            }
-            report.reaped_events += 1;
-            let Some(data) = event.get("data") else {
-                continue;
-            };
-            if data.get("receipt_staged").is_some() {
-                continue; // roster-reap door: carries its own accounting
-            }
-            let harness = data.get("harness").and_then(Value::as_str).unwrap_or("");
-            let session_id = data
-                .get("harness_session_id")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            if harness.is_empty() || session_id.is_empty() {
-                continue;
-            }
-            let name = data.get("name").and_then(Value::as_str).unwrap_or("");
-            if !crate::receipt::reap_receipt_path_for(home, harness, session_id).exists() {
-                report.problems.push(VerifyProblem {
-                    receipt: "events".into(),
-                    reason: format!(
-                        "session {harness}:{session_id} ({name}) reaped at {ts} with no receipt on disk"
-                    ),
-                });
-            }
+        if event.get("type").and_then(Value::as_str) != Some("agent_row_reaped") {
+            continue;
+        }
+        let Some(ts) = event
+            .get("ts")
+            .and_then(Value::as_str)
+            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+        else {
+            continue;
+        };
+        if (now - ts).num_seconds() > since_secs as i64 {
+            continue; // outside the window: not this report's population
+        }
+        report.reaped_events += 1;
+        let Some(data) = event.get("data") else {
+            continue;
+        };
+        if data.get("receipt_staged").is_some() {
+            continue; // roster-reap door: carries its own accounting
+        }
+        let harness = data.get("harness").and_then(Value::as_str).unwrap_or("");
+        let session_id = data
+            .get("harness_session_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if harness.is_empty() || session_id.is_empty() {
+            continue;
+        }
+        let name = data.get("name").and_then(Value::as_str).unwrap_or("");
+        if !crate::receipt::reap_receipt_path_for(home, harness, session_id).exists() {
+            report.problems.push(VerifyProblem {
+                receipt: "events".into(),
+                reason: format!(
+                    "session {harness}:{session_id} ({name}) reaped at {ts} with no receipt on disk"
+                ),
+            });
         }
     }
 }
@@ -936,6 +935,35 @@ mod tests {
             problem
         );
         assert_eq!(report.reaped_events, 1);
+    }
+
+    /// AC3-REAP: a store-committed reaped row counts; an unreadable store
+    /// names itself as an events-log problem.
+    #[test]
+    fn ac3_reap_a_store_committed_reaped_row_counts_and_a_broken_store_names_itself() {
+        let home = temp_home();
+        let line = serde_json::json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "type": "agent_row_reaped",
+            "source": "daemon",
+            "data": {"name": "row-store", "harness": "codex", "harness_session_id": "sess-store"},
+        })
+        .to_string();
+        crate::event_store::append_envelope(&home.events_jsonl(), &line, None).unwrap();
+        let report = verify(&home, 24 * 3600, &[]);
+        assert_eq!(report.reaped_events, 1, "{:?}", report.problems);
+
+        let store = home.events_jsonl().with_extension("db");
+        std::fs::write(&store, b"not a database").unwrap();
+        let report = verify(&home, 24 * 3600, &[]);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.reason.contains("events log unreadable")),
+            "{:?}",
+            report.problems
+        );
     }
 
     /// AC3-EDGE: a `receipt_staged` event (roster-reap), an
