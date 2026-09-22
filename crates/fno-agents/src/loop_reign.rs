@@ -813,7 +813,9 @@ pub(crate) fn superseded_manifests(
 /// the reaper's full vacate predicate holds - the holder is proven dead
 /// AND the crown is older than the window - so a young crown whose holder
 /// died stays listed until the reaper can vacate it, and the empty-crown
-/// alarm pages on it. The age test runs first, so a young crown spends no
+/// alarm pages on it. A young candidate neither claims the territory key
+/// nor yields to a sibling that claimed it, so every young manifest of one
+/// key lists. The age test runs first, so a young crown spends no
 /// roster read; the roster read stays lazy - it fires at most once, and
 /// only when a candidate survives every file filter. The holder verdict is
 /// the one function crown_reap also runs, so the court and the sweep
@@ -844,16 +846,24 @@ pub fn court_orphans(
             continue;
         }
         let key = territory_key(&scope);
-        if held_keys.contains(&key) || seen.contains(&key) {
+        // A DATED young crown neither claims the territory key nor yields
+        // to a sibling that claimed it: the reaper cannot vacate it yet, so
+        // it must stay visible whatever else shares the key, and it must
+        // not hide a sibling either. An undated one keeps the old rule -
+        // yield to a claimed key, claim when listed - so multi-spelling
+        // dedup holds for manifests with no parsable created_at.
+        let crown_old = crate::crown_reap::crown_outlived_window(content, now, window_s);
+        let young = crown_old == Some(false);
+        if held_keys.contains(&key) || (!young && seen.contains(&key)) {
             continue;
         }
         if let Some(session) = crate::claude_adopt::manifest_field(content, "harness_session_id") {
             let harness = crate::claude_adopt::manifest_field(content, "harness");
-            // The read stays lazy exactly as before: a young crown (or one
-            // with no parsable created_at) drops nothing, and a non-claude
-            // harness has a predetermined verdict, so neither spends a
-            // roster read.
-            if crate::crown_reap::crown_outlived_window(content, now, window_s) == Some(true)
+            // The drop is the reaper's full vacate predicate: only an OLD
+            // crown drops on a proven-dead holder, so a young or undated
+            // one lists whatever the roster says - and only an old claude
+            // candidate spends a roster read.
+            if crown_old == Some(true)
                 && crate::crown_reap::no_witness_reason(harness.as_deref()).is_none()
             {
                 let snapshot = roster_read.get_or_insert_with(roster);
@@ -870,7 +880,11 @@ pub fn court_orphans(
         }
         // Only a LISTED candidate claims the territory key: one the verdict
         // dropped must not hide a second spelling held by a live session.
-        seen.insert(key);
+        // A dated-young candidate never claims, so every dated-young
+        // manifest of the key lists.
+        if !young {
+            seen.insert(key);
+        }
         let level = crate::claude_adopt::manifest_field(content, "crown_level")
             .and_then(|v| v.parse().ok());
         out.push(OrphanCrown {
@@ -1408,6 +1422,34 @@ mod tests {
             "no created_at keeps the crown listed: {out:?}"
         );
         fs::remove_dir_all(&no_stamp).ok();
+
+        // No-hide: a young dead crown and an older live manifest of the
+        // same territory key both list. The young one claims nothing, and
+        // nothing that claimed the key hides it.
+        let older_sess = "dedd3333-0000-4000-8000-000000000033";
+        let roster_both = || {
+            crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+                crate::claude_roster::ClaudeAgentRow::new(short, Some("stopped")),
+                crate::claude_roster::ClaudeAgentRow::new(&older_sess[..8], Some("working")),
+            ])
+        };
+        let both = tmp("young-and-live");
+        write_court_manifest(&both, "x-key", sess, &stamp(1));
+        let kings_b = both.join("space-b").join("kings");
+        fs::create_dir_all(&kings_b).unwrap();
+        fs::write(
+            kings_b.join("x-key.md"),
+            format!(
+                "---\nscope: x-key\nshape: pass\nharness: claude\n\
+                 harness_session_id: {older_sess}\nowner_pid: 1\ncreated_at: {}\n\
+                 crown_scope: x-key\ncrown_level: 2\ncrown_grantor: operator\n---\n",
+                stamp(13)
+            ),
+        )
+        .unwrap();
+        let out = court_orphans(&both, &[], &roster_both, &|_| None, 12 * 3600, now);
+        assert_eq!(out.len(), 2, "young dead and old live both list: {out:?}");
+        fs::remove_dir_all(&both).ok();
     }
 
     #[test]
