@@ -6,7 +6,8 @@ never disagree. Python-only by design (LD8). The cost column is the worker's
 whole process TREE off the resolved session pid (W2) - a recorded pid
 alone prices the PTY host and misses the per-session MCP servers.
 ``--subagents`` appends a display-only sidechain section: never
-slot-counted, observable, not addressable.
+slot-counted, observable, not addressable. RSS is read by the Rust census
+verb so this view and machine_sample share one process-tree walk.
 """
 from __future__ import annotations
 
@@ -19,8 +20,22 @@ from fno.agents.discover import (
     _subagent_live_seconds,
     discover_subagents,
 )
-from fno.agents.session_procs import tree_rss_mb
 from fno.agents.spawn_gate import LiveWorker, census
+from fno.rust_binary import call_binary_json
+
+
+def _tree_rss(pids: list[int]) -> dict[int, int]:
+    """Read one Rust process-table walk for all session roots."""
+    roots = [pid for pid in pids if pid]
+    if not roots:
+        return {}
+    error, payload = call_binary_json("census", ["--tree-rss", ",".join(map(str, roots))], timeout=10)
+    if error or not isinstance(payload, dict):
+        return {}
+    values = payload.get("rss_mb")
+    if not isinstance(values, dict):
+        return {}
+    return {int(pid): int(rss) for pid, rss in values.items() if str(pid).isdigit() and isinstance(rss, int)}
 
 
 def lane_rows() -> list[dict]:
@@ -222,6 +237,7 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
     verdict_map = verdicts(
         (idn, reg_nodes.get(idn)) for idn in registry_ids
     )
+    rss = _tree_rss([w.session_pid or w.pid for w in workers])
     rows = []
     for w in workers:
         # A foreign claude row (no registry entry) still gets age and reach;
@@ -248,7 +264,7 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 # The process that IS the session (W2): a bg row's
                 # recorded pid names the PTY HOST, not the worker.
                 "pid": w.session_pid or w.pid,
-                "rss_mb": tree_rss_mb(w.session_pid or w.pid),
+                "rss_mb": rss.get(w.session_pid or w.pid),
                 # (AC7) Served activity from the one truth read the
                 # progress axis uses; the stored token rides `stored_status`.
                 "status": activity,
