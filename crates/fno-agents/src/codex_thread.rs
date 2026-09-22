@@ -29,6 +29,7 @@ use crate::codex_inject::{
     AppServerStream, ReviewDelivery, ReviewTarget,
 };
 use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -154,6 +155,22 @@ pub struct TurnResult {
     pub raw: Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalStatus {
+    Active,
+    Paused,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeGoal {
+    pub objective: String,
+    pub status: GoalStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_owner: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewResult {
     pub turn_id: String,
@@ -246,16 +263,106 @@ pub fn thread_goal_set_request_json(
     objective: &str,
     status: &str,
 ) -> String {
+    thread_goal_set_request_json_with_owner(id, thread_id, objective, status, None)
+}
+
+pub fn thread_goal_set_request_json_with_owner(
+    id: u64,
+    thread_id: &str,
+    objective: &str,
+    status: &str,
+    continuation_owner: Option<&str>,
+) -> String {
+    let mut params = json!({
+        "threadId": thread_id,
+        "goal": objective,
+        "status": status,
+    });
+    if let Some(owner) = continuation_owner.filter(|owner| !owner.trim().is_empty()) {
+        params["continuationOwner"] = json!(owner);
+    }
     json!({
         "id": id,
         "method": "thread/goal/set",
-        "params": {
-            "threadId": thread_id,
-            "goal": objective,
-            "status": status,
-        }
+        "params": params,
     })
     .to_string()
+}
+
+pub fn reign_objective(scope: &str) -> String {
+    format!("$fno:reign {}", scope.trim())
+}
+
+pub fn parse_goal_response(raw: &str) -> Result<Option<NativeGoal>, ThreadDriverError> {
+    let value: Value = serde_json::from_str(raw)
+        .map_err(|_| ThreadDriverError::Protocol("invalid thread/goal response".into()))?;
+    parse_goal_value(&value)
+}
+
+pub fn parse_goal_value(value: &Value) -> Result<Option<NativeGoal>, ThreadDriverError> {
+    if let Some(error) = value.get("error") {
+        return Err(ThreadDriverError::Protocol(server_error(error)));
+    }
+    let goal = value.pointer("/result/goal").or_else(|| value.get("goal"));
+    let Some(goal) = goal else {
+        return Ok(None);
+    };
+    if goal.is_null() {
+        return Ok(None);
+    }
+    let object = goal.as_object().ok_or_else(|| {
+        ThreadDriverError::Protocol("thread/goal response carried a non-object goal".into())
+    })?;
+    let objective = object
+        .get("objective")
+        .or_else(|| object.get("goal"))
+        .and_then(Value::as_str)
+        .filter(|objective| !objective.trim().is_empty())
+        .ok_or_else(|| ThreadDriverError::Protocol("thread/goal response has no objective".into()))?
+        .to_string();
+    let status = match object
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("active")
+    {
+        "active" => GoalStatus::Active,
+        "paused" => GoalStatus::Paused,
+        "completed" | "done" => GoalStatus::Completed,
+        other => {
+            return Err(ThreadDriverError::Protocol(format!(
+                "thread/goal response has unknown status {other:?}"
+            )))
+        }
+    };
+    let continuation_owner = object
+        .get("continuationOwner")
+        .or_else(|| object.get("continuation_owner"))
+        .or_else(|| object.get("owner"))
+        .and_then(Value::as_str)
+        .filter(|owner| !owner.trim().is_empty())
+        .map(str::to_string);
+    Ok(Some(NativeGoal {
+        objective,
+        status,
+        continuation_owner,
+    }))
+}
+
+pub fn ensure_reign_goal(
+    current: Option<&NativeGoal>,
+    scope: &str,
+    continuation_owner: &str,
+) -> Result<GoalStatus, ThreadDriverError> {
+    let expected = reign_objective(scope);
+    if let Some(goal) = current {
+        if goal.status == GoalStatus::Active && goal.objective != expected {
+            return Err(ThreadDriverError::Protocol(format!(
+                "refusing active native goal {:?}; expected {:?}; continuation owner {}",
+                goal.objective, expected, continuation_owner
+            )));
+        }
+    }
+    Ok(GoalStatus::Active)
 }
 
 /// Build a `turn/start` request for the held driver.
@@ -1133,6 +1240,64 @@ impl CodexThread {
         )
         .await
         .and_then(provider_response)
+    }
+
+    pub async fn goal_get_typed(&mut self) -> Result<Option<NativeGoal>, ThreadDriverError> {
+        let value = self.goal_get().await?;
+        parse_goal_value(&value)
+    }
+
+    pub async fn goal_set_typed(
+        &mut self,
+        objective: &str,
+        status: GoalStatus,
+        continuation_owner: Option<&str>,
+    ) -> Result<NativeGoal, ThreadDriverError> {
+        let status_wire = match status {
+            GoalStatus::Active => "active",
+            GoalStatus::Paused => "paused",
+            GoalStatus::Completed => "completed",
+        };
+        if objective.trim().is_empty() || matches!(status, GoalStatus::Completed) {
+            return Err(ThreadDriverError::Protocol(
+                "typed goal set needs a non-empty active or paused objective".into(),
+            ));
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let value = self
+            .request_value(
+                id,
+                thread_goal_set_request_json_with_owner(
+                    id,
+                    &self.thread_id,
+                    objective,
+                    status_wire,
+                    continuation_owner,
+                ),
+            )
+            .await
+            .and_then(provider_response)?;
+        parse_goal_value(&value)?.ok_or_else(|| {
+            ThreadDriverError::Protocol("thread/goal/set returned no typed goal".into())
+        })
+    }
+
+    pub async fn ensure_reign_goal_typed(
+        &mut self,
+        scope: &str,
+        continuation_owner: &str,
+    ) -> Result<NativeGoal, ThreadDriverError> {
+        let current = self.goal_get_typed().await?;
+        ensure_reign_goal(current.as_ref(), scope, continuation_owner)?;
+        let objective = reign_objective(scope);
+        match current {
+            Some(goal) if goal.status == GoalStatus::Active => Ok(goal),
+            _ => {
+                self.goal_set_typed(&objective, GoalStatus::Active, Some(continuation_owner))
+                    .await
+            }
+        }
     }
 
     /// Unarchive this thread id so `thread/resume` finds it in the same

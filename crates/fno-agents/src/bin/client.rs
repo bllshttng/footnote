@@ -67,6 +67,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "list",
     "logs",
     "loop",
+    "loop-readiness",
     "loop-check",
     "loops",
     "mail-inject",
@@ -596,6 +597,9 @@ async fn run(args: Vec<String>) -> i32 {
     // dispatch like loop-check; no daemon RPC.
     if verb == "loop" {
         return fno_agents::loop_target::run_loop_verb(&args[1..]);
+    }
+    if verb == "loop-readiness" {
+        return fno_agents::loop_readiness::run(&args[1..]);
     }
 
     // `finalize`: terminal-only side-effect WRITER (see finalize.rs doc). Direct

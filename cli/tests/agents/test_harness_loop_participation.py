@@ -210,3 +210,59 @@ def test_the_direct_spawn_seam_still_calls_the_gate():
     """
     source = (REPO_ROOT / "cli/src/fno/agents/cli.py").read_text()
     assert "check_loop_participation(harness, message)" in source
+
+
+def test_effective_readiness_is_one_typed_snapshot_with_four_legs():
+    """AC7-HP: admission reads one native predicate with named legs."""
+    import fno.agents.harness_map as harness_map
+
+    assert hasattr(harness_map, "effective_loop_readiness")
+    snapshot = harness_map.effective_loop_readiness(
+        "codex", "/fno:target x-1", scope="x-1"
+    )
+    assert snapshot["ready"] is True
+    assert set(snapshot["legs"]) == {"machine", "lifecycle", "stop", "provider_goal"}
+    assert snapshot["continuation_owner"]
+
+
+def test_unreadable_effective_readiness_fails_closed_and_can_recover(monkeypatch):
+    """AC7-ERR/AC7-RECOVER: unreadable is not a healthy false and a later
+    positive native receipt admits again."""
+    import fno.agents.harness_map as harness_map
+
+    assert hasattr(harness_map, "_read_effective_loop_readiness")
+    monkeypatch.setattr(
+        harness_map,
+        "_read_effective_loop_readiness",
+        lambda *args, **kwargs: ("machine unreadable: probe failed", None),
+    )
+    with pytest.raises(DispatchResolveError, match="machine unreadable"):
+        harness_map.check_loop_participation("codex", "/target x-1")
+
+    monkeypatch.setattr(
+        harness_map,
+        "_read_effective_loop_readiness",
+        lambda *args, **kwargs: (
+            None,
+            {
+                "ready": True,
+                "legs": {
+                    "machine": "ready",
+                    "lifecycle": "ready",
+                    "stop": "ready",
+                    "provider_goal": "ready",
+                },
+                "continuation_owner": "king:x-1",
+            },
+        ),
+    )
+    harness_map.check_loop_participation("codex", "/target x-1")
+
+
+def test_codex_goal_contract_is_typed_and_names_continuation_owner():
+    """AC8-ERR/AC11-EDGE: goal state is parsed as a typed contract, not an
+    unexamined JSON value, and the owner is part of the receipt."""
+    import fno.agents.harness_map as harness_map
+
+    assert hasattr(harness_map, "ensure_codex_reign_goal")
+    assert hasattr(harness_map, "parse_codex_goal")

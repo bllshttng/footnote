@@ -542,3 +542,40 @@ def test_a_repeated_scope_crowns_one_epic_set(monkeypatch, tmp_path):
 
     assert state.king_manifest_path("x-119e,x-4d9b").exists()
     assert "scope:  x-119e,x-4d9b" in out
+
+
+def test_explicit_harness_crown_admission_fails_closed_on_unreadable_readiness(
+    monkeypatch, tmp_path
+):
+    """AC7-ERR: a known harness cannot crown through an unreadable leg."""
+    import fno.agents.harness_map as harness_map
+    import fno.king.state as state
+    from typer.testing import CliRunner
+    from fno.king.cli import king_app
+
+    monkeypatch.setattr(state, "king_loop_enabled", lambda: True)
+    monkeypatch.setattr(
+        harness_map,
+        "effective_loop_readiness",
+        lambda *args, **kwargs: {
+            "ready": False,
+            "refusal": "machine unreadable: probe failed",
+            "legs": {"machine": "unreadable"},
+        },
+    )
+    result = CliRunner().invoke(
+        king_app,
+        [
+            "init",
+            "--scope",
+            "drain",
+            "--harness",
+            "codex",
+            "--harness-session-id",
+            "sess-1",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 2
+    assert "machine unreadable" in result.output
+    assert not state.king_manifest_path("drain", state_root=tmp_path / ".fno").exists()

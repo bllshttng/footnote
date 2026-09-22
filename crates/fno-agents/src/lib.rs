@@ -194,6 +194,7 @@ pub mod logs;
 pub mod logs_client;
 pub mod loop_dispatch;
 pub mod loop_king;
+pub mod loop_readiness;
 pub mod loop_reign;
 pub mod loop_runtime;
 pub mod loop_target;

@@ -61,6 +61,9 @@ def init_cmd(
     harness_session_id: str = typer.Option(
         "", "--harness-session-id", help="The king's own harness session id."
     ),
+    harness: str = typer.Option(
+        "", "--harness", help="Harness whose loop and native-goal legs must be readable."
+    ),
     max_iterations: int = typer.Option(
         40, "--max-iterations", help="Iteration ceiling before the loop stops on Budget."
     ),
@@ -124,6 +127,29 @@ def init_cmd(
         )
         raise typer.Exit(2)
     scope = canonical_scope(list(_canonical_members(scope)))
+
+    if harness.strip():
+        from fno.agents.harness_map import (
+            DispatchResolveError,
+            effective_loop_readiness,
+            ensure_codex_reign_goal,
+        )
+
+        try:
+            readiness = effective_loop_readiness(
+                harness.strip(), f"/fno:reign {scope}", scope=scope
+            )
+            if not readiness.get("ready"):
+                raise DispatchResolveError(readiness.get("refusal") or "readiness is unreadable")
+            if harness.strip() == "codex":
+                ensure_codex_reign_goal(None, scope, f"king:{scope}")
+        except DispatchResolveError as exc:
+            typer.echo(
+                f"king: refusing crown admission for {scope!r}: {exc}; "
+                f"continuation owner king:{scope}",
+                err=True,
+            )
+            raise typer.Exit(2) from exc
 
     try:
         manifest_path = king_manifest_path(scope)
