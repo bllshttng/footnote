@@ -45,6 +45,13 @@ CHANGED_FILES=$(git show --name-only --pretty=format: HEAD 2>/dev/null | sed '/^
 COMMIT_SUBJECT=$(git log -1 --pretty=%s 2>/dev/null || echo "")
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+# The applied-correction link: which commit carried the change, and which
+# autocorrect proposal it applied (the Autocorrect-Ref trailer triage asks
+# the shipping worker for). A failed read drops the token; the commit never
+# blocks on either.
+COMMIT_SHA=$(git rev-parse --short=12 HEAD 2>/dev/null || echo "")
+COMMIT_REF=$(git log -1 --format='%(trailers:key=Autocorrect-Ref,valueonly,separator=%x2C)' 2>/dev/null | tr -d '\n' || echo "")
+
 # Severity from commit message.
 SEVERITY="S1"
 case "$COMMIT_SUBJECT" in
@@ -86,6 +93,12 @@ emit_for() {
   esac
   local details
   details="$(corrections_escape_details "$COMMIT_SUBJECT")"
+  if [[ -n "$COMMIT_SHA" ]]; then
+    details="${details} sha=${COMMIT_SHA}"
+  fi
+  if [[ -n "$COMMIT_REF" ]]; then
+    details="${details} ref=${COMMIT_REF}"
+  fi
   local line="${TIMESTAMP} | ${SEVERITY} | ${SOURCE_FIELD} | ${file} | ${details}"
   corrections_lock_append "$LOG_PATH" "$line" || \
     echo "corrections-git-postcommit: failed to write entry for $file" >&2
