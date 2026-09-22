@@ -40,8 +40,8 @@ One paragraph: what the operator's last 14 days say to do next. From
 operator turns only; no relay or harness turn may appear here.
 
 ## Skipped
-The harnesses the fold reports under `skipped` (today: opencode, no
-transcript source). Counted, never guessed.
+The harnesses the fold reports under `skipped`: harnesses whose store
+could not be read, with the reason. Counted, never guessed.
 ```
 
 Rules the renderer holds to:
