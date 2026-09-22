@@ -407,6 +407,7 @@ const STAGES: &[(&str, &[&str])] = &[
             "python",
             "crate",
             "port",
+            "verb",
         ],
     ),
     (
@@ -573,7 +574,8 @@ fn node_subject_idents(node_id: &str, graph_path: Option<&std::path::Path>) -> V
 }
 
 /// The context block for a stage with laws: cap 2000 bytes, first law line
-/// always renders, overflow counted in one final line.
+/// always renders, and every law past the cap keeps a short id line the
+/// validator parses, so overflow law is acknowledged, not hidden.
 fn render_stage_block(stage: &str, matching: &[String], damaged: usize) -> String {
     let mut text = format!(
         "## Law governing {stage}\n\nThese live operator rulings govern the {stage} you are starting. Act inside them. Do not re-derive them.\n"
@@ -588,11 +590,14 @@ fn render_stage_block(stage: &str, matching: &[String], damaged: usize) -> Strin
         text.push('\n');
         rendered += 1;
     }
-    let remaining = matching.len() - rendered;
-    if remaining > 0 {
-        text.push_str(&format!(
-            "- and {remaining} more: fno backlog decisions --lane law --state live\n"
-        ));
+    // Newest first, like the full lines. The old single `- and N more` line
+    // carried no ids, so the stage-law ack check in validate-plan.sh could
+    // never see the laws the cap had cut.
+    for line in &matching[rendered..] {
+        if let Some(short) = short_law_line(line) {
+            text.push_str(&short);
+            text.push('\n');
+        }
     }
     if damaged > 0 {
         text.push_str(&format!(
@@ -601,6 +606,17 @@ fn render_stage_block(stage: &str, matching: &[String], damaged: usize) -> Strin
         ));
     }
     text
+}
+
+/// `- <id> (<subject>): fno backlog decisions <id>`, cut from a full stage
+/// line at its first `): `. Laws the 2000-byte cap could not summarize still
+/// get a line matching the validator's `- <id> (<subject>):` shape.
+fn short_law_line(full: &str) -> Option<String> {
+    let rest = full.strip_prefix("- ")?;
+    let cut = rest.find("): ")?;
+    let head = &rest[..cut];
+    let id = head.split(" (").next()?;
+    Some(format!("- {head}): fno backlog decisions {id}"))
 }
 
 /// The stage answer. A readable index with zero matching laws renders
@@ -1213,7 +1229,7 @@ mod tests {
     }
 
     #[test]
-    fn ac2_cap_overflow_is_counted_not_dropped() {
+    fn ac3_hp_cap_overflow_still_lists_every_law_id() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("decisions.jsonl");
         let mut rows: Vec<String> = Vec::new();
@@ -1236,19 +1252,23 @@ mod tests {
             .as_str()
             .expect("context present");
         let overflow: Vec<&str> = ctx.lines().filter(|l| l.starts_with("- and ")).collect();
-        assert_eq!(overflow.len(), 1, "{ctx}");
-        let count: usize = overflow[0]
-            .trim_start_matches("- and ")
-            .split(' ')
-            .next()
-            .expect("count")
-            .parse()
-            .expect("count parses");
-        assert!(count > 0, "names the count left out: {ctx}");
-        // The rendered body under the cap, overflow line excluded.
+        assert!(
+            overflow.is_empty(),
+            "no `- and N more` line may remain: {ctx}"
+        );
+        // Every matched law id on its own line, in the validator's
+        // `- <id> (<subject>):` shape, whatever the cap cut.
+        for i in 0..40 {
+            let id = format!("d-cap{i:04}000");
+            let listed = ctx
+                .lines()
+                .any(|l| l.starts_with(&format!("- {id} (review-cap-fixture):")));
+            assert!(listed, "{id} missing from the block: {ctx}");
+        }
+        // The summarized body under the cap; short overflow lines excluded.
         let body_len: usize = ctx
             .lines()
-            .filter(|l| !l.starts_with("- and "))
+            .filter(|l| !l.contains("fno backlog decisions"))
             .map(|l| l.len() + 1)
             .sum();
         assert!(body_len <= 2000, "body {body_len} exceeds the cap");
@@ -1256,6 +1276,32 @@ mod tests {
             answer["hook_output"]["hookSpecificOutput"]["hookEventName"],
             "UserPromptSubmit"
         );
+    }
+
+    #[test]
+    fn ac4_hp_verb_law_matches_blueprint_stage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_index(
+            dir.path(),
+            &[stage_row(
+                "d-verbs0001",
+                "top-level-verbs",
+                "The root menu caps top-level verbs.",
+            )],
+        );
+        let hook = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Skill",
+            "tool_input": {
+                "skill": "fno:blueprint",
+                "args": "x-aaaa"
+            }
+        });
+        let answer = stage_answer_with(StageRequest { hook }, Some(&path), None);
+        let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("context present");
+        assert!(ctx.contains("- d-verbs0001 (top-level-verbs):"), "{ctx}");
     }
 
     fn validate_req(
