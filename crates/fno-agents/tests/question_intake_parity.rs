@@ -88,6 +88,8 @@ fn request(question: &str, root: &Path) -> IntakeRequest {
         laws: vec![],
         storage_root: root.to_path_buf(),
         index_path: None,
+        display_name: None,
+        render_cap: None,
     }
 }
 
