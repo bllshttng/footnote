@@ -603,6 +603,12 @@ fn render_stage_block(stage: &str, matching: &[String], damaged: usize) -> Strin
             text.push('\n');
         }
     }
+    text.push_str(&render_read_receipt(damaged, unread));
+    text
+}
+
+fn render_read_receipt(damaged: usize, unread: &[String]) -> String {
+    let mut text = String::new();
     if damaged > 0 {
         text.push_str(&format!(
             "{} index row(s) could not be parsed, so this list may be incomplete.\n",
@@ -661,20 +667,26 @@ fn stage_answer_with(
                     &idents,
                     node_id.as_deref().unwrap_or(""),
                 );
-                if !matching.is_empty() || !unread.is_empty() {
+                if !matching.is_empty() || !unread.is_empty() || index.damaged > 0 {
+                    let additional_context = if matching.is_empty() {
+                        render_read_receipt(index.damaged, &unread)
+                    } else {
+                        render_stage_block(stage_name, &matching, index.damaged, &unread)
+                    };
                     hook_output = Some(json!({
                         "hookSpecificOutput": {
                             "hookEventName": req.hook.get("hook_event_name").cloned().unwrap_or(Value::Null),
-                            "additionalContext": render_stage_block(stage_name, &matching, index.damaged, &unread),
+                            "additionalContext": additional_context,
                         }
                     }));
                 }
             }
             Err(reason) => {
-                let text = format!(
-                    "## Law governing {stage_name}\n\nThe decision index could not be read ({reason}), so the rulings that govern this {stage_name} are unknown. Run fno backlog decisions --lane law --state live before you act on {stage_name} policy.\nUnread: the decision index ({reason})\n"
-                );
                 unread.push(format!("the decision index ({reason})"));
+                let text = format!(
+                    "The decision index could not be read ({reason}), so the rulings that govern this {stage_name} are unknown. Run fno backlog decisions --lane law --state live before you act on {stage_name} policy.\n{}",
+                    render_read_receipt(0, &unread)
+                );
                 hook_output = Some(json!({
                     "hookSpecificOutput": {
                         "hookEventName": req.hook.get("hook_event_name").cloned().unwrap_or(Value::Null),
@@ -1664,5 +1676,52 @@ mod tests {
         );
         assert!(ctx.contains("d-node0001"), "{ctx}");
         assert_eq!(answer["unread"].as_array().expect("unread").len(), 1);
+    }
+
+    #[test]
+    fn ac2_unreadable_graph_and_index_keep_both_reasons() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, "not json").expect("writes");
+        let index = dir.path().join("missing-decisions.jsonl");
+        let hook = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "/fno:blueprint x-aaaa"
+        });
+        let answer = stage_answer_with(StageRequest { hook }, Some(&index), Some(&graph));
+        let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("context");
+        assert!(
+            ctx.contains("Unread: the node's epic and project (graph:"),
+            "{ctx}"
+        );
+        assert!(ctx.contains("Unread: the decision index ("), "{ctx}");
+        assert!(!ctx.contains("These live operator rulings govern"), "{ctx}");
+        assert_eq!(answer["unread"].as_array().expect("unread").len(), 2);
+    }
+
+    #[test]
+    fn ac2_empty_match_with_unread_graph_has_no_empty_law_block() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index = write_index(
+            dir.path(),
+            &[stage_row("d-other0001", "unrelated", "not for this stage")],
+        );
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, "not json").expect("writes");
+        let hook = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "/fno:blueprint x-aaaa"
+        });
+        let answer = stage_answer_with(StageRequest { hook }, Some(&index), Some(&graph));
+        let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("context");
+        assert!(
+            ctx.contains("Unread: the node's epic and project (graph:"),
+            "{ctx}"
+        );
+        assert!(!ctx.contains("These live operator rulings govern"), "{ctx}");
     }
 }

@@ -1300,10 +1300,10 @@ def list_decisions(
     emitted: "set[str]" = set()
     graph_entries: list[dict] = []
     if any(_decision_lane(row) == "coord" for row in decisions):
-        try:
-            graph_entries = _graph_entries(required=True)
-        except Exception:
-            graph_entries = []
+        # Reuse a caller's strict graph read when it already has one. Without
+        # this, the caller can read a healthy graph and this second read can
+        # fail, silently turning coord rows into unscoped rows.
+        graph_entries = entries if entries is not None else _graph_entries(required=True)
 
     for row in decisions:
         if not keep(row):
