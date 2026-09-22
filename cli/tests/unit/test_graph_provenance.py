@@ -1369,7 +1369,10 @@ def test_cli_session_close_refuses_without_identity(tmp_path, monkeypatch):
 def test_cli_session_open_holds_node_for_this_session(tmp_path, monkeypatch):
     """AC1-HP: a free node comes back claimed under blueprint-session:<id>,
     and the open writes no session row and no status change."""
+    import os
+
     from typer.testing import CliRunner
+    import fno.claims.session_pid as session_pid
     import fno.graph.cli as C
     from fno.claims.core import claim_status
     from fno.graph.store import read_graph
@@ -1377,6 +1380,7 @@ def test_cli_session_open_holds_node_for_this_session(tmp_path, monkeypatch):
     g = _make_graph(tmp_path, [{"id": "x-open001", "title": "t"}])
     _patch_graph(monkeypatch, g)
     monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setattr(session_pid, "resolve_session_pid", lambda: os.getpid())
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-open1")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
 
@@ -1395,6 +1399,61 @@ def test_cli_session_open_holds_node_for_this_session(tmp_path, monkeypatch):
     node = read_graph(g)[0]
     assert node["status"] != "in_progress"
     assert node.get("sessions") in (None, [])
+
+
+def test_cli_session_open_uses_lease_for_thread_session(tmp_path, monkeypatch):
+    """AC1-HP: an unanchored thread claim carries its session witness and TTL."""
+    from typer.testing import CliRunner
+    import fno.claims.session_pid as session_pid
+    import fno.graph.cli as C
+    from fno.claims.core import claim_status
+
+    g = _make_graph(tmp_path, [{"id": "x-open005", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setattr(session_pid, "resolve_session_pid", lambda: None)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-thread1")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+
+    r = CliRunner().invoke(C.cli, ["session", "open", "x-open005", "--json"])
+
+    assert r.exit_code == 0, r.output
+    status = claim_status("node:x-open005")
+    assert status["pid"] is None
+    assert status["pid_unavailable"] is True
+    assert status["session_id"] == "sess-thread1"
+    assert status["expires_at"] == status["acquired_at"] + 7_200_000
+    assert status["state"] in {"live", "suspect"}
+
+
+def test_cli_session_open_uses_lease_when_pid_resolution_fails(tmp_path, monkeypatch):
+    """AC2-ERR: pid resolution failure cannot record the opener pid."""
+    import os
+
+    from typer.testing import CliRunner
+    import fno.claims.session_pid as session_pid
+    import fno.graph.cli as C
+    from fno.claims.core import claim_status
+
+    g = _make_graph(tmp_path, [{"id": "x-open006", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+
+    def fail_pid_resolution():
+        raise RuntimeError("session pid unavailable")
+
+    monkeypatch.setattr(session_pid, "resolve_session_pid", fail_pid_resolution)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-error1")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+
+    r = CliRunner().invoke(C.cli, ["session", "open", "x-open006", "--json"])
+
+    assert r.exit_code == 0, r.output
+    status = claim_status("node:x-open006")
+    assert status["pid"] is None
+    assert status["pid"] != os.getpid()
+    assert status["pid_unavailable"] is True
+    assert status["expires_at"] == status["acquired_at"] + 7_200_000
 
 
 def test_cli_session_open_refuses_live_foreign_holder(tmp_path, monkeypatch):
