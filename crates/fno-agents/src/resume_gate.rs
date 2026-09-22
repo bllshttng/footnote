@@ -386,9 +386,15 @@ where
                 .into_iter()
                 .find(|entry| entry.name == row_name)
         });
+    let route_provider = row
+        .as_ref()
+        .and_then(|entry| entry.route_provider_id.clone());
+    let node = row.as_ref().and_then(|entry| entry.node.clone());
     let input = crate::spawn_gate::GateInput {
         name: row_name.to_string(),
         substrate: "bg".to_string(),
+        route_provider: route_provider.clone(),
+        node: node.clone(),
         account: row.as_ref().and_then(|entry| entry.launch_account.clone()),
         caller_session: row
             .as_ref()
@@ -404,14 +410,22 @@ where
             eprintln!(
                 "fno agents {verb}: the spawn gate refused reviving {row_name}; nothing was launched. FNO_SPAWN_GATE=0 skips the gate for one run."
             );
-            let mut fields: Vec<(String, Value)> = refusal.event.into_iter().collect();
-            fields.extend([
-                ("name".to_string(), Value::String(row_name.to_string())),
-                ("verb".to_string(), Value::String(verb.to_string())),
-                ("substrate".to_string(), Value::String("bg".to_string())),
-                ("gate".to_string(), Value::String("revival".to_string())),
-                ("exit_code".to_string(), Value::from(refusal.exit_code)),
-            ]);
+            let mut fields = serde_json::Map::new();
+            if let Some(receipt) = refusal.receipt.as_ref().and_then(Value::as_object) {
+                fields.extend(receipt.clone());
+            }
+            fields.extend(refusal.event);
+            fields.insert("name".to_string(), Value::String(row_name.to_string()));
+            fields.insert("verb".to_string(), Value::String(verb.to_string()));
+            fields.insert("substrate".to_string(), Value::String("bg".to_string()));
+            fields.insert("gate".to_string(), Value::String("revival".to_string()));
+            fields.insert("exit_code".to_string(), Value::from(refusal.exit_code));
+            if let Some(provider) = route_provider {
+                fields.insert("provider".to_string(), Value::String(provider));
+            }
+            if let Some(node) = node {
+                fields.insert("node".to_string(), Value::String(node));
+            }
             let event_fields: Vec<(&str, Value)> = fields
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.clone()))
@@ -816,6 +830,8 @@ mod tests {
                 name: "w1".to_string(),
                 harness: Some("claude".to_string()),
                 harness_session_id: Some("sess-uuid".to_string()),
+                route_provider_id: Some("zai".to_string()),
+                node: Some("x-node".to_string()),
                 launch_account: Some("makers".to_string()),
                 spawned_by_session: Some("k1-parent".to_string()),
                 ..Default::default()
@@ -832,6 +848,8 @@ mod tests {
         let input = seen.lock().unwrap().take().unwrap();
         assert_eq!(input.name, "w1");
         assert_eq!(input.substrate, "bg");
+        assert_eq!(input.route_provider.as_deref(), Some("zai"));
+        assert_eq!(input.node.as_deref(), Some("x-node"));
         assert_eq!(input.account.as_deref(), Some("makers"));
         assert_eq!(input.caller_session.as_deref(), Some("k1-parent"));
         let _ = std::fs::remove_dir_all(dir);
@@ -857,7 +875,15 @@ mod tests {
     fn admit_revival_records_refusal_and_returns_gate_code() {
         let (home, dir) = registry_home("admit-refusal");
         let code = admit_revival_with(&home, "resume", "w1", |_| {
-            Err(crate::spawn_gate::Refusal::code(83).ev("axis", Value::String("slots".to_string())))
+            Err(crate::spawn_gate::Refusal::with_receipt(
+                83,
+                serde_json::json!({
+                    "reason": "provider_cap",
+                    "provider": "zai",
+                    "count": 4,
+                }),
+            )
+            .ev("axis", Value::String("slots".to_string())))
         })
         .unwrap_err();
         assert_eq!(code, 83);
@@ -867,6 +893,9 @@ mod tests {
         assert!(events.contains("\"name\":\"w1\""));
         assert!(events.contains("\"verb\":\"resume\""));
         assert!(events.contains("\"gate\":\"revival\""));
+        assert!(events.contains("\"reason\":\"provider_cap\""));
+        assert!(events.contains("\"provider\":\"zai\""));
+        assert!(events.contains("\"count\":4"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
