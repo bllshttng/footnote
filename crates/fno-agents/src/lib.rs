@@ -112,6 +112,7 @@ mod completion_output;
 pub mod component_update;
 pub mod context_run;
 pub mod convert;
+pub mod corrections_verify;
 pub mod court_fold;
 pub mod crown_alarm;
 pub mod crown_reap;

@@ -80,6 +80,7 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "CLAUDE_PLUGIN_ROOT",
     "CODEX_PLUGIN_ROOT",
     "CLAUDE_CONFIG_DIR",  # the account-alias channel; picks which bill is paid
+    "CLAUDE_DIR_OVERRIDE",  # redirects the Claude config root (the rule-file git repo the corrections hook watches); same category as CLAUDE_CONFIG_DIR
     "CODEX_HOME",  # 12 reads in source; a real per-developer setting
     "GEMINI_PROJECT_DIR",
     "GEMINI_SANDBOX",
