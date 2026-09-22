@@ -535,6 +535,27 @@ pub fn project(
     items
 }
 
+/// Join each question item's asker to the agents registry: a row whose
+/// liveness reads alive yields `fno agents attach <name>`. A miss or an
+/// unmeasured row leaves `reach` None (unmeasured, never false).
+pub fn attach_reach(items: &mut [AttentionItem], registry: &crate::state::Registry) {
+    for item in items {
+        let Some(asker) = item.asker.as_mut() else {
+            continue;
+        };
+        if asker.reach.is_some() {
+            continue;
+        }
+        let Some(row) = registry.find(&asker.handle) else {
+            continue;
+        };
+        if row.liveness.as_deref() == Some("alive") {
+            asker.live = Some(true);
+            asker.reach = Some(format!("fno agents attach {}", row.name));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,5 +678,42 @@ mod tests {
         let items = project(&raw, &[], "", 0);
         assert_eq!(items.len(), 1);
         assert!(items[0].ready, "missing: {:?}", items[0].missing);
+    }
+
+    #[test]
+    fn ac10_hp_live_registry_row_yields_the_attach_command() {
+        let journals = row(
+            "q-reach",
+            "Which lane?",
+            json!({
+                "ask": "pick one",
+                "session_id": "s1",
+                "cwd": "/repo/fno",
+                "asker": "worker-9",
+                "node": "x-aaaa"
+            }),
+        );
+        let mut items = project(&journals, &[], "", 0);
+        assert_eq!(items.len(), 1);
+        assert!(items[0].asker.as_ref().unwrap().reach.is_none());
+        let mut registry = crate::state::Registry::default();
+        registry.entries.push(crate::state::RegistryEntry {
+            name: "worker-9".to_string(),
+            liveness: Some("alive".to_string()),
+            ..Default::default()
+        });
+        crate::attention::attach_reach(&mut items, &registry);
+        let asker = items[0].asker.as_ref().unwrap();
+        assert_eq!(
+            asker.reach.as_deref(),
+            Some("fno agents attach worker-9"),
+            "a live row yields the exact command"
+        );
+        assert_eq!(asker.live, Some(true));
+        // A dead row never fabricates reach.
+        registry.entries[0].liveness = Some("dead".to_string());
+        let mut items2 = project(&journals, &[], "", 0);
+        crate::attention::attach_reach(&mut items2, &registry);
+        assert!(items2[0].asker.as_ref().unwrap().reach.is_none());
     }
 }

@@ -95,6 +95,11 @@
           },
           {
             "type": "command",
+            "command": "${PLUGIN_ROOT}/hooks/prompt-outstanding.sh",
+            "timeout": 2
+          },
+          {
+            "type": "command",
             "command": "${PLUGIN_ROOT}/hooks/law-stage-inject.sh",
             "timeout": 5
           }

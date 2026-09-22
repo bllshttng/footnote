@@ -248,6 +248,7 @@ pub mod provider_cap;
 pub mod provider_cap_verbs;
 pub mod publish_review;
 pub mod quarantine;
+pub mod question_intake;
 pub mod question_sweep;
 pub mod quiet_retire;
 pub mod readiness;
@@ -1060,6 +1061,9 @@ mod tests {
 /// output; only include kinds that appear as the first string argument to an
 /// emit call in non-test production code.
 pub const KNOWN_EVENT_KINDS: &[&str] = &[
+    // The question intake's journal write (the ask port): the durable half
+    // of `fno inbox outstanding ask`.
+    "operator_question",
     // Agent lifecycle (daemon-emitted)
     "agent_spawned",
     // Spawn coordinator: the durable accepted record written BEFORE
