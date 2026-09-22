@@ -32,24 +32,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-/// The fourteen readings of the check-in body, in print order.
-const READING_NAMES: [&str; 14] = [
-    "user_notes",
-    "board",
-    "escalations",
-    "blocked_child",
-    "court",
-    "territory",
-    "capacity",
-    "workers",
-    "crown",
-    "refusal_rate",
-    "drain",
-    "main_ci",
-    "control_plane",
-    "parked",
-];
-
 /// The numeric keys this verb owns and diffs versus the previous beat.
 const NUMERIC_DIFF_KEYS: [&str; 9] = [
     "open_prs",
@@ -495,7 +477,49 @@ fn r_court(folded: &Result<Value, String>) -> Result<Value, String> {
         "active_nodes": total - done,
         "total_nodes": total,
         "rows": rows,
+        "epics": fold.get("epics").cloned().unwrap_or(Value::Null),
+        "epic_cap": fold.get("epic_cap").cloned().unwrap_or(Value::Null),
     }))
+}
+
+/// The `epics:` line under the court reading: each scope epic that holds an
+/// open child, fullest first, as `open/cap` cells, ` full` on the rows whose
+/// next open child the write cap refuses. `-` and a trailing `(cap unset)`
+/// say no cap is configured.
+fn epic_line(court: &Value) -> String {
+    let Some(rows) = court.get("epics").and_then(|v| v.as_array()) else {
+        return "epics: unmeasured".into();
+    };
+    if rows.is_empty() {
+        return "epics: none in scope holds an open child".into();
+    }
+    let cap_raw = court.get("epic_cap").and_then(Value::as_u64);
+    let cap = cap_raw.map(|c| c.to_string()).unwrap_or_else(|| "-".into());
+    let cells: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            let id = s_str(row, "id").unwrap_or("?");
+            let n = row
+                .get("open_children")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            // `full` is a cap word: with no cap configured the producer
+            // never emits it, and a stray one must not read as a refusal.
+            let full =
+                if cap_raw.is_some() && row.get("full").and_then(Value::as_bool) == Some(true) {
+                    " full"
+                } else {
+                    ""
+                };
+            format!("{id} {n}/{cap}{full}")
+        })
+        .collect();
+    let body = crate::court_fold::named_ids(&cells);
+    if cap_raw.is_none() {
+        format!("epics: {body} (cap unset)")
+    } else {
+        format!("epics: {body}")
+    }
 }
 
 fn r_capacity() -> Result<Value, String> {
@@ -1399,6 +1423,7 @@ fn render_lines(
                     .unwrap_or_else(|| "null".into()),
                 dash(court.get("total_nodes")),
             ));
+            lines.push(epic_line(court));
             let rows = court
                 .get("rows")
                 .and_then(|r| r.as_array())
@@ -1619,16 +1644,14 @@ fn render_lines(
         }
     }
 
-    let coverage = data.get("coverage").and_then(|c| c.as_i64()).unwrap_or(0);
-    lines.push(format!(
-        "coverage: {coverage} of {} readings ok",
-        READING_NAMES.len()
-    ));
     let failed_names: Vec<&str> = data
         .get("readers_failed")
         .and_then(|f| f.as_array())
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
+    let coverage = data.get("coverage").and_then(|c| c.as_i64()).unwrap_or(0);
+    let ran = coverage + failed_names.len() as i64;
+    lines.push(format!("coverage: {coverage} of {ran} readings ok"));
     if !failed_names.is_empty() {
         let named = failed_names
             .iter()
@@ -2303,6 +2326,84 @@ mod tests {
         assert_eq!(rows[0]["session"], json!("s1"));
     }
 
+    #[test]
+    fn the_epics_line_renders_right_after_the_scope_line() {
+        // AC3-HP: the lead reads the cap distance on the court reading
+        // itself, one line under the active count.
+        let court = json!({
+            "active_nodes": 3, "total_nodes": 5, "rows": [],
+            "epics": [
+                {"id": "e-1", "open_children": 16, "full": true},
+                {"id": "e-2", "open_children": 3, "full": false}
+            ],
+            "epic_cap": 15
+        });
+        let readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            court,
+            json!({"footprint": "admit", "gate": "admit", "disagree": false,
+                   "unparsed_lines": 0, "lanes": ""}),
+            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let scope_at = lines
+            .iter()
+            .position(|l| l.starts_with("x-bbbb: ") && l.contains("active of"))
+            .unwrap();
+        assert_eq!(lines[scope_at + 1], "epics: e-1 16/15 full, e-2 3/15");
+    }
+
+    #[test]
+    fn the_epics_line_reads_unset_when_no_cap_is_configured() {
+        // AC3-EDGE: `-` per cell and a trailing `(cap unset)`; seven rows
+        // name five and count the rest.
+        let line = epic_line(&json!({
+            "epics": [
+                {"id": "e-1", "open_children": 16, "full": true},
+                {"id": "e-2", "open_children": 3, "full": false}
+            ],
+            "epic_cap": Value::Null
+        }));
+        assert_eq!(line, "epics: e-1 16/-, e-2 3/- (cap unset)");
+        let rows: Vec<Value> = (1..=7)
+            .map(|i| json!({"id": format!("e-{i}"), "open_children": i, "full": false}))
+            .collect();
+        let line = epic_line(&json!({"epics": rows, "epic_cap": 15}));
+        assert!(line.starts_with("epics: e-1 1/15, e-2 2/15, e-3 3/15, e-4 4/15, e-5 5/15"));
+        assert!(line.ends_with("+2 more"));
+    }
+
+    #[test]
+    fn the_epics_line_degrades_honestly() {
+        // AC3-ERR: a fold that never carried the load reads unmeasured, an
+        // empty scope reads none, and a failed court reader prints its own
+        // failure instead of an epics line.
+        assert_eq!(epic_line(&json!({})), "epics: unmeasured");
+        assert_eq!(
+            epic_line(&json!({"epics": []})),
+            "epics: none in scope holds an open child"
+        );
+        let mut readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false,
+                   "unparsed_lines": 0, "lanes": ""}),
+            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+        );
+        set_reading(
+            &mut readings,
+            Reading::failed("court", "scope fold unreadable: no graph".into()),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        assert!(
+            !lines.iter().any(|l| l.starts_with("epics:")),
+            "lines: {lines:?}"
+        );
+        assert!(lines.iter().any(|l| l.starts_with("READER FAILED court: ")));
+    }
+
     fn sample_readings(board: Value, court: Value, cap: Value, workers: Value) -> Vec<Reading> {
         vec![
             Reading::took("user_notes", Value::Null),
@@ -2322,10 +2423,21 @@ mod tests {
                 json!({"rate": 0.05, "refused": 5, "total": 100, "window": 100}),
             ),
             Reading::took("drain", json!(9)),
+            Reading::took("held", json!({"open": 0, "rows": []})),
             Reading::took("main_ci", json!("green")),
             Reading::took("control_plane", json!({"attention": []})),
             Reading::took("parked", json!({"open": 0, "rows": []})),
         ]
+    }
+
+    /// Swap in the fixture row that carries `r.name`. A name the fixture
+    /// lacks fails the test rather than growing the set.
+    fn set_reading(readings: &mut [Reading], r: Reading) {
+        let i = readings
+            .iter()
+            .position(|x| x.name == r.name)
+            .unwrap_or_else(|| panic!("fixture has no {} reading", r.name));
+        readings[i] = r;
     }
 
     #[test]
@@ -2468,8 +2580,9 @@ mod tests {
         assert!(board_line.contains("blocked 2"));
         let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
         assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(14)));
+        assert_eq!(data.get("coverage"), Some(&json!(15)));
         assert_eq!(data.get("open_prs"), Some(&json!(7)));
+        assert!(lines.iter().any(|l| l == "coverage: 15 of 15 readings ok"));
     }
 
     // AC1: the printed body carries a refusal_rate line with the real
@@ -2557,14 +2670,17 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
-        readings[1] = Reading::failed("board", "board payload names no undriven_pr queue".into());
+        set_reading(
+            &mut readings,
+            Reading::failed("board", "board payload names no undriven_pr queue".into()),
+        );
         let data = build_data(&readings, "x-bbbb");
         let change = derive_change(None, &data, "");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", &change);
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 13 of 14 readings ok")));
+            .any(|l| l.starts_with("coverage: 14 of 15 readings ok")));
         assert!(lines.iter().any(|l| l.contains("failed readers: board")));
         assert_eq!(change, "no numeric movement; readings failed: board");
         assert_eq!(data.get("open_prs"), None);
@@ -2579,7 +2695,10 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
-        readings[10] = Reading::failed("drain", "drain unreadable".into());
+        set_reading(
+            &mut readings,
+            Reading::failed("drain", "drain unreadable".into()),
+        );
         let data = build_data(&readings, "x-bbbb");
         assert!(derive_change(None, &data, "").starts_with("no numeric movement; readings failed"));
     }
@@ -2592,14 +2711,17 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 1, "oldest_worker_seen": "30s w1"}),
         );
-        readings[13] = Reading::took(
-            "parked",
-            json!({"open": 2, "rows": [
-                {"key": "owner/repo#101", "node": "x-aa",
-                 "reason_detail": "failed; checks are red", "age_hours": 2},
-                {"key": "owner/repo#2078", "node": "x-bb",
-                 "reason_detail": "failed; checks are red", "age_hours": 5},
-            ]}),
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "parked",
+                json!({"open": 2, "rows": [
+                    {"key": "owner/repo#101", "node": "x-aa",
+                     "reason_detail": "failed; checks are red", "age_hours": 2},
+                    {"key": "owner/repo#2078", "node": "x-bb",
+                     "reason_detail": "failed; checks are red", "age_hours": 5},
+                ]}),
+            ),
         );
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
@@ -2620,7 +2742,10 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 1, "oldest_worker_seen": "30s w1"}),
         );
-        readings[13] = Reading::took("parked", json!({"open": 0, "rows": []}));
+        set_reading(
+            &mut readings,
+            Reading::took("parked", json!({"open": 0, "rows": []})),
+        );
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(
@@ -2646,13 +2771,16 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 0, "oldest_worker_seen": ""}),
         );
-        readings.push(Reading::took(
-            "held",
-            json!({"open": 2, "rows": [
-                {"node": "x-1", "question_id": "q-1", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0},
-                {"node": "x-2", "question_id": "q-2", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0}
-            ]}),
-        ));
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "held",
+                json!({"open": 2, "rows": [
+                    {"node": "x-1", "question_id": "q-1", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0},
+                    {"node": "x-2", "question_id": "q-2", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0}
+                ]}),
+            ),
+        );
         let data = build_data(&readings, "x-bbbb");
         assert_eq!(data.get("held_open"), Some(&json!(2)));
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
@@ -2668,15 +2796,17 @@ mod tests {
 
     #[test]
     fn held_absent_reads_none() {
-        let readings = sample_readings(
+        let mut readings = sample_readings(
             json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
             json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 0, "oldest_worker_seen": ""}),
         );
+        readings.retain(|r| r.name != "held");
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(lines.iter().any(|l| l == "held: none"), "lines: {lines:?}");
+        assert!(lines.iter().any(|l| l == "coverage: 14 of 14 readings ok"));
     }
 
     fn prev_row() -> Value {
@@ -2749,9 +2879,12 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
-        readings[11] = Reading::took(
-            "control_plane",
-            json!({"attention": ["pr_watch_merge FAIL timeout for 2000s"]}),
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "control_plane",
+                json!({"attention": ["pr_watch_merge FAIL timeout for 2000s"]}),
+            ),
         );
         let data = build_data(&readings, "x-bbbb");
         let change = derive_change(previous.as_ref().and_then(|p| p.get("data")), &data, "");
@@ -2770,9 +2903,12 @@ mod tests {
         );
 
         // A count that also moved still names itself, after the attention.
-        readings[1] = Reading::took(
-            "board",
-            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
+        set_reading(
+            &mut readings,
+            Reading::took(
+                "board",
+                json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
+            ),
         );
         let data = build_data(&readings, "x-bbbb");
         let change = derive_change(previous.as_ref().and_then(|p| p.get("data")), &data, "");
@@ -2792,7 +2928,10 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
-        readings[12] = Reading::failed("control_plane", "journals unreadable".into());
+        set_reading(
+            &mut readings,
+            Reading::failed("control_plane", "journals unreadable".into()),
+        );
         let data = build_data(&readings, "x-bbbb");
         let change = derive_change(None, &data, "");
         assert_eq!(
@@ -2805,7 +2944,7 @@ mod tests {
             .any(|l| l == "READER FAILED control_plane: journals unreadable"));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 13 of 14 readings ok")));
+            .any(|l| l.starts_with("coverage: 14 of 15 readings ok")));
     }
 
     // AC6-EDGE: under the threshold with nothing stuck, the quiet beat stands.

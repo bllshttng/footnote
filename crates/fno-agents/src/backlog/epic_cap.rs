@@ -7,7 +7,8 @@
 //! decompose, the rollup auto-link, api node_create) meets the same
 //! refusal. Unset means no cap, which is the OSS default.
 
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 /// `config.backlog.epic_max_open_children`, beside the graph. `None` = no
@@ -31,6 +32,15 @@ fn parent_of(row: &Value) -> Option<&str> {
     row.get("parent")
         .and_then(Value::as_str)
         .filter(|p| !p.is_empty())
+}
+
+/// Open direct children one epic holds: the same count the refusal judges
+/// with, lifted here so the read-time view and the write-time refusal
+/// cannot disagree.
+pub fn open_child_count(rows: &[Value], epic: &str) -> usize {
+    rows.iter()
+        .filter(|r| row_is_open(r) && parent_of(r) == Some(epic))
+        .count()
 }
 
 /// Refuse a write that leaves an epic it grew with more open children than
@@ -110,10 +120,7 @@ pub fn enforce(pre: &[Value], post: &[Value], cap: Option<usize>) -> Result<(), 
         entry.2.push(id);
     }
     for (epic, epic_row, children) in grown {
-        let open = post
-            .iter()
-            .filter(|r| row_is_open(r) && parent_of(r) == Some(epic))
-            .count();
+        let open = open_child_count(post, epic);
         if open <= cap {
             continue;
         }
@@ -139,6 +146,30 @@ pub fn enforce(pre: &[Value], post: &[Value], cap: Option<usize>) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+/// Read-time view of the cap: for the epic ids given, one row per epic that
+/// holds at least one open direct child, fullest first. `full` means the
+/// next open child is refused: `enforce` refuses once the count after a
+/// write passes the cap, so a count already at the cap cannot take one
+/// more. An epic's own status is ignored, as `enforce` ignores it.
+pub fn epic_load(rows: &[Value], ids: &BTreeSet<String>, cap: Option<usize>) -> Vec<Value> {
+    let by_id = crate::graph_store::index_by_id(rows);
+    let mut load: Vec<(String, usize)> = ids
+        .iter()
+        .filter(|id| {
+            by_id
+                .get(id.as_str())
+                .map(|r| r.get("type").and_then(Value::as_str) == Some("epic"))
+                .unwrap_or(false)
+        })
+        .map(|id| (id.clone(), open_child_count(rows, id)))
+        .filter(|(_, n)| *n > 0)
+        .collect();
+    load.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    load.into_iter()
+        .map(|(id, n)| json!({"id": id, "open_children": n, "full": cap.is_some_and(|c| n >= c)}))
+        .collect()
 }
 
 #[cfg(test)]
@@ -432,5 +463,83 @@ mod tests {
         )
         .unwrap();
         assert_eq!(configured_cap(&graph), Some(15));
+    }
+
+    #[test]
+    fn epic_load_orders_full_epics_first_and_drops_closed_children() {
+        // e-2's done and deferred children never count, so it reads 2.
+        let mut rows = full_epic_rows();
+        rows.push(epic("e-2"));
+        for i in 1..=2 {
+            rows.push(child(&format!("k-{i}"), "e-2"));
+        }
+        rows.push(json!({"id": "k-done", "slug": "k-done", "title": "k-done",
+                         "type": "feature", "status": "done", "priority": "p2",
+                         "domain": "code", "parent": "e-2"}));
+        rows.push(json!({"id": "k-def", "slug": "k-def", "title": "k-def",
+                         "type": "feature", "status": "deferred", "priority": "p2",
+                         "domain": "code", "parent": "e-2"}));
+        let ids: BTreeSet<String> = ["e-1", "e-2"].iter().map(|s| s.to_string()).collect();
+        let load = epic_load(&rows, &ids, Some(15));
+        assert_eq!(
+            load,
+            vec![
+                json!({"id": "e-1", "open_children": 15, "full": true}),
+                json!({"id": "e-2", "open_children": 2, "full": false}),
+            ]
+        );
+    }
+
+    #[test]
+    fn epic_load_skips_features_and_childless_epics() {
+        let mut rows = full_epic_rows();
+        // An epic with no open child is left out; so is a non-epic id.
+        rows.push(
+            json!({"id": "e-empty", "slug": "e-empty", "title": "e-empty",
+                         "type": "epic", "status": "done", "priority": "p2",
+                         "domain": "code"}),
+        );
+        rows.push(json!({"id": "f-1", "slug": "f-1", "title": "f-1",
+                         "type": "feature", "status": "in_progress", "priority": "p2",
+                         "domain": "code"}));
+        let ids: BTreeSet<String> = ["e-1", "e-empty", "f-1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let load = epic_load(&rows, &ids, None);
+        assert_eq!(
+            load,
+            vec![json!({"id": "e-1", "open_children": 15, "full": false})]
+        );
+    }
+
+    #[test]
+    fn epic_load_full_rows_are_the_ones_enforce_refuses() {
+        // AC2-HP: the flag and the refusal answer the same question. A row
+        // epic_load marks full refuses one more open child; a row it does
+        // not mark passes the same write.
+        let mut rows = full_epic_rows();
+        rows.push(epic("e-2"));
+        for i in 1..=2 {
+            rows.push(child(&format!("k-{i}"), "e-2"));
+        }
+        let both: BTreeSet<String> = ["e-1", "e-2"].iter().map(|s| s.to_string()).collect();
+        let load = epic_load(&rows, &both, Some(15));
+        let full_flag = |id: &str| {
+            load.iter()
+                .find(|row| row["id"] == json!(id))
+                .map(|row| row["full"].as_bool().unwrap())
+                .unwrap()
+        };
+        assert!(full_flag("e-1"));
+        assert!(!full_flag("e-2"));
+        // e-1 at 15: the next open child is refused, exactly as the flag says.
+        let mut grown = rows.clone();
+        grown.push(child("c-16", "e-1"));
+        enforce(&rows, &grown, Some(15)).unwrap_err();
+        // e-2 at 2: the same write passes at the same cap.
+        let mut grown = rows.clone();
+        grown.push(child("k-3", "e-2"));
+        enforce(&rows, &grown, Some(15)).unwrap();
     }
 }
