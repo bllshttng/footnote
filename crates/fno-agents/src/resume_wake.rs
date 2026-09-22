@@ -896,16 +896,13 @@ fn revive_parked_claude_session(
     home: &AgentsHome,
     name: &str,
     row_name: &str,
-    session_id: &str,
     short_id: &str,
     session_uuid: &str,
     cwd: &str,
 ) -> Result<(), (i32, String)> {
     // A revive brings the session back from down: the same second-writer
     // gate the relaunch arm runs, before anything launches.
-    if let Some(code) =
-        crate::resume_gate::gate_and_reserve(home, session_id, row_name, session_uuid)
-    {
+    if let Some(code) = crate::resume_gate::gate_and_reserve(home, row_name, session_uuid) {
         return Err((code, "node-held".to_string()));
     }
     if let Err((code, msg)) = acquire_resume_session_claim(session_uuid, None, None) {
@@ -994,17 +991,7 @@ pub(crate) fn parked_claude_route(
         None,
         parked_roster_state,
         |_, uuid| daemon_roster_has_worker(uuid),
-        |short, uuid| {
-            revive_parked_claude_session(
-                home,
-                name,
-                row_name,
-                crate::client_verbs::resume_session_id(entry, harness),
-                short,
-                uuid,
-                cwd,
-            )
-        },
+        |short, uuid| revive_parked_claude_session(home, name, row_name, short, uuid, cwd),
         |uuid, wrapped| {
             crate::mail_inject::deliver_via_control_sock(
                 uuid,
