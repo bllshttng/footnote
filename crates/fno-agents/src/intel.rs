@@ -49,6 +49,9 @@ struct SessionRow {
     kind: String,
     /// Every provenance counter, including zeros.
     counters: BTreeMap<&'static str, u64>,
+    /// Raw timestamps of each witnessed operator turn: the skill quotes
+    /// only these when it judges the session.
+    operator_turns: Vec<String>,
     tool_use: usize,
     /// HEAD-sha transitions in the entry's loop_check fingerprints, the
     /// derivation digest.rs uses (events never carry a commit event).
@@ -107,6 +110,8 @@ struct Report {
     /// Harnesses whose store could not be read, with the reason.
     skipped: BTreeMap<String, String>,
     totals: Totals,
+    /// The operator_submit witness receipt: what the mux saw and bound.
+    witness: crate::operator_witness::WitnessReceipt,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -128,6 +133,8 @@ struct FoldCtx {
     join: HashMap<String, (Vec<String>, Option<String>, Option<u64>)>,
     /// Raw events.jsonl rows, for the loop_check commit derivation.
     events: Vec<Value>,
+    /// The operator_submit witness rows: what the fold binds turns against.
+    witness: crate::operator_witness::SubmitIndex,
     days: u64,
     now: u64,
 }
@@ -280,7 +287,7 @@ fn fold_session(
     harness: &'static str,
     file: &crate::provenance::SessionFile,
     source: &dyn TranscriptSource,
-    ctx: &FoldCtx,
+    ctx: &mut FoldCtx,
 ) -> SessionRow {
     // One read serves every parser: turns, tool calls, and the relay
     // delivery check all work from this text.
@@ -292,6 +299,7 @@ fn fold_session(
         .collect();
     let mut first_ts: Option<f64> = None;
     let mut last_ts: Option<f64> = None;
+    let mut operator_turns: Vec<String> = Vec::new();
     for turn in &turns {
         if turn.text.trim().is_empty() {
             continue;
@@ -300,7 +308,31 @@ fn fold_session(
             first_ts = Some(first_ts.map_or(ts, |f| f.min(ts)));
             last_ts = Some(last_ts.map_or(ts, |f| f.max(ts)));
         }
-        let p = crate::provenance::classify_turn(&turn.obj, &ctx.bus, &file.session_id);
+        let mut p = crate::provenance::classify_turn(&turn.obj, &ctx.bus, &file.session_id);
+        // The witness join: an unshaped turn (or a command the operator ran
+        // by hand) binds to the earliest unconsumed operator_submit inside
+        // the window. A bound unshaped turn is witnessed; a bound command
+        // stays a command but consumes the submit so it can never bind a
+        // later machine turn. Relay and keepalive turns never bind; a turn
+        // with no timestamp never binds.
+        if p == crate::provenance::Provenance::Unknown
+            || p == crate::provenance::Provenance::Harness(
+                crate::provenance::HarnessKind::CommandInvocation,
+            )
+        {
+            let bound = turn
+                .ts_epoch
+                .and_then(|ts| ctx.witness.bind(&file.session_id, (ts * 1000.0) as i64))
+                .is_some();
+            if bound && p == crate::provenance::Provenance::Unknown {
+                p = crate::provenance::Provenance::Operator;
+            }
+        }
+        if p == crate::provenance::Provenance::Operator {
+            if let Some(ts) = turn.obj.get("timestamp").and_then(|t| t.as_str()) {
+                operator_turns.push(ts.to_string());
+            }
+        }
         *counters.entry(p.label()).or_insert(0) += 1;
     }
 
@@ -362,7 +394,8 @@ fn fold_session(
         .get(&file.session_id)
         .cloned()
         .unwrap_or_else(|| (Vec::new(), None, None));
-    let operator_turns = counters.get("operator").copied().unwrap_or(0);
+    let operator_count = counters.get("operator").copied().unwrap_or(0);
+    let unknown_count = counters.get("unknown").copied().unwrap_or(0);
     let relay_turns: u64 = counters
         .iter()
         .filter(|(k, _)| k.starts_with("relay_"))
@@ -374,12 +407,16 @@ fn fold_session(
         path: file.path.display().to_string(),
         started: first_ts.and_then(rfc3339_str),
         duration_s: first_ts.zip(last_ts).map(|(f, l)| (l - f) as i64),
-        kind: if operator_turns > 0 || relay_turns > 0 {
+        // Attended now includes unwitnessed sessions: unknown turns mean the
+        // session may hold operator speech the fold cannot witness yet, and
+        // session totals must not shift.
+        kind: if operator_count > 0 || unknown_count > 0 || relay_turns > 0 {
             "attended".to_string()
         } else {
             "unattended".to_string()
         },
         counters,
+        operator_turns,
         tool_use: source.tool_uses(&raw),
         commits: ctx.commits_for(&group),
         mtime: file.mtime,
@@ -391,12 +428,13 @@ fn fold_session(
 }
 
 /// The pure fold over one source's sessions.
-fn fold_source(source: &dyn TranscriptSource, ctx: &FoldCtx) -> Vec<SessionRow> {
-    source
+fn fold_source(source: &dyn TranscriptSource, ctx: &mut FoldCtx) -> Vec<SessionRow> {
+    let rows: Vec<SessionRow> = source
         .sessions(ctx.days)
         .iter()
         .map(|file| fold_session(source.harness(), file, source, ctx))
-        .collect()
+        .collect();
+    rows
 }
 
 /// The per-node mail graph over the rows a node's own sessions exchanged.
@@ -499,20 +537,24 @@ fn print_report(report: &Report) {
             report.scope.projects.join(",")
         }
     );
-    println!("  harness     session                              operator  relay  harness  keepalive  tool_use  commits  node");
+    println!("  harness     session                              operator  relay  harness  keepalive  unknown  tool_use  commits  node");
     for s in &report.sessions {
         println!(
-            "  {:<10}  {:<36}  {:>8}  {:>5}  {:>7}  {:>9}  {:>8}  {:>7}  {}",
+            "  {:<10}  {:<36}  {:>8}  {:>5}  {:>7}  {:>9}  {:>7}  {:>8}  {:>7}  {}",
             s.harness,
             short_id(&s.session),
             s.counters.get("operator").copied().unwrap_or(0),
             relay_total(s),
             harness_total(s),
             s.counters.get("keepalive").copied().unwrap_or(0),
+            s.counters.get("unknown").copied().unwrap_or(0),
             s.tool_use,
             s.commits,
             s.node.as_deref().unwrap_or("-")
         );
+    }
+    if report.witness.submits == 0 {
+        println!("  witness: no operator_submit rows in window; unshaped turns read unknown");
     }
     if !report.nodes.is_empty() {
         println!("  node mail graph:");
@@ -729,7 +771,16 @@ pub fn run_intel(args: &[String]) -> i32 {
     } else {
         Some(default_roots(&cwd, &fno_dir))
     };
-    let report = fold_all(days, node, session, selected, roots, projects, &fno_dir);
+    let report = fold_all(
+        days,
+        node,
+        session,
+        selected,
+        roots,
+        projects,
+        &fno_dir,
+        &home.events_jsonl(),
+    );
 
     if report.sessions.is_empty() {
         println!("no sessions in window");
@@ -824,18 +875,21 @@ fn fold_all(
     roots: Option<Vec<PathBuf>>,
     projects: Vec<String>,
     fno_dir: &Path,
+    events_journal: &Path,
 ) -> Report {
     let bus = BusIndex::load(&bus_log_path(fno_dir));
     let join = session_join(fno_dir);
     let events = read_events(&fno_dir.join("events.jsonl"));
+    let witness = crate::operator_witness::SubmitIndex::load(events_journal);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let ctx = FoldCtx {
+    let mut ctx = FoldCtx {
         bus,
         join,
         events,
+        witness,
         days,
         now,
     };
@@ -866,7 +920,7 @@ fn fold_all(
     }
     let mut rows: Vec<SessionRow> = Vec::new();
     for source in &sources {
-        rows.extend(fold_source(source.as_ref(), &ctx));
+        rows.extend(fold_source(source.as_ref(), &mut ctx));
     }
     if let Some(want) = &session {
         rows.retain(|r| &r.session == want);
@@ -876,6 +930,20 @@ fn fold_all(
     }
     let nodes = node_rows(&rows, &ctx.bus, ctx.now);
     let totals = totals_of(&rows);
+    // The witness receipt over the --days window; `unwitnessed_sessions`
+    // counts sessions with unknown turns that no submit row names at all -
+    // the from-the-fold measure of sessions typed outside the mux.
+    let window_start_ms = if days == 0 {
+        i64::MIN
+    } else {
+        (now.saturating_sub(days * 86_400)) as i64 * 1_000
+    };
+    let unwitnessed_sessions = rows
+        .iter()
+        .filter(|r| r.counters.get("unknown").copied().unwrap_or(0) > 0)
+        .filter(|r| !ctx.witness.has_session(&r.session))
+        .count();
+    let witness = ctx.witness.receipt(window_start_ms, unwitnessed_sessions);
     Report {
         days,
         scope: Scope {
@@ -891,6 +959,7 @@ fn fold_all(
         nodes,
         skipped,
         totals,
+        witness,
     }
 }
 
@@ -1046,6 +1115,27 @@ mod tests {
         ];
         write_lines(&dir.join("events.jsonl"), &events);
 
+        // The witness journal: two operator_submit rows 1.1s and 0.4s before
+        // the fixture's typed turns, so both bind (AC3-HP).
+        let base = ts_secs("2026-09-16T12:00:00.000Z").unwrap() as i64 * 1000;
+        let witness = vec![
+            serde_json::json!({
+                "ts": "2026-09-16T11:59:58Z", "type": "operator_submit",
+                "source": "daemon",
+                "data": {"mux_session": "main", "pane": 7, "via": "pane",
+                         "submit_ms": base - 1100, "resolution": "ok",
+                         "harness_session": CLAUDE_SID}
+            }),
+            serde_json::json!({
+                "ts": "2026-09-16T11:59:59Z", "type": "operator_submit",
+                "source": "daemon",
+                "data": {"mux_session": "main", "pane": 7, "via": "pane",
+                         "submit_ms": base - 400, "resolution": "ok",
+                         "harness_session": CLAUDE_SID}
+            }),
+        ];
+        write_lines(&dir.join("witness").join("events.jsonl"), &witness);
+
         Fixture { dir, cwd }
     }
 
@@ -1056,10 +1146,13 @@ mod tests {
     fn fold_fixture() -> (Fixture, Vec<SessionRow>) {
         let fx = build_fixture("folded");
         let bus = BusIndex::load(&fx.dir.join("bus").join("messages.jsonl"));
-        let ctx = FoldCtx {
+        let mut ctx = FoldCtx {
             bus,
             join: session_join(&fx.dir),
             events: read_events(&fx.dir.join("events.jsonl")),
+            witness: crate::operator_witness::SubmitIndex::load(
+                &fx.dir.join("witness").join("events.jsonl"),
+            ),
             days: 30,
             now: 1_800_000_000,
         };
@@ -1074,7 +1167,7 @@ mod tests {
         let sources: [&dyn TranscriptSource; 2] = [&claude, &codex];
         let mut rows = Vec::new();
         for source in sources {
-            rows.extend(fold_source(source, &ctx));
+            rows.extend(fold_source(source, &mut ctx));
         }
         (fx, rows)
     }
@@ -1095,6 +1188,11 @@ mod tests {
             }
         }
         assert_eq!(claude.counters.get("operator"), Some(&2));
+        assert_eq!(
+            claude.operator_turns.len(),
+            2,
+            "both witnessed turns carry their raw timestamps"
+        );
         assert_eq!(claude.counters.get("relay_fno_mail"), Some(&1));
         assert_eq!(claude.counters.get("keepalive"), Some(&1));
         assert_eq!(claude.tool_use, 1);
@@ -1128,10 +1226,11 @@ mod tests {
                 .join(format!("{QUIET_SID}.jsonl")),
             &[user_row("[cache-keepalive] Ping 2/4")],
         );
-        let ctx = FoldCtx {
+        let mut ctx = FoldCtx {
             bus: BusIndex::empty(),
             join: HashMap::new(),
             events: Vec::new(),
+            witness: crate::operator_witness::SubmitIndex::empty(),
             days: 30,
             now: 1_800_000_000,
         };
@@ -1139,7 +1238,7 @@ mod tests {
             projects_dir: fx.dir.join("claude"),
             roots: Some(vec![fx.cwd.clone()]),
         };
-        let rows = fold_source(&claude, &ctx);
+        let rows = fold_source(&claude, &mut ctx);
         let quiet = rows.iter().find(|r| r.session == QUIET_SID).unwrap();
         assert_eq!(quiet.kind, "unattended");
         let totals = totals_of(&rows);
@@ -1179,5 +1278,145 @@ mod tests {
             run_intel(&["--days".into(), "7".into(), "--period".into(), "1m".into()]),
             2
         );
+    }
+
+    /// Overwrite the fixture's claude transcript with plain unshaped turns at
+    /// base, base+1s, base+2s (UTC RFC3339), and return their raw stamps.
+    fn write_unshaped_claude_turns(fx: &Fixture, sid: &str) -> Vec<String> {
+        let base = ts_secs("2026-09-16T12:00:00Z").unwrap() as f64;
+        let stamps: Vec<String> = (0..3)
+            .map(|k| rfc3339_str(base + f64::from(k)).unwrap())
+            .collect();
+        let rows: Vec<Value> = stamps
+            .iter()
+            .map(|ts| {
+                serde_json::json!({
+                    "type": "user", "uuid": "u", "timestamp": ts,
+                    "message": {"role": "user", "content": "a plain typed turn"}
+                })
+            })
+            .collect();
+        let slug = crate::claude_ask::claude_cwd_slug(&fx.cwd);
+        write_lines(
+            &fx.dir
+                .join("claude")
+                .join(&slug)
+                .join(format!("{sid}.jsonl")),
+            &rows,
+        );
+        stamps
+    }
+
+    fn fold_fixture_ctx(fx: &Fixture) -> FoldCtx {
+        FoldCtx {
+            bus: BusIndex::load(&fx.dir.join("bus").join("messages.jsonl")),
+            join: session_join(&fx.dir),
+            events: read_events(&fx.dir.join("events.jsonl")),
+            witness: crate::operator_witness::SubmitIndex::load(
+                &fx.dir.join("witness").join("events.jsonl"),
+            ),
+            days: 30,
+            now: 1_800_000_000,
+        }
+    }
+
+    #[test]
+    fn three_unshaped_turns_two_submits_reads_operator_two_unknown_one() {
+        let fx = build_fixture("ac3hp");
+        let stamps = write_unshaped_claude_turns(&fx, CLAUDE_SID);
+        let mut ctx = fold_fixture_ctx(&fx);
+        let claude = ClaudeSource {
+            projects_dir: fx.dir.join("claude"),
+            roots: Some(vec![fx.cwd.clone()]),
+        };
+        let rows = fold_source(&claude, &mut ctx);
+        let row = rows.iter().find(|r| r.session == CLAUDE_SID).unwrap();
+        assert_eq!(row.counters.get("operator"), Some(&2));
+        assert_eq!(row.counters.get("unknown"), Some(&1));
+        assert_eq!(row.operator_turns, stamps[..2]);
+        let receipt = ctx.witness.receipt(0, 0);
+        assert_eq!(receipt.bound, 2);
+    }
+
+    #[test]
+    fn no_witness_journal_reads_every_unshaped_turn_unknown() {
+        let fx = build_fixture("ac3err");
+        let _ = std::fs::remove_file(fx.dir.join("witness").join("events.jsonl"));
+        let stamps = write_unshaped_claude_turns(&fx, CLAUDE_SID);
+        let mut ctx = fold_fixture_ctx(&fx);
+        let claude = ClaudeSource {
+            projects_dir: fx.dir.join("claude"),
+            roots: Some(vec![fx.cwd.clone()]),
+        };
+        let rows = fold_source(&claude, &mut ctx);
+        let row = rows.iter().find(|r| r.session == CLAUDE_SID).unwrap();
+        assert_eq!(row.counters.get("operator"), Some(&0));
+        assert_eq!(row.counters.get("unknown"), Some(&3));
+        assert!(row.operator_turns.is_empty());
+        let receipt = ctx.witness.receipt(0, 0);
+        assert_eq!(receipt.submits, 0);
+        assert_eq!(stamps.len(), 3);
+    }
+
+    #[test]
+    fn one_submit_binds_exactly_one_of_two_turns() {
+        let fx = build_fixture("ac3edge");
+        let _ = write_unshaped_claude_turns(&fx, CLAUDE_SID);
+        // Keep only the -1100ms submit: one submit, three unshaped turns.
+        let base = ts_secs("2026-09-16T12:00:00.000Z").unwrap() as i64 * 1000;
+        let witness = vec![serde_json::json!({
+            "ts": "2026-09-16T11:59:58Z", "type": "operator_submit",
+            "source": "daemon",
+            "data": {"mux_session": "main", "pane": 7, "via": "pane",
+                     "submit_ms": base - 1100, "resolution": "ok",
+                     "harness_session": CLAUDE_SID}
+        })];
+        write_lines(&fx.dir.join("witness").join("events.jsonl"), &witness);
+        let mut ctx = fold_fixture_ctx(&fx);
+        let claude = ClaudeSource {
+            projects_dir: fx.dir.join("claude"),
+            roots: Some(vec![fx.cwd.clone()]),
+        };
+        let rows = fold_source(&claude, &mut ctx);
+        let row = rows.iter().find(|r| r.session == CLAUDE_SID).unwrap();
+        assert_eq!(row.counters.get("operator"), Some(&1));
+        assert_eq!(row.counters.get("unknown"), Some(&2));
+    }
+
+    #[test]
+    fn a_relay_turn_never_binds_a_submit() {
+        let fx = build_fixture("ac3relay");
+        let base = ts_secs("2026-09-16T12:00:00.000Z").unwrap() as i64 * 1000;
+        // One submit 1s before the transcript's ONLY turn: a mail envelope.
+        let witness = vec![serde_json::json!({
+            "ts": "2026-09-16T11:59:59Z", "type": "operator_submit",
+            "source": "daemon",
+            "data": {"mux_session": "main", "pane": 7, "via": "pane",
+                     "submit_ms": base - 1000, "resolution": "ok",
+                     "harness_session": CLAUDE_SID}
+        })];
+        write_lines(&fx.dir.join("witness").join("events.jsonl"), &witness);
+        let slug = crate::claude_ask::claude_cwd_slug(&fx.cwd);
+        write_lines(
+            &fx.dir
+                .join("claude")
+                .join(slug)
+                .join(format!("{CLAUDE_SID}.jsonl")),
+            &[user_row(
+                "<fno_mail from=\"peer\" to=\"me\" id=\"msg-9\">run the sweep</fno_mail>",
+            )],
+        );
+        let mut ctx = fold_fixture_ctx(&fx);
+        let claude = ClaudeSource {
+            projects_dir: fx.dir.join("claude"),
+            roots: Some(vec![fx.cwd.clone()]),
+        };
+        let rows = fold_source(&claude, &mut ctx);
+        let row = rows.iter().find(|r| r.session == CLAUDE_SID).unwrap();
+        // The mail turn stays a relay; the submit stays unbound for a typed
+        // turn to claim.
+        assert_eq!(row.counters.get("relay_fno_mail"), Some(&1));
+        let receipt = ctx.witness.receipt(0, 0);
+        assert_eq!(receipt.bound, 0);
     }
 }
