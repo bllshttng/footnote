@@ -3924,10 +3924,10 @@ class ConfigBlock(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _lift_legacy_keys(cls, data: object) -> object:
-        if isinstance(data, dict) and "reach_me" in data:
+        if isinstance(data, dict) and isinstance(data.get("reach_me"), list):
             legacy = data.pop("reach_me")
             _LOG.warning("[[reach_me]] is now [[attention]]; the old name reads one release")
-            data["attention"] = list(data.get("attention") or []) + list(legacy or [])
+            data["attention"] = list(data.get("attention") or []) + legacy
         return _watchdog.lift_retire_grace(data)
 
     @field_validator("attention", mode="before")
