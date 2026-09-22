@@ -131,7 +131,7 @@ page_reload_s = 60
 staleness_days = 30
 # Consecutive failures before a node auto-defers.
 max_failed_attempts = 3
-# Transcript-quiet hours before `maintain --apply` reaps an open do row whose session is provably gone.
+# Idle hours before `maintain --apply` and `requeue` settle an open do row with no live claim and no reachable worker on its node.
 abandoned_do_row_hours = 24
 # Wall-clock budget (seconds) for one `fno backlog maintain` pass; a short run exits 4 with a partial receipt naming the leg it stopped in.
 budget_seconds = 300

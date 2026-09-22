@@ -693,6 +693,24 @@ pub fn worktree_space_dir(cwd: &Path) -> PathBuf {
     }
 }
 
+/// [`worktree_space_dir`] for best-effort readers, over [`space_dir_opt`]:
+/// `None` when no state root is declared (a hermetic test), the durable
+/// answer everywhere else. A read-only gate skips on `None` instead of
+/// tripping the undeclared-root guard.
+pub fn worktree_space_dir_opt(cwd: &Path) -> Option<PathBuf> {
+    let root = worktree_repo_root(cwd);
+    match canonical_repo_root(cwd) {
+        Some(canonical) if canonical != root => space_dir_opt(cwd).map(|dir| {
+            dir.join("worktrees").join(
+                root.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            )
+        }),
+        _ => space_dir_opt(cwd),
+    }
+}
+
 /// The project event journal on the space. Migrates the legacy
 /// `<checkout>/.fno/events.jsonl` once on first resolve so appenders never
 /// split the file across the two locations; one contract for every reader

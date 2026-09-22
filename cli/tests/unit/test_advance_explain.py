@@ -427,8 +427,7 @@ _AB_SID_LIVE = "aa5b6c93-1111-4222-8333-444455556666"
 
 
 def _ab_world(tmp_path, monkeypatch, sid, age_hours, node_id="x-abt0001"):
-    """A hermetic graph with ONE node whose only open do row names `sid`,
-    plus a real fixture transcript for that session."""
+    """A hermetic graph with ONE node whose only open do row names `sid`."""
     g = tmp_path / "graph.json"
     g.write_text('{"entries": []}\n')
     import fno.graph._constants as gc
@@ -444,6 +443,9 @@ def _ab_world(tmp_path, monkeypatch, sid, age_hours, node_id="x-abt0001"):
 
     monkeypatch.setattr(gcli, "_live_claimed_node_ids", lambda **k: set())
     monkeypatch.setattr("fno.graph.statuses.live_worked_node_ids", lambda **k: {})
+    from fno.claims import roster
+
+    monkeypatch.setattr(roster, "read_roster", lambda **_kw: roster.RosterReading(True, 0, {}))
 
     stamp = (_dt.now(_tz.utc) - _td(hours=age_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
     root = tmp_path / "projects" / "-some-worktree"
@@ -459,12 +461,13 @@ def _ab_world(tmp_path, monkeypatch, sid, age_hours, node_id="x-abt0001"):
 
     monkeypatch.setattr(resolver, "_DEFAULT_PROJECTS_ROOT", tmp_path / "projects")
 
+    started_at = (_dt.now(_tz.utc) - _td(hours=age_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
     g.write_text(_json.dumps({"entries": [{
         "id": node_id, "title": "abandoned arm", "priority": "p2",
         "project": "fno", "domain": "code", "cwd": "/some/worktree",
         "status": "in_progress",
         "sessions": [{"phase": "do", "harness": "claude", "session_id": sid,
-                      "started_at": "2026-09-09T15:46:29Z"}],
+                      "started_at": started_at}],
     }]}))
     return g
 
@@ -511,13 +514,11 @@ def test_abandoned_arm_row_settles_and_advance_names_the_node_a_candidate(
 
 
 def test_held_arm_fresh_transcript_keeps_the_row_open(tmp_path, monkeypatch):
-    """AC3-HP: a last event inside the bar holds the row - report stamps held
-    with the active-transcript reason, and the node still carries the open do
-    row for that exact session."""
+    """AC3-HP: a row inside the idle bound stays open for that session."""
     g = _ab_world(tmp_path, monkeypatch, _AB_SID_LIVE, age_hours=0)
     result = _ab_maintain_apply(monkeypatch)
     assert "held" in result.output
-    assert "transcript active" in result.output
+    assert "row idle 0h, inside the 24h bound" in result.output
 
     entries = _json.loads(g.read_text())["entries"]
     rows = entries[0]["sessions"]
