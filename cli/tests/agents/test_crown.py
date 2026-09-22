@@ -1971,6 +1971,40 @@ def test_a_pure_drop_without_the_binary_refuses_fail_closed(
     assert [asdict(row) for row in load_registry()] == before
 
 
+def test_a_self_add_answer_without_a_grantor_refuses_fail_closed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC6-EDGE: a widen-true answer with no grantor key is an OLD binary
+    (it predates the grantor echo); stamping would self-declare the row,
+    so the self edit refuses and names the update remedy."""
+    from fno.agents.registry import load_registry
+    from fno.agents import spawn_overlay_client
+
+    lead = _entry(
+        "lead-a",
+        harness_session_id=WIDEN_LEAD_SESSION,
+        status="busy",
+        crown_level=2,
+        crown_scope="e-1",
+        crown_grantor="human",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [lead])
+    _widen_graph(monkeypatch, created_by=WIDEN_LEAD_SESSION)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", WIDEN_LEAD_SESSION)
+    before = [asdict(row) for row in load_registry()]
+
+    def _old_binary(payload):
+        return {"widen": True, "added": ["e-2"], "hint": None}
+
+    monkeypatch.setattr(spawn_overlay_client, "spawn_overlay_call", _old_binary)
+
+    result = _invoke_crown("lead-a", "--scope", "e-1", "--scope", "e-2")
+
+    assert result.exit_code == 2
+    assert "update the fno-agents binary" in result.output
+    assert [asdict(row) for row in load_registry()] == before
+
+
 def test_succession_by_an_agent_caller_is_refused_with_a_reachable_remedy(
     tmp_path: Path, monkeypatch
 ) -> None:

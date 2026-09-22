@@ -1044,7 +1044,6 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
     # Resolved before update_registry, never inside _stamp: this reads the
     # registry itself, and the closure runs under its lock.
     from fno.agents.registry import AgentResolutionError, TERMINAL_STATUSES, resolve_agent, update_registry
-
     caller = calling_agent_row()
     try:
         target_name = resolve_agent(handle).entry.name
@@ -1054,10 +1053,11 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         ) from exc
     denial = grant_error(scope, caller, allow_succession=True)
     widen = _widen_answer(scope, caller, target_name) if caller is not None else {}
-    # The widen answer owns the self-edit question: on the session's own row it is the only authority.
     if widen.get("widen") is not True and (denial is not None or (caller is not None and target_name == caller.name)):
         raise CrownPromotionError(" ".join(filter(None, (denial, widen.get("hint"))))
             or "crown self-edit refused: the crown-widen answer was unavailable")
+    if widen.get("widen") is True and target_name == caller.name and not widen.get("grantor"):
+        raise CrownPromotionError("crown self-edit admitted with no grantor in the answer; update the fno-agents binary (`fno doctor update --rust`)")
     grantor_name = "human" if caller is None else caller.name
     recorded_grantor = widen.get("grantor") or grantor_name
     # `grant_error` blesses an equal scope because SPAWN succession vacates the
