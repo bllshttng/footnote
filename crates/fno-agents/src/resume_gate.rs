@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::claims::{self, AcquireOutcome, ClaimState};
 use crate::client_verbs::py_repr_str;
 use crate::gc_sweep;
-use crate::graph_store::{entry_id, sessions_index};
+use crate::graph_store::{entry_id, is_open_do_row, work_state_key};
 use crate::king_board::prs::{node_pr_refs, nodes_binding_pr};
 use crate::king_board::{is_terminal, s_str};
 use crate::paths::AgentsHome;
@@ -55,6 +55,20 @@ fn session_nodes<'a>(entries: &'a [Value], session_id: &str) -> Vec<&'a Value> {
                     })
                 })
         })
+        .collect()
+}
+
+/// Session ids with an open `do` row on `node_id`. A planner's ended
+/// blueprint row records who planned the node, never who writes it.
+fn open_do_sessions(entries: &[Value], node_id: &str) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|e| entry_id(e) == Some(node_id))
+        .filter_map(|e| e.get("sessions").and_then(Value::as_array))
+        .flatten()
+        .filter(|r| is_open_do_row(r))
+        .filter_map(|r| s_str(r, "session_id"))
+        .map(|s| work_state_key(s.trim()))
         .collect()
 }
 
@@ -112,31 +126,31 @@ pub(crate) fn other_holder(
     None
 }
 
-/// The gate `run_resume` consults. `None` means "may launch": either no other
-/// holder, or the graph could not be read (one warning, never a block).
-/// The claim-store half is a snapshot: a claim can expire while the worker it
-/// held keeps answering. The roster half closes that gap - registry rows
-/// stamped (directly, or through a graph session row) to this node whose
-/// transcript probe answers reachable. The probe is the liveness instrument;
-/// the batch answers for every candidate in ONE process.
+/// The reachable registry row that currently writes `node_id`, excluding the
+/// resuming session itself. The claim-store half is a snapshot: a claim can
+/// expire while the worker it held keeps answering. The roster half closes
+/// that gap for direct stamps and open `do` rows.
 fn roster_holder_with(
     home: &AgentsHome,
     entries: &[Value],
     node_id: &str,
+    self_id: &str,
     probe_many: &dyn Fn(&[String]) -> std::collections::HashMap<String, TruthProbe>,
 ) -> Option<String> {
     let registry = state::load_registry(&home.registry_json()).ok()?;
-    let index = sessions_index(entries);
+    let open = open_do_sessions(entries, node_id);
+    let me = work_state_key(self_id.trim());
     let mut tokens: Vec<String> = Vec::new();
     let mut names: Vec<String> = Vec::new();
     for e in &registry.entries {
+        let session_key = e
+            .harness_session_id
+            .as_deref()
+            .map(|sid| work_state_key(sid.trim()));
+        let is_self = !me.is_empty() && session_key.as_deref() == Some(me.as_str());
         let stamped = e.node.as_deref() == Some(node_id)
-            || e.harness_session_id.as_deref().is_some_and(|sid| {
-                index
-                    .get(sid.trim())
-                    .is_some_and(|rows| rows.iter().any(|(n, _)| n == node_id))
-            });
-        if !stamped {
+            || session_key.as_ref().is_some_and(|sid| open.contains(sid));
+        if !stamped || is_self {
             continue;
         }
         tokens.push(
@@ -158,19 +172,29 @@ fn roster_holder_with(
     None
 }
 
-fn roster_holder(home: &AgentsHome, entries: &[Value], node_id: &str) -> Option<String> {
-    roster_holder_with(home, entries, node_id, &family1_truth_probe_many)
+fn roster_holder(
+    home: &AgentsHome,
+    entries: &[Value],
+    node_id: &str,
+    self_id: &str,
+) -> Option<String> {
+    roster_holder_with(home, entries, node_id, self_id, &family1_truth_probe_many)
 }
 
 /// The holder predicate the gate hands to `other_holder`: the claim store
 /// first (Live or Suspect), then the roster.
-fn gate_holder_of(home: &AgentsHome, entries: &[Value], key: &str) -> Option<String> {
+fn gate_holder_of(
+    home: &AgentsHome,
+    entries: &[Value],
+    key: &str,
+    self_id: &str,
+) -> Option<String> {
     let (claim_state, rec) = claims::status(key, None);
     if matches!(claim_state, ClaimState::Live | ClaimState::Suspect) {
         return rec.map(|r| r.holder).filter(|h| !h.is_empty());
     }
     let node = key.strip_prefix("node:")?;
-    roster_holder(home, entries, node)
+    roster_holder(home, entries, node, self_id)
 }
 
 fn refused_line(
@@ -180,7 +204,7 @@ fn refused_line(
     row_name: &str,
 ) -> Option<i32> {
     let Some(hit) = other_holder(entries, session_id, &|key| {
-        gate_holder_of(home, entries, key)
+        gate_holder_of(home, entries, key, session_id)
     }) else {
         return None;
     };
@@ -510,7 +534,126 @@ mod tests {
         .unwrap();
         let entries = vec![do_entry("x-aaaa", "8c58eaf1-old")];
         let probes = HashMap::from([("uuid-other".to_string(), reachable_probe())]);
-        let hit = roster_holder_with(&home, &entries, "x-aaaa", &|toks| {
+        let hit = roster_holder_with(&home, &entries, "x-aaaa", "8c58eaf1-old", &|toks| {
+            toks.iter()
+                .filter_map(|t| probes.get(t).cloned().map(|p| (t.clone(), p)))
+                .collect()
+        });
+        assert_eq!(hit.as_deref(), Some("t-other"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn add_registry_row(
+        home: &AgentsHome,
+        name: &str,
+        session_id: &str,
+        node: Option<&str>,
+    ) {
+        crate::state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(
+                serde_json::from_value(json!({
+                    "name": name,
+                    "harness": "claude",
+                    "harness_session_id": session_id,
+                    "node": node,
+                    "status": "live",
+                    "cwd": "/tmp/x",
+                    "created_at": "2026-09-01T00:00:00Z"
+                }))
+                .unwrap(),
+            )
+        })
+        .unwrap();
+    }
+
+    fn open_do_entry(id: &str, session_id: &str) -> Value {
+        json!({
+            "id": id,
+            "status": "in_progress",
+            "sessions": [{
+                "phase": "do",
+                "harness": "codex",
+                "session_id": session_id,
+                "started_at": "2026-09-22T10:00:00Z"
+            }]
+        })
+    }
+
+    #[test]
+    fn ended_blueprint_row_is_not_a_holder() {
+        let (home, dir) = registry_home("ended-blueprint");
+        add_registry_row(&home, "king-fno-g6", "uuid-king", None);
+        let entries = vec![json!({
+            "id": "x-aaaa",
+            "status": "in_progress",
+            "sessions": [
+                {
+                    "phase": "blueprint",
+                    "harness": "claude",
+                    "session_id": "uuid-king",
+                    "started_at": "2026-09-21T22:00:00Z",
+                    "ended_at": "2026-09-21T22:31:41Z"
+                },
+                {
+                    "phase": "do",
+                    "harness": "codex",
+                    "session_id": "uuid-resuming",
+                    "started_at": "2026-09-22T10:00:00Z"
+                }
+            ]
+        })];
+        let probes = HashMap::from([("uuid-king".to_string(), reachable_probe())]);
+        let hit = roster_holder_with(&home, &entries, "x-aaaa", "uuid-resuming", &|toks| {
+            toks.iter()
+                .filter_map(|t| probes.get(t).cloned().map(|p| (t.clone(), p)))
+                .collect()
+        });
+        assert_eq!(hit, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_do_row_from_another_session_holds() {
+        let (home, dir) = registry_home("open-do");
+        add_registry_row(&home, "t-other", "uuid-other", None);
+        let entries = vec![open_do_entry("x-aaaa", "uuid-other")];
+        let probes = HashMap::from([("uuid-other".to_string(), reachable_probe())]);
+        let hit = roster_holder_with(&home, &entries, "x-aaaa", "uuid-resuming", &|toks| {
+            toks.iter()
+                .filter_map(|t| probes.get(t).cloned().map(|p| (t.clone(), p)))
+                .collect()
+        });
+        assert_eq!(hit.as_deref(), Some("t-other"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ended_do_row_is_not_a_holder() {
+        let (home, dir) = registry_home("ended-do");
+        add_registry_row(&home, "t-other", "uuid-other", None);
+        let mut entry = open_do_entry("x-aaaa", "uuid-other");
+        entry["sessions"][0]["ended_at"] = json!("2026-09-22T10:30:00Z");
+        let probes = HashMap::from([("uuid-other".to_string(), reachable_probe())]);
+        let hit = roster_holder_with(&home, &[entry], "x-aaaa", "uuid-resuming", &|toks| {
+            toks.iter()
+                .filter_map(|t| probes.get(t).cloned().map(|p| (t.clone(), p)))
+                .collect()
+        });
+        assert_eq!(hit, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resuming_session_row_never_holds_against_itself() {
+        let (home, dir) = registry_home("self-row");
+        add_registry_row(&home, "t-self", "uuid-self", Some("x-aaaa"));
+        add_registry_row(&home, "t-other", "uuid-other", Some("x-aaaa"));
+        let entries = vec![open_do_entry("x-aaaa", "uuid-self")];
+        let probes = HashMap::from([
+            ("uuid-self".to_string(), reachable_probe()),
+            ("uuid-other".to_string(), reachable_probe()),
+        ]);
+        let hit = roster_holder_with(&home, &entries, "x-aaaa", "uuid-self", &|toks| {
             toks.iter()
                 .filter_map(|t| probes.get(t).cloned().map(|p| (t.clone(), p)))
                 .collect()
