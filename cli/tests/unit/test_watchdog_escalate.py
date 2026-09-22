@@ -47,11 +47,22 @@ def _run(root: Path, findings, monkeypatch=None, captured=None):
     if monkeypatch is not None:
         import fno.rust_binary
 
+        seen: set = set()
+
         def fake_verb_call(verb, payload, *args, **kwargs):
+            # The stub folds like the Rust door: same (lane, key, cwd) twice
+            # reads duplicate, an empty set reads none.
             assert verb == "fleet-task", verb
             if captured is not None:
                 captured.append(payload)
-            return {"outcome": "asked", "id": "ft-watchd00"}
+            if payload["empty"]:
+                outcome, id_out = ("closed", "") if seen else ("none", "")
+            elif (payload["lane"], payload["key"]) in seen:
+                outcome, id_out = "duplicate", "ft-watchd00"
+            else:
+                seen.add((payload["lane"], payload["key"]))
+                outcome, id_out = "asked", "ft-watchd00"
+            return {"outcome": outcome, "id": id_out}
 
         monkeypatch.setattr(fno.rust_binary, "verb_call", fake_verb_call)
     return _subject().escalate_unfinished(

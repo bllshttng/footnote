@@ -71,15 +71,27 @@ def crate_render_stub(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _capture_transport(monkeypatch: pytest.MonkeyPatch, *, answer: dict) -> list:
-    """Stub the fleet-task transport; returns the captured payloads."""
+    """Stub the fleet-task transport; returns the captured payloads. The
+    stub folds like the Rust door: the same (lane, key, cwd) twice reads
+    duplicate, an empty set reads none."""
     import fno.rust_binary
 
     captured: list = []
+    seen: set = set()
 
     def fake_verb_call(verb, payload, *args, **kwargs):
         assert verb == "fleet-task", verb
         captured.append(payload)
-        return dict(answer)
+        identity = (payload["lane"], payload["key"], payload["cwd"])
+        if payload["empty"]:
+            outcome, id_out = ("closed", "") if seen else ("none", "")
+        elif identity in seen:
+            outcome, id_out = "duplicate", "ft-kingfeed"
+        else:
+            seen.add(identity)
+            outcome, id_out = "asked", answer.get("id", "ft-kingfeed")
+        reply = {"outcome": outcome, "id": id_out}
+        return reply
 
     monkeypatch.setattr(fno.rust_binary, "verb_call", fake_verb_call)
     return captured
