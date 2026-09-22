@@ -143,22 +143,59 @@ EVENT_COUNT=$(wc -l < "$FILTERED_EVENTS" | tr -d ' ')
 # aged out; a vanished path anywhere else is a unit-test fixture that leaked
 # past the writer guard and is skipped with a count, not rendered.
 PM_ROOT="${FNO_HOME:-$HOME/.fno}/postmortems"
+REPO_ROOT_PACK="$(cd "$SCRIPT_DIR/.." && pwd)"
 SKIPPED_FIXTURE_ROWS=0
 SKIPPED_DEAD_ROWS=0
 
+# The `skill=<name>` pair an intel correction line carries: print that
+# shipped skill's SKILL.md when it exists. No pair, or no such skill, adds
+# nothing.
+_pack_skill_from_details() {
+  local line="$1" det name candidate
+  det="$(printf '%s' "$line" | awk -F' \\| ' '{print $5}')"
+  name="$(printf '%s' "$det" | grep -oE '(^| )skill=[A-Za-z0-9_-]+' | head -1 | sed 's/.*skill=//')" || name=""
+  if [[ -z "$name" ]]; then
+    return 0
+  fi
+  candidate="$REPO_ROOT_PACK/skills/$name/SKILL.md"
+  if [[ -f "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+  fi
+  return 0
+}
+
 # -------------------------------------------------------------------
 # Collect implicated files (from LOCATION field). Resolve full text or
-# mark as deleted.
+# mark as deleted. An absolute or ~ LOCATION is a file pointer as today;
+# a relative one resolves against the root its SOURCE names (the job cwd
+# is meaningless under launchd, which sets no WorkingDirectory), and a
+# source with no root is evidence, not a pointer.
 # -------------------------------------------------------------------
 IMPLICATED_LIST="$TMPDIR_PACK/implicated.txt"
 : > "$IMPLICATED_LIST"
 while IFS= read -r line; do
   loc="$(printf '%s' "$line" | awk -F' \\| ' '{print $4}')"
   [[ -z "$loc" || "$loc" == "-" ]] && continue
+  src="$(printf '%s' "$line" | awk -F' \\| ' '{print $3}')"
   # Strip :line suffix if present.
   file_path="${loc%%:*}"
   # Expand ~ if present.
   file_path="${file_path/#\~/$HOME}"
+  if [[ "$file_path" != /* ]]; then
+    case "$src" in
+      git-rule-edit) file_path="$CLAUDE_DIR/$file_path" ;;
+      skill-commit) file_path="$REPO_ROOT_PACK/$file_path" ;;
+      insights-tag)
+        # The report file named by LOCATION is evidence; a `skill=` pair
+        # pulls the named skill in.
+        _pack_skill_from_details "$line" >> "$IMPLICATED_LIST"
+        continue
+        ;;
+      *) continue ;;
+    esac
+  elif [[ "$src" == "insights-tag" ]]; then
+    _pack_skill_from_details "$line" >> "$IMPLICATED_LIST"
+  fi
   # Only treat as a file reference if it looks like a path (contains /
   # or .) or actually exists. Session-ids and repo-names without
   # separators don't pollute implicated_rules.
@@ -169,7 +206,6 @@ while IFS= read -r line; do
     # A dead path on a postmortem row is the fixture leak signature; a dead
     # path on any other source is ordinary file aging. Count them apart so
     # corpus poisoning stays readable.
-    src="$(printf '%s' "$line" | awk -F' \\| ' '{print $3}')"
     case "$src" in
       *-postmortem) SKIPPED_FIXTURE_ROWS=$((SKIPPED_FIXTURE_ROWS + 1)) ;;
       *) SKIPPED_DEAD_ROWS=$((SKIPPED_DEAD_ROWS + 1)) ;;
@@ -186,7 +222,6 @@ done < "$FILTERED_EVENTS"
 # the skill itself. A source that is not *-postmortem, or whose resolved
 # path does not exist, adds nothing.
 # -------------------------------------------------------------------
-REPO_ROOT_PACK="$(cd "$SCRIPT_DIR/.." && pwd)"
 SKILL_LIST="$TMPDIR_PACK/skills.txt"
 : > "$SKILL_LIST"
 while IFS= read -r line; do
