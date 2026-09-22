@@ -3858,6 +3858,30 @@ event_types:
           description: "Optional. The operator_decision id the subsequent clear records, joined by the reader."
     consumers: [operator, fno-agents needs]
 
+  - name: user_ask_answered
+    retention: durable
+    description: "A question the user asked a session was answered: the ack (fno inbox user ack --outcome answer:<text>) records what the answer was, beside the turn that asked. The attention arm folds these rows into the questions file as closed lines, so the thread survives outside chat. Written by the Rust ack (compaction ack); the asker is the user, so no authority lane applies."
+    sources: [target, test]
+    data:
+      required: [session_id, turn_id, answer]
+      properties:
+        session_id:
+          type: string
+          description: "The session the user asked."
+        turn_id:
+          type: string
+          description: "The acked user turn."
+        excerpt:
+          type: string
+          description: "Optional. The turn's rendered excerpt from the scan cursor; empty when the cursor has rotated."
+        answer:
+          type: string
+          description: "The answer text after the answer: prefix."
+        answered_at:
+          type: string
+          description: "Optional. When the ack recorded it."
+    consumers: [operator, fno-agents needs]
+
   - name: day_boundary
     retention: durable
     description: "A deterministic project-scoped morning or end-of-day readback folded from existing journals, backlog completion records, and the operator-question lifecycle. The stored row is the bounded historical report; Markdown and JSON rendering are exports. Repeated invocation of the same boundary kind on the same local day reuses the existing row and does not advance question attention."
