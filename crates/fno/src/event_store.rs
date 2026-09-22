@@ -1044,9 +1044,13 @@ pub fn journal_text(journal: &Path, types: &[&str]) -> String {
             .join(",");
         // Corrupt and typeless rows store with an empty type; parsers count
         // our own corrupted rows for their notices.
-        let sql = format!(
-            "SELECT row_hash, line FROM events WHERE type IN ({placeholders}, '') ORDER BY seq"
-        );
+        let sql = if types.is_empty() {
+            "SELECT row_hash, line FROM events ORDER BY seq".to_string()
+        } else {
+            format!(
+                "SELECT row_hash, line FROM events WHERE type IN ({placeholders}, '') ORDER BY seq"
+            )
+        };
         let mut stmt = conn.prepare(&sql).ok()?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(types), |r| {

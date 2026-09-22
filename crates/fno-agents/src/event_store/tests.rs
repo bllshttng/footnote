@@ -612,6 +612,30 @@ fn journal_text_reads_history_then_live_with_the_type_filter() {
 }
 
 #[test]
+fn journal_text_with_no_type_filter_reads_every_committed_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("events.jsonl");
+    append_envelope(
+        &live,
+        &checkin("2026-09-17T12:00:00Z", "x-aaaa", "all").to_string(),
+        None,
+    )
+    .unwrap();
+    append_envelope(
+        &live,
+        &json!({"ts": "2026-09-17T12:01:00Z", "type": "loop_check",
+            "source": "hook", "data": {"decision": "block"}})
+        .to_string(),
+        None,
+    )
+    .unwrap();
+
+    let text = journal_text(&live, &[]);
+    assert!(text.contains("reign_checkin"));
+    assert!(text.contains("loop_check"));
+}
+
+#[test]
 fn journal_text_preserves_append_order_for_equal_timestamps() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("events.jsonl");

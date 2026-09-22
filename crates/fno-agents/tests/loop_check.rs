@@ -43,6 +43,10 @@ fn make_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     path
 }
 
+fn event_text(path: &Path) -> String {
+    fno_agents::event_store::journal_text(path, &[])
+}
+
 /// Positive marker that publication is exec-ready: the script make_script
 /// returns must run immediately, with no sleep, probe, or retry, and carry
 /// its full body. Fails if anyone reintroduces write-in-place publication.
@@ -531,8 +535,11 @@ fn ac1_hp_promise_green_pr_done() {
 
     // Verify: termination event appended to project events
     let events_path = project_events(&cwd);
-    assert!(events_path.exists(), "project events.jsonl must exist");
-    let events_content = fs::read_to_string(&events_path).unwrap();
+    assert!(
+        fno_agents::event_store::store_path(&events_path).exists(),
+        "project events.db must exist"
+    );
+    let events_content = event_text(&events_path);
     assert!(
         events_content.contains("\"termination\""),
         "termination event expected in events.jsonl"
@@ -582,7 +589,7 @@ fn ac3_ui_unparseable_settings_emits_event() {
         &format!("--git-bin={}", mock.git.display()),
     ]);
 
-    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
+    let events = event_text(&project_events(&cwd));
     assert!(
         events.contains("loop_check_settings_unparseable"),
         "unparseable settings must emit loop_check_settings_unparseable; events: {events}"
@@ -696,7 +703,7 @@ fn batched_unit_promise_done_batched() {
         d.termination_reason
     );
 
-    let events_content = fs::read_to_string(project_events(&cwd)).unwrap();
+    let events_content = event_text(&project_events(&cwd));
     assert!(
         events_content.contains("DoneBatched"),
         "DoneBatched in termination event"
@@ -829,7 +836,7 @@ fn ac1_err_gh_outage_blocks_promise() {
 
     // loop_check_gh_error event must exist
     let events_path = project_events(&cwd);
-    let events = fs::read_to_string(&events_path).unwrap_or_default();
+    let events = event_text(&events_path);
     assert!(
         events.contains("loop_check_gh_error"),
         "loop_check_gh_error event expected; events: {events}"
@@ -927,7 +934,7 @@ fn ac1_edge_no_pr_block_with_fingerprint() {
     assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
 
     // Fingerprint event with pr_state=none
-    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
+    let events = event_text(&project_events(&cwd));
     assert!(
         events.contains("loop_check"),
         "loop_check event expected; got: {events}"
@@ -1010,7 +1017,7 @@ fn ac4_edge_legacy_complete_allows_exit() {
     assert_eq!(code, 0);
     assert_eq!(d.decision, "allow");
 
-    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
+    let events = event_text(&project_events(&cwd));
     assert!(
         events.contains("loop_check_legacy_manifest"),
         "legacy event expected; got: {events}"
@@ -1072,7 +1079,7 @@ fn ac3_hp_budget_flat_key_trips_cost() {
     assert_eq!(d.termination_reason.as_deref(), Some("Budget"));
 
     // Verify axis=cost in the termination event
-    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
+    let events = event_text(&project_events(&cwd));
     assert!(
         events.contains("cost"),
         "axis=cost expected in Budget termination event; got: {events}"
@@ -1117,7 +1124,7 @@ fn wall_clock_budget_trips() {
     assert_eq!(d.decision, "allow");
     assert_eq!(d.termination_reason.as_deref(), Some("Budget"));
 
-    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
+    let events = event_text(&project_events(&cwd));
     assert!(events.contains("wall_clock"), "axis=wall_clock expected");
 }
 
@@ -1236,7 +1243,7 @@ fn streak_window_secs_is_emitted_on_every_loop_check_event() {
     fire(&args);
     fire(&args);
 
-    let content = fs::read_to_string(&events_path).unwrap();
+    let content = event_text(&events_path);
     let mut seen = 0;
     for line in content.lines() {
         let v: serde_json::Value = serde_json::from_str(line).unwrap();
@@ -1299,7 +1306,7 @@ fn loop_check_config_emitted_once_at_first_fire() {
     fire(&args);
     fire(&args);
 
-    let content = fs::read_to_string(&events_path).unwrap();
+    let content = event_text(&events_path);
     let mut config: Vec<serde_json::Value> = Vec::new();
     for line in content.lines() {
         let Ok(v): serde_json::Result<serde_json::Value> = serde_json::from_str(line) else {
@@ -1912,13 +1919,16 @@ fn events_appended_to_both_project_and_global() {
     ]);
 
     assert!(
-        project_events(&cwd).exists(),
-        "project events.jsonl must exist"
+        fno_agents::event_store::store_path(&project_events(&cwd)).exists(),
+        "project events.db must exist"
     );
-    assert!(global_events.exists(), "global events.jsonl must exist");
+    assert!(
+        fno_agents::event_store::store_path(&global_events).exists(),
+        "global events.db must exist"
+    );
 
-    let proj_events = fs::read_to_string(project_events(&cwd)).unwrap();
-    let glob_events = fs::read_to_string(&global_events).unwrap();
+    let proj_events = event_text(&project_events(&cwd));
+    let glob_events = event_text(&global_events);
     assert!(
         !proj_events.is_empty() && !glob_events.is_empty(),
         "both event files must have content"
@@ -2025,7 +2035,7 @@ fn gh_unspawnable_stays_out_of_advisory_mode() {
     ]);
 
     assert_eq!(code, 0);
-    let events = fs::read_to_string(project_events(&cwd)).unwrap();
+    let events = event_text(&project_events(&cwd));
     assert!(
         events.contains("\"gh_probe\""),
         "probe outcome row expected: {events}"
@@ -2081,7 +2091,7 @@ fn gh_absent_attended_promise_done_advisory() {
     assert_eq!(code, 0);
     assert_eq!(d.decision, "allow");
     assert_eq!(d.termination_reason.as_deref(), Some("DoneAdvisory"));
-    let events = fs::read_to_string(project_events(&cwd)).unwrap();
+    let events = event_text(&project_events(&cwd));
     assert!(events.contains("\"loop_advisory_mode\""));
     assert!(events.contains("DoneAdvisory"));
 }
@@ -2122,7 +2132,7 @@ fn gh_absent_unattended_interrupted() {
     assert_eq!(code, 0);
     assert_eq!(d.decision, "allow");
     assert_eq!(d.termination_reason.as_deref(), Some("Interrupted"));
-    let events = fs::read_to_string(project_events(&cwd)).unwrap();
+    let events = event_text(&project_events(&cwd));
     assert!(
         events.contains("\"termination\"") && events.contains("Interrupted"),
         "termination(Interrupted) event expected: {events}"
@@ -2788,7 +2798,7 @@ fn ac3_hp_empty_required_bots_skips_review_reads() {
     assert_eq!(d.termination_reason.as_deref(), Some("DonePRGreen"));
 
     // AC3-UI: the skip is recorded in the loop_check event.
-    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
+    let events = event_text(&project_events(&cwd));
     assert!(
         events.contains("\"review_skipped\":true"),
         "loop_check event must record review_skipped; got: {events}"
@@ -2859,7 +2869,7 @@ fn not_required_terminal_never_says_reviewed() {
     );
 
     // The durable lie lived in the event row, not the stdout.
-    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
+    let events = event_text(&project_events(&cwd));
     assert!(
         !events.contains("green and reviewed"),
         "the termination event must not say green and reviewed: {events}"
@@ -2969,7 +2979,7 @@ fn code_pr_floors_even_where_the_cwd_diff_is_empty() {
     let (code, d) = fire_pr_payload(cwd, "[review]\nrequired_bots = []\n", &mock);
 
     assert_eq!(code, 0);
-    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
+    let events = event_text(&project_events(&cwd));
     assert!(
         events.contains("\"review_skipped\":false"),
         "the floor must engage from the PR payload; review_skipped is the proof: {events}"
@@ -3009,7 +3019,7 @@ fn docs_pr_keeps_the_floor_off_and_names_the_opt_out() {
         "the docs-PR message must not carry the word reviewed: {}",
         d.message
     );
-    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
+    let events = event_text(&project_events(&cwd));
     assert!(
         events.contains("\"review_skipped\":true"),
         "a docs-only PR must not floor: {events}"
@@ -3166,7 +3176,7 @@ fn no_external_on_active_gate_serializes_unknown_coverage_not_uncovered() {
         "no_external must not block: {}",
         d.message
     );
-    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
+    let events = event_text(&project_events(&cwd));
     assert!(
         events.contains("\"coverage\":\"unknown\""),
         "no_external on an active gate must read unknown, not a fabricated zero: {events}"
@@ -3297,7 +3307,7 @@ fn x2219_no_external_lane_counts_github_review_rounds_past_the_cap() {
     // discharge): the session terminates green instead of demanding a round
     // the budget will not fund. The emitted review_coverage row carries the
     // exact numbers.
-    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
+    let events = event_text(&project_events(&cwd));
     assert!(
         events.contains("\"rounds_used\":3"),
         "three GitHub-only rounds must count as 3 on the no-external arm: {events}"
@@ -3349,7 +3359,7 @@ fn x2219_max_rounds_three_fires_at_four_rounds_and_five_does_not() {
             &format!("--gh-bin={}", gh.display()),
             &format!("--git-bin={}", git.display()),
         ]);
-        let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
+        let events = event_text(&project_events(&cwd));
         assert!(
             events.contains("\"rounds_used\":4"),
             "max_rounds={max_rounds}: the counter read all four rounds: {events}"
@@ -3631,7 +3641,7 @@ fn no_external_on_inactive_gate_serializes_the_known_zero() {
         "an ungated repo must not block: {}",
         d.message
     );
-    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
+    let events = event_text(&project_events(&cwd));
     assert!(
         events.contains("\"coverage\":\"uncovered\""),
         "nothing configured to read is a known zero, never an unknown: {events}"
@@ -3986,7 +3996,7 @@ fn ac4_hp_fr_outage_freezes_streak_then_resumes() {
     assert!(d5.termination_reason.is_none());
 
     // AC4-HP: the recorded consecutive count held at 3 across the outage.
-    let events = fs::read_to_string(&events_path).unwrap();
+    let events = event_text(&events_path);
     let last_check = events
         .lines()
         .filter(|l| l.contains("\"loop_check\"") && l.contains("sess-freeze"))
@@ -4105,7 +4115,7 @@ exit 1
         d3.message
     );
 
-    let events = fs::read_to_string(&events_path).unwrap();
+    let events = event_text(&events_path);
     assert!(events.contains("loop_check_gh_error"));
     assert!(
         !events.contains("\"termination\""),
@@ -4898,7 +4908,7 @@ fn done_probes_ac1_hp_passing_probe_grants_done() {
         d.message
     );
 
-    let events = fs::read_to_string(project_events(&cwd)).unwrap();
+    let events = event_text(&project_events(&cwd));
     assert!(
         events.contains("\"done_probes\""),
         "probe evidence must be recorded in the loop_check event"
@@ -4922,7 +4932,7 @@ fn done_probes_ac2_hp_absent_field_leaves_gate_unchanged() {
     assert_eq!(d.decision, "allow");
     assert_eq!(d.termination_reason.as_deref(), Some("DonePRGreen"));
 
-    let events = fs::read_to_string(project_events(&cwd)).unwrap();
+    let events = event_text(&project_events(&cwd));
     assert!(
         events.contains("\"done_probes\":null"),
         "no declaration must record a null, never a fabricated 0/0: {events}"
@@ -5054,7 +5064,7 @@ fn done_probes_block_path_records_evidence_in_the_event() {
     let d = fire_probe_gate(cwd, &manifest, &transcript, &mock);
     assert_eq!(d.decision, "block");
 
-    let events = fs::read_to_string(project_events(&cwd)).unwrap();
+    let events = event_text(&project_events(&cwd));
     assert!(
         events.contains("\"exit 3\":\"fail:3\""),
         "a failing probe's result must be recorded, not just its reason: {events}"
@@ -5445,7 +5455,7 @@ fn nudge_failed_post_keeps_needs_nudge_and_emits_event() {
         "a failed post must leave the by-hand command in the reason; got: {}",
         d.message
     );
-    let events = fs::read_to_string(&events_path).unwrap_or_default();
+    let events = event_text(&events_path);
     assert!(
         events.contains("loop_check_nudge_post_failed"),
         "a failed post must emit loop_check_nudge_post_failed; events: {events}"
@@ -8304,7 +8314,7 @@ fn assert_timeout_block(
         elapsed < std::time::Duration::from_secs(10),
         "fire must return within the bound plus slack, took {elapsed:?}"
     );
-    let journal = fs::read_to_string(events).unwrap_or_default();
+    let journal = event_text(events);
     assert!(
         journal.contains("\"outcome\":\"timeout\""),
         "the gh_error event must carry the positive timeout outcome: {journal}"
@@ -8643,7 +8653,7 @@ fn operator_waiver_no_law_is_a_clean_no() {
 use serde_json::Value;
 
 fn last_review_coverage_row(project: &Path) -> Value {
-    let text = fs::read_to_string(project).unwrap();
+    let text = event_text(project);
     let mut row: Option<Value> = None;
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
