@@ -13,6 +13,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::claims;
+use crate::spawn_gate::NOTE;
 
 /// The reservation rule, in the same words everywhere it appears: the
 /// provider-cap refusal, the reserve mode's usage text, and
@@ -107,8 +108,6 @@ pub(crate) fn release_redeemed_reservation(name: &str, root: Option<&Path>) {
         }
     }
 }
-
-use crate::spawn_gate::NOTE;
 
 #[cfg(test)]
 mod tests {
