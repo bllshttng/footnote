@@ -936,7 +936,7 @@ fn fold_all(
     let window_start_ms = if days == 0 {
         i64::MIN
     } else {
-        (now.saturating_sub(days * 86_400)) as i64 * 1_000
+        (now.saturating_sub(days.saturating_mul(86_400))) as i64 * 1_000
     };
     let unwitnessed_sessions = rows
         .iter()
