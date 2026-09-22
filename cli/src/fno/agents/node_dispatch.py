@@ -124,7 +124,7 @@ def resolve_node_spawn(
         lifecycle = _verb_answer(node)
         effective_verb = lifecycle[0]
     # x-aaaa: the verb code resolves (and refuses) BEFORE the resolver.
-    verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb)
+    verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb or declared_verb)
     # A node's own raw pin is a sanctioned source (route_resolve reads the same
     # field), so fold it in before the grid consult: the gate below must see
     # every pin the node carries, whatever its door passed.

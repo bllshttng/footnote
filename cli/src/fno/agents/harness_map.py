@@ -1344,10 +1344,7 @@ def resolve_dispatch(
     ``claude``; substrate explicit > config > per-harness default; command
     explicit > lifecycle derivation > node ``verb`` (allowlist-checked;
     a graph field is a trust boundary) > ``config.dispatch.command`` >
-    per-harness builtin. ``lifecycle`` (the ported decision) runs BEFORE the
-    stage-table read so ``agents.profiles.<derived-verb>`` drives the harness;
-    an explicit command bypasses it (reconcile and the other explicit doors
-    spell their own verb). ``brief`` rides ``env['TARGET_BRIEF']`` only, capped
+    per-harness builtin. ``brief`` rides ``env['TARGET_BRIEF']`` only, capped
     at 8 KB, never truncated. ``route`` is the stage table's vendor lane beside
     the harness ("" when unset), returned so a caller forwarding the harness
     can forward the vendor too. ``trigger`` is autonomous or attended (pane
@@ -1358,8 +1355,8 @@ def resolve_dispatch(
     Raises :class:`DispatchResolveError` on an unknown/refused harness, a
     missing substrate lane, an unsupported autonomous pane, an unknown trigger
     or substrate, an out-of-allowlist verb, an oversized brief, an empty or
-    unsubstituted command. ``dispatch_cfg`` overrides the config read (for
-    tests)."""
+    unsubstituted command, or an unanswerable node lifecycle.
+    ``dispatch_cfg`` overrides the config read (for tests)."""
     decision: list[str] = []
     lifecycle_verb: Optional[str] = None
     if command is None or not command.strip():
