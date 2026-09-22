@@ -308,6 +308,29 @@ fn assert_overlay_closes_on_lone_esc(h: &mut ClientHarness, chord: &[u8], marker
     h.wait_screen(15, |s| s.contains("after-esc"));
 }
 
+/// Input readiness at 24x120. `wait_input_ready` matches the round-trip
+/// line exactly, and at this width the sideline paints its border glyph
+/// onto the pane's rows, salting every line (the launcher test's own
+/// caveat). The marker is spelled split so the tty ECHO of the typed
+/// command carries neither half joined; only the pane's OUTPUT does.
+fn wait_ready_split_marker(h: &mut ClientHarness) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        h.type_bytes(b"printf 'fno-input-%s' ready\r");
+        let attempt = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < attempt {
+            if h.screen().contains("fno-input-ready") {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if h.screen().contains("fno-input-ready") {
+            return;
+        }
+    }
+    panic!("client input never became ready\n{}", h.diagnostics());
+}
+
 #[test]
 fn a_lone_esc_closes_the_which_key_table() {
     // R1: a raw-fed overlay stalls on a lone Esc until the next key
@@ -315,7 +338,7 @@ fn a_lone_esc_closes_the_which_key_table() {
     let scratch = Scratch::new("esc-which-key");
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     h.wait_screen(15, |s| !s.trim().is_empty());
-    h.wait_input_ready(15);
+    wait_ready_split_marker(&mut h);
     assert_overlay_closes_on_lone_esc(&mut h, b"\x02?", "this key table");
 }
 
@@ -326,7 +349,7 @@ fn a_lone_esc_closes_the_search_input() {
     let scratch = Scratch::new("esc-search");
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     h.wait_screen(15, |s| !s.trim().is_empty());
-    h.wait_input_ready(15);
+    wait_ready_split_marker(&mut h);
     assert_overlay_closes_on_lone_esc(&mut h, b"\x02/", " /_");
 }
 
@@ -337,7 +360,7 @@ fn a_lone_esc_closes_the_navigator() {
     let scratch = Scratch::new("esc-navigator");
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     h.wait_screen(15, |s| !s.trim().is_empty());
-    h.wait_input_ready(15);
+    wait_ready_split_marker(&mut h);
     assert_overlay_closes_on_lone_esc(&mut h, b"\x02f", " find \u{203a} ");
 }
 
@@ -351,7 +374,7 @@ fn a_lone_esc_closes_the_row_selector() {
     let scratch = Scratch::new("esc-selector");
     let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
     h.wait_screen(15, |s| !s.trim().is_empty());
-    h.wait_input_ready(15);
+    wait_ready_split_marker(&mut h);
     h.type_bytes(b"\x02w");
     std::thread::sleep(Duration::from_millis(200));
     h.type_bytes(&[0x1b]);
