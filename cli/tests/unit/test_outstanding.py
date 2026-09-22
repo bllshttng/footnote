@@ -379,7 +379,7 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
         "question": "which implementation should land?",
         "session_id": "ledger-run-id",
         "cwd": str(Path.cwd()),
-        "node": None,
+        "node": "x-one",
         "asker": "01234567",
         "ask": "pick one",
         "options": ["index", "journal"],
@@ -571,41 +571,26 @@ class TestAskRefusedWhenLiveLawRules:
         assert len(rows) == 1, "a broken index must not eat the question"
 
 
-_NEARBY_ANSWER = {
-    "ok": True,
-    "exact": [],
-    "nearby": [
-        {
-            "decision_id": "d-4b39ad4c",
-            "subject": "file-budget",
-            "decision": "A size-budget refusal is never answered by raising the allowance.",
-            "shared": ["budget"],
-        }
-    ],
-    "uncited": ["d-4b39ad4c"],
-    "nearby_refusal": (
-        "outstanding: refused: live law on a nearby subject may already answer this. "
-        "d-4b39ad4c (file-budget): A size-budget refusal is never answered by raising "
-        "the allowance. Read each with fno inbox decisions <id>. If your question still "
-        "stands, name every id above in the question and ask again."
-    ),
+_NEARBY_LAW_ROW = {
+    "decision_id": "d-4b39ad4c",
+    "subject": "file-budget",
+    "decision": "A size-budget refusal is never answered by raising the allowance.",
+    "ts": "2026-09-01T00:00:00Z",
 }
 
 
 class TestAskNearbyLawRefusal:
-    """The nearby tier (x-cf6a): a per-PR subject can never exact-match a
-    general law, so naming --subject used to switch the whole check off.
-    Fake-matcher tests: the matcher runs in the crate; these pin the ask
-    verb's contract around it."""
+    """The tiers run in the crate; these pin the ask verb's row seam: the
+    rows feed the intake, a refusal exits 2 without recording, and citing
+    the id in the question text is the way past a nearby subject."""
 
     @requires_rust
-    def test_a_nearby_refusal_exits_2_and_records_nothing(
+    def test_a_refusal_exits_2_and_records_nothing(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        clean = dict(_NEARBY_ANSWER, uncited=[], nearby_refusal=None)
-        answers = iter([clean, _NEARBY_ANSWER])
+        rows = iter([[], [_NEARBY_LAW_ROW]])
         monkeypatch.setattr(
-            "fno.outstanding.cli._law_match", lambda *a, **k: next(answers)
+            "fno.outstanding.cli._law_rows", lambda *a, **k: next(rows)
         )
         # Positive control: an allowed ask records a row, so the absence below
         # is the gate's doing and not an empty journal.
@@ -619,7 +604,7 @@ class TestAskNearbyLawRefusal:
                 "ask",
                 "PR 1847 shrank +207 to +142. Requesting a budget-exception label.",
                 "--subject",
-                "pr-1847-budget-exception",
+                "file-budget",
             ],
         )
         assert refused.exit_code == 2, refused.output
@@ -629,9 +614,8 @@ class TestAskNearbyLawRefusal:
     def test_citing_the_listed_ids_records_the_question(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        answer = dict(_NEARBY_ANSWER, uncited=[], nearby_refusal=None)
         monkeypatch.setattr(
-            "fno.outstanding.cli._law_match", lambda *a, **k: answer
+            "fno.outstanding.cli._law_rows", lambda *a, **k: [_NEARBY_LAW_ROW]
         )
         allowed = runner.invoke(
             outstanding_app,
@@ -654,7 +638,7 @@ class TestAskNearbyLawRefusal:
         def broken(*a, **k):
             raise VerbUnavailable("binary missing")
 
-        monkeypatch.setattr("fno.outstanding.cli._law_match", broken)
+        monkeypatch.setattr("fno.outstanding.cli._law_rows", broken)
         allowed = runner.invoke(outstanding_app, ["ask", "still worth recording"])
         assert allowed.exit_code == 0, allowed.output
         assert "live-law lookup failed" in allowed.output
@@ -664,10 +648,7 @@ class TestAskNearbyLawRefusal:
     def test_json_rows_carry_the_subject(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        answer = dict(_NEARBY_ANSWER, uncited=[], nearby_refusal=None)
-        monkeypatch.setattr(
-            "fno.outstanding.cli._law_match", lambda *a, **k: answer
-        )
+        monkeypatch.setattr("fno.outstanding.cli._law_rows", lambda *a, **k: [])
         assert (
             runner.invoke(
                 outstanding_app,
@@ -1416,25 +1397,18 @@ def test_question_index_dual_writes_ask_and_close(root: Path):
 
 @requires_rust
 def test_question_index_failure_names_id_and_reindex(root: Path, monkeypatch: pytest.MonkeyPatch):
-    from fno import paths
-    from fno.events import append_event as real_append_event
+    # The index write is best-effort Rust-side; pointing it at a directory
+    # makes the append fail while the project journal stays writable.
+    blocked = root / "index-blocked"
+    blocked.mkdir()
+    monkeypatch.setattr("fno.paths.questions_jsonl", lambda: blocked)
 
-    index_path = paths.questions_jsonl()
-    monkeypatch.setattr("fno.outstanding.cli.secrets.token_hex", lambda _n: "feedface")
-
-    def fail_index(event, *, events_path=None):
-        if events_path == index_path:
-            raise OSError("index unavailable")
-        return real_append_event(event, events_path=events_path)
-
-    monkeypatch.setattr("fno.events.append_event", fail_index)
     result = runner.invoke(outstanding_app, ["ask", "which index?"])
 
     assert result.exit_code == 1
-    assert "q-feedface" in result.output
     assert "fno inbox outstanding reindex" in result.output
     durable = _journal_last(project_log("events.jsonl", project_root=root))
-    assert durable["data"]["question_id"] == "q-feedface"
+    assert durable["data"]["question_id"] in result.output
 
 
 @requires_rust
