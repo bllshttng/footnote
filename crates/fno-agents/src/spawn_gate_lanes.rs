@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -774,6 +774,89 @@ pub(crate) fn check_account_quota_lock(
             "resets_at": resets_at,
         }),
     ))
+}
+
+/// The auth wall beside the quota lock: a spawn naming an account whose
+/// config dir cannot log in is refused before launch, so the node is not
+/// counted as dispatched while nobody works on it. Claude-only: codex and
+/// opencode status verbs read local state and cannot see a server-side
+/// expiry, so a probe built on them could only ever say yes. The rules and
+/// their order live in [`check_account_login_with`]; this wrapper binds the
+/// production reader and probe so tests can inject both.
+pub(crate) fn check_account_login(
+    route_provider: Option<&str>,
+    account: &str,
+    warnings: &mut Vec<String>,
+) -> Result<(), crate::spawn_gate::Refusal> {
+    check_account_login_with(
+        route_provider,
+        account,
+        crate::reentry::shell_account_binding,
+        crate::claude_login::probe_config_dir,
+        warnings,
+    )
+}
+
+/// The decision body, split for tests: `binding` and `probe` are injected, so
+/// a test never shells out. Rules, in order:
+/// 1. no account or `default`: admit, nothing is called (the quota lock's rule).
+/// 2. a route to any provider other than anthropic: admit, nothing is called
+///    - a routed worker authenticates with the route's key, not the slot's login.
+/// 3. an unreadable binding: admit; the Python seam's own resolver owns that
+///    refusal and runs before the gate.
+/// 4. a binding with no config dir (an api-key lane): admit, nothing to probe.
+/// 5. a readable config dir: probe it. Logged in: admit. A logged-out verdict
+///    refuses with the quota lock's exit code and a receipt naming the
+///    account, the dir and the login command. An INCONCLUSIVE probe (timeout,
+///    unparseable output, a non-auth error) pushes a note and admits - a
+///    silent fail-open would hide a probe broken by a future claude flag
+///    rename, so the note is the lane's one honesty signal.
+pub(crate) fn check_account_login_with(
+    route_provider: Option<&str>,
+    account: &str,
+    binding: impl Fn(&str) -> Result<Option<String>, String>,
+    probe: impl Fn(&Path) -> crate::claude_login::Login,
+    warnings: &mut Vec<String>,
+) -> Result<(), crate::spawn_gate::Refusal> {
+    use crate::claude_login::Login;
+    use crate::spawn_gate::{Refusal, EXIT_PROVIDER_CAP};
+    if account.is_empty() || account == "default" {
+        return Ok(());
+    }
+    if route_provider.is_some_and(|p| p != "anthropic") {
+        return Ok(());
+    }
+    let Ok(Some(dir)) = binding(account) else {
+        // An Err reads admit, same as an api-key lane (rule 3/4).
+        return Ok(());
+    };
+    let dir = PathBuf::from(dir);
+    match probe(&dir) {
+        Login::LoggedIn => Ok(()),
+        Login::Unknown(why) => {
+            warnings.push(format!(
+                "spawn-gate note: account {account} login probe inconclusive ({why}); not refusing on it"
+            ));
+            Ok(())
+        }
+        Login::LoggedOut(detail) => {
+            let remedy = crate::claude_login::login_command(&dir);
+            warnings.push(format!(
+                "spawn-gate: account {account} cannot log in ({detail}); refusing; no worker launched; run: {remedy}"
+            ));
+            Err(Refusal::with_receipt(
+                EXIT_PROVIDER_CAP,
+                serde_json::json!({
+                    "status": "refused",
+                    "reason": "account_not_logged_in",
+                    "account": account,
+                    "config_dir": dir,
+                    "detail": detail,
+                    "remedy": remedy,
+                }),
+            ))
+        }
+    }
 }
 
 /// The same wall on the ROUTE axis: a route-keyed spawn (`--provider zai`,
@@ -1668,5 +1751,137 @@ mod tests {
             None => std::env::remove_var("FNO_CONFIG"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- check_account_login_with: one test per rule ----
+
+    use crate::claude_login::Login;
+
+    /// A binding/probe pair that counts every call, so a rule that must
+    /// short-circuit proves it called nothing.
+    fn login_lane_fakes(
+        binding_result: Result<Option<String>, String>,
+        probe_verdict: Login,
+    ) -> (
+        impl Fn(&str) -> Result<Option<String>, String>,
+        impl Fn(&Path) -> Login,
+        std::rc::Rc<std::cell::Cell<usize>>,
+    ) {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let binding_calls = calls.clone();
+        let probe_calls = calls.clone();
+        let binding = move |_id: &str| {
+            binding_calls.set(binding_calls.get() + 1);
+            binding_result.clone()
+        };
+        let probe = move |_dir: &Path| {
+            probe_calls.set(probe_calls.get() + 1);
+            probe_verdict.clone()
+        };
+        (binding, probe, calls)
+    }
+
+    /// Rule 1: no account or `default` admits and calls nothing.
+    #[test]
+    fn login_lane_skips_empty_and_default_accounts() {
+        for account in ["", "default"] {
+            let (binding, probe, calls) = login_lane_fakes(Ok(None), Login::LoggedIn);
+            let mut warnings = Vec::new();
+            assert!(check_account_login_with(None, account, binding, probe, &mut warnings).is_ok());
+            assert_eq!(calls.get(), 0, "account {account:?} must call nothing");
+            assert!(warnings.is_empty());
+        }
+    }
+
+    /// Rule 2: a route to any non-anthropic provider admits and calls
+    /// nothing - a routed worker authenticates with the route's key.
+    #[test]
+    fn login_lane_skips_a_routed_non_anthropic_spawn() {
+        let (binding, probe, calls) = login_lane_fakes(Ok(None), Login::LoggedIn);
+        let mut warnings = Vec::new();
+        assert!(
+            check_account_login_with(Some("zai"), "makers", binding, probe, &mut warnings).is_ok()
+        );
+        assert_eq!(calls.get(), 0);
+        assert!(warnings.is_empty());
+    }
+
+    /// Rule 3: an unreadable binding admits; the Python resolver owns that
+    /// refusal, and the probe must not run.
+    #[test]
+    fn login_lane_admits_an_unreadable_binding_without_probing() {
+        let (binding, probe, calls) =
+            login_lane_fakes(Err("no such account".to_string()), Login::LoggedIn);
+        let mut warnings = Vec::new();
+        assert!(check_account_login_with(None, "makers", binding, probe, &mut warnings).is_ok());
+        assert_eq!(calls.get(), 1, "binding once, probe never");
+        assert!(warnings.is_empty());
+    }
+
+    /// Rule 4: a binding with no config dir (an api-key lane) admits without
+    /// probing.
+    #[test]
+    fn login_lane_admits_an_api_key_lane_without_probing() {
+        let (binding, probe, calls) = login_lane_fakes(Ok(None), Login::LoggedIn);
+        let mut warnings = Vec::new();
+        assert!(check_account_login_with(None, "makers", binding, probe, &mut warnings).is_ok());
+        assert_eq!(calls.get(), 1, "binding once, probe never");
+        assert!(warnings.is_empty());
+    }
+
+    /// Rule 5, logged-out: exit 78, the full receipt, and the warning that
+    /// names the remedy and says no worker launched.
+    #[test]
+    fn login_lane_refuses_a_logged_out_account_with_receipt() {
+        let (binding, probe, _calls) = login_lane_fakes(
+            Ok(Some("/tmp/acct".to_string())),
+            Login::LoggedOut("Login expired".to_string()),
+        );
+        let mut warnings = Vec::new();
+        let err = check_account_login_with(None, "makers", binding, probe, &mut warnings)
+            .expect_err("a logged-out account must refuse");
+        assert_eq!(err.exit_code, crate::spawn_gate::EXIT_PROVIDER_CAP);
+        let receipt = err.receipt.expect("refusal carries the receipt");
+        assert_eq!(receipt["reason"], "account_not_logged_in");
+        assert_eq!(receipt["account"], "makers");
+        assert_eq!(receipt["config_dir"], "/tmp/acct");
+        assert_eq!(receipt["detail"], "Login expired");
+        assert_eq!(
+            receipt["remedy"],
+            "CLAUDE_CONFIG_DIR=/tmp/acct claude /login"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("no worker launched") && w.contains("claude /login")),
+            "{warnings:?}"
+        );
+    }
+
+    /// Rule 5, inconclusive: admit, but push the one honesty note.
+    #[test]
+    fn login_lane_admits_an_inconclusive_probe_with_a_note() {
+        let (binding, probe, _calls) = login_lane_fakes(
+            Ok(Some("/tmp/acct".to_string())),
+            Login::Unknown("probe timed out after 20s".to_string()),
+        );
+        let mut warnings = Vec::new();
+        assert!(check_account_login_with(None, "makers", binding, probe, &mut warnings).is_ok());
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly the inconclusive note: {warnings:?}"
+        );
+        assert!(warnings[0].contains("inconclusive"), "{warnings:?}");
+    }
+
+    /// Rule 5, logged-in: admit with no note.
+    #[test]
+    fn login_lane_admits_a_logged_in_account_silently() {
+        let (binding, probe, _calls) =
+            login_lane_fakes(Ok(Some("/tmp/acct".to_string())), Login::LoggedIn);
+        let mut warnings = Vec::new();
+        assert!(check_account_login_with(None, "makers", binding, probe, &mut warnings).is_ok());
+        assert!(warnings.is_empty());
     }
 }

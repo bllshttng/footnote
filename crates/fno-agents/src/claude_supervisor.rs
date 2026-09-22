@@ -87,7 +87,7 @@ pub fn is_poison(key: &str) -> bool {
 
 /// The poison keys present in the ambient env - the birth command holds these
 /// back. Names only, never values.
-fn held_poison_keys() -> Vec<String> {
+pub(crate) fn held_poison_keys() -> Vec<String> {
     std::env::vars_os()
         .filter_map(|(k, _)| k.into_string().ok())
         .filter(|k| is_poison(k))

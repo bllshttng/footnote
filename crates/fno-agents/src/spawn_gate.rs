@@ -29,7 +29,7 @@ use crate::claude_roster::ClaudeRoster;
 use crate::daemon::pid_is_ours;
 use crate::spawn_gate_lanes;
 use crate::spawn_gate_lanes::{
-    check_account_quota_lock, check_lane_quota_lock, check_registry_schema,
+    check_account_login, check_account_quota_lock, check_lane_quota_lock, check_registry_schema,
 };
 use crate::state::{load_registry, Registry, RegistryEntry};
 use crate::AgentStatus;
@@ -1378,6 +1378,7 @@ fn decide_gate(
     if let Some(account) = input.account.as_deref() {
         let mut quota_warnings = Vec::new();
         check_account_quota_lock(config_cwd, account, &mut quota_warnings)?;
+        check_account_login(route_provider, account, &mut quota_warnings)?;
         for w in &quota_warnings {
             eprintln!("{w}");
         }
