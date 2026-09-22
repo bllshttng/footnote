@@ -2836,7 +2836,19 @@ def test_an_agent_row_cannot_muddy_an_operator_waiver(monkeypatch, tmp_path):
         decision=_coverage_gate.WAIVER_DECISION,
         authority_source="chat_attested",
     )
-    assert _coverage_gate.law_authority(subject) == ("single", "")
+    verdict = _coverage_gate.law_authority(subject)
+    if verdict != ("single", ""):
+        from fno import paths
+        from fno.decide import list_decisions
+
+        label, rows, damaged = list_decisions(subject, lane="law", state="live")
+        index = paths.decisions_jsonl()
+        raise AssertionError(
+            f"verdict={verdict!r} label={label!r} rows={rows!r}"
+            f" damaged={damaged} index={index} exists={index.exists()}"
+            f" native={__import__('fno.events.store_client', fromlist=['x']).native_rows(index)!r}"
+        )
+    assert verdict == ("single", "")
 
 
 def test_waiver_subjects_are_one_spelling_across_decide_and_the_gate():
