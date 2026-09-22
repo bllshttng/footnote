@@ -175,18 +175,12 @@ fn main() {
     if args.first().map(String::as_str) == Some("launch-workdir") {
         std::process::exit(fno_agents::launch_workdir::run_launch_workdir(&args[1..]));
     }
-    // `worktree-reapable`: the worktree-removal gate, daemon-free, a
-    // transport-only arm like surface-check - it registers NO client action
-    // (the shrink law allows none), because its callers exec the binary
-    // directly: the Python typer leaf, worktree_gate.py, and
-    // scripts/lib/worktree-reapable.sh.
+    // `worktree-reapable`: the worktree-removal gate, daemon-free, transport-
+    // only (no client action; the shrink law allows none) - callers exec the
+    // binary directly (worktree_gate.py, scripts/lib/worktree-reapable.sh).
     if args.first().map(String::as_str) == Some("worktree-reapable") {
         std::process::exit(fno_agents::worktree_reapable::run_client(&args[1..]));
     }
-    // `pending-session-row`: the deferred sessions-row park and open (see
-    // pending_session_row.rs). Transport-only like worktree-reapable; Python's
-    // `verb_call` is the caller (spawn_lineage and the registry flush), and it
-    // registers no client action (the shrink law allows none).
     if args.first().map(String::as_str) == Some("pending-session-row") {
         std::process::exit(fno_agents::pending_session_row::run(&args[1..]));
     }

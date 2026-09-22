@@ -2600,11 +2600,9 @@ def _flush_pending_session_row(entry: AgentEntry, session_id: str) -> None:
     if not entry.pending_session_row:
         return
     from fno.rust_binary import verb_call
-
     try:
-        verb_call("pending-session-row", {
-            "action": "open", "name": entry.name, "session_id": session_id,
-        })
+        verb_call("pending-session-row", {"action": "open", "name": entry.name,
+                 "session_id": session_id})
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the stamp
         print(f"registry: deferred row open skipped: {exc}", file=sys.stderr)
 

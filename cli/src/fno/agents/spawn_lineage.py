@@ -279,13 +279,10 @@ def _stamp_spawned_session_row(
     if not harness or not session_id:
         if worker_name:
             from fno.rust_binary import verb_call
-
             try:
                 grant = _resolve_spawn_merge_grant(message) if phase == "do" else None
-                verb_call("pending-session-row", {
-                    "action": "park", "name": worker_name,
-                    "phase": phase, "merge_grant": grant,
-                })
+                verb_call("pending-session-row", {"action": "park", "name": worker_name,
+                         "phase": phase, "merge_grant": grant})
             except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the spawn
                 print(f"spawn: park skipped for {node_id}: {exc}", file=sys.stderr)
             return
