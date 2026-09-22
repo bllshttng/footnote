@@ -20,7 +20,6 @@ from fno.bus.log import (
 from fno.mail.reply_resolve import mail_ids_in_transcript
 # The nag renders inside hooks/inject-mail-notify.sh's 2s timeout; bound reads.
 _LANDED_READ_BUDGET_S = 0.5
-# Defang a literal </system-reminder> that could break out of the hook wrapper.
 _REMINDER_TAG = re.compile(r"<\s*(/?)\s*system-reminder\s*>", re.IGNORECASE)
 
 
@@ -95,7 +94,7 @@ def landed_states(
     """Landed tri-state for ``msgs``: durable proof first, then a transcript read."""
     already = landed_ids(all_msgs)
     to_check = [m for m in msgs if m.id not in already]
-    out: dict[str, Optional[bool]] = dict.fromkeys((m.id for m in to_check), True)
+    out: dict[str, Optional[bool]] = dict.fromkeys((m.id for m in msgs), True)
     out.update(_landed_map(to_check, budget_s))
     return out
 
@@ -122,7 +121,6 @@ def _sent_unclaimed(handle: str, ttl_seconds: int) -> list:
     if not sent:
         return []
     pos = {m.id: i for i, m in enumerate(all_msgs)}
-    # A hosted row has no cursor; an advanced one would misread it claimed.
     cursor_pos: dict[str, int] = {}
     for r in {m.to for m in sent if m.delivery != HOSTED_DELIVERY}:
         try:
