@@ -742,8 +742,12 @@ fn transcript_is_open_spawn(transcript: &str) -> bool {
     if transcript.is_empty() {
         return false;
     }
-    crate::interrupt_classify::trailing_open_call(&crate::tail_text(Path::new(transcript), 262_144))
-        .is_some_and(|c| c.name == "Task" || c.name == "Agent")
+    crate::tail_text_strict(Path::new(transcript), 262_144)
+        .and_then(|tail| {
+            crate::interrupt_classify::trailing_open_call(&tail)
+                .filter(|c| c.name == "Task" || c.name == "Agent")
+        })
+        .is_some()
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1033,6 +1037,19 @@ mod tests {
         assert!(!transcript_is_open_spawn(
             "/nonexistent/kgd/no-such-transcript.jsonl"
         ));
+    }
+
+    // (e) A tail that is not valid UTF-8 is unreadable evidence: fail closed
+    // the way the deleted private leg did, never a repaired guess.
+    #[test]
+    fn corrupt_tail_fails_closed() {
+        let dir = std::env::temp_dir().join(format!("kgd-spawn-corrupt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let mut body = spawn_line("t1", "Task").into_bytes();
+        body.push(0xFF);
+        std::fs::write(&path, body).unwrap();
+        assert!(!transcript_is_open_spawn(&path.to_string_lossy()));
     }
 
     #[test]

@@ -648,7 +648,9 @@ fn r_crown() -> Result<Value, String> {
         .map_err(|e| e.to_string());
     // One dead-call reading per stale row, keyed by row name. A reading is
     // built only when the registry itself read, so an unread registry stays
-    // a null-count error, never a synthesized zero.
+    // a null-count error, never a synthesized zero. The boot reading is
+    // hoisted: one sysctl per beat, not one per row.
+    let boot = crate::host_boot_epoch_ms();
     let dead: std::collections::BTreeMap<String, crate::crown_split::DeadCallReading> =
         match &split_read {
             Ok(splits) => splits
@@ -659,7 +661,7 @@ fn r_crown() -> Result<Value, String> {
                         .as_ref()
                         .ok()
                         .and_then(|r| r.entries.iter().find(|e| e.name == s.row))
-                        .map(|e| crate::crown_split::dead_call(e, crate::host_boot_epoch_ms()))
+                        .map(|e| crate::crown_split::dead_call(e, boot))
                         .unwrap_or(crate::crown_split::DeadCallReading::Unread(
                             "crowned row not found in the registry".to_string(),
                         ));

@@ -1500,33 +1500,47 @@ pub fn emit_schema_json() -> serde_json::Value {
 
 /// A file's tail, at most `cap` bytes, starting on a line boundary: a seek
 /// into the middle of a line drops that partial line, so every admitted row
-/// is whole. Empty on any read failure, never a guess.
-pub(crate) fn tail_text(path: &std::path::Path, cap: u64) -> String {
+/// is whole. Empty on any read failure, never a guess. The one tail walk:
+/// `tail_text` lossy-repairs it for observational readers, and a guard that
+/// must fail closed takes [`tail_text_strict`] instead.
+pub(crate) fn tail_bytes(path: &std::path::Path, cap: u64) -> Vec<u8> {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut file) = std::fs::File::open(path) else {
-        return String::new();
+        return Vec::new();
     };
     let len = match file.metadata() {
         Ok(m) => m.len(),
-        Err(_) => return String::new(),
+        Err(_) => return Vec::new(),
     };
     let start = len.saturating_sub(cap);
     if file.seek(SeekFrom::Start(start)).is_err() {
-        return String::new();
+        return Vec::new();
     }
     let mut buf = Vec::new();
     if file.read_to_end(&mut buf).is_err() {
-        return String::new();
+        return Vec::new();
     }
     if start > 0 {
         match buf.iter().position(|&b| b == b'\n') {
-            Some(p) => String::from_utf8_lossy(&buf[p + 1..]).into_owned(),
             // No whole line inside the window: nothing to admit.
-            None => String::new(),
+            Some(p) => buf.split_off(p + 1),
+            None => Vec::new(),
         }
     } else {
-        String::from_utf8_lossy(&buf).into_owned()
+        buf
     }
+}
+
+/// [`tail_bytes`] as lossy text: observational readers never fail on bytes.
+pub(crate) fn tail_text(path: &std::path::Path, cap: u64) -> String {
+    String::from_utf8_lossy(&tail_bytes(path, cap)).into_owned()
+}
+
+/// [`tail_bytes`] as text, None when the tail is not valid UTF-8: a guard
+/// that answers with an allow reads corrupt evidence as unreadable, never
+/// as a repaired guess.
+pub(crate) fn tail_text_strict(path: &std::path::Path, cap: u64) -> Option<String> {
+    String::from_utf8(tail_bytes(path, cap)).ok()
 }
 
 /// Host boot as epoch ms. Linux reuses `claims::linux_boot_time_s` (the
@@ -1539,28 +1553,32 @@ pub fn host_boot_epoch_ms() -> Option<i64> {
 }
 
 /// The macOS leg: sysctl `kern.boottime` into a zeroed timeval, the same
-/// call shape `census.rs` uses for its CTL_KERN probes.
+/// call shape `census.rs` uses for its CTL_KERN probes. Cached like the
+/// Linux btime: constant for the life of the host, read once per process.
 #[cfg(target_os = "macos")]
 pub fn host_boot_epoch_ms() -> Option<i64> {
-    let mut mib = [libc::CTL_KERN, libc::KERN_BOOTTIME];
-    let mut tv: libc::timeval = unsafe { std::mem::zeroed() };
-    let mut size = std::mem::size_of::<libc::timeval>();
-    // SAFETY: sysctl fills a caller-owned zeroed buffer; mib and size live
-    // in this frame and are read only during the call.
-    let done = unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            2,
-            &mut tv as *mut _ as *mut libc::c_void,
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if done != 0 {
-        return None;
-    }
-    boot_ms_from(tv.tv_sec as i64, tv.tv_usec as i64)
+    static BOOT: std::sync::OnceLock<Option<i64>> = std::sync::OnceLock::new();
+    *BOOT.get_or_init(|| {
+        let mut mib = [libc::CTL_KERN, libc::KERN_BOOTTIME];
+        let mut tv: libc::timeval = unsafe { std::mem::zeroed() };
+        let mut size = std::mem::size_of::<libc::timeval>();
+        // SAFETY: sysctl fills a caller-owned zeroed buffer; mib and size live
+        // in this frame and are read only during the call.
+        let done = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                2,
+                &mut tv as *mut _ as *mut libc::c_void,
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if done != 0 {
+            return None;
+        }
+        boot_ms_from(tv.tv_sec as i64, tv.tv_usec as i64)
+    })
 }
 
 /// Platforms with neither reader read absent, like every other bound.
