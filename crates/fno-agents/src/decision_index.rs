@@ -337,6 +337,11 @@ mod tests {
             "operator",
             "topic-a",
             "",
+        )
+        .replacen(
+            "\"type\":\"operator_decision\"",
+            "\"type\":\"operator_decision\",\"source\":\"operator\"",
+            1,
         );
         crate::event_store::append_envelope(&path, &row, None).unwrap();
         let index = read_live(&path).unwrap();

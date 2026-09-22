@@ -1420,7 +1420,8 @@ fn strict_termination_reader_errs_on_a_broken_store() {
     let journal = Journal::new_raw(project_events, global_events);
     let err = journal
         .find_termination_strict("sess-broken")
-        .expect_err("strict must report the unreadable store");
+        .err()
+        .expect("strict must report the unreadable store");
     assert!(
         format!("{err}").contains("events.db"),
         "error names the store path: {err}"

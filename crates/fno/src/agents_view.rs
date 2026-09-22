@@ -4425,8 +4425,9 @@ config_dir = "~/.claude-alt"
             .unwrap();
         }
         fn write_event(&self, sid: &str, ts: &str) {
-            let line =
-                format!(r#"{{"ts":"{ts}","type":"loop_check","data":{{"session_id":"{sid}"}}}}"#);
+            let line = format!(
+                r#"{{"ts":"{ts}","type":"loop_check","source":"hook","data":{{"session_id":"{sid}"}}}}"#
+            );
             crate::event_store::append_envelope(&self.events(), &line, None).unwrap();
         }
     }
