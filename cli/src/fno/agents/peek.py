@@ -112,14 +112,20 @@ def _parse_codex_record(rec: dict) -> Optional[Record]:
     )
 
 
+_TAIL_BYTES = 4 << 20  # 4 MiB holds the last 40 records of every live king transcript
+
+
 def _records_from_jsonl(
-    path: Path, n: Optional[int], parse: Callable[[dict], Optional[Record]]
+    path: Path, n: Optional[int], parse: Callable[[dict], Optional[Record]],
+    tail: bool = True,
 ) -> list[Record]:
     """Parse the last ``n`` renderable records from a JSONL transcript.
 
     Streams line-by-line into a bounded deque so memory stays O(n). A torn or
     non-JSON line (mid-write tail, AC2-EDGE) is skipped, never raised. ``n`` of
     0 or negative returns ``[]``; ``None`` returns every record.
+
+    Seeks to the last ``_TAIL_BYTES``, reading the whole file when the tail is short.
     """
     import collections
 
@@ -127,7 +133,9 @@ def _records_from_jsonl(
         return []
     dq: "collections.deque[Record]" = collections.deque(maxlen=n)
     try:
-        with path.open("r", encoding="utf-8") as fh:
+        with path.open("rb") as fh:
+            start = max(0, fh.seek(0, 2) - _TAIL_BYTES) if tail and n else 0
+            fh.seek(start)  # a partial first line fails the parse below and is skipped
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -143,6 +151,8 @@ def _records_from_jsonl(
                     dq.append(record)
     except OSError:
         return []
+    if start and n is not None and len(dq) < n:
+        return _records_from_jsonl(path, n, parse, tail=False)
     return list(dq)
 
 
