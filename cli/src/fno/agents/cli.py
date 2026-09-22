@@ -2724,7 +2724,7 @@ def cmd_spawn(
         # closed set before it lands here, so a config-sourced mode carrying a
         # backslash or control char would otherwise emit invalid JSON. Matches
         # Rust's json_string_ascii byte-for-byte for every ordinary mode.
-        eff_mode = permission_mode or (("yolo" if harness == "codex" else "bypassPermissions") if yolo else None)
+        eff_mode = permission_mode or (("yolo" if "codex" in (harness, getattr(result, "provider", "")) else "bypassPermissions") if yolo else None)
         perm_field = (
             f', "permission_mode_requested": {json.dumps(eff_mode)}'
             if eff_mode

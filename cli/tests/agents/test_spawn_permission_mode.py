@@ -380,6 +380,18 @@ def test_codex_yolo_receipt_names_yolo_via_python(runner, monkeypatch):
     assert receipt["permission_mode_requested"] == "yolo"
     assert "permission_mode" not in receipt
 
+    # The env-resolved harness counts too: no --harness, the invoking-harness
+    # marker names codex, and the receipt still reads yolo.
+    monkeypatch.setenv("CODEX_THREAD_ID", "t-env-codex")
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w2", "hi", "--substrate", "bg", "--yolo"],
+    )
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output.splitlines()[0])
+    assert receipt["permission_mode_requested"] == "yolo"
+    assert "permission_mode" not in receipt
+
 
 def test_claude_python_build_argv_threads_permission_mode():
     """The Python claude bg argv builder mirrors Rust: --permission-mode rides
