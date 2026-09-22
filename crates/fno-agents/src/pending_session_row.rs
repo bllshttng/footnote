@@ -233,6 +233,10 @@ mod tests {
                 harness: Some("claude".into()),
                 node: node.map(|n| n.to_string()),
                 effort: Some("xhigh".into()),
+                // A parked row carries no session id yet; the pid leg is its
+                // resolvable handle, exactly as a live spawn mints it.
+                pid: Some(4_194_301),
+                pid_start_time: Some(1_000),
                 ..Default::default()
             });
         })
