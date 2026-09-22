@@ -107,6 +107,10 @@ fn stub_gh(dir: &Path) {
         r#"#!/bin/sh
 D="$(dirname "$0")"
 echo "gh $*" >> "$D/gh.log"
+if [ -f "$D/gh-error" ]; then
+  echo "check read failed" >&2
+  exit 1
+fi
 for a in "$@"; do case "$a" in
   */check-runs)
     if [ -f "$D/no-runs" ]; then
@@ -213,6 +217,57 @@ fn a_run_in_flight_refuses_with_exit_2_and_names_the_check() {
         !log_of(&d, "git.log").contains("git push"),
         "nothing pushed"
     );
+}
+
+#[test]
+fn an_in_flight_run_refuses_before_preflight() {
+    let (_t, d) = tmpdir();
+    std::fs::write(d.join("pending"), "").unwrap();
+    std::fs::create_dir_all(d.join("scripts/ci")).unwrap();
+    write_exec(
+        &d.join("scripts/ci"),
+        "preflight.sh",
+        "#!/bin/sh\necho ran > \"$(dirname \"$0\")/../../preflight.log\"\nexit 0\n",
+    );
+    let (code, out, err) = run_verb(&d, &[]);
+    assert_eq!(code, 2, "{out}\n{err}");
+    assert!(!d.join("preflight.log").exists(), "preflight did not run");
+    assert!(!log_of(&d, "git.log").contains("git push"));
+}
+
+#[test]
+fn the_in_flight_probe_emits_true_false_and_error_shapes_without_mutating_git() {
+    let (_t, d) = tmpdir();
+    std::fs::write(d.join("pending"), "").unwrap();
+    let (code, out, err) = run_verb(&d, &["--in-flight", "feature/x"]);
+    assert_eq!(code, 2, "{out}\n{err}");
+    assert!(out.contains("\"in_flight\":true"), "{out}");
+    assert!(out.contains("\"check\":\"guards\""), "{out}");
+    assert!(out.contains("\"job\":\"42\""), "{out}");
+    assert!(!log_of(&d, "git.log").contains("git push"));
+    assert!(!log_of(&d, "git.log").contains("fetch"));
+    assert!(!log_of(&d, "git.log").contains("rebase"));
+
+    std::fs::remove_file(d.join("pending")).unwrap();
+    let (code, out, err) = run_verb(&d, &["--in-flight", "feature/x"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("\"in_flight\":false"), "{out}");
+
+    std::fs::write(d.join("gh-error"), "").unwrap();
+    let (code, out, err) = run_verb(&d, &["--in-flight", "feature/x"]);
+    assert_eq!(code, 4, "{out}\n{err}");
+    assert!(out.contains("\"error\""), "{out}");
+    assert!(!out.contains("\"in_flight\""), "{out}");
+}
+
+#[test]
+fn an_in_flight_probe_without_a_remote_ref_answers_false() {
+    let (_t, d) = tmpdir();
+    std::fs::write(d.join("no-remote-branch"), "").unwrap();
+    let (code, out, err) = run_verb(&d, &["--in-flight", "feature/x"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("\"in_flight\":false"), "{out}");
+    assert!(!log_of(&d, "gh.log").contains("check-runs"));
 }
 
 #[test]
