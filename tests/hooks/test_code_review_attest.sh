@@ -133,6 +133,9 @@ fi
 if [[ "\${1:-}" == "agents" && "\${2:-}" == "claim" && "\${3:-}" == "list" ]]; then
   [[ "\${FNO_TEST_CLAIM_LIST_FAIL:-}" == "1" ]] && exit 19
   [[ "\${FNO_TEST_CLAIM_LIST_MALFORMED:-}" == "1" ]] && printf '%s\n' '{malformed' && exit 0
+  [[ "\${FNO_TEST_CLAIM_ROW_MALFORMED:-}" == "1" ]] \
+    && printf '%s\n' '[{"key":"review:branch:feat/x","holder":"review-session:S","expired":false,"acquired_at":1,"metadata":"broken"}]' \
+    && exit 0
   cat "$CLAIM_JSON"
   exit 0
 fi
@@ -784,6 +787,23 @@ if [[ "$CLAIM_MALFORMED_RC" == "2" ]] \
   pass "malformed claim data refuses before wrong-checkout attestation"
 else
   fail "malformed claim data was not fail-closed: rc=$CLAIM_MALFORMED_RC emitted=$(cat "$EMITTED") stderr=$(cat "$HOOK_STDERR")"
+fi
+
+: > "$EMITTED"
+: > "$CLASSIFY_MARKER"
+set +e
+printf '%s' "$(subagent_stop "" "$PARTIAL_FINDINGS" S)" \
+  | FNO="$BIN/fno-stub" FNO_TEST_CLAIM_ROW_MALFORMED=1 bash "$HOOK" \
+    >"$HOOK_STDOUT" 2>"$HOOK_STDERR"
+CLAIM_ROW_MALFORMED_RC=$?
+set -e
+if [[ "$CLAIM_ROW_MALFORMED_RC" == "2" ]] \
+  && [[ ! -s "$EMITTED" ]] \
+  && [[ ! -s "$CLASSIFY_MARKER" ]] \
+  && grep -q 'claim row was malformed' "$HOOK_STDERR"; then
+  pass "malformed claim row refuses before wrong-checkout attestation"
+else
+  fail "malformed claim row was not fail-closed: rc=$CLAIM_ROW_MALFORMED_RC emitted=$(cat "$EMITTED") stderr=$(cat "$HOOK_STDERR")"
 fi
 
 echo ""

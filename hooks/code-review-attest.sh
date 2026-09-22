@@ -315,6 +315,20 @@ if [[ -n "$session" ]]; then
     echo "code-review-attest: review target claim was malformed; refusing attestation; retry from the PR's worktree" >&2
     exit 2
   fi
+  if ! jq -e --arg holder "review-session:$session" '
+    all(.[]; type == "object")
+    and all(.[]; (.holder != $holder) or (
+      (.key | type == "string" and startswith("review:branch:"))
+      and (.expired | type == "boolean")
+      and (.acquired_at | type == "number")
+      and (.metadata | type == "object")
+      and (.metadata.head_sha | type == "string")
+      and (.metadata.invocation_id | type == "string")
+    ))
+  ' <<<"$claims_json" >/dev/null 2>&1; then
+    echo "code-review-attest: review target claim row was malformed; refusing attestation; retry from the PR's worktree" >&2
+    exit 2
+  fi
   held_claim="$(printf '%s' "$claims_json" | jq -c --arg holder "review-session:$session" '
     [ .[] | select(.holder == $holder and ((.expired // false) | not)) ]
     | sort_by(.acquired_at // 0) | .[-1] // empty
