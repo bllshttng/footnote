@@ -138,8 +138,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // Transport-only early dispatches, before the runtime builds: the shrink
-    // law (d-fe66560a) bars new client verbs, so these arms register no verb.
-    // Callers reach them via resolve_binary; each module's doc carries its shape.
+    // law (d-fe66560a) bars new client verbs; each module's doc carries its shape.
     if args.first().map(String::as_str) == Some("backlog-update") {
         std::process::exit(fno_agents::backlog::patch::run_update(&args[1..]));
     }
