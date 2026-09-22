@@ -215,7 +215,7 @@ fn window_mean(sessions: &[&SessionEnd], at: DateTime<Utc>, after: bool, n: usiz
 /// One scored correction: the before/after means, the ratio, and the
 /// verdict (improved under 0.7x, worse over 1.3x, flat between,
 /// insufficient-data when either side has fewer than 3 sessions).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Verdict {
     ts: DateTime<Utc>,
     file: String,
