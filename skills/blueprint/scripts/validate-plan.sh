@@ -1476,8 +1476,7 @@ check_surface_file() {
 
     # Presence, graduated. The block only proves the looking happened; whether
     # it must exist is policy, so the date + kind split lives here in bash.
-    if ! awk '/^---/ { c++; if (c==2) exit; next } c==1 { print }' "$file" \
-            | grep -E '^surface:' >/dev/null; then
+    if ! _fm_has '^surface:' "$file"; then
         if _is_quick_plan; then
             warn "$label: no surface: block (quick plan) - the step 2b-bis enumeration is unwritten; backfill one before this question costs its second PR"
             return 0
@@ -1945,18 +1944,17 @@ validate_wave_section_headers() {
     # being a defined value.
     while IFS= read -r w; do
         [[ -z "$w" ]] && continue
-        # The `! ... | grep -qx` shape is load-bearing under `set -e`:
-        # the `!` converts grep's exit-1-on-no-match into a tested
-        # condition rather than a script abort. Removing the `!` would
-        # silently abort the loop on the first non-matching wave.
-        if ! echo "$header_waves" | grep -qx "$w"; then
+        # The `!` converts grep's exit-1-on-no-match into a tested condition
+        # rather than a script abort. Removing it would silently abort the
+        # loop on the first non-matching wave.
+        if ! grep -qx "$w" <<< "$header_waves"; then
             missing+="$w "
         fi
     done <<< "$yaml_waves"
 
     while IFS= read -r w; do
         [[ -z "$w" ]] && continue
-        if ! echo "$yaml_waves" | grep -qx "$w"; then
+        if ! grep -qx "$w" <<< "$yaml_waves"; then
             orphan+="$w "
         fi
     done <<< "$header_waves"
@@ -1986,7 +1984,7 @@ validate_wave_section_headers() {
         local wave_num
         wave_num=$(echo "$line" | sed -E 's/^## Wave ([0-9]+):.*/\1/')
         # Skip naming check for orphan headers (already warned above).
-        if ! echo "$yaml_waves" | grep -qx "$wave_num"; then
+        if ! grep -qx "$wave_num" <<< "$yaml_waves"; then
             continue
         fi
         local name_part
