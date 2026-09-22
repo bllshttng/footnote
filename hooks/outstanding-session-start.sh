@@ -14,12 +14,15 @@ PATH="${PATH:+$PATH:}/usr/bin:/bin:/usr/sbin:/sbin"
 export PATH
 
 command -v fno >/dev/null 2>&1 || exit 0
-command -v jq >/dev/null 2>&1 || exit 0
+# No jq: the cache path cannot parse, so the fold below answers instead of
+# an empty session start.
+have_jq=1
+command -v jq >/dev/null 2>&1 || have_jq=0
 
 CACHE_MAX_AGE_SECS=120
 cache="${FNO_HOME:-$HOME/.fno}/attention/items.json"
 
-if [[ -s "$cache" ]]; then
+if [[ $have_jq -eq 1 && -s "$cache" ]]; then
     now=$(date +%s)
     mtime=$(stat -f %m "$cache" 2>/dev/null || stat -c %Y "$cache" 2>/dev/null || echo 0)
     if (( now - mtime <= CACHE_MAX_AGE_SECS )); then
