@@ -123,9 +123,8 @@ def resolve_node_spawn(
         answer = _verb_answer(node)
         effective_verb = answer.get("verb")
         lifecycle = (effective_verb, str(answer.get("note") or ""))
-    # The node's own declaration is the last fallback for the name code and
-    # the receipt: the table abstains on an out-of-family verb, and the
-    # declared verb is exactly what then dispatches.
+    # The row's own declaration is the last fallback for the name code and
+    # the receipt: the table abstains on an out-of-family verb.
     declared_verb = (
         str(node.get("dispatch_verb") or "").strip() if isinstance(node, dict) else ""
     )
@@ -439,25 +438,17 @@ def find_node_row(node: str) -> Optional[dict]:
 
 
 def _verb_answer(row: Optional[dict], *, node_id: Optional[str] = None) -> dict:
-    """One node row -> the ported verb decision (backlog_ready.rs through
-    the store door): ``{"verb", "note"}``, or a raised
-    :class:`DispatchResolveError` on a refusal or on a runtime this install
-    cannot answer. One fetch for every feed site; never a guessed verb."""
+    """One node row -> the ported verb decision (backlog_ready.rs via the
+    store door); a refusal or an unavailable runtime raises, never guesses."""
     from fno.agents.harness_map import DispatchResolveError
-    from fno.graph.store import STATE_SPAWN_FAILED, StoreUnavailable, request_effective_verb
+    from fno.graph.store import StoreUnavailable, request_effective_verb
 
     payload = dict(row or {})
-    if not str(payload.get("id") or "").strip():
-        payload["id"] = node_id
+    payload.setdefault("id", node_id)
     try:
         answers = request_effective_verb([payload])
     except StoreUnavailable as exc:
-        if exc.state == STATE_SPAWN_FAILED and "not found" in str(exc.detail):
-            raise DispatchResolveError(
-                "fno dispatch verb unavailable: the fno-agents binary was not "
-                "found; run `fno doctor update --rust` or set FNO_AGENTS_BIN."
-            ) from exc
-        raise
+        raise DispatchResolveError(str(exc)) from exc
     answer = answers[0] if answers else {}
     if answer.get("refusal"):
         raise DispatchResolveError(str(answer["refusal"]))

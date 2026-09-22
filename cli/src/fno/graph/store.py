@@ -553,7 +553,8 @@ class _ExecClient(_Keeper):
         if binary is None:
             raise StoreUnavailable(
                 STATE_SPAWN_FAILED,
-                "fno-agents-worker not found (set FNO_AGENTS_WORKER or install the runtime)",
+                "fno-agents-worker not found; run `fno doctor update --rust`, "
+                "or set FNO_AGENTS_WORKER.",
             )
         argv = [
             str(binary),
@@ -903,11 +904,8 @@ def request_scoreboard_classify(
 
 
 def request_effective_verb(entries: list[dict]) -> list[dict]:
-    """The lifecycle verb decision (backlog_ready.rs) over client-shipped
-    rows: one ``{"verb", "note", "refusal"}`` answer per row, in order. It
-    carries no decision of its own; a refusal rides its own row. A keeper
-    predating the verb answers ``StoreUnavailable(STATE_STALE_KEEPER, ...)``
-    with the restart remedy, the same mapping ``request_ready`` performs."""
+    """One lifecycle verb answer per row (backlog_ready.rs); a refusal rides
+    its own row, and a keeper predating the verb names the restart remedy."""
     try:
         result = _client_for(GRAPH_JSON).request("effective_verb", {"entries": entries})
     except RuntimeError as exc:

@@ -17,7 +17,7 @@
 //! never the process cwd, and answers UNREADABLE - which fails open - when
 //! there is no anchor; staleness degrades to 21 days on any config problem.
 
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -459,6 +459,25 @@ pub fn effective_verb(entry: &Value) -> Result<(Option<String>, String), String>
         Some(answer.0.to_string()),
         format!("verb=lifecycle({} -> {})", answer.1, answer.0),
     ))
+}
+
+/// The keeper's `effective_verb` body: one row's ported lifecycle verb
+/// decision per shipped entry, in order (`{"verb", "note", "refusal"}`).
+/// Pure over the client's rows and their linked plan docs. Kept beside the
+/// table so the decision and its serving live in one file.
+pub(crate) fn serve_effective_verb(params: &Value) -> Result<Value, String> {
+    let entries = params
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "effective_verb needs entries".to_string())?;
+    let answers: Vec<Value> = entries
+        .iter()
+        .map(|entry| match effective_verb(entry) {
+            Ok((verb, note)) => json!({"verb": verb, "note": note, "refusal": Value::Null}),
+            Err(refusal) => json!({"verb": Value::Null, "note": Value::Null, "refusal": refusal}),
+        })
+        .collect();
+    Ok(json!({ "answers": answers }))
 }
 
 /// A plan-less idea the autonomous drain may dispatch without a plan
@@ -1826,5 +1845,52 @@ mod tests {
             let (verb, _note) = effective_verb(&row).unwrap();
             assert_eq!(verb.as_deref(), Some("/blueprint"), "{spelling}");
         }
+    }
+
+    #[test]
+    fn serve_effective_verb_answers_one_row_per_entry_and_a_refusal_rides_its_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let research = plan_at(
+            dir.path(),
+            "research.md",
+            "---\nkind: research\nstatus: ready\n---\n# findings\n",
+        );
+        let qp = plan_at(
+            dir.path(),
+            "qp.md",
+            "---\nkind: quick-plan\nstatus: ready\n---\n# contract\n",
+        );
+        let research_row = row_with(
+            &research,
+            serde_json::Map::from_iter([("dispatch_verb".to_string(), json!("/fno:blueprint"))]),
+        );
+        let qp_row = row_with(&qp, serde_json::Map::new());
+        let reply = serve_effective_verb(&json!({
+            "entries": [
+                research_row,
+                qp_row,
+                json!({"id": "x-think", "dispatch_verb": "/fno:think"}),
+                json!({"id": "x-planless", "difficulty": "spicy"})
+            ]
+        }))
+        .unwrap();
+        let answers = reply["answers"].as_array().expect("answers array");
+        assert_eq!(answers.len(), 4);
+        assert_eq!(answers[0]["verb"], json!("/blueprint"));
+        assert!(answers[0]["note"].as_str().unwrap().contains(
+            "verb=declared(/blueprint; lifecycle answers /target: plan ready not a blueprint)"
+        ));
+        assert_eq!(answers[1]["verb"], json!("/target"));
+        assert!(answers[1]["refusal"].is_null());
+        assert!(answers[2]["verb"].is_null());
+        assert!(answers[2]["note"]
+            .as_str()
+            .unwrap()
+            .contains("out-of-family /think"));
+        assert!(answers[3]["verb"].is_null());
+        assert!(answers[3]["refusal"]
+            .as_str()
+            .unwrap()
+            .starts_with("dispatch verb cannot be derived for node x-planless:"));
     }
 }

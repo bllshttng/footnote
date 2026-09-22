@@ -605,7 +605,8 @@ def test_missing_runtime_refuses_naming_the_remedy(monkeypatch):
     def absent(entries):
         raise StoreUnavailable(
             STATE_SPAWN_FAILED,
-            "fno-agents-worker not found (set FNO_AGENTS_WORKER or install the runtime)",
+            "fno-agents-worker not found; run `fno doctor update --rust`, "
+            "or set FNO_AGENTS_WORKER.",
         )
 
     _stub_door(monkeypatch, absent)
