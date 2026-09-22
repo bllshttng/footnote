@@ -3769,7 +3769,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 params.insert("from_name".into(), str_arg(&mut it, "--from-name")?);
             }
             "--yolo" | "-Y" => {
-                // NOTE: --yolo is accepted and forwarded; daemon ignores it for now.
+                // The daemon resolves yolo through resolve_thread_posture.
                 params.insert("yolo".into(), Value::Bool(true));
             }
             // The Python spawn seam (rust_runtime
