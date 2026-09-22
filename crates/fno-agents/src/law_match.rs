@@ -580,7 +580,12 @@ fn node_subject_idents(
 /// The context block for a stage with laws: cap 2000 bytes, first law line
 /// always renders, and every law past the cap keeps a short id line the
 /// validator parses, so overflow law is acknowledged, not hidden.
-fn render_stage_block(stage: &str, matching: &[String], damaged: usize) -> String {
+fn render_stage_block(
+    stage: &str,
+    matching: &[String],
+    damaged: usize,
+    unread: &[String],
+) -> String {
     let mut text = format!(
         "## Law governing {stage}\n\nThese live operator rulings govern the {stage} you are starting. Act inside them. Do not re-derive them.\n"
     );
