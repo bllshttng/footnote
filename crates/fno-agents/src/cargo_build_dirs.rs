@@ -511,15 +511,22 @@ fn live_cargo_cwds() -> Result<Vec<PathBuf>, ()> {
 /// checkout). `Err` when `lsof` failed to run or a live cwd's own tree
 /// cannot answer its manifests: either way the returned set may be missing
 /// entries, so the caller must fail closed rather than trust an empty one.
+/// The registered tree `path` falls under: the LONGEST match wins, so a
+/// worktree nested inside its own checkout owns its own rows, never the
+/// outer checkout `git worktree list` happens to print first.
+fn owning_tree<'a>(path: &Path, trees: &'a [PathBuf]) -> Option<&'a PathBuf> {
+    let p = phys(path);
+    trees
+        .iter()
+        .filter(|t| p.starts_with(phys(t)))
+        .max_by_key(|t| phys(t).as_os_str().len())
+}
+
 fn live_shards(trees: &[PathBuf], fno_base: &Path) -> Result<BTreeSet<PathBuf>, ()> {
     let mut shards = BTreeSet::new();
     for cwd in live_cargo_cwds()? {
         let cwd = phys(&cwd);
-        let tree = trees
-            .iter()
-            .filter(|t| cwd.starts_with(phys(t)))
-            .max_by_key(|t| phys(t).as_os_str().len());
-        let Some(tree) = tree else {
+        let Some(tree) = owning_tree(&cwd, trees) else {
             continue;
         };
         let answer = answer_tree(tree, fno_base).map_err(|_| ())?;
@@ -587,6 +594,9 @@ struct Row {
     quiet: Duration,
     under_fno: bool,
     membership: bool,
+    /// The registered tree whose manifests resolve to this dir; `None` when
+    /// no tree did (what the orphan lane acts on).
+    owner: Option<PathBuf>,
 }
 
 /// Classify and (on `apply`) reap both build bases' tagged hash dirs. Dry run
@@ -601,13 +611,26 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
     rep.effective_cap_bytes = effective_cap_bytes(root);
 
     let mut names: BTreeSet<String> = BTreeSet::new();
-    let mut resolved: BTreeSet<PathBuf> = BTreeSet::new();
+    // phys dir -> the tree whose manifests resolve to it (phys tree). When
+    // two trees resolve the same dir the LONGER tree path wins, the same
+    // rule `owning_tree` applies.
+    let mut owner_of: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
     for tree in &trees {
         match answer_tree(tree, &fno_base) {
             Ok(answer) => {
                 rep.trees_resolved += 1;
                 names.extend(answer.names);
-                resolved.extend(answer.dirs.iter().map(|d| phys(d)));
+                let tree_phys = phys(tree);
+                for d in &answer.dirs {
+                    let dir = phys(d);
+                    let longer_wins = match owner_of.get(&dir) {
+                        Some(existing) => existing.as_os_str().len() >= tree_phys.as_os_str().len(),
+                        None => false,
+                    };
+                    if !longer_wins {
+                        owner_of.insert(dir, tree_phys.clone());
+                    }
+                }
             }
             Err(manifest) => {
                 rep.orphan_lane.get_or_insert(manifest);
@@ -638,6 +661,7 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
             let membership = has_membership(&path, &names);
             rows.push(Row {
                 under_fno: phys(&path).starts_with(phys(&fno_base)),
+                owner: owner_of.get(&phys(&path)).cloned(),
                 path,
                 bytes,
                 quiet,
@@ -666,7 +690,7 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
         } else if row.quiet < Duration::from_secs(FRESH_SECS) {
             Decision::Keep("fresh")
         } else if rep.orphan_lane.is_none()
-            && !resolved.contains(&phys(&row.path))
+            && !owner_of.contains_key(&phys(&row.path))
             && row.membership
         {
             rep.orphans += 1;
