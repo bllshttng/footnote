@@ -1478,8 +1478,8 @@ fn opencode_reachable_with(
 ///
 /// Shelling out to opencode's own binary (rather than opening the sqlite file)
 /// inherits its channel-aware database resolution (`opencode-<channel>.db`,
-/// `OPENCODE_DB`) for free, keeps this crate free of a sqlite dependency, and
-/// pins to the CLI verb rather than a storage layout mid-migration to v2.
+/// `OPENCODE_DB`) for free, and pins to the CLI verb rather than a storage
+/// layout mid-migration to v2.
 ///
 /// The query is a single-row lookup, so its output cannot fill the stdout pipe
 /// while we poll. On timeout only the child pid is killed — never its process

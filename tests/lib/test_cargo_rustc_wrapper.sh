@@ -206,6 +206,27 @@ t09_run_without_a_program_refuses() {
   rm -rf "$stub_dir"
 }
 
+t10_joined_runner_arrays_run_the_binary_once() {
+  local stub_dir out_file rc
+  stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
+  calls="$stub_dir/calls.txt"
+  printf '#!/usr/bin/env bash\necho "$*" >> "%s"\n' "$calls" > "$stub_dir/fno-agents"
+  chmod +x "$stub_dir/fno-agents"
+  out_file="$stub_dir/out.txt"
+
+  # A nested worktree hands cargo both runner arrays joined. The repeat names
+  # the wrapper by a relative path that does not exist from the crate dir.
+  (cd "$stub_dir" && TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" \
+    --run scripts/lib/cargo-rustc-wrapper.sh --run /bin/sh -c 'echo ran "$@"' x a b) >"$out_file" 2>/dev/null
+  rc=$?
+  [[ "$rc" -eq 0 ]] || { fail "T10: expected rc=0, got $rc"; rm -rf "$stub_dir"; return; }
+  grep -q '^ran a b$' "$out_file" || { fail "T10: the binary did not run with its args: $(cat "$out_file")"; rm -rf "$stub_dir"; return; }
+  [[ "$(wc -l < "$calls" | tr -d ' ')" == "1" ]] \
+    || { fail "T10: expected one run admission, got: $(cat "$calls")"; rm -rf "$stub_dir"; return; }
+  pass "T10 joined runner arrays drop the repeated wrapper and run the binary once"
+  rm -rf "$stub_dir"
+}
+
 t01_sccache_present_announces_on_probe
 t02_sccache_absent_ordinary_compile_silent
 t03_compile_asks_admission_and_probe_does_not
@@ -215,6 +236,7 @@ t06_run_door_admits_then_execs
 t07_failed_run_admission_runs_anyway_once_per_cargo
 t08_signalled_run_admission_runs_nothing
 t09_run_without_a_program_refuses
+t10_joined_runner_arrays_run_the_binary_once
 
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then

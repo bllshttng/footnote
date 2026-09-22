@@ -1900,7 +1900,7 @@ fn the_resume_form_comes_from_the_capability_table() {
         let mut e = ask_row("form", None);
         e.harness = Some(harness.into());
         e.harness_session_id = Some("s-1".into());
-        let receipt = build_reap_receipt(&e, None).unwrap();
+        let receipt = build_reap_receipt(&e, None, crate::receipt::Writer::GcSweep).unwrap();
         assert_eq!(receipt.resume, expected, "{harness}");
     }
     // A harness with no capability row (hermes hosts real sessions per
@@ -1910,7 +1910,7 @@ fn the_resume_form_comes_from_the_capability_table() {
     let mut e = ask_row("hermes-row", None);
     e.harness = Some("hermes".into());
     e.harness_session_id = Some("h-1".into());
-    let err = build_reap_receipt(&e, None).unwrap_err();
+    let err = build_reap_receipt(&e, None, crate::receipt::Writer::GcSweep).unwrap_err();
     assert!(err.contains("hermes"), "{err}");
 }
 
@@ -1953,7 +1953,7 @@ fn the_ledger_entry_enriches_the_receipt_when_one_exists() {
 
     let mut e = ask_row("shipped", None);
     e.harness_session_id = Some("s-ledger".into());
-    let receipt = build_reap_receipt(&e, Some(row)).unwrap();
+    let receipt = build_reap_receipt(&e, Some(row), crate::receipt::Writer::GcSweep).unwrap();
     let led = receipt.ledger.expect("ledger enrichment present");
     assert_eq!(led["pr_number"], 1325);
 }
@@ -4189,7 +4189,8 @@ fn the_commit_gate_drops_an_order_whose_obligation_opened() {
     .unwrap();
     let entries = state::load_registry(&home.registry_json()).unwrap();
     let entry = entries.entries.first().unwrap();
-    let mut receipt = crate::receipt::build_reap_receipt(entry, None).unwrap();
+    let mut receipt =
+        crate::receipt::build_reap_receipt(entry, None, crate::receipt::Writer::GcSweep).unwrap();
     receipt.effects = vec![crate::gc_native::stop_outcome_effect(true, None)];
     let mut receipts = std::collections::BTreeMap::new();
     receipts.insert(entry.name.clone(), receipt);
@@ -4295,7 +4296,9 @@ fn the_reap_receipt_joins_its_node_through_the_route_cascade() {
     let mut receipts = std::collections::BTreeMap::new();
     let mut to_retire = std::collections::BTreeMap::new();
     for entry in &entries.entries {
-        let mut receipt = crate::receipt::build_reap_receipt(entry, None).unwrap();
+        let mut receipt =
+            crate::receipt::build_reap_receipt(entry, None, crate::receipt::Writer::GcSweep)
+                .unwrap();
         receipt.effects = vec![crate::gc_native::stop_outcome_effect(true, None)];
         receipts.insert(entry.name.clone(), receipt);
         to_retire.insert(
@@ -4374,7 +4377,8 @@ fn the_archived_session_record_survives_cwd_deletion_and_resolves() {
     // The record: built through the REAL capability table (resume form
     // rendered, locator staged), then localized to the fixture store the
     // way the harness's own index resolves a live session.
-    let mut receipt = crate::receipt::build_reap_receipt(&e, None).unwrap();
+    let mut receipt =
+        crate::receipt::build_reap_receipt(&e, None, crate::receipt::Writer::GcSweep).unwrap();
     receipt.native_locator = Some(json!({ "transcripts": [transcript.to_string_lossy()] }));
     receipt.effects = vec![
         crate::gc_native::stop_outcome_effect(true, None),
@@ -4821,6 +4825,55 @@ fn ac8_stage_stops_the_claude_thread_before_the_surface_removal() {
         Some("claude session ended; session sess-bgrow")
     );
     std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// A receipt the sweep stages names its writer. `removed_by` reads
+/// the surface `gc-sweep`, `removal_trigger` reads `unattended`; the 80
+/// unstamped receipts of 2026-09-17 were this sweep declining to sign.
+#[test]
+fn a_sweep_receipt_names_its_writer_and_trigger() {
+    let home = tmp_home("gc-writer-stamp");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let a_path = quiet_transcript(transcripts.path(), "a.jsonl", 2 * 3600);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut a = ask_row("row-stamp", None);
+        a.short_id = "stamp1".into();
+        a.harness = Some("claude".into());
+        a.harness_session_id = Some("sess-stamp".into());
+        a.origin = Some("spawn".into());
+        r.entries.push(a);
+    })
+    .unwrap();
+
+    let summary = retire_sweep(
+        &home,
+        &emitter,
+        &[("sess-stamp", "N1", "done")],
+        &|e| match e.harness_session_id.as_deref() {
+            Some("sess-stamp") => Some(vec![a_path.clone()]),
+            _ => None,
+        },
+    );
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+
+    let receipt: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(crate::receipt::reap_receipt_path_for(
+            &home,
+            "claude",
+            "sess-stamp",
+        ))
+        .expect("the sweep staged its receipt"),
+    )
+    .unwrap();
+    assert_eq!(
+        receipt["removed_by"], "gc-sweep",
+        "the sweep signs the receipt: {receipt}"
+    );
+    assert_eq!(
+        receipt["removal_trigger"], "unattended",
+        "a sweep nobody asked for: {receipt}"
+    );
 }
 
 /// The blueprint retirement families, split by the file budget; the

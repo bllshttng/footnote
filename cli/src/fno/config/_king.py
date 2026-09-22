@@ -51,6 +51,7 @@ class KingBlock(BaseModel):
     # silences it. An unknown value degrades to `refuse`, the deliberate
     # default.
     implementation_guard: str = "refuse"
+    write_roots: list[str] = []
     # The monitor and stop hook are the beat; the cron proves they are alive.
     checkin_interval: str = "4h"
     checkin_text: str = KING_CHECKIN_TEXT
@@ -82,6 +83,16 @@ class KingBlock(BaseModel):
         if isinstance(v, str) and v.strip() in ("refuse", "warn", "off"):
             return v.strip()
         return "refuse"
+
+    @field_validator("write_roots", mode="before")
+    @classmethod
+    def _coerce_write_roots(cls, v: object) -> list[str]:
+        """A bare string is one root; blanks and non-strings drop, never raise."""
+        if isinstance(v, str):
+            v = [v]
+        if not isinstance(v, list):
+            return []
+        return [s.strip() for s in v if isinstance(s, str) and s.strip()]
 
     @field_validator("checkin_text", "goal_text", mode="before")
     @classmethod

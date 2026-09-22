@@ -322,7 +322,6 @@ scripts/autocorrect-watcher.sh
 scripts/ci/check-no-internal-refs.sh
 scripts/ci/check-no-stale-skill-refs.sh
 scripts/ci/check-placement-rule.sh
-scripts/corrections-insights-tag.sh
 scripts/diagnostics/guard-corpus-sweep.py
 scripts/corrections-log-init.sh
 scripts/corrections-migrate-to-fno.sh
