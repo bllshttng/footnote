@@ -2892,8 +2892,7 @@ async fn run_status(json_out: bool) -> i32 {
     }
 }
 
-/// The control-plane arms rows, from the journals the arms write (agents home
-/// + the global mirror) plus their `.1` rotations, and the pr_watch tick
+/// The control-plane arms rows from the arm journals plus the pr_watch tick
 /// trace the readout's cause rules consult.
 fn arms_readout(
     home: &AgentsHome,
@@ -2905,10 +2904,10 @@ fn arms_readout(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // The journal list is owned by tick_ledger::journals, so the readout and
-    // the arm_watch daemon arm fold the same files and cannot drift.
+    // The journal list is owned by tick_ledger::journals, so the readout
+    // and the arm_watch fold the same files and cannot drift.
     let journals = fno_agents::tick_ledger::journals(home);
-    let arms = fno_agents::tick_ledger::read_arms(&journals, now_unix);
+    let arms = fno_agents::tick_ledger::read_arms_starved(&journals, now_unix);
     let trace = fno_agents::tick_ledger::read_tick_trace_live(&journals, &arms, now_unix);
     (arms, trace)
 }
@@ -2949,6 +2948,8 @@ fn print_status_human(result: &Value, arms: &[fno_agents::tick_ledger::ArmStatus
     for arm in arms {
         println!("  {}", arm.line);
     }
+    // The readout teaches its own detail verb (the loops table).
+    println!("  loop detail: fno agents loops table");
     if let Some(stuck) = result.get("stuck_work") {
         for line in fno_agents::stuck_work::render_lines(stuck) {
             println!("{line}");

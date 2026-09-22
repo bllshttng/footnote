@@ -291,7 +291,15 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let journals = crate::tick_ledger::journals(&home);
-        let mut rows = crate::tick_ledger::read_arms(&journals, now_unix);
+        // Arm values ride the read: an arm whose switch is off is a
+        // configuration, and the pager must never wake on its silence. The
+        // values answer for the daemon's own config root, the same root the
+        // thresholds below read.
+        let mut rows = {
+            let mut rows = crate::tick_ledger::read_arms(&journals, now_unix);
+            crate::tick_ledger::fill_arm_values(&mut rows, &config_cwd);
+            rows
+        };
         let trace = crate::tick_ledger::read_tick_trace_live(&journals, &rows, now_unix);
         crate::tick_ledger::explain_with_trace(
             &mut rows,
