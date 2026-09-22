@@ -2184,8 +2184,7 @@ fn demote_unmeasured_coverage(coverage: &mut Coverage, resolver: &FreshnessResol
 /// is never counted twice. An unreadable journal degrades to project-only.
 fn review_journal_text(events_path: &Path, global_events_path: &Path, repo_slug: &str) -> String {
     let project_text = crate::events_store::review_text(events_path);
-    let global_text =
-        attestation_journal::tail_text(global_events_path, attestation_journal::GLOBAL_TAIL_BYTES);
+    let global_text = crate::event_store::review_text(global_events_path);
     let extra_global = missing_global_attestations(&global_text, &project_text, repo_slug);
     if extra_global.is_empty() {
         project_text
@@ -11025,11 +11024,11 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                         .as_deref()
                         .map(str::to_string)
                         .or_else(|| {
-                            carry_author_session_forward(
-                                &std::fs::read_to_string(&inputs.project_events)
-                                    .unwrap_or_default(),
-                                pr_info.number,
-                            )
+                            let carried = crate::event_store::journal_text(
+                                &inputs.project_events,
+                                &["review_coverage"],
+                            );
+                            carry_author_session_forward(&carried, pr_info.number)
                         })
                         .as_deref(),
                     Some(&pr_info.range_tiling),

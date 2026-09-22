@@ -87,18 +87,6 @@ pub(super) fn missing_global_attestations(
     out
 }
 
-/// The global journal's tail, at most `cap` bytes, starting on a line
-/// boundary: a seek into the middle of a line drops that partial line, so
-/// every admitted row is whole. Evidence older than the window is invisible
-/// to the merge, which is acceptable by the same measure that makes the
-/// merge correct: the failure it fixes (a deleted fork's surviving mirror)
-/// is recent by construction, and the dedup keys on identity, not recency.
-pub(super) const GLOBAL_TAIL_BYTES: u64 = 8 * 1024 * 1024;
-
-// The reader itself lives at the crate root (`crate::tail_text`) so the
-// dead-call crown reading reuses the one line-boundary tail walk.
-pub(super) use crate::tail_text;
-
 /// The text-taking body of [`unattested_reviewers_scan`], split so the
 /// producer can feed the merged project-plus-global attestation text without
 /// a temp file.
@@ -382,11 +370,24 @@ mod tests {
         std::fs::write(&path, &body).unwrap();
         // A window that begins inside the FIRST line must drop that partial
         // line and still return the whole second row.
-        let tail = tail_text(&path, (second.len() + 5) as u64);
+        let tail = crate::tail_text(&path, (second.len() + 5) as u64);
         assert_eq!(tail, second, "partial head line dropped, second row whole");
         // A window covering everything returns everything.
-        let tail = tail_text(&path, body.len() as u64);
+        let tail = crate::tail_text(&path, body.len() as u64);
         assert_eq!(tail, body);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// AC6-HP: an attestation committed only to the global store, absent
+    /// from the project journal, still reaches the merged text.
+    #[test]
+    fn review_journal_text_reads_a_store_committed_global_attestation() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project-events.jsonl");
+        let global = dir.path().join("global-events.jsonl");
+        let line = global_attest_line("t1", "aaaaaaaaaa", "feature/x", "github.com/o/r");
+        crate::event_store::append_envelope(&global, &line, None).unwrap();
+        let merged = super::super::review_journal_text(&project, &global, "github.com/o/r");
+        assert!(merged.contains("aaaaaaaaaa"), "{merged}");
     }
 }
