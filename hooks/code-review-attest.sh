@@ -318,7 +318,7 @@ if [[ -n "$session" ]]; then
   if ! jq -e --arg holder "review-session:$session" '
     all(.[]; type == "object")
     and all(.[]; (.holder != $holder) or (
-      (.key | type == "string" and startswith("review:branch:"))
+      (.key | type == "string" and startswith("review:branch:") and length > 14)
       and (.expired | type == "boolean")
       and (.acquired_at | type == "number")
       and (.metadata | type == "object")
