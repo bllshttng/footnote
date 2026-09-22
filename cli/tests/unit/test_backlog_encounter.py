@@ -577,7 +577,7 @@ def test_encounters_live_only_in_the_graph_store_and_export(probe):
         for path in probe.state.rglob("*")
         if path.is_file() and evidence.encode() in path.read_bytes()
     ]
-    assert carriers == ["graph.json", "graph.db"]
+    assert sorted(carriers) == sorted(["graph.json", "graph.db"])
 
 
 

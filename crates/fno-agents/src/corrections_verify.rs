@@ -3,8 +3,9 @@
 //! bash pack is a thin caller). Transport-only, dispatched in client.rs
 //! beside `evals-trend`; registers no verb.
 //!
-//! Inputs: `corrections.log` rows whose SOURCE is `git-rule-edit` (the
-//! post-commit hook's applied-correction row) and `events.jsonl`
+//! Inputs: `corrections.log` rows whose SOURCE is `git-rule-edit` or
+//! `skill-commit` (the post-commit hook's applied-correction rows) and
+//! `events.jsonl`
 //! `termination` + `loop_check` rows. Friction per session: 1 when the
 //! termination reason classifies stuck (`run_outcome::classify_legacy`, the
 //! one stuck definition) plus the session's `loop_check` block rows. Each
@@ -26,11 +27,15 @@ const USAGE: &str = "usage: fno-agents corrections-verify (--json | -J | --markd
 
 /// One applied correction from corrections.log.
 /// Line shape: `{ts} | {severity} | {source} | {location} | {details}`
-/// (scripts/lib/corrections-lock.sh `corrections_build_line`).
+/// (scripts/lib/corrections-lock.sh `corrections_build_line`). The
+/// post-commit hook appends ` sha=<12 hex>` and, when the commit carries
+/// the triage-minted trailer, ` ref=<review>#<N>` to DETAILS.
 struct AppliedCorrection {
     ts: DateTime<Utc>,
     file: String,
     details: String,
+    sha: Option<String>,
+    reference: Option<String>,
 }
 
 /// One ended session: when it ended, whether the end was stuck, and how
@@ -65,8 +70,20 @@ fn resolve_events(flag: Option<&str>) -> Option<PathBuf> {
     crate::finalize::loop_state_root(home.as_deref()).map(|p| p.join("events.jsonl"))
 }
 
-/// The applied corrections: `git-rule-edit` rows only; a `target-postmortem`
-/// pointer is not a correction and is never scored.
+/// The `key=value` token a writer appended to DETAILS, as its value. The
+/// hook appends its tokens after the commit subject, so the LAST match
+/// wins when the subject itself carries a `key=` token.
+fn detail_token(details: &str, key: &str) -> Option<String> {
+    details
+        .split_whitespace()
+        .filter_map(|t| t.strip_prefix(key))
+        .next_back()
+        .map(str::to_string)
+}
+
+/// The applied corrections: the post-commit hook's rows only
+/// (`git-rule-edit` and `skill-commit`); a `target-postmortem` pointer is
+/// not a correction and is never scored.
 fn read_corrections(log: &str, since: DateTime<Utc>) -> Vec<AppliedCorrection> {
     let mut out = Vec::new();
     for line in log.lines() {
@@ -78,7 +95,7 @@ fn read_corrections(log: &str, since: DateTime<Utc>) -> Vec<AppliedCorrection> {
         let [ts, _sev, source, location, details] = fields.as_slice() else {
             continue;
         };
-        if *source != "git-rule-edit" {
+        if !matches!(*source, "git-rule-edit" | "skill-commit") {
             continue;
         }
         let (Some(ts), location) = (parse_ts(ts), (*location).trim()) else {
@@ -87,10 +104,13 @@ fn read_corrections(log: &str, since: DateTime<Utc>) -> Vec<AppliedCorrection> {
         if ts < since {
             continue;
         }
+        let details = (*details).trim();
         out.push(AppliedCorrection {
             ts,
             file: location.to_string(),
-            details: (*details).trim().to_string(),
+            details: details.to_string(),
+            sha: detail_token(details, "sha="),
+            reference: detail_token(details, "ref="),
         });
     }
     out.sort_by_key(|c| c.ts);
@@ -198,11 +218,13 @@ fn window_mean(sessions: &[&SessionEnd], at: DateTime<Utc>, after: bool, n: usiz
 /// One scored correction: the before/after means, the ratio, and the
 /// verdict (improved under 0.7x, worse over 1.3x, flat between,
 /// insufficient-data when either side has fewer than 3 sessions).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Verdict {
     ts: DateTime<Utc>,
     file: String,
     details: String,
+    sha: Option<String>,
+    reference: Option<String>,
     before: f64,
     after: f64,
     ratio: Option<f64>,
@@ -235,6 +257,8 @@ fn score(corrections: &[AppliedCorrection], sessions: &[SessionEnd]) -> Vec<Verd
                 ts: c.ts,
                 file: c.file.clone(),
                 details: c.details.clone(),
+                sha: c.sha.clone(),
+                reference: c.reference.clone(),
                 before,
                 after,
                 ratio,
@@ -289,7 +313,10 @@ fn markdown(verdicts: &[Verdict]) -> String {
         let verb = match v.verdict {
             "improved" => "keep".to_string(),
             "flat" => "improve".to_string(),
-            "worse" => match revert_sha(&claude_dir, &v.file, v.ts) {
+            "worse" => match v.sha.as_deref().map_or_else(
+                || revert_sha(&claude_dir, &v.file, v.ts),
+                |s| Some(s.to_string()),
+            ) {
                 Some(sha) => format!("git revert {sha}"),
                 None => format!(
                     "roll back (sha unresolved: git -C {claude_dir} log --before={} -- {})",
@@ -302,8 +329,14 @@ fn markdown(verdicts: &[Verdict]) -> String {
                 v.sessions_before, v.sessions_after
             ),
         };
+        // The ref names the proposal the commit applied, closing the chain
+        // evidence rows -> review item -> node -> commit -> verdict.
+        let ref_suffix = match v.reference.as_deref() {
+            Some(r) => format!("; ref={r}"),
+            None => String::new(),
+        };
         lines.push(format!(
-            "- {} {}: {} ({verb})",
+            "- {} {}: {} ({verb}{ref_suffix})",
             v.ts.to_rfc3339(),
             v.file,
             v.verdict
@@ -321,6 +354,8 @@ fn json_rows(verdicts: &[Verdict]) -> Value {
                     "ts": v.ts.to_rfc3339(),
                     "file": v.file,
                     "details": v.details,
+                    "sha": v.sha,
+                    "ref": v.reference,
                     "before": round4(v.before),
                     "after": round4(v.after),
                     "ratio": v.ratio.map(round4),

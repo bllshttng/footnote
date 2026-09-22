@@ -21,7 +21,7 @@ Consumer surface (this skill):
 
 - **Monthly review** (1st of each month, 09:00 local) sends the last 30 days of S1+S2 events plus the current full text of every implicated rule file to a fresh Claude API call. Output is a numbered patch list.
 - **S0 watcher** (every 15 minutes) catches any unprocessed S0 events and fires an immediate review.
-- **Triage** walks the patch list interactively; accept/reject/defer/skip/quit per item.
+- **Triage** walks the patch list interactively with accept/reject/defer/skip/quit per item. An accepted diff to a shipped skill (`skills/<name>/SKILL.md` in this repo) is never applied locally. Triage files a backlog node, and a worker ships it through the normal PR path. The shipping commit carries the trailer `Autocorrect-Ref: <review_id>#<N>`, so the post-commit hook's row links back to the proposal.
 
 ## Commands
 
