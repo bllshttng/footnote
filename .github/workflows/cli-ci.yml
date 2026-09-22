@@ -590,9 +590,6 @@ jobs:
     # silent skip.
     env:
       FNO_CLAIMS_PARITY_PYTHON: ${{ github.workspace }}/cli/.venv/bin/python
-      FNO_HOME: ${{ runner.temp }}/fno
-      FNO_AGENTS_HOME: ${{ runner.temp }}/fno-agents
-      FNO_CLAIMS_ROOT: ${{ runner.temp }}/fno-claims
 
     steps:
       - name: Checkout
@@ -601,6 +598,12 @@ jobs:
           # The PROTO_VERSION guard below needs a merge-base between the base
           # tip and the PR head; the default shallow fetch cannot compute one.
           fetch-depth: 0
+
+      - name: Set isolated FNO state roots
+        run: |
+          echo "FNO_HOME=$RUNNER_TEMP/fno" >> "$GITHUB_ENV"
+          echo "FNO_AGENTS_HOME=$RUNNER_TEMP/fno-agents" >> "$GITHUB_ENV"
+          echo "FNO_CLAIMS_ROOT=$RUNNER_TEMP/fno-claims" >> "$GITHUB_ENV"
 
       - name: PROTO_VERSION monotonic bump guard
         # Runs before the Rust build so a version collision fails in seconds
