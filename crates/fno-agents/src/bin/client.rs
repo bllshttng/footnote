@@ -175,9 +175,8 @@ fn main() {
     if args.first().map(String::as_str) == Some("launch-workdir") {
         std::process::exit(fno_agents::launch_workdir::run_launch_workdir(&args[1..]));
     }
-    // `worktree-reapable`: the worktree-removal gate, daemon-free, transport-
-    // only (no client action; the shrink law allows none) - callers exec the
-    // binary directly (worktree_gate.py, scripts/lib/worktree-reapable.sh).
+    // `worktree-reapable`: the worktree-removal gate, daemon-free, transport-only
+    // (no client action - shrink law); callers: worktree_gate.py, worktree-reapable.sh.
     if args.first().map(String::as_str) == Some("worktree-reapable") {
         std::process::exit(fno_agents::worktree_reapable::run_client(&args[1..]));
     }
