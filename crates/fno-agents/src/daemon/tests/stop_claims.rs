@@ -162,10 +162,8 @@ async fn claude_stop_stamps_the_stop_record_and_exit() {
         .await
         .expect("the registry write succeeds");
 
-    let entry = state::load_registry(&home.registry_json())
-        .unwrap()
-        .find("w1")
-        .unwrap();
+    let registry = state::load_registry(&home.registry_json()).unwrap();
+    let entry = registry.find("w1").unwrap();
     assert_eq!(entry.status, AgentStatus::Exited);
     assert!(entry.exited_at.is_some(), "an exit stamp is set");
     let stop = entry.stop.as_ref().expect("the stop record is set");
