@@ -8,59 +8,56 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fno.config import KING_CHECKIN_TEXT, KING_GOAL_TEXT, KingBlock
+from fno.config import KING_CHECKIN_TEXT, KingBlock
 
 
 def test_ac19_defaults_with_no_config() -> None:
     block = KingBlock()
-    assert block.checkin_interval == "4h"
+    assert block.checkin_interval == "55m"
     assert block.checkin_text == KING_CHECKIN_TEXT
-    assert block.goal_text == KING_GOAL_TEXT
-    # The defaults are the skill's own texts: they name the check-in body,
-    # the never-clear rule, and the done-or-superseded drain rule, so a fresh
-    # install runs with no config.
+    # The default is the skill's own check-in text, so a fresh install runs
+    # with no config.
     assert "reign check-in" in block.checkin_text
-    assert "NoProgress" in block.goal_text
-    assert "done, superseded or will not do" in block.goal_text
+    assert not hasattr(block, "goal_text")
 
 
 def test_ac19_registry_answers_config_get(tmp_path: Path, monkeypatch) -> None:
-    """`fno config get king.checkin_interval` answers 4h from bare defaults."""
+    """`fno config get king.checkin_interval` answers 55m from bare defaults."""
     from fno.config import load_settings
     from fno.paths_testing import use_tmpdir
 
     use_tmpdir(monkeypatch, tmp_path)
     settings = load_settings()
-    assert settings.king.checkin_interval == "4h"
+    assert settings.king.checkin_interval == "55m"
 
 
 def test_ac20_bad_interval_degrades_to_default() -> None:
     block = KingBlock(checkin_interval="not a duration")
-    assert block.checkin_interval == "4h"
+    assert block.checkin_interval == "55m"
     # Valid shapes pass through verbatim.
     assert KingBlock(checkin_interval="15m").checkin_interval == "15m"
     assert KingBlock(checkin_interval="2h").checkin_interval == "2h"
-    assert KingBlock(checkin_interval=45).checkin_interval == "4h"  # type: ignore[arg-type]
+    assert KingBlock(checkin_interval=45).checkin_interval == "55m"  # type: ignore[arg-type]
 
 
 def test_ac20_blank_texts_degrade_and_do_not_raise() -> None:
     block = KingBlock(checkin_text="   ", goal_text=None)
     assert block.checkin_text == KING_CHECKIN_TEXT
-    assert block.goal_text == KING_GOAL_TEXT
-    custom = KingBlock(checkin_text="custom body", goal_text="custom goal")
+    assert not hasattr(block, "goal_text")
+    custom = KingBlock(checkin_text="custom body", goal_text="legacy goal")
     assert custom.checkin_text == "custom body"
-    assert custom.goal_text == "custom goal"
+    assert not hasattr(custom, "goal_text")
 
 
-def test_registry_lists_the_three_keys() -> None:
+def test_registry_lists_the_two_live_keys() -> None:
     from fno.config.registry import FIELD_META
 
     for key in (
         "king.checkin_interval",
         "king.checkin_text",
-        "king.goal_text",
     ):
         assert key in FIELD_META
+    assert "king.goal_text" not in FIELD_META
 
 
 def test_write_roots_default_and_coercion() -> None:
@@ -89,8 +86,4 @@ def test_shipped_defaults_pass_the_style_gate_that_sends_them() -> None:
     settings = load_settings()
     cap = settings.style.word_cap.mail
     interval = settings.king.checkin_interval
-    for body in (
-        f"/loop {interval} {KING_CHECKIN_TEXT}",
-        f"/goal {KING_GOAL_TEXT}",
-    ):
-        assert style.check(body, surface="mail", word_cap=cap) == []
+    assert style.check(f"/loop {interval} {KING_CHECKIN_TEXT}", surface="mail", word_cap=cap) == []
