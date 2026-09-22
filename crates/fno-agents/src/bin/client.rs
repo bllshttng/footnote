@@ -402,11 +402,10 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     // `king-escalation-text` is the hidden binary-direct transport for the
-    // king escalation renderer: the question/mail text renderer
-    // ported out of `fno.king.escalate`. Python keeps the question fold and
-    // the liveness read; this side only renders. Same `matches!` treatment
-    // as `law-match` so the routable-verb parity guard does not see it - no
-    // advertised fno verb is added.
+    // king escalation renderer (ported out of `fno.king.escalate`): Python
+    // keeps the question fold and the liveness read, this side only renders.
+    // Same `matches!` treatment as `law-match`, so no advertised fno verb is
+    // added.
     if matches!(verb, "king-escalation-text") {
         return fno_agents::king_escalation::run_king_escalation_text(&args[1..]);
     }
