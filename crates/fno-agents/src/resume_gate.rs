@@ -209,7 +209,7 @@ fn refused_line(
         return None;
     };
     let pr_clause = hit.pr.map(|pr| format!(" (PR #{pr})")).unwrap_or_default();
-    let who = holder_short(&hit.holder);
+    let who = holder_handle(&hit.holder);
     eprintln!(
         "fno agents resume: refused: node {sn}{pr_clause} is now held by {holder} on node {node}. \
 Resuming {name} would put a second writer on that branch. Stop or hand off that holder first; \
@@ -282,7 +282,7 @@ fn reserve_nodes(
         match claims::acquire(&format!("node:{id}"), holder, opts) {
             AcquireOutcome::Acquired(_) => {}
             AcquireOutcome::HeldByOther { holder: other, .. } => {
-                let who = holder_short(&other);
+                let who = holder_handle(&other);
                 eprintln!(
                     "fno agents resume: refused: node {id} was just claimed by {other}. \
 Resuming {name} would put a second writer on that branch. Stop or hand off that holder first; \
@@ -306,9 +306,8 @@ read it with fno agents truth {who}.",
     None
 }
 
-fn holder_short(holder: &str) -> &str {
-    let id = holder.split_once(':').map(|(_, id)| id).unwrap_or(holder);
-    id.get(..8).unwrap_or(id)
+fn holder_handle(holder: &str) -> &str {
+    holder.split_once(':').map(|(_, id)| id).unwrap_or(holder)
 }
 
 /// `run_resume`'s two cwd refusals live here beside the holder check: all
@@ -442,6 +441,15 @@ mod tests {
             "target-session:8c58eaf1-old",
         )]));
         assert!(other_holder(&entries, sid, &holder_of).is_none());
+    }
+
+    #[test]
+    fn holder_handle_prints_the_whole_handle() {
+        assert_eq!(holder_handle("king-fno-g6"), "king-fno-g6");
+        assert_eq!(
+            holder_handle("target-session:01a0c61c-c000-70c0-8dd4-dcb7cd9e27d4"),
+            "01a0c61c-c000-70c0-8dd4-dcb7cd9e27d4"
+        );
     }
 
     // AC4-EDGE: no node carries a do-row for this session.
