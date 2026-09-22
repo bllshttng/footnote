@@ -2100,7 +2100,12 @@ def test_one_unusable_projection_row_does_not_abort_the_backfill(
     aborts on the first bad row and loses the journal half of the fold too."""
     from fno.decide import reindex
 
-    runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "from the journal"])
+    recorded = runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "from the journal"])
+    if not index.exists():
+        raise AssertionError(
+            f"record rc={recorded.exit_code} out={recorded.output!r}"
+            f" exc={recorded.exception!r} index={index}"
+        )
     index.unlink()
     _seed_projection(
         tmp_graph,

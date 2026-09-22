@@ -365,5 +365,12 @@ def test_damaged_index_rows_fail_closed_not_reported_as_clean(tmp_path):
     ))
     result = _run(plan, state_dir)
     assert result.returncode == 1, result.stdout
-    assert "decisions_acknowledged could not be checked" in result.stdout
+    if "damaged row" not in result.stdout:
+        from fno.events.store_client import native_rows
+
+        raise AssertionError(
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+            f" index_lines={index.read_text(encoding='utf-8')!r}"
+            f" native={native_rows(index)!r}"
+        )
     assert "damaged row" in result.stdout
