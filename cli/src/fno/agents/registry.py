@@ -2596,7 +2596,6 @@ SESSION_OBSERVATION_OUTCOMES = (
 
 
 def _flush_pending_session_row(entry: AgentEntry, session_id: str) -> None:
-    """Hand a parked row to the fno-agents binary; it opens and clears."""
     if not entry.pending_session_row:
         return
     from fno.paths import agents_registry_path, graph_json
