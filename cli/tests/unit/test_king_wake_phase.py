@@ -1746,3 +1746,147 @@ def test_a_refused_spawn_says_so_in_the_feed(tmp_path):
     assert summary["refused"] == [
         {"scope": "epic-x", "refusal": "manifest-carries-no-model-pin"}
     ]
+
+
+def _manifest_for(root, scope):
+    from fno.king.state import king_manifest_path, king_state_root
+
+    return king_manifest_path(scope, state_root=king_state_root(root))
+
+
+def test_one_bus_read_serves_every_address_in_a_pass(tmp_path, monkeypatch):
+    # AC1-HP: the default mail reader holds ONE bus read per pass; nine
+    # addresses across two crowns must not re-read it.
+    from fno.bus import log as bus_log
+
+    calls = []
+    real_iter = bus_log.iter_messages
+
+    def counted(*a, **k):
+        calls.append(1)
+        return real_iter(*a, **k)
+
+    monkeypatch.setattr(bus_log, "iter_messages", counted)
+    monkeypatch.setenv("FNO_BUS_DIR", str(tmp_path / "bus"))
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    rec = _Recorder()
+    crowns = [
+        {"holder": "king-a", "scope": "epic-a1,epic-a2,epic-a3", "status": "live"},
+        {"holder": "king-b", "scope": "epic-b1,epic-b2", "status": "live"},
+    ]
+    for scope in ("epic-a1,epic-a2,epic-a3", "epic-b1,epic-b2"):
+        write_manifest(
+            _manifest_for(root, scope),
+            scope=scope,
+            harness_session_id="11111111-2222-3333-4444-555555555555",
+            force=True,
+        )
+
+    def rows():
+        return [
+            SimpleNamespace(
+                name="king-a", cwd=str(root), status="live", short_id="aa11bb22"
+            ),
+            SimpleNamespace(
+                name="king-b", cwd=str(root), status="live", short_id="cc22dd33"
+            ),
+        ]
+
+    summary = run_king_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        court_fn=lambda _rows: {"crowns": crowns, "conflicts": []},
+        rows_fn=rows,
+        truth_fn=lambda h: {"state": "done"},
+        entries_fn=lambda: [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+        answered_fn=lambda: [],
+    )
+
+    assert summary["evaluated"] == 2, summary
+    assert rec.dispatches == [], "a held empty bus is no trigger"
+    assert len(calls) == 1, f"one bus read per pass, saw {len(calls)}"
+
+
+def test_the_default_court_reads_no_agreement(tmp_path, monkeypatch):
+    # AC2-EDGE: the default court_fn binds agree=False, and a manifest-only
+    # crown still lands in the note as an unregistered holder.
+    from fno.agents import court as court_mod
+
+    received = {}
+
+    def spy(rows, **kwargs):
+        received.update(kwargs)
+        return {
+            "crowns": [
+                {
+                    "holder": "ghost",
+                    "scope": "epic-x",
+                    "level": 2,
+                    "grantor": "human",
+                    "status": "manifest-only",
+                    "agree": None,
+                    "reason": "crown lives on the manifest",
+                }
+            ],
+            "conflicts": [],
+        }
+
+    monkeypatch.setattr(court_mod, "gather_court", spy)
+    rec, summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda a: [],
+        extra={"court_fn": None},
+    )
+
+    assert received == {"agree": False}
+    assert "unregistered holder(s)" in summary["note"]
+    assert summary["evaluated"] == 0
+    assert rec.dispatches == []
+
+
+def test_a_cut_inside_the_compile_reports_the_board_step(tmp_path, monkeypatch):
+    # AC5-HP: the board compile and backstop run under a `board` label - it
+    # follows `graph` for the first crown and `mail` for every later one, so a
+    # cut inside a compile reads king_wake:board, not the step before it.
+    monkeypatch.setenv("FNO_BUS_DIR", str(tmp_path / "bus"))
+    root = tmp_path / "proj"
+    root.mkdir()
+    crowns = [
+        {"holder": "king-a", "scope": "epic-a1", "status": "live"},
+        {"holder": "king-b", "scope": "epic-b1", "status": "live"},
+    ]
+    for scope in ("epic-a1", "epic-b1"):
+        write_manifest(
+            _manifest_for(root, scope),
+            scope=scope,
+            harness_session_id="11111111-2222-3333-4444-555555555555",
+            force=True,
+        )
+    rec = _Recorder()
+    steps: list[str] = []
+
+    summary = run_king_wake(
+        _settings(),
+        emit=rec.emit,
+        now=NOW,
+        court_fn=lambda _rows: {"crowns": crowns, "conflicts": []},
+        rows_fn=lambda: [
+            SimpleNamespace(name="king-a", cwd=str(root), status="live", short_id="aa11bb22"),
+            SimpleNamespace(name="king-b", cwd=str(root), status="live", short_id="cc22dd33"),
+        ],
+        truth_fn=lambda h: {"state": "done"},
+        entries_fn=lambda: [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+        answered_fn=lambda: [],
+        on_step=steps.append,
+    )
+
+    assert summary["evaluated"] == 2
+    assert steps == ["court", "answers", "mail", "graph", "board", "mail", "board"], steps

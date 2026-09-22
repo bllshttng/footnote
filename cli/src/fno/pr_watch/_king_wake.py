@@ -12,6 +12,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, cast
 
@@ -456,8 +457,7 @@ def _dispatch_walk(
     return True
 
 
-#: A pass stops under 15s left, sized to a loaded 10.4s truth read, rather than
-#: being cut mid-read and losing every crown before it.
+#: A pass stops under 15s left rather than be cut mid-step and lose every crown after it.
 _KING_STEP_FLOOR_S = 15.0
 
 _GRAPH_ENTRIES_MEMO: dict = {"ident": None, "entries": None}
@@ -518,15 +518,18 @@ def run_king_wake(
     if court_fn is None:
         from fno.agents.court import gather_court
 
-        court_fn = gather_court
+        # The wake reads holder and scope, never agreement: skip that graph parse.
+        court_fn = partial(gather_court, agree=False)
     if truth_fn is None:
         from fno.agents.session_truth import resolve_session_truth
 
         truth_fn = resolve_session_truth
     if unread_fn is None:
         from fno.bus.cursor import scan_unread
+        from fno.bus.log import iter_messages
 
-        unread_fn = scan_unread
+        # One bus read per pass, not one per address: a crown has up to nine.
+        unread_fn = partial(scan_unread, messages=list(iter_messages()))
     if answered_fn is None:
         from fno.outstanding.core import read_answered_questions
 
@@ -634,6 +637,7 @@ def run_king_wake(
                 entries = entries_fn()
             # One compile feeds both lanes; None rows (empty or uncompilable
             # scope) is no signal for either.
+            _step("board")
             rows = _board_rows(target.scope, entries, scope_resolver) if entries else None
             changed, fresh_board_hash, fresh_board_rows, wake_detail, first_observation = (
                 _board_trigger(target, rows)
@@ -675,10 +679,6 @@ def run_king_wake(
             _update_sidecar(target, answered_cursor=_birth_cursor(target.manifest))
         if first_observation and fresh_board_hash is not None:
             _store_board_hash(target, fresh_board_hash, fresh_board_rows or ())
-        if reason is None:
-            # A first observation is a seed, never a trigger: nothing to wake.
-            summary["evaluated"] += 1
-            continue
         if holder_gone:
             from fno.king.state import at_respawn_ceiling, parse_manifest, respawn_ceiling
 

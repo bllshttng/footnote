@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::agents_config;
@@ -232,8 +232,10 @@ const GATE_CLAIM_TTL_MS: i64 = 5 * 60 * 1000;
 /// forbids. Failing open can overshoot the cap by the number of racing
 /// spawners, so a capped spawner keeps queueing instead.
 const MUTEX_WAIT_BUDGET: Duration = Duration::from_secs(60);
-/// worker:<name> headless slot TTL: bounds a one-shot that outlives its
-/// client pid record; PID liveness is the primary release.
+/// worker:<name> headless slot TTL: bounds a LIVE holder's stay; a dead
+/// holder frees the slot at once (the claim carries its holder pid stamped
+/// `holder-process`, so PID liveness is the primary release and the TTL is
+/// only the backstop).
 const WORKER_CLAIM_TTL_MS: i64 = 4 * 60 * 60 * 1000;
 const KNOWN_UNROUTED_PROVIDER: &str = "__uncapped__";
 
@@ -577,16 +579,16 @@ pub(crate) fn live_rows(registry_path: &Path, warnings: &mut Vec<String>) -> Vec
 /// warning line pushed to `warnings` (LD5, fail open).
 pub fn slot_count(registry_path: &Path, warnings: &mut Vec<String>) -> usize {
     let (rows, claims) = slot_reading(registry_path, warnings);
-    rows.len() + claims
+    rows.len() + claims.len()
 }
 
 /// The slot count's two inputs, together: the live registry rows and the live
-/// `worker:<name>` headless reservations. `slot_count` is the sum; the
-/// refusal paths need the rows themselves to name them.
+/// `worker:<name>` headless reservations, each reservation named. `slot_count`
+/// is the sum; the refusal paths need the rows themselves to name them.
 pub(crate) fn slot_reading(
     registry_path: &Path,
     warnings: &mut Vec<String>,
-) -> (Vec<RegistryEntry>, usize) {
+) -> (Vec<RegistryEntry>, Vec<SlotReservation>) {
     let rows = live_rows(registry_path, warnings);
     let claims = live_worker_slot_claims(warnings);
     (rows, claims)
@@ -596,12 +598,13 @@ pub(crate) fn slot_reading(
 /// never quote a count the gate did not measure. Pure text; the caller adds
 /// its own tail (`refusing (--no-wait).`, or the queue line's advice). The
 /// rows are named by the probe's `slot_rows` field (`fno agents gate-status`),
-/// never by a second walk.
+/// never by a second walk. When a reservation is counted, the sentence names
+/// the release verb for the first suspect one; all-live saturation names none.
 fn slot_refusal_line(
     slots: usize,
     cap: usize,
     rows: usize,
-    claims: usize,
+    claims: &[SlotReservation],
     waiting: usize,
     tail: &str,
 ) -> String {
@@ -610,10 +613,22 @@ fn slot_refusal_line(
     } else {
         String::new()
     };
+    // Name the remedy only for a SUSPECT reservation: a live one still holds
+    // its slot on purpose, and releasing it would leave the worker running
+    // uncounted. All-live saturation names no release target.
+    let remedy = match claims.iter().find(|r| r.state == "suspect") {
+        Some(r) => format!(
+            "; free a dead reservation: fno agents claim release worker:{} --force \
+             --reason \"<why>\"",
+            r.name
+        ),
+        None => String::new(),
+    };
     format!(
-        "{slots} live worker slots >= max_live {cap} ({rows} registry rows, {claims} headless \
+        "{slots} live worker slots >= max_live {cap} ({rows} registry rows, {n} headless \
          reservations{waiting_note}); every counted row: fno agents gate-status, field \
-         slot_rows; {tail}"
+         slot_rows{remedy}; {tail}",
+        n = claims.len()
     )
 }
 
@@ -979,22 +994,46 @@ pub fn run_territory_verdict(args: &[String]) -> i32 {
     0
 }
 
-/// Live `worker:<name>` slot claims under the GLOBAL claims root. Headless
-/// one-shots write no registry row, so their gate acquires one of these for
-/// the call duration; concurrent gates see them here. `Suspect` counts like
-/// `Live` (TTL-protected, never up for grabs).
-fn live_worker_slot_claims(warnings: &mut Vec<String>) -> usize {
+/// One counted `worker:<name>` reservation the slot census named, so a
+/// reader can see what holds each slot and free a dead one. The provider
+/// walker (`spawn_gate_lanes`) reuses this record instead of a third walk.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SlotReservation {
+    /// The claim key's name half (`worker:<name>` minus the prefix).
+    pub name: String,
+    /// The claim's holder string (a credential, never parsed for identity).
+    pub holder: String,
+    /// The recorded holder pid, when the writer proved one.
+    pub pid: Option<i32>,
+    /// Seconds since `acquired_at`.
+    pub age_s: Option<u64>,
+    /// `live` or `suspect` - the only states the census counts.
+    pub state: &'static str,
+    /// The `model_provider` metadata tag the provider count reads.
+    pub provider: Option<String>,
+}
+
+/// Live `worker:<name>` slot claims under the GLOBAL claims root, named.
+/// Headless one-shots write no registry row, so their gate acquires one of
+/// these for the call duration; concurrent gates see them here. `Suspect`
+/// counts like `Live` (TTL-protected, never up for grabs); a dead
+/// holder-process claim reads `Stale` before this counts it.
+fn live_worker_slot_claims(warnings: &mut Vec<String>) -> Vec<SlotReservation> {
     let root = match gate_claims_root() {
         Some(r) => r,
-        None => return 0,
+        None => return Vec::new(),
     };
     let dir = root.join(".fno/claims");
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
-        Err(_) => return 0, // no claims dir yet: nothing held.
+        Err(_) => return Vec::new(), // no claims dir yet: nothing held.
     };
     let prefix = claims::encode_key("worker:");
-    let mut n = 0usize;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let mut found = Vec::new();
     for entry in entries.flatten() {
         let fname = entry.file_name();
         let fname = fname.to_string_lossy();
@@ -1008,14 +1047,30 @@ fn live_worker_slot_claims(warnings: &mut Vec<String>) -> usize {
             None => continue,
         };
         match claims::status(&key, Some(&root)) {
-            (claims::ClaimState::Live, _) | (claims::ClaimState::Suspect, _) => n += 1,
+            (state @ (claims::ClaimState::Live | claims::ClaimState::Suspect), Some(rec)) => {
+                found.push(SlotReservation {
+                    name: key.strip_prefix("worker:").unwrap_or(&key).to_string(),
+                    holder: rec.holder,
+                    pid: rec.pid,
+                    age_s: u64::try_from((now_ms - rec.acquired_at).max(0) / 1000).ok(),
+                    state: match state {
+                        claims::ClaimState::Live => "live",
+                        _ => "suspect",
+                    },
+                    provider: rec
+                        .metadata
+                        .get("model_provider")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                });
+            }
             (claims::ClaimState::Corrupted, _) => {
                 warnings.push(format!("{NOTE} corrupted slot claim {key} ignored"));
             }
             _ => {}
         }
     }
-    n
+    found
 }
 
 /// Minimal percent-decoder for claim filenames (inverse of
@@ -1396,7 +1451,7 @@ fn decide_gate(
         eprintln!("{NOTE} forced past cap, RAM floor, and CPU share ceiling (--force)");
         if substrate == "headless" {
             // fail_closed=false: this arm cannot fault, only warn.
-            acquire_worker_slot(&mut guard, name, &holder, route_provider, false).ok();
+            acquire_worker_slot(&mut guard, name, &holder, holder_pid, route_provider, false).ok();
         }
         return Ok(guard);
     }
@@ -1564,9 +1619,14 @@ fn decide_gate(
                 );
                 if substrate == "headless" {
                     // A worker-slot claim fault is not the gate mutex; name the site.
-                    if let Err(fault) =
-                        acquire_worker_slot(&mut guard, name, &holder, route_provider, true)
-                    {
+                    if let Err(fault) = acquire_worker_slot(
+                        &mut guard,
+                        name,
+                        &holder,
+                        holder_pid,
+                        route_provider,
+                        true,
+                    ) {
                         guard.release();
                         return Err(gate_fault_refusal(
                             route_provider,
@@ -1671,8 +1731,8 @@ fn decide_gate(
                     }
                     if !hold_pause {
                         let mut warnings = Vec::new();
-                        let (live, claims) = slot_reading(registry_path, &mut warnings);
-                        let slots = live.len() + claims;
+                        let (live, reservations) = slot_reading(registry_path, &mut warnings);
+                        let slots = live.len() + reservations.len();
                         last_slots = slots;
                         for w in &warnings {
                             eprintln!("{w}");
@@ -1740,6 +1800,7 @@ fn decide_gate(
                                     &mut guard,
                                     name,
                                     &holder,
+                                    holder_pid,
                                     route_provider,
                                     provider_cap.is_some(),
                                 ) {
@@ -1780,7 +1841,7 @@ fn decide_gate(
                                 slots,
                                 cap,
                                 live.len(),
-                                claims,
+                                &reservations,
                                 waiting.len(),
                                 "refusing (--no-wait).",
                             );
@@ -1796,7 +1857,11 @@ fn decide_gate(
                                     "max_live": cap,
                                     "count": slots,
                                     "current_count": slots,
-                                    "slot_rows": live.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+                                    "slot_rows": live
+                                        .iter()
+                                        .map(|r| r.name.clone())
+                                        .chain(reservations.iter().map(|r| r.name.clone()))
+                                        .collect::<Vec<_>>(),
                                     "waiting_on_operator": waiting.iter().map(|(name, qid)| serde_json::json!({
                                         "name": name,
                                         "question_id": qid,
@@ -1819,7 +1884,7 @@ fn decide_gate(
                                 slots,
                                 cap,
                                 live.len(),
-                                claims,
+                                &reservations,
                                 waiting.len(),
                                 "waiting for a free slot (--no-wait to fail fast, --force to bypass)",
                             );
@@ -2449,13 +2514,17 @@ fn footprint_cause_raw_with(argv: &[String], budget: Duration) -> Result<String,
 
 /// Take the headless worker slot claim. The claim carries `model_provider`
 /// (the route provider, else the un-routed marker) because the provider count
-/// reads that tag. `fail_closed` (a provider cap applies) turns a fault into
-/// the caller's refusal; without a cap the claim is count VISIBILITY, not a
-/// correctness gate, and a fault proceeds uncounted.
+/// reads that tag. The claim carries the holder pid stamped `holder-process`
+/// (the same stamp the flight gate writes), so a dead holder frees its slot
+/// at once instead of reading Suspect for the whole TTL. `fail_closed` (a
+/// provider cap applies) turns a fault into the caller's refusal; without a
+/// cap the claim is count VISIBILITY, not a correctness gate, and a fault
+/// proceeds uncounted.
 fn acquire_worker_slot(
     guard: &mut GateGuard,
     name: &str,
     holder: &str,
+    holder_pid: u32,
     route_provider: Option<&str>,
     fail_closed: bool,
 ) -> Result<(), String> {
@@ -2474,6 +2543,8 @@ fn acquire_worker_slot(
         &key,
         holder,
         claims::AcquireOpts {
+            pid: Some(holder_pid),
+            pid_provenance: Some(claims::HOLDER_PROCESS.to_string()),
             ttl_ms: Some(WORKER_CLAIM_TTL_MS),
             metadata: Some(metadata),
             root: guard.root.clone(),
@@ -3698,7 +3769,7 @@ MemAvailable:    8000000 kB\n";
     /// blames a population its own recommended reader cannot see.
     #[test]
     fn slot_refusal_line_names_the_probe_and_marks_waiting_rows() {
-        let line = slot_refusal_line(3, 2, 3, 0, 1, "refusing (--no-wait).");
+        let line = slot_refusal_line(3, 2, 3, &[], 1, "refusing (--no-wait).");
         assert!(line.contains("fno agents gate-status"), "{line}");
         assert!(line.contains("slot_rows"), "{line}");
         assert!(
@@ -3708,7 +3779,7 @@ MemAvailable:    8000000 kB\n";
         assert!(!line.contains("--status quiet"), "{line}");
         assert!(!line.contains("fno agents top"), "{line}");
 
-        let line = slot_refusal_line(3, 2, 3, 0, 0, "refusing (--no-wait).");
+        let line = slot_refusal_line(3, 2, 3, &[], 0, "refusing (--no-wait).");
         assert!(!line.contains("wait on an operator question"), "{line}");
     }
 
@@ -4089,7 +4160,15 @@ MemAvailable:    8000000 kB\n";
             root: Some(root.clone()),
         };
 
-        acquire_worker_slot(&mut guard, "plain-codex", "spawn-gate:test", None, false).unwrap();
+        acquire_worker_slot(
+            &mut guard,
+            "plain-codex",
+            "spawn-gate:test",
+            std::process::id(),
+            None,
+            false,
+        )
+        .unwrap();
 
         let claim_path = root
             .join(".fno/claims")
@@ -4712,3 +4791,7 @@ MemAvailable:    8000000 kB\n";
         e
     }
 }
+
+#[cfg(test)]
+#[path = "spawn_gate_slot_tests.rs"]
+mod spawn_gate_slot_tests;

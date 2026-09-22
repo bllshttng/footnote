@@ -1015,8 +1015,6 @@ pub(crate) enum CoreMsg {
         prs: HashMap<String, u64>,
         /// node id -> driving session short id, from the same graph read.
         drivers: HashMap<String, String>,
-        /// Active missions, from the same graph read as `cards`.
-        missions: backlog_view::MissionMap,
     },
     /// The per-pane counter snapshot cadence fired: snapshot every live pane's
     /// monotonic totals and emit one event onto the machine-global events
@@ -1616,9 +1614,6 @@ pub(crate) struct Core {
     /// node id -> driving session short id; joined at layout time into
     /// `AgentRow.pr_session_short` (the PR row's attach handle).
     backlog_driver: HashMap<String, String>,
-    /// Active missions, from the off-loop graph reader; grouped into
-    /// synthetic "mission squad" headers at layout time.
-    missions: backlog_view::MissionMap,
     /// Panes spawned claim-ELIGIBLE (`pane run --claim`, agent panes). A
     /// general pane never appears here and never consults a claim (Locked 5).
     claim_eligible: HashSet<u64>,
@@ -6583,13 +6578,9 @@ impl Core {
     /// Capture squad `sid`'s whole tab topology into store shape -
     /// EVERY tab, hand-split and template alike, ending the three gates
     /// (template-only, named-squad-only, named-tab-only) that left the
-    /// operator's real layouts unpersisted. A mission squad is synthetic and
-    /// never captured. `None` when the squad is gone.
+    /// operator's real layouts unpersisted. `None` when the squad is gone.
     fn stored_tab_trees(&self, sid: u64) -> Option<(Vec<StoredTabTree>, usize)> {
         let sq = self.session.squad(sid)?;
-        if crate::proto::is_mission_squad(sid) {
-            return None;
-        }
         // Reverse the attach join so a pane with an fno id names its slot that
         // id (stable across restarts); anything else is an ordinal shell.
         let mut pane_owner_names: HashMap<u64, String> = self
@@ -9230,14 +9221,8 @@ impl Core {
                 panes: s.tabs.iter().map(|t| tree::leaves(&t.root).len()).sum(),
             })
             .collect();
-        // Synthetic "mission squad" headers: one per active mission, done/total
-        // and the rotation `(i of n)` baked into the name. They ride their own
-        // lane, never `squads`, because a mission is a progress header the
-        // client draws as a band. Renders even with zero tagged workers -
-        // "nothing running" must stay visible. Identity: mission_squad.
         ServerMsg::Layout {
             squads,
-            missions: crate::mission_squad::headers(&self.missions.missions),
             active_squad: view.0,
             panes: rects.to_vec(),
             focus,
@@ -13056,7 +13041,6 @@ impl Core {
                 holders,
                 prs,
                 drivers,
-                missions,
             } => {
                 // Same as AgentRows: only sideline data moved, so push the
                 // Layout without a frame re-emit.
@@ -13066,7 +13050,6 @@ impl Core {
                 self.backlog_holders = holders;
                 self.backlog_pr = prs;
                 self.backlog_driver = drivers;
-                self.missions = missions;
                 self.push_layout(false);
                 Flow::Continue
             }
@@ -13390,7 +13373,6 @@ async fn serve(
         backlog_holders: HashMap::new(),
         backlog_pr: HashMap::new(),
         backlog_driver: HashMap::new(),
-        missions: backlog_view::MissionMap::default(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
