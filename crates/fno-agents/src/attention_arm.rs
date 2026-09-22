@@ -1,4 +1,4 @@
-//! The `attention` daemon arm: deliver attention items to `[[reach_me]]`
+//! The `attention` daemon arm: deliver attention items to `[[attention]]`
 //! `md` sinks, read answers back after the settle window, record
 //! `attention_answer` rows, and flip delivered blocks closed. Zero sinks
 //! configured means the arm never opens a file.
@@ -23,7 +23,7 @@ pub const DEFAULT_SETTLE_SECS: u64 = 120;
 /// arm gives up and leaves the durable row for a human to finish.
 pub const CLEAR_RETRY_CAP: u32 = 5;
 
-/// One `[[reach_me]]` sink row. Unknown types and bad rows arrive as
+/// One `[[attention]]` sink row. Unknown types and bad rows arrive as
 /// errors, never silently dropped (AC6-ERR).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SinkOrErr {
@@ -67,14 +67,28 @@ impl SinkConfig {
     }
 }
 
-/// Read `[[reach_me]]` from the layered config, first-hit per key.
-pub fn reach_me(cwd: &Path) -> Vec<SinkOrErr> {
-    let Some(value) = crate::agents_config::config_lookup(cwd, &["reach_me"]) else {
-        return vec![];
-    };
+/// Read `[[attention]]` from the layered config, first-hit per key. The
+/// retired `[[reach_me]]` name reads for one release; loading it warns and
+/// names the new key (operator ruling, 2026-09-21).
+pub fn attention_sinks(cwd: &Path) -> Vec<SinkOrErr> {
+    if let Some(value) = crate::agents_config::config_lookup(cwd, &["attention"]) {
+        return parse_sinks(&value);
+    }
+    match crate::agents_config::config_lookup(cwd, &["reach_me"]) {
+        Some(value) => {
+            eprintln!(
+                "fno-agents attention: config key [[reach_me]] is now [[attention]]; rename it (the old name reads for one release)."
+            );
+            parse_sinks(&value)
+        }
+        None => vec![],
+    }
+}
+
+fn parse_sinks(value: &toml::Value) -> Vec<SinkOrErr> {
     let Some(rows) = value.as_array() else {
         return vec![SinkOrErr::Err(
-            "reach_me is not an array of tables".to_string(),
+            "attention is not an array of tables".to_string(),
         )];
     };
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -82,7 +96,7 @@ pub fn reach_me(cwd: &Path) -> Vec<SinkOrErr> {
         .enumerate()
         .map(|(i, row)| match parse_sink(row, i) {
             SinkOrErr::Ok(cfg) if !seen.insert(cfg.name.clone()) => SinkOrErr::Err(format!(
-                "reach_me[{i}]: duplicate sink name {:?}; each row needs its own",
+                "attention[{i}]: duplicate sink name {:?}; each row needs its own",
                 cfg.name
             )),
             other => other,
@@ -111,7 +125,7 @@ fn parse_sink(row: &toml::Value, index: usize) -> SinkOrErr {
                 Some(s) => s,
                 None => {
                     return SinkOrErr::Err(format!(
-                        "reach_me[{index}]: missing name (and no path to derive one from)"
+                        "attention[{index}]: missing name (and no path to derive one from)"
                     ))
                 }
             }
@@ -120,12 +134,12 @@ fn parse_sink(row: &toml::Value, index: usize) -> SinkOrErr {
     let sink_type = get_str("type").unwrap_or_else(|| "md".to_string());
     if sink_type != "md" {
         return SinkOrErr::Err(format!(
-            "reach_me[{index}] ({name}): unknown type {sink_type:?} (only \"md\" ships today)"
+            "attention[{index}] ({name}): unknown type {sink_type:?} (only \"md\" ships today)"
         ));
     }
     let Some(path_raw) = get_str("path").filter(|p| !p.is_empty()) else {
         return SinkOrErr::Err(format!(
-            "reach_me[{index}] ({name}): missing path (the one required key)"
+            "attention[{index}] ({name}): missing path (the one required key)"
         ));
     };
     let tag = get_str("tag").unwrap_or("#fno".to_string());
@@ -595,6 +609,132 @@ pub fn attention_dir() -> Result<PathBuf, std::io::Error> {
         .ok_or_else(|| std::io::Error::other("no agents home parent"))
 }
 
+/// The not-ready bounce: one wrapped mail to a not-ready item's asker,
+/// naming the id and the missing fields, once per item ever (the second
+/// beat stays quiet via the persisted bounce set). AC9-HP.
+fn bounce_not_ready(items: &[AttentionItem], dir: &Path) {
+    bounce_not_ready_with(items, dir, &|asker, body| {
+        let mut cmd = crate::loop_dispatch::fno_cmd("fno");
+        cmd.args(["agents", "mail", "send", asker, body]);
+        matches!(
+            crate::loop_dispatch::retry_etxtbsy(move || cmd.output()),
+            Ok(out) if out.status.success()
+        )
+    });
+}
+
+/// [`bounce_not_ready`] with the send injected, so a test counts sends
+/// without a `fno` shellout.
+fn bounce_not_ready_with(items: &[AttentionItem], dir: &Path, send: &dyn Fn(&str, &str) -> bool) {
+    let path = dir.join("bounced.json");
+    let mut bounced: std::collections::HashSet<String> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    let mut dirty = false;
+    for item in items {
+        if item.ready || !matches!(item.kind.as_str(), "question" | "pin") {
+            continue;
+        }
+        let Some(asker) = item
+            .asker
+            .as_ref()
+            .map(|a| a.handle.clone())
+            .filter(|h| !h.trim().is_empty())
+        else {
+            continue;
+        };
+        if bounced.contains(&item.id) {
+            continue;
+        }
+        let body = format!(
+            "Question {} is missing: {}. Re-ask with the fields (docs/architecture/attention-items.md) or clear it.",
+            item.id,
+            item.missing.join(", ")
+        );
+        if send(&asker, &body) {
+            bounced.insert(item.id.clone());
+            dirty = true;
+        }
+    }
+    if dirty {
+        if let Ok(s) = serde_json::to_string(&bounced) {
+            let _ = std::fs::write(&path, s);
+        }
+    }
+}
+
+/// Fold `user_ask_answered` rows into every sink: one closed line per row,
+/// appended once (the acked set persists beside the settle state). AC14-HP.
+fn fold_user_ask_answered(
+    index: &Path,
+    sinks: &[SinkConfig],
+    dir: &Path,
+    io: &mut dyn SinkIo,
+) -> u64 {
+    let seen_path = dir.join("answered.json");
+    let mut seen: std::collections::HashSet<String> = std::fs::read_to_string(&seen_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    let raw = std::fs::read_to_string(index).unwrap_or_default();
+    let mut appended = 0u64;
+    let mut dirty = false;
+    for line in raw.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("user_ask_answered") {
+            continue;
+        }
+        let data = v.get("data");
+        let session = data
+            .and_then(|d| d.get("session_id"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let turn = data
+            .and_then(|d| d.get("turn_id"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        if session.is_empty() || turn.is_empty() {
+            continue;
+        }
+        let key = format!("{session}:{turn}");
+        if seen.contains(&key) {
+            continue;
+        }
+        let field = |name: &str| -> String {
+            data.and_then(|d| d.get(name))
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        let (excerpt, answer) = (field("excerpt"), field("answer"));
+        let date: String = v
+            .get("ts")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .chars()
+            .take(10)
+            .collect();
+        let closed_line =
+            format!("- [x] You asked ({session}): \"{excerpt}\". Answer: {answer}. ✅ {date}\n");
+        for sink in sinks {
+            if io.append(&sink.path, &closed_line).is_ok() {
+                appended += 1;
+            }
+        }
+        seen.insert(key);
+        dirty = true;
+    }
+    if dirty {
+        if let Ok(s) = serde_json::to_string(&seen) {
+            let _ = std::fs::write(&seen_path, s);
+        }
+    }
+    appended
+}
+
 /// The daemon-facing wrapper: due-check plus one-in-flight gate (the
 /// `merge_close::maybe_tick` shape). The body runs off-loop.
 pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
@@ -612,9 +752,9 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
     let cwd = arm.config_cwd.clone();
     tokio::task::spawn_blocking(move || {
         let _gate = crate::daemon::SweepGate(flag);
-        let sinks = reach_me(&cwd);
+        let sinks = attention_sinks(&cwd);
         if sinks.is_empty() {
-            emit_tick_row(&home, 0, Some("no_sinks"), "no [[reach_me]] configured");
+            emit_tick_row(&home, 0, Some("no_sinks"), "no [[attention]] configured");
             return;
         }
         let (items, unreadable) = read_items(&cwd);
@@ -633,7 +773,25 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
                 return;
             }
         };
-        let mut acted = 0u64;
+        bounce_not_ready(&items, &dir);
+        let ok_sinks: Vec<SinkConfig> = sinks
+            .iter()
+            .filter_map(|e| match e {
+                SinkOrErr::Ok(s) => Some(s.clone()),
+                SinkOrErr::Err(_) => None,
+            })
+            .collect();
+        let answered = if ok_sinks.is_empty() {
+            0
+        } else {
+            fold_user_ask_answered(
+                &crate::provider_cap::questions_path(&home),
+                &ok_sinks,
+                &dir,
+                &mut RealIo,
+            )
+        };
+        let mut acted = answered;
         let mut skip: Option<String> = None;
         let mut detail: Vec<String> = Vec::new();
         for entry in sinks {
@@ -711,7 +869,12 @@ fn read_items_at(fno_dir: &Path, cwd: &Path) -> (Vec<AttentionItem>, Vec<String>
     let notes = read_notes(cwd);
     let lane_path = crate::king_board::scope::operator_lane_path(cwd);
     let lane_text = std::fs::read_to_string(lane_path).unwrap_or_default();
-    let items = crate::attention::project(&journals_raw, &notes, &lane_text, now_secs());
+    let mut items = crate::attention::project(&journals_raw, &notes, &lane_text, now_secs());
+    if let Ok(registry) =
+        crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json())
+    {
+        crate::attention::attach_reach(&mut items, &registry);
+    }
     (items, unreadable)
 }
 
@@ -948,5 +1111,70 @@ mod tests {
             unreadable.iter().any(|u| u.contains("events")),
             "{unreadable:?}"
         );
+    }
+
+    use crate::attention::project;
+
+    /// One not-ready question with a live asker: every context field but
+    /// `unknowns` is present, so `missing` names exactly one field.
+    fn not_ready_items() -> Vec<AttentionItem> {
+        let row = r#"{"ts":"2026-09-18T12:00:00Z","type":"operator_question","source":"test","data":{"question_id":"q-nr","question":"Which?","ask":"pick","session_id":"s1","cwd":"/repo/fno","node":"x-aaaa","asker":"worker-1","options":[{"n":1,"text":"A","next":"x"},{"n":2,"text":"B","next":"y"}],"context":{"blocked_because":"two repairs are Python edits","options_rationale":"the readings kings acted on","recommendation":{"option":1,"why":"narrowest"},"reversible":"costly","cost_if_wrong":"allowance drops","meanwhile":"stops"}}}"#;
+        project(row, &[], "", 0)
+    }
+
+    fn bounce_dir(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "attention-bounce-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn ac9_hp_the_bounce_mails_once_then_stays_quiet() {
+        let items = not_ready_items();
+        assert!(!items[0].ready);
+        let dir = bounce_dir("once");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sends = std::sync::atomic::AtomicUsize::new(0);
+        {
+            let send = |asker: &str, body: &str| {
+                use std::sync::atomic::Ordering;
+                assert_eq!(asker, "worker-1");
+                assert!(body.contains("q-nr"), "names the item id: {body}");
+                assert!(
+                    body.contains("missing unknowns"),
+                    "names the missing field: {body}"
+                );
+                sends.fetch_add(1, Ordering::SeqCst);
+                true
+            };
+            bounce_not_ready_with(&items, &dir, &send);
+        }
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+        // Second beat: quiet.
+        bounce_not_ready_with(&items, &dir, &|_a, _b| {
+            panic!("a second beat must stay quiet");
+        });
+    }
+
+    #[test]
+    fn ac9_hp_a_failed_bounce_send_is_retried_next_beat() {
+        let items = not_ready_items();
+        let dir = bounce_dir("retry");
+        std::fs::create_dir_all(&dir).unwrap();
+        bounce_not_ready_with(&items, &dir, &|_a, _b| false);
+        let retried = std::sync::atomic::AtomicUsize::new(0);
+        bounce_not_ready_with(&items, &dir, &|a, b| {
+            use std::sync::atomic::Ordering;
+            assert_eq!(a, "worker-1");
+            assert!(b.contains("q-nr"));
+            retried.fetch_add(1, Ordering::SeqCst);
+            true
+        });
+        assert_eq!(retried.load(Ordering::SeqCst), 1);
     }
 }
