@@ -53,8 +53,9 @@ PROMPT_PAYLOAD='{"hook_event_name":"UserPromptSubmit","prompt":"/fno:review low"
 
 # AC3-HP: the answer's hook_output object reaches stdout as compact JSON,
 # nothing else. Both happy stubs read stdin and answer only a "mode":"stage"
-# request, so a wrapper that drops stdin (the async-job /dev/null defect,
-# x-cc15) fails here instead of passing on an answer that was never fed.
+# request, so a wrapper that drops stdin (the async-job /dev/null defect
+# measured 2026-09-22) fails here instead of passing on an answer that was
+# never fed.
 out="$(run_with_stub \
     'read -r req
      [[ "$req" == *"mode\":\"stage\""* ]] && echo "{\"ok\":true,\"stage\":\"review\",\"hook_output\":{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"x\"}}}"' \
