@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 
 from fno.decide.cli import decide_app
 from fno.paths import project_log
+from fno.tracker.metadata import ExternalMetadataUnavailable
 
 runner = CliRunner()
 
@@ -308,7 +309,7 @@ def test_backlog_decide_skips_claim_read_for_non_node_subject(
     )
 
     assert result.exit_code == 0, result.output
-    assert "subject names no graph node" in result.stderr
+    assert "'area:coordination' names no graph node" in result.stderr
     assert calls == []
 
 
@@ -2150,6 +2151,59 @@ def test_a_failed_projection_never_reports_a_lost_capture(
         runner.invoke(decide_app, ["list", "--subject", "x-7d94", "--json"]).stdout
     )
     assert [d["decision"] for d in payload["decisions"]] == ["fold first"]
+
+
+@pytest.mark.parametrize(
+    ("patch_target", "exc", "expected"),
+    [
+        pytest.param(
+            "fno.graph.api.decision_record",
+            RuntimeError("database is locked"),
+            "the graph store refused the ruling",
+            id="store-refusal",
+        ),
+        pytest.param(
+            "fno.decide._project",
+            OSError("disk full"),
+            "the graph projection failed",
+            id="projection-raise",
+        ),
+        pytest.param(
+            "fno.tracker.metadata.read_entries",
+            RuntimeError("connection refused"),
+            "the graph could not be read",
+            id="precheck-read-error",
+        ),
+        pytest.param(
+            "fno.tracker.metadata.read_entries",
+            ExternalMetadataUnavailable("tracker is external"),
+            "the active tracker is external",
+            id="external-tracker",
+        ),
+    ],
+)
+def test_a_failed_or_skipped_projection_names_its_path(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    patch_target: str,
+    exc: Exception,
+    expected: str,
+):
+    """Every None node_id names the path that produced it. A live node subject
+    must never read as "names no graph node" - that line is the false receipt
+    that sent a blueprint to rediscover a live hold."""
+    def boom(*a, **kw):
+        raise exc
+
+    monkeypatch.setattr(patch_target, boom)
+    res = runner.invoke(
+        decide_app, ["--subject", "x-7d94", "--decision", "hold the merge"]
+    )
+    assert res.exit_code == 0, res.output
+    assert expected in res.stderr
+    assert "names no graph node" not in res.stderr
 
 
 def test_a_node_subject_folds_case_in_both_directions(

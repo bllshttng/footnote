@@ -80,10 +80,12 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "CLAUDE_PLUGIN_ROOT",
     "CODEX_PLUGIN_ROOT",
     "CLAUDE_CONFIG_DIR",  # the account-alias channel; picks which bill is paid
+    "CLAUDE_DIR_OVERRIDE",  # redirects the Claude config root (the rule-file git repo the corrections hook watches); same category as CLAUDE_CONFIG_DIR
     "CODEX_HOME",  # 12 reads in source; a real per-developer setting
     "GEMINI_PROJECT_DIR",
     "GEMINI_SANDBOX",
     "OPENCODE_CONFIG_DIR",  # opencode's config root; same category as CODEX_HOME
+    "OPENCODE_DB",  # points the intel fold at one opencode store; same category as CODEX_HOME
     "GROK_HOME",  # grok's session store root; the same category pi once read a store-root var for
     "GROK_SESSION_ID",  # a live grok session marker; identity, not test input
     "CLAUDE_CLI",

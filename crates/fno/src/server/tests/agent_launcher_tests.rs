@@ -11,11 +11,52 @@ fn launch_req(id: u64, cwd: &str, harness: &str) -> crate::proto::AgentLaunchReq
         harness: harness.to_string(),
         substrate: "pane".to_string(),
         model: None,
+        model_names_harness: false,
         effort: None,
         permission_mode: None,
         placement: None,
+        portal: None,
+        split: None,
         message: String::new(),
     }
+}
+
+#[tokio::test]
+async fn agent_launch_accepts_empty_substrate_and_refuses_headless() {
+    // AC6: EMPTY = the door's default, an explicit lane still names pane or
+    // thread, and headless is refused pre-wire (never offered by the dock).
+    let (out_tx, _out_rx) = mpsc::channel::<(u64, PaneChunk)>(8);
+    let (exit_tx, _exit_rx) = mpsc::channel::<u64>(8);
+    let (self_tx, _self_rx) = mpsc::channel::<CoreMsg>(8);
+    let mut core = empty_core_with(self_tx);
+    // The empty substrate passes substrate validation; the BAD PATH refusal
+    // (below) must then be the cwd one, not the substrate one.
+    let mut req = launch_req(1, "/definitely/not/a/dir/", "claude");
+    req.substrate = String::new();
+    core.agent_launch(1, req);
+    match core.launch_desk.settled_state(1, 1) {
+        Some(crate::proto::agent_launch::LaunchState::Refused { reason }) => {
+            assert!(
+                reason.contains("does not exist"),
+                "empty substrate accepted; refusal should be the cwd: {reason}"
+            );
+        }
+        other => panic!("expected a settled refusal, got {other:?}"),
+    }
+    let mut bad = launch_req(2, "/definitely/not/a/dir/", "claude");
+    bad.substrate = "headless".to_string();
+    core.agent_launch(1, bad);
+    match core.launch_desk.settled_state(1, 2) {
+        Some(crate::proto::agent_launch::LaunchState::Refused { reason }) => {
+            assert!(
+                reason.contains("substrate"),
+                "headless refuses pre-wire: {reason}"
+            );
+        }
+        other => panic!("expected a substrate refusal, got {other:?}"),
+    }
+    drop(out_tx);
+    drop(exit_tx);
 }
 
 #[tokio::test]

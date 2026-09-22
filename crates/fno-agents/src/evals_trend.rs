@@ -206,7 +206,9 @@ fn stats_window(rows: &[Row], start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<T
     stats(&kept)
 }
 
-fn round4(x: f64) -> f64 {
+/// One rounding rule for every fold that emits ratios (evals trend and
+/// corrections verify), so two reports never disagree by display precision.
+pub(crate) fn round4(x: f64) -> f64 {
     (x * 10000.0).round() / 10000.0
 }
 

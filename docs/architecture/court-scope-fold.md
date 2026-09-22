@@ -76,6 +76,8 @@ When `claim_state` is `live` or `suspect`, `worker` names the holder. On any oth
 
 The board's HTML section renders `claim` and `age` as their own columns, because the section and the JSON come from one fold.
 
+`owned` says which crown answers for a node. An L1 fold lists every node its L2 folds list, and two L2 folds can share a node. In one read, each node is owned by exactly one fold: the deepest crown level, then the lowest scope string on a tie. A caller that acts only on its own `owned` rows never acts twice on one node. A fold that did not run owns nothing, and its nodes fall to the next crown that lists them. Measured 2026-09-21: 11 of the L1 crown's 13 PR-bearing rows also sat in an L2 fold.
+
 ## The stuck verdict
 
 The counts say how much. `stuck` says whether anything needs a hand, which is the only part of the read worth a glance. It is computed in `court_fold.rs`, beside the rows it judges, so no second reader can disagree about what a row means. The fold returns it as `stuck`, plus a rendered `stuck_line` for the node half of the one-line answer.
@@ -96,6 +98,14 @@ A clause names five ids and then counts the rest, because a live court put 40 id
 The caller adds only what the fold cannot see. `fno agents court` appends the spawn gate's refusal. An unknown gate is itself a blind spot, so it lands in `blind` rather than being dropped. When nothing is stuck and the gate accepts, the line reads `stuck: nothing`. When the fold, the sweep or the gate cannot answer, the line says which one cannot answer. A clean line and a blind line must never look the same.
 
 Live PR state is deliberately out of scope. `merge_status` on a graph entry is a closure stamp that only ever reads `merged` or null. It cannot say CONFLICTING or red. The honest verdict needs a network read, and `fno do pr status <n>` already performs it. The row carries `pr_number` and an age, so an `in_review` node past the threshold surfaces without one.
+
+## Epic load
+
+Each `ok` fold also carries `epics` and `epic_cap`. `epic_cap` is `backlog.epic_max_open_children` as resolved beside the graph. With no cap set, it reads null. `epics` lists the epics of the scope that hold at least one open direct child, fullest first, as `{"id", "open_children", "full"}`.
+
+The count is `epic_cap::open_child_count`, the same function the write-time refusal counts with, so the read and the refusal cannot disagree. Children are direct: a sub-epic is one child of its parent and carries its own row. An epic with no open child is left out. `full` means the next open child is refused at the current cap.
+
+A fold whose `status` is not `ok` carries neither key, so an unread scope never reads as a scope with no epics.
 
 ## Session ids on a row
 

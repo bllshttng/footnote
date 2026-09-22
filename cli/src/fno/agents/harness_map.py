@@ -1280,10 +1280,12 @@ def effort_values(harness: str) -> list[str]:
     return []
 
 
-#: claude's own --permission-mode vocabulary, its --help being the authority
-#: ; the CLI help and the doctor readout spell it from here.
+#: claude's own --permission-mode vocabulary. One home: the capability
+#: table's claude row (`permission_modes`), whose authority is claude's
+#: --help. The packaged copy this module already loads is the source, so the
+#: list cannot drift between the Rust and Python lanes.
 CLAUDE_PERMISSION_MODES = frozenset(
-    {"default", "acceptEdits", "auto", "dontAsk", "plan", "bypassPermissions"}
+    tomllib.loads(_PACKAGED_CONTRACT_TEXT)["harness"]["claude"]["permission_modes"]
 )
 
 CLAUDE_PERMISSION_HELP = (

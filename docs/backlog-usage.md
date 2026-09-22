@@ -243,6 +243,8 @@ Every write that sets a parent meets the refusal: `update --parent`, `idea --par
 
 The refusal names the epic, its open count, the cap, and the next step. Run `fno backlog idea "EPIC: <theme>" --type epic` to start a new small epic, then point the write at the new epic id. If a king leads the full epic, it adds the new epic to its own crown: `fno agents crown <its handle> --scope <each epic it holds> --scope <new-epic-id>`. That works for an epic the king's own session created. Any other epic needs an attended shell or a crown that contains both.
 
+The same count reads before any write, on the `epics:` line of `fno agents king checkin`. `19/15 full` means the next open child is refused at the current cap. `19/- (cap unset)` means no cap is configured, which is the OSS default. `fno agents court --nodes --json` carries the list per crown as `epics` and `epic_cap`.
+
 ## Finding work by meaning: find --fts
 
 `fno backlog find --fts "free text query"` searches title, slug, and details through an FTS5 index (BM25-ranked whole-word matching) and finds concepts that share only some of the original words. The index is a CACHE beside graph.json (`graph.json.fts5`), never a second source of truth. It stores the sha256 of the graph bytes, compares on every read, and rebuilds from scratch on any mismatch. There is no incremental write path, so the index cannot answer stale. A build without FTS5 degrades to the ordinary substring search with a warning. The honest limit: a query sharing no words with the node still misses, so filing duplicates before searching stays the failure mode to watch.
