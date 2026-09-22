@@ -485,21 +485,20 @@ def _live_root_pids(
             dead_rows.clear()
         if not routed_rows:
             return roots, AttributionGap("; ".join(gap_rows)) if gap_rows else None
-        if deadline is not None and time.monotonic() >= deadline:
-            gap_rows.append("bg-socket resolution timed out")
-            return roots, AttributionGap("; ".join(gap_rows))
-        socket_pids = bg_socket_pid_map(
+        # The deadline binds the lsof sweep only; the roster below is one file read.
+        socket_blind = deadline is not None and time.monotonic() >= deadline
+        socket_pids = {} if socket_blind else bg_socket_pid_map(
             timeout=15.0 if deadline is None else max(0.01, deadline - time.monotonic())
         )
+        socket_blind = socket_blind or (deadline is not None and time.monotonic() >= deadline)
         missing = [pair for pair in routed_keys if pair[0] not in socket_pids]
         if missing:
             # the socket map is the FIRST oracle; a key in neither is a
-            # corpse, an unreadable roster stays a gap, the read may spend the deadline.
-            spent = deadline is not None and time.monotonic() >= deadline
-            roster_pids = None if spent else roster_pid_map()
+            # corpse, an unreadable roster stays a gap.
+            roster_pids = roster_pid_map()
             still_missing: list[Any] = []
             for key, row in missing:
-                if roster_pids is not None and key not in roster_pids:
+                if roster_pids is not None and key not in roster_pids and not socket_blind:
                     continue  # absent from a readable oracle: a corpse drops
                 pid = (roster_pids or {}).get(key)
                 if pid is None:
@@ -513,7 +512,8 @@ def _live_root_pids(
             missing = still_missing
         if missing:
             gap_rows.append(
-                f"{len(missing)} bg-socket row(s) missing from the socket map"
+                f"{len(missing)} bg-socket row(s) "
+                + ("unresolved: bg-socket resolution timed out" if socket_blind else "missing from the socket map")
                 + ("" if roster_pids is not None else " (roster oracle unavailable)")
             )
         for key, row in routed_keys:
