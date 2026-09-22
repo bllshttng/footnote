@@ -44,7 +44,7 @@ Each is reversible or additive, which is what makes an unattended daily pass saf
 
 The table is the whole contract: if an action you want is not on it, it is not yours to take - file the question instead.
 
-**Never** edit `~/.fno/graph.json`, its Kanban sibling, or any state file directly - not with Edit, Write, `jq -i`, or `sed -i`.
+**Never** edit `~/.fno/graph.db`, its Kanban sibling, or any state file directly - not with Edit, Write, `jq -i`, or `sed -i`.
 Every mutation goes through a lever above so it lands with a receipt.
 A `PreToolUse` hook blocks direct edits as a backstop, but the rule is yours to keep, not the hook's to enforce.
 

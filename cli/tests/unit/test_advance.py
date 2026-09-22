@@ -647,6 +647,7 @@ def test_spawn_failure_records_the_refusal_not_a_clipped_head(iso, monkeypatch):
     assert "refusing to spawn" in recorded
     assert len(recorded) >= 300
     ticks = [
+        event for event in event_rows(iso) if event["type"] == "control_plane_tick"
     ]
     failed_ticks = [t for t in ticks if t["data"].get("skip_reason") == "spawn-failed"]
     assert failed_ticks
@@ -945,6 +946,8 @@ def test_capacity_refusal_skips_and_names_the_gate_line(iso, monkeypatch):
     # the numbers, never the provider-stamp warning.
     ticks = [
         event
+        for event in event_rows(iso)
+        if event["type"] == "control_plane_tick"
         and event["data"].get("arm") == "auto_continue"
     ]
     assert ticks and ticks[-1]["data"]["skip_reason"] == "capacity-refused"

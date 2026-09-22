@@ -236,7 +236,10 @@ def test_graph_memo_read_once_per_graph_identity(graph, monkeypatch):
     second = wake.graph_entries()
     assert len(first) == FILLER + CHILDREN + 1
     assert first == second
-    assert len(calls) == 1  # the unchanged graph is served, not re-read
+    assert len(calls) == 1, (
+        f"memo re-read: ident={wake._GRAPH_ENTRIES_MEMO['ident']!r},"
+        f" export_status={__import__('fno.graph.store', fromlist=['x']).store_export_status(graph)!r}"
+    )
 
     _write_graph(graph, done_children=CHILDREN, done_epic=True)
     third = wake.graph_entries()

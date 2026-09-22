@@ -2965,9 +2965,9 @@ def test_a_foreign_repo_same_number_primary_pr_is_not_stamped(monkeypatch, tmp_p
 
     _merge._sync_graph_merge_status("merged", 1060)
 
-    saved = json.loads(graph.read_text())["entries"]
-    assert saved[0]["merge_status"] is None
-    assert saved[1]["merge_status"] == "merged"
+    saved = {e["id"]: e for e in read_graph_strict(graph)}
+    assert not saved["x-other"].get("merge_status")
+    assert saved["x-ours"]["merge_status"] == "merged"
 
 
 def test_a_primary_pr_is_not_stamped_when_our_repo_is_unknown(monkeypatch, tmp_path):
@@ -2985,8 +2985,8 @@ def test_a_primary_pr_is_not_stamped_when_our_repo_is_unknown(monkeypatch, tmp_p
 
     _merge._sync_graph_merge_status("merged", 1060)
 
-    saved = json.loads(graph.read_text())["entries"][0]
-    assert saved["merge_status"] is None
+    saved = read_graph_strict(graph)[0]
+    assert "merge_status" not in saved
 
 
 def test_a_url_less_primary_pr_is_stamped_for_a_known_repo(monkeypatch, tmp_path):
@@ -3003,7 +3003,7 @@ def test_a_url_less_primary_pr_is_stamped_for_a_known_repo(monkeypatch, tmp_path
 
     _merge._sync_graph_merge_status("merged", 1060)
 
-    saved = json.loads(graph.read_text())["entries"][0]
+    saved = read_graph_strict(graph)[0]
     assert saved["merge_status"] == "merged"
 
 

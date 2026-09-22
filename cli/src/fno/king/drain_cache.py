@@ -17,32 +17,18 @@ def cache_file() -> Path:
 
 
 def graph_ident(path: Path) -> "tuple | None":
-    """The store's identity for the rows it serves: sqlite keys on the store
-    version (one stamp per committed write); json keys on the file's stat
-    (the file IS the store; ctime catches a same-size same-mtime
-    overwrite). A sqlite store whose version is not yet readable falls back
-    to the db file's stat, which still moves on every commit, so the memo
-    never serves pre-write rows across a sealed identity. Backend-tagged so
-    a flip invalidates; no store read at all, no identity."""
+    """The store's identity for the rows it serves: json keys on the file's
+    stat (the file IS the store; ctime catches a same-size same-mtime
+    overwrite), sqlite on the store version (the file lags until export).
+    Backend-tagged so a flip invalidates; no keeper, no identity."""
     try:
         from fno.graph.store import store_export_status
         status = store_export_status(Path(path))
         if not status:
-            # An unreachable store has no identity: the memo must not serve
-            # rows across a read that never confirmed what it read.
             return None
         if status.get("backend") == "sqlite":
             version = status.get("version")
-            if version:
-                return ("sqlite", version)
-            db = Path(path).with_suffix(".db")
-            if not db.exists():
-                return None
-            st = db.stat()
-            return (
-                "sqlite-file", st.st_dev, st.st_ino,
-                st.st_size, st.st_mtime_ns, st.st_ctime_ns,
-            )
+            return ("sqlite", version) if version else None
         st = Path(path).stat()
     except OSError:
         return None
