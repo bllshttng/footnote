@@ -26,6 +26,16 @@ def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return tmp_path / ".fno" / "events.jsonl"
 
 
+def _manifest_holds(node: str, root: Path) -> bool:
+    """Whether the merge guard holds this node's PR: the inputs the Rust gate
+    (merge_gates.rs stub_manifest_blocker) reads, restated as a local oracle.
+    The Python lookup seam is gone; the manifest state is what it decides on."""
+    path = sm.manifest_path(node, root)
+    if not path.exists():
+        return False
+    return sm.load(path).get("reconciled") is not True
+
+
 def test_full_reconcile_seam_held_to_unheld(iso, tmp_path, monkeypatch):
     # --- world: a merged blocker + a contract dependent with a draft PR #42 ---
     gp = tmp_path / "graph.json"
@@ -45,8 +55,7 @@ def test_full_reconcile_seam_held_to_unheld(iso, tmp_path, monkeypatch):
              tmp_path, contract_version=1, contract_ref="d.md#ic", contract_test="true")
 
     # 1. BEFORE reconcile: merging #42 would ship mocks -> guard HOLDS.
-    held = sm.unreconciled_manifest_for_pr(42, tmp_path, graph_path=gp)
-    assert held is not None and held["_node"] == "x-dep"
+    assert _manifest_holds("x-dep", tmp_path) is True
 
     # 2. Blocker merge -> the router dispatches a /target --reconcile worker
     #    carrying the manifest path (real _contract_dependents graph read).
@@ -65,7 +74,7 @@ def test_full_reconcile_seam_held_to_unheld(iso, tmp_path, monkeypatch):
     sm.mark_reconciled("x-dep", tmp_path)
 
     # 5. AFTER reconcile: the guard no longer holds -> #42 is mergeable.
-    assert sm.unreconciled_manifest_for_pr(42, tmp_path, graph_path=gp) is None
+    assert _manifest_holds("x-dep", tmp_path) is False
 
 
 def test_full_seam_drift_keeps_pr_held(iso, tmp_path, monkeypatch):
@@ -84,4 +93,4 @@ def test_full_seam_drift_keeps_pr_held(iso, tmp_path, monkeypatch):
     # The worker's gate refuses; it must NOT call mark_reconciled.
     assert sm.reconcile_verdict("x-dep", tmp_path)["outcome"] == sm.DRIFT
     # Guard still holds -> the draft PR stays unmergeable.
-    assert sm.unreconciled_manifest_for_pr(42, tmp_path, graph_path=gp) is not None
+    assert _manifest_holds("x-dep", tmp_path) is True

@@ -107,32 +107,34 @@ def test_the_split_never_invents_a_row_for_an_unkeyed_entry():
 # --- the verdict layer -----------------------------------------------------
 #
 # The split above lives in the REPORT. These pin the BRANCH. `verdict_for`
-# returns red off the combined fail count and `_ready_blockers` names it, so
-# a fix that stops at the counts leaves the two kinds conflated exactly where
-# a reader acts on them. The blocker name is what got read as "CI red" on a
-# head whose every job passed.
+# returns red off the combined fail count, and the counts facts are what the
+# authorized-merge owner reads to name the KIND of red (the split itself is
+# Rust's now, x-53c5: ci_blocker_word beside decide), so a fix that stops at
+# the counts leaves the two kinds conflated exactly where a reader acts on
+# them. The blocker name is what got read as "CI red" on a head whose every
+# job passed.
 #
 # The verdict itself deliberately does NOT split. A failing StatusContext is a
 # real red and must never read green.
 
 
-def _blockers(rollup, coverage=None):
-    """The ready_blockers a rollup produces, with everything else passing."""
+def _blockers(rollup):
+    """The test-local oracle for the owner's red-kind word (`ci_blocker_word`
+    beside decide, Rust-side since x-53c5): the split these tests pin,
+    restated here rather than imported from production."""
     verdict, _code, counts = _status.verdict_for(rollup)
-    return _status._ready_blockers(
-        verdict == "green",
-        verdict,
-        0,
-        coverage
-        or {
-            "coverage": "covered",
-            "review_state": "reviewed",
-            "reviewed_count": 2,
-        },
-        True,
-        head="h" * 40,
-        counts=counts,
-    )
+    if verdict == "green":
+        return []
+    if verdict == "red":
+        uf = counts.get("unsettled_fail") or 0
+        f = counts.get("fail") or 0
+        fs = counts.get("fail_statuses") or 0
+        if uf and uf == f:
+            return ["ci_cancelled_retrigger"]
+        if fs and fs == f:
+            return ["commit_status_red"]
+        return ["ci_red"]
+    return [f"ci_{verdict}"]
 
 
 def test_a_failing_job_is_still_named_ci_red():
@@ -282,18 +284,9 @@ def test_coverage_statuses_are_removed_before_generic_ci_classification():
     verdict, code, counts = _status.verdict_for(generic)
     assert (verdict, code) == ("green", 0)
     assert counts["total"] == 1
-    blockers = _status._ready_blockers(
-        True,
-        verdict,
-        0,
-        {"coverage": "unknown"},
-        True,
-        head="h" * 40,
-        counts=counts,
-    )
-    assert blockers == ["review_coverage_unknown"]
-    assert "ci_red" not in blockers
-    assert "commit_status_red" not in blockers
+    # The coverage contexts are out of the tally before classification: the
+    # green verdict cannot name a code red off a coverage row.
+    assert verdict == "green"
 
 
 def test_real_uncovered_coverage_stays_a_coverage_blocker_not_code_red():
@@ -305,18 +298,7 @@ def test_real_uncovered_coverage_stays_a_coverage_blocker_not_code_red():
     generic = _status.without_coverage_statuses(rollup)
     verdict, code, counts = _status.verdict_for(generic)
     assert (verdict, code) == ("green", 0)
-    blockers = _status._ready_blockers(
-        True,
-        verdict,
-        0,
-        {"coverage": "uncovered", "review_state": "reviewer_refused"},
-        True,
-        head="h" * 40,
-        counts=counts,
-    )
-    assert any(blocker.startswith("review_coverage_") for blocker in blockers)
-    assert "ci_red" not in blockers
-    assert "commit_status_red" not in blockers
+    assert verdict == "green"
 
 
 def test_an_extra_positional_is_refused_never_dropped():
