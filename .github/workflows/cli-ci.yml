@@ -787,6 +787,7 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/fno-test-home
           CARGO_HOME: /home/runner/.cargo
+          RUSTUP_HOME: /home/runner/.rustup
           FNO_TEST_HERMETIC: "0"
         run: cargo test --lib --bins --no-fail-fast
 
@@ -795,6 +796,7 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/fno-test-home
           CARGO_HOME: /home/runner/.cargo
+          RUSTUP_HOME: /home/runner/.rustup
           FNO_TEST_HERMETIC: "0"
         # A lib red must not hide the integration shard: this leg still runs
         # when the lib step fails, so the grok and stop-hook tests report on
