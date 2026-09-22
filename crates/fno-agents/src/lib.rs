@@ -112,6 +112,7 @@ pub mod compaction;
 mod completion_output;
 pub mod component_update;
 pub mod context_run;
+pub mod context_window;
 pub mod convert;
 pub mod corrections_verify;
 pub mod court_fold;

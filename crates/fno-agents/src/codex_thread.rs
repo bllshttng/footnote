@@ -632,6 +632,10 @@ pub struct CodexThread {
     rollout_path: PathBuf,
     cwd: PathBuf,
     effort: Option<String>,
+    /// Explicit context-window settings belong to this thread, not the shared
+    /// Codex daemon. The registry copies this request so a daemon restart can
+    /// replay the same values on `thread/resume`.
+    context_window_request: Option<crate::context_window::ContextWindowRequest>,
     /// The fno state roots this thread is granted, spent on every `turn/start`
     ///. Per THREAD, never per daemon: the daemon is shared and owns
     /// every thread on the box, so a grant applied at daemon scope would widen
@@ -716,6 +720,8 @@ impl CodexThread {
         driver.effort = effort
             .filter(|effort| !effort.is_empty())
             .map(str::to_string);
+        driver.context_window_request =
+            crate::context_window::ContextWindowRequest::from_config(config);
         driver.state_dirs = granted_roots(&cwd, state_dirs);
         driver.requested = posture.clone();
         driver.resolved_sandbox = parse_resolved_sandbox(&response);
@@ -796,6 +802,8 @@ impl CodexThread {
         driver.effort = effort
             .filter(|effort| !effort.is_empty())
             .map(str::to_string);
+        driver.context_window_request =
+            crate::context_window::ContextWindowRequest::from_config(config);
         driver.state_dirs = granted_roots(&cwd, state_dirs);
         driver.requested = posture.clone();
         driver.resolved_sandbox = parse_resolved_sandbox(&response);
@@ -844,6 +852,7 @@ impl CodexThread {
             rollout_path: PathBuf::new(),
             cwd,
             effort: None,
+            context_window_request: None,
             state_dirs: Vec::new(),
             requested: CodexPosture::bounded(),
             resolved_sandbox: None,
@@ -1087,9 +1096,15 @@ impl CodexThread {
     pub async fn compact(&mut self) -> Result<Value, ThreadDriverError> {
         let id = self.next_id;
         self.next_id += 1;
-        self.request_value(id, thread_compact_start_request_json(id, &self.thread_id))
+        let receipt = self
+            .request_value(id, thread_compact_start_request_json(id, &self.thread_id))
             .await
-            .and_then(provider_response)
+            .and_then(provider_response)?;
+        crate::context_window::verify_compaction_receipt(&receipt, &self.thread_id).map_err(
+            |error| {
+                ThreadDriverError::Protocol(format!("unverified compaction receipt: {error:?}"))
+            },
+        )
     }
 
     pub async fn goal_get(&mut self) -> Result<Value, ThreadDriverError> {
@@ -1217,6 +1232,10 @@ impl CodexThread {
     /// instead of taking a parallel copy of the same answer.
     pub fn requested_posture(&self) -> &CodexPosture {
         &self.requested
+    }
+
+    pub fn context_window_request(&self) -> Option<&crate::context_window::ContextWindowRequest> {
+        self.context_window_request.as_ref()
     }
 
     /// Where the CURRENT turn's sandboxPolicy comes from: `resolved` when the

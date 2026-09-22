@@ -162,6 +162,7 @@ FLUSH_STATIC_STOPS="3"      # consecutive turn-ends the HEAD must be unmoved
 USED_PCT=""
 USED_TOKENS=""
 WINDOW_TOKENS=""
+COMPACTION_BAND=""
 if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     PROBE_OUT=$(with_timeout 5 fno whoami context --transcript "$TRANSCRIPT" --json 2>/dev/null || true)
     # jq, not sed: BSD sed (macOS) does not support `[0-9]\+` in basic regex, and
@@ -171,7 +172,8 @@ if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
         ''|*[!0-9]*) ;;          # unreadable -> USED_PCT stays empty (no pressure)
         *) USED_PCT="$_p"
            USED_TOKENS=$(printf '%s' "$PROBE_OUT" | jq -r '.used_tokens // empty' 2>/dev/null)
-           WINDOW_TOKENS=$(printf '%s' "$PROBE_OUT" | jq -r '.window_tokens // empty' 2>/dev/null) ;;
+           WINDOW_TOKENS=$(printf '%s' "$PROBE_OUT" | jq -r '.window_tokens // empty' 2>/dev/null)
+           COMPACTION_BAND=$(printf '%s' "$PROBE_OUT" | jq -r '.compaction_band // empty' 2>/dev/null) ;;
     esac
 fi
 
@@ -400,6 +402,12 @@ if [[ -n "$USED_PCT" && -n "$WINDOW_TOKENS" ]]; then
         FIRE_CTX=1
     fi
     if [[ -n "$USED_TOKENS" && $(( WINDOW_TOKENS - USED_TOKENS )) -le "$RESERVE" ]]; then
+        FIRE_CTX=1
+    fi
+    # The Rust context owner supplies session-specific Astra bands. An absent
+    # band is the unchanged non-Astra path; either Astra band keeps the
+    # measured nudge path alive before provider compaction is requested.
+    if [[ "$COMPACTION_BAND" == "prepare" || "$COMPACTION_BAND" == "action" ]]; then
         FIRE_CTX=1
     fi
 fi

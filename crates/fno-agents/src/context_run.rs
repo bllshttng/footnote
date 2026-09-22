@@ -73,6 +73,12 @@ struct CoreInput<'a> {
 }
 
 pub fn run_context_run(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("--probe") {
+        return run_context_probe(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("--effective-window") {
+        return run_effective_window(&args[1..]);
+    }
     let mut group_name: Option<&str> = None;
     let mut plugin_root: Option<&str> = None;
     let mut rest = args.iter();
@@ -116,6 +122,94 @@ pub fn run_context_run(args: &[String]) -> i32 {
         {
             eprintln!("context-run: snapshot append failed: {e}");
         }
+    }
+    0
+}
+
+fn run_effective_window(args: &[String]) -> i32 {
+    let mut model = None;
+    let mut configured = None;
+    let mut cap = None;
+    let mut percent = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        let Some(value) = rest.next() else { return 2 };
+        match arg.as_str() {
+            "--model" => model = Some(value.as_str()),
+            "--configured" => configured = value.parse::<u64>().ok(),
+            "--cap" => cap = value.parse::<u64>().ok(),
+            "--percent" => percent = value.parse::<u64>().ok(),
+            _ => return 2,
+        }
+    }
+    let Some(model) = model else { return 2 };
+    let receipt = crate::context_window::ContextWindowReceipt {
+        model: model.to_string(),
+        context_window: configured,
+        max_context_window: cap,
+        effective_context_window_percent: percent,
+    };
+    let effective = match crate::context_window::effective_window(&receipt) {
+        Ok(effective) => effective,
+        Err(_) => return 3,
+    };
+    println!(
+        "{}",
+        json!({
+            "model": model,
+            "configured": configured,
+            "max_context_window": cap,
+            "percent": percent.unwrap_or(100),
+            "effective": effective,
+        })
+    );
+    0
+}
+
+fn run_context_probe(args: &[String]) -> i32 {
+    let mut transcript = None;
+    let mut json_output = false;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--transcript" => transcript = rest.next().map(String::as_str),
+            "--json" => json_output = true,
+            other => {
+                eprintln!("context-run --probe: unknown argument `{other}`");
+                return 2;
+            }
+        }
+    }
+    let Some(transcript) = transcript else {
+        eprintln!("context-run --probe: --transcript is required");
+        return 2;
+    };
+    let usage = match crate::context_window::read_last_usage(Path::new(transcript)) {
+        Ok(Some(usage)) => usage,
+        Ok(None) | Err(_) => return 3,
+    };
+    let used_tokens = match usage.used_tokens() {
+        Some(tokens) => tokens,
+        None => return 3,
+    };
+    let window_tokens = crate::context_window::window_for_model(&usage.model);
+    let used_pct =
+        ((used_tokens as u128 * 100 + (window_tokens as u128 / 2)) / window_tokens as u128) as u64;
+    let band = crate::context_window::compaction_band(&usage.model, used_tokens, window_tokens);
+    let payload = json!({
+        "used_tokens": used_tokens,
+        "window_tokens": window_tokens,
+        "used_pct": used_pct,
+        "model": usage.model,
+        "compaction_band": format!("{band:?}").to_ascii_lowercase(),
+    });
+    if json_output {
+        println!("{payload}");
+    } else {
+        println!(
+            "{}% used ({} of {} tokens), model {}",
+            used_pct, used_tokens, window_tokens, payload["model"]
+        );
     }
     0
 }
