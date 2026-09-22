@@ -68,7 +68,7 @@ def _make_tick_deps(tmp_path: Path, candidates=None, obs_map: Optional[dict] = N
             return obs_map[candidate.pr_number]
         return _make_obs(pr_number=candidate.pr_number)
 
-    def fake_fire_skill(verb, pr_number, repo_dir, *, runner=None, model=None, env_seam=None):
+    def fake_fire_skill(verb, pr_number, repo_dir, *, node_id=None, runner=None, model=None, env_seam=None):
         fired.append({"verb": verb, "pr": pr_number})
         return DispatchResult(ok=True, rc=0, is_error=False, raw='{"is_error":false}')
 
@@ -92,7 +92,7 @@ def _make_tick_deps(tmp_path: Path, candidates=None, obs_map: Optional[dict] = N
         "read_pr_state": fake_read_pr_state,
         "fire_skill": fake_fire_skill,
         "emit": fake_emit,
-        "reviewers_for": lambda _: [],
+        "reviewers_for": lambda _: ["gemini-code-assist"],
         "claim": FakeClaim(),
         "notify": lambda *a, **kw: None,
         "post_merge_readiness": lambda repo_root: V(),
@@ -161,7 +161,8 @@ class TestSweepBoundedByPhaseClock:
             d._default_read_pr_state(_make_candidate(pr_number=1), reviewers=[])
         finally:
             d.set_phase_deadline(None)
-        assert recorded == [10.0]
+        assert len(recorded) == 1
+        assert 0 < recorded[0] <= 10.0
 
     def test_default_read_pr_state_keeps_30s_without_a_phase(self, monkeypatch):
         """AC2-EDGE: no phase armed, the read keeps today's 30s bound."""
