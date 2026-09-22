@@ -2599,10 +2599,12 @@ def _flush_pending_session_row(entry: AgentEntry, session_id: str) -> None:
     """Hand a parked row to the fno-agents binary; it opens and clears."""
     if not entry.pending_session_row:
         return
+    from fno.paths import agents_registry_path, graph_json
     from fno.rust_binary import verb_call
     try:
         verb_call("pending-session-row", {"action": "open", "name": entry.name,
-                 "session_id": session_id})
+                 "session_id": session_id, "graph": str(graph_json()),
+                 "registry": str(agents_registry_path())})
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the stamp
         print(f"registry: deferred row open skipped: {exc}", file=sys.stderr)
 

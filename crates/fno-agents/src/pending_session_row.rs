@@ -13,12 +13,11 @@
 //! stdin, one JSON answer out - the route-slot transport shape.
 
 use crate::backlog::api::{self, Store};
-use crate::graph_get::default_graph_path;
 use crate::paths::AgentsHome;
 use crate::state::update_registry;
 use serde_json::{json, Value};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The session phases a parked row may name, mirroring Python store's
 /// `_SESSION_PHASES`. A phase out of this vocabulary is a producer bug and
@@ -45,9 +44,8 @@ pub fn run(rest: &[String]) -> i32 {
             return 2;
         }
     };
-    let registry = AgentsHome::from_env().registry_json();
     match payload.get("action").and_then(Value::as_str) {
-        Some("park") => match park(&registry, &payload) {
+        Some("park") => match park(&payload) {
             Ok(answer) => {
                 println!("{answer}");
                 0
@@ -57,7 +55,7 @@ pub fn run(rest: &[String]) -> i32 {
                 1
             }
         },
-        Some("open") => match open(&registry, &payload) {
+        Some("open") => match open(&payload) {
             Ok(answer) => {
                 println!("{answer}");
                 0
@@ -74,10 +72,41 @@ pub fn run(rest: &[String]) -> i32 {
     }
 }
 
+/// The registry the payload names, or the ambient home when it does not.
+/// Python passes `paths.agents_registry_path()` explicitly so a caller
+/// pinned to a non-default state root (tests, `config.state_dir`) and the
+/// binary agree - the `backlog-update --graph` contract.
+fn payload_registry(payload: &Value) -> PathBuf {
+    match payload
+        .get("registry")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        Some(r) => PathBuf::from(r),
+        None => AgentsHome::from_env().registry_json(),
+    }
+}
+
+/// The graph the payload names, or the config-resolved graph when it does
+/// not (the same chain Python's `paths.graph_json()` walks).
+fn payload_graph(payload: &Value) -> PathBuf {
+    match payload
+        .get("graph")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        Some(g) => PathBuf::from(g),
+        None => crate::king_board::scope::graph_json_path(
+            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        ),
+    }
+}
+
 /// Park the owed payload on the named worker's registry row. Answers
 /// `{"parked": bool}`; first park wins, so a retried spawn never rewrites
 /// the payload a live worker's SessionStart is about to consume.
-fn park(registry: &Path, payload: &Value) -> Result<Value, String> {
+fn park(payload: &Value) -> Result<Value, String> {
+    let registry = payload_registry(payload);
     let name = payload
         .get("name")
         .and_then(Value::as_str)
@@ -91,7 +120,7 @@ fn park(registry: &Path, payload: &Value) -> Result<Value, String> {
     }
     let grant = payload.get("merge_grant").cloned().filter(|v| !v.is_null());
     let name = name.to_string();
-    let parked = update_registry(registry, |reg| {
+    let parked = update_registry(&registry, |reg| {
         for entry in reg.entries.iter_mut() {
             if entry.name != name {
                 continue;
@@ -114,7 +143,8 @@ fn park(registry: &Path, payload: &Value) -> Result<Value, String> {
 /// that order, so a failed graph write keeps the payload. A row with
 /// nothing parked, or a node the graph does not carry, answers and moves
 /// on: a provenance miss is never an error.
-fn open(registry: &Path, payload: &Value) -> Result<Value, String> {
+fn open(payload: &Value) -> Result<Value, String> {
+    let registry = payload_registry(payload);
     let name = payload
         .get("name")
         .and_then(Value::as_str)
@@ -124,7 +154,7 @@ fn open(registry: &Path, payload: &Value) -> Result<Value, String> {
         .get("session_id")
         .and_then(Value::as_str)
         .ok_or("open payload carries no session_id")?;
-    let rows = crate::client_verbs::load_registry_entries(registry)
+    let rows = crate::client_verbs::load_registry_entries(&registry)
         .map_err(|e| format!("registry load failed: {e}"))?;
     let Some(row) = rows
         .iter()
@@ -145,7 +175,7 @@ fn open(registry: &Path, payload: &Value) -> Result<Value, String> {
         .filter(|s| !s.is_empty())
     else {
         // No node on the row: the payload can never open. Drop the corpse.
-        clear_park(registry, &name).map_err(|e| e.to_string())?;
+        clear_park(&registry, &name).map_err(|e| e.to_string())?;
         return Ok(json!({ "opened": false, "cleared": true, "reason": "no node on row" }));
     };
     let phase = parked
@@ -159,14 +189,14 @@ fn open(registry: &Path, payload: &Value) -> Result<Value, String> {
     let effort = row.get("effort").and_then(Value::as_str);
     let grant = parked.get("merge_grant").cloned().filter(|v| !v.is_null());
     let started = crate::daemon::now_rfc3339_like();
-    let store = Store::new(&default_graph_path());
+    let store = Store::new(&payload_graph(payload));
     let found = api::session_open_parked(
         &store, node, phase, harness, session_id, effort, grant, &started,
     )
     .map_err(|e| e.0)?;
     // Clear only after the graph write answered: a node the graph does not
     // carry can never open, so the payload clears there too (found=false).
-    let cleared = clear_park(registry, &name)
+    let cleared = clear_park(&registry, &name)
         .map_err(|e| e.to_string())
         .is_ok();
     Ok(json!({ "opened": found, "cleared": cleared }))
@@ -174,7 +204,7 @@ fn open(registry: &Path, payload: &Value) -> Result<Value, String> {
 
 fn clear_park(registry: &Path, name: &str) -> Result<(), crate::state::StateError> {
     let name = name.to_string();
-    update_registry(registry, |reg| {
+    update_registry(&registry, |reg| {
         for entry in reg.entries.iter_mut() {
             if entry.name == name {
                 entry.pending_session_row = None;
@@ -214,22 +244,33 @@ mod tests {
         let dir = tmp_dir("park");
         let registry = dir.join("registry.json");
         seed_row(&registry, "w1", Some("x-1"));
-        let payload = json!({"action": "park", "name": "w1", "phase": "do", "merge_grant": null});
+        let payload = park_payload(&registry, "do");
 
-        let first = park(&registry, &payload).unwrap();
+        let first = park(&payload).unwrap();
         assert_eq!(first["parked"], json!(true));
         let rows = crate::client_verbs::load_registry_entries(&registry).unwrap();
         assert_eq!(rows[0]["pending_session_row"]["phase"], json!("do"));
 
-        let second = park(&registry, &payload_with("review")).unwrap();
+        let second = park(&park_payload(&registry, "review")).unwrap();
         assert_eq!(second["parked"], json!(false));
         let rows = crate::client_verbs::load_registry_entries(&registry).unwrap();
         assert_eq!(rows[0]["pending_session_row"]["phase"], json!("do"));
         let _ = fs::remove_dir_all(&dir);
     }
 
-    fn payload_with(phase: &str) -> Value {
-        json!({"action": "park", "name": "w1", "phase": phase, "merge_grant": null})
+    fn park_payload(registry: &Path, phase: &str) -> Value {
+        json!({
+            "action": "park", "name": "w1", "phase": phase, "merge_grant": null,
+            "registry": registry.to_string_lossy(),
+        })
+    }
+
+    fn open_payload(registry: &Path, graph: &Path, session_id: &str) -> Value {
+        json!({
+            "action": "open", "name": "w1", "session_id": session_id,
+            "registry": registry.to_string_lossy(),
+            "graph": graph.to_string_lossy(),
+        })
     }
 
     #[test]
@@ -245,13 +286,9 @@ mod tests {
         .unwrap();
         std::env::set_var("FNO_HOME", &dir);
         seed_row(&registry, "w1", Some("x-defr"));
-        park(&registry, &payload_with("do")).unwrap();
+        park(&park_payload(&registry, "do")).unwrap();
 
-        let answer = open(
-            &registry,
-            &json!({"action": "open", "name": "w1", "session_id": "sid-1"}),
-        )
-        .unwrap();
+        let answer = open(&open_payload(&registry, &graph, "sid-1")).unwrap();
         assert_eq!(answer["opened"], json!(true));
         assert_eq!(answer["cleared"], json!(true));
 
@@ -265,23 +302,15 @@ mod tests {
         assert!(rows[0].get("pending_session_row").is_none());
 
         // A second observation adds no twin row.
-        let answer = open(
-            &registry,
-            &json!({"action": "open", "name": "w1", "session_id": "sid-1"}),
-        )
-        .unwrap();
+        let answer = open(&open_payload(&registry, &graph, "sid-1")).unwrap();
         assert_eq!(answer["opened"], json!(false));
         let body: Value = serde_json::from_str(&fs::read_to_string(&graph).unwrap()).unwrap();
         assert_eq!(body["entries"][0]["sessions"].as_array().unwrap().len(), 1);
-        std::env::remove_var("FNO_HOME");
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn open_with_a_claim_path_row_already_won_adds_nothing_and_clears() {
-        let _lock = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let dir = tmp_dir("claim");
         let registry = dir.join("registry.json");
         let graph = dir.join("graph.json");
@@ -295,48 +324,33 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        std::env::set_var("FNO_HOME", &dir);
         seed_row(&registry, "w1", Some("x-clai"));
-        park(&registry, &payload_with("do")).unwrap();
+        park(&park_payload(&registry, "do")).unwrap();
 
-        let answer = open(
-            &registry,
-            &json!({"action": "open", "name": "w1", "session_id": "sid-2"}),
-        )
-        .unwrap();
+        let answer = open(&open_payload(&registry, &graph, "sid-2")).unwrap();
         assert_eq!(answer["opened"], json!(true));
         assert_eq!(answer["cleared"], json!(true));
         let body: Value = serde_json::from_str(&fs::read_to_string(&graph).unwrap()).unwrap();
         let sessions = body["entries"][0]["sessions"].as_array().unwrap();
         assert_eq!(sessions.len(), 1, "no duplicate row");
         assert_eq!(sessions[0]["started_at"], json!("2026-09-22T00:00:00Z"));
-        std::env::remove_var("FNO_HOME");
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn open_with_a_node_absent_from_the_graph_clears_the_corpse() {
-        let _lock = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let dir = tmp_dir("absent");
         let registry = dir.join("registry.json");
         let graph = dir.join("graph.json");
         fs::write(&graph, json!({"entries": []}).to_string()).unwrap();
-        std::env::set_var("FNO_HOME", &dir);
         seed_row(&registry, "w1", Some("x-gone"));
-        park(&registry, &payload_with("review")).unwrap();
+        park(&park_payload(&registry, "review")).unwrap();
 
-        let answer = open(
-            &registry,
-            &json!({"action": "open", "name": "w1", "session_id": "sid-3"}),
-        )
-        .unwrap();
+        let answer = open(&open_payload(&registry, &graph, "sid-3")).unwrap();
         assert_eq!(answer["opened"], json!(false));
         assert_eq!(answer["cleared"], json!(true));
         let rows = crate::client_verbs::load_registry_entries(&registry).unwrap();
         assert!(rows[0].get("pending_session_row").is_none());
-        std::env::remove_var("FNO_HOME");
         let _ = fs::remove_dir_all(&dir);
     }
 }
