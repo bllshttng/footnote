@@ -108,7 +108,8 @@ class Rung(Enum):
     ``idea``: ``NONE`` (nothing on disk) is COLD-DISPATCHABLE - the derived
     verb authors the plan (low -> ``/target``, medium/high -> ``/blueprint``)
     - while ``IDEA`` (a linked-but-undesigned decompose scaffold) needs warm
-    inline-fill, so it stays gated behind ``--include-ideas``.
+    inline-fill, so it stays gated behind ``--include-ideas``. See
+    :func:`is_cold_dispatchable` and ``harness_map.resolve_effective_verb``.
     """
 
     NONE = "none"  # no usable plan_path - nothing on disk
