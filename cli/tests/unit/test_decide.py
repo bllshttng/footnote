@@ -2102,11 +2102,22 @@ def test_one_unusable_projection_row_does_not_abort_the_backfill(
 
     recorded = runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "from the journal"])
     if not index.exists():
-        raise AssertionError(
-            f"record rc={recorded.exit_code} out={recorded.output!r}"
-            f" exc={recorded.exception!r} index={index}"
-        )
-    index.unlink()
+        # The fresh front commits the event into the store beside the index
+        # and leaves the raw file unwritten; the record is still the record.
+        from fno.events.store_client import native_rows
+
+        if not native_rows(index):
+            raise AssertionError(
+                f"record rc={recorded.exit_code} out={recorded.output!r}"
+                f" exc={recorded.exception!r} index={index}"
+            )
+    # A clean slate either way: the backfill's `added` counts rows it folds
+    # from the journal and the graph, so a surviving store row would dedupe
+    # one of them back out of the count.
+    from fno.events.store_client import store_db_path
+
+    store_db_path(index).unlink(missing_ok=True)
+    index.unlink(missing_ok=True)
     _seed_projection(
         tmp_graph,
         [
