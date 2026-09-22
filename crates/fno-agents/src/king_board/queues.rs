@@ -2015,7 +2015,7 @@ mod tests {
 
     #[test]
     fn an_unread_gate_is_never_filed_as_undriven() {
-        // AC8-HP (x-4c00): no gate row leaves `ready` null, which is no
+        // AC8-HP: no gate row leaves `ready` null, which is no
         // evidence of a driverless PR. The PR stays visible under
         // mergeable_pr and out of undriven_pr.
         let inputs = pr_board_inputs(
@@ -2039,7 +2039,7 @@ mod tests {
 
     #[test]
     fn a_red_gate_verdict_keeps_the_pr_in_undriven() {
-        // AC9-EDGE (x-4c00): `ready: false` is a real verdict, not an unread
+        // AC9-EDGE: `ready: false` is a real verdict, not an unread
         // gate; a driverless PR behind it still needs a driver named.
         let mut inputs = pr_board_inputs(
             json!([

@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn an_accepting_run_returns_the_payload_of_a_verdict_exit() {
-        // AC6-HP (x-4c00): a red PR reads exit 1 with the JSON verdict on
+        // AC6-HP: a red PR reads exit 1 with the JSON verdict on
         // stdout; accepting 0-3 must return that payload, not drop it.
         let dir = tempfile::tempdir().unwrap();
         let cmd = vec![
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn an_accepting_run_still_refuses_an_exit_outside_the_set() {
-        // AC7-ERR (x-4c00): exit 4 is a reader failure, never a verdict; the
+        // AC7-ERR: exit 4 is a reader failure, never a verdict; the
         // error names the exit so the gate stays unanswered loudly.
         let dir = tempfile::tempdir().unwrap();
         let cmd = vec![
