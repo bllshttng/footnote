@@ -242,8 +242,20 @@ fn open_store(store: &Path) -> Result<Connection, String> {
     let mut conn = Connection::open(store).map_err(|e| format!("{}: {e}", store.display()))?;
     conn.busy_timeout(Duration::from_secs(5))
         .map_err(|e| e.to_string())?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+    let journal_mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
         .map_err(|e| format!("{}: {e}", store.display()))?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        conn.execute_batch("PRAGMA journal_mode=WAL;")
+            .map_err(|e| format!("{}: {e}", store.display()))?;
+    }
+    let synchronous: i64 = conn
+        .query_row("PRAGMA synchronous", [], |row| row.get(0))
+        .map_err(|e| format!("{}: {e}", store.display()))?;
+    if synchronous != 2 {
+        conn.execute_batch("PRAGMA synchronous=FULL;")
+            .map_err(|e| format!("{}: {e}", store.display()))?;
+    }
     ensure_schema(&mut conn, store)?;
     Ok(conn)
 }
