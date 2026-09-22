@@ -313,7 +313,7 @@ pub(crate) fn relaunch_on_pane(
         expected_mux,
         events,
         home,
-        || crate::resume_gate::admit_revival(home, verb, row_name),
+        || crate::resume_gate::admit_revival(home, verb, row_name, std::path::Path::new(cwd)),
     )
 }
 
@@ -342,7 +342,10 @@ where
     // the row before it becomes visible.
     let _admission = match admit() {
         Ok(guard) => guard,
-        Err(code) => return code,
+        Err(code) => {
+            crate::resume_gate::release_revival_claims(session_id);
+            return code;
+        }
     };
     // Launch. stdin null so a pane run that reads stdin cannot stall against
     // the caller's terminal; stdout piped (the pane id); stderr inherited.
@@ -1145,6 +1148,30 @@ mod tests {
             r.entries.push(pane_row("repro", "main", 2179))
         })
         .unwrap();
+        let claims_root = dir.path().join("claims-root");
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+        for (key, holder) in [
+            (
+                format!("session:{SESSION}"),
+                format!("resume:{}", std::process::id()),
+            ),
+            (
+                "node:x-repro".to_string(),
+                format!("target-session:{SESSION}"),
+            ),
+        ] {
+            assert!(matches!(
+                crate::claims::acquire(
+                    &key,
+                    &holder,
+                    crate::claims::AcquireOpts {
+                        root: Some(claims_root.clone()),
+                        ..Default::default()
+                    }
+                ),
+                crate::claims::AcquireOutcome::Acquired(_)
+            ));
+        }
         stub_fno(
             dir.path(),
             "4242",
@@ -1166,7 +1193,13 @@ mod tests {
             Some(p) => std::env::set_var("PATH", p),
             None => std::env::remove_var("PATH"),
         }
+        let session_state =
+            crate::claims::status(&format!("session:{SESSION}"), Some(&claims_root)).0;
+        let node_state = crate::claims::status("node:x-repro", Some(&claims_root)).0;
+        std::env::remove_var("FNO_CLAIMS_ROOT");
         assert_eq!(code, 83);
+        assert!(matches!(session_state, crate::claims::ClaimState::Free));
+        assert!(matches!(node_state, crate::claims::ClaimState::Free));
         assert!(events_of(&home).is_empty());
         let row = &state::load_registry(&home.registry_json()).unwrap().entries[0];
         assert_eq!(row.mux.as_ref().unwrap().pane_id, 2179);

@@ -341,11 +341,30 @@ pub(crate) fn admit_revival(
     home: &AgentsHome,
     verb: &str,
     row_name: &str,
+    worker_cwd: &std::path::Path,
 ) -> Result<crate::spawn_gate::GateGuard, i32> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     admit_revival_with(home, verb, row_name, |input| {
-        crate::spawn_gate::run_gate(&cwd, &home.registry_json(), input)
+        crate::spawn_gate::run_gate(worker_cwd, &home.registry_json(), input)
     })
+}
+
+pub(crate) fn release_revival_claims(session_id: &str) {
+    if session_id.is_empty() {
+        return;
+    }
+    let session_key = format!("session:{session_id}");
+    let session_holder = format!("resume:{}", std::process::id());
+    let _ = claims::release(&session_key, &session_holder, None, None);
+
+    let node_holder = format!("target-session:{session_id}");
+    if let Ok(records) = claims::list(Some("node:"), None, true) {
+        for record in records
+            .into_iter()
+            .filter(|record| record.holder == node_holder)
+        {
+            let _ = claims::release(&record.key, &node_holder, None, None);
+        }
+    }
 }
 
 pub(crate) fn admit_revival_with<G>(

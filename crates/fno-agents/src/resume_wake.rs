@@ -468,7 +468,7 @@ pub(crate) fn run_and_confirm_respawn(
         ClaudeHome::from_env(),
         family1_truth_state,
         std::thread::sleep,
-        || crate::resume_gate::admit_revival(home, verb, &plan.name),
+        || crate::resume_gate::admit_revival(home, verb, &plan.name, Path::new(&plan.cwd)),
     )
 }
 
@@ -586,7 +586,10 @@ where
     // slot count cannot miss the row before it becomes visible.
     let _admission = match admit() {
         Ok(guard) => guard,
-        Err(code) => return code,
+        Err(code) => {
+            crate::resume_gate::release_revival_claims(&plan.session_id);
+            return code;
+        }
     };
     let jobs_dir = claude_home.jobs_dir_for(&plan.short_id);
     let bg_resume = plan.mechanism == "bg-resume";
@@ -1020,7 +1023,7 @@ pub(crate) fn parked_claude_route(
                 short,
                 uuid,
                 cwd,
-                || crate::resume_gate::admit_revival(home, "resume", row_name),
+                || crate::resume_gate::admit_revival(home, "resume", row_name, Path::new(cwd)),
             )
         },
         |uuid, wrapped| {
