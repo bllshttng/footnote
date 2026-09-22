@@ -9747,15 +9747,15 @@ fn a_layout_with_backlog_cards_renders_no_backlog_rows() {
 
 #[test]
 fn blank_spacers_separate_groups_only_when_multi_squad() {
-    let v = unified_rows_view(); // 2 squads, orphan section, backlog
+    let v = unified_rows_view(); // 2 squads, orphan section
     let rows = v.display_rows();
     let blanks = rows
         .iter()
         .filter(|r| matches!(r, DisplayRow::Blank))
         .count();
     assert_eq!(
-        blanks, 4,
-        "one between the two groups + one before the footer + one before each of the two headers"
+        blanks, 3,
+        "one between the two groups + one before the footer + one before the header"
     );
     // Never two spacers in a row.
     assert!(
