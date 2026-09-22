@@ -224,28 +224,13 @@ read it with fno agents truth {who}.",
     Some(RESUME_REASSIGNED_EXIT)
 }
 
-/// The gate `run_resume` consults. `None` means "may launch": either no other
-/// holder, or the graph could not be read (one warning, never a block).
-pub fn refuse_if_reassigned(home: &AgentsHome, session_id: &str, row_name: &str) -> Option<i32> {
-    let Some(entries) = gc_sweep::read_graph_rows(home) else {
-        eprintln!("fno agents resume: warning: graph unreadable, holder check skipped");
-        return None;
-    };
-    refused_line(home, &entries, session_id, row_name)
-}
-
 /// Gate plus atomic reservation. A dispatch racing this resume is decided by
 /// the claim file itself: the reserve acquires `node:<id>` under the
 /// resuming session's own holder, and same-holder acquire is idempotent, so
 /// the revived session's own claim refreshes the reservation instead of
-/// fighting it. `gate_id` is the holder id part (`claim_uuid` on the
-/// relaunch arm, else the row's session id).
-pub fn gate_and_reserve(
-    home: &AgentsHome,
-    session_id: &str,
-    row_name: &str,
-    gate_id: &str,
-) -> Option<i32> {
+/// fighting it. `session_id` is always the full session id, including on the
+/// claude resume arms whose row handle is only a short id.
+pub fn gate_and_reserve(home: &AgentsHome, row_name: &str, session_id: &str) -> Option<i32> {
     let Some(entries) = gc_sweep::read_graph_rows(home) else {
         eprintln!("fno agents resume: warning: graph unreadable, holder check skipped");
         return None;
@@ -253,7 +238,7 @@ pub fn gate_and_reserve(
     if let Some(code) = refused_line(home, &entries, session_id, row_name) {
         return Some(code);
     }
-    let holder = format!("target-session:{gate_id}");
+    let holder = format!("target-session:{session_id}");
     reserve_nodes(&entries, session_id, row_name, &holder, None)
 }
 
@@ -490,7 +475,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("agents")).unwrap();
         std::fs::write(dir.join("graph.json"), b"{not json").unwrap();
         let home = AgentsHome::at(dir.join("agents"));
-        assert_eq!(refuse_if_reassigned(&home, "sid", "row"), None);
+        assert_eq!(gate_and_reserve(&home, "row", "sid"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -551,12 +536,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn add_registry_row(
-        home: &AgentsHome,
-        name: &str,
-        session_id: &str,
-        node: Option<&str>,
-    ) {
+    fn add_registry_row(home: &AgentsHome, name: &str, session_id: &str, node: Option<&str>) {
         crate::state::update_registry(&home.registry_json(), |r| {
             r.entries.push(
                 serde_json::from_value(json!({
