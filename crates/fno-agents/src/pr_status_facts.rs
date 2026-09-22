@@ -53,6 +53,7 @@ pub fn run_op(op: &str, payload: &Value) -> String {
         "status-failure-cause" => failure_cause(payload).to_string(),
         "status-zero-job-runs" => zero_job_runs_op(&RealGhProbe, payload).to_string(),
         "status-cache-key" => status_cache_key(payload).to_string(),
+        "status-branch-history" => branch_history_op(&RealGhProbe, payload).to_string(),
         other => json!({"error": format!("unknown op {other}")}).to_string(),
     }
 }
@@ -765,6 +766,279 @@ fn finished(cause: Option<String>, source: &str) -> Value {
         )
     });
     json!({"cause": cause, "source": source, "truncated": truncated})
+}
+
+// ---------------------------------------------------------------------------
+// status-branch-history
+// ---------------------------------------------------------------------------
+
+fn actions_id(url: &str, part: &str) -> Option<String> {
+    Regex::new(&format!(r"/actions/runs/(\d+)/{part}/(\d+)"))
+        .ok()?
+        .captures(url)
+        .and_then(|captures| captures.get(1).map(|m| m.as_str().to_string()))
+}
+
+fn actions_job_id(url: &str) -> Option<String> {
+    actions_id(url, "job").and_then(|run| {
+        Regex::new(r"/actions/runs/\d+/job/(\d+)")
+            .ok()?
+            .captures(url)
+            .and_then(|captures| captures.get(1).map(|m| m.as_str().to_string()))
+            .or(Some(run))
+    })
+}
+
+fn gh_json<P: GhProbe>(probes: &P, cwd: &Path, path: String) -> Option<Value> {
+    let args = vec!["api".to_string(), path];
+    let (ok, stdout, _) = probes.run_gh(cwd, &args).ok()?;
+    if !ok {
+        return None;
+    }
+    serde_json::from_str(&stdout).ok()
+}
+
+fn workflow_rows(value: &Value) -> Vec<Value> {
+    match value {
+        Value::Array(pages) => pages.iter().flat_map(workflow_rows).collect::<Vec<_>>(),
+        Value::Object(_) => value
+            .get("workflow_runs")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn row_text<'a>(row: &'a Value, keys: &[&str]) -> &'a str {
+    keys.iter()
+        .find_map(|key| row.get(*key).and_then(Value::as_str))
+        .unwrap_or("")
+}
+
+fn job_minutes(job: &Value) -> Option<f64> {
+    let start = parse_rfc3339_unix(row_text(job, &["started_at", "startedAt"]))?;
+    let end = parse_rfc3339_unix(row_text(job, &["completed_at", "completedAt"]))?;
+    (end >= start).then(|| (end - start) as f64 / 60.0)
+}
+
+fn median_minutes(mut values: Vec<f64>) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(f64::total_cmp);
+    let middle = values.len() / 2;
+    if values.len() % 2 == 1 {
+        Some(values[middle])
+    } else {
+        Some((values[middle - 1] + values[middle]) / 2.0)
+    }
+}
+
+fn minutes_word(value: f64) -> String {
+    format!("{}m", value.round() as u64)
+}
+
+fn branch_superseded(row: &Value, runs: &[Value]) -> bool {
+    let created = row_text(row, &["created_at", "createdAt"]);
+    let updated = row_text(row, &["updated_at", "updatedAt"]);
+    if created.is_empty() || updated.is_empty() {
+        return false;
+    }
+    runs.iter().any(|newer| {
+        row_text(newer, &["created_at", "createdAt"]) > created
+            && row_text(newer, &["created_at", "createdAt"]) <= updated
+    })
+}
+
+fn branch_history_op<P: GhProbe>(probes: &P, payload: &Value) -> Value {
+    let cwd = PathBuf::from(payload.get("cwd").and_then(Value::as_str).unwrap_or("."));
+    let branch = payload.get("branch").and_then(Value::as_str).unwrap_or("");
+    let rollup = payload
+        .get("rollup")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let workflow_runs = payload
+        .get("workflow_runs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let latest = crate::check_supersession::latest_per_name(&Value::Array(rollup));
+    let mut selected = latest
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let conclusion = row_text(row, &["conclusion", "state"]).to_lowercase();
+            if conclusion != "cancelled" && conclusion != "timed_out" {
+                return None;
+            }
+            let url = row_text(row, &["detailsUrl", "details_url", "htmlUrl", "html_url"]);
+            let job_id = actions_job_id(url)?;
+            let run_id = actions_id(url, "job")?;
+            let run = workflow_runs.iter().find(|candidate| {
+                candidate.get("id").map(|id| id.to_string()) == Some(run_id.clone())
+            })?;
+            let workflow_id = run
+                .get("workflow_id")
+                .or_else(|| run.get("workflowId"))
+                .map(ToString::to_string)?;
+            let workflow = row_text(run, &["name", "path"]);
+            if workflow.is_empty() {
+                return None;
+            }
+            Some((
+                row_text(row, &["name", "context"]).to_string(),
+                job_id,
+                run_id,
+                workflow_id,
+                workflow.to_string(),
+                conclusion,
+            ))
+        })
+        .collect::<Vec<_>>();
+    selected.sort_by(|left, right| {
+        let timeout_order = |conclusion: &str| if conclusion == "timed_out" { 0 } else { 1 };
+        timeout_order(&left.5)
+            .cmp(&timeout_order(&right.5))
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    selected.truncate(2);
+
+    if selected.is_empty() {
+        return json!({"checks": [], "line": ""});
+    }
+    if let Some(prior) = payload.get("prior").filter(|value| value.is_object()) {
+        let prior_ids = prior
+            .get("checks")
+            .and_then(Value::as_array)
+            .map(|checks| {
+                checks
+                    .iter()
+                    .filter_map(|check| check.get("job_id").and_then(Value::as_str))
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        if prior_ids.len() == selected.len()
+            && selected
+                .iter()
+                .all(|(_, job_id, ..)| prior_ids.contains(job_id.as_str()))
+        {
+            return prior.clone();
+        }
+    }
+
+    let mut checks = Vec::new();
+    let mut lines = Vec::new();
+    for (check, job_id, _run_id, workflow_id, workflow, _conclusion) in selected {
+        let current = gh_json(
+            probes,
+            &cwd,
+            format!("repos/{{owner}}/{{repo}}/actions/jobs/{job_id}"),
+        )
+        .and_then(|job| job_minutes(&job));
+        let branch_runs = gh_json(
+            probes,
+            &cwd,
+            format!(
+                "repos/{{owner}}/{{repo}}/actions/workflows/{workflow_id}/runs?branch={branch}&event=pull_request&per_page=100"
+            ),
+        )
+        .map(|value| workflow_rows(&value));
+        let baseline_runs = gh_json(
+            probes,
+            &cwd,
+            format!(
+                "repos/{{owner}}/{{repo}}/actions/workflows/{workflow_id}/runs?event=pull_request&status=success&per_page=20"
+            ),
+        )
+        .map(|value| {
+            workflow_rows(&value)
+                .into_iter()
+                .filter(|run| row_text(run, &["head_branch", "headBranch"]) != branch)
+                .take(3)
+                .collect::<Vec<_>>()
+        });
+        let mut baseline_minutes = Vec::new();
+        if let Some(runs) = baseline_runs.as_ref() {
+            for run in runs {
+                let Some(id) = run.get("id").map(ToString::to_string) else {
+                    continue;
+                };
+                let Some(jobs) = gh_json(
+                    probes,
+                    &cwd,
+                    format!("repos/{{owner}}/{{repo}}/actions/runs/{id}/jobs?per_page=100"),
+                ) else {
+                    continue;
+                };
+                let Some(job) = jobs.get("jobs").and_then(Value::as_array).and_then(|jobs| {
+                    jobs.iter().find(|job| {
+                        row_text(job, &["name"]) == check
+                            && row_text(job, &["conclusion"]).eq_ignore_ascii_case("success")
+                    })
+                }) else {
+                    continue;
+                };
+                if let Some(minutes) = job_minutes(job) {
+                    baseline_minutes.push(minutes);
+                }
+            }
+        }
+        let passed = branch_runs.as_ref().map(|runs| {
+            runs.iter()
+                .filter(|run| row_text(run, &["conclusion"]).eq_ignore_ascii_case("success"))
+                .count()
+        });
+        let superseded = branch_runs.as_ref().map(|runs| {
+            runs.iter()
+                .filter(|run| row_text(run, &["conclusion"]).eq_ignore_ascii_case("cancelled"))
+                .filter(|run| branch_superseded(run, runs))
+                .count()
+        });
+        let baseline_median = median_minutes(baseline_minutes);
+        let mut fragments = Vec::new();
+        if let (Some(here), Some(median)) = (current, baseline_median) {
+            fragments.push(format!(
+                "{check} ran {} here vs {} median on {} passing PR runs",
+                minutes_word(here),
+                minutes_word(median),
+                baseline_runs.as_ref().map_or(0, Vec::len)
+            ));
+        }
+        if let (Some(runs), Some(passed)) = (branch_runs.as_ref(), passed) {
+            if passed == 0 {
+                fragments.push(format!(
+                    "{workflow} never passed on this branch (0 of {} runs)",
+                    runs.len()
+                ));
+            } else {
+                fragments.push(format!(
+                    "{workflow} passed {passed} of {} runs on this branch",
+                    runs.len()
+                ));
+            }
+        }
+        if let Some(count) = superseded.filter(|count| *count > 0) {
+            fragments.push(format!("{count} cancelled by a newer push on this branch"));
+        }
+        if !fragments.is_empty() {
+            lines.push(fragments.join(", "));
+        }
+        checks.push(json!({
+            "check": check,
+            "job_id": job_id,
+            "workflow": workflow,
+            "minutes_here": current,
+            "branch_runs": branch_runs.as_ref().map(Vec::len),
+            "branch_passed": passed,
+            "superseded": superseded,
+            "baseline_minutes": baseline_median,
+            "baseline_runs": baseline_runs.as_ref().map(Vec::len),
+        }));
+    }
+    json!({"checks": checks, "line": lines.join(" | ")})
 }
 
 #[cfg(test)]

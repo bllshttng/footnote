@@ -360,7 +360,7 @@ def _no_floor(monkeypatch):
     )
 
 
-def _run_status_on(monkeypatch, capsys, rollup):
+def _run_status_on(monkeypatch, capsys, rollup, *, history=None):
     """run_status with gh stubbed out; returns (exit code, parsed JSON, stderr)."""
 
     def _patch(name, value):
@@ -371,6 +371,7 @@ def _run_status_on(monkeypatch, capsys, rollup):
     # The rerun-recovery probe shells out to gh on green reads; no case here
     # is about it, so it answers never-recovered (tests about it override).
     _patch("rerun_recovery", lambda pr, cwd=None, sha=None, runs=None: {"recovered": False, "failed": []})
+    _patch("_branch_history", lambda pr_json, rollup, cwd, prior: history)
     _patch(
         "read_optional_review_state",
         lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
@@ -435,6 +436,26 @@ def test_ac1_cancelled_latest_is_red_and_unsettled(monkeypatch, capsys):
     # The instruction travels with the number: which check, and what to do.
     assert "ci" in err
     assert "do not read this pr as decided" in err.lower()
+
+
+def test_ac3_branch_history_is_additive_and_precedes_the_conclusion(monkeypatch, capsys):
+    history = {
+        "checks": [{"job_id": "106470248875"}],
+        "line": (
+            "rust e2e concurrency stress (20 trials) ran 35m here vs 20m median on "
+            "3 passing PR runs; rust-ci never passed on this branch (0 of 5 runs), "
+            "3 cancelled by a newer push on this branch"
+        ),
+    }
+    code, out, err = _run_status_on(
+        monkeypatch,
+        capsys,
+        [{"name": "rust e2e concurrency stress (20 trials)", "status": "COMPLETED", "conclusion": "CANCELLED"}],
+        history=history,
+    )
+    assert code == 1
+    assert out["branch_history"] == history
+    assert f"history: {history['line']} - " in err
 
 
 def test_ac2_all_concluded_passes_stay_settled(monkeypatch, capsys):
