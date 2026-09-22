@@ -1131,9 +1131,19 @@ if isinstance(loaded, dict):
         node_id = None
 if isinstance(node_id, str) and node_id.strip():
     try:
-        from fno.decide import list_decisions
+        from fno.decide import _coord_lifecycle, _graph_entries, list_decisions
 
-        _subj, rows, damaged = list_decisions(node_id.strip(), limit=None, state="all")
+        entries = _graph_entries(required=True)
+    except Exception as exc:  # noqa: BLE001 - an unread graph is not an empty graph
+        sys.stdout.write(
+            "W\tthe graph could not be read (%s), so coord lifecycles and slug subjects are unknown\n"
+            % " ".join(str(exc).split())[:160]
+        )
+        raise SystemExit(0)
+    try:
+        _subj, rows, damaged = list_decisions(
+            node_id.strip(), limit=None, state="all", entries=entries
+        )
     except Exception as exc:  # noqa: BLE001 - reported as W below, never a bare crash
         sys.stdout.write("W\t" + " ".join(str(exc).split())[:160] + "\n")
     else:
@@ -1148,6 +1158,14 @@ if isinstance(node_id, str) and node_id.strip():
                 "`fno backlog decide-reindex` and re-validate\n" % damaged
             )
         else:
+            for row in rows:
+                if row.get("lane") == "coord" and row.get("lifecycle") in {
+                    "live",
+                    "expired",
+                    "unscoped",
+                }:
+                    row["lifecycle"], _ = _coord_lifecycle(row, entries)
+
             def valid_expiry_ref_shape(ref):
                 if not isinstance(ref, dict):
                     return False
