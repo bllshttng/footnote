@@ -14,7 +14,7 @@ The effects, in order: the confirmed stop, the native active-surface removal, th
 
 Receipts live in `<agents home>/reap-receipts/`, one per retired session, keyed by harness and `harness_session_id`. Each carries the retirement contract (`retirement_contract`, the required op set promised) and a build stamp (`writer_build`) as provenance. A receipt on another contract, or with no contract, skips instead of failing the audit.
 
-A claude receipt's resume line asks resume_pin, the same pin-or-refuse decision every fno door that resumes a claude session makes. The line carries `--model` and `--effort` when the row records them. For a row a non-Anthropic route served, it names `fno agents spawn --resume <sid> -P <provider> -m <model>`, because a bare `claude --resume` lands on the account default, and that door seeds a new session from the transcript, so the session id changes. The line is shell-quoted; `resume_argv` holds the raw tokens a launcher runs.
+A claude receipt's resume line asks resume_pin, the same pin-or-refuse decision every fno door that resumes a claude session makes. When the row records a model or an effort, the line carries `--model` and `--effort`. For a row a non-Anthropic route served, it names `fno agents spawn --resume <sid> -P <provider> -m <model>`. A bare `claude --resume` lands on the account default, and that door seeds a new session from the transcript, so the session id changes. The line is shell-quoted. `resume_argv` holds the raw tokens a launcher runs.
 
 Every receipt names its writer. `removed_by` carries the SURFACE that took the row, never the process that ran it, and `removal_trigger` separates an unattended sweep from a session-initiated call. The doors:
 
