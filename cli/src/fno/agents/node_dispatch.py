@@ -115,14 +115,9 @@ def resolve_node_spawn(
     verb_source = (
         "declared" if str(node.get("dispatch_verb") or "").strip() else "none-declared"
     )
-    # The ported lifecycle answer (verb + note) fetched once; reconcile
-    # bypasses (its explicit command spells the de-stub pass).
-    lifecycle: Optional[tuple[Optional[str], str]] = None
-    effective_verb: Optional[str] = None
-    if not is_reconcile:
-        answer = _verb_answer(node)
-        effective_verb = answer.get("verb")
-        lifecycle = (effective_verb, str(answer.get("note") or ""))
+    # The ported lifecycle answer (verb, note); reconcile bypasses it.
+    lifecycle = None if is_reconcile else _verb_answer(node)
+    effective_verb = lifecycle[0] if lifecycle else None
     # The row's own declaration is the last fallback for the name code and
     # the receipt: the table abstains on an out-of-family verb.
     declared_verb = (
@@ -231,14 +226,11 @@ def resolve_node_spawn(
                 resolve_kwargs["command"]
             )
     else:
-        # The ported decision rides in; the node's own declared verb rides
-        # beside it (allowlist-checked in the resolver; a graph field is a
-        # trust boundary): a declared target-family verb wins, an
-        # out-of-family one keeps declared precedence when the table abstains.
+        # The decision rides in; the row's declaration rides the allowlist-
+        # checked verb rung when the table abstains (declared precedence).
         if isinstance(node, dict):
             resolve_kwargs["lifecycle"] = lifecycle
-            if node_verb or declared_verb:
-                resolve_kwargs["verb"] = node_verb or declared_verb
+            resolve_kwargs["verb"] = node_verb or declared_verb or None
     resolved = harness_map.resolve_dispatch(**resolve_kwargs)
     substrate = resolved["substrate"]
     target_cmd = resolved["command"]
@@ -437,22 +429,20 @@ def find_node_row(node: str) -> Optional[dict]:
     return None
 
 
-def _verb_answer(row: Optional[dict], *, node_id: Optional[str] = None) -> dict:
-    """One node row -> the ported verb decision (backlog_ready.rs via the
-    store door); a refusal or an unavailable runtime raises, never guesses."""
+def _verb_answer(row: Optional[dict], *, node_id: Optional[str] = None) -> tuple:
+    """(verb, note) from the ported lifecycle table; refusal raises."""
     from fno.agents.harness_map import DispatchResolveError
-    from fno.graph.store import StoreUnavailable, request_effective_verb
+    from fno.graph.store import GRAPH_JSON, _client_for
 
     payload = dict(row or {})
     payload.setdefault("id", node_id)
     try:
-        answers = request_effective_verb([payload])
-    except StoreUnavailable as exc:
+        answer = _client_for(GRAPH_JSON).request(
+            "effective_verb", {"entries": [payload]}
+        )
+        return answer["verb"], answer["note"]
+    except RuntimeError as exc:
         raise DispatchResolveError(str(exc)) from exc
-    answer = answers[0] if answers else {}
-    if answer.get("refusal"):
-        raise DispatchResolveError(str(answer["refusal"]))
-    return answer
 
 
 def node_effective_verb(
@@ -461,7 +451,7 @@ def node_effective_verb(
     """The lifecycle table's answer for a node row, or None on abstain:
     one answer per node, shared by every door. Accepts a None row; raises
     DispatchResolveError on an unanswerable node."""
-    return _verb_answer(row, node_id=node_id).get("verb")
+    return _verb_answer(row, node_id=node_id)[0]
 
 
 def render_node_seed(node: str, *, harness: Optional[str]) -> Optional[NodeSeed]:
@@ -487,12 +477,11 @@ def render_node_seed(node: str, *, harness: Optional[str]) -> Optional[NodeSeed]
         return None
     try:
         node_brief, node_brief_source = resolve_dispatch_brief(seed_rec)
-        answer = _verb_answer(seed_rec)
         resolved_seed = resolve_dispatch(
             harness=harness,
             node_id=str(seed_node_id),
             verb=str(seed_rec.get("dispatch_verb")).strip(),
-            lifecycle=(answer.get("verb"), str(answer.get("note") or "")),
+            lifecycle=_verb_answer(seed_rec),
             brief=node_brief,
             trigger="autonomous",
         )

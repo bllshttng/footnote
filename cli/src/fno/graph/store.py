@@ -553,8 +553,7 @@ class _ExecClient(_Keeper):
         if binary is None:
             raise StoreUnavailable(
                 STATE_SPAWN_FAILED,
-                "fno-agents-worker not found; run `fno doctor update --rust`, "
-                "or set FNO_AGENTS_WORKER.",
+                "fno-agents-worker not found (set FNO_AGENTS_WORKER or install the runtime)",
             )
         argv = [
             str(binary),
@@ -901,22 +900,6 @@ def request_scoreboard_classify(
             "since_days": since_days,
         },
     )
-
-
-def request_effective_verb(entries: list[dict]) -> list[dict]:
-    """One lifecycle verb answer per row (backlog_ready.rs); a refusal rides
-    its own row, and a keeper predating the verb names the restart remedy."""
-    try:
-        result = _client_for(GRAPH_JSON).request("effective_verb", {"entries": entries})
-    except RuntimeError as exc:
-        if "unknown store method" in str(exc):
-            raise StoreUnavailable(
-                STATE_STALE_KEEPER,
-                "the running store keeper predates this verb; restart it on a "
-                "current fno-agents-worker (`fno doctor` names binary lag)",
-            ) from None
-        raise
-    return list(result.get("answers") or [])
 
 
 def _plan_rung_map(entries: list[dict]) -> "dict[str, str]":

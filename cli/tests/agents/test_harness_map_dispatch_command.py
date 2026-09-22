@@ -504,32 +504,34 @@ def test_redispatch_build_rung_declared_blueprint_wins():
     )
 
 
-def _stub_door(monkeypatch, answers):
-    """Stub the store door: ``answers`` is the reply row list, or a callable
-    replacing ``request_effective_verb`` itself (a raising door)."""
+def _stub_door(monkeypatch, impl):
+    """Stub the keeper client: ``impl(method, params)`` answers or raises."""
     import fno.graph.store as store
 
-    if callable(answers):
-        monkeypatch.setattr(store, "request_effective_verb", answers)
-    else:
-        monkeypatch.setattr(store, "request_effective_verb", lambda entries: answers)
+    class _FakeClient:
+        @staticmethod
+        def request(method, params):
+            assert method == "effective_verb"
+            return impl(method, params)
+
+    monkeypatch.setattr(store, "_client_for", lambda path: _FakeClient())
+
+
+def _refusal_text(rung, difficulty=""):
+    return (
+        f"dispatch verb cannot be derived for node x-abcd: plan rung "
+        f"{rung!r} with difficulty {difficulty!r} answers no lifecycle rung"
+    )
 
 
 @pytest.mark.parametrize("rung", ["unreadable", "done", "superseded"])
 def test_unanswerable_plan_rungs_refuse(monkeypatch, rung):
     from fno.agents.node_dispatch import node_effective_verb
 
-    _stub_door(
-        monkeypatch,
-        [
-            {
-                "refusal": (
-                    f"dispatch verb cannot be derived for node x-abcd: plan rung "
-                    f"{rung!r} with difficulty '' answers no lifecycle rung"
-                )
-            }
-        ],
-    )
+    def door(method, params):
+        raise RuntimeError(_refusal_text(rung))
+
+    _stub_door(monkeypatch, door)
     with pytest.raises(DispatchResolveError, match=rung) as exc_info:
         node_effective_verb({"id": "x-abcd"})
     assert_refusal_names_subject_and_cites_no_node(exc_info.value)
@@ -538,17 +540,10 @@ def test_unanswerable_plan_rungs_refuse(monkeypatch, rung):
 def test_planless_node_without_difficulty_refuses_naming_the_field(monkeypatch):
     from fno.agents.node_dispatch import node_effective_verb
 
-    _stub_door(
-        monkeypatch,
-        [
-            {
-                "refusal": (
-                    "dispatch verb cannot be derived for node x-abcd: plan rung "
-                    "'none' with difficulty '' answers no lifecycle rung"
-                )
-            }
-        ],
-    )
+    def door(method, params):
+        raise RuntimeError(_refusal_text("none"))
+
+    _stub_door(monkeypatch, door)
     with pytest.raises(DispatchResolveError, match="difficulty") as exc_info:
         node_effective_verb({"id": "x-abcd"})
     assert_refusal_names_subject_and_cites_no_node(exc_info.value)
@@ -557,17 +552,10 @@ def test_planless_node_without_difficulty_refuses_naming_the_field(monkeypatch):
 def test_planless_node_with_invalid_difficulty_refuses(monkeypatch):
     from fno.agents.node_dispatch import node_effective_verb
 
-    _stub_door(
-        monkeypatch,
-        [
-            {
-                "refusal": (
-                    "dispatch verb cannot be derived for node x-abcd: plan rung "
-                    "'none' with difficulty 'spicy' answers no lifecycle rung"
-                )
-            }
-        ],
-    )
+    def door(method, params):
+        raise RuntimeError(_refusal_text("none", "spicy"))
+
+    _stub_door(monkeypatch, door)
     with pytest.raises(DispatchResolveError, match="difficulty") as exc_info:
         node_effective_verb({"id": "x-abcd", "difficulty": "spicy"})
     assert_refusal_names_subject_and_cites_no_node(exc_info.value)
@@ -578,17 +566,11 @@ def test_refusal_without_node_id_names_unknown_not_a_citation(monkeypatch):
     # carries no citation for a reader to mistake for the subject.
     from fno.agents.node_dispatch import node_effective_verb
 
-    _stub_door(
-        monkeypatch,
-        [
-            {
-                "refusal": (
-                    "dispatch verb cannot be derived for node unknown: plan rung "
-                    "'none' with difficulty '' answers no lifecycle rung"
-                )
-            }
-        ],
-    )
+    def door(method, params):
+        text = _refusal_text("none").replace("node x-abcd", "node unknown")
+        raise RuntimeError(text)
+
+    _stub_door(monkeypatch, door)
     with pytest.raises(DispatchResolveError) as exc_info:
         node_effective_verb({})
     message = str(exc_info.value)
@@ -600,16 +582,14 @@ def test_missing_runtime_refuses_naming_the_remedy(monkeypatch):
     # The binary being absent is a refusal, never a guessed verb and never a
     # Python fallback table.
     from fno.agents.node_dispatch import node_effective_verb
-    from fno.graph.store import STATE_SPAWN_FAILED, StoreUnavailable
 
-    def absent(entries):
-        raise StoreUnavailable(
-            STATE_SPAWN_FAILED,
-            "fno-agents-worker not found; run `fno doctor update --rust`, "
-            "or set FNO_AGENTS_WORKER.",
+    def door(method, params):
+        raise RuntimeError(
+            "graph store unavailable (spawn_failed): fno-agents-worker not "
+            "found; run `fno doctor update --rust`, or set FNO_AGENTS_WORKER."
         )
 
-    _stub_door(monkeypatch, absent)
+    _stub_door(monkeypatch, door)
     with pytest.raises(DispatchResolveError, match="fno doctor update --rust"):
         node_effective_verb({"id": "x-abcd"})
 

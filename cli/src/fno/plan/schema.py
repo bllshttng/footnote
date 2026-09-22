@@ -443,8 +443,8 @@ class PlanFrontmatter(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _fill_node_from_claims(cls, data: Any) -> Any:
-        """One release: blueprint authors write `claims:` only; fill `node`
-        from the synonym (validate-plan.sh's node-then-claims read)."""
+        # One release: blueprint authors write `claims:` only; fill `node`
+        # from the synonym (validate-plan.sh's node-then-claims read).
         if isinstance(data, dict) and not str(data.get("node") or "").strip():
             claims = str(data.get("claims") or "").strip()
             if claims:

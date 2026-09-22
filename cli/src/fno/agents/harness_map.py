@@ -1319,9 +1319,7 @@ _BRIEF_MAX_BYTES = 8192
 # _HARNESS_CAPS), not a single template - see the resolve builtin branch.
 
 
-#: The verbs the lifecycle table owns; anything else abstains. The table
-#: itself lives once in crates/fno-agents/src/backlog_ready.rs; this is the
-#: family vocabulary the lost-verb scan shares.
+#: The verbs the lifecycle table owns; anything else abstains.
 _TARGET_FAMILY_VERBS = ("/target", "/blueprint")
 
 
@@ -1346,11 +1344,10 @@ def resolve_dispatch(
     ``claude``; substrate explicit > config > per-harness default; command
     explicit > lifecycle answer > node ``verb`` (allowlist-checked;
     a graph field is a trust boundary) > ``config.dispatch.command`` >
-    per-harness builtin. ``lifecycle`` is the ported verb decision
-    (backlog_ready.rs via the store door) as ``(verb, note)``; the verb runs
-    BEFORE the stage-table read so ``agents.profiles.<resolved-verb>`` drives
-    the harness, and the note joins the decision trail; absent, the chain
-    falls through to the verb rung, config, then the builtin. ``brief``
+    per-harness builtin. ``lifecycle`` is the ported verb decision (the
+    backlog_ready.rs table) as ``(verb, note)``; the verb runs BEFORE the
+    stage-table read so ``agents.profiles.<resolved-verb>`` drives the harness.
+    ``brief``
     rides ``env['TARGET_BRIEF']`` only, capped
     at 8 KB, never truncated. ``route`` is the stage table's vendor lane beside
     the harness ("" when unset), returned so a caller forwarding the harness
@@ -1362,13 +1359,10 @@ def resolve_dispatch(
     Raises :class:`DispatchResolveError` on an unknown/refused harness, a
     missing substrate lane, an unsupported autonomous pane, an unknown trigger
     or substrate, an out-of-allowlist verb, an oversized brief, an empty or
-    unsubstituted command. ``dispatch_cfg`` overrides the config read (for
-    tests)."""
+    unsubstituted command, or an unanswerable node lifecycle.
+    ``dispatch_cfg`` overrides the config read (for tests)."""
     decision: list[str] = []
-    # The ported lifecycle answer rides in as (verb, note) and lands BEFORE
-    # the config read so the stage table resolves the RESOLVED verb's profile
-    # row. Absent, the chain falls through to the allowlist-checked verb
-    # rung, config, then the per-harness builtin.
+    # The ported lifecycle answer (verb, note) lands BEFORE the config read.
     lifecycle_verb: Optional[str] = None
     if command is None or not command.strip():
         if lifecycle is not None:

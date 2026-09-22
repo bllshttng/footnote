@@ -461,23 +461,19 @@ pub fn effective_verb(entry: &Value) -> Result<(Option<String>, String), String>
     ))
 }
 
-/// The keeper's `effective_verb` body: one row's ported lifecycle verb
-/// decision per shipped entry, in order (`{"verb", "note", "refusal"}`).
-/// Pure over the client's rows and their linked plan docs. Kept beside the
-/// table so the decision and its serving live in one file.
+/// The keeper's `effective_verb` body: one row in, its ported lifecycle
+/// verb decision out (`{"verb", "note"}`), the refusal as the error so the
+/// Python client raises without an unwrapping layer. Pure over the shipped
+/// row and its linked plan doc. Kept beside the table so the decision and
+/// its serving live in one file.
 pub(crate) fn serve_effective_verb(params: &Value) -> Result<Value, String> {
-    let entries = params
+    let entry = params
         .get("entries")
         .and_then(Value::as_array)
-        .ok_or_else(|| "effective_verb needs entries".to_string())?;
-    let answers: Vec<Value> = entries
-        .iter()
-        .map(|entry| match effective_verb(entry) {
-            Ok((verb, note)) => json!({"verb": verb, "note": note, "refusal": Value::Null}),
-            Err(refusal) => json!({"verb": Value::Null, "note": Value::Null, "refusal": refusal}),
-        })
-        .collect();
-    Ok(json!({ "answers": answers }))
+        .and_then(|entries| entries.first())
+        .ok_or_else(|| "effective_verb needs entries[0]".to_string())?;
+    let (verb, note) = effective_verb(entry)?;
+    Ok(json!({ "verb": verb, "note": note }))
 }
 
 /// A plan-less idea the autonomous drain may dispatch without a plan
@@ -1848,7 +1844,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_effective_verb_answers_one_row_per_entry_and_a_refusal_rides_its_row() {
+    fn serve_effective_verb_answers_the_row_and_the_refusal_is_the_error() {
         let dir = tempfile::tempdir().unwrap();
         let research = plan_at(
             dir.path(),
@@ -1865,32 +1861,22 @@ mod tests {
             serde_json::Map::from_iter([("dispatch_verb".to_string(), json!("/fno:blueprint"))]),
         );
         let qp_row = row_with(&qp, serde_json::Map::new());
-        let reply = serve_effective_verb(&json!({
-            "entries": [
-                research_row,
-                qp_row,
-                json!({"id": "x-think", "dispatch_verb": "/fno:think"}),
-                json!({"id": "x-planless", "difficulty": "spicy"})
-            ]
-        }))
-        .unwrap();
-        let answers = reply["answers"].as_array().expect("answers array");
-        assert_eq!(answers.len(), 4);
-        assert_eq!(answers[0]["verb"], json!("/blueprint"));
-        assert!(answers[0]["note"].as_str().unwrap().contains(
+        let reply = serve_effective_verb(&json!({"entries": [research_row, qp_row]})).unwrap();
+        assert_eq!(reply["verb"], json!("/blueprint"));
+        assert!(reply["note"].as_str().unwrap().contains(
             "verb=declared(/blueprint; lifecycle answers /target: plan ready not a blueprint)"
         ));
-        assert_eq!(answers[1]["verb"], json!("/target"));
-        assert!(answers[1]["refusal"].is_null());
-        assert!(answers[2]["verb"].is_null());
-        assert!(answers[2]["note"]
-            .as_str()
-            .unwrap()
-            .contains("out-of-family /think"));
-        assert!(answers[3]["verb"].is_null());
-        assert!(answers[3]["refusal"]
-            .as_str()
-            .unwrap()
-            .starts_with("dispatch verb cannot be derived for node x-planless:"));
+        assert_eq!(
+            serve_effective_verb(&json!({"entries": [qp_row]})).unwrap()["verb"],
+            json!("/target")
+        );
+        let refusal = serve_effective_verb(&json!({"entries": [
+            json!({"id": "x-planless", "difficulty": "spicy"})
+        ]}))
+        .unwrap_err();
+        assert!(
+            refusal.starts_with("dispatch verb cannot be derived for node x-planless:"),
+            "{refusal}"
+        );
     }
 }
