@@ -1,17 +1,16 @@
-//! `crown-widen`: can an agent add an epic its own session created to its
-//! own epic-set crown? One payload kind on the existing `spawn-overlay`
-//! verb, the shape `crown-settle` set: graph rows in as JSON, one answer
-//! out. The decision lives here, not in Python, so `cli/src/fno` stays
-//! call glue.
+//! `crown-widen`: may this session edit its own epic-set crown? One
+//! payload kind on the existing `spawn-overlay` verb, the shape
+//! `crown-settle` set: graph rows in as JSON, one answer out. The
+//! decision lives here, not in Python, so `cli/src/fno` stays call glue.
 //!
 //! The rule answers exactly one question and refuses everything else. A
 //! live agent crowned over a set of epics may add an epic whose
-//! `source_session_id` is the agent's own session, and only when it names
-//! its full held set plus the new epic. Every other grant still needs an
-//! attended shell or a containing crown. A row's `source_session_id` is a
-//! birth record the patch door refuses to rewrite, so the answer is
-//! verifiable by an external reader - the claim the self-crown refusal
-//! guards.
+//! `source_session_id` is the agent's own session, and may drop a held
+//! epic whose graph row reads terminal (done or superseded). Every other
+//! grant still needs an attended shell or a containing crown. A row's
+//! `source_session_id` is a birth record the patch door refuses to
+//! rewrite, so the answer is verifiable by an external reader - the claim
+//! the self-crown refusal guards.
 
 use crate::announce::TERMINAL_STATUSES;
 use serde_json::{json, Value};
@@ -25,8 +24,9 @@ fn split_scope(raw: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Can this agent add an epic its own session created to its own crown?
-/// See the module doc for the request and answer shapes.
+/// May this session edit its own epic-set crown (an add it created, a
+/// drop of a closed epic)? See the module doc for the request and answer
+/// shapes.
 pub fn resolve(payload: &Value) -> Result<Value, String> {
     let requested = payload
         .get("requested")
@@ -45,6 +45,15 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
         .map(split_scope)
         .unwrap_or_default();
     let requested_members = split_scope(requested);
+    let target = payload
+        .get("target")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let grantor_held = caller
+        .get("crown_grantor")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
     let sessions: Vec<&str> = ["harness_session_id", "cc_session_id"]
         .iter()
         .filter_map(|f| caller.get(*f).and_then(Value::as_str))
@@ -55,6 +64,7 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
         json!({
             "widen": false,
             "added": [],
+            "dropped": [],
             "hint": match hint {
                 Some(h) => json!(h),
                 None => Value::Null,
@@ -90,6 +100,11 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
             .map(|sid| !sid.trim().is_empty() && sessions.contains(&sid))
             .unwrap_or(false)
     };
+    let terminal = |id: &str| -> bool {
+        row_for(id)
+            .map(crate::graph_store::is_terminal_entry)
+            .unwrap_or(false)
+    };
 
     // Rule: only a crown over epics widens itself. This runs before the
     // created-set check below, because a member with NO row is not an epic
@@ -111,31 +126,68 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
         .copied()
         .filter(|m| !held.contains(m))
         .collect();
+    let dropped: Vec<&str> = held
+        .iter()
+        .copied()
+        .filter(|m| !requested_members.contains(m))
+        .collect();
     let created: Vec<&str> = added.iter().copied().filter(|m| created_by(m)).collect();
-    if created.is_empty() {
+
+    // Rule: this answer belongs to the caller's own crown. When the
+    // resolved target names another row, the request is an ordinary grant
+    // question the caller's containment check already answered.
+    if target != name {
+        return Ok(refused(None));
+    }
+
+    // Self re-scope from here on. A crown is stamped by a grantor, never
+    // self-declared: an edit that neither adds nor drops anything is the
+    // succession shape, and succession runs through `spawn --crown`.
+    if added.is_empty() && dropped.is_empty() {
+        return Ok(refused(Some(&format!(
+            "refusing to crown {name:?}: that is this session, and a crown is stamped by a \
+             grantor, never self-declared. The row would record itself as its own grantor, \
+             which is exactly the claim an external reader cannot verify. Ask a king whose \
+             scope contains {requested:?}, or crown a different row."
+        ))));
+    }
+
+    if !added.is_empty() && created.is_empty() {
         // The caller named no epic it created, so the request is an
         // ordinary grant question today's refusal already answers.
         return Ok(refused(None));
     }
 
-    // Rule: a held epic the request drops would be vacated by the
-    // re-scope, and a self-widen never surrenders. Name the full command.
-    if let Some(missing) = held.iter().find(|m| !requested_members.contains(m)) {
-        let mut all: Vec<&str> = held.clone();
-        all.extend(created.iter().copied());
-        all.sort_unstable();
-        all.dedup();
-        let command = all
+    // Rule: a held epic the request drops must already be closed. A live
+    // member (or one with no row to prove it closed) is territory the king
+    // still rules, so the refusal names it and prints the command that
+    // would succeed: every held member not provably closed, plus the adds.
+    if let Some(missing) = dropped.iter().find(|m| !terminal(m)) {
+        let mut keep: Vec<&str> = held.iter().copied().filter(|m| !terminal(m)).collect();
+        keep.extend(created.iter().copied());
+        keep.sort_unstable();
+        keep.dedup();
+        let command = keep
             .iter()
             .map(|m| format!("--scope {m}"))
             .collect::<Vec<_>>()
             .join(" ");
+        let lead = if created.is_empty() {
+            format!(
+                "the request drops '{}', which is not done: a crown edit drops an epic \
+                 only once it reads done or superseded",
+                missing
+            )
+        } else {
+            format!(
+                "to add {} to this session's own crown, name every epic it holds as well: \
+                 the request drops '{}'",
+                created.join(", "),
+                missing
+            )
+        };
         return Ok(refused(Some(&format!(
-            "to add {} to this session's own crown, name every epic it holds as well: \
-             the request drops '{}', so the command is fno agents crown <own handle> {}",
-            created.join(", "),
-            missing,
-            command
+            "{lead}, so the command is fno agents crown <own handle> {command}"
         ))));
     }
 
@@ -148,9 +200,18 @@ pub fn resolve(payload: &Value) -> Result<Value, String> {
         ))));
     }
 
+    // The grantor survives the self edit: echo the recorded one so the
+    // Python stamp keeps the upstream grant instead of self-declaring.
+    let grantor = if grantor_held.is_empty() {
+        name
+    } else {
+        grantor_held
+    };
     Ok(json!({
         "widen": true,
         "added": added,
+        "dropped": dropped,
+        "grantor": grantor,
         "hint": Value::Null,
     }))
 }
@@ -166,6 +227,7 @@ mod tests {
         json!({
             "kind": "crown-widen",
             "requested": requested,
+            "target": "lead-a",
             "caller": {"name": "lead-a", "status": "idle", "crown_scope": held,
                        "harness_session_id": S, "cc_session_id": null},
             "members": members,
@@ -324,5 +386,135 @@ mod tests {
         }))
         .unwrap_err();
         assert!(error.contains("members array"), "{error}");
+    }
+
+    fn grantor_payload(requested: &str, held: &str, members: Value, grantor: &str) -> Value {
+        let mut p = payload(requested, held, members);
+        p["caller"]["crown_grantor"] = json!(grantor);
+        p
+    }
+
+    #[test]
+    fn a_done_drop_is_admitted_and_keeps_the_upstream_grantor() {
+        // AC1-HP (drop): held e-1,e-2 with e-2 done, requesting e-1:
+        // widen true, added [], dropped [e-2], grantor echoes the
+        // recorded one instead of self-declaring.
+        let out = resolve(&grantor_payload(
+            "e-1",
+            "e-1,e-2",
+            json!([
+                {"id": "e-1", "type": "epic", "status": "ready"},
+                {"id": "e-2", "type": "epic", "status": "done"},
+            ]),
+            "human",
+        ))
+        .unwrap();
+        assert_eq!(out["widen"], true);
+        assert_eq!(out["added"], json!([]));
+        assert_eq!(out["dropped"], json!(["e-2"]));
+        assert_eq!(out["grantor"], "human");
+    }
+
+    #[test]
+    fn a_superseded_drop_with_a_created_add_is_admitted() {
+        // AC1-HP (drop + add): e-2 superseded drops, e-3 self-created adds.
+        let out = resolve(&payload(
+            "e-1,e-3",
+            "e-1,e-2",
+            json!([
+                {"id": "e-1", "type": "epic", "status": "ready"},
+                {"id": "e-2", "type": "epic", "status": "superseded"},
+                row("e-3", S),
+            ]),
+        ))
+        .unwrap();
+        assert_eq!(out["widen"], true);
+        assert_eq!(out["added"], json!(["e-3"]));
+        assert_eq!(out["dropped"], json!(["e-2"]));
+    }
+
+    #[test]
+    fn a_live_drop_refuses_naming_it_and_the_succeeding_command() {
+        // AC2-ERR (drop): e-2 still live; the hint names it and prints
+        // the full command (held minus closed members plus the adds).
+        let out = resolve(&payload(
+            "e-1",
+            "e-1,e-2",
+            json!([
+                {"id": "e-1", "type": "epic", "status": "ready"},
+                {"id": "e-2", "type": "epic", "status": "ready"},
+            ]),
+        ))
+        .unwrap();
+        assert_eq!(out["widen"], false);
+        let hint = out["hint"].as_str().unwrap();
+        assert!(hint.contains("e-2"), "{hint}");
+        assert!(hint.contains("done or superseded"), "{hint}");
+        assert!(hint.contains("--scope e-1 --scope e-2"), "{hint}");
+    }
+
+    #[test]
+    fn a_dropped_epic_with_no_row_cannot_prove_it_closed() {
+        // AC2-ERR (drop): no graph row, no terminal proof; same refusal.
+        let out = resolve(&payload(
+            "e-1",
+            "e-1,e-2",
+            json!([{"id": "e-1", "type": "epic", "status": "ready"}]),
+        ))
+        .unwrap();
+        assert_eq!(out["widen"], false);
+        let hint = out["hint"].as_str().unwrap();
+        assert!(hint.contains("e-2"), "{hint}");
+    }
+
+    #[test]
+    fn a_noop_self_edit_carries_the_self_declared_refusal() {
+        // AC2-ERR: requested == held adds and drops nothing; the moved
+        // crown.py text names the self-grantor claim it prevents.
+        let out = resolve(&payload(
+            "e-1",
+            "e-1",
+            json!([{"id": "e-1", "type": "epic", "status": "ready"}]),
+        ))
+        .unwrap();
+        assert_eq!(out["widen"], false);
+        let hint = out["hint"].as_str().unwrap();
+        assert!(hint.contains("never self-declared"), "{hint}");
+    }
+
+    #[test]
+    fn another_rows_target_answers_the_ordinary_grant() {
+        // AC6-EDGE: the widen answer belongs to this session's own row.
+        // Even a droppable done epic is refused hintless when the resolved
+        // target is another row - the ordinary grant keeps its answer.
+        let mut p = grantor_payload(
+            "e-1",
+            "e-1,e-2",
+            json!([
+                {"id": "e-1", "type": "epic", "status": "ready"},
+                {"id": "e-2", "type": "epic", "status": "done"},
+            ]),
+            "human",
+        );
+        p["target"] = json!("lead-c");
+        let out = resolve(&p).unwrap();
+        assert_eq!(out["widen"], false);
+        assert!(out["hint"].is_null());
+    }
+
+    #[test]
+    fn a_blank_recorded_grantor_falls_back_to_the_caller_name() {
+        // AC3-EDGE: crown_grantor unset on the row; the echo is the name.
+        let out = resolve(&payload(
+            "e-1",
+            "e-1,e-2",
+            json!([
+                {"id": "e-1", "type": "epic", "status": "ready"},
+                {"id": "e-2", "type": "epic", "status": "done"},
+            ]),
+        ))
+        .unwrap();
+        assert_eq!(out["widen"], true);
+        assert_eq!(out["grantor"], "lead-a");
     }
 }
