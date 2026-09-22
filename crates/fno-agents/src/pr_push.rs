@@ -731,6 +731,10 @@ fn behind(git_bin: &str, cwd: &Path) -> String {
 /// \x1e, the short sha joins its message on \x1f.
 fn commit_citation_failures(log: &str) -> Vec<String> {
     let mut failures = Vec::new();
+    // One store read serves the whole scan: the known set loads on the
+    // first id-citing record and every later record reuses it. A failed
+    // load yields the same refusal a single-message scan produces.
+    let mut known: Option<Result<std::collections::HashSet<String>, String>> = None;
     for record in log.split('\u{1e}').map(str::trim).filter(|r| !r.is_empty()) {
         let mut parts = record.splitn(2, '\u{1f}');
         let short = parts.next().unwrap_or("?").trim();
@@ -738,7 +742,20 @@ fn commit_citation_failures(log: &str) -> Vec<String> {
         // carrying a literal \x1e would otherwise put its tail in the short
         // field, which no real short sha can (hex only, never a hyphen), so
         // scanning it cannot fabricate a hit but can catch a hidden one.
-        let bad = crate::evidence::check_decision_citations(record);
+        let bad = if crate::evidence::cites_decision_id(record) {
+            if known.is_none() {
+                known = Some(crate::evidence::known_decision_ids());
+            }
+            match known.as_ref().unwrap() {
+                Ok(set) => crate::evidence::check_decision_citations_against(record, set),
+                Err(reason) => vec![format!(
+                    "the decision store could not be read ({reason}); the citation \
+                     cannot be checked, and an unchecked citation is not a pass"
+                )],
+            }
+        } else {
+            Vec::new()
+        };
         if !bad.is_empty() {
             failures.push(format!(
                 "commit {short} cites a decision id no ruling carries: {}. \

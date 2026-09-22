@@ -205,28 +205,22 @@ pub fn unknown_decision_ids(text: &str, known: &HashSet<String>) -> Vec<String> 
     ids
 }
 
-/// The decision-id arm: one failure per cited id no ruling on this machine
-/// carries, retired rows included in the known set (supersession history
-/// honestly cites retired ids). Text with no id reads nothing. A store read
-/// that fails is one failure naming the error: a citation that cannot be
-/// checked is not a pass.
-pub fn check_decision_citations(text: &str) -> Vec<String> {
-    if !decision_id_re().is_match(text) {
-        return Vec::new();
-    }
-    let (rows, _) = match crate::decision_index::read_store_rows(
+/// Whether the text cites the decision-id shape at all. A caller scanning
+/// many texts (the push's commit loop) uses it to load the known set once,
+/// on the first match, instead of paying a store read per text.
+pub fn cites_decision_id(text: &str) -> bool {
+    decision_id_re().is_match(text)
+}
+
+/// The known decision ids: every `decision_id` on an operator_decision row
+/// of the store, retired rows included (supersession history honestly cites
+/// retired ids), lowercase.
+pub fn known_decision_ids() -> Result<HashSet<String>, String> {
+    let (rows, _) = crate::decision_index::read_store_rows(
         &crate::graph_get::default_graph_path(),
         &crate::decision_index::default_state_path("decisions.jsonl"),
-    ) {
-        Ok(r) => r,
-        Err(reason) => {
-            return vec![format!(
-                "the decision store could not be read ({reason}); the citation cannot be \
-                 checked, and an unchecked citation is not a pass"
-            )]
-        }
-    };
-    let known: HashSet<String> = rows
+    )?;
+    Ok(rows
         .iter()
         .filter(|row| {
             row.get("_event_type")
@@ -235,17 +229,42 @@ pub fn check_decision_citations(text: &str) -> Vec<String> {
         })
         .filter_map(|row| row.get("decision_id").and_then(Value::as_str))
         .map(|id| id.to_lowercase())
-        .collect();
-    unknown_decision_ids(text, &known)
+        .collect())
+}
+
+/// The refusal line for one unknown id: the durable teaching text.
+fn unknown_id_failure(id: &str) -> String {
+    format!(
+        "{id}: no ruling on this machine carries this id. Check it with \
+         fno backlog decisions {id}, cite the live ruling, or write the id \
+         as {} (capitals) when it is an example",
+        id.to_uppercase()
+    )
+}
+
+/// The decision-id arm: one failure per cited id no ruling on this machine
+/// carries. Text with no id reads nothing. A store read that fails is one
+/// failure naming the error: a citation that cannot be checked is not a
+/// pass.
+pub fn check_decision_citations(text: &str) -> Vec<String> {
+    if !cites_decision_id(text) {
+        return Vec::new();
+    }
+    match known_decision_ids() {
+        Ok(known) => check_decision_citations_against(text, &known),
+        Err(reason) => vec![format!(
+            "the decision store could not be read ({reason}); the citation cannot be \
+             checked, and an unchecked citation is not a pass"
+        )],
+    }
+}
+
+/// The arm against a caller-supplied known set, so one store read serves a
+/// whole scan.
+pub fn check_decision_citations_against(text: &str, known: &HashSet<String>) -> Vec<String> {
+    unknown_decision_ids(text, known)
         .into_iter()
-        .map(|id| {
-            format!(
-                "{id}: no ruling on this machine carries this id. Check it with \
-                 fno backlog decisions {id}, cite the live ruling, or write the id \
-                 as {} (capitals) when it is an example",
-                id.to_uppercase()
-            )
-        })
+        .map(|id| unknown_id_failure(&id))
         .collect()
 }
 
