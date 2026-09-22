@@ -57,6 +57,14 @@ fn negative_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(&format!(r"\b(?:no|zero)\s+{}", nouns())).expect("negative regex"))
 }
 
+/// The cited-ruling shape, case-sensitive like
+/// `scripts/ci/check-skill-decision-ids.sh`: the all-capitals form is the
+/// escape for an illustrative id.
+fn decision_id_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\bd-[0-9a-f]{8}\b").expect("decision id regex"))
+}
+
 /// A code fact stated with no read attached, or a read that could not run
 /// (`kind: "unmeasured"`); a citation the repo contradicts (`kind:
 /// "citation"`). The refusal strings are the durable teaching text.
@@ -181,6 +189,64 @@ pub fn check_citations(text: &str, root: &Path) -> Vec<String> {
         }
     }
     failures
+}
+
+/// The cited ids whose lowercase form names no known ruling, first-seen
+/// order, deduped. Pure: the store read stays in
+/// [`check_decision_citations`].
+pub fn unknown_decision_ids(text: &str, known: &HashSet<String>) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for m in decision_id_re().find_iter(text) {
+        if seen.insert(m.as_str().to_string()) && !known.contains(&m.as_str().to_lowercase()) {
+            ids.push(m.as_str().to_string());
+        }
+    }
+    ids
+}
+
+/// The decision-id arm: one failure per cited id no ruling on this machine
+/// carries, retired rows included in the known set (supersession history
+/// honestly cites retired ids). Text with no id reads nothing. A store read
+/// that fails is one failure naming the error: a citation that cannot be
+/// checked is not a pass.
+pub fn check_decision_citations(text: &str) -> Vec<String> {
+    if !decision_id_re().is_match(text) {
+        return Vec::new();
+    }
+    let (rows, _) = match crate::decision_index::read_store_rows(
+        &crate::graph_get::default_graph_path(),
+        &crate::decision_index::default_state_path("decisions.jsonl"),
+    ) {
+        Ok(r) => r,
+        Err(reason) => {
+            return vec![format!(
+                "the decision store could not be read ({reason}); the citation cannot be \
+                 checked, and an unchecked citation is not a pass"
+            )]
+        }
+    };
+    let known: HashSet<String> = rows
+        .iter()
+        .filter(|row| {
+            row.get("_event_type")
+                .and_then(Value::as_str)
+                .map_or(true, |t| t == "operator_decision")
+        })
+        .filter_map(|row| row.get("decision_id").and_then(Value::as_str))
+        .map(|id| id.to_lowercase())
+        .collect();
+    unknown_decision_ids(text, &known)
+        .into_iter()
+        .map(|id| {
+            format!(
+                "{id}: no ruling on this machine carries this id. Check it with \
+                 fno backlog decisions {id}, cite the live ruling, or write the id \
+                 as {} (capitals) when it is an example",
+                id.to_uppercase()
+            )
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -347,15 +413,16 @@ pub fn run_reads(
 /// Ruling-lane gate: the rows to store, or None when the body has no claim.
 ///
 /// Order matters: a citation the repo contradicts is refused whatever is
-/// attached to it, then a claim with no read. No claim, no change from
-/// today's behavior.
+/// attached to it, then a cited id no ruling carries, then a claim with no
+/// read. No claim, no change from today's behavior.
 pub fn check_ruling_evidence(
     text: &str,
     reads: &[String],
     root: &Path,
     runner: &mut Runner,
 ) -> Result<Option<Vec<Value>>, GateRefusal> {
-    let failures = check_citations(text, root);
+    let mut failures = check_citations(text, root);
+    failures.extend(check_decision_citations(text));
     if !failures.is_empty() {
         return Err(refusal(
             "citation",
@@ -395,7 +462,8 @@ pub fn note_evidence(
     root: &Path,
     runner: &mut Runner,
 ) -> Result<(Option<Vec<Value>>, Option<Vec<String>>), GateRefusal> {
-    let failures = check_citations(text, root);
+    let mut failures = check_citations(text, root);
+    failures.extend(check_decision_citations(text));
     if !failures.is_empty() {
         return Err(refusal("citation", failures.join("; ")));
     }
@@ -843,5 +911,89 @@ mod tests {
             .contains("no tracked file"));
         let empty: Map<String, Value> = Map::new();
         assert!(empty.is_empty());
+    }
+
+    // Pure half: first-seen order, dedupe, lowercase known-set match, the
+    // capitals escape never cited.
+    #[test]
+    fn unknown_ids_keep_first_seen_order_and_match_case_insensitively() {
+        let known: HashSet<String> = ["d-aaaa0001", "d-bbbb0002"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let ids = unknown_decision_ids(
+            "per d-bbbb0002 then d-deadbeef, again d-bbbb0002 and D-DEADBEEF",
+            &known,
+        );
+        assert_eq!(ids, vec!["d-deadbeef"]);
+    }
+
+    fn decision_envelope(id: &str, ts: &str) -> String {
+        format!(
+            "{{\"type\":\"operator_decision\",\"ts\":\"{ts}\",\"data\":{{\"decision_id\":\"{id}\",\
+             \"subject\":\"s\",\"decision\":\"R.\",\"text\":\"R.\",\
+             \"authority_source\":\"operator\"}}}}"
+        )
+    }
+
+    // AC2-HP, AC2-ERR, AC2-EDGE, the read-error refusal and AC3-ERR, against
+    // seeded FNO_HOME stores so nothing here touches the machine store. One
+    // test body: set_var is process-global and cargo runs tests in parallel.
+    #[test]
+    fn decision_id_arm_refuses_unknown_ids_and_a_dead_store() {
+        let old_home = std::env::var("FNO_HOME").ok();
+        let seeded = tempfile::tempdir().expect("tmp");
+        std::env::set_var("FNO_HOME", seeded.path());
+        std::fs::write(
+            seeded.path().join("decisions.jsonl"),
+            format!(
+                "{}\n{}\n{}\n",
+                decision_envelope("d-aaaa0001", "2026-09-12T00:00:00Z"),
+                decision_envelope("d-eeee0005", "2026-09-05T00:00:00Z"),
+                "{\"type\":\"decision_retracted\",\"ts\":\"2026-09-13T00:00:00Z\",\
+                 \"data\":{\"retraction_id\":\"d-rrrr0009\",\
+                 \"target_decision_id\":\"d-eeee0005\",\"reason\":\"r\"}}"
+            ),
+        )
+        .expect("write index");
+        // AC2-HP: a live id on a JSONL-only store passes.
+        assert!(check_decision_citations("per d-aaaa0001").is_empty());
+        // AC2-ERR: the unknown id is refused, named, with the check verb.
+        let failures = check_decision_citations("per d-deadbeef");
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("d-deadbeef"), "{}", failures[0]);
+        assert!(
+            failures[0].contains("fno backlog decisions d-deadbeef"),
+            "{}",
+            failures[0]
+        );
+        // AC2-EDGE: a retired id is known, and the capitals form escapes.
+        assert!(check_decision_citations("per d-eeee0005 and D-DEADBEEF").is_empty());
+
+        // An empty FNO_HOME: no id never reads the store, an id names the
+        // read error instead of passing.
+        let empty = tempfile::tempdir().expect("tmp");
+        std::env::set_var("FNO_HOME", empty.path());
+        assert!(check_decision_citations("no citation in this note").is_empty());
+        let failures = check_decision_citations("per d-deadbeef");
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("could not be read"), "{}", failures[0]);
+
+        // AC3-ERR: the ruling lane refuses before any read runs.
+        let mut ran = false;
+        let mut runner = |_cmd: &str, _root: &Path| {
+            ran = true;
+            ok_run("1\n", 0)
+        };
+        let err = check_ruling_evidence("per d-deadbeef we ruled", &[], empty.path(), &mut runner)
+            .expect_err("unknown id refuses");
+        assert_eq!(err.kind, "citation");
+        assert!(err.message.contains("d-deadbeef"), "{}", err.message);
+        assert!(!ran, "no read ran past the refusal");
+
+        match old_home {
+            Some(v) => std::env::set_var("FNO_HOME", v),
+            None => std::env::remove_var("FNO_HOME"),
+        }
     }
 }
