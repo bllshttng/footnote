@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -489,7 +490,9 @@ def graph_entries(path: Optional[Path] = None) -> list:
 
 
 def _resume_codex_reign_goal(target: CrownTarget, reason: str) -> Optional[dict[str, Any]]:
-    from fno.king.state import parse_manifest; manifest = parse_manifest(target.manifest)
+    from fno.king.state import parse_manifest
+
+    manifest = parse_manifest(target.manifest)
     session_id = str(manifest.get("harness_session_id") or "").strip()
     if manifest.get("harness") != "codex" or not session_id:
         return None
