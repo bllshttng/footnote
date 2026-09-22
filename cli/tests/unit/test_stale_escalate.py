@@ -143,11 +143,11 @@ def test_stale_lane_passes_the_verdicts_through(
     payload, out_rows = wd.run_sweep(
         now_s=_NOW,
         rows_provider=lambda: ([row], []),
-        transcript_fn=lambda sid: {row.session_id: tail}.get(sid),
+        transcript_fn=lambda sid: {row.row_id: tail}.get(sid),
         claim_fn=lambda node: {},
         graph_fn=lambda: {},
     )
-    assert not payload.get("refused")
+    assert not payload.get("refused"), payload
     stale_pairs = [
         (wd.Verdict(**data), r)
         for data, r in zip(payload["verdicts"], out_rows)

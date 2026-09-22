@@ -47,21 +47,25 @@ def _run(root: Path, findings, monkeypatch=None, captured=None):
     if monkeypatch is not None:
         import fno.rust_binary
 
-        seen: set = set()
-
         def fake_verb_call(verb, payload, *args, **kwargs):
-            # The stub folds like the Rust door: same (lane, key, cwd) twice
-            # reads duplicate, an empty set reads none.
+            # The stub folds like the Rust door, deriving its state from the
+            # shared capture list so it survives across _run calls: the same
+            # (lane, key) twice reads duplicate, an empty set reads none.
             assert verb == "fleet-task", verb
             if captured is not None:
                 captured.append(payload)
+            earlier = captured[:-1] if captured else []
             if payload["empty"]:
-                outcome, id_out = ("closed", "") if seen else ("none", "")
-            elif (payload["lane"], payload["key"]) in seen:
-                outcome, id_out = "duplicate", "ft-watchd00"
+                any_open = any(not p["empty"] for p in earlier)
+                outcome, id_out = ("closed", "") if any_open else ("none", "")
             else:
-                seen.add((payload["lane"], payload["key"]))
-                outcome, id_out = "asked", "ft-watchd00"
+                prior = [
+                    p
+                    for p in earlier
+                    if not p["empty"]
+                    and (p["lane"], p["key"]) == (payload["lane"], payload["key"])
+                ]
+                outcome, id_out = ("duplicate", "ft-watchd00") if prior else ("asked", "ft-watchd00")
             return {"outcome": outcome, "id": id_out}
 
         monkeypatch.setattr(fno.rust_binary, "verb_call", fake_verb_call)
