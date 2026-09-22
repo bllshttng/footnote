@@ -247,10 +247,10 @@ mod tests {
             ReadinessLeg::ready(),
             ReadinessLeg::ready(),
             ReadinessLeg::ready(),
-            "king:x-e64a",
+            "king:x-0000",
         );
         assert!(snapshot.ready());
-        assert_eq!(snapshot.continuation_owner, "king:x-e64a");
+        assert_eq!(snapshot.continuation_owner, "king:x-0000");
         assert_eq!(
             snapshot.to_json()["legs"]["provider_goal"]["state"],
             "ready"
@@ -264,7 +264,7 @@ mod tests {
             ReadinessLeg::ready(),
             ReadinessLeg::ready(),
             ReadinessLeg::ready(),
-            "king:x-e64a",
+            "king:x-0000",
         );
         let refusal = admit(snapshot).unwrap_err();
         assert!(refusal.contains("machine"));

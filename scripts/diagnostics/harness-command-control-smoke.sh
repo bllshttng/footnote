@@ -4,7 +4,7 @@
 # back to the operator's live FNO or Codex roots.
 set -euo pipefail
 
-ROOT="${FNO_SMOKE_ROOT:-/private/tmp/fno-x-e64a-4.2.sYZyNb}"
+ROOT="${FNO_SMOKE_ROOT:-/private/tmp/fno-continuation-proof}"
 SESSION=""
 HARNESS=""
 

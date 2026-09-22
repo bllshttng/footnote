@@ -195,12 +195,12 @@ an identity mismatch, an unreadable registry, or any root outside this private
 set; it never creates or re-points a live session.
 
 ```bash
-FNO_HOME=/private/tmp/fno-x-e64a-4.2.sYZyNb \
-FNO_AGENTS_HOME=/private/tmp/fno-x-e64a-4.2.sYZyNb/agents \
-FNO_CLAIMS_ROOT=/private/tmp/fno-x-e64a-4.2.sYZyNb/claims \
-FNO_SPACES_DIR=/private/tmp/fno-x-e64a-4.2.sYZyNb/spaces \
-HOME=/private/tmp/fno-x-e64a-4.2.sYZyNb/home \
-CODEX_HOME=/private/tmp/fno-x-e64a-4.2.sYZyNb/codex \
+FNO_HOME=/private/tmp/fno-continuation-proof \
+FNO_AGENTS_HOME=/private/tmp/fno-continuation-proof/agents \
+FNO_CLAIMS_ROOT=/private/tmp/fno-continuation-proof/claims \
+FNO_SPACES_DIR=/private/tmp/fno-continuation-proof/spaces \
+HOME=/private/tmp/fno-continuation-proof/home \
+CODEX_HOME=/private/tmp/fno-continuation-proof/codex \
 bash scripts/diagnostics/harness-command-control-smoke.sh \
   --session <full-disposable-session-id> --harness <codex|claude>
 ```

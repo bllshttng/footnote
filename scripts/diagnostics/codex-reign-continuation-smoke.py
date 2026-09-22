@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_ROOT = Path("/private/tmp/fno-x-e64a-4.2.sYZyNb")
+DEFAULT_ROOT = Path("/private/tmp/fno-continuation-proof")
 RECEIPT_PREFIX = "codex_reign_continuation_"
 FAILURE_CLASSES = {
     "plugin-missing",

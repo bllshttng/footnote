@@ -2298,13 +2298,13 @@ mod tests {
         let goal: Value = serde_json::from_str(&thread_goal_set_request_json(
             8,
             "thread-full",
-            "$fno:reign x-e64a",
+            "$fno:reign x-0000",
             "active",
         ))
         .unwrap();
         assert_eq!(goal["method"], "thread/goal/set");
         assert_eq!(goal["params"]["status"], "active");
-        assert_eq!(goal["params"]["goal"], "$fno:reign x-e64a");
+        assert_eq!(goal["params"]["goal"], "$fno:reign x-0000");
     }
 
     #[test]
