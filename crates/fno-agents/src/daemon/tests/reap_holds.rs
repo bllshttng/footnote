@@ -940,11 +940,71 @@ fn ac1_hp_open_pr_keep_survives_a_terminal_state_through_the_sweep() {
     assert_eq!(ladder_row.session_id, sid);
     // A stopped roster state reads as not live: the ladder's resume arm.
     assert!(!ladder_row.live);
+    assert!(!ladder_row.busy, "a stopped row is never mid-turn");
     assert_eq!(summary.retired, vec![], "nothing retires");
     std::fs::remove_dir_all(home.root()).ok();
 }
 
 // ── the open-PR keep asks the PR ─────────────────────────────────────────
+
+/// A working roster row reads live AND busy: the row is mid-turn, so the
+/// nudge ladder keeps it on Mail and never sends it to the resume that
+/// would refuse it.
+#[test]
+fn ac3_working_roster_row_reads_live_and_busy() {
+    let home = tmp_home("gc-open-pr-working");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 2 * 3600);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut row = claude_worker_row("pr-row-working", "cccc9999");
+        row.origin = Some("spawn".into());
+        r.entries.push(row);
+    })
+    .unwrap();
+    let sid = "cccc9999-1111-2222-3333-444444444444";
+    let graph = Some(GraphRead {
+        index: HashMap::from([(
+            sid.to_string(),
+            vec![("x-node".to_string(), "in_review".to_string())],
+        )]),
+        work_index: HashMap::from([(
+            sid.to_string(),
+            vec![("x-node".to_string(), "in_review".to_string())],
+        )]),
+        statuses: HashMap::from([("x-node".to_string(), "in_review".to_string())]),
+        pr_state: HashMap::from([("x-node".to_string(), (None, 0, 0))]),
+        pr_number: HashMap::from([("x-node".to_string(), Some(1943))]),
+        do_nodes: HashMap::from([(
+            sid.to_string(),
+            std::collections::HashSet::from(["x-node".to_string()]),
+        )]),
+        pr_reads: HashMap::from([("/tmp".to_string(), 1943u64)])
+            .into_iter()
+            .map(|(cwd, pr)| ((cwd, pr), Some(true)))
+            .collect(),
+        ..Default::default()
+    });
+    // The roster reads working: mid-turn, live and busy at once.
+    let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("cccc9999", Some("working")),
+    ]);
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        900,
+        false,
+        graph,
+        &|_| Some(vec![quiet.clone()]),
+        agents,
+        &|_| true,
+    );
+    assert_eq!(summary.open_pr_rows.len(), 1, "{:?}", summary.open_pr_rows);
+    let ladder_row = &summary.open_pr_rows[0];
+    assert!(ladder_row.live, "working is a non-terminal roster state");
+    assert!(ladder_row.busy, "working is the mid-turn state");
+    std::fs::remove_dir_all(home.root()).ok();
+}
 
 /// The candidate's graph: one in_review node this session drives, PR 4242.
 fn open_candidate_graph() -> GraphRead {
