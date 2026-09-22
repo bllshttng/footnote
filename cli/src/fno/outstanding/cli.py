@@ -198,7 +198,7 @@ def ask(
     """
     from fno.claims.self_identity import resolve_self_identity
     from fno.harness_identity import canonical_handle
-    from fno.paths import questions_jsonl
+    from fno.paths import project_log, questions_jsonl
     from fno.rust_binary import verb_call
     from fno.text_or_file import read_text_arg
 
@@ -223,7 +223,9 @@ def ask(
             "node": node, "subject": subject, "session_id": _session_id(),
             "cwd": str(Path.cwd()), "asker": asker, "laws": laws,
             "storage_root": str(_storage_root()),
-            "index_path": str(questions_jsonl()), "display_name": display_name(),
+            "index_path": str(questions_jsonl()),
+            "journal_path": str(project_log("events.jsonl")),
+            "display_name": display_name(),
         },
     )
     # Every human word rides the answer's lines, composed Rust-side.

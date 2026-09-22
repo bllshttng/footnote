@@ -52,6 +52,11 @@ pub struct IntakeRequest {
     /// `questions_path(home)` when absent.
     #[serde(default)]
     pub index_path: Option<PathBuf>,
+    /// The project journal (`paths.project_log("events.jsonl")`), same
+    /// authority rule as `index_path`. Falls back to the legacy
+    /// `<storage_root>/.fno/events.jsonl`.
+    #[serde(default)]
+    pub journal_path: Option<PathBuf>,
     /// The user's stated name, interpolated into the law-refusal line.
     #[serde(default)]
     pub display_name: Option<String>,
@@ -425,12 +430,33 @@ already waits ({}). Answer it or clear it; do not ask twice.",
         data.insert("context".into(), Value::Object(context));
     }
 
-    // Project journal first: the durable half. A failure here is fatal.
-    let journal = crate::events::EventEmitter::new(
-        req.storage_root.join(".fno").join("events.jsonl"),
-        "target",
-    );
-    if let Err(e) = journal.emit("operator_question", &Value::Object(data.clone())) {
+    // One envelope, two sinks: the journal and the recall index must carry
+    // the identical line, so the ts is stamped once. The journal is the
+    // durable half and its failure is fatal. The journal path travels in
+    // the request (the Python sandbox stays the single path authority, as
+    // with index_path); the legacy .fno path is the fallback.
+    let journal_path = req
+        .journal_path
+        .clone()
+        .unwrap_or_else(|| req.storage_root.join(".fno").join("events.jsonl"));
+    let event = json!({
+        "ts": crate::events::now_rfc3339(),
+        "type": "operator_question",
+        "source": "target",
+        "data": Value::Object(data),
+    });
+    let line = match serde_json::to_string(&event) {
+        Ok(l) => l,
+        Err(e) => {
+            answer.lines.push(format!(
+                "outstanding: failed to record question: could not serialize the envelope: {e}"
+            ));
+            answer.refusal = Some("write".to_string());
+            answer.exit_code = 1;
+            return answer;
+        }
+    };
+    if let Err(e) = crate::event_store::append_envelope(&journal_path, &line, None) {
         answer.lines.push(format!(
             "outstanding: failed to record question: failed to append question to project journal: {e}"
         ));
@@ -440,12 +466,6 @@ already waits ({}). Answer it or clear it; do not ask twice.",
     }
 
     // Machine-wide recall index: best-effort, reported.
-    let event = json!({
-        "ts": crate::events::now_rfc3339(),
-        "type": "operator_question",
-        "source": "target",
-        "data": Value::Object(data),
-    });
     let index_error = write_index_row(&index, &event).err();
     if let Some(e) = index_error {
         answer.lines.push(format!(
@@ -563,6 +583,7 @@ mod tests {
             laws: vec![],
             storage_root: root.to_path_buf(),
             index_path: None,
+            journal_path: None,
             display_name: None,
             render_cap: None,
         }
