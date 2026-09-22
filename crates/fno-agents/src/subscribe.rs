@@ -28,6 +28,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 const TRANSITION_TYPES: &[&str] = &[
     "inside_leg_report",
+    "inside_leg_buffer_flushed",
     "inside_leg_completed",
     "screen_state_change",
 ];
