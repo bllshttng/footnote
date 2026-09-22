@@ -2905,8 +2905,8 @@ fn arms_readout(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // The journal list is owned by tick_ledger::journals, so the readout and
-    // the arm_watch daemon arm fold the same files and cannot drift.
+    // The journal list is owned by tick_ledger::journals, so the readout
+    // and the arm_watch fold the same files and cannot drift.
     let journals = fno_agents::tick_ledger::journals(home);
     let arms = fno_agents::tick_ledger::read_arms_starved(&journals, now_unix);
     let trace = fno_agents::tick_ledger::read_tick_trace_live(&journals, &arms, now_unix);
@@ -2949,8 +2949,7 @@ fn print_status_human(result: &Value, arms: &[fno_agents::tick_ledger::ArmStatus
     for arm in arms {
         println!("  {}", arm.line);
     }
-    // The readout teaches its own detail verb: the loops table folds the
-    // same rows with the starved mark and the launchd label facts.
+    // The readout teaches its own detail verb (the loops table).
     println!("  loop detail: fno agents loops table");
     if let Some(stuck) = result.get("stuck_work") {
         for line in fno_agents::stuck_work::render_lines(stuck) {
