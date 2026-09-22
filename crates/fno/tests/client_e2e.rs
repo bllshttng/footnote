@@ -147,6 +147,84 @@ fn client_e2e_detach_exits_client_and_leaves_server_running() {
 }
 
 #[test]
+fn launcher_one_esc_closes_the_dock() {
+    // R1 (x-5026): one Esc press must close the composer dock. The chord
+    // scanner already holds the lone byte and flushes it after the 40ms quiet
+    // window, so a trailing lone ESC at the end of a launcher chunk is always
+    // a bare Esc press - the rule pick_keys_from_read and node_detail_keys
+    // already apply. On main the dock's own carry re-buffers the flushed byte
+    // and the dock survives both the Esc and the next key.
+    //
+    // Every screen match here is `contains`, never line-exact: at 120 columns
+    // the sideline is visible and paints the pane title onto the same rows as
+    // the shell output, salting every line. And each marker is spelled so the
+    // tty ECHO of the typed command cannot contain it - only the pane's
+    // OUTPUT can - so `contains` still proves a round trip.
+    let scratch = Scratch::new("esc-dock");
+    let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
+    h.wait_screen(15, |s| !s.trim().is_empty());
+    // The input path must forward bytes before the composer chord means
+    // anything. `printf 'read%s' y-marker` prints `ready-marker`; the echoed
+    // command carries neither half joined.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        h.type_bytes(b"printf 'read%s' y-marker\r");
+        let attempt = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < attempt {
+            if h.screen().contains("ready-marker") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if h.screen().contains("ready-marker") {
+            break;
+        }
+    }
+    assert!(
+        h.screen().contains("ready-marker"),
+        "client input never became ready\n{}",
+        h.diagnostics()
+    );
+    // prefix+i opens the composer. The dock-open marker is its footer:
+    // `tab: next field` exists only while the dock is painted, and the chip
+    // row's own labels ellipsize (`La…`) on the 27-column panel.
+    let dock_open = |s: &str| s.contains("tab: next field");
+    h.type_bytes(b"\x02i");
+    h.wait_screen(15, |s| dock_open(s));
+    let before = h.screen();
+    // The PR's rendered evidence: R1_DUMP=1 prints the opened dock's screen
+    // (the after render; the before render is the recorded main failure).
+    if std::env::var("R1_DUMP").is_ok() {
+        eprintln!("--- x-5026 dock render (open, after) ---\n{before}");
+        // Change 7's render: the harness picker, open on the first field
+        // (dock focus starts at Harness), filtered to `co`. The catalog's
+        // inventory read is bounded at 5s; let it settle so the picker lists
+        // real rows instead of the `reading...` placeholder. Esc then closes
+        // ONLY the picker, so the lone-Esc proof below stays one Esc.
+        std::thread::sleep(Duration::from_secs(6));
+        h.type_bytes(&[0x0d]); // enter: open the picker on Harness
+        std::thread::sleep(Duration::from_millis(500));
+        h.type_bytes(b"co");
+        std::thread::sleep(Duration::from_millis(500));
+        eprintln!("--- x-5026 picker render (filter: co) ---\n{}", h.screen());
+        h.type_bytes(&[0x1b]); // close the picker, dock stays
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    // Exactly one Esc byte, then silence.
+    h.type_bytes(&[0x1b]);
+    std::thread::sleep(Duration::from_millis(500));
+    let after = h.screen();
+    assert!(
+        !dock_open(&after),
+        "one Esc must close the dock; screen still shows it:\n{after}\n--- screen before Esc ---\n{before}"
+    );
+    // The next key reaches the shell, not the dock (which would swallow it
+    // as its close key). Quoting splits the marker in the echo.
+    h.type_bytes(b"echo after-\"esc\"\r");
+    h.wait_screen(15, |s| s.contains("after-esc"));
+}
+
+#[test]
 fn output_line_matcher_survives_a_late_prompt() {
     // The 2026-09-10 screen (main run 34438652586, persistence_kill_nine):
     // CR nudges queued while the shell was still starting printed their

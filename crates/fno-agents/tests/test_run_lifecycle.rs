@@ -14,6 +14,18 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_fno-agents")
 }
 
+/// A `test-run` command on a scratch claims root with the owner-identity env
+/// stripped. Under `fno doctor test rust` the outer owner puts its identity
+/// in the env, so a spawned test-run reads itself as nested and never takes
+/// the claim; a test that measures contention must strip it.
+fn test_run(root: &std::path::Path) -> Command {
+    let mut cmd = Command::new(bin());
+    cmd.args(["test-run", "--claims-root"]).arg(root);
+    cmd.env_remove("FNO_TEST_OWNER_PID");
+    cmd.env_remove("FNO_TEST_OWNER_BIRTH");
+    cmd
+}
+
 /// Liveness by the same primitive `test_run.rs` uses: a `kill(pid, 0)` probe.
 fn pid_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::c_int, 0) == 0 }
@@ -32,11 +44,11 @@ fn tmp_claims_root(tag: &str) -> PathBuf {
     dir
 }
 
-/// The x-b275 shape: a leader that backgrounds a child and exits immediately,
-/// leaving that child alive in the SAME process group (no job control under
-/// `sh -c`, so the background job never gets its own pgid). The old
-/// `wait_or_kill_group` only killed on timeout/exception; this proves the
-/// native owner kills it on a plain, successful, on-time exit too.
+/// A leader that backgrounds a child and exits immediately, leaving that
+/// child alive in the SAME process group (no job control under `sh -c`, so
+/// the background job never gets its own pgid). The old `wait_or_kill_group`
+/// only killed on timeout/exception; this proves the native owner kills it on
+/// a plain, successful, on-time exit too.
 #[test]
 fn normal_exit_still_reaps_a_backgrounded_group_mate() {
     let root = tmp_claims_root("normal-exit");
@@ -114,9 +126,8 @@ fn concurrent_runs_serialize_under_the_shared_claim() {
     let root = tmp_claims_root("admission");
     let start = Instant::now();
 
-    let mut first = Command::new(bin())
-        .args(["test-run", "--timeout", "30", "--claims-root"])
-        .arg(&root)
+    let mut first = test_run(&root)
+        .args(["--timeout", "30"])
         .arg("--")
         .arg("sleep")
         .arg("1")
@@ -125,9 +136,8 @@ fn concurrent_runs_serialize_under_the_shared_claim() {
     // Give the first run a head start on the claim so the second reliably
     // observes it Live rather than racing the lockfile create.
     std::thread::sleep(Duration::from_millis(200));
-    let mut second = Command::new(bin())
-        .args(["test-run", "--timeout", "30", "--claims-root"])
-        .arg(&root)
+    let mut second = test_run(&root)
+        .args(["--timeout", "30"])
         .arg("--")
         .arg("sleep")
         .arg("1")
@@ -145,6 +155,329 @@ fn concurrent_runs_serialize_under_the_shared_claim() {
         "two 1s runs under one admission claim must serialize to ~2s total, took {elapsed:?} \
          (a parallel/broken claim would finish in ~1s)"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC1-HP: a waiter queued behind a live holder names that holder, its pid
+/// and its liveness on the waiting line; `holder=-` never prints.
+#[test]
+fn a_queued_waiter_names_the_live_holder() {
+    let root = tmp_claims_root("wait-names");
+    let mut holder = test_run(&root)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg("sleep")
+        .arg("6")
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn holder");
+    std::thread::sleep(Duration::from_millis(300));
+    let w1 = test_run(&root)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg("true")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn waiter 1");
+    let w2 = test_run(&root)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg("true")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn waiter 2");
+
+    let out1 = w1.wait_with_output().expect("wait waiter 1");
+    let out2 = w2.wait_with_output().expect("wait waiter 2");
+    assert!(
+        holder.try_wait().unwrap().is_some(),
+        "the holder must have exited"
+    );
+    let _ = holder.wait();
+    assert!(out1.status.success() && out2.status.success());
+    for (n, out) in [(1, &out1), (2, &out2)] {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let line = stderr
+            .lines()
+            .find(|l| l.contains("suite_waiting"))
+            .unwrap_or_else(|| panic!("waiter {n} must print a waiting line: {stderr}"));
+        assert!(line.contains("claim=test:suite"), "{line}");
+        assert!(line.contains("holder_state=live"), "{line}");
+        assert!(!line.contains("holder=-"), "{line}");
+        let pid = line
+            .split(" pid=")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no pid field: {line}"))
+            .split(' ')
+            .next()
+            .unwrap();
+        assert!(
+            !pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit()),
+            "pid must print as digits, got {line}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC2-HP: a queued waiter repeats its waiting line at the notice interval,
+/// so a 3s wait holds exactly one `suite_waiting` line, naming the holder.
+#[test]
+fn a_queued_waiter_prints_its_waiting_line_once() {
+    let root = tmp_claims_root("wait-once");
+    let mut holder = test_run(&root)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg("sleep")
+        .arg("3")
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn holder");
+    std::thread::sleep(Duration::from_millis(300));
+    let out = test_run(&root)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg("true")
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("run waiter");
+    assert!(
+        holder.try_wait().unwrap().is_some(),
+        "the holder must have exited"
+    );
+    let _ = holder.wait();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let waiting = stderr
+        .lines()
+        .filter(|l| l.contains("suite_waiting"))
+        .count();
+    assert_eq!(waiting, 1, "one throttled waiting line, got:\n{stderr}");
+    assert!(stderr.contains("holder_state=live"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC4-HP: SIGTERM to a queued waiter stops it within 2s with exit 143 and a
+/// `suite_wait_interrupted` receipt naming the signal and the wait so far.
+#[test]
+fn a_queued_waiter_stops_on_sigterm() {
+    let root = tmp_claims_root("wait-term");
+    let mut holder = test_run(&root)
+        .args(["--timeout", "20"])
+        .arg("--")
+        .arg("sleep")
+        .arg("20")
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn holder");
+    std::thread::sleep(Duration::from_millis(300));
+    let mut waiter = test_run(&root)
+        .args(["--timeout", "20"])
+        .arg("--")
+        .arg("sleep")
+        .arg("20")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn waiter");
+    std::thread::sleep(Duration::from_millis(500));
+
+    unsafe { libc::kill(waiter.id() as libc::c_int, libc::SIGTERM) };
+    let start = Instant::now();
+    let status = waiter.wait().expect("wait for the interrupted waiter");
+    assert_eq!(status.code(), Some(143), "SIGTERM must exit 143");
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "the stop must follow the signal within 2s, took {:?}",
+        start.elapsed()
+    );
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut waiter.stderr.take().unwrap(), &mut stderr).unwrap();
+    let line = stderr
+        .lines()
+        .find(|l| l.contains("suite_wait_interrupted"))
+        .unwrap_or_else(|| panic!("interrupted receipt missing: {stderr}"));
+    assert!(line.contains("signal=15"), "{line}");
+    assert!(line.contains("waited_s="), "{line}");
+    assert!(!stderr.contains("suite_started"), "the argv must never run");
+
+    let _ = holder.kill();
+    let _ = holder.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC5-ERR: SIGINT stops a queued waiter with exit 130, and the argv never
+/// ran.
+#[test]
+fn a_queued_waiter_stops_on_sigint() {
+    let root = tmp_claims_root("wait-int");
+    let mut holder = test_run(&root)
+        .args(["--timeout", "20"])
+        .arg("--")
+        .arg("sleep")
+        .arg("20")
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn holder");
+    std::thread::sleep(Duration::from_millis(300));
+    let mut waiter = test_run(&root)
+        .args(["--timeout", "20"])
+        .arg("--")
+        .arg("sleep")
+        .arg("20")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn waiter");
+    std::thread::sleep(Duration::from_millis(500));
+
+    unsafe { libc::kill(waiter.id() as libc::c_int, libc::SIGINT) };
+    let start = Instant::now();
+    let status = waiter.wait().expect("wait for the interrupted waiter");
+    assert_eq!(status.code(), Some(130), "SIGINT must exit 130");
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "the stop must follow the signal within 2s, took {:?}",
+        start.elapsed()
+    );
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut waiter.stderr.take().unwrap(), &mut stderr).unwrap();
+    assert!(
+        stderr.contains("suite_wait_interrupted"),
+        "interrupted receipt missing: {stderr}"
+    );
+    assert!(
+        !stderr.contains("suite_started"),
+        "the argv must never run: {stderr}"
+    );
+
+    let _ = holder.kill();
+    let _ = holder.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC6-HP: a SIGKILLed holder's slot frees at once. The stamped
+/// holder-process lease reads the dead pid as the verdict, so the next
+/// waiter acquires inside 3s instead of timing out against the dead pid.
+#[test]
+fn a_dead_holders_slot_frees_at_once() {
+    let root = tmp_claims_root("dead-holder");
+    let mut holder = test_run(&root)
+        .args(["--timeout", "20"])
+        .arg("--")
+        .arg("sleep")
+        .arg("20")
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn holder");
+    std::thread::sleep(Duration::from_millis(300));
+    holder.kill().expect("SIGKILL the holder");
+    let _ = holder.wait();
+
+    let start = Instant::now();
+    let status = test_run(&root)
+        .args(["--timeout", "10"])
+        .arg("--")
+        .arg("true")
+        .status()
+        .expect("run the next waiter");
+    assert!(status.success(), "the next run must acquire, got {status}");
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "a dead holder must free the slot at once, took {:?}",
+        start.elapsed()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC8-HP: a run admitted late dies at the shared deadline with a TIMEOUT
+/// line that names the split: seconds waiting for the claim, seconds
+/// running the argv.
+#[test]
+fn the_run_timeout_names_the_wait_and_the_run() {
+    let root = tmp_claims_root("timeout-split");
+    let mut holder = test_run(&root)
+        .args(["--timeout", "30"])
+        .arg("--")
+        .arg("sleep")
+        .arg("2")
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn holder");
+    std::thread::sleep(Duration::from_millis(300));
+    let out = test_run(&root)
+        .args(["--timeout", "4"])
+        .arg("--")
+        .arg("sleep")
+        .arg("10")
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("run the late-admitted waiter");
+    assert!(
+        holder.try_wait().unwrap().is_some(),
+        "the holder must have exited"
+    );
+    let _ = holder.wait();
+    assert_eq!(out.status.code(), Some(124), "the deadline must exit 124");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let line = stderr
+        .lines()
+        .find(|l| l.contains("TIMEOUT after 4s"))
+        .unwrap_or_else(|| panic!("timeout line missing: {stderr}"));
+    assert!(
+        line.contains("waiting for the test:suite claim") && line.contains("running the argv"),
+        "{line}"
+    );
+    let wait_secs: u64 = line
+        .split("TIMEOUT after 4s: ")
+        .nth(1)
+        .and_then(|rest| rest.split("s waiting").next())
+        .unwrap_or("0")
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    assert!(wait_secs >= 1, "the wait share must be named: {line}");
+    let run_secs: u64 = line
+        .split("s waiting for the test:suite claim, ")
+        .nth(1)
+        .and_then(|rest| rest.split("s running").next())
+        .unwrap_or("0")
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    assert!(run_secs >= 1, "the run share must be named: {line}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// AC9-HP: a waiter that never reaches the front ends at the budget with the
+/// refusal naming how many runs were ahead of it and that the argv never
+/// started.
+#[test]
+fn the_wait_refusal_names_the_queue_and_the_unstarted_argv() {
+    let root = tmp_claims_root("wait-refusal");
+    let mut holder = test_run(&root)
+        .args(["--timeout", "20"])
+        .arg("--")
+        .arg("sleep")
+        .arg("20")
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn holder");
+    std::thread::sleep(Duration::from_millis(300));
+    let out = test_run(&root)
+        .args(["--timeout", "2"])
+        .arg("--")
+        .arg("true")
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("run the never-admitted waiter");
+    assert_eq!(out.status.code(), Some(124));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("The argv never started."), "{stderr}");
+    assert!(
+        stderr.contains("runs were ahead of it in a queue of"),
+        "{stderr}"
+    );
+
+    let _ = holder.kill();
+    let _ = holder.wait();
     let _ = std::fs::remove_dir_all(&root);
 }
 

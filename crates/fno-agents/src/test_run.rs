@@ -27,7 +27,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SUITE_CLAIM_KEY: &str = "test:suite";
 const BUILD_CLAIM_KEY: &str = "build:cargo";
-/// How often a held build repeats its holding line on stderr.
+/// How often a held build or a queued suite run repeats its waiting line on
+/// stderr.
 const BUILD_HOLD_NOTICE: Duration = Duration::from_secs(30);
 /// How often a held build scans for a cargo nested under the holder, and for
 /// whether the holder is still compiling.
@@ -329,6 +330,46 @@ fn acquire_claim_blocking(
     result
 }
 
+/// The fields every suite-wait receipt carries, read fresh from the same
+/// claims root the acquire polls: a waiter behind the queue front sees no
+/// `HeldByOther` row, so the read is `claims::status`, not the acquire's
+/// poll result. The claim key, the holder's identity and liveness, the queue
+/// position when one is active, and the wait so far.
+fn suite_wait_fields(
+    root: Option<&Path>,
+    pos: Option<(usize, usize)>,
+    started: Instant,
+) -> Vec<(&'static str, String)> {
+    let (state, rec) = crate::claims::status(SUITE_CLAIM_KEY, root);
+    let mut fields: Vec<(&'static str, String)> = vec![
+        ("claim", SUITE_CLAIM_KEY.to_string()),
+        (
+            "holder",
+            rec.as_ref().map_or("-".to_string(), |r| r.holder.clone()),
+        ),
+        (
+            "pid",
+            rec.as_ref()
+                .and_then(|r| r.pid)
+                .map_or("-".to_string(), |p| p.to_string()),
+        ),
+        (
+            "host",
+            match rec.as_ref() {
+                Some(r) => r.host.clone(),
+                None => "-".to_string(),
+            },
+        ),
+        ("holder_state", state.as_str().to_string()),
+    ];
+    if let Some((index, total)) = pos {
+        fields.push(("position", index.to_string()));
+        fields.push(("queued", total.to_string()));
+    }
+    fields.push(("waited_s", started.elapsed().as_secs().to_string()));
+    fields
+}
+
 fn acquire_suite_claim(
     run_id: &str,
     holder: &str,
@@ -338,57 +379,63 @@ fn acquire_suite_claim(
 ) -> Result<(), i32> {
     let opts = |_: usize| crate::claims::AcquireOpts {
         pid: Some(std::process::id()),
+        // The recorded pid is this owner, which lives for the whole run:
+        // stamp holder-process so the classifier reads the pid's verdict and
+        // a SIGKILLed holder's slot frees inside the TTL instead of refusing
+        // every waiter until expiry.
+        pid_provenance: Some(crate::claims::HOLDER_PROCESS.to_string()),
         ttl_ms: Some(3_600_000),
         reason: Some("test-run".to_string()),
         root: root.map(PathBuf::from),
         ..Default::default()
     };
     let started = Instant::now();
-    let mut last_held: Option<(String, Option<i32>, String)> = None;
-    acquire_claim_blocking(&[SUITE_CLAIM_KEY.to_string()], holder, opts, |rows, pos| {
-        // On a queue-gate skip the attempt loop never ran, so `rows` is
-        // empty; keep the last seen holder row so the timeout still names
-        // whom it waited on.
-        if let Some(row) = rows.first() {
-            last_held = Some(row.clone());
-        }
-        let mut fields: Vec<(&str, String)> = match &last_held {
-            Some((h, pid, host)) => vec![
-                ("holder", h.to_string()),
-                ("pid", format!("{pid:?}")),
-                ("host", host.to_string()),
-            ],
-            None => vec![("holder", "-".to_string())],
-        };
-        if let Some((index, total)) = pos {
-            fields.push(("position", index.to_string()));
-            fields.push(("queued", total.to_string()));
-        }
-        if Instant::now() >= deadline {
-            fields.push(("waited_s", started.elapsed().as_secs().to_string()));
-            emit(run_id, "suite_wait_timeout", &fields);
-            // The x-c425 shape: name the condition, what it measured, and
-            // a remedy the reader can run.
-            let where_txt = match pos {
-                Some((index, total)) => {
-                    format!("it was position {index} of {total} in the wait queue")
-                }
-                None => "it was not queued (no wait queue was active)".to_string(),
-            };
-            eprintln!(
-                    "test_run: the machine-wide test:suite claim did not reach this run inside its {}s budget; {}.",
-                    budget.as_secs(),
-                    where_txt
+    let mut last_notice: Option<Instant> = None;
+    acquire_claim_blocking(
+        &[SUITE_CLAIM_KEY.to_string()],
+        holder,
+        opts,
+        |_rows, pos| {
+            if let Some(sig) = received_signal() {
+                let mut fields = suite_wait_fields(root, pos, started);
+                fields.push(("signal", sig.to_string()));
+                emit(run_id, "suite_wait_interrupted", &fields);
+                return OnHeld::Stop(128 + sig);
+            }
+            if Instant::now() >= deadline {
+                emit(
+                    run_id,
+                    "suite_wait_timeout",
+                    &suite_wait_fields(root, pos, started),
                 );
-            eprintln!("test_run:   who holds it: fno agents claim status test:suite");
-            eprintln!(
-                "test_run:   raise the budget: fno-agents test-run --timeout <secs> -- <argv>"
+                let where_txt = match pos {
+                    Some((index, total)) => {
+                        format!("{index} runs were ahead of it in a queue of {total}")
+                    }
+                    None => "No wait queue was active.".to_string(),
+                };
+                eprintln!(
+                "test_run: the machine-wide test:suite claim did not reach this run inside its {}s budget. {} The argv never started.",
+                budget.as_secs(),
+                where_txt
             );
-            return OnHeld::Stop(124);
-        }
-        emit(run_id, "suite_waiting", &fields);
-        OnHeld::Wait
-    })
+                eprintln!("test_run:   who holds it: fno agents claim status test:suite");
+                eprintln!(
+                    "test_run:   raise the budget: fno-agents test-run --timeout <secs> -- <argv>"
+                );
+                return OnHeld::Stop(124);
+            }
+            if last_notice.is_none_or(|t| t.elapsed() >= BUILD_HOLD_NOTICE) {
+                last_notice = Some(Instant::now());
+                emit(
+                    run_id,
+                    "suite_waiting",
+                    &suite_wait_fields(root, pos, started),
+                );
+            }
+            OnHeld::Wait
+        },
+    )
 }
 
 /// `test-run build-admit --cargo-pid PID --worktree PATH`: the rustc wrapper
@@ -1038,7 +1085,7 @@ pub fn run_test_run(args: &[String]) -> i32 {
         return 2;
     }
 
-    // x-77db: the durable fleet incident stop gates BEFORE nested-owner
+    // The durable fleet incident stop gates BEFORE nested-owner
     // detection, suite-claim acquisition, or any child process group. A suite
     // already running when the stop lands is untouched (this process was
     // admitted earlier); every LATER admission refuses here with a positive
@@ -1086,6 +1133,7 @@ pub fn run_test_run(args: &[String]) -> i32 {
     // the same value.
     let overall_deadline = Instant::now() + opts.timeout;
 
+    let wait_started = Instant::now();
     // A nested invocation inherits the outer admission rather than
     // re-acquiring: it never touches the outer claim and never multiplies
     // the outer concurrency budget, because it never becomes a NEW claim
@@ -1104,6 +1152,7 @@ pub fn run_test_run(args: &[String]) -> i32 {
         }
         claimed = true;
     }
+    let admitted = Instant::now();
 
     let (owner_pid, owner_birth) = nested.unwrap_or_else(|| {
         let pid = std::process::id();
@@ -1164,10 +1213,19 @@ pub fn run_test_run(args: &[String]) -> i32 {
     let exit_code = match wait_result {
         Ok(code) => code,
         Err(Unfinished::TimedOut) => {
+            let wait_secs = admitted.saturating_duration_since(wait_started).as_secs();
+            let run_secs = admitted.elapsed().as_secs();
             eprintln!(
-                "fno-agents test-run: TIMEOUT after {}s; process group killed",
-                opts.timeout.as_secs()
+                "fno-agents test-run: TIMEOUT after {}s: {}s waiting for the test:suite claim, {}s running the argv; process group killed",
+                opts.timeout.as_secs(),
+                wait_secs,
+                run_secs
             );
+            if wait_secs >= 1 {
+                eprintln!(
+                    "fno-agents test-run:   raise the budget: fno-agents test-run --timeout <secs> -- <argv>"
+                );
+            }
             return 124;
         }
         Err(Unfinished::Signalled(sig)) => {
@@ -1462,5 +1520,60 @@ mod tests {
         // A different holder restarts the watch.
         let t4 = t3 + Duration::from_secs(30);
         assert_eq!(clock.observe("cargo:/b:200", false, t4), Duration::ZERO);
+    }
+
+    /// AC3-EDGE: the wait receipt names a free claim with no holder when the
+    /// root holds no suite claim, and names a live holder with its pid as
+    /// digits when this process holds it.
+    #[test]
+    fn suite_wait_fields_names_free_and_live_holders() {
+        let root = std::env::temp_dir().join(format!("fno-test-run-fields-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let fields = suite_wait_fields(Some(&root), Some((1, 2)), Instant::now());
+        let get = |name: &str| {
+            fields
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(get("claim"), "test:suite");
+        assert_eq!(get("holder"), "-");
+        assert_eq!(get("pid"), "-");
+        assert_eq!(get("holder_state"), "free");
+        assert_eq!(get("position"), "1");
+        assert_eq!(get("queued"), "2");
+
+        let holder = format!("test-run:{}:{}", std::process::id(), now_secs());
+        let acquired = crate::claims::acquire(
+            SUITE_CLAIM_KEY,
+            &holder,
+            crate::claims::AcquireOpts {
+                pid: Some(std::process::id()),
+                ttl_ms: Some(3_600_000),
+                reason: Some("test-run".to_string()),
+                root: Some(root.clone()),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            acquired,
+            crate::claims::AcquireOutcome::Acquired(_)
+        ));
+        let fields = suite_wait_fields(Some(&root), None, Instant::now());
+        let get = |name: &str| {
+            fields
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(get("holder"), holder);
+        assert_eq!(get("pid"), std::process::id().to_string());
+        assert_eq!(get("host"), crate::claims::hostname());
+        assert_eq!(get("holder_state"), "live");
+        assert_eq!(get("position"), "");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

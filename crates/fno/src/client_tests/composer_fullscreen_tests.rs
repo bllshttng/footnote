@@ -91,10 +91,7 @@ async fn full_screen_sideline_hides_panes_and_shows_the_composer() {
         text.contains("last msg"),
         "the Extended table header paints"
     );
-    assert!(
-        text.contains("[Launch]"),
-        "composer occupies the bottom rows"
-    );
+    assert!(text.contains("Launch"), "composer occupies the bottom rows");
 }
 
 #[tokio::test]
