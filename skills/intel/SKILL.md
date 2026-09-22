@@ -39,7 +39,7 @@ The one rule the whole report stands on: **operator turns only**. Relay, harness
 
 3. Write the report: `<vault>/fno/intel/<date>.md`, where `<vault>/fno/` is the directory `fno do plan path` resolves beside `plans/`. Sections: [references/report-shape.md](references/report-shape.md).
 
-4. Corrections section: quote operator corrections verbatim, dedupe across sessions, rank by repeat count. Each correction sits on its own line ending with ` #agent-correction` and carrying `signal=<friction category>`. Each one is a candidate AGENTS.md line or law. Say which in the report.
+4. Corrections section: quote operator corrections verbatim, dedupe across sessions, rank by repeat count. Each correction sits on its own line ending with ` #agent-correction` and carrying `signal=<friction category>`. When the correction is about how one fno verb behaves, the line also carries `skill=<name>`, that verb's skills/ directory. Each one is a candidate AGENTS.md line, a law, or a SKILL.md diff. Say which in the report.
 
 5. Feed the S2 writer so the rows land in `~/.fno/corrections.log`:
 
