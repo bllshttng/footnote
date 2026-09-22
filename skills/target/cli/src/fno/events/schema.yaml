@@ -3458,6 +3458,42 @@ event_types:
           description: "The cadence this arm runs on, in seconds; the readout reads stale past twice this. 0 marks an event-driven arm (stop_hook): staleness does not apply."
     consumers: [operator]
 
+  - name: machine_sample
+    description: "One bounded machine and session-cost sample from the machine_watch beat. Null is unmeasured, never zero; compressor_gb is RAM occupied by compressed pages while compressed_gb is the data stored in them."
+    sources: [loop, test]
+    data:
+      required: [verdict]
+      properties:
+        sample_id: { type: [string, "null"] }
+        load_1m: { type: [number, "null"] }
+        load_5m: { type: [number, "null"] }
+        load_15m: { type: [number, "null"] }
+        cores: { type: [number, "null"] }
+        busy_fraction: { type: [number, "null"] }
+        sys_fraction: { type: [number, "null"] }
+        busy_window_s: { type: [number, "null"] }
+        runnable: { type: [integer, "null"] }
+        processes: { type: [integer, "null"] }
+        zombies: { type: [integer, "null"] }
+        cargo_processes: { type: [integer, "null"] }
+        test_processes: { type: [integer, "null"] }
+        compressor_gb: { type: [number, "null"] }
+        compressed_gb: { type: [number, "null"] }
+        swap_used_gb: { type: [number, "null"] }
+        swap_total_gb: { type: [number, "null"] }
+        live_rows: { type: [integer, "null"] }
+        kings: { type: [integer, "null"] }
+        workers: { type: [integer, "null"] }
+        verdict: { type: string }
+        busy_band: { type: [number, "null"] }
+        load_band_per_core: { type: [number, "null"] }
+        took_ms: { type: integer }
+        sessions: { type: [array, "null"] }
+        unresolved: { type: array }
+        top_rss: { type: [array, "null"] }
+        sessions_error: { type: [string, "null"] }
+    consumers: [operator]
+
   - name: evals_scheduled_run
     description: "The pr-watch tick ran the regression tier on its schedule (the eval bank's demand leg): what ran and what it graded. The counterpart row in `fno doctor` and `fno backlog triage health` reads the same history this run appends, so a run that appends nothing is a could-not-fire (evals_stale), never a success."
     sources: [daemon, test]
