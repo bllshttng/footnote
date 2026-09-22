@@ -560,6 +560,35 @@ def test_coord_expiry_is_derived_from_closed_node_but_law_stays_live(
     assert rows["d-law00001"]["lifecycle"] == "live"
 
 
+def test_list_decisions_reuses_supplied_graph_for_coord_lifecycle(
+    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fno.decide import list_decisions
+
+    entries = json.loads(tmp_graph.read_text())
+    entries["entries"][0]["completed_at"] = "2026-08-25T00:00:00Z"
+    _write_decision_index(
+        index,
+        {
+            "decision_id": "d-coordreuse",
+            "decision": "coordinate this node",
+            "subject": "x-7d94",
+            "authority_source": "agent",
+            "expiry_ref": {"kind": "node", "node_id": "x-7d94"},
+            "ts": "2026-08-20T00:00:00Z",
+        },
+    )
+    monkeypatch.setattr(
+        "fno.decide._graph_entries",
+        lambda **_: pytest.fail("list_decisions reread the graph"),
+    )
+
+    _, rows, _ = list_decisions(
+        "x-7d94", state="all", entries=entries["entries"]
+    )
+    assert rows[0]["lifecycle"] == "expired"
+
+
 def test_ambiguous_coord_without_positive_closure_evidence_is_unscoped(
     root: Path, tmp_graph: Path, index: Path
 ):

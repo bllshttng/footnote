@@ -876,6 +876,66 @@ else
     fail "AC10o: Missing binary should warn-only without a receipt (exit $EXIT_CODE): $OUTPUT"
 fi
 
+# AC10p (AC5-HP): a two-write help probe is captured without pipefail turning
+# a successful installed-CLI capability check into the stale-CLI refusal.
+HELP_ROOT="$TMPDIR_BASE/helpprobe"
+HELP_BIN="$HELP_ROOT/bin"
+mkdir -p "$HELP_ROOT/scripts" "$HELP_BIN"
+cp "$VALIDATE" "$HELP_ROOT/scripts/validate-plan.sh"
+cat > "$HELP_BIN/fno" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-} ${3:-} ${4:-}" == "do plan validate --help" ]]; then
+    echo "  --execution  validate execution"
+    sleep 0.3
+    echo "  --json       emit JSON"
+    exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "do plan validate" ]]; then
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$HELP_BIN/fno"
+OUTPUT=$(cd "$HELP_ROOT" && env -u FNO_AGENTS_BIN PATH="$HELP_BIN:/usr/bin:/bin" FNO_PYTHON=/usr/bin/python3 \
+    bash "$HELP_ROOT/scripts/validate-plan.sh" "$PLAN_SEMANTIC" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -ne 2 ]] && ! grep -q "predates semantic plan validation" <<< "$OUTPUT"; then
+    pass "AC10p: two-write help probe stays a successful capability check"
+else
+    fail "AC10p: help probe was misread as stale CLI (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# AC10q (AC5-EDGE): a large quick-plan frontmatter is read to completion, so
+# the kind marker survives past the pipe buffer and the graduated surface gate
+# remains a warning.
+PLAN_LARGE_QUICK="$TMPDIR_BASE/large-quick.md"
+{
+    cat <<'EOF'
+---
+kind: quick-plan
+status: ready
+created: 2026-09-10
+difficulty: low
+project: fno
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
+EOF
+    pad_line=0
+    while (( pad_line < 3000 )); do
+        printf '# pad for the frontmatter completion probe: %080d\n' "$pad_line"
+        pad_line=$((pad_line + 1))
+    done
+    printf '%s\n' '---'
+    sed -n '/^# Quick fixture/,$p' "$PLAN_SURFACE_QUICK"
+} > "$PLAN_LARGE_QUICK"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_LARGE_QUICK" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 0 ]] && grep -q "no surface: block (quick plan)" <<< "$OUTPUT" \
+    && ! grep -q "no surface: block in frontmatter" <<< "$OUTPUT"; then
+    pass "AC10q: large quick-plan frontmatter stays on the quick-plan path"
+else
+    fail "AC10q: large frontmatter was misclassified (exit $EXIT_CODE): $OUTPUT"
+fi
+
 # --- AC11: No New Python row gate ---
 echo ""
 echo "--- AC11: No New Python ---"
@@ -1190,6 +1250,214 @@ if ! grep -q "d-a11b0002" <<< "$OUTPUT"; then
     pass "AC11k: acknowledged stage law prints nothing"
 else
     fail "AC11k: expected no d-a11b0002 finding: $OUTPUT"
+fi
+
+# AC11l (AC2-HP): the stage-law receipt compares acknowledged ids without
+# spawning a piped grep, including an uppercase id from the plan.
+STUB_AGENTS_HP="$STUBBIN/fno-agents-hp"
+cat > "$STUB_AGENTS_HP" <<'STUB'
+#!/bin/bash
+if [[ "${1:-}" == "law-match" ]]; then
+    printf '%s' '{"ok":true,"stage":"blueprint","hook_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"## Law governing blueprint\n\n- d-a11b0002 (stub-epic-ruling): A stub ruling names the epic.\n- d-a11b0003 (stub-project-ruling): A stub ruling names the project.\n"}}}'
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_AGENTS_HP"
+PLAN_NNPY_L="$TMPDIR_BASE/nnpy_l.md"
+cat > "$PLAN_NNPY_L" <<'EOF'
+---
+claims: x-a11b003
+created: 2099-01-01
+consolidation:
+  outcome: proceed_alone
+  rejected: []
+  decisions_acknowledged:
+    - decision_id: D-A11B0002
+      reason: "fixture acknowledgment"
+    - decision_id: D-A11B0003
+      reason: "fixture acknowledgment"
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `crates/fno-agents/src/mail.rs` | Modify |
+EOF
+OUTPUT=$(FNO_AGENTS_BIN="$STUB_AGENTS_HP" bash "$VALIDATE" "$PLAN_NNPY_L" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "stage-law check: 2 law(s) listed, 2 acknowledged" <<< "$OUTPUT" \
+    && ! grep -q "stage-law.*ERROR\|decisions_acknowledged is missing d-a11b000" <<< "$OUTPUT"; then
+    pass "AC11l: stage-law receipt counts uppercase acknowledgments"
+else
+    fail "AC11l: expected a clean stage-law receipt (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# AC11m (AC2-ERR): an unread stage scope is NOT CHECKED, while a listed law
+# that is not acknowledged still fails closed.
+STUB_AGENTS_UNREAD="$STUBBIN/fno-agents-unread"
+cat > "$STUB_AGENTS_UNREAD" <<'STUB'
+#!/bin/bash
+if [[ "${1:-}" == "law-match" ]]; then
+    printf '%s' '{"ok":true,"stage":"blueprint","hook_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"## Law governing blueprint\n\nUnread: the node'"'"'s epic and project (graph: invalid graph)\n- d-a11b0002 (stub-epic-ruling): A stub ruling names the epic.\n- d-a11b0003 (stub-project-ruling): A stub ruling names the project.\n"}}}'
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_AGENTS_UNREAD"
+PLAN_NNPY_M="$TMPDIR_BASE/nnpy_m.md"
+sed 's/x-a11b003/x-a11b004/; /D-A11B0003/{N;d;}' "$PLAN_NNPY_L" > "$PLAN_NNPY_M"
+OUTPUT=$(FNO_AGENTS_BIN="$STUB_AGENTS_UNREAD" bash "$VALIDATE" "$PLAN_NNPY_M" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 1 ]] \
+    && grep -q "stage-law check NOT CHECKED (the node's epic and project (graph: invalid graph)" <<< "$OUTPUT" \
+    && grep -q "decisions_acknowledged is missing d-a11b0003" <<< "$OUTPUT"; then
+    pass "AC11m: stage-law unread is named and missing law still errors"
+else
+    fail "AC11m: expected unread warning plus missing-law ERROR (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# AC11n (AC3-HP): capture the complete decisions output before matching it, so
+# a two-write LIVE response cannot be mistaken for a broken ruling read.
+STUB_FNO_SLOW_DIR="$TMPDIR_BASE/stub-slow"
+mkdir -p "$STUB_FNO_SLOW_DIR"
+STUB_FNO_SLOW="$STUB_FNO_SLOW_DIR/fno"
+cat > "$STUB_FNO_SLOW" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "backlog decisions" && "${3:-}" == "d-1234abcd" ]]; then
+    echo "LIVE  LAW  d-1234abcd  2026-09-12T00:00:00Z  new-code-language  stub"
+    sleep 0.3
+    echo "    rationale: stub"
+    exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
+    echo 30
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_FNO_SLOW"
+OUTPUT=$(PATH="$STUB_FNO_SLOW_DIR:$PATH" bash "$VALIDATE" "$PLAN_NNPY_E" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if [[ -z "$NNPY_OUT" ]]; then
+    pass "AC11n: two-write LIVE ruling is captured before matching"
+else
+    fail "AC11n: two-write LIVE ruling should be clean: $NNPY_OUT"
+fi
+
+# AC11o (AC3-ERR): a nonzero decisions read is named as unread, not as a
+# completed read with no LIVE line.
+STUB_FNO_UNREAD_DIR="$TMPDIR_BASE/stub-unread"
+mkdir -p "$STUB_FNO_UNREAD_DIR"
+STUB_FNO_UNREAD="$STUB_FNO_UNREAD_DIR/fno"
+cat > "$STUB_FNO_UNREAD" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then
+    echo "database is locked" >&2
+    exit 1
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
+    echo 30
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_FNO_UNREAD"
+OUTPUT=$(PATH="$STUB_FNO_UNREAD_DIR:$PATH" bash "$VALIDATE" "$PLAN_NNPY_E" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if grep -q "could not be read (exit 1: database is locked)" <<< "$NNPY_OUT" \
+    && ! grep -q "reads no LIVE line" <<< "$NNPY_OUT"; then
+    pass "AC11o: failed decisions read is named unread"
+else
+    fail "AC11o: expected the unread Grant finding: $NNPY_OUT"
+fi
+
+# AC11p (AC3-EDGE): exit 0 with empty stdout is a completed non-live read.
+STUB_FNO_EMPTY_DIR="$TMPDIR_BASE/stub-empty"
+mkdir -p "$STUB_FNO_EMPTY_DIR"
+STUB_FNO_EMPTY="$STUB_FNO_EMPTY_DIR/fno"
+cat > "$STUB_FNO_EMPTY" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then
+    echo "no decision carries it" >&2
+    exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
+    echo 30
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_FNO_EMPTY"
+OUTPUT=$(PATH="$STUB_FNO_EMPTY_DIR:$PATH" bash "$VALIDATE" "$PLAN_NNPY_E" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if grep -q "reads no LIVE line" <<< "$NNPY_OUT" && ! grep -q "could not be read" <<< "$NNPY_OUT"; then
+    pass "AC11p: empty successful decisions read stays not-live"
+else
+    fail "AC11p: expected the not-live Grant finding: $NNPY_OUT"
+fi
+
+# AC11q (AC3-CACHE): duplicate Grant rows share one decisions subprocess.
+STUB_FNO_CACHE_DIR="$TMPDIR_BASE/stub-cache"
+mkdir -p "$STUB_FNO_CACHE_DIR"
+STUB_FNO_CACHE="$STUB_FNO_CACHE_DIR/fno"
+cat > "$STUB_FNO_CACHE" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then
+    printf '%s\n' "${3:-}" >> "$DECISION_LOG"
+    echo "LIVE  LAW  ${3:-}  2026-09-12T00:00:00Z  new-code-language  stub"
+    exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
+    echo 30
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_FNO_CACHE"
+PLAN_NNPY_Q="$TMPDIR_BASE/nnpy_q.md"
+cat > "$PLAN_NNPY_Q" <<'EOF'
+---
+claims: x-nnpyq
+created: 2099-01-01
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/mail/cli.py` | Grant d-1234abcd +5 |
+| `cli/src/fno/other/cli.py` | Grant d-1234abcd +5 |
+EOF
+DECISION_LOG="$TMPDIR_BASE/decision-calls" PATH="$STUB_FNO_CACHE_DIR:$PATH" bash "$VALIDATE" "$PLAN_NNPY_Q" >/dev/null 2>&1 || true
+if [[ "$(wc -l < "$TMPDIR_BASE/decision-calls" | tr -d ' ')" == 1 ]]; then
+    pass "AC11q: duplicate Grant rows read one decision once"
+else
+    fail "AC11q: expected one decisions subprocess call"
+fi
+
+# AC11r (AC3-BUDGET): a failed budget read warns and uses the default ceiling.
+STUB_FNO_BUDGET_DIR="$TMPDIR_BASE/stub-budget"
+mkdir -p "$STUB_FNO_BUDGET_DIR"
+STUB_FNO_BUDGET="$STUB_FNO_BUDGET_DIR/fno"
+cat > "$STUB_FNO_BUDGET" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then
+    echo "LIVE  LAW  d-1234abcd  2026-09-12T00:00:00Z  new-code-language  stub"
+    exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
+    echo "config unavailable" >&2
+    exit 1
+fi
+exit 3
+STUB
+chmod +x "$STUB_FNO_BUDGET"
+OUTPUT=$(PATH="$STUB_FNO_BUDGET_DIR:$PATH" bash "$VALIDATE" "$PLAN_NNPY_E" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "grant budget NOT READ (exit 1), using the default 30" <<< "$OUTPUT" \
+    && ! grep -q "against a budget of" <<< "$OUTPUT"; then
+    pass "AC11r: failed Grant budget read warns and uses 30"
+else
+    fail "AC11r: expected the default-budget warning: $OUTPUT"
 fi
 
 # AC12: Plan Node Binding. A filename-encoded node id with no node:/claims:
