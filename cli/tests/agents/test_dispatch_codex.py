@@ -77,12 +77,12 @@ def fake_codex_create(monkeypatch):
 
 
 def _read_events() -> list[dict]:
-    """Return parsed events.jsonl entries for assertions."""
+    """Return the committed event rows for the default journal."""
     from fno import paths
-    log = paths.state_dir() / "events.jsonl"
-    if not log.exists():
-        return []
-    return [json.loads(line) for line in log.read_text().splitlines() if line]
+
+    from tests._event_rows import event_rows
+
+    return event_rows(paths.state_dir() / "events.jsonl")
 
 
 # ---------------------------------------------------------------------------

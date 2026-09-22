@@ -1589,7 +1589,7 @@ fn update_registry_accounts_for_a_removed_row() {
     // One per-row event on the agent-lifecycle log, naming the row, the
     // remover, and a staged receipt (the grouped registry_rows_lost line
     // lands after it; the tests for that event assert its own shape).
-    let events = std::fs::read_to_string(home.join("events.jsonl")).unwrap();
+    let events = crate::events::committed_journal_text(&home.join("events.jsonl"));
     let removals: Vec<serde_json::Value> = events
         .lines()
         .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
@@ -1663,7 +1663,7 @@ fn update_registry_emits_registry_rows_lost_naming_the_writer() {
     })
     .unwrap();
 
-    let events = std::fs::read_to_string(home.join("events.jsonl")).unwrap();
+    let events = crate::events::committed_journal_text(&home.join("events.jsonl"));
     let lost: Vec<serde_json::Value> = events
         .lines()
         .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
@@ -1737,7 +1737,7 @@ fn update_registry_announces_a_removal_it_cannot_build_a_receipt_for() {
     // The write itself succeeds and the event still announces the removal.
     let reg = load_registry(&path).unwrap();
     assert_eq!(reg.entries.len(), 1);
-    let events = std::fs::read_to_string(home.join("events.jsonl")).unwrap();
+    let events = crate::events::committed_journal_text(&home.join("events.jsonl"));
     let event: serde_json::Value = serde_json::from_str(events.lines().next().unwrap()).unwrap();
     assert_eq!(event["data"]["name"], "identity-less");
     assert_eq!(event["data"]["receipt_staged"], false);
@@ -1786,7 +1786,7 @@ fn update_registry_keeps_a_receipt_the_sweep_already_staged() {
     // rewrite a receipt another door already staged and signed.
     let after = std::fs::read(&receipt_path).unwrap();
     assert_eq!(before, after, "the sweep's receipt was rewritten");
-    let events = std::fs::read_to_string(home.join("events.jsonl")).unwrap();
+    let events = crate::events::committed_journal_text(&home.join("events.jsonl"));
     let event: serde_json::Value = serde_json::from_str(events.lines().next().unwrap()).unwrap();
     assert_eq!(event["data"]["receipt_staged"], true);
     assert_eq!(event["data"]["name"], "swept");

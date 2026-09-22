@@ -88,10 +88,10 @@ fn seed_termination_event(journal_path: &Path, session_key: &str, reason: &str) 
 
 /// Read and parse a JSONL file.
 fn read_jsonl(path: &Path) -> Vec<serde_json::Value> {
-    if !path.exists() {
+    if !path.exists() && !fno_agents::event_store::store_path(path).exists() {
         return vec![];
     }
-    let content = fs::read_to_string(path).unwrap_or_default();
+    let content = fno_agents::event_store::journal_text(path, &[]);
     content
         .lines()
         .filter(|l| !l.trim().is_empty())

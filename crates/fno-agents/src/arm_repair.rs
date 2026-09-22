@@ -105,6 +105,16 @@ fn entry(
             Some("fno agents incident status"),
             Some(OPERATOR),
         ),
+        "unarmed" => (
+            "this loop is off by config; the switch, not a scheduler, owns its silence",
+            None,
+            None,
+        ),
+        "starved" => (
+            "armed and running, producing nothing; its input has been empty",
+            None,
+            None,
+        ),
         _ => (
             "no class matches; read the skip reason and detail",
             None,
@@ -246,6 +256,34 @@ fn classify(row: &mut ArmStatus, facts: &RepairFacts) {
         row.repair = verb.map(str::to_string);
         if row.line.is_empty() {
             row.line = format!("{} cause={cause} ({hint})", render_row(row));
+        }
+        row.line.push_str(&suffix(row));
+        return;
+    }
+    // The two vocabulary words: neither is a fault, so neither ends in
+    // `heal=auto`. An unarmed row names the switch that turns the loop on; a
+    // starved row names the verb that reads the loop's own detail.
+    if crate::tick_ledger::row_is_unarmed(row) {
+        let key = row.arm_key.clone().unwrap_or_default();
+        row.cause = Some("unarmed".to_string());
+        row.repair = Some(format!("fno config set {key} true"));
+        if row.line.is_empty() {
+            let (hint, _, _) = entry("unarmed", row.scheduler.as_deref());
+            row.line = format!("{} cause=unarmed ({hint})", render_row(row));
+        }
+        row.line.push_str(&suffix(row));
+        return;
+    }
+    if row.starved {
+        row.cause = Some("starved".to_string());
+        row.repair = Some(
+            row.reader
+                .clone()
+                .unwrap_or_else(|| "fno agents loops table".to_string()),
+        );
+        if row.line.is_empty() {
+            let (hint, _, _) = entry("starved", row.scheduler.as_deref());
+            row.line = format!("{} cause=starved ({hint})", render_row(row));
         }
         row.line.push_str(&suffix(row));
         return;
@@ -417,6 +455,16 @@ pub fn heal(
         parts.push("paused".to_string());
         return format!("heal={}", parts.join(","));
     }
+    // Rows carrying the two vocabulary words are never repairs: an off or
+    // idle loop is a configuration, and the token names the stand-down so a
+    // quiet heal tick is a decision, not a blind spot.
+    let stood_down = rows
+        .iter()
+        .filter(|r| r.starved || crate::tick_ledger::row_is_unarmed(r))
+        .count();
+    if stood_down > 0 {
+        parts.push(format!("stand_down:{stood_down}"));
+    }
     let mut refresh_set: Vec<String> = rows
         .iter()
         .filter(|r| {
@@ -581,6 +629,10 @@ mod tests {
             repair: None,
             heal: None,
             upstream: None,
+            arm_key: None,
+            arm_value: None,
+            reader: None,
+            starved: false,
         }
     }
 
@@ -598,6 +650,60 @@ mod tests {
             candidate += 1;
         }
         candidate
+    }
+
+    #[test]
+    fn unarmed_rows_carry_the_config_verb_and_never_heal_auto() {
+        let mut r = row("heal", SCHED_LAUNCHD);
+        r.arm_key = Some("auto_heal.enabled".to_string());
+        r.arm_value = Some("false".to_string());
+        classify(&mut r, &facts(false));
+        assert_eq!(r.cause.as_deref(), Some("unarmed"));
+        assert!(
+            r.line
+                .ends_with("repair: fno config set auto_heal.enabled true"),
+            "{}",
+            r.line
+        );
+        assert!(!r.line.contains("heal=auto"), "{}", r.line);
+        assert!(r.heal.is_none(), "{}", r.line);
+    }
+
+    #[test]
+    fn starved_rows_carry_their_reader_verb() {
+        let mut r = row("heal", "daemon");
+        r.starved = true;
+        r.reader = Some("fno do pr watch status".to_string());
+        classify(&mut r, &facts(false));
+        assert_eq!(r.cause.as_deref(), Some("starved"));
+        assert!(
+            r.line.contains("repair: fno do pr watch status"),
+            "{}",
+            r.line
+        );
+        assert!(!r.line.contains("heal=auto"), "{}", r.line);
+    }
+
+    #[test]
+    fn the_heal_lane_names_the_stand_down_in_its_token() {
+        let mut r = row("heal", SCHED_LAUNCHD);
+        r.arm_key = Some("auto_heal.enabled".to_string());
+        r.arm_value = Some("false".to_string());
+        r.starved = false;
+        classify(&mut r, &facts(false));
+        let out = heal(
+            std::slice::from_ref(&r),
+            &[],
+            true,
+            Path::new("/tmp/does-not-matter"),
+            0,
+            1800,
+            &mut |_| false,
+        );
+        assert!(
+            out.contains("stand_down:1"),
+            "token must name the stand-down: {out}"
+        );
     }
 
     fn write_claim(root: &Path, key: &str, holder: &str, pid: i32) {

@@ -21,10 +21,9 @@ from fno.paths_testing import use_tmpdir
 
 
 def _events(tmp_path: Path) -> list[dict]:
-    path = tmp_path / ".fno" / "events.jsonl"
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    from tests._event_rows import event_rows
+
+    return event_rows(tmp_path / ".fno" / "events.jsonl")
 
 
 # ---------------------------------------------------------------------------

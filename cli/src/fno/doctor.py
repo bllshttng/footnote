@@ -1207,36 +1207,42 @@ def _source_checkout_sync(source: Optional[Path]) -> dict[str, Any]:
 
 
 def _launch_agent_failures() -> dict[str, Any]:
-    """Every ``sh.fno.*`` LaunchAgent whose LAST EXIT was nonzero.
+    """Dead launchd labels, from the Rust fold the loops table runs.
 
-    Generic over the label prefix rather than groom-specific: two unrelated fno
-    agents were dead and silent when this was written, so one loop is both
-    smaller and wider than a bespoke check per agent. Column 2 is the last exit,
-    not current state - a ``-`` in column 1 is normal for a periodic job.
+    One launchctl reader, not two: the Rust ``loops table --json`` payload
+    carries the dead list (any ``sh.fno.*`` or autocorrect label with a
+    nonzero last exit), so doctor reads the same truth the arms table
+    prints, and the labels the old ``sh.fno.`` prefix filter missed
+    (``com.user.autocorrect*``) show up here too. Exit 1 is the table's own
+    red verdict, not an error: the payload still parses.
     """
-    if sys.platform != "darwin" or not shutil.which("launchctl"):
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
         return {"applicable": False, "dead": []}
     try:
         proc = subprocess.run(
-            ["launchctl", "list"], capture_output=True, text=True, timeout=10
+            [str(binary), "loops", "table", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
     except Exception:  # noqa: BLE001 - an unrunnable probe must not fabricate an alarm
         return {"applicable": False, "dead": []}
-    if proc.returncode != 0:
+    if proc.returncode not in (0, 1):
         return {"applicable": False, "dead": []}
-
-    dead: list[dict[str, Any]] = []
-    for line in (proc.stdout or "").splitlines():
-        cols = line.split("\t")
-        if len(cols) < 3 or not cols[2].startswith("sh.fno."):
-            continue
-        try:
-            status = int(cols[1])
-        except ValueError:
-            continue  # "-" or a header; only a numeric exit proves a failure
-        if status != 0:
-            dead.append({"label": cols[2].strip(), "exit": status})
-    return {"applicable": True, "dead": dead}
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except ValueError:
+        return {"applicable": False, "dead": []}
+    section = payload.get("launchd") if isinstance(payload, dict) else None
+    if not isinstance(section, dict):
+        return {"applicable": False, "dead": []}
+    dead = section.get("dead")
+    if not isinstance(dead, list):
+        dead = []
+    return {"applicable": bool(section.get("applicable")), "dead": list(dead)}
 
 
 # --------------------------------------------------------------------------
@@ -3415,32 +3421,25 @@ def _drained_msg_ids() -> set[str]:
     Read once per sweep so the dead-letter sweep prefers a positive drain marker
     over cursor inference: a message with a marker was drained and never
     escalates, while cursor logic stays as the fallback for legacy mail written
-    before the marker existed. A torn or unreadable log reads as empty, so the
+    before the marker existed. A torn or unreadable store reads as empty, so the
     sweep degrades to cursor-only (its prior behavior) rather than crashing or
     silently clearing its findings.
     """
     from fno.paths import state_dir
 
-    path = state_dir() / "events.jsonl"
     ids: set[str] = set()
     try:
-        # Stream line-by-line: the events log grows unboundedly, so never slurp
-        # it whole just to collect drained ids (mirrors gate_escape.py's reader).
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                if "agent_mail_drained" not in line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (ValueError, TypeError):
-                    continue
-                if not isinstance(rec, dict):
-                    continue
-                if rec.get("kind") == "agent_mail_drained":
-                    mid = rec.get("msg_id")
-                    if isinstance(mid, str) and mid:
-                        ids.add(mid)
-    except OSError:
+        # Committed rows, not journal bytes: the store commit is the write
+        # boundary, so a marker the emitter committed is only visible there.
+        from fno.events.store_client import query_rows
+
+        for rec in query_rows(state_dir() / "events.jsonl", types=["agent_mail_drained"]):
+            mid = rec.get("msg_id")
+            if not isinstance(mid, str):
+                mid = (rec.get("data") or {}).get("msg_id")
+            if isinstance(mid, str) and mid:
+                ids.add(mid)
+    except Exception:
         return ids
     return ids
 

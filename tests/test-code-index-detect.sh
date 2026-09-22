@@ -114,6 +114,37 @@ check_contains "AC1-HP: codegraph names its bundled manifest" \
   "skills/blueprint/code-index/providers/codegraph.toml" "$OUT1"
 check_true "AC1-HP: nothing on stderr" test ! -s "$SBX1/err"
 
+# Every printed fourth column is canonical: no . or .. segment, and a file
+# a reader can open. This is the check the phantom skills/code-index read
+# punished: the old output kept the SCRIPT_DIR/../../ spelling.
+AC1_PATHS_OK=1
+while IFS= read -r p; do
+  [ -z "$p" ] && continue
+  case "$p" in */..|*/../*|*/.|*/./*) AC1_PATHS_OK=0 ;; esac
+  [ -f "$p" ] || AC1_PATHS_OK=0
+done <<< "$(printf '%s\n' "$OUT1" | cut -f4)"
+check_eq "AC1-HP: every manifest path is dot-free and openable" "1" "$AC1_PATHS_OK"
+
+# ---------------------------------------------------------------------------
+# AC1-CANON: the deployed-skill layout prints its manifest path resolved -
+# SCRIPT_DIR/../../code-index/providers under <tmp>/skills/blueprint, the
+# exact path two readers once misresolved one level too far.
+# ---------------------------------------------------------------------------
+CANON_SBX="$(mktemp -d)"
+mkdir -p "$CANON_SBX/skills/blueprint/scripts/lib" \
+         "$CANON_SBX/skills/blueprint/code-index/providers" \
+         "$CANON_SBX/home"
+cp "$DETECT" "$CANON_SBX/skills/blueprint/scripts/lib/code-index-detect.sh"
+write_manifest "$CANON_SBX/skills/blueprint/code-index/providers/codegraph.toml" \
+  codegraph '["symbol"]' ".codegraph" "codegraph" ""
+make_repo_with_indexes "$CANON_SBX/repo"
+OUT_CANON="$(PATH="$SYS_PATH:$STUB1" HOME="$CANON_SBX/home" \
+  bash "$CANON_SBX/skills/blueprint/scripts/lib/code-index-detect.sh" "$CANON_SBX/repo" 2>/dev/null)"
+check_eq "AC1-CANON: the deployed-skill manifest prints its resolved path" \
+  "$CANON_SBX/skills/blueprint/code-index/providers/codegraph.toml" \
+  "$(printf '%s\n' "$OUT_CANON" | sed -n $'s/^codegraph\t[^\t]*\t[^\t]*\t//p')"
+rm -rf "$CANON_SBX"
+
 # ---------------------------------------------------------------------------
 # AC1-EDGE: a user manifest with the same name wins
 # ---------------------------------------------------------------------------
@@ -127,6 +158,13 @@ check_contains "AC1-EDGE: the line carries the user roles" \
   "$(printf 'codegraph\tsymbol,semantic\t')" "$OUT2"
 check_contains "AC1-EDGE: the line names the repo manifest path" \
   "$SBX1/repo/.fno/code-index/providers/codegraph.toml" "$CG2"
+
+# AC1-REL: a caller may pass a ..-carrying repo root; the repo override leg
+# prints what it is given, so the root resolves and the path stays canonical.
+OUT_REL="$(cd "$SBX1/repo" && PATH="$SYS_PATH:$STUB1" HOME="$SBX1/home" \
+  bash "$DETECT" "$SBX1/repo/.fno/.." 2>/dev/null)"
+check_contains "AC1-REL: a .. root still prints its canonical override path" \
+  "$SBX1/repo/.fno/code-index/providers/codegraph.toml" "$OUT_REL"
 
 # ---------------------------------------------------------------------------
 # AC2-ERR: malformed manifests are skipped by name; the others still print

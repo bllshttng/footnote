@@ -1328,7 +1328,7 @@ mod tests {
             &|_| CascadeOutcome::Removed,
         );
         assert_eq!(summary.retired.len(), 1, "{summary:?}");
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let events = crate::events::committed_journal_text(&home.events_jsonl());
         let event = events
             .lines()
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -1375,7 +1375,7 @@ mod tests {
         assert!(summary.retired.is_empty());
         assert_eq!(summary.refused.len(), 1);
         assert!(summary.refused[0].1.contains("failed"));
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let events = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(!events.lines().any(|line| line.contains("fade5678")));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1441,7 +1441,7 @@ mod tests {
             &|_| CascadeOutcome::Removed,
         );
         assert_eq!(summary.retired.len(), 2, "{summary:?}");
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let events = crate::events::committed_journal_text(&home.events_jsonl());
         let found: Vec<serde_json::Value> = events
             .lines()
             .filter_map(|line| serde_json::from_str(line).ok())

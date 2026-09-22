@@ -1,9 +1,9 @@
 """The Rust ephemeral set equals the schema's, entry for entry.
 
 Two write boundaries route on this class (Python `append_event`, Rust
-`EventEmitter::write_line`). The Rust side states the set as a const in
-`crates/fno-agents/src/events.rs`; this file parses that const out of the
-source text - the same derivation pattern as
+`EventEmitter::write_line`). The Rust side states the set as a const in the
+`event_store` module (`crates/fno-agents/src/event_store.rs`); this file
+parses that const out of the source text - the same derivation pattern as
 `test_rust_events_documented.py` - so a schema.yaml edit that flips a type's
 class without touching the Rust const fails HERE, naming the drifted type,
 instead of routing differently per language in production.
@@ -18,7 +18,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCHEMA_PATH = REPO_ROOT / "cli/src/fno/events/schema.yaml"
-EVENTS_RS = REPO_ROOT / "crates/fno-agents/src/events.rs"
+EVENTS_RS = REPO_ROOT / "crates/fno-agents/src/event_store.rs"
 
 # Floor guarding against a VACUOUS pass: a regex that matched the wrong block
 # or nothing would compare an empty set against the schema's and pass on

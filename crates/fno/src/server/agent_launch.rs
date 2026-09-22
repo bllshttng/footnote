@@ -161,8 +161,16 @@ fn validate_launch_request(req: &AgentLaunchRequest) -> Result<(), String> {
     if req.harness.trim().is_empty() {
         return Err("no harness selected".to_string());
     }
-    if !matches!(req.substrate.as_str(), "pane" | "thread") {
+    // EMPTY = the door's default (thread where the harness seats one); an
+    // explicit lane names `pane` or `thread`. `headless` is never offered by
+    // the dock and is refused here before any effect.
+    if !matches!(req.substrate.as_str(), "" | "pane" | "thread") {
         return Err(format!("unsupported substrate {:?}", req.substrate));
+    }
+    if let Some(dir) = &req.split {
+        if !matches!(dir.as_str(), "left" | "right" | "up" | "down") {
+            return Err(format!("unsupported split direction {dir:?}"));
+        }
     }
     let cwd = std::path::Path::new(&req.cwd);
     if !cwd.is_absolute() {
@@ -378,9 +386,12 @@ mod tests {
             harness: "claude".to_string(),
             substrate: "pane".to_string(),
             model: None,
+            model_names_harness: false,
             effort: None,
             permission_mode: None,
             placement: None,
+            portal: None,
+            split: None,
             message: String::new(),
         }
     }

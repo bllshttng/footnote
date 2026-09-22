@@ -2181,7 +2181,7 @@ mod tests {
             &crate::events::EventEmitter::new(temp.path().join("events.jsonl"), "daemon"),
             fields,
         );
-        let raw = std::fs::read_to_string(temp.path().join("events.jsonl")).unwrap();
+        let raw = crate::events::committed_journal_text(&temp.path().join("events.jsonl"));
         let event: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
         assert_eq!(event["type"], "review_invocation");
         assert_eq!(
@@ -2207,7 +2207,7 @@ mod tests {
         crate::events::EventEmitter::new(&path, "daemon")
             .emit_fields("agent_raw_inject", fields)
             .unwrap();
-        let raw = std::fs::read_to_string(path).unwrap();
+        let raw = crate::events::committed_journal_text(&path);
         let event: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
         assert_eq!(event["type"], "agent_raw_inject");
         assert_eq!(event["data"]["target_session"], "thread-1");
@@ -2236,7 +2236,7 @@ mod tests {
         crate::events::EventEmitter::new(&path, "daemon")
             .emit_fields("agent_raw_inject", fields)
             .unwrap();
-        let raw = std::fs::read_to_string(path).unwrap();
+        let raw = crate::events::committed_journal_text(&path);
         let event: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
         assert_eq!(event["type"], "agent_raw_inject");
         assert_eq!(event["data"]["payload_truncated"], true);

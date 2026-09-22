@@ -943,11 +943,39 @@ def _find_file_stats(
         "kind_counts": {},
         "matching_rows": [],
     }
+    # SQL authority: a store beside the journal answers first. Only a
+    # store-less path falls back to the raw file (fixtures, pre-cutover
+    # journal bytes nothing has imported yet).
+    from fno.events.store_client import EventStoreUnavailable, query_rows, store_db_path
+
+    if store_db_path(path).exists():
+        try:
+            rows = query_rows(path)
+        except EventStoreUnavailable as exc:
+            stats["status"] = "unreadable"
+            stats["error"] = str(exc)
+            stats["rows"] = 0
+            stats["matches"] = 0
+            stats["keys"] = {field: 0 for field in _QUERY_FIELDS}
+            stats["kind_counts"] = {}
+            stats["matching_rows"] = []
+            return stats
+        timestamps: list[tuple[datetime, str]] = []
+        _fold_rows(stats, rows, kind=kind, field_filters=field_filters, since=since,
+                   session=session, limit=limit, timestamps_out=timestamps)
+        if timestamps:
+            timestamps.sort(key=lambda item: item[0])
+            stats["span"] = {
+                "earliest": timestamps[0][1],
+                "latest": timestamps[-1][1],
+            }
+        return stats
     if not path.exists() and not _ROTATED_SUFFIX.search(path.name):
         stats["status"] = "absent"
         return stats
-    timestamps: list[tuple[datetime, str]] = []
+    timestamps = []
     try:
+        rows = []
         with path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 if not line.strip():
@@ -958,34 +986,12 @@ def _find_file_stats(
                 except (json.JSONDecodeError, TypeError):
                     stats["malformed"] = stats.get("malformed", 0) + 1
                     continue
-                if not isinstance(row, dict):
+                if isinstance(row, dict):
+                    rows.append(row)
+                else:
                     stats["malformed"] = stats.get("malformed", 0) + 1
-                    continue
-                event_name, key = _event_kind(row)
-                if key is not None:
-                    stats["keys"][key] += 1
-                raw_timestamp = row.get("ts") or row.get("timestamp")
-                timestamp = _parse_event_timestamp(raw_timestamp)
-                if timestamp is not None and isinstance(raw_timestamp, str):
-                    timestamps.append((timestamp, raw_timestamp))
-                if _find_row_matches(
-                    row,
-                    kind=kind,
-                    field_filters=field_filters,
-                    since=since,
-                    session=session,
-                ):
-                    stats["matches"] += 1
-                    if len(stats["matching_rows"]) < limit:
-                        stats["matching_rows"].append({"row": row, "key": key})
-                    if event_name is not None:
-                        counts = stats["kind_counts"].setdefault(
-                            event_name,
-                            {"count": 0, "keys": {field: 0 for field in _QUERY_FIELDS}},
-                        )
-                        counts["count"] += 1
-                        if key is not None:
-                            counts["keys"][key] += 1
+        _fold_rows(stats, rows, kind=kind, field_filters=field_filters, since=since,
+                   session=session, limit=limit, timestamps_out=timestamps)
     except OSError as exc:
         stats["status"] = "rotated-away" if not path.exists() else "unreadable"
         stats["error"] = str(exc)
@@ -1002,6 +1008,51 @@ def _find_file_stats(
             "latest": timestamps[-1][1],
         }
     return stats
+
+
+def _fold_rows(
+    stats: dict[str, Any],
+    rows: list[dict[str, Any]],
+    *,
+    kind: str | None,
+    field_filters: list[tuple[str, str]],
+    since: datetime | None,
+    session: str | None,
+    limit: int,
+    timestamps_out: list[tuple[datetime, str]] | None = None,
+) -> None:
+    """Match + count one path's parsed rows into the stats fold. Shared by
+    the store query path and the raw-file fallback so the two can never
+    disagree about what matched."""
+    for row in rows:
+        if timestamps_out is None:
+            stats["rows"] += 1
+        event_name, key = _event_kind(row)
+        if key is not None:
+            stats["keys"][key] += 1
+        raw_timestamp = row.get("ts") or row.get("timestamp")
+        timestamp = _parse_event_timestamp(raw_timestamp)
+        if timestamp is not None and isinstance(raw_timestamp, str):
+            if timestamps_out is not None:
+                timestamps_out.append((timestamp, raw_timestamp))
+        if _find_row_matches(
+            row,
+            kind=kind,
+            field_filters=field_filters,
+            since=since,
+            session=session,
+        ):
+            stats["matches"] += 1
+            if len(stats["matching_rows"]) < limit:
+                stats["matching_rows"].append({"row": row, "key": key})
+            if event_name is not None:
+                counts = stats["kind_counts"].setdefault(
+                    event_name,
+                    {"count": 0, "keys": {field: 0 for field in _QUERY_FIELDS}},
+                )
+                counts["count"] += 1
+                if key is not None:
+                    counts["keys"][key] += 1
 
 
 def _find_span(stats: list[dict[str, Any]]) -> dict[str, str] | None:

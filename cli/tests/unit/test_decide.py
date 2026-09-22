@@ -427,6 +427,24 @@ def test_top_level_decide_lazy_entry_points_to_the_shim():
     assert LAZY_SUBCOMMANDS["decide"][0] == "fno.decide.cli:shim_app"
 
 
+def _index_rows(index: Path) -> list[dict]:
+    """The index's committed envelopes, in commit order."""
+    from tests._event_rows import event_rows
+
+    return event_rows(Path(index))
+
+
+def _drop_index(index: Path) -> None:
+    """Delete the index in both shapes: raw bytes and store."""
+    from fno.events.store_client import store_db_path
+
+    index = Path(index)
+    index.unlink(missing_ok=True)
+    store = store_db_path(index)
+    if store.exists():
+        store.unlink()
+
+
 @pytest.fixture
 def index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """The machine-wide decision index, pinned into the sandbox.
@@ -480,11 +498,9 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _events(root: Path) -> list[dict]:
-    return [
-        json.loads(line)
-        for line in project_log("events.jsonl", project_root=root).read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    from tests._event_rows import event_rows
+
+    return event_rows(project_log("events.jsonl", project_root=root))
 
 
 def _write_decision_index(index: Path, *rows: dict) -> None:
@@ -688,7 +704,7 @@ def test_reindex_preserves_distinct_retractions_for_one_target(
             ["decide-retract", decision_id, "--reason", reason, "--authority", "agent"],
         )
         assert result.exit_code == 0, result.output
-    index.unlink()
+    _drop_index(index)
     assert reindex(sources=[project_log("events.jsonl", project_root=root)])["added"] == 3
     listed = runner.invoke(decide_app, ["list", "--state", "retracted", "--json"])
     row = json.loads(listed.stdout)["decisions"][0]
@@ -739,7 +755,7 @@ def test_retraction_survives_reindex(root: Path, tmp_graph: Path, index: Path):
         ["decide-retract", decision_id, "--reason", "no longer applies", "--authority", "agent"],
     )
     assert retracted.exit_code == 0, retracted.output
-    index.unlink()
+    _drop_index(index)
     assert reindex(sources=[project_log("events.jsonl", project_root=root)])["added"] == 2
     listed = runner.invoke(decide_app, ["list", "--state", "retracted", "--json"])
     assert json.loads(listed.stdout)["decisions"][0]["decision_id"] == decision_id
@@ -1064,7 +1080,7 @@ def test_explicit_enforced_graduation_reaches_every_decision_store(
         "artifact": "test:tests.unit.test_decide::test_operator_only",
     }
     assert _events(root)[0]["data"]["graduation"] == expected
-    indexed = json.loads(index.read_text().splitlines()[0])["data"]
+    indexed = _index_rows(index)[0]["data"]
     assert indexed["decision_id"] == decision_id
     assert indexed["graduation"] == expected
     projected = json.loads(tmp_graph.read_text())["entries"][0]["decisions"][0]
@@ -1780,7 +1796,7 @@ def test_reindex_recovers_journal_records_and_is_idempotent(
     journal = project_log("events.jsonl", project_root=root)
     for subject in ("pr-923", "pr-921", "x-6352-worktree"):
         runner.invoke(decide_app, ["--subject", subject, "--decision", f"on {subject}"])
-    index.unlink()  # the state before the index existed: journal only
+    _drop_index(index)  # the state before the index existed: journal only
 
     counts = reindex(sources=[journal])
     assert counts["added"] == 3, counts
@@ -1803,7 +1819,7 @@ def test_reindex_reads_one_journal_once_through_a_symlink(
     from fno.decide import reindex
 
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
-    index.unlink()
+    _drop_index(index)
 
     from fno.paths import project_log
 
@@ -1864,7 +1880,7 @@ def test_reindex_folds_every_project_root_the_graph_names(
     did = record_decision(
         decision="the sibling repo ruled this", subject="pr-777", events_root=sibling
     )["decision_id"]
-    index.unlink()
+    _drop_index(index)
 
     from fno.paths import project_log
 
@@ -1935,7 +1951,7 @@ def test_reindex_counts_a_journal_row_and_its_own_projection_once(
     from fno.decide import reindex
 
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
-    index.unlink()
+    _drop_index(index)
 
     counts = reindex(sources=[project_log("events.jsonl", project_root=root)])
     assert (counts["added"], counts["already"]) == (1, 0), counts
@@ -2033,7 +2049,7 @@ def test_one_unusable_projection_row_does_not_abort_the_backfill(
     from fno.decide import reindex
 
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "from the journal"])
-    index.unlink()
+    _drop_index(index)
     entries = json.loads(tmp_graph.read_text())["entries"]
     entries[0]["decisions"] = [
         {"decision_id": "d-bad001", "decision": "unusable", "rationale": 123},
@@ -2118,7 +2134,7 @@ def test_a_torn_journal_does_not_make_reindex_impossible(
     from fno.decide import reindex
 
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
-    index.unlink()
+    _drop_index(index)
     from fno.paths import project_log
 
     journal = project_log("events.jsonl", project_root=root)
@@ -2249,7 +2265,7 @@ def test_reindex_exits_nonzero_when_the_index_cannot_be_written(
     import fno.events as events_mod
 
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
-    index.unlink()
+    _drop_index(index)
 
     real = events_mod.append_event
 
@@ -2339,7 +2355,7 @@ def test_a_row_the_schema_rejects_does_not_wedge_the_recovery_verb(
     import fno.events as events_mod
 
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
-    index.unlink()
+    _drop_index(index)
 
     real = events_mod.validate
     calls = {"n": 0}
@@ -2466,7 +2482,7 @@ def test_no_identity_and_no_terminal_refuses_operator_authority(
     ]
     assert [
         json.loads(line)["data"]["decision_id"]
-        for line in index.read_text(encoding="utf-8").splitlines()
+        for line in [json.dumps(e) for e in _index_rows(index)]
         if line.strip()
     ] == [
         unattributed_rows[0]["decision_id"],
@@ -2543,7 +2559,7 @@ def test_record_decision_refuses_agent_operator_authority_before_either_write(
     journal_events = [e for e in _events(root) if e["type"] == "operator_decision"]
     index_events = [
         json.loads(line)
-        for line in index.read_text(encoding="utf-8").splitlines()
+        for line in [json.dumps(e) for e in _index_rows(index)]
         if line.strip()
     ]
     assert [e["data"]["decision_id"] for e in journal_events] == [
@@ -2589,7 +2605,7 @@ def test_backlog_decide_records_non_operator_authority_in_coord(
     ]
     assert [
         json.loads(line)["data"]["decision_id"]
-        for line in index.read_text(encoding="utf-8").splitlines()
+        for line in [json.dumps(e) for e in _index_rows(index)]
         if line.strip()
     ] == [decision["decision_id"]]
 
@@ -2651,7 +2667,7 @@ def test_backlog_decide_still_refuses_operator_authority_before_any_write(
     assert [e["data"]["decision_id"] for e in _events(root)] == [decision_id]
     assert [
         json.loads(line)["data"]["decision_id"]
-        for line in index.read_text(encoding="utf-8").splitlines()
+        for line in [json.dumps(e) for e in _index_rows(index)]
         if line.strip()
     ] == [decision_id]
 
@@ -2712,7 +2728,7 @@ def test_cli_refuses_agent_operator_authority_with_actionable_guidance(
     assert [e["data"]["decision_id"] for e in _events(root)] == [did]
     assert [
         json.loads(line)["data"]["decision_id"]
-        for line in index.read_text(encoding="utf-8").splitlines()
+        for line in [json.dumps(e) for e in _index_rows(index)]
         if line.strip()
     ] == [did]
 
@@ -2782,9 +2798,9 @@ def test_one_id_is_one_row_even_if_the_index_holds_it_twice(
     """reindex is read-then-write with no lock across the fold, so a decide
     landing mid-backfill can be appended twice under one id."""
     runner.invoke(decide_app, ["--subject", "pr-923", "--decision", "merged"])
-    duplicate = index.read_text(encoding="utf-8")
+    duplicate = json.dumps(_index_rows(index)[0])
     with index.open("a", encoding="utf-8") as fh:
-        fh.write(duplicate)
+        fh.write(duplicate + "\n" + duplicate + "\n")
 
     payload = json.loads(
         runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout

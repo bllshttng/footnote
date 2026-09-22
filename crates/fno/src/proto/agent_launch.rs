@@ -19,20 +19,39 @@ pub struct AgentLaunchRequest {
     pub cwd: String,
     /// Harness name from the launcher catalog (`claude`, `codex`, ...).
     pub harness: String,
-    /// Canonical spawn substrate (`pane` or `thread`; `headless` is not
-    /// offered by the popup).
+    /// Canonical spawn substrate. EMPTY means the door's default (`thread`
+    /// where the harness seats one, `headless` where it does not); `pane`
+    /// names the pane lane explicitly (the only way `--tab`/`--split` reach
+    /// a pane), `thread` names the thread lane explicitly. `headless` is
+    /// never sent by the popup and is refused pre-wire.
     pub substrate: String,
     /// Optional explicit pins. `None` = the harness default; the popup shows
-    /// "harness default" rather than inventing a resolved value.
+    /// "harness decides" rather than inventing a resolved value.
     #[serde(default)]
     pub model: Option<String>,
+    /// True when the model came from a picked routing row: argv omits
+    /// `--harness` so the door resolves that row's harness, route, account
+    /// and effort itself. A typed model keeps the false default and the
+    /// plain `--harness` override.
+    #[serde(default)]
+    pub model_names_harness: bool,
     #[serde(default)]
     pub effort: Option<String>,
     #[serde(default)]
     pub permission_mode: Option<String>,
-    /// Optional mux tab selector for pane placement (`--tab`).
+    /// Optional mux tab selector for pane placement (`--tab`), or `new` for
+    /// a thread opened in a new tab through its portal.
     #[serde(default)]
     pub placement: Option<String>,
+    /// Portal index for a thread spawn placed through a portal
+    /// (`--portal N`). Required by the door whenever a thread spawn carries
+    /// a placement flag.
+    #[serde(default)]
+    pub portal: Option<u8>,
+    /// Split direction for a thread spawn opened as a split beside the
+    /// focused pane (`--split <dir>`: left/right/up/down).
+    #[serde(default)]
+    pub split: Option<String>,
     /// The seed text. Empty = an intentionally interactive launch; the door
     /// owns whether the harness/substrate combination accepts one, and its
     /// refusal (never a fabricated seed) is what the operator sees.

@@ -64,9 +64,11 @@ def _emit(project: Path, type_: str, data: str = "{}", source: str = "test"):
 
 
 def _rows(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    # No exists() gate: the raw file may stay absent while its store holds
+    # the committed rows (the store commit is the write boundary).
+    from tests._event_rows import event_rows
+
+    return event_rows(path)
 
 
 def _types(path: Path) -> list[str]:

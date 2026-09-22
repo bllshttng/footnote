@@ -50,8 +50,7 @@ def evaluate_plan_delivery(plan_path: Path, events_path: Path) -> DeliveryEvalua
         return _inactive_declaration()
 
     try:
-        raw = _read_coherent_bytes(events_path)
-        events = _parse_events(raw)
+        raw, events = _read_snapshot(events_path)
     except JournalRevisionConflict as exc:
         fact_revision = "conflict:" + ":".join(exc.revisions)
         diagnostic = (
@@ -126,6 +125,28 @@ def _stat_revision(stat: os.stat_result) -> str:
 
 def _stat_identity(stat: os.stat_result) -> tuple[int, int, int, int]:
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
+def _read_snapshot(path: Path) -> "tuple[bytes, tuple[dict[str, object], ...]]":
+    """One coherent evidence snapshot: committed store rows when a store sits
+    beside the journal, raw bytes otherwise.
+
+    The store commit is the write boundary, so a post-cutover journal may have
+    no bytes at all - absence of the raw file beside a live store is the
+    normal shape, not a malformed one.
+    """
+    from fno.events.store_client import store_db_path
+
+    if store_db_path(path).exists():
+        from fno.events.store_client import native_rows
+
+        committed = native_rows(path)
+        if committed is None:
+            raise OSError(f"event store beside {path} is unreadable")
+        raw = b"".join(line.encode("utf-8") + b"\n" for line in committed)
+        return raw, _parse_events(raw)
+    raw = _read_coherent_bytes(path)
+    return raw, _parse_events(raw)
 
 
 def _read_coherent_bytes(path: Path, *, after_read=None) -> bytes:

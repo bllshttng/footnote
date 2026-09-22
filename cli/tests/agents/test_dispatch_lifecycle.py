@@ -76,7 +76,7 @@ def _force_claude_on_path(monkeypatch, tmp_path: Path) -> None:
 
 
 def _read_events(tmp_path: Path) -> list[dict]:
-    """Return all events.jsonl records (or empty if file absent).
+    """Return the committed event rows for the default journal.
 
     Mirrors the helper in test_codex_fatal_error_dispatch.py; copied
     here so each lifecycle test can verify the forensic event-stream
@@ -84,15 +84,9 @@ def _read_events(tmp_path: Path) -> list[dict]:
     """
     from fno import paths
 
-    events_path = paths.state_dir() / "events.jsonl"
-    if not events_path.exists():
-        return []
-    out: list[dict] = []
-    for line in events_path.read_text().splitlines():
-        if not line.strip():
-            continue
-        out.append(json.loads(line))
-    return out
+    from tests._event_rows import event_rows
+
+    return event_rows(paths.state_dir() / "events.jsonl")
 
 
 # ---------------------------------------------------------------------------

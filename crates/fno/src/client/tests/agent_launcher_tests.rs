@@ -32,8 +32,14 @@ fn catalog(names: &[(&str, bool, bool)]) -> Option<CatalogOutcome> {
                 name: n.to_string(),
                 native: *native,
                 installed: *installed,
+                models: Vec::new(),
+                // Free-text surface by default: the effort chip stays
+                // offered in tests that do not name a list.
+                efforts: Some(Vec::new()),
+                permission_modes: Some(Vec::new()),
             })
             .collect(),
+        None,
     ))
 }
 
@@ -41,7 +47,7 @@ fn sync_catalog(v: &mut View) {
     // Mirror the run loop's rx arm: land the catalog and sync the draft's
     // harness names.
     let names: Vec<String> = match &v.launcher_catalog {
-        Some(CatalogOutcome::Ok(rows)) => rows.iter().map(|r| r.name.clone()).collect(),
+        Some(CatalogOutcome::Ok(rows, _)) => rows.iter().map(|r| r.name.clone()).collect(),
         _ => vec![],
     };
     if let Some(l) = v.launcher.as_mut() {
@@ -82,6 +88,53 @@ fn open_seeds_project_candidates_and_kicks_the_catalog_probe() {
     let own = std::env::current_dir().unwrap().display().to_string();
     let l = v.launcher.as_ref().unwrap();
     assert_eq!(l.draft.projects.first().map(String::as_str), Some(&own[..]));
+}
+
+#[test]
+fn one_lone_esc_byte_closes_the_dock() {
+    // The unit twin of the pty repro: the scanner flushes [0x1b] into
+    // launcher_keys after its quiet window, and the dock's own carry must
+    // release a trailing lone ESC as a bare Esc press, not re-buffer it.
+    let mut v = view_with_launcher();
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b", &mut sock).await;
+    });
+    assert!(v.launcher.is_none(), "one lone Esc byte closes the dock");
+    assert!(
+        v.launcher_closed.is_some(),
+        "the draft is retained for reopen"
+    );
+}
+
+#[test]
+fn arrow_reaches_the_dock_whole_or_scanner_rejoined() {
+    // AC1-EDGE: an arrow in one chunk, or as the scanner-rejoined pair a
+    // lone-Esc read plus a follow-up, moves the cursor / focus and never
+    // reads as Esc.
+    let mut v = view_with_launcher();
+    if let Some(l) = v.launcher.as_mut() {
+        l.focus = Focus::Message;
+    }
+    type_message(&mut v, "ab");
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\x1b[A", &mut sock).await;
+    });
+    // Whole-chunk arrow: the cursor moves inside the editor, no close.
+    assert!(v.launcher.is_some(), "an arrow never closes the dock");
+    // The scanner rejoins an arrow into ONE chunk, so the fold sees
+    // `\x1b` + `[A` in a single read and folds Up, never Esc.
+    let mut esc = LauncherEsc::default();
+    assert_eq!(
+        esc.fold(b"\x1b[A"),
+        vec![super::agent_launcher::LKey::Up],
+        "a rejoined arrow folds Up, not Esc"
+    );
 }
 
 #[test]
@@ -339,10 +392,7 @@ fn chip_row_paints_fields_and_launch_on_one_row() {
         row_text.contains("claude@"),
         "harness chip carries the catalog name: {row_text}"
     );
-    let launch_x = labels
-        .iter()
-        .find(|(s, _)| s == "[Launch]")
-        .map(|(_, x)| *x);
+    let launch_x = labels.iter().find(|(s, _)| s == "Launch").map(|(_, x)| *x);
     let Some(launch_x) = launch_x else {
         panic!("launch chip on the primary row: {row_text}");
     };
@@ -352,19 +402,52 @@ fn chip_row_paints_fields_and_launch_on_one_row() {
 }
 
 #[test]
-fn focused_chip_paints_inverted_and_others_dim() {
+fn chips_paint_in_the_popup_control_vocabulary() {
+    // Change 2: the popup's control grammar, not raw DIM (a dim word reads
+    // as a caption). Unfocused chips are filled Body blocks (INVERSE under
+    // the terminal theme), the focused chip is the BodySel cut-out, Launch
+    // wears the esc-chip role, adjacent chips sit a default-styled blank
+    // column apart, and every picker chip ends in the dropdown caret.
     let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
     if let Some(l) = v.launcher.as_mut() {
         l.focus = Focus::Effort;
     }
     let l = v.launcher.as_ref().unwrap();
-    let area = RtRect::new(0, 0, 40, 3);
+    let area = RtRect::new(0, 0, 80, 3);
     let rects = l.dock_layout_rects(&v, area);
     let mut buf = RtBuffer::empty(area);
     l.paint(&v, &mut buf, area);
     for (f, _, r) in &rects.chips {
-        let inverted = buf[(r.x, r.y)].modifier.contains(Modifier::REVERSED);
-        assert_eq!(inverted, *f == Focus::Effort, "chip {f:?} inverted state");
+        let focused = *f == Focus::Effort;
+        assert!(
+            !buf[(r.x, r.y)].modifier.contains(Modifier::DIM),
+            "chip {f:?} must not read as a dim caption"
+        );
+        assert_eq!(
+            buf[(r.x, r.y)].modifier.contains(Modifier::REVERSED),
+            !focused,
+            "chip {f:?} filled-block vs focused cut-out"
+        );
+        if super::agent_launcher::is_picker_chip(*f) {
+            let last = buf[(r.x + r.width - 1, r.y)].symbol().to_string();
+            assert_eq!(last, "\u{25be}", "picker chip {f:?} ends in the caret");
+        }
+    }
+    // Adjacent same-row chips are separated by one default-styled column.
+    for pair in rects.chips.windows(2) {
+        let (f0, _, r0) = (&pair[0].0, &pair[0].1, pair[0].2);
+        let (f1, _, r1) = (&pair[1].0, &pair[1].1, pair[1].2);
+        if r0.y == r1.y {
+            let gap_x = r0.x + r0.width;
+            assert!(gap_x < r1.x, "chips {f0:?} and {f1:?} need a gap column");
+            let gap = &buf[(gap_x, r0.y)];
+            assert!(
+                gap.modifier.is_empty(),
+                "the gap column between {f0:?} and {f1:?} stays default-styled"
+            );
+        }
     }
 }
 #[test]
@@ -433,14 +516,15 @@ fn wrapped_cursor_lands_on_the_row_holding_the_char() {
 fn dock_growth_counts_wrapped_rows_and_caps_at_a_third() {
     let mut v = view_with_launcher();
     v.term = (24, 80);
-    // A 120-character line at 40 columns wraps to 3 rows: the bar grows to
-    // 1 chip + 3 message + 1 footer = 5 and shrinks when it clears.
+    // A 120-character line wraps to 4 rows at the editor's 38 wrap columns
+    // (40 minus the prompt gutter): the bar grows to 1 chip + 4 message +
+    // 1 footer = 6 and shrinks when it clears.
     if let Some(l) = v.launcher.as_mut() {
         l.draft.message = "x".repeat(120);
     }
     let l = v.launcher.as_ref().unwrap();
     let (total, editor) = l.dock_layout(60, 40);
-    assert_eq!((total, editor), (5, 3), "grows with wrapped rows");
+    assert_eq!((total, editor), (6, 4), "grows with wrapped rows");
     if let Some(l) = v.launcher.as_mut() {
         l.draft.message.clear();
     }
@@ -450,7 +534,7 @@ fn dock_growth_counts_wrapped_rows_and_caps_at_a_third() {
         (3, 1),
         "clearing gives the rows back"
     );
-    // 20 wrapped rows against a 30-row panel: capped at a third (editor 8,
+    // 800 characters against a 30-row panel: capped at a third (editor 8,
     // total 10) and the window holds the cursor row.
     if let Some(l) = v.launcher.as_mut() {
         l.draft.message = "y".repeat(20 * 40);
@@ -461,7 +545,7 @@ fn dock_growth_counts_wrapped_rows_and_caps_at_a_third() {
     let area = RtRect::new(0, 0, 40, 10);
     let rects = l.dock_layout_rects(&v, area);
     let (cur_row, _) =
-        super::agent_launcher::wrapped_cursor(&l.draft.message, l.draft.cursor_chars, 40);
+        super::agent_launcher::wrapped_cursor(&l.draft.message, l.draft.cursor_chars, 38);
     assert!(
         cur_row >= rects.start_chunk && cur_row < rects.start_chunk + rects.editor_rows,
         "window holds the cursor row: cur {cur_row}, start {}, rows {}",
@@ -683,7 +767,7 @@ fn chip_paint_truncates_with_an_ellipsis_inside_its_rect() {
     let area = RtRect::new(0, 0, 6, 1);
     let mut buf = RtBuffer::empty(area);
     let style = RtStyle::new();
-    super::agent_launcher::paint_chip(&mut buf, area, "abcdefgh", style);
+    super::agent_launcher::paint_chip(&mut buf, area, "abcdefgh", style, false);
     let painted: String = (0..area.width)
         .map(|x| buf[(x, 0)].symbol().to_string())
         .collect();
@@ -691,5 +775,460 @@ fn chip_paint_truncates_with_an_ellipsis_inside_its_rect() {
     assert!(
         painted.ends_with('\u{2026}'),
         "truncated chip elides: {painted}"
+    );
+}
+
+#[test]
+fn caret_survives_chip_truncation() {
+    // AC2-EDGE: a chip rect narrower than its label ellipsizes the label and
+    // keeps the caret visible - truncate the text, never the caret.
+    let area = RtRect::new(0, 0, 5, 1);
+    let mut buf = RtBuffer::empty(area);
+    let style = RtStyle::new();
+    super::agent_launcher::paint_chip(&mut buf, area, "long-label", style, true);
+    let painted: String = (0..area.width)
+        .map(|x| buf[(x, 0)].symbol().to_string())
+        .collect();
+    assert_eq!(
+        painted.chars().last(),
+        Some('\u{25be}'),
+        "the caret stays visible: {painted}"
+    );
+}
+
+#[test]
+fn labels_name_their_field_and_never_say_default() {
+    // R3 + AC3-UI: every empty pin reads "<harness> decides" (placement:
+    // the door's thread default) and NO label anywhere contains the bare
+    // word "default" - the operator could not tell which default was which.
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        l.draft.expanded = true;
+    }
+    let l = v.launcher.as_ref().unwrap();
+    let texts: Vec<String> = l.chip_texts(&v).into_iter().map(|(_, s)| s).collect();
+    let joined = texts.join(" | ");
+    for want in [
+        "harness: claude",
+        "model: claude decides",
+        "effort: claude decides",
+        "permission: claude decides",
+        "where: thread",
+    ] {
+        assert!(
+            texts.iter().any(|t| t.contains(want)),
+            "want {want:?} in {joined}"
+        );
+    }
+    assert!(
+        !joined.split_whitespace().any(|w| w == "default"),
+        "no bare default: {joined}"
+    );
+}
+
+#[test]
+fn model_picker_lists_catalog_rows_and_picking_one_pins_the_row() {
+    // AC3-HP: the model picker lists "<harness> decides", then the claude
+    // routing rows, then free text; picking a row sets the chip to the ROW
+    // name (and change 5's wire field rides the row's model id).
+    let mut v = view_with_launcher();
+    let mut rows = catalog(&[("claude", true, true)]).unwrap();
+    if let CatalogOutcome::Ok(choices, _) = &mut rows {
+        choices[0].models = vec![
+            super::agent_launcher::ModelChoice {
+                name: "claude-opus-5".into(),
+                model: "claude-opus-5".into(),
+                verdict: "ok".into(),
+            },
+            super::agent_launcher::ModelChoice {
+                name: "zai-flash".into(),
+                model: "glm-5.3-flash[1m]".into(),
+                verdict: "ok".into(),
+            },
+        ];
+    }
+    v.launcher_catalog = Some(rows);
+    sync_catalog(&mut v);
+    let mut l = v.launcher.take().unwrap();
+    l.focus = Focus::Model;
+    assert!(
+        super::agent_launcher::open_picker(&mut l, &v),
+        "picker opens"
+    );
+    v.launcher = Some(l);
+    let l = v.launcher.as_ref().unwrap();
+    let picker = l.picker.as_ref().unwrap();
+    let labels: Vec<String> = picker
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Entry { label, enabled, .. } if *enabled => Some(label.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        labels.contains(&"claude decides".to_string()) && labels.contains(&"zai-flash".to_string()),
+        "picker lists decides + rows: {labels:?}"
+    );
+    // Pick zai-flash: the chip reads `model: zai-flash`, the draft carries
+    // the row's model id.
+    let target = picker
+        .popup
+        .rows
+        .iter()
+        .position(
+            |r| matches!(r, crate::popup::PopupRow::Entry { label, .. } if label == "zai-flash"),
+        )
+        .unwrap();
+    let mut l = v.launcher.as_mut().unwrap();
+    l.picker.as_mut().unwrap().popup.select(target);
+    let action = l
+        .picker
+        .as_ref()
+        .unwrap()
+        .actions
+        .get(target)
+        .cloned()
+        .flatten();
+    super::agent_launcher::apply_picker_action(&mut l, &v.launcher_catalog, action.unwrap(), 0);
+    v.launcher = Some(l.clone());
+    let l = v.launcher.as_ref().unwrap();
+    assert!(l.picker.is_none(), "commit closes the picker");
+    assert_eq!(l.draft.model, "glm-5.3-flash[1m]");
+    assert_eq!(l.draft.model_row.as_deref(), Some("zai-flash"));
+}
+
+#[test]
+fn degraded_inventory_leaves_free_text_and_names_the_failure() {
+    // AC3-EDGE: when the inventory read fails, the model picker shows a
+    // disabled entry carrying the reason and a working `type a model...`;
+    // the harness chip still lists every catalog harness.
+    let mut v = view_with_launcher();
+    v.launcher_catalog = Some(CatalogOutcome::Ok(
+        vec![HarnessChoice {
+            name: "claude".into(),
+            native: true,
+            installed: true,
+            models: Vec::new(),
+            efforts: Some(Vec::new()),
+            permission_modes: Some(Vec::new()),
+        }],
+        Some("routing inventory unavailable".into()),
+    ));
+    sync_catalog(&mut v);
+    let mut l = v.launcher.take().unwrap();
+    l.focus = Focus::Model;
+    assert!(super::agent_launcher::open_picker(&mut l, &v));
+    v.launcher = Some(l);
+    let l = v.launcher.as_ref().unwrap();
+    let picker = l.picker.as_ref().unwrap();
+    let disabled: Vec<&str> = picker
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Entry {
+                label,
+                enabled: false,
+                ..
+            } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    let enabled: Vec<&str> = picker
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Entry {
+                label,
+                enabled: true,
+                ..
+            } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        disabled.iter().any(|d| d.contains("unavailable")),
+        "the failure is named: {disabled:?}"
+    );
+    assert!(
+        enabled.contains(&"type a model..."),
+        "free text still works: {enabled:?}"
+    );
+    assert!(
+        !v.launcher.as_ref().unwrap().draft.harnesses.is_empty(),
+        "harness choices survive the degraded model list"
+    );
+}
+
+#[test]
+fn placement_picker_offers_thread_views_and_the_one_pane_entry() {
+    // The operator's placement ruling: a thread view, not a pane. The chip
+    // offers thread (the door default), thread split beside, thread new tab
+    // - each sent as --substrate thread --portal N with --split/--tab - and
+    // keeps one pane entry for args a thread cannot carry.
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    let mut l = v.launcher.take().unwrap();
+    l.focus = Focus::Placement;
+    l.draft.expanded = true;
+    assert!(super::agent_launcher::open_picker(&mut l, &v));
+    v.launcher = Some(l);
+    let l = v.launcher.as_ref().unwrap();
+    let labels: Vec<String> = l
+        .picker
+        .as_ref()
+        .unwrap()
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Entry { label, .. } => Some(label.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        labels,
+        vec![
+            "thread",
+            "thread split beside",
+            "thread new tab",
+            "pane: active tab",
+        ]
+    );
+    // Committing split beside records the placement; request() turns it
+    // into --substrate thread --portal N --split right.
+    let mut l = v.launcher.take().unwrap();
+    super::agent_launcher::apply_picker_action(
+        &mut l,
+        &v.launcher_catalog,
+        super::agent_launcher::PickerAction::Place(
+            super::agent_launcher::Placement::ThreadSplitBeside,
+        ),
+        2,
+    );
+    v.launcher = Some(l.clone());
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(l.draft.placement_portal, 2);
+    let texts: Vec<String> = l.chip_texts(&v).into_iter().map(|(_, s)| s).collect();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("where: thread split beside")),
+        "the chip shows the picked view: {texts:?}"
+    );
+}
+
+#[test]
+fn editor_paints_prompt_marker_and_empty_draft_placeholder() {
+    // The operator's scope add: a visible input marker before the first
+    // message row, and dim placeholder text on an empty draft.
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    let l = v.launcher.as_ref().unwrap();
+    let area = RtRect::new(0, 0, 80, 5);
+    let rects = l.dock_layout_rects(&v, area);
+    let mut buf = RtBuffer::empty(area);
+    l.paint(&v, &mut buf, area);
+    let glyph: String = (0..2)
+        .map(|x| {
+            buf[(rects.message.x + x, rects.message.y)]
+                .symbol()
+                .to_string()
+        })
+        .collect();
+    assert!(
+        glyph.contains('\u{276f}'),
+        "prompt marker painted: {glyph:?}"
+    );
+    let row: String = (0..40)
+        .map(|x| buf[(x, rects.message.y)].symbol().to_string())
+        .collect();
+    assert!(
+        row.contains("/fno:target <node> or a task"),
+        "placeholder on an empty draft: {row:?}"
+    );
+    // Typing replaces the placeholder and keeps the marker.
+    if let Some(l) = v.launcher.as_mut() {
+        l.focus = Focus::Message;
+    }
+    type_message(&mut v, "ship it");
+    let l = v.launcher.as_ref().unwrap();
+    let mut buf = RtBuffer::empty(area);
+    l.paint(&v, &mut buf, area);
+    let row: String = (0..40)
+        .map(|x| buf[(x, rects.message.y)].symbol().to_string())
+        .collect();
+    assert!(row.contains("ship it"), "draft paints: {row:?}");
+    assert!(!row.contains("/fno:target"), "placeholder gone: {row:?}");
+}
+
+#[test]
+fn typing_in_an_open_picker_filters_the_rows() {
+    // Change 7: the picker's rows narrow in place as the operator types;
+    // the query rides a visible header; Backspace widens; the commit
+    // actions follow their rows through the filter.
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true), ("codex", true, true)]);
+    sync_catalog(&mut v);
+    let mut l = v.launcher.take().unwrap();
+    l.focus = Focus::Harness;
+    assert!(super::agent_launcher::open_picker(&mut l, &v));
+    v.launcher = Some(l);
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    // Type `cod`: only the codex row survives; the header names the query.
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"cod", &mut sock).await;
+    });
+    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
+    let labels: Vec<&str> = picker
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Entry { label, .. } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels, vec!["codex"], "the query narrows the rows");
+    assert!(matches!(
+        picker.popup.rows.first(),
+        Some(crate::popup::PopupRow::Header(h)) if h.contains("cod")
+    ));
+    // Backspace once: the query `co` still narrows to codex.
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, &[0x7f], &mut sock).await;
+    });
+    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
+    let still: Vec<&str> = picker
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Entry { label, .. } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(still, vec!["codex"], "`co` still filters: {still:?}");
+    // Clearing the query fully restores every row.
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, &[0x7f, 0x7f], &mut sock).await;
+    });
+    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
+    let labels: Vec<&str> = picker
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            crate::popup::PopupRow::Entry { label, .. } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels.len(), 2, "widened: {labels:?}");
+}
+
+#[test]
+fn enter_commits_the_highlighted_row_under_an_active_filter() {
+    // The picker's sel indexes SELECTABLE targets (the filter header is
+    // skipped); Enter must resolve the commit through the row that target
+    // points at. The regression: actions.get(sel) read the header's None and
+    // the highlighted codex row never committed.
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true), ("codex", true, true)]);
+    sync_catalog(&mut v);
+    let mut l = v.launcher.take().unwrap();
+    l.focus = Focus::Harness;
+    assert!(super::agent_launcher::open_picker(&mut l, &v));
+    v.launcher = Some(l);
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    // `co` leaves header + codex; the selection sits on codex (target 0).
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"co", &mut sock).await;
+    });
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, &[0x0d], &mut sock).await;
+    });
+    let l = v.launcher.as_ref().unwrap();
+    assert!(l.picker.is_none(), "Enter commits and closes the picker");
+    assert_eq!(l.draft.harness(), "codex", "the highlighted row committed");
+}
+
+#[test]
+fn at_opens_the_node_picker_and_picking_inserts_the_id() {
+    // Change 7: `@` in the message opens a node picker over the layout's
+    // backlog cards; the glyph never lands in the draft; the pick inserts
+    // `<id> ` at the cursor.
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        l.focus = Focus::Message;
+    }
+    // One backlog card for the picker to list (the fixture ships none).
+    v.layout.backlog = vec![BacklogCard {
+        id: "x-6233".into(),
+        slug: "a-node".into(),
+        priority: "p1".into(),
+        state: CardState::Ready,
+        pane_id: None,
+        attach_id: None,
+        where_hint: None,
+        project: None,
+        lane: None,
+        plan_path: None,
+        head: false,
+    }];
+    type_message(&mut v, "plan ");
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"@", &mut sock).await;
+    });
+    let picker = v.launcher.as_ref().unwrap().picker.as_ref().unwrap();
+    assert_eq!(
+        picker.field,
+        Focus::Message,
+        "the node picker rides the message field"
+    );
+    let entry_count = picker
+        .popup
+        .rows
+        .iter()
+        .filter(|r| matches!(r, crate::popup::PopupRow::Entry { .. }))
+        .count();
+    assert_eq!(
+        v.launcher.as_ref().unwrap().draft.message,
+        "plan ",
+        "the @ never lands in the draft"
+    );
+    // Pick the first card: its id lands at the cursor.
+    let first_id: String = picker
+        .actions
+        .iter()
+        .find_map(|a| match a {
+            Some(super::agent_launcher::PickerAction::InsertNode(id)) => Some(id.clone()),
+            _ => None,
+        })
+        .expect("the fixture carries at least one InsertNode row");
+    assert!(entry_count >= 1, "cards list: {entry_count}");
+    let mut l = v.launcher.take().unwrap();
+    let action = super::agent_launcher::PickerAction::InsertNode(first_id.clone());
+    super::agent_launcher::apply_picker_action(&mut l, &v.launcher_catalog, action, 0);
+    v.launcher = Some(l);
+    assert_eq!(
+        v.launcher.as_ref().unwrap().draft.message,
+        format!("plan {first_id} "),
+        "the node id lands at the cursor"
     );
 }

@@ -91,49 +91,167 @@ pub(crate) fn stop_pane_process_confirmed(e: &RegistryEntry) -> PaneStop {
     stop_pane_process_confirmed_with(e, &production_seams())
 }
 
-/// The one pane-stop body, shared by the reap and `fno agents rm` (
-/// change 1). Confirms ONLY on the pid reading gone; every earlier answer
-/// is a not-confirmed detail naming what ran.
+/// The one pane-stop body, shared by the reap and `fno agents rm`. Resolves
+/// the process to end once, then confirms ONLY on the pid reading gone;
+/// every earlier answer is a not-confirmed detail naming what ran.
 pub(crate) fn stop_pane_process_confirmed_with(
     e: &RegistryEntry,
     seams: &PaneStopSeams,
 ) -> PaneStop {
-    // 0. The precheck: separate the three facts `pid_ours` used to
-    //    fuse. A gone pid backed by the harness's own reader is the stop
-    //    already happened; only an unprovable row refuses here.
-    match precheck_pane_stop_with(e, seams) {
-        PanePrecheck::AlreadyStopped(detail) => {
-            return PaneStop {
-                confirmed: true,
-                detail,
-            }
-        }
-        PanePrecheck::Unprovable(detail) => {
-            return PaneStop {
-                confirmed: false,
-                detail,
-            }
-        }
-        PanePrecheck::NeedsKill => {}
-    }
-    // NeedsKill implies the precheck saw a verified pid; the fallback is
-    // unreachable but the pid must not read as infallible.
-    let Some(pid) = e.pid else {
-        return PaneStop {
+    match resolve_stop_target(e, seams) {
+        StopTarget::Stopped(detail) => PaneStop {
+            confirmed: true,
+            detail,
+        },
+        StopTarget::Refuse(detail) => PaneStop {
             confirmed: false,
-            detail: "pane row carries no verified pid; the stop cannot be proven".into(),
-        };
+            detail,
+        },
+        StopTarget::Kill(t) => kill_target_confirmed(t, e, seams),
+    }
+}
+
+/// The one process a stop may end, resolved once so the dry-run precheck
+/// and the real stop can never answer from two different worlds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StopTarget {
+    /// The harness session is already stopped; the string is the evidence.
+    Stopped(String),
+    /// A pid must end: `pid` to kill, `start` the incarnation check rides
+    /// on, `found` naming how the pid was found when it is not the row's
+    /// own recorded pid.
+    Kill(KillTarget),
+    /// Nothing can be proven. Holds the row; the string is the refusal.
+    Refuse(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KillTarget {
+    pid: u32,
+    start: Option<u64>,
+    found: Option<String>,
+    /// An open-file holder carries no start-time proof, so the signal
+    /// escalation may not reach it directly: its pane kill (or a confirmed
+    /// death) is the whole case. The row's own pid keeps today's path.
+    require_pane: bool,
+}
+
+/// Resolve what one pane stop must end. Rules, in order: the row's own
+/// recorded pid when it is live and provably ours; the harness holder when
+/// the pid is gone, recycled, or never recorded - the sweep wipes pid and
+/// pid_start_time when it writes Exited, so a swept pane row carries none
+/// and the holder read is the only witness left.
+fn resolve_stop_target(e: &RegistryEntry, seams: &PaneStopSeams) -> StopTarget {
+    let Some(pid) = e.pid else {
+        // A pid-less row is a proven stop only when the sweep itself
+        // proved the row's process dead; anything else is a gap no probe
+        // recorded.
+        let proven = e.status == crate::AgentStatus::Exited && e.exited_at.is_some();
+        return ask_holder(e, seams, "pane row carries no verified pid", proven);
     };
+    if (seams.pid_gone)(pid) {
+        return ask_holder(e, seams, &format!("pid {pid} is gone (ESRCH)"), true);
+    }
+    if let (Some(rec), Some(now)) = (e.pid_start_time, (seams.pid_start)(pid)) {
+        if rec != now {
+            return ask_holder(
+                e,
+                seams,
+                &format!("pid {pid} was recycled (start time {now} != recorded {rec})"),
+                true,
+            );
+        }
+    }
+    if (seams.pid_ours)(pid, e.pid_start_time) {
+        return StopTarget::Kill(KillTarget {
+            pid,
+            start: e.pid_start_time,
+            found: None,
+            require_pane: false,
+        });
+    }
+    StopTarget::Refuse(format!(
+        "pid {pid} is alive and not provably ours (unsignalable, or its start time is \
+         unreadable); the stop cannot be proven"
+    ))
+}
+
+/// Map the harness-holder answer onto a stop target. `fact` spells the pid
+/// fact; `history_proven` says the row's recorded process is already proven
+/// dead (probed gone, recycled past doubt, or swept to Exited with a stamp).
+fn ask_holder(
+    e: &RegistryEntry,
+    seams: &PaneStopSeams,
+    fact: &str,
+    history_proven: bool,
+) -> StopTarget {
+    match (seams.session_holder)(e) {
+        SessionHolder::NotHeld(why) => {
+            if history_proven {
+                StopTarget::Stopped(format!("{fact}; {why}"))
+            } else {
+                StopTarget::Refuse(format!(
+                    "{fact} and no exit is recorded; {why}; the stop cannot be proven"
+                ))
+            }
+        }
+        SessionHolder::Held {
+            pid: Some(holder),
+            proven,
+            why,
+        } => {
+            // An unproven holder (an open-file read) is signalled only
+            // through a live pane that hosts it: the pane kill is what
+            // proves the pid is ours, because a bare open-file holder can
+            // be a shared host process.
+            if !proven {
+                let hosted = (seams.pane_lookup)(e.mux.as_ref().map(|m| m.session.as_str()))
+                    .iter()
+                    .any(|p| p.child_pid == Some(holder));
+                if !hosted {
+                    return StopTarget::Refuse(format!(
+                        "{fact}; {why}, and no live pane hosts pid {holder}. A holder read from \
+                         an open file carries no start-time proof and can be a shared host \
+                         process, so it is never signalled"
+                    ));
+                }
+            }
+            StopTarget::Kill(KillTarget {
+                pid: holder,
+                start: (seams.pid_start)(holder),
+                found: Some(why),
+                require_pane: !proven,
+            })
+        }
+        SessionHolder::Held { pid: None, why, .. } => StopTarget::Refuse(format!(
+            "{fact} but {why}; the session outlived the row's process"
+        )),
+        SessionHolder::Unmeasured(why) => StopTarget::Refuse(format!(
+            "{fact}; {why}; the pid evidence alone does not prove the harness session stopped"
+        )),
+    }
+}
+
+/// The kill steps, run against the resolved target pid: find the live pane
+/// by child pid, kill it, poll, escalate, and confirm on ESRCH only.
+fn kill_target_confirmed(t: KillTarget, e: &RegistryEntry, seams: &PaneStopSeams) -> PaneStop {
+    let pid = t.pid;
     let mut ran: Vec<String> = Vec::new();
+    // When the pid is not the row's own record, how it was found leads.
+    if let Some(found) = &t.found {
+        ran.push(found.clone());
+    }
     // 2. Find the live pane by child pid. Never address the stored
     //    mux.pane_id alone: the server re-mints pane ids when it re-adopts a
     //    keeper, and the cascade that trusted the stored id killed a stale
     //    id and read the missing pane as absent.
     let sightings = (seams.pane_lookup)(e.mux.as_ref().map(|m| m.session.as_str()));
     let pane_hosts = sightings.iter().any(|p| p.child_pid == Some(pid));
+    let mut pane_killed = false;
     match sightings.iter().find(|p| p.child_pid == Some(pid)) {
         Some(pane) => match (seams.pane_kill)(&pane.session, pane.pane_id) {
             Ok(true) => {
+                pane_killed = true;
                 ran.push(format!(
                     "pane {}:{} (child {pid}) killed",
                     pane.session, pane.pane_id
@@ -168,11 +286,24 @@ pub(crate) fn stop_pane_process_confirmed_with(
         return confirmed(ran, pid);
     }
     // 4. Escalate while the pid lives, re-checking ownership before every
-    //    signal: a recycled pid is never ours to signal. A pid whose
-    //    incarnation is unproven - no recorded start time and no live pane
-    //    hosting it - is never signalled: guessing costs someone else's
-    //    process (; mirrors stop_claude_pid_confirmed).
-    if !pane_hosts && e.pid_start_time.is_none() {
+    //    signal: a recycled pid is never ours to signal. An open-file
+    //    holder never reaches the signal directly: its pane proof is the
+    //    kill itself, so a pane that vanished between resolve and kill
+    //    holds the row for a retry instead of gambling on a host process.
+    if t.require_pane && !pane_killed {
+        return PaneStop {
+            confirmed: false,
+            detail: format!(
+                "{}; pid {pid} outlived its pane, and an open-file holder is never \
+                 signalled without the pane kill as its proof",
+                ran.join("; ")
+            ),
+        };
+    }
+    // A pid whose incarnation is unproven - no recorded start time and no
+    // live pane hosting it - is never signalled: guessing costs someone
+    // else's process (mirrors stop_claude_pid_confirmed).
+    if !pane_hosts && t.start.is_none() {
         return PaneStop {
             confirmed: false,
             detail: format!(
@@ -182,13 +313,13 @@ pub(crate) fn stop_pane_process_confirmed_with(
             ),
         };
     }
-    if (seams.pid_ours)(pid, e.pid_start_time) && (seams.signal)(pid, libc::SIGTERM) {
+    if (seams.pid_ours)(pid, t.start) && (seams.signal)(pid, libc::SIGTERM) {
         ran.push(format!("SIGTERM sent to {pid}"));
         if poll_gone(seams, pid, TERM_POLL_TICKS) {
             return confirmed(ran, pid);
         }
     }
-    if (seams.pid_ours)(pid, e.pid_start_time) && (seams.signal)(pid, libc::SIGKILL) {
+    if (seams.pid_ours)(pid, t.start) && (seams.signal)(pid, libc::SIGKILL) {
         ran.push(format!("SIGKILL sent to {pid}"));
         if poll_gone(seams, pid, KILL9_POLL_TICKS) {
             return confirmed(ran, pid);
@@ -241,8 +372,16 @@ pub(crate) enum PanePrecheck {
 /// so the reader resolves the harness first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionHolder {
-    /// A live process demonstrably holds the session; the string names it.
-    Held(String),
+    /// A live process holds the session. `pid` is the process a signal can
+    /// end, or None when a signal is not how it stops (a claude bg job
+    /// stops through claude, or two holders disagree on which pid).
+    /// `proven` is true when the reader matched that process's start to
+    /// the session, not only an open file.
+    Held {
+        pid: Option<u32>,
+        proven: bool,
+        why: String,
+    },
     /// The harness's own reader found no live holder; the string is the
     /// evidence.
     NotHeld(String),
@@ -262,57 +401,19 @@ pub(crate) enum LsofRead {
 }
 
 /// The one pane-stop precheck, shared by the real stop, the reap dry run,
-/// `fno agents rm`, and the merge trigger. Decide in this order: no pid,
-/// gone, recycled, ours, unprovable.
+/// `fno agents rm`, and the merge trigger. A map of [`resolve_stop_target`],
+/// so a dry run can never answer differently from the real stop.
 pub(crate) fn precheck_pane_stop_with(e: &RegistryEntry, seams: &PaneStopSeams) -> PanePrecheck {
-    let Some(pid) = e.pid else {
-        return PanePrecheck::Unprovable(
-            "pane row carries no verified pid; the stop cannot be proven".into(),
-        );
-    };
-    if (seams.pid_gone)(pid) {
-        return map_holder(pid, "is gone (ESRCH)", e, seams);
+    match resolve_stop_target(e, seams) {
+        StopTarget::Stopped(detail) => PanePrecheck::AlreadyStopped(detail),
+        StopTarget::Kill(_) => PanePrecheck::NeedsKill,
+        StopTarget::Refuse(detail) => PanePrecheck::Unprovable(detail),
     }
-    if let (Some(rec), Some(now)) = (e.pid_start_time, (seams.pid_start)(pid)) {
-        if rec != now {
-            return map_holder(
-                pid,
-                &format!("was recycled (start time {now} != recorded {rec})"),
-                e,
-                seams,
-            );
-        }
-    }
-    if (seams.pid_ours)(pid, e.pid_start_time) {
-        return PanePrecheck::NeedsKill;
-    }
-    PanePrecheck::Unprovable(format!(
-        "pid {pid} is alive and not provably ours (unsignalable, or its start time is \
-         unreadable); the stop cannot be proven"
-    ))
 }
 
 /// The production seams of [`precheck_pane_stop_with`].
 pub(crate) fn precheck_pane_stop(e: &RegistryEntry) -> PanePrecheck {
     precheck_pane_stop_with(e, &production_seams())
-}
-
-/// Map the harness-holder answer for the gone and recycled cases.
-/// `fact` spells the pid fact; the holder evidence rides behind it in every
-/// string.
-fn map_holder(pid: u32, fact: &str, e: &RegistryEntry, seams: &PaneStopSeams) -> PanePrecheck {
-    match (seams.session_holder)(e) {
-        SessionHolder::NotHeld(why) => {
-            PanePrecheck::AlreadyStopped(format!("pid {pid} {fact}; {why}"))
-        }
-        SessionHolder::Held(why) => PanePrecheck::Unprovable(format!(
-            "pid {pid} {fact} but {why}; the session outlived the row's process"
-        )),
-        SessionHolder::Unmeasured(why) => PanePrecheck::Unprovable(format!(
-            "pid {pid} {fact}; {why}; the pid evidence alone does not prove the harness \
-             session stopped"
-        )),
-    }
 }
 
 /// One `lsof -F p` read of one rollout path.
@@ -359,13 +460,25 @@ fn holder_from_lsof(reads: &[(std::path::PathBuf, LsofRead)]) -> SessionHolder {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
-            return SessionHolder::Held(format!(
-                "pid {} holds codex rollout {file}",
-                pids.iter()
-                    .map(|p| p.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+            // One holder names a signalable pid; two or more name none -
+            // an open-file read carries no start-time proof, and signalling
+            // a shared host process by guess is the failure this shape
+            // prevents.
+            let names = pids
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let (subject, verb) = if pids.len() == 1 {
+                (format!("pid {names}"), "holds")
+            } else {
+                (format!("pids {names}"), "hold")
+            };
+            return SessionHolder::Held {
+                pid: pids.first().copied().filter(|_| pids.len() == 1),
+                proven: false,
+                why: format!("{subject} {verb} codex rollout {file}"),
+            };
         }
     }
     for (path, read) in reads {
@@ -410,12 +523,26 @@ fn session_holder_live(e: &RegistryEntry) -> SessionHolder {
             holder_from_lsof(&reads)
         }
         "claude" => {
-            let snapshot = crate::claude_roster::read_all_agents_union();
-            match crate::gc_sweep::claude_death_reason(e, &snapshot) {
-                Some(reason) => SessionHolder::NotHeld(reason),
-                None => SessionHolder::Unmeasured(
-                    "claude roster shows no terminal state and no dead pid for this session".into(),
-                ),
+            // Claude's own per-process records answer for interactive
+            // sessions the bg-only roster cannot see; the roster read
+            // stays as the fallback for rows the records cannot answer.
+            let sid = e.harness_session_id.as_deref().unwrap_or("");
+            let answer = crate::claude_sessions::session_record_holder(
+                &crate::claude_sessions::session_record_dirs(),
+                sid,
+                &|pid| crate::claims::process_create_time_ms(pid as i32),
+            );
+            match answer {
+                SessionHolder::Unmeasured(why) => {
+                    let snapshot = crate::claude_roster::read_all_agents_union();
+                    match crate::gc_sweep::claude_death_reason(e, &snapshot) {
+                        Some(reason) => SessionHolder::NotHeld(reason),
+                        None => SessionHolder::Unmeasured(format!(
+                            "{why}; claude roster shows no terminal state and no dead pid for this session"
+                        )),
+                    }
+                }
+                answer => answer,
             }
         }
         other => SessionHolder::Unmeasured(format!("no session-holder reader for harness {other}")),
@@ -809,9 +936,11 @@ mod tests {
         );
         let stop = stop_pane_process_confirmed_with(&no_pid, &sx);
         assert!(!stop.confirmed);
-        assert_eq!(
-            stop.detail,
-            "pane row carries no verified pid; the stop cannot be proven"
+        // The pid fact leads; the staged holder's Unmeasured rides behind it.
+        assert!(
+            stop.detail.starts_with("pane row carries no verified pid"),
+            "{}",
+            stop.detail
         );
         assert!(log.borrow().kills.is_empty() && log.borrow().signals.is_empty());
 
@@ -919,15 +1048,19 @@ mod tests {
         );
     }
 
-    /// A gone pid whose harness reader answers Held does not confirm: the
-    /// session outlived the row's process (AC1-ERR).
+    /// A gone pid whose harness reader answers Held with no start-time
+    /// proof and no hosting pane does not confirm: an open-file holder is
+    /// never signalled (AC1-ERR).
     #[test]
     fn x58a5_gone_pid_with_a_live_holder_does_not_confirm() {
         let log = Shared::new(RefCell::new(Log::default()));
         let mut sx = seams(log.clone(), vec![], Ok(true), true, true, true);
         sx.pid_gone = Box::new(|_| true);
-        sx.session_holder =
-            Box::new(|_| SessionHolder::Held("pid 99 holds codex rollout x.jsonl".into()));
+        sx.session_holder = Box::new(|_| SessionHolder::Held {
+            pid: Some(99),
+            proven: false,
+            why: "pid 99 holds codex rollout x.jsonl".into(),
+        });
         let stop = stop_pane_process_confirmed_with(&x58a5_row(Some(22287), Some(42)), &sx);
         assert!(!stop.confirmed);
         assert!(
@@ -1017,8 +1150,242 @@ mod tests {
         assert_eq!(log.borrow().signals, vec![]);
     }
 
+    // ──: the stop resolves its target by session ─────────────────
+
+    /// A swept pane row shaped like the stout-tapir case: harness claude,
+    /// pid and start time wiped by the sweep, and when `exited` the
+    /// Exited+stamp pair that proves the recorded process dead.
+    fn x1530_row(exited: bool) -> RegistryEntry {
+        let mut e = pane_row(None, Some(("main", 1991)));
+        e.harness = Some("claude".into());
+        e.pid_start_time = None;
+        if exited {
+            e.status = crate::AgentStatus::Exited;
+            e.exited_at = Some("2026-09-21T16:40:00Z".into());
+        }
+        e
+    }
+
+    /// A live pane sighting that hosts a holder pid.
+    fn x1530_sighting(child: u32) -> PaneSighting {
+        PaneSighting {
+            session: "main".into(),
+            pane_id: 2034,
+            child_pid: Some(child),
+        }
+    }
+
+    /// AC1-HP: a swept pane row with a live interactive holder whose
+    /// start time matches the session: the holder's pane is killed, the
+    /// stop confirms only on ESRCH, and the detail names the holder and
+    /// how the pid was found.
+    #[test]
+    fn x1530_ac1_holder_proven_true_kills_the_hosting_pane_and_confirms() {
+        let log = Shared::new(RefCell::new(Log::default()));
+        let mut sx = seams(
+            log.clone(),
+            vec![x1530_sighting(24896)],
+            Ok(true),
+            true,
+            true,
+            true,
+        );
+        sx.session_holder = Box::new(|_| SessionHolder::Held {
+            pid: Some(24896),
+            proven: true,
+            why: "pid 24896 holds claude session abcd1234 (interactive record, start time matches)"
+                .into(),
+        });
+        let precheck = precheck_pane_stop_with(&x1530_row(true), &sx);
+        assert_eq!(precheck, PanePrecheck::NeedsKill);
+        let stop = stop_pane_process_confirmed_with(&x1530_row(true), &sx);
+        assert!(stop.confirmed);
+        assert_eq!(log.borrow().kills, vec![("main".into(), 2034)]);
+        assert_eq!(log.borrow().signals, vec![]);
+        assert!(
+            stop.detail
+                .starts_with("pid 24896 holds claude session abcd1234")
+                && stop.detail.contains("pane main:2034 (child 24896) killed")
+                && stop.detail.ends_with("pid 24896 gone"),
+            "{}",
+            stop.detail
+        );
+    }
+
+    /// AC2-ERR: a pid-less row with no recorded exit and a NotHeld
+    /// holder answer refuses: the row's process history is a gap, not a
+    /// death.
+    #[test]
+    fn x1530_ac2_pidless_row_with_no_exit_proof_refuses() {
+        let log = Shared::new(RefCell::new(Log::default()));
+        let mut sx = seams(log.clone(), vec![], Ok(true), true, true, true);
+        sx.session_holder = Box::new(|_| {
+            SessionHolder::NotHeld(
+                "no live claude process records session abcd1234 (0 record dirs read)".into(),
+            )
+        });
+        let precheck = precheck_pane_stop_with(&x1530_row(false), &sx);
+        assert_eq!(
+            precheck,
+            PanePrecheck::Unprovable(
+                "pane row carries no verified pid and no exit is recorded; no live claude \
+                 process records session abcd1234 (0 record dirs read); the stop cannot be proven"
+                    .into()
+            )
+        );
+        let stop = stop_pane_process_confirmed_with(&x1530_row(false), &sx);
+        assert!(!stop.confirmed);
+        assert_eq!(log.borrow().kills, vec![]);
+        assert_eq!(log.borrow().signals, vec![]);
+        assert!(
+            stop.detail.starts_with("pane row carries no verified pid")
+                && stop.detail.contains("no exit is recorded"),
+            "{}",
+            stop.detail
+        );
+    }
+
+    /// AC3-EDGE: a pid-less swept row whose holder answers NotHeld is the
+    /// stop already happened: the precheck answers AlreadyStopped and the
+    /// stop confirms without touching anything.
+    #[test]
+    fn x1530_ac3_pidless_swept_row_with_no_holder_confirms_without_touching_anything() {
+        let log = Shared::new(RefCell::new(Log::default()));
+        let mut sx = seams(log.clone(), vec![], Ok(true), true, true, true);
+        sx.session_holder = Box::new(|_| {
+            SessionHolder::NotHeld(
+                "no live claude process records session abcd1234 (1 record dir read)".into(),
+            )
+        });
+        let precheck = precheck_pane_stop_with(&x1530_row(true), &sx);
+        assert!(matches!(precheck, PanePrecheck::AlreadyStopped(_)));
+        let stop = stop_pane_process_confirmed_with(&x1530_row(true), &sx);
+        assert!(stop.confirmed);
+        assert_eq!(log.borrow().kills, vec![]);
+        assert_eq!(log.borrow().signals, vec![]);
+        assert!(
+            stop.detail.starts_with("pane row carries no verified pid")
+                && stop
+                    .detail
+                    .contains("no live claude process records session"),
+            "{}",
+            stop.detail
+        );
+    }
+
+    /// AC4-ERR: an open-file holder no live pane hosts is never
+    /// signalled: the refusal names it.
+    #[test]
+    fn x1530_ac4_unproven_holder_with_no_hosting_pane_refuses() {
+        let log = Shared::new(RefCell::new(Log::default()));
+        let mut sx = seams(log.clone(), vec![], Ok(true), true, true, true);
+        sx.session_holder = Box::new(|_| SessionHolder::Held {
+            pid: Some(7),
+            proven: false,
+            why: "pid 7 holds codex rollout x.jsonl".into(),
+        });
+        let precheck = precheck_pane_stop_with(&x1530_row(true), &sx);
+        assert!(matches!(precheck, PanePrecheck::Unprovable(_)));
+        let stop = stop_pane_process_confirmed_with(&x1530_row(true), &sx);
+        assert!(!stop.confirmed);
+        assert_eq!(log.borrow().signals, vec![]);
+        assert!(
+            stop.detail.contains("no live pane hosts pid 7"),
+            "{}",
+            stop.detail
+        );
+    }
+
+    /// AC5-HP: an open-file holder a live pane hosts is killed through
+    /// that pane: the pane kill is the proof the pid is ours.
+    #[test]
+    fn x1530_ac5_unproven_holder_a_pane_hosts_is_killed_through_the_pane() {
+        let log = Shared::new(RefCell::new(Log::default()));
+        let mut sx = seams(
+            log.clone(),
+            vec![x1530_sighting(7)],
+            Ok(true),
+            true,
+            true,
+            true,
+        );
+        sx.session_holder = Box::new(|_| SessionHolder::Held {
+            pid: Some(7),
+            proven: false,
+            why: "pid 7 holds codex rollout x.jsonl".into(),
+        });
+        let precheck = precheck_pane_stop_with(&x1530_row(true), &sx);
+        assert_eq!(precheck, PanePrecheck::NeedsKill);
+        let stop = stop_pane_process_confirmed_with(&x1530_row(true), &sx);
+        assert!(stop.confirmed);
+        assert_eq!(log.borrow().kills, vec![("main".into(), 2034)]);
+        assert_eq!(log.borrow().signals, vec![]);
+    }
+
+    /// AC6-EDGE: a holder answer that names no pid (a bg job, or two
+    /// holders) never confirms and quotes the holder's evidence.
+    #[test]
+    fn x1530_ac6_holder_without_a_pid_never_confirms_and_quotes_the_holder() {
+        let log = Shared::new(RefCell::new(Log::default()));
+        let mut sx = seams(log.clone(), vec![], Ok(true), true, true, true);
+        sx.session_holder = Box::new(|_| {
+            SessionHolder::Held {
+            pid: None,
+            proven: true,
+            why: "claude bg job J (pid 500) holds session abcd1234; a bg job stops through claude, not a signal".into(),
+        }
+        });
+        let precheck = precheck_pane_stop_with(&x1530_row(true), &sx);
+        assert!(matches!(precheck, PanePrecheck::Unprovable(_)));
+        let stop = stop_pane_process_confirmed_with(&x1530_row(true), &sx);
+        assert!(!stop.confirmed);
+        assert_eq!(log.borrow().kills, vec![]);
+        assert_eq!(log.borrow().signals, vec![]);
+        assert!(
+            stop.detail
+                .contains("claude bg job J (pid 500) holds session abcd1234"),
+            "{}",
+            stop.detail
+        );
+    }
+
+    /// An unproven holder whose pane vanishes between resolve and kill is
+    /// never signalled directly: the pane kill is the whole case, so the
+    /// row holds for a retry instead of gambling on a host process.
+    #[test]
+    fn x1530_unproven_holder_whose_pane_vanished_is_never_signalled() {
+        let log = Shared::new(RefCell::new(Log::default()));
+        let mut sx = seams(
+            log.clone(),
+            vec![x1530_sighting(7)],
+            Ok(false),
+            false,
+            true,
+            true,
+        );
+        sx.session_holder = Box::new(|_| SessionHolder::Held {
+            pid: Some(7),
+            proven: false,
+            why: "pid 7 holds codex rollout x.jsonl".into(),
+        });
+        let precheck = precheck_pane_stop_with(&x1530_row(true), &sx);
+        assert_eq!(precheck, PanePrecheck::NeedsKill);
+        let stop = stop_pane_process_confirmed_with(&x1530_row(true), &sx);
+        assert!(!stop.confirmed);
+        assert_eq!(log.borrow().signals, vec![]);
+        assert!(
+            stop.detail.contains("outlived its pane")
+                && stop
+                    .detail
+                    .contains("never signalled without the pane kill"),
+            "{}",
+            stop.detail
+        );
+    }
+
     /// Every `holder_from_lsof` branch: a Held path wins, a Failed path
-    /// answers Unmeasured, all-Empty answers NotHeld.
+    /// answers Unmeasured, all-Empty answers NotHeld. One holder pid names
+    /// the pid; two name none.
     #[test]
     fn x58a5_holder_from_lsof_covers_every_branch() {
         let held = std::path::PathBuf::from("/tmp/rollout-hold.jsonl");
@@ -1026,7 +1393,19 @@ mod tests {
         let empty = std::path::PathBuf::from("/tmp/rollout-empty.jsonl");
         assert_eq!(
             super::holder_from_lsof(&[(held.clone(), LsofRead::Held(vec![41862]))]),
-            SessionHolder::Held("pid 41862 holds codex rollout rollout-hold.jsonl".into())
+            SessionHolder::Held {
+                pid: Some(41862),
+                proven: false,
+                why: "pid 41862 holds codex rollout rollout-hold.jsonl".into()
+            }
+        );
+        assert_eq!(
+            super::holder_from_lsof(&[(held, LsofRead::Held(vec![7, 9]))]),
+            SessionHolder::Held {
+                pid: None,
+                proven: false,
+                why: "pids 7, 9 hold codex rollout rollout-hold.jsonl".into()
+            }
         );
         assert!(matches!(
             super::holder_from_lsof(&[(failed, LsofRead::Failed("boom".into()))]),
@@ -1042,13 +1421,16 @@ mod tests {
         // is the stronger answer, and it holds the row.
         assert!(matches!(
             super::holder_from_lsof(&[
-                (held, LsofRead::Held(vec![7])),
+                (
+                    std::path::PathBuf::from("/tmp/rollout-hold2.jsonl"),
+                    LsofRead::Held(vec![7])
+                ),
                 (
                     std::path::PathBuf::from("/tmp/x"),
                     LsofRead::Failed("boom".into())
                 )
             ]),
-            SessionHolder::Held(_)
+            SessionHolder::Held { .. }
         ));
     }
 
