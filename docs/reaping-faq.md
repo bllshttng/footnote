@@ -177,7 +177,7 @@ A kept open-PR row is a session that is not driving. The daemon's retire arm run
 6. **Mail.** A live session gets `fno agents mail send <full-session-id> "continue: ..."`. The text renders the status JSON of `fno do pr status <N>`: verdict, head, and each failing check with its step and first error. A `queued (durable)` receipt on a session the claude roster reads `working` stays queued, because the durable leg delivers it at the next turn (39 of 40 did, 2026-09-19 to 2026-09-22) and a resume must not type into a turn; on any other session, a durable receipt or a failed send falls back to resume in the same pass.
 7. **Resume.** A session with no live process gets `fno agents resume <full-session-id> --message "<text>"`, which relaunches the conversation and then delivers the text, confirmed by content, or exits 16 naming why.
 
-Events: `pr_nudge_sent`, `pr_nudge_escalated`, `pr_nudge_paused`. `pr_nudge_sent` carries `reason` when a resume failed, and `resume_exit` and `resume_reason` when a mail pass fell back. State is one file per session under `~/.fno/agents/pr-nudge/`. The ladder fires on the daemon arm only. `fno agents reap --dry-run` prints its plan as `would nudge {id} ({action})` and takes no effect.
+Events: `pr_nudge_sent`, `pr_nudge_escalated`, `pr_nudge_paused`. When a resume failed, `pr_nudge_sent` carries `reason`. When a mail pass fell back, it carries `resume_exit` and `resume_reason`. State is one file per session under `~/.fno/agents/pr-nudge/`. The ladder fires on the daemon arm only. `fno agents reap --dry-run` prints its plan as `would nudge {id} ({action})` and takes no effect.
 
 ### open do row on done node
 
