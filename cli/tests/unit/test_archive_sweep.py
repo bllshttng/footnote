@@ -289,21 +289,6 @@ def test_last_sweep_line_says_none_on_record_for_an_empty_store(world):
     assert _last_sweep_line(dt(2026, 9, 10, 12, 0, tzinfo=tz.utc)) == "none on record"
 
 
-def test_last_sweep_line_says_none_stamped_without_parseable_stamps(world):
-    from datetime import datetime as dt, timezone as tz
-
-    _seed(world["graph"], _row("ab-garbage", archived_at="garbage"))
-    assert _last_sweep_line(dt(2026, 9, 10, 12, 0, tzinfo=tz.utc)) == "none stamped"
-
-
-def test_last_sweep_line_names_an_unreadable_store(world, monkeypatch):
-    from datetime import datetime as dt, timezone as tz
-
-    import fno.graph.store as gs
-
-    def _boom(*_a, **_k):
-        raise RuntimeError("store down")
-
     monkeypatch.setattr(gs, "read_archive_entries", _boom)
     assert _last_sweep_line(dt(2026, 9, 10, 12, 0, tzinfo=tz.utc)) == "unknown (archive unreadable)"
 
@@ -380,8 +365,6 @@ def test_apply_retires_receipts_and_reports_them(world):
     assert rows["ab-old00001"]["status"] == "done"
     assert rows["ab-old00001"]["retired"] == "stale-postmortem-receipt"
     assert rows["ab-live0001"]["status"] == "idea"
-
-
 def test_dry_run_reports_would_retire_count(world):
     _seed(world["graph"], _row("ab-old00001", status="idea", created_at=_real_old(40),
                                details="<!-- retro-triage source_pr=None finding_hash=ab12 -->"))

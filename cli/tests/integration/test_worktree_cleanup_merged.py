@@ -1265,7 +1265,20 @@ def _graph_home(tmp_path: Path, rows: list[dict]) -> dict[str, str]:
     """
     home = tmp_path / "graph-home" / "agents"
     home.mkdir(parents=True, exist_ok=True)
-    (home.parent / "graph-archive.json").write_text(json.dumps({"entries": rows}))
+    # The fold imports through the typed model: a row it cannot represent
+    # never lands in the store, so each seed carries the fields it requires.
+    full = [
+        {
+            "id": row["id"],
+            "slug": row["id"],
+            "title": f"node {row['id']}",
+            "type": "feature",
+            "status": row["status"],
+            "priority": "p2",
+        }
+        for row in rows
+    ]
+    (home.parent / "graph-archive.json").write_text(json.dumps({"entries": full}))
     return {"FNO_AGENTS_HOME": str(home)}
 
 

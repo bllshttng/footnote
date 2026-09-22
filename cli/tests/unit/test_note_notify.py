@@ -436,7 +436,14 @@ def test_send_pointer_without_identity_keeps_the_default_and_still_sends(
     assert seen["from_name"] == "fno"
 
 
-# --- the refusal: resolution runs before the write ----------------------------
+# --- the refusal: resolution runs before the append ---------------------------
+
+
+def _forbid_append(monkeypatch) -> None:
+    def no_append(*a, **k):
+        raise AssertionError("append_progress_note must not run on a refusal")
+
+    monkeypatch.setattr("fno.graph.store.append_progress_note", no_append)
 
 
 def test_nobody_bound_refuses_with_every_arm_reading(tmp_path, monkeypatch) -> None:
@@ -445,6 +452,7 @@ def test_nobody_bound_refuses_with_every_arm_reading(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(note_notify, "own_session", lambda: "sess-me")
     monkeypatch.setattr(note_notify, "crowned_over", lambda scope: [])
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+    _forbid_append(monkeypatch)
     got = readers_before_append(
         "x-d211", _graph(tmp_path, [{"id": "x-d211", "project": "fno"}])
     )
@@ -471,6 +479,7 @@ def test_an_unreadable_registry_refuses_before_the_append(tmp_path, monkeypatch)
         raise RegistryVersionError("registry at /tmp/r.json is malformed JSON")
 
     monkeypatch.setattr("fno.agents.registry.load_registry", boom)
+    _forbid_append(monkeypatch)
     got = readers_before_append("x-d211", _graph(tmp_path, [{"id": "x-d211"}]))
     assert isinstance(got, Refused)
     assert got.exit_code == 3

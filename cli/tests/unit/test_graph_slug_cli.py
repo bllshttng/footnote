@@ -28,7 +28,6 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     # Seam readers (guarded metadata/display reads) resolve paths.graph_json
     # at call time; pin the resolver to the same hermetic file.
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
-    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: tmp_path / "graph-archive.json")
     return g
 
 
@@ -37,7 +36,9 @@ def _seed(g: Path, entries: list[dict]) -> None:
 
 
 def _read(g: Path) -> list[dict]:
-    return json.loads(g.read_text()).get("entries", [])
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(g)
 
 
 # -- get by slug / bare-hex --------------------------------------------------
@@ -317,16 +318,11 @@ def test_roadmap_includes_archive_only_shipped_row(tmp_graph, tmp_path):
     _seed(tmp_graph, [
         {"id": "ab-live0001", "title": "Live marker", "status": "ready",
          "priority": "p1", "project": "fno"},
+        {"id": "ab-done0001", "title": "Archive shipped marker", "status": "done",
+         "priority": "p2", "project": "fno",
+         "completed_at": "2026-08-20T00:00:00Z",
+         "archived_at": "2026-08-21T00:00:00Z"},
     ])
-    archive = tmp_path / "graph-archive.json"
-    archive.write_text(
-        json.dumps({"entries": [
-            {"id": "ab-done0001", "title": "Archive shipped marker", "status": "done",
-             "priority": "p2", "project": "fno",
-             "completed_at": "2026-08-20T00:00:00Z"},
-        ]}),
-        encoding="utf-8",
-    )
 
     result = runner.invoke(app, ["backlog", "roadmap", "--project", "fno"])
 

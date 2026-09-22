@@ -43,24 +43,24 @@ from fno.agents.harnesses.pi import (  # noqa: E402
 
 
 @pytest.fixture
-def pi_agent_dir(tmp_path, monkeypatch):
-    """An isolated pi agent dir (the env var pi itself reads)."""
-    agent = tmp_path / "pi-agent"
-    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(agent))
-    return agent
+def pi_home(tmp_path, monkeypatch):
+    """An isolated pi session store."""
+    home = tmp_path / "pi-home"
+    monkeypatch.setenv("PI_HOME", str(home))
+    return home
 
 
-def _seed_session_file(pi_agent_dir: Path, cwd: str, session_id: str, stamp: str) -> Path:
+def _seed_session_file(pi_home: Path, cwd: str, session_id: str, stamp: str) -> Path:
     from fno.agents.harnesses.pi import encode_cwd
 
-    directory = pi_agent_dir / "sessions" / encode_cwd(cwd)
+    directory = pi_home / "agent" / "sessions" / encode_cwd(cwd)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{stamp}_{session_id}.jsonl"
     path.write_text('{"role": "user"}\n')
     return path
 
 
-def test_AC5_HP_four_way_create_yields_exactly_one_winner(tmp_path, pi_agent_dir):
+def test_AC5_HP_four_way_create_yields_exactly_one_winner(tmp_path, pi_home):
     """AC5-HP: four simultaneous creates, one winner, three joiners.
 
     The winner is the process that took the claim. The other three are told who
@@ -88,7 +88,7 @@ def test_AC5_HP_four_way_create_yields_exactly_one_winner(tmp_path, pi_agent_dir
             if decision.role == "create":
                 # The winner is the one that creates the session, and only
                 # after it exists may anyone else be pointed at that id.
-                _seed_session_file(pi_agent_dir, cwd, session_id, "2026-08-28T20-58-10-768Z")
+                _seed_session_file(pi_home, cwd, session_id, "2026-08-28T20-58-10-768Z")
             with lock:
                 roles.append(decision.role)
 
@@ -107,7 +107,7 @@ def test_AC5_HP_four_way_create_yields_exactly_one_winner(tmp_path, pi_agent_dir
     assert lookup.state == "one", f"one id, one session; got {lookup}"
 
 
-def test_AC5_HP_the_refusal_names_the_holder(tmp_path, pi_agent_dir):
+def test_AC5_HP_the_refusal_names_the_holder(tmp_path, pi_home):
     """A create that cannot wait is refused with the HOLDER named.
 
     A timeout that reports a clock while the real condition is "another process
@@ -141,7 +141,7 @@ def test_AC5_HP_the_refusal_names_the_holder(tmp_path, pi_agent_dir):
 
 
 def test_AC5_EDGE_the_blind_window_is_covered_by_the_claim_not_by_files(
-    tmp_path, pi_agent_dir
+    tmp_path, pi_home
 ):
     """AC5-EDGE: zero session files, and fno still knows the session exists.
 
@@ -183,7 +183,7 @@ def test_the_claim_key_is_a_session_key_carrying_cwd():
 
 
 def test_a_failed_create_releases_the_claim_instead_of_leaking_the_ttl(
-    tmp_path, pi_agent_dir
+    tmp_path, pi_home
 ):
     """A create that raises must not lock the id for the rest of the TTL.
 

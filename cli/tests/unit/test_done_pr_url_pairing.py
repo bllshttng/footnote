@@ -14,6 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.graph.store import read_graph_strict
 
 runner = CliRunner()
 
@@ -59,7 +60,7 @@ def merged_pr(monkeypatch):
 
 
 def _first(g: Path) -> dict:
-    return json.loads(g.read_text())["entries"][0]
+    return read_graph_strict(g)[0]
 
 
 def _runner(remote: str):

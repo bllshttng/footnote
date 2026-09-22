@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from fno.graph.store import read_graph_strict
 from fno.pr.closure import (
     branch_node_ids,
     ensure_closure_trailer,
@@ -1375,7 +1376,7 @@ def test_supersede_keeps_the_human_reason(tmp_path, monkeypatch):
         "--reason", "folded into the rewrite",
     ])
     assert result.exit_code == 0, result.output
-    rows = {e["id"]: e for e in json.loads(graph.read_text())["entries"]}
+    rows = {e["id"]: e for e in read_graph_strict(graph)}
     assert rows["x-9f0c"]["supersession"]["reason"] == "folded into the rewrite"
 
 

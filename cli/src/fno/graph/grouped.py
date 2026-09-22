@@ -21,6 +21,7 @@ GROUPED_FIELD_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "deferred_at",
             "reopened_at",
             "queued_at",
+            "archived_at",
         ),
     ),
     (

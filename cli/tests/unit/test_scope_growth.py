@@ -274,13 +274,9 @@ def test_scope_growth_reads_through_the_archive(graph, tmp_path, monkeypatch):
     A metric that quietly changes when unrelated grooming runs is exactly the
     kind of number this feature refuses to print.
     """
-    archive = tmp_path / "graph-archive.json"
-    archive.write_text(
-        json.dumps({"entries": [_node("x-swept", parent="x-epic", pr_number=99)]})
-        + "\n"
-    )
-    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: archive)
-    graph([_epic(), _node("x-c1", parent="x-epic", pr_number=1)])
+    swept = _node("x-swept", parent="x-epic", pr_number=99)
+    swept["archived_at"] = "2026-01-01T00:00:00Z"
+    graph([_epic(), _node("x-c1", parent="x-epic", pr_number=1), swept])
 
     payload = json.loads(
         runner.invoke(app, ["backlog", "epic", "status", "x-epic", "--json"]).stdout

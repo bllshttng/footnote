@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
+from fno.graph.store import read_graph_strict
 
 
 def _node(node_id: str, **overrides) -> dict:
@@ -95,7 +96,7 @@ def graph_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
 
     def read_entries():
-        return json.loads(g.read_text())["entries"]
+        return read_graph_strict(g)
 
     return write_frontmatter, read_entries, doc
 
