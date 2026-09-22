@@ -446,7 +446,6 @@ class PlanFrontmatter(BaseModel):
         if isinstance(data, dict) and data.get("claims") and not data.get("node"):
             data["node"] = data["claims"]
         return data
-
     @field_validator("created", mode="before")
     @classmethod
     def _created_must_be_dateable(cls, v: Any) -> Any:
