@@ -28,6 +28,10 @@ Not for: one-way event pushes to phones and webhooks (counts and notices, no ans
 
 A fleet pin is an `operator_question` with no options and an `ask` line. Agents stop hand-writing `#jc` lines for fleet pins and run `fno inbox outstanding ask` instead.
 
+## What is not a question
+
+A machine chore whose row names the command that clears it is a `fleet_task`, not a question. It lands in `~/.fno/questions.jsonl` beside the questions. A king reads open tasks report-only on the board's `fleet_task` queue. It never reaches a sink or the user's question list. See `crates/fno-agents/src/fleet_task.rs`.
+
 ## The ten context fields and the readiness gate
 
 The eight context fields are:

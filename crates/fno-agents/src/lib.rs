@@ -148,6 +148,7 @@ pub mod finalize_run_summary;
 pub mod fleet_incident;
 pub mod fleet_load;
 pub mod fleet_page;
+pub mod fleet_task;
 pub mod flight_gate;
 pub mod gc;
 pub mod gc_claude_stop;
@@ -1159,9 +1160,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // so a quiet repo cannot be mistaken for a sweep that never ran.
     "worktree_sweep",
     // Stale-question reconcile (daemon-emitted): `fno agents stale-escalate`
-    // ran on its 6h floor and reconciled the durable [watchdog-stale:*]
-    // operator question to the measured fleet. Report-only: rows past the
-    // wake ceiling are the needs-human bucket no action lane may take.
+    // ran on its 6h floor and reconciled the lane's fleet tasks (the former
+    // [watchdog-stale:*] operator question) to the measured fleet through
+    // the Rust fleet-task door. Report-only: a king reads open tasks on the
+    // board's fleet_task queue.
     // Emitted even on outcome none/duplicate, so a quiet run cannot be
     // mistaken for a sweep that never ran.
     "stale_sweep",

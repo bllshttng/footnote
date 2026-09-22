@@ -1462,72 +1462,46 @@ fn seam_bin(a: &Args, name: &str) -> String {
     }
 }
 
-/// Does an already-open operator question carry this marker? Read through
-/// the same `fno inbox outstanding --json` an operator would run, so dedup
-/// can never drift from what is actually on the board. An unreadable board
-/// fails toward asking: silence is the failure a question exists to prevent.
-fn open_questions_mention(a: &Args, marker: &str) -> bool {
-    let bin = seam_bin(a, "fno");
-    match run(
-        &bin,
-        &["inbox", "outstanding", "--json"],
-        &a.cwd,
-        READ_TIMEOUT,
-    ) {
-        Ok((true, out, _)) => serde_json::from_str::<Value>(&out)
-            .ok()
-            .and_then(|v| v.get("questions").and_then(|q| q.as_array()).cloned())
-            .is_some_and(|qs| {
-                qs.iter().any(|q| {
-                    q.get("question")
-                        .and_then(|s| s.as_str())
-                        .is_some_and(|s| s.contains(marker))
-                })
-            }),
-        _ => false,
-    }
+/// The fleet-task store: `questions.jsonl` beside the events journal, so a
+/// test's `--events-file` moves it with the journal.
+fn questions_store(a: &Args) -> std::path::PathBuf {
+    journal_path(a).with_file_name("questions.jsonl")
 }
 
-/// File one operator question, deduplicated on the marker, attributed to the
-/// node the branch names. The inbox lane every heal escalation shares:
-/// `fno inbox outstanding ask --node <id>`, never a file nobody reads.
-/// Returns true when a question was filed.
-fn ask_inbox(a: &Args, marker: &str, question: &str, head_ref: &str) -> bool {
-    if open_questions_mention(a, marker) {
-        return false;
-    }
-    let bin = seam_bin(a, "fno");
-    let mut argv: Vec<&str> = vec!["inbox", "outstanding", "ask", question];
+/// File one heal fleet task, deduplicated on (lane, key, cwd), attributed to
+/// the node the branch names. True when a NEW task was filed; an already
+/// open one reads false, so the escalated receipt stays honest.
+fn file_task(a: &Args, key: &str, text: &str, run_cmd: &str, head_ref: &str) -> bool {
     let node = branch_node_ids(head_ref).into_iter().next();
-    let node_flag;
-    if let Some(n) = &node {
-        node_flag = vec!["--node", n.as_str()];
-        argv.extend(node_flag.iter().copied());
-    }
-    match run(&bin, &argv, &a.cwd, READ_TIMEOUT) {
-        Ok((true, _, _)) => true,
-        Ok((_, _, err)) => {
-            eprintln!("pr-heal: escalation refused: {}", err.trim());
-            false
-        }
+    match crate::fleet_task::file_once(
+        &questions_store(a),
+        "heal",
+        key,
+        a.cwd.to_string_lossy().as_ref(),
+        text,
+        Some(run_cmd),
+        node.as_deref(),
+    ) {
+        Ok(crate::fleet_task::Filed::New(_)) => true,
+        Ok(crate::fleet_task::Filed::Duplicate(_)) => false,
         Err(e) => {
-            eprintln!("pr-heal: escalation failed: {e}");
+            eprintln!("pr-heal: task refused: {e}");
             false
         }
     }
 }
 
-/// File one operator question for a failing check no signature recognized.
-/// Deduplicated on the marker, so a 600s tick cannot re-ask a question the
-/// board already carries.
+/// File one fleet task for a failing check no signature recognized.
+/// Deduplicated on (lane, key, cwd), so a 600s tick cannot re-file a task
+/// the store already carries.
 fn escalate_unknown_signature(a: &Args, pr: &str, check: &str, head_ref: &str) -> bool {
-    let marker = format!("heal: PR {pr} check {check}");
-    let question = format!(
-        "{marker} failed with no playbook signature. Classify it with \
+    let key = format!("PR {pr} check {check}");
+    let text = format!(
+        "heal: {key} failed with no playbook signature. Classify it with \
          `fno do pr heal {pr}` (that report carries the log tail) or add a \
          signature in crates/fno-agents/src/heal.rs."
     );
-    ask_inbox(a, &marker, &question, head_ref)
+    file_task(a, &key, &text, &format!("fno do pr heal {pr}"), head_ref)
 }
 
 /// The events journal for this invocation. `--events-file` is the test seam;
@@ -2364,6 +2338,17 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
                         "rebased",
                         &format!("{trigger}; behind {before} -> {after}"),
                     );
+                    // The conflict cleared: the task heal filed for it closes.
+                    if let Err(e) = crate::fleet_task::close(
+                        &questions_store(a),
+                        "heal",
+                        &format!("PR {pr} rebase conflict"),
+                        a.cwd.to_string_lossy().as_ref(),
+                        "rebased",
+                        "heal",
+                    ) {
+                        eprintln!("pr-heal: task close refused: {e}");
+                    }
                     // The push restarted CI; classifying the old sha's checks
                     // would classify a dead run.
                     continue;
@@ -2375,20 +2360,20 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
                     );
                     bump(&mut counts, "skip_rebase_conflict");
                     receipt(&pr, "skip_rebase_conflict", &files);
-                    let marker = format!("heal: PR {pr} rebase conflict");
-                    let question = if files.is_empty() {
+                    let key = format!("PR {pr} rebase conflict");
+                    let text = if files.is_empty() {
                         format!(
-                            "{marker} onto origin/main. Resolve with \
+                            "heal: {key} onto origin/main. Resolve with \
                              `fno do pr rebase {pr}` from the PR's worktree."
                         )
                     } else {
                         format!(
-                            "{marker} onto origin/main in: {files}. Resolve with \
+                            "heal: {key} onto origin/main in: {files}. Resolve with \
                              `fno do pr rebase {pr}` from the PR's worktree."
                         )
                     };
-                    if ask_inbox(a, &marker, &question, &head_ref) {
-                        println!("escalated: PR {pr} rebase conflict is now an inbox question");
+                    if file_task(a, &key, &text, &format!("fno do pr rebase {pr}"), &head_ref) {
+                        println!("escalated: PR {pr} rebase conflict is now a fleet task");
                     }
                     continue;
                 }
@@ -2548,7 +2533,7 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
                 .is_some_and(|k| journal_has_rerun(&journal_path(a), k));
             if already_reran || key.is_none() {
                 if escalate_unknown_signature(a, pr, check, head_ref) {
-                    println!("escalated: PR {pr} check {check} is now an inbox question");
+                    println!("escalated: PR {pr} check {check} is now a fleet task");
                 }
             }
         }
@@ -3609,23 +3594,18 @@ echo '[]'
         )
     }
 
-    /// A stub `fno` answering the inbox reads. `existing` is the question
-    /// list `outstanding --json` reports; every `ask` lands in fno-ask.log.
-    fn stub_fno(dir: &Path, existing: &str) {
+    /// A stub `fno` logging every invocation. Heal files fleet tasks by
+    /// writing the store directly, so the inbox lanes are gone; the stub
+    /// exists for the verbs the seams still shell (`do pr push`, `backlog`).
+    fn stub_fno(dir: &Path) {
         write_exec(
             dir,
             "fno",
-            &format!(
-                r#"#!/bin/sh
+            r#"#!/bin/sh
 D="$(dirname "$0")"
 echo "fno $*" >> "$D/fno.log"
-case "$*" in
-  *"outstanding --json"*) echo '{existing}'; exit 0 ;;
-  *"outstanding ask"*) echo "ask $*" >> "$D/fno-ask.log"; exit 0 ;;
-esac
 exit 0
-"#
-            ),
+"#,
         );
     }
 
@@ -3686,7 +3666,7 @@ exit 0
         stub_gh_drive(d, false);
         stub_git_drive(d);
         stub_cargo(d);
-        stub_fno(d, r#"{"questions":[]}"#);
+        stub_fno(d);
         hold_claim(d);
         std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
         let code = run_heal(&drive_args(d, &["--dry-run"]));
@@ -3713,7 +3693,7 @@ exit 0
         stub_gh_drive(d, false);
         stub_git_drive(d);
         stub_cargo(d);
-        stub_fno(d, r#"{"questions":[]}"#);
+        stub_fno(d);
         hold_claim(d);
         std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
         let code = run_heal(&drive_args(d, &[]));
@@ -3735,7 +3715,7 @@ exit 0
         let d = tmp.path();
         stub_gh_drive(d, true);
         stub_git_drive(d);
-        stub_fno(d, r#"{"questions":[]}"#);
+        stub_fno(d);
         hold_claim(d);
         std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
         let code1 = run_heal(&drive_args(d, &[]));
@@ -3745,37 +3725,33 @@ exit 0
         );
         let gh = log_of(d, "gh.log");
         assert_eq!(gh.matches("run rerun 1 --failed").count(), 1, "{gh}");
-        assert_eq!(
-            log_of(d, "fno-ask.log"),
-            "",
-            "no ask before the rerun answers"
+        let store_before = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
+        assert!(
+            !store_before.contains("fleet_task"),
+            "no task before the rerun answers: {store_before}"
         );
         run_heal(&drive_args(d, &[]));
-        let asks = log_of(d, "fno-ask.log");
-        assert_eq!(asks.matches("outstanding ask").count(), 1, "{asks}");
+        let store = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
+        assert_eq!(
+            store.matches(r#""type":"fleet_task""#).count(),
+            1,
+            "exactly one task: {store}"
+        );
         assert!(
-            asks.contains("no playbook signature") && asks.contains("mystery-check"),
-            "{asks}"
+            store.contains("no playbook signature") && store.contains("mystery-check"),
+            "{store}"
+        );
+        assert!(store.contains(r#""run":"fno do pr heal 1""#), "{store}");
+        // The next tick re-files nothing: the open task dedups on its key.
+        run_heal(&drive_args(d, &[]));
+        let store = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
+        assert_eq!(
+            store.matches(r#""type":"fleet_task""#).count(),
+            1,
+            "the open task is never re-filed: {store}"
         );
         let events = log_of(d, "events.jsonl");
         assert!(events.contains("\"unknown\":1"), "{events}");
-    }
-
-    #[test]
-    fn a_question_already_on_the_board_is_not_re_asked_each_tick() {
-        // The tick fires every 600s; an unanswered question must not become
-        // one new inbox row per tick.
-        let tmp = tempfile::tempdir().unwrap();
-        let d = tmp.path();
-        stub_gh_drive(d, true);
-        stub_git_drive(d);
-        hold_claim(d);
-        stub_fno(
-            d,
-            r#"{"questions":[{"question":"heal: PR 1 check mystery-check failed with no playbook signature"}]}"#,
-        );
-        run_heal(&drive_args(d, &[]));
-        assert_eq!(log_of(d, "fno-ask.log"), "", "deduped, never re-asked");
     }
 
     #[test]
@@ -3787,7 +3763,7 @@ exit 0
         // found for the free PR's branch.
         stub_git(d, "feature/x-1111", false);
         stub_cargo(d);
-        stub_fno(d, r#"{"questions":[]}"#);
+        stub_fno(d);
         hold_claim(d);
         std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
         let code = run_heal(&drive_args(d, &[]));
@@ -3909,7 +3885,7 @@ exit 0
         let d = tmp.path();
         stub_gh_drive_rerun(d);
         stub_git_drive(d);
-        stub_fno(d, r#"{"questions":[]}"#);
+        stub_fno(d);
         hold_claim(d);
         std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
         let code = run_heal(&drive_args(d, &[]));
@@ -3934,7 +3910,7 @@ exit 0
         let d = tmp.path();
         stub_gh_drive_rerun(d);
         stub_git_drive(d);
-        stub_fno(d, r#"{"questions":[]}"#);
+        stub_fno(d);
         hold_claim(d);
         std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
         let mut args = args_for(d, &["--apply"]);
@@ -3961,7 +3937,7 @@ exit 0
         let d = tmp.path();
         stub_gh_drive_rerun(d);
         stub_git_drive(d);
-        stub_fno(d, r#"{"questions":[]}"#);
+        stub_fno(d);
         hold_claim(d);
         std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
         run_heal(&drive_args(d, &[]));
@@ -4006,15 +3982,13 @@ echo '[]'
     }
 
     /// A stub `fno` whose `do pr push` seam answers a caller-named
-    /// stdout/exit/stderr triple; the inbox and backlog lanes log and answer.
+    /// stdout/exit/stderr triple; the backlog lane logs and answers.
     fn stub_fno_push(dir: &Path, push_stdout: &str, push_exit: u8, push_stderr: &str) {
         let body = r#"#!/bin/sh
 D="$(dirname "$0")"
 echo "fno $*" >> "$D/fno.log"
 case "$*" in
   *"do pr push"*) printf '%s' 'PUSH_STDOUT' ; printf '%s' 'PUSH_STDERR' >&2; exit PUSH_EXIT ;;
-  *"outstanding --json"*) echo '{"questions":[]}'; exit 0 ;;
-  *"outstanding ask"*) echo "ask $*" >> "$D/fno-ask.log"; exit 0 ;;
   *"backlog idea"*) echo "backlog node fno-abc9 created"; exit 0 ;;
 esac
 exit 0
@@ -4098,33 +4072,6 @@ exit 0
         let events = log_of(d, "events.jsonl");
         assert!(events.contains("\"rebased\":1"), "{events}");
         assert!(events.contains("\"skip_no_worktree\":1"), "{events}");
-    }
-
-    #[test]
-    fn a_rebase_conflict_files_one_deduped_inbox_question() {
-        let tmp = tempfile::tempdir().unwrap();
-        let d = tmp.path();
-        stub_gh_drive_rebase(d, "false");
-        stub_git_drive(d);
-        stub_cargo(d);
-        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
-        stub_fno_push(
-            d,
-            "",
-            3,
-            "pr-push: the branch is not safely rebasable onto origin/main (status needs_resolver; files: crates/fno-agents/src/a.rs, crates/fno/src/b.rs). Resolve the conflicts, then run `fno do pr rebase --continue`.",
-        );
-        run_heal(&drive_args(d, &[]));
-        let asks = log_of(d, "fno-ask.log");
-        assert_eq!(asks.matches("outstanding ask").count(), 1, "{asks}");
-        assert!(
-            asks.contains("rebase conflict")
-                && asks.contains("crates/fno-agents/src/a.rs")
-                && asks.contains("crates/fno/src/b.rs"),
-            "{asks}"
-        );
-        let events = log_of(d, "events.jsonl");
-        assert!(events.contains("\"skip_rebase_conflict\":1"), "{events}");
     }
 
     #[test]
@@ -4228,7 +4175,7 @@ echo '[]'
         stub_git_drive(d);
         stub_cargo(d);
         std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
-        stub_fno(d, r#"{"questions":[]}"#);
+        stub_fno(d);
         hold_claim(d);
         let code = run_heal(&drive_args(d, &[]));
         assert_eq!(code, EXIT_CLEAN, "the rerun acted: {code}");
@@ -4282,7 +4229,7 @@ echo '[]'
         stub_git_drive(d);
         stub_cargo(d);
         std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
-        stub_fno(d, r#"{"questions":[]}"#);
+        stub_fno(d);
         hold_claim(d);
         run_heal(&drive_args(d, &[]));
         run_heal(&drive_args(d, &[]));
@@ -4347,7 +4294,7 @@ echo '[]'
         stub_gh_drive_flake(d);
         stub_git_drive(d);
         stub_cargo(d);
-        stub_fno(d, r#"{"questions":[]}"#);
+        stub_fno(d);
         hold_claim(d);
         seed_tick_with_keys(d, &["aaa1:777"]);
         run_heal(&drive_args(d, &[]));

@@ -1,20 +1,17 @@
-"""The friction lane: the report-only friction verdicts (contended,
-polling_settled) land in ONE reconciled operator question, deduped on
-outcome identity, and the channel is reconciled - never piled up - as the
-measured set changes.
+"""The friction lane after the fleet-task port: the contended and
+polling_settled verdicts ride ``reconcile_friction``, which is ONE transport
+call through ``verb_call("fleet-task", ...)``.
 
-Classification runs through the real ``run_sweep`` with only the
-fleet-enumeration seams injected; the fold under test is
-``reconcile_friction``.
+The fold's behavior is characterized in Rust
+(``fleet_task_reconcile_parity.rs``); what stays testable here is the lane's
+payload: its marker lane, its measured-set empty flag, and the question text
+it renders from the verdicts.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
-
-from fno.outstanding.core import read_open_questions
 
 _NOW = 1_800_000_000.0
 
@@ -28,18 +25,23 @@ def isolate_question_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     )
 
 
-def _linked_worktree(tmp_path: Path, name: str) -> str:
-    wt = tmp_path / name
-    wt.mkdir()
-    (wt / ".git").write_text("gitdir: /tmp/elsewhere/main\n")
-    return str(wt)
-
-
-def _friction_run(root: Path, rows, transcripts, pr_state_for=None):
-    """The verb's flow with only the fleet-enumeration seams injected:
-    classification, filtering and the fold all run for real."""
+def _friction_run(root, rows, transcripts, monkeypatch, pr_state_for=None, captured=None):
+    """The verb's flow with the fleet-enumeration seams injected and the
+    transport stubbed: classification runs for real, the fold's payload is
+    captured and a canned outcome comes back."""
+    import fno.rust_binary
     from fno.agents import friction_lane as fl
     from fno.agents import watchdog as wd
+
+    def fake_verb_call(verb, payload, *args, **kwargs):
+        assert verb == "fleet-task"
+        if captured is not None:
+            captured.append(payload)
+        return {"outcome": "asked", "id": "ft-friction00"}
+
+    import fno.agents.stale_escalate as se
+
+    monkeypatch.setattr(fno.rust_binary, "verb_call", fake_verb_call)
 
     payload, out_rows = wd.run_sweep(
         now_s=_NOW,
@@ -68,8 +70,19 @@ def _facts(text: str, age_s: float, pr_polls: tuple = ()):
     )
 
 
-def test_one_question_names_every_friction_row(tmp_path: Path) -> None:
-    wt = _linked_worktree(tmp_path, "w1")
+def _row(sid: str, name: str, cwd: str):
+    from fno.agents.watchdog import Row
+
+    return Row(sid, name, "working", None, cwd)
+
+
+def test_one_question_names_every_friction_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list = []
+    wt = str(tmp_path / "w1")
+    (tmp_path / "w1").mkdir()
+    (tmp_path / "w1" / ".git").write_text("gitdir: /tmp/elsewhere/main\n")
     rows = [
         _row("aaaa1111-0000", "w1", wt),
         _row("bbbb2222-0000", "w2", wt),
@@ -84,76 +97,38 @@ def test_one_question_names_every_friction_row(tmp_path: Path) -> None:
         ),
     }
     outcome, qid = _friction_run(
-        tmp_path, rows, transcripts, pr_state_for=lambda cwd, n: "MERGED"
+        tmp_path, rows, transcripts, monkeypatch,
+        pr_state_for=lambda cwd, n: "MERGED",
+        captured=captured,
     )
     assert outcome == "asked"
-    [question] = read_open_questions(tmp_path)
-    assert question.id == qid
-    assert "[watchdog-friction:" in question.question
-    assert "3 contention/polling row(s)" in question.question
-    assert "w1" in question.question and "w3" in question.question
-    assert "fno agents watchdog --only contended" in question.ask
+    assert qid == "ft-friction00"
+    [payload] = captured
+    assert payload["lane"] == "watchdog-friction"
+    assert payload["empty"] is False
+    assert "3 contention/polling row(s)" in payload["text"]
+    assert "w1" in payload["text"] and "w3" in payload["text"]
 
 
-def _row(sid: str, name: str, cwd: str):
-    from fno.agents.watchdog import Row
-
-    return Row(sid, name, "working", None, cwd)
-
-
-def test_second_run_over_the_same_set_is_a_duplicate(tmp_path: Path) -> None:
-    wt = _linked_worktree(tmp_path, "w1")
+def test_emptied_set_sends_the_empty_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list = []
+    wt = str(tmp_path / "w1")
+    (tmp_path / "w1").mkdir()
+    (tmp_path / "w1" / ".git").write_text("gitdir: /tmp/elsewhere/main\n")
     rows = [_row("aaaa1111-0000", "w1", wt), _row("bbbb2222-0000", "w2", wt)]
     transcripts = {
         "aaaa1111-0000": _facts("still on it", 60),
         "bbbb2222-0000": _facts("still on it", 60),
     }
-    first_outcome, first_id = _friction_run(tmp_path, rows, transcripts)
-    second_outcome, second_id = _friction_run(tmp_path, rows, transcripts)
-    assert (first_outcome, second_outcome) == ("asked", "duplicate")
-    assert second_id == first_id
-    assert len(read_open_questions(tmp_path)) == 1
-
-
-def test_emptied_set_resolves_the_open_question(tmp_path: Path) -> None:
-    wt = _linked_worktree(tmp_path, "w1")
-    rows = [_row("aaaa1111-0000", "w1", wt), _row("bbbb2222-0000", "w2", wt)]
-    transcripts = {
-        "aaaa1111-0000": _facts("still on it", 60),
-        "bbbb2222-0000": _facts("still on it", 60),
-    }
-    _outcome, _qid = _friction_run(tmp_path, rows, transcripts)
-    assert read_open_questions(tmp_path)
+    _friction_run(tmp_path, rows, transcripts, monkeypatch, captured=captured)
+    assert captured, "the first run filed a task"
     # The peer goes quiet-and-finished: one live row in the tree, no friction.
     quiet = dict(transcripts)
     quiet["bbbb2222-0000"] = _facts(
         "<promise>PR is green and reviewed</promise>", 1800
     )
-    outcome, _closed_id = _friction_run(tmp_path, rows, quiet)
-    assert outcome == "closed"
-    assert read_open_questions(tmp_path) == []
-
-
-def test_a_friction_close_records_friction_provenance(tmp_path: Path) -> None:
-    wt = _linked_worktree(tmp_path, "w1")
-    rows = [_row("aaaa1111-0000", "w1", wt), _row("bbbb2222-0000", "w2", wt)]
-    transcripts = {
-        "aaaa1111-0000": _facts("still on it", 60),
-        "bbbb2222-0000": _facts("still on it", 60),
-    }
-    _friction_run(tmp_path, rows, transcripts)
-    quiet = dict(transcripts)
-    quiet["bbbb2222-0000"] = _facts(
-        "<promise>PR is green and reviewed</promise>", 1800
-    )
-    _friction_run(tmp_path, rows, quiet)
-    from tests._event_rows import event_rows
-
-    raw = "".join(
-        json.dumps(e) + "\n" for e in event_rows(tmp_path / "questions.jsonl")
-    )
-    # The close and its decision row must name the friction lane, not the
-    # stale lane whose close helper the channel shares.
-    assert '"closed_by":"friction-escalate"' in raw.replace(" ", "")
-    assert "watchdog-friction:" in raw
-    assert "watchdog-stale:" not in raw
+    outcome, _qid = _friction_run(tmp_path, rows, quiet, monkeypatch, captured=captured)
+    assert outcome == "asked"
+    assert captured[-1]["empty"] is True, captured[-1]
