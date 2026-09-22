@@ -45,3 +45,6 @@ codex-loaded-threads|fno-agents list --json --no-discovered --harness codex (the
 
 # The one king skill: the one-wave pass is reign --once.
 king-for-a-day|/fno:reign --once <scope>|the one-king-skill fold
+
+# Never shipped: step 2a-bis of the blueprint skill named it for the question door.
+fno inbox ask|fno inbox outstanding ask "<question>" --node <id>|never shipped: the question door is fno inbox outstanding ask

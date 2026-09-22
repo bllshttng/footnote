@@ -95,33 +95,9 @@ pub(super) fn missing_global_attestations(
 /// is recent by construction, and the dedup keys on identity, not recency.
 pub(super) const GLOBAL_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 
-pub(super) fn tail_text(path: &std::path::Path, cap: u64) -> String {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return String::new();
-    };
-    let len = match file.metadata() {
-        Ok(m) => m.len(),
-        Err(_) => return String::new(),
-    };
-    let start = len.saturating_sub(cap);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return String::new();
-    }
-    let mut buf = Vec::new();
-    if file.read_to_end(&mut buf).is_err() {
-        return String::new();
-    }
-    if start > 0 {
-        match buf.iter().position(|&b| b == b'\n') {
-            Some(p) => String::from_utf8_lossy(&buf[p + 1..]).into_owned(),
-            // No whole line inside the window: nothing to admit.
-            None => String::new(),
-        }
-    } else {
-        String::from_utf8_lossy(&buf).into_owned()
-    }
-}
+// The reader itself lives at the crate root (`crate::tail_text`) so the
+// dead-call crown reading reuses the one line-boundary tail walk.
+pub(super) use crate::tail_text;
 
 /// The text-taking body of [`unattested_reviewers_scan`], split so the
 /// producer can feed the merged project-plus-global attestation text without

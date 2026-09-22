@@ -352,3 +352,28 @@ def test_a_malformed_allowlist_line_names_its_line_number(repo: Path) -> None:
     result = _run(repo)
     assert result.returncode == 1
     assert ":2:" in result.stderr and "malformed" in result.stderr
+
+
+def test_absent_question_verb_with_placeholder_fails(repo: Path) -> None:
+    _add(repo, "skills/k/new.md", "File it with `fno inbox ask <question> --node <id>`.\n")
+    result = _run(repo)
+    assert result.returncode == 1
+    assert "skills/k/new.md" in result.stderr
+    assert "fno inbox outstanding ask" in result.stderr
+
+
+def test_absent_question_verb_with_quoted_question_fails(repo: Path) -> None:
+    _add(repo, "skills/k/new.md", 'File it with `fno inbox ask "why narrow" --node <id>`.\n')
+    result = _run(repo)
+    assert result.returncode == 1
+    assert "skills/k/new.md" in result.stderr
+
+
+def test_real_question_verb_passes(repo: Path) -> None:
+    _add(
+        repo,
+        "skills/k/new.md",
+        'File it with `fno inbox outstanding ask "<question>" --node <id>`.\n',
+    )
+    result = _run(repo)
+    assert result.returncode == 0, result.stderr

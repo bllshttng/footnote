@@ -3987,41 +3987,6 @@ fn acquire_session_claim_maps_native_outcomes() {
 }
 
 #[test]
-fn claude_stream_worker_args_carry_stream_flags_and_child_argv() {
-    let child = crate::provider::claude_stream_json_resume_argv("U-9");
-    let args = claude_stream_worker_args(
-        "sw9",
-        std::path::Path::new("/home/agents"),
-        std::path::Path::new("/work"),
-        "U-9",
-        "stream:sw9",
-        &child,
-    );
-    // Selector + claim pair are present, the child argv follows `--`, and the
-    // resume target is the FULL uuid (never the jobId).
-    assert!(args.contains(&"--stream".to_string()));
-    assert_eq!(
-        args.iter()
-            .position(|a| a == "--session-uuid")
-            .map(|i| &args[i + 1]),
-        Some(&"U-9".to_string())
-    );
-    assert_eq!(
-        args.iter()
-            .position(|a| a == "--holder")
-            .map(|i| &args[i + 1]),
-        Some(&"stream:sw9".to_string())
-    );
-    let sep = args
-        .iter()
-        .position(|a| a == "--")
-        .expect("missing -- separator");
-    assert_eq!(&args[sep + 1..], child.as_slice());
-    assert_eq!(child[0], "claude");
-    assert!(child.contains(&"--resume".to_string()) && child.contains(&"U-9".to_string()));
-}
-
-#[test]
 fn build_claude_stream_entry_marks_interactive_claude_with_full_uuid() {
     let e = crate::claude_stream_entry::build_claude_stream_entry(
         "adopted",

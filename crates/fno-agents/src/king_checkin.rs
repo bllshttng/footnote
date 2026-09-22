@@ -639,12 +639,39 @@ fn r_crown() -> Result<Value, String> {
     // crown fields is invisible there by construction, and a court failure
     // must never read as "no splits either". A failed read names itself and
     // leaves both counts null, never a measured-looking zero.
-    let split_read =
+    let registry_read =
         crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json())
-            .map(|registry| crate::crown_split::read_crown_splits(&registry.entries))
             .map_err(|e| e.to_string());
+    let split_read = registry_read
+        .as_ref()
+        .map(|registry| crate::crown_split::read_crown_splits(&registry.entries))
+        .map_err(|e| e.to_string());
+    // One dead-call reading per stale row, keyed by row name. A reading is
+    // built only when the registry itself read, so an unread registry stays
+    // a null-count error, never a synthesized zero. The boot reading is
+    // hoisted: one sysctl per beat, not one per row.
+    let boot = crate::host_boot_epoch_ms();
+    let dead: std::collections::BTreeMap<String, crate::crown_split::DeadCallReading> =
+        match &split_read {
+            Ok(splits) => splits
+                .stale
+                .iter()
+                .map(|s| {
+                    let reading = registry_read
+                        .as_ref()
+                        .ok()
+                        .and_then(|r| r.entries.iter().find(|e| e.name == s.row))
+                        .map(|e| crate::crown_split::dead_call(e, boot))
+                        .unwrap_or(crate::crown_split::DeadCallReading::Unread(
+                            "crowned row not found in the registry".to_string(),
+                        ));
+                    (s.row.clone(), reading)
+                })
+                .collect(),
+            Err(_) => std::collections::BTreeMap::new(),
+        };
     let (double_ruled, stale_crowned, split_read_error, ruled_lines, stale_lines) =
-        crown_split_fields(split_read);
+        crown_split_fields(split_read, &dead);
     let mut anomalies = ruled_lines;
     anomalies.extend(court_anomalies);
     anomalies.extend(stale_lines);
@@ -664,6 +691,7 @@ fn r_crown() -> Result<Value, String> {
 /// registry.
 fn crown_split_fields(
     read: Result<crate::crown_split::CrownSplits, String>,
+    dead: &std::collections::BTreeMap<String, crate::crown_split::DeadCallReading>,
 ) -> (Value, Value, Value, Vec<String>, Vec<String>) {
     match read {
         Ok(splits) => {
@@ -682,11 +710,27 @@ fn crown_split_fields(
             let stale = splits
                 .stale
                 .iter()
-                .map(|s| {
-                    format!(
+                .map(|s| match dead.get(&s.row) {
+                    Some(crate::crown_split::DeadCallReading::Open { session_id, tool, at, boot }) => {
+                        let boot_clause = match boot {
+                            Some(b) => format!(", before the last boot at {b}"),
+                            None => String::new(),
+                        };
+                        format!(
+                            "stale crown {} on {} (stored status {}): session {} stopped inside a {} call made at {}{}; fno agents resume {} relaunches it, fno agents rm {} drops the row and its crown",
+                            s.scope, s.row, s.stored_status, session_id, tool, at, boot_clause, s.row, s.row
+                        )
+                    }
+                    Some(crate::crown_split::DeadCallReading::Unread(reason)) => {
+                        format!(
+                            "stale crown {} on {} (stored status {}); fno agents rm {} (tool-call reading: {})",
+                            s.scope, s.row, s.stored_status, s.row, reason
+                        )
+                    }
+                    _ => format!(
                         "stale crown {} on {} (stored status {}); fno agents rm {}",
                         s.scope, s.row, s.stored_status, s.row
-                    )
+                    ),
                 })
                 .collect();
             (
@@ -3179,7 +3223,8 @@ mod tests {
                 stored_status: "orphaned".into(),
             }],
         };
-        let (double_ruled, stale_crowned, err, ruled, stale) = crown_split_fields(Ok(splits));
+        let (double_ruled, stale_crowned, err, ruled, stale) =
+            crown_split_fields(Ok(splits), &std::collections::BTreeMap::new());
         assert_eq!(double_ruled, json!(1));
         assert_eq!(stale_crowned, json!(1));
         assert!(err.is_null());
@@ -3197,8 +3242,10 @@ mod tests {
 
     #[test]
     fn crown_split_fields_never_zero_an_unread_registry() {
-        let (double_ruled, stale_crowned, err, ruled, stale) =
-            crown_split_fields(Err("registry unreadable: boom".into()));
+        let (double_ruled, stale_crowned, err, ruled, stale) = crown_split_fields(
+            Err("registry unreadable: boom".into()),
+            &std::collections::BTreeMap::new(),
+        );
         assert!(double_ruled.is_null());
         assert!(stale_crowned.is_null());
         assert_eq!(err, json!("registry unreadable: boom"));
@@ -3207,5 +3254,58 @@ mod tests {
             vec!["crown split read failed: registry unreadable: boom"]
         );
         assert!(stale.is_empty());
+    }
+
+    // AC4-HP: the specimen line names the dead call and offers resume.
+    #[test]
+    fn stale_crown_line_names_the_dead_call_when_one_is_open() {
+        let splits = crate::crown_split::CrownSplits {
+            double_ruled: vec![],
+            stale: vec![crate::crown_split::StaleCrown {
+                row: "king-fno-g6".into(),
+                scope: "fno".into(),
+                stored_status: "exited".into(),
+            }],
+        };
+        let mut dead = std::collections::BTreeMap::new();
+        dead.insert(
+            "king-fno-g6".to_string(),
+            crate::crown_split::DeadCallReading::Open {
+                session_id: "278c9a89-11ed-49af-a6fb-371bb36e410d".to_string(),
+                tool: "Bash".to_string(),
+                at: "2026-09-21T08:21:13.913Z".to_string(),
+                boot: Some("2026-09-21T13:33:58Z".to_string()),
+            },
+        );
+        let (_, _, _, _, stale) = crown_split_fields(Ok(splits), &dead);
+        assert_eq!(
+            stale,
+            vec!["stale crown fno on king-fno-g6 (stored status exited): session 278c9a89-11ed-49af-a6fb-371bb36e410d stopped inside a Bash call made at 2026-09-21T08:21:13.913Z, before the last boot at 2026-09-21T13:33:58Z; fno agents resume king-fno-g6 relaunches it, fno agents rm king-fno-g6 drops the row and its crown".to_string()]
+        );
+    }
+
+    // AC4-ERR: an unreadable reading appends the reason, never a clean read.
+    #[test]
+    fn stale_crown_line_appends_the_reason_when_unreadable() {
+        let splits = crate::crown_split::CrownSplits {
+            double_ruled: vec![],
+            stale: vec![crate::crown_split::StaleCrown {
+                row: "king-gone".into(),
+                scope: "fno".into(),
+                stored_status: "exited".into(),
+            }],
+        };
+        let mut dead = std::collections::BTreeMap::new();
+        dead.insert(
+            "king-gone".to_string(),
+            crate::crown_split::DeadCallReading::Unread(
+                "no transcript for session 278c9a89-11ed-49af-a6fb-371bb36e410d".to_string(),
+            ),
+        );
+        let (_, _, _, _, stale) = crown_split_fields(Ok(splits), &dead);
+        assert_eq!(
+            stale,
+            vec!["stale crown fno on king-gone (stored status exited); fno agents rm king-gone (tool-call reading: no transcript for session 278c9a89-11ed-49af-a6fb-371bb36e410d)".to_string()]
+        );
     }
 }

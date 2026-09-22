@@ -658,7 +658,7 @@ pub fn probe_pid(pid: i32) -> PidProbe {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_boot_time_s() -> Option<i64> {
+pub(crate) fn linux_boot_time_s() -> Option<i64> {
     // btime (boot epoch seconds) is constant for the life of the host, so cache
     // it: probe_pid is on the claim status/acquire hot path and re-reading
     // /proc/stat every call is wasted I/O.
