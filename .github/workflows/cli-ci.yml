@@ -590,6 +590,9 @@ jobs:
     # silent skip.
     env:
       FNO_CLAIMS_PARITY_PYTHON: ${{ github.workspace }}/cli/.venv/bin/python
+      FNO_HOME: ${{ runner.temp }}/fno
+      FNO_AGENTS_HOME: ${{ runner.temp }}/fno-agents
+      FNO_CLAIMS_ROOT: ${{ runner.temp }}/fno-claims
 
     steps:
       - name: Checkout
