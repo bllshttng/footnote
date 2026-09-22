@@ -430,9 +430,8 @@ def _verb_answer(row: Optional[dict], *, node_id: Optional[str] = None) -> tuple
     from fno.graph.store import GRAPH_JSON, _client_for
     payload = dict(row or {}, id=(row or {}).get("id") or node_id)
     try:
-        answer = _client_for(GRAPH_JSON).request(
-            "effective_verb", {"entries": [payload]}
-        )
+        client = _client_for(GRAPH_JSON)
+        answer = client.request("effective_verb", {"entries": [payload]})
         return answer["verb"], answer["note"]
     except RuntimeError as exc:
         raise DispatchResolveError(str(exc)) from exc
