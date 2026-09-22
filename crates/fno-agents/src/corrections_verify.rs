@@ -464,7 +464,7 @@ pub fn run(args: &[String]) -> i32 {
     };
     let log_text = std::fs::read_to_string(&log_path).unwrap_or_default();
     let events_text = match resolve_events(events.as_deref()) {
-        Some(p) => std::fs::read_to_string(&p).unwrap_or_default(),
+        Some(p) => crate::event_store::journal_text(&p, &["loop_check", "termination"]),
         None => String::new(),
     };
     let verdicts = score(

@@ -545,21 +545,27 @@ pub fn run_day(rest: &[String], home: &crate::paths::AgentsHome) -> i32 {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".fno"));
     let questions_path = state_dir.join("questions.jsonl");
-    let (questions_raw, questions_state) = match std::fs::read_to_string(&questions_path) {
-        Ok(raw) => (raw, "read".to_string()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            (String::new(), "missing".to_string())
-        }
-        Err(error) => {
-            eprintln!(
-                "fno-agents day: questions store unreadable: {}: {error}",
-                questions_path.display()
-            );
-            return 1;
+    let questions_exist =
+        questions_path.exists() || crate::event_store::store_path(&questions_path).exists();
+    let (questions_raw, questions_state) = if !questions_exist {
+        (String::new(), "missing".to_string())
+    } else {
+        match crate::event_store::journal_text_checked(
+            &questions_path,
+            &crate::event_store::EventQuery::of_types(&[]),
+        ) {
+            Ok(raw) => (raw, "read".to_string()),
+            Err(error) => {
+                eprintln!(
+                    "fno-agents day: questions store unreadable: {}: {error}",
+                    questions_path.display()
+                );
+                return 1;
+            }
         }
     };
     let decisions_path = state_dir.join("decisions.jsonl");
-    let decisions_raw = std::fs::read_to_string(&decisions_path).unwrap_or_default();
+    let decisions_raw = crate::event_store::journal_text(&decisions_path, &[]);
     let graph_entries = match crate::graph_store::read_raw(&graph_path(home)) {
         Ok(crate::graph_store::RawRead::Entries(entries)) => entries,
         _ => Vec::new(),
@@ -567,9 +573,13 @@ pub fn run_day(rest: &[String], home: &crate::paths::AgentsHome) -> i32 {
     let mut journals: Vec<(String, String)> = Vec::new();
     let mut journal_states: Vec<(String, String)> = Vec::new();
     for path in &event_paths {
-        let raw = match std::fs::read_to_string(path) {
-            Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        let exists = path.exists() || crate::event_store::store_path(path).exists();
+        let raw = match crate::event_store::journal_text_checked(
+            path,
+            &crate::event_store::EventQuery::of_types(&["review_attestation"]),
+        ) {
+            Ok(raw) if exists => raw,
+            Ok(_) => {
                 journal_states.push((path.display().to_string(), "missing".to_string()));
                 String::new()
             }
@@ -731,21 +741,19 @@ fn commit_boundary(
 ) -> Result<(), String> {
     let line = boundary_event_line(payload)?;
     let id = payload["boundary_id"].as_str().unwrap_or_default();
-    let journal_has_it = std::fs::read_to_string(journal_path)
-        .map(|raw| {
-            raw.lines().any(|row| {
-                serde_json::from_str::<Value>(row.trim())
-                    .ok()
-                    .and_then(|v| {
-                        v.get("data")
-                            .and_then(|d| d.get("boundary_id"))
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    })
-                    .is_some_and(|row_id| row_id == id)
-            })
-        })
-        .unwrap_or(false);
+    let journal_has_it = crate::event_store::journal_text(journal_path, &["day_boundary"])
+        .lines()
+        .any(|row| {
+            serde_json::from_str::<Value>(row.trim())
+                .ok()
+                .and_then(|v| {
+                    v.get("data")
+                        .and_then(|d| d.get("boundary_id"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .is_some_and(|row_id| row_id == id)
+        });
     if !journal_has_it {
         append_row(journal_path, &line)
             .map_err(|e| format!("project journal append failed: {e}"))?;
@@ -957,5 +965,29 @@ mod tests {
         assert_eq!(first, retry, "a same-day retry must reuse the id");
         assert_ne!(first, other_day);
         assert_ne!(first, other_kind);
+    }
+
+    #[test]
+    fn commit_boundary_skips_a_store_committed_boundary() {
+        // AC10-DAY: a day_boundary committed to the store only is not re-appended.
+        let tmp = tempfile::tempdir().unwrap();
+        let journal = tmp.path().join("events.jsonl");
+        let questions = tmp.path().join("questions.jsonl");
+        let payload = serde_json::json!({
+            "boundary_id": "day-start-20260910",
+            "kind": "start",
+            "day": "2026-09-10",
+        });
+        let line = boundary_event_line(&payload).unwrap();
+        crate::event_store::append_envelope(&journal, &line, None).unwrap();
+        commit_boundary(&payload, &journal, &questions).unwrap();
+        let rows = crate::event_store::query_events(
+            &journal,
+            &crate::event_store::EventQuery::of_types(&["day_boundary"]),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1, "the store-only boundary is recognized");
+        let raw = std::fs::read_to_string(&journal).unwrap_or_default();
+        assert!(raw.is_empty(), "no second append for the same id");
     }
 }
