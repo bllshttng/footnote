@@ -622,9 +622,12 @@ def test_yolo_pins_the_config_permission_probe(monkeypatch, journal) -> None:
     assert "permission mappability" not in err.getvalue()
 
 
-def test_unpinned_config_permission_still_refuses_on_codex(monkeypatch, journal) -> None:
+def test_unpinned_config_permission_still_refuses_on_codex(
+    monkeypatch, journal, capsys
+) -> None:
     """Positive control: the same config default with NO explicit permission
-    axis still probes per substrate and names the refusal (x-6c8a)."""
+    axis still probes per substrate and names the refusal on stderr (x-6c8a).
+    _permission_mappable prints to process stderr, not the injected stream."""
     import fno.rust_binary as rb
 
     monkeypatch.setattr(
@@ -641,4 +644,4 @@ def test_unpinned_config_permission_still_refuses_on_codex(monkeypatch, journal)
         err=err,
         permission_mode="bypassPermissions",
     )
-    assert err.getvalue().count("permission mappability refused") == 2
+    assert capsys.readouterr().err.count("permission mappability refused") == 2
