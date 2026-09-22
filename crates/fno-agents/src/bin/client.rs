@@ -146,6 +146,11 @@ fn main() {
     if args.first().map(String::as_str) == Some("backlog-update") {
         std::process::exit(fno_agents::backlog::patch::run_update(&args[1..]));
     }
+    // question_intake: the `fno inbox outstanding ask` port. Transport-only
+    // like its siblings (the shrink law registers no verb).
+    if args.first().map(String::as_str) == Some("question-intake") {
+        std::process::exit(fno_agents::question_intake::run_question_intake());
+    }
     // The SessionStart reconcile sweep execs here; see backlog::orphan_plans.
     if args.first().map(String::as_str) == Some("backlog-orphan-plans") {
         std::process::exit(fno_agents::backlog::orphan_plans::run_orphan_plans(
@@ -191,11 +196,12 @@ fn main() {
     if args.first().map(String::as_str) == Some("hook") {
         let code = match args.get(1).map(String::as_str) {
             Some("king-guard") => fno_agents::hook::king_guard::run(&args[2..]),
+            Some("prompt") => fno_agents::hook::prompt::run(&args[2..]),
             Some("test-run-guard") => fno_agents::hook::test_run_guard::run(&args[2..]),
             Some("stop") => fno_agents::hook::stop::run(&args[2..]),
             other => {
                 eprintln!(
-                    "fno-agents hook: unknown entry {other:?}; expected king-guard, test-run-guard or stop"
+                    "fno-agents hook: unknown entry {other:?}; expected king-guard, prompt, test-run-guard or stop"
                 );
                 2
             }

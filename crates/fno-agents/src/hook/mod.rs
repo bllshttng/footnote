@@ -9,6 +9,7 @@
 //! ratchet never sees them (shrink law d-fe66560a).
 
 pub mod king_guard;
+pub mod prompt;
 pub mod stop;
 pub mod test_run_guard;
 
