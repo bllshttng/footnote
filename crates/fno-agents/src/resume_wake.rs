@@ -923,9 +923,7 @@ where
     };
     // A revive brings the session back from down: the same second-writer
     // gate the relaunch arm runs, before anything launches.
-    if let Some(code) =
-        crate::resume_gate::gate_and_reserve(home, session_id, row_name, session_uuid)
-    {
+    if let Some(code) = crate::resume_gate::gate_and_reserve(home, row_name, session_id) {
         return Err((code, "node-held".to_string()));
     }
     if let Err((code, msg)) = acquire_resume_session_claim(session_uuid, None, None) {
