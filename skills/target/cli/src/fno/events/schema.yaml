@@ -3730,8 +3730,17 @@ event_types:
           description: "Optional. One line naming the action that closes the question."
         options:
           type: array
-          items: { type: string }
-          description: "Optional choices when the question is a pick rather than free text."
+          items:
+            oneOf:
+              - type: string
+              - type: object
+                properties:
+                  n: { type: integer }
+                  text: { type: string }
+                  next: { type: string }
+                  pros: { type: array, items: { type: string } }
+                  cons: { type: array, items: { type: string } }
+          description: "Optional choices when the question is a pick rather than free text; the Rust intake writes objects carrying each option's next."
         blocks:
           type: array
           items: { type: string }
@@ -3739,6 +3748,9 @@ event_types:
         subject:
           type: string
           description: "Optional. The decision subject the question is about; the ask verb refuses it when live law rules that subject."
+        context:
+          type: object
+          description: "Optional. The structured context the Rust intake writes: blocked_because, options_rationale, recommendation {option, why, downside}, unknowns, reversible, cost_if_wrong, meanwhile. Keys are open; the attention projection reads each by name."
     consumers: [operator, fno-agents needs]
 
   - name: fleet_task
