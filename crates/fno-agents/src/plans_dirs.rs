@@ -317,11 +317,10 @@ mod tests {
             let fake_bin = base.join("bin");
             fs::create_dir_all(&fake_bin).unwrap();
             let fake = fake_bin.join("fno");
-            fs::write(
-                &fake,
-                "#!/bin/sh\ncase \"$PWD\" in *skip*) exit 1;; esac\necho \"$PWD/plans/20260101-x.md\"\n",
-            )
-            .unwrap();
+            // Answers from its own cwd; `$PWD` comes back in the physical
+            // form (`/private/var/...` on macOS), which the expectations
+            // below must match.
+            fs::write(&fake, "#!/bin/sh\necho \"$PWD/plans/20260101-x.md\"\n").unwrap();
             fs::set_permissions(&fake, Permissions::from_mode(0o755)).unwrap();
             fs::create_dir_all(base.join("cache")).unwrap();
             Fixture { base }
@@ -340,12 +339,10 @@ mod tests {
         }
 
         fn probe_count(&self) -> usize {
-            // The fake fno appends to a counter next to itself on every run.
+            // The fake fno appends one byte to this file per run.
             fs::read_to_string(self.fake_bin().join("count"))
                 .unwrap_or_default()
-                .trim()
-                .parse()
-                .unwrap_or(0)
+                .len()
         }
     }
 
@@ -369,23 +366,27 @@ mod tests {
     }
 
     fn count_script() -> &'static str {
-        // Appends to $0.dir/count so tests can count real probe invocations.
-        "#!/bin/sh\ncase \"$PWD\" in *skip*) exit 1;; esac\nprintf 'x' >> \"$(dirname \"$0\")/count\"\necho \"$PWD/plans/20260101-x.md\"\n"
+        // Appends one byte to $0.dir/count so tests can count real probe
+        // invocations.
+        "#!/bin/sh\nprintf 'x' >> \"$(dirname \"$0\")/count\"\necho \"$PWD/plans/20260101-x.md\"\n"
     }
 
     #[test]
     fn plans_dirs_probe_every_registered_project() {
         let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let fx = Fixture::new("enumerate");
-        // Counter-bearing fake fno for the cache tests below.
-        fs::write(fx.fake_bin().join("fno"), count_script()).unwrap();
-        fs::set_permissions(fx.fake_bin().join("fno"), Permissions::from_mode(0o755)).unwrap();
         let _env = guard_for(&fx);
 
         let dirs = plans_dirs(&fx.base);
+        // The probe answers in `$PWD`'s physical form, so the expectation is
+        // canonicalized to the same namespace.
         let want = vec![
-            fx.base.join("alpha").join("plans"),
-            fx.base.join("beta").join("plans"),
+            fs::canonicalize(fx.base.join("alpha"))
+                .unwrap()
+                .join("plans"),
+            fs::canonicalize(fx.base.join("beta"))
+                .unwrap()
+                .join("plans"),
         ];
         assert_eq!(dirs, want, "one sorted dir per registered project");
     }
@@ -425,10 +426,21 @@ mod tests {
         let fx = Fixture::new("skip");
         let _env = guard_for(&fx);
 
-        // `beta` sits in a directory whose path contains "skip": the fake fno
-        // exits 1 for it, so only alpha's dir comes back.
+        // The fake fno exits 1 for the beta project, so only alpha's dir
+        // comes back.
+        fs::write(
+            fx.fake_bin().join("fno"),
+            "#!/bin/sh\ncase \"$PWD\" in */beta) exit 1;; esac\necho \"$PWD/plans/20260101-x.md\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(fx.fake_bin().join("fno"), Permissions::from_mode(0o755)).unwrap();
         let dirs = plans_dirs(&fx.base);
-        assert_eq!(dirs, vec![fx.base.join("alpha").join("plans")]);
+        assert_eq!(
+            dirs,
+            vec![fs::canonicalize(fx.base.join("alpha"))
+                .unwrap()
+                .join("plans")]
+        );
 
         // A probe that answers a relative line contributes nothing.
         fs::write(
