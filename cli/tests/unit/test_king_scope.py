@@ -125,6 +125,30 @@ def test_scope_undelivered_counts_only_nodes_not_done_or_superseded():
     assert scope_undelivered("x-root", entries, resolver=lambda _: (2, "x-root")) == 4
 
 
+def test_scope_undelivered_closes_wont_do_but_not_unclassified_deferrals():
+    entries = [
+        {
+            "id": "x-root",
+            "type": "epic",
+            "status": "done",
+            "completed_at": "2026-09-06T00:00:00Z",
+        },
+        {
+            "id": "x-wont-do",
+            "parent": "x-root",
+            "status": "deferred",
+            "deferred_kind": "wont_do",
+        },
+        {
+            "id": "x-unclassified",
+            "parent": "x-root",
+            "status": "deferred",
+            "deferred_kind": None,
+        },
+    ]
+    assert scope_undelivered("x-root", entries, resolver=lambda _: (2, "x-root")) == 1
+
+
 def test_a_fully_driven_scope_still_counts_as_undelivered():
     # The 2026-09-06 incident shape: every row had a driver, the actionable
     # board read empty, nothing had shipped. Assignment is not delivery.
