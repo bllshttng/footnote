@@ -1,7 +1,7 @@
 //! `fno-agents pr-push` -- the one guarded push: fetch, rebase onto
 //! origin/main (or merge it when the branch already holds merges), preflight, read the in-flight state, push exactly once,
 //! print one receipt. Every push site in `skills/pr` calls this through
-//! `fno do pr push`, so a branch is rebased before it moves and a queued CI
+//! `fno do pr push`, so a branch integrates origin/main before it moves and a queued CI
 //! run is never cancelled by a second push.
 //!
 //! The in-flight guard is heal's, promoted. heal used to hold a private copy
