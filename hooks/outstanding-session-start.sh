@@ -24,7 +24,10 @@ cache="${FNO_HOME:-$HOME/.fno}/attention/items.json"
 
 if [[ $have_jq -eq 1 && -s "$cache" ]]; then
     now=$(date +%s)
-    mtime=$(stat -f %m "$cache" 2>/dev/null || stat -c %Y "$cache" 2>/dev/null || echo 0)
+    # GNU first (stat -f is --file-system there and exits 0 with junk text on
+    # a valid file, which set -u then trips over); BSD stat takes -f as the
+    # format flag and answers second.
+    mtime=$(stat -c %Y "$cache" 2>/dev/null || stat -f %m "$cache" 2>/dev/null || echo 0)
     if (( now - mtime <= CACHE_MAX_AGE_SECS )); then
         # This session's own questions: the asker's session id is the target
         # manifest id the session already carries. No manifest means a session
