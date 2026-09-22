@@ -2553,9 +2553,10 @@ def _seed_crown_graph(monkeypatch, tmp_path: Path, epics: list[dict]) -> None:
 
 
 def _graph_entries() -> list[dict]:
+    from fno.graph.store import read_graph_strict
     from fno.paths import graph_json
 
-    return json.loads(graph_json().read_text(encoding="utf-8"))["entries"]
+    return read_graph_strict(graph_json())
 
 
 def _mission_events() -> list[dict]:
