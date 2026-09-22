@@ -27,7 +27,7 @@ def _collision_diagnosis() -> str:
     """What the seam actually answered: the store read, the archive file, and
     the native byte read, in one line that survives the CI log cut."""
     from fno import paths
-    from fno.graph.store import _read_json, read_entries
+    from fno.graph.store import _read_json
     from fno.tracker.metadata import read_entries as tracker_read
 
     try:
