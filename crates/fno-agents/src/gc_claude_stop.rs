@@ -409,7 +409,7 @@ mod tests {
     fn a_surviving_pid_signals_once_and_confirms_when_it_dies() {
         use std::process::{Command, Stdio};
 
-        let sleeper = Command::new("sleep")
+        let mut sleeper = Command::new("sleep")
             .arg("60")
             .stdout(Stdio::null())
             .spawn()
@@ -452,7 +452,7 @@ mod tests {
     fn a_pid_still_reported_after_the_signal_refuses() {
         use std::process::{Command, Stdio};
 
-        let sleeper = Command::new("sh")
+        let mut sleeper = Command::new("sh")
             .args(["-c", "trap '' TERM; sleep 60"])
             .stdout(Stdio::null())
             .spawn()
