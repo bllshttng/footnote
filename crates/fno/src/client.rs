@@ -11843,6 +11843,13 @@ async fn handle_stdin(
         view.cancel_row_drag();
         return Ok(StdinFlow::Continue);
     }
+    // A chunk the mouse pre-pass consumed whole carries no key bytes: the
+    // folds must not see an empty read here, or a lone ESC in the owning
+    // overlay's carry would flush on the mouse's clock instead of the
+    // quiet window's. The deadline's flush enters through flush_lone_esc.
+    if passthrough.is_empty() {
+        return Ok(StdinFlow::Continue);
+    }
     // The overlay chain lives in overlay_keys::route: the one precedence
     // list, plus the quiet-window flush entry (`flush_lone_esc`). `None`
     // here means no overlay owns the keyboard.
