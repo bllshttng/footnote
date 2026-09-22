@@ -127,17 +127,22 @@ impl PaneSendAudit {
             "source": "daemon",
             "data": data,
         });
-        let _ = (|| -> std::io::Result<()> {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)?;
-            writeln!(file, "{event}")
-        })();
+        let _ = append_agents_event(path, &event);
     }
+}
+
+/// One O_APPEND line to the agents events journal, creating the parent dir.
+/// The raw row append both the pane-send floor and the `operator_submit`
+/// witness share; each write is best-effort and names its own failure.
+pub(crate) fn append_agents_event(path: &Path, row: &serde_json::Value) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "{row}")
 }
 
 /// A submit key is a control byte, not a dispatch: the CRs, Tabs and ESC
@@ -212,7 +217,7 @@ fn pane_send_registry_identity(
 /// (`~/.fno/agents/events.jsonl`, `FNO_AGENTS_HOME` redirects tests), mirrored
 /// from fno-agents' `AgentPaths` - the crates share no types, the FILE is the
 /// contract.
-fn pane_send_audit_events_path() -> PathBuf {
+pub(crate) fn pane_send_audit_events_path() -> PathBuf {
     if let Some(home) = std::env::var_os("FNO_AGENTS_HOME").filter(|v| !v.is_empty()) {
         return PathBuf::from(&home).join("events.jsonl");
     }

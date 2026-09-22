@@ -109,5 +109,34 @@ else
     fail "hook exited $RC with an unwritable log"
 fi
 
+# Rebuild the log the token cases append to.
+: > "$LOG"
+
+# ---- T05 (AC2-HP): trailer lands sha= and ref= on the row ----
+echo "T05: Autocorrect-Ref trailer appends sha= and ref="
+( cd "$D/repo" && printf 'fixed\n' > skills/target/SKILL.md \
+    && git add skills/target/SKILL.md \
+    && git commit -qm "autocorrect r1#1: correct the target skill" --trailer "Autocorrect-Ref: r1#1" )
+( cd "$D/repo" && FNO_HOME="$D/fno" CLAUDE_DIR_OVERRIDE="$D/claude" bash "$HOOK" )
+if grep -Eq '\| skill-commit \| skills/target/SKILL\.md \| autocorrect r1#1: correct the target skill sha=[0-9a-f]{12} ref=r1#1$' "$LOG" 2>/dev/null; then
+    pass "row ends with sha=<12 hex> ref=r1#1"
+else
+    fail "sha/ref tokens missing from the row"
+    cat "$LOG" >&2
+fi
+
+# ---- T06 (AC2-EDGE): no trailer keeps sha= without ref= ----
+echo "T06: no trailer appends sha= only"
+( cd "$D/repo" && printf 'fixed2\n' > skills/target/SKILL.md \
+    && git add skills/target/SKILL.md \
+    && git commit -qm "autocorrect: no trailer this time" )
+( cd "$D/repo" && FNO_HOME="$D/fno" CLAUDE_DIR_OVERRIDE="$D/claude" bash "$HOOK" )
+if grep -Eq '\| skill-commit \| skills/target/SKILL\.md \| autocorrect: no trailer this time sha=[0-9a-f]{12}$' "$LOG" 2>/dev/null; then
+    pass "row ends with sha=<12 hex> and no ref="
+else
+    fail "bare sha row malformed"
+    cat "$LOG" >&2
+fi
+
 summary
 exit $?

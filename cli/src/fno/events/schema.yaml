@@ -3035,7 +3035,7 @@ event_types:
           type: string
 
   - name: stale_sweep
-    description: "The daemon's stale-question reconcile: `fno agents stale-escalate` ran on its 6h floor and reconciled the durable [watchdog-stale:*] operator question to the measured fleet. Report-only by construction: rows past the wake ceiling are the needs-human bucket no action lane may take, so the question channel is the only surface they reach. Emitted for every run including outcome none and duplicate, so a quiet run is never mistaken for a sweep that did not run. `outcome` carries the verb's own word verbatim - on `refused` the stale_count is NOT a real reading and must never be read as a measured zero. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."
+    description: "The daemon's stale-row reconcile: `fno agents stale-escalate` ran on its 6h floor and reconciled the lane's fleet tasks (the former [watchdog-stale:*] operator question, now filed in the fleet-task channel) to the measured fleet. Report-only by construction: a king reads open tasks on the board's fleet_task queue. Emitted for every run including outcome none and duplicate, so a quiet run is never mistaken for a sweep that did not run. `outcome` carries the verb's own word verbatim - on `refused` the stale_count is NOT a real reading and must never be read as a measured zero. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."
     sources: [daemon]
     data:
       required: []
@@ -3741,6 +3741,52 @@ event_types:
           description: "Optional. The decision subject the question is about; the ask verb refuses it when live law rules that subject."
     consumers: [operator, fno-agents needs]
 
+  - name: fleet_task
+    description: "A machine chore that names its own clearing command, filed by a lane writer (heal, pr-nudge, the daemon reconcile lanes) instead of an operator_question, so the operator's question list carries only rows needing a human ruling. Written only by Rust (fleet_task.rs); never written by Python. A king reads open tasks on the board's fleet_task queue, report-only; the operator question surfaces never show one."
+    sources: [daemon, test]
+    data:
+      required: [task_id]
+      properties:
+        task_id:
+          type: string
+          description: "Stable id for this task (ft-<hex>), what a fleet_task_closed row names to close it."
+        lane:
+          type: string
+          description: "The writer family that owns the chore: heal, pr-nudge, watchdog-stale, reap-hold, king-escalation, watchdog-unfinished-work, watchdog-friction."
+        key:
+          type: string
+          description: "The dedup key within the lane, e.g. 'PR 2226 rebase conflict'."
+        text:
+          type: string
+          description: "The human-readable chore text, including the command that clears it."
+        run:
+          type: string
+          description: "Optional. The command that clears the chore."
+        node:
+          type: string
+          description: "Optional. The backlog node the task is about, when the writer knows one; the sweep closes the task when that node closes."
+        cwd:
+          type: string
+          description: "The repo root the writer ran in; one heal process serves several repos, so identity is lane + key + cwd."
+    consumers: [fno-agents needs, king board]
+
+  - name: fleet_task_closed
+    description: "A fleet_task was closed: its condition cleared (rebased, activity), its node closed, its lane reconciled empty or superseded, or the sweep retired it. Written only by Rust. Append-only with a last-writer-wins fold; a double close is a no-op."
+    sources: [daemon, test]
+    data:
+      required: [task_id]
+      properties:
+        task_id:
+          type: string
+          description: "The fleet_task this closes."
+        reason:
+          type: string
+          description: "Why it closed: rebased, activity, node-closed, set-empty, superseded, moved-to-fleet-task."
+        closed_by:
+          type: string
+          description: "The writer that closed it: heal, pr-nudge, question-sweep, or the lane marker."
+    consumers: [fno-agents needs, king board]
+
   - name: operator_question_closed
     description: "An operator_question was answered or withdrawn. Explicit close only: there is no auto-expiry and no transcript-derived auto-resolution, because peek.Record carries role and text but no timestamp, so answering 'is there a user turn newer than this question' would need a new timestamped reader in every harness arm. An explicit clear costs nothing and never lies about whether an answer actually arrived. A question going quiet with age is the exact failure being fixed, so age never closes one. Append-only with a last-writer-wins fold: a double close is a no-op, not an error."
     sources: [target, hook, subagent, daemon, test]
@@ -4014,6 +4060,39 @@ event_types:
         exit_code:
           type: integer
           description: "Optional (pane-send floor). The verb's own exit code the outcome word came from."
+    consumers: [operator]
+
+  - name: operator_submit
+    retention: durable
+    description: "A human pressed Enter in a mux pane or portal: the positive witness that a person typed the next turn. Written at the CoreMsg::Input choke point, after the relay bounce and the passive-client drop, so machine transports (pane send, control.sock mail, codex turn/start) never reach it. Records WHERE and WHEN only - no typed text is ever recorded. The intel fold joins submits to transcript turns by session and submit_ms; a turn with no submit and no injected shape reads unknown, never operator."
+    sources: [daemon, test]
+    data:
+      required: [mux_session, pane, via, submit_ms, resolution]
+      properties:
+        mux_session:
+          type: string
+          description: "The mux server's session name the pane belongs to."
+        pane:
+          type: integer
+          description: "The pane id the Enter landed on."
+        via:
+          enum: [pane, portal, shell]
+          description: "pane: a pane hosting a registry row. portal: a pane seating a portal. shell: a pane with no registry or portal row (a hand-started harness)."
+        submit_ms:
+          type: integer
+          description: "Epoch milliseconds the Enter reached the server. The join key to transcript turns: the envelope ts is second precision, this is not."
+        resolution:
+          enum: [ok, unresolved]
+          description: "ok: a registry or portal row bound the pane, so turns in its session can join. unresolved: no row bound (shell pane); the submit still counts, nothing joins to it."
+        harness_session:
+          type: [string, "null"]
+          description: "The bound row's harness_session_id, else its effective identity - the id transcripts are named by. Null when no row binds or the row carries no id."
+        harness:
+          type: [string, "null"]
+          description: "The bound row's harness axis. Null when no row binds."
+        fno_id:
+          type: [string, "null"]
+          description: "The bound row's own fno session id (the durable identity). Null when no row binds."
     consumers: [operator]
 
   - name: mail_origin_classified

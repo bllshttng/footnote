@@ -408,15 +408,15 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::king_escalation::run_king_escalation_text(&args[1..]);
     }
 
-    // `review-start` is the hidden codex review-forcing verb (node): the
-    // app-server `review/start` RPC is the codex counterpart of claude's
-    // `--raw /code-review` (the Python raw router sends exact review verbs here;
-    // codex's turn/start lane still cannot parse arbitrary slash payloads).
-    // Structured targets + an outcome receipt (a Turn + a reviewThreadId),
-    // strictly better than keystroke faking. Same `matches!`
-    // treatment as `mail-inject` so it stays out of
-    // CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the parity guard - no advertised
-    // fno verb is added. The socket round-trip needs the user's daemon.
+    // `fleet-task` is the hidden binary-direct transport the Python reconcile
+    // lanes ride through verb_call (fleet_task.rs). Same `matches!` treatment
+    // as `law-match`: no advertised fno verb.
+    if matches!(verb, "fleet-task") {
+        return fno_agents::fleet_task::run_fleet_task(&args[1..]);
+    }
+
+    // `review-start` (hidden codex review verb, node): the app-server
+    // `review/start` RPC; claude's `--raw /code-review` counterpart; no advertised verb.
     if matches!(verb, "review-start") {
         return fno_agents::codex_inject::run_review_start(&args[1..]).await;
     }

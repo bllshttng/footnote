@@ -221,6 +221,20 @@ a session whose gates are all false (it just started).
 
 Concurrency is bounded where the spawn is refused. Two caps bind: `agents.max_live` over the live fleet census, and `agents.provider_limits.<provider>.lanes` per provider. The epic advance derives its width from those same counters. It reads them through the same functions that `fno agents top` and `advance --explain` use. No two surfaces can disagree about why a launch did not happen. The retired `config.parallel.max_lanes` knob was a second authority beside the real one. When the key is set, fno prints one deprecation line and ignores it. The key stays parseable for one release. Delete it from config.
 
+## Reservations: a lane slot held for a name
+
+A reservation is a lane slot held for a worker that has not spawned yet. A king can order the next freed slot to go to a named worker. Without enforcement the gate knows nothing about the promise. The reserved work loses the race to whatever spawns first, and obeying the order costs the slot. `fno-agents spawn-gate reserve <name> --provider <p> [--ttl 10m] --reason "<why>" [--node <id>]` mints `worker:<name>` under the global claims root with `model_provider`, `reserved_by` and `reserved_reason` metadata. The claim is counted by `provider_live_slot_claims`. A reservation already spends a lane slot against every stranger before the worker exists.
+
+The gate refuses on that lane and names the reservation, in these words:
+
+```
+A reservation is held for a NAME: spawn with --name <that name> to redeem it.
+A reservation expires within 15 minutes, whatever happened to the session that made it.
+Slot order is otherwise first-come; read `fno agents gate-status` for the lane.
+```
+
+The gate skips the redeemer's own reservation in the provider count. It releases the reservation at admission, after every refusing axis has passed. An unrelated CPU or RAM refusal never burns it. Only a claim with the `reserved_by` key is redeemable. A live worker's plain slot claim carries no key. A spawn cannot skip or release it by borrowing the name. A reservation expires within 15 minutes. Nothing that happens to the minting session changes this. Only TTL expiry frees a claim, and pid death does not. A four-hour reservation with a dead holder once wedged the zai lane end to end. When the lane's reservations reach the lane cap, the reserve mode refuses to mint. At least one slot on every capped lane can never be reserved. First-come always has a lane to win. Slot order is otherwise first-come. Read `fno agents gate-status` for the lane. Its lane rows carry a `reserved` array beside `cap`, `live`, `counted` and `parked`.
+
 ## Per-territory team cap
 
 `check_territory_cap` (`crates/fno-agents/src/spawn_gate.rs`) is the one enforcement home for the per-territory team cap. The Rust client's own gate passes the node through, and the binary door (`fno-agents territory-verdict`) serves the readout surfaces. Nothing recomputes the verdict elsewhere. A binary or payload fault reads as `territory_unknown`, never as headroom, since an unreadable verdict must never count as free capacity.

@@ -319,6 +319,30 @@ def test_unreadable_decision_index_fails_closed(tmp_path):
     assert "decisions_acknowledged could not be checked" in result.stdout
 
 
+def test_unreadable_graph_fails_closed_before_coord_lifecycle(tmp_path):
+    state_dir = tmp_path / "fno-home"
+    _seed_decision(
+        state_dir,
+        decision_id="d-c0ffee12",
+        subject="x-c0ffee12",
+        expiry_ref={"kind": "node", "node_id": "x-c0ffee12"},
+        authority_source="agent",
+    )
+    (state_dir / "graph.json").write_text("{not valid json\n", encoding="utf-8")
+
+    plan = tmp_path / "unreadable-graph.md"
+    plan.write_text(_plan(
+        "title: T\nstatus: ready\nkind: quick-plan\nclaims: x-c0ffee12\ncreated: 2026-08-23\n"
+        "consolidation:\n"
+        "  outcome: proceed_alone\n"
+        "  proceed_alone_against: []\n"
+    ))
+    result = _run(plan, state_dir)
+    assert result.returncode == 1, result.stdout
+    assert "decisions_acknowledged could not be checked (the graph could not be read" in result.stdout
+    assert "no positive closure evidence" not in result.stdout
+
+
 def test_damaged_index_rows_fail_closed_not_reported_as_clean(tmp_path):
     """codex finding: a damaged row's decision might be the closing verdict;
     reading the surviving rows as complete would silently pass a plan whose

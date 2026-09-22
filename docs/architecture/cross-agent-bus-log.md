@@ -170,7 +170,7 @@ One announcement is ONE `kind: "announce"` envelope on the shared bus. It is app
 
 **Envelope.** Key order matches `to_json_line`. `to: "fleet:<scope>"` and `to_kind: "fleet"` mean no Python address can ever equal it, so `scan_unread` and every addressed-mail reader cannot deliver it. `meta` carries `scope`, `audience` (the snapshot), `subject`, `expires_at`, `urgent`, `supersedes`.
 
-**Audience snapshot.** At send time the writer records the `session_identity_key` of every live registry row matching the scope. The row filters: non-terminal status, a session id, `crown_level` set for `kings`. A crown scope answers to territory equality, alias-normalized. `project:<p>` adds a cwd path match. That list is the receipt denominator.
+**Audience snapshot.** At send time the writer records each matching row's identity-normalized full `harness_session_id`. It never records the Claude transport `short_id`. It leaves the sender's own row out. The row filters: non-terminal status, a session id, `crown_level` set for `kings`. A crown scope answers to territory equality, alias-normalized. `project:<p>` adds a cwd path match. That list is the receipt denominator.
 
 **Late arrivals.** A session outside the snapshot that matches the scope at read time still sees a standing announcement. Receipts count it as `late`, never in the audience N.
 
@@ -178,7 +178,7 @@ One announcement is ONE `kind: "announce"` envelope on the shared bus. It is app
 
 **Render.** `<fno_mail id="..." kind="announce" from="..." subject="..." expires="...">body</fno_mail>`. The id inside the open tag is what a transcript scan proves landing with. No new marker exists.
 
-**Receipts.** `announce status <id>` is the sender view: `audience N, landed L, pending P, woken W, unreachable U, late K`. When a `kind: "landed"` control row exists for the (announcement, session) pair, the session is `landed`. Otherwise the status run scans that session's transcript for the id: claude `<projects>/*/<id>.jsonl`, codex a rollout scan. A session with no resolvable store is `unreachable`, never `pending`. On transcript proof the run appends the landed control row, so the next run re-reads nothing. `mail team --json` prints the send receipt only. Status is a separate read.
+**Receipts.** `announce status <id>` is the sender view: `audience N, landed L, pending P, woken W, unverified U, late K`. When a `kind: "landed"` control row exists for the (announcement, session) pair, the session is `landed`. Otherwise the status run scans that session's transcript for the id: claude `<projects>/*/<id>.jsonl`, codex a rollout scan. A session with no resolvable store is `unverified`, never `pending`. On transcript proof the run appends the landed control row, so the next run re-reads nothing. `mail team --json` prints the send receipt only. Status is a separate read.
 
 **Expiry and supersession.** `--expires` defaults to 24h and caps at 7d. Readers skip expired rows. A newer announcement with the same `subject` and scope lists the older standing one in `meta.supersedes`. Readers skip superseded rows, so a woken session only ever sees current news.
 

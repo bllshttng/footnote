@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use serde_json::{json, Map, Value};
 
 use crate::agents_config;
+use crate::claims;
 use crate::spawn_gate::{self, GateFlags, GateInput};
 use crate::spawn_gate_lanes;
 
@@ -23,7 +24,13 @@ use crate::spawn_gate_lanes;
 /// an answer was produced, including a refused answer. An unreadable payload
 /// is a loud non-zero: the transport turns that into a gate-unavailable
 /// refusal, never an admit.
-pub fn run_spawn_gate(_args: &[String]) -> i32 {
+pub fn run_spawn_gate(args: &[String]) -> i32 {
+    // The reserve mode is argv-typed, so a king can type it in one line; the
+    // gate and probe modes keep their stdin JSON payloads.
+    if args.first().map(String::as_str) == Some("reserve") {
+        let config_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        return reserve_spawn_gate(&config_cwd, &args[1..]);
+    }
     let mut raw = String::new();
     if std::io::stdin().read_to_string(&mut raw).is_err() {
         eprintln!("spawn-gate: could not read the request payload");
@@ -46,6 +53,183 @@ pub fn run_spawn_gate(_args: &[String]) -> i32 {
     };
     println!("{answer}");
     0
+}
+
+/// The reservation TTL ceiling: only TTL expiry frees a claim and pid death
+/// does not (claims.rs classification), so a four-hour reservation with a
+/// dead holder is the measured four-hour lane wedge. The ceiling bounds the
+/// longest a reservation can hold a slot.
+pub(crate) const RESERVATION_MAX_TTL_MS: i64 = 15 * 60 * 1000;
+/// A reservation holds its lane for its whole TTL when unredeemed, so the
+/// default is short.
+const RESERVATION_DEFAULT_TTL_MS: i64 = 10 * 60 * 1000;
+
+/// `fno-agents spawn-gate reserve <name> --provider <p> [--ttl 10m] --reason "<why>" [--node <id>]`
+///
+/// Mints `worker:<name>` under the global claims root with `model_provider`,
+/// `reserved_by`, `reserved_reason` (and `node` when given) metadata, anchored
+/// to this process's pid with an explicit TTL. Two guards refuse before any
+/// write: a TTL over [`RESERVATION_MAX_TTL_MS`], and a lane whose reservations
+/// would reach the lane cap (at least one slot on every capped lane stays
+/// winnable first-come). Release early with `fno agents claim release --force`
+/// or wait out the TTL; nothing here queues.
+pub(crate) fn reserve_spawn_gate(config_cwd: &std::path::Path, args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("--help")
+        || args.first().map(String::as_str) == Some("-h")
+    {
+        println!("usage: fno-agents spawn-gate reserve <name> --provider <p> [--ttl 10m] --reason \"<why>\" [--node <id>]");
+        println!("{}", crate::spawn_gate_reservations::RESERVATION_RULE);
+        return 0;
+    }
+    let mut name: Option<String> = None;
+    let mut provider: Option<String> = None;
+    let mut node: Option<String> = None;
+    let mut ttl_arg: Option<String> = None;
+    let mut reason: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--provider" | "--ttl" | "--reason" | "--node" => {
+                let flag = arg.as_str();
+                let Some(value) = it.next() else {
+                    eprintln!("spawn-gate: {flag} needs a value");
+                    return 2;
+                };
+                if value.starts_with("--") {
+                    eprintln!("spawn-gate: {flag} needs a value, got the flag {value:?}");
+                    return 2;
+                }
+                match flag {
+                    "--provider" => provider = Some(value.clone()),
+                    "--ttl" => ttl_arg = Some(value.clone()),
+                    "--reason" => reason = Some(value.clone()),
+                    _ => node = Some(value.clone()),
+                }
+            }
+            a if a.starts_with("--") => {
+                eprintln!("spawn-gate: unknown reserve flag {a:?}");
+                return 2;
+            }
+            a => {
+                if name.is_some() {
+                    eprintln!("spawn-gate: reserve takes ONE name; got {a:?} too");
+                    return 2;
+                }
+                name = Some(a.to_string());
+            }
+        }
+    }
+    let Some(name) = name else {
+        eprintln!("spawn-gate: reserve needs a worker name and --provider");
+        println!("{}", crate::spawn_gate_reservations::RESERVATION_RULE);
+        return 2;
+    };
+    let Some(provider) = provider else {
+        eprintln!("spawn-gate: reserve needs --provider");
+        return 2;
+    };
+    let Some(reason) = reason else {
+        eprintln!("spawn-gate: reserve needs --reason (why this lane slot is held)");
+        return 2;
+    };
+    let ttl_ms = match ttl_arg.as_deref() {
+        None => RESERVATION_DEFAULT_TTL_MS,
+        Some(raw) => match claims::parse_ttl_ms(raw) {
+            Some(ms) if ms <= RESERVATION_MAX_TTL_MS => ms,
+            Some(ms) => {
+                eprintln!(
+                    "spawn-gate: refusing --ttl {raw}: {ms}ms is over the {}s reservation ceiling. Only TTL expiry frees a claim, pid death does not; a four-hour reservation with a dead holder is what wedged the zai lane once.",
+                    RESERVATION_MAX_TTL_MS / 1000
+                );
+                return 2;
+            }
+            None => {
+                eprintln!("spawn-gate: unparsable --ttl {raw:?}; want 10m, 90s, 600");
+                return 2;
+            }
+        },
+    };
+    // The lane headroom guard: minting refuses when the slot claims live on
+    // that lane would reach the lane cap, so at least one slot on every
+    // capped lane is always winnable first-come. An uncapped lane skips the
+    // guard: nothing to starve.
+    let mut lane_warnings = Vec::new();
+    if let Some(cap) = spawn_gate_lanes::provider_lanes_cap(config_cwd, &provider) {
+        let held = match spawn_gate_lanes::provider_live_slot_claims(
+            &provider,
+            &[],
+            None,
+            &mut lane_warnings,
+        ) {
+            Ok((n, _)) => n,
+            Err(e) => {
+                eprintln!("spawn-gate: reserve could not read the lane: {e}");
+                return 2;
+            }
+        };
+        if held + 1 >= cap {
+            eprintln!(
+                "spawn-gate: refusing reserve {name} on lane {provider}: {} reservation(s) \
+                 plus this one would reach the lane cap {cap}, and at least one slot on \
+                 every capped lane stays winnable first-come. {}",
+                held + 1,
+                crate::spawn_gate_reservations::RESERVATION_RULE
+            );
+            return 2;
+        }
+    }
+    // Mint the claim. holder is the resolved caller session when ambient
+    // identity resolves; the pid defaults to this process, and the explicit
+    // TTL (never HOLDER_PROCESS provenance) is what frees the lane.
+    let (session, _harness) = claims::resolve_identity();
+    let holder = session.unwrap_or_else(|| format!("reserve:{}", std::process::id()));
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("model_provider".into(), json!(&provider));
+    metadata.insert("reserved_by".into(), json!(&holder));
+    metadata.insert("reserved_reason".into(), json!(&reason));
+    if let Some(node) = &node {
+        metadata.insert("node".into(), json!(node));
+    }
+    let key = format!("worker:{name}");
+    let outcome = claims::acquire(
+        &key,
+        &holder,
+        claims::AcquireOpts {
+            pid: Some(std::process::id()),
+            ttl_ms: Some(ttl_ms),
+            reason: Some(reason),
+            metadata: Some(metadata),
+            root: claims::global_claims_root(),
+            ..Default::default()
+        },
+    );
+    match outcome {
+        claims::AcquireOutcome::Acquired(record) => {
+            println!(
+                "{}",
+                json!({
+                    "status": "reserved",
+                    "key": key,
+                    "provider": provider,
+                    "holder": holder,
+                    "expires_at": record.expires_at,
+                    "redeem": "the spawn carried --name <this name> redeems it at admission",
+                })
+            );
+            0
+        }
+        claims::AcquireOutcome::HeldByOther { holder: h, .. } => {
+            eprintln!(
+                "spawn-gate: refusing reserve {name}: {key} is already held by {h}; \
+                 a live worker's own claim is never a reservation"
+            );
+            1
+        }
+        claims::AcquireOutcome::Error(e) => {
+            eprintln!("spawn-gate: reserve failed: {e}");
+            2
+        }
+    }
 }
 
 fn gate_answer(payload: &Value) -> Value {
@@ -177,8 +361,16 @@ mod probe {
         }
 
         // Read provider lanes before any refusal so the answer preserves the
-        // quota evidence that explains a busy fleet.
-        let lanes_result = lanes_answer(&config_cwd, &registry_path, &mut warnings);
+        // quota evidence that explains a busy fleet. The probe reads the
+        // named spawn's own odds: a reservation minted for that name redeems
+        // at the gate, so the readout skips it the same way the gate does.
+        let probe_name = opt_str_of(payload, "name");
+        let lanes_result = lanes_answer(
+            &config_cwd,
+            &registry_path,
+            probe_name.as_deref().filter(|n| !n.is_empty()),
+            &mut warnings,
+        );
         if let Ok(lanes) = &lanes_result {
             out.insert("lanes".into(), lanes.clone());
         }
@@ -676,6 +868,7 @@ fn share_json(reading: &spawn_gate_lanes::ShareReading) -> Value {
 fn lanes_answer(
     config_cwd: &std::path::Path,
     registry_path: &std::path::Path,
+    redeemer: Option<&str>,
     warnings: &mut Vec<String>,
 ) -> Result<Value, spawn_gate_lanes::LaneFault> {
     let home = crate::paths::AgentsHome::from_env();
@@ -736,16 +929,29 @@ fn lanes_answer(
             registry_path,
             &provider,
             &questions_raw,
+            redeemer,
             warnings,
         ) {
-            Ok((live, counted, parked)) => {
+            Ok(reading) => {
                 let mut lane = Map::new();
                 lane.insert("cap".into(), json!(cap));
-                lane.insert("live".into(), json!(live));
-                lane.insert("counted".into(), json!(counted));
+                lane.insert("live".into(), json!(reading.count));
+                lane.insert("counted".into(), json!(reading.counted));
+                lane.insert(
+                    "reserved".into(),
+                    json!(reading
+                        .reserved
+                        .iter()
+                        .map(|(name, exp)| serde_json::json!({
+                            "name": name,
+                            "expires_at": json!(exp),
+                        }))
+                        .collect::<Vec<_>>()),
+                );
                 lane.insert(
                     "parked".into(),
-                    json!(parked
+                    json!(reading
+                        .parked
                         .iter()
                         .map(|(name, qid)| serde_json::json!({
                             "name": name,
@@ -1292,8 +1498,216 @@ mod tests {
         );
         assert!(
             leftovers.is_empty(),
-            "the claims dir holds {:?} after a pid-less refusal",
+            "refusals before the mint write nothing: {:?}",
             leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
+    }
+
+    /// AC3-HP: reserve mints a claim with the reservation metadata, an expiry
+    /// inside the ceiling, and the next lane count one higher; gate-status
+    /// (AC4-HP) names it in the lane row's `reserved` array.
+    #[test]
+    fn reserve_mints_a_claim_with_metadata_and_lane_count() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-resv-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // lanes_answer resolves the agents home; a test run must declare a
+        // hermetic root, never the real $HOME.
+        let agents_home = dir.join("agents-home");
+        std::fs::create_dir_all(&agents_home).unwrap();
+        std::env::set_var(crate::paths::HOME_ENV, &agents_home);
+        let root = dir.join("claims-root");
+        let claims_dir = root.join(".fno").join("claims");
+        std::fs::create_dir_all(&claims_dir).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 999\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let argv: Vec<String> = [
+            "t-reserved-x-4444",
+            "--provider",
+            "zai",
+            "--ttl",
+            "10m",
+            "--reason",
+            "four parked PRs",
+            "--node",
+            "x-4444",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let code = reserve_spawn_gate(&dir, &argv);
+        // AC4-HP: the gate-status lane row names the reservation beside
+        // cap/live/counted/parked.
+        let agents = dir.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let reg = agents.join("registry.json");
+        std::fs::write(&reg, r#"{"schema_version":1,"entries":[]}"#).unwrap();
+        let mut warnings = Vec::new();
+        let lanes = lanes_answer(&dir, &reg, None, &mut warnings).unwrap();
+        assert_eq!(
+            lanes["zai"]["reserved"][0]["name"],
+            json!("t-reserved-x-4444")
+        );
+        assert_eq!(
+            lanes["zai"]["live"],
+            json!(1),
+            "the reservation spends a lane slot in the readout too"
+        );
+        let (state, rec) = crate::claims::status("worker:t-reserved-x-4444", Some(&root));
+        let rec = rec.expect("the minted claim exists");
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        std::env::remove_var(crate::paths::HOME_ENV);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 0);
+        assert_eq!(state, crate::claims::ClaimState::Live);
+        assert_eq!(
+            rec.metadata.get("model_provider").and_then(Value::as_str),
+            Some("zai")
+        );
+        assert!(
+            rec.metadata.get("reserved_by").is_some(),
+            "reserved_by names the caller"
+        );
+        assert_eq!(
+            rec.metadata.get("reserved_reason").and_then(Value::as_str),
+            Some("four parked PRs")
+        );
+        assert_eq!(
+            rec.metadata.get("node").and_then(Value::as_str),
+            Some("x-4444")
+        );
+        assert!(
+            rec.expires_at.unwrap_or(0) > now,
+            "expires_at sits inside the ceiling, past the mint instant"
+        );
+        assert!(
+            rec.expires_at.unwrap_or(0) <= now + RESERVATION_MAX_TTL_MS,
+            "expires_at within the 15m ceiling"
+        );
+    }
+
+    /// AC3-EDGE: a TTL over the ceiling refuses and writes nothing.
+    #[test]
+    fn reserve_refuses_a_ttl_over_the_ceiling_and_writes_nothing() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-resv-ttl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("claims-root");
+        let claims_dir = root.join(".fno").join("claims");
+        std::fs::create_dir_all(&claims_dir).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let argv: Vec<String> = [
+            "t-reserved-x-4444",
+            "--provider",
+            "zai",
+            "--ttl",
+            "4h",
+            "--reason",
+            "too long",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let code = reserve_spawn_gate(&dir, &argv);
+        let leftovers: Vec<_> = std::fs::read_dir(&claims_dir).unwrap().flatten().collect();
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 2);
+        assert!(
+            leftovers.is_empty(),
+            "the ceiling refusal writes no claim: {:?}",
+            leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
+    }
+
+    /// AC3-EDGE: reservations never hold a whole lane. With zai capped at 2
+    /// and one reservation live, a second refuses and writes nothing.
+    #[test]
+    fn reserve_refuses_to_reserve_the_whole_lane() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-resv-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("claims-root");
+        let claims_dir = root.join(".fno").join("claims");
+        std::fs::create_dir_all(&claims_dir).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 999\nmin_free_gb = 0\nmax_swap_pct = 0\n\n\
+             [agents.provider_limits.zai]\nlanes = 2\n",
+        )
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let host = crate::claims::hostname();
+        let first = claims_dir.join(format!(
+            "{}.lock",
+            crate::claims::encode_key("worker:t-first-x-4444")
+        ));
+        std::fs::write(
+            &first,
+            format!(
+                "schema_version: {}\nkey: worker:t-first-x-4444\nholder: king-1\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n  reserved_by: king-1\n",
+                crate::claims::SCHEMA_VERSION,
+                now + 600_000,
+                std::process::id()
+            ),
+        )
+        .unwrap();
+        let argv: Vec<String> = [
+            "t-second-x-4444",
+            "--provider",
+            "zai",
+            "--reason",
+            "one slot must stay winnable",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let code = reserve_spawn_gate(&dir, &argv);
+        let leftovers: Vec<_> = std::fs::read_dir(&claims_dir).unwrap().flatten().collect();
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(code, 2);
+        assert_eq!(
+            leftovers.len(),
+            1,
+            "only the pre-existing fixture claim is on disk; the refused mint wrote nothing"
+        );
+    }
+
+    /// AC4-HP: the usage text names the rule, so the rule cannot drift from
+    /// the behavior it teaches.
+    #[test]
+    fn reserve_usage_names_the_rule() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let code = reserve_spawn_gate(std::path::Path::new("."), &["--help".to_string()]);
+        assert_eq!(code, 0);
+        assert!(crate::spawn_gate_reservations::RESERVATION_RULE.contains("first-come"));
+        assert!(
+            crate::spawn_gate_reservations::RESERVATION_RULE.contains("expires within 15 minutes")
         );
     }
 }
