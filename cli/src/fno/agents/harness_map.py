@@ -1342,13 +1342,13 @@ def resolve_dispatch(
     Full contract: docs/architecture/backlog-graph-verb-contracts.md. Field
     precedence (each independent): harness explicit > stage table >
     ``claude``; substrate explicit > config > per-harness default; command
-    explicit > lifecycle answer > node ``verb`` (allowlist-checked;
+    explicit > lifecycle derivation > node ``verb`` (allowlist-checked;
     a graph field is a trust boundary) > ``config.dispatch.command`` >
-    per-harness builtin. ``lifecycle`` is the ported verb decision (the
-    backlog_ready.rs table) as ``(verb, note)``; the verb runs BEFORE the
-    stage-table read so ``agents.profiles.<resolved-verb>`` drives the harness.
-    ``brief``
-    rides ``env['TARGET_BRIEF']`` only, capped
+    per-harness builtin. ``lifecycle`` is the ported verb decision, (verb,
+    note) from the backlog_ready.rs table; it runs BEFORE the
+    stage-table read so ``agents.profiles.<derived-verb>`` drives the harness;
+    an explicit command bypasses it (reconcile and the other explicit doors
+    spell their own verb). ``brief`` rides ``env['TARGET_BRIEF']`` only, capped
     at 8 KB, never truncated. ``route`` is the stage table's vendor lane beside
     the harness ("" when unset), returned so a caller forwarding the harness
     can forward the vendor too. ``trigger`` is autonomous or attended (pane

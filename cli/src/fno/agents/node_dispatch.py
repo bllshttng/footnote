@@ -115,15 +115,15 @@ def resolve_node_spawn(
     verb_source = (
         "declared" if str(node.get("dispatch_verb") or "").strip() else "none-declared"
     )
-    # The ported lifecycle answer (verb, note); reconcile bypasses it.
-    lifecycle = None if is_reconcile else _verb_answer(node)
-    effective_verb = lifecycle[0] if lifecycle else None
-    # The row's own declaration is the last fallback for the name code and
-    # the receipt: the table abstains on an out-of-family verb.
-    declared_verb = (
-        str(node.get("dispatch_verb") or "").strip() if isinstance(node, dict) else ""
-    )
-    # the verb code resolves (and refuses) BEFORE the resolver.
+    declared_verb = str(node.get("dispatch_verb") or "").strip()
+    # the effective workflow verb. Reconcile bypasses (its explicit
+    # command spells the de-stub pass).
+    lifecycle = None
+    effective_verb: Optional[str] = None
+    if not is_reconcile:
+        lifecycle = _verb_answer(node)
+        effective_verb = lifecycle[0]
+    # x-aaaa: the verb code resolves (and refuses) BEFORE the resolver.
     verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb)
     # A node's own raw pin is a sanctioned source (route_resolve reads the same
     # field), so fold it in before the grid consult: the gate below must see
@@ -224,8 +224,6 @@ def resolve_node_spawn(
                 resolve_kwargs["command"]
             )
     else:
-        # The decision rides in; the row's declaration rides the allowlist-
-        # checked verb rung when the table abstains (declared precedence).
         if isinstance(node, dict):
             resolve_kwargs["lifecycle"] = lifecycle
             resolve_kwargs["verb"] = node_verb or declared_verb or None
@@ -431,8 +429,7 @@ def _verb_answer(row: Optional[dict], *, node_id: Optional[str] = None) -> tuple
     from fno.agents.harness_map import DispatchResolveError
     from fno.graph.store import GRAPH_JSON, _client_for
 
-    payload = dict(row or {})
-    payload.setdefault("id", node_id)
+    payload = dict(row or {}, id=(row or {}).get("id") or node_id)
     try:
         answer = _client_for(GRAPH_JSON).request(
             "effective_verb", {"entries": [payload]}
