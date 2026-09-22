@@ -361,8 +361,16 @@ mod probe {
         }
 
         // Read provider lanes before any refusal so the answer preserves the
-        // quota evidence that explains a busy fleet.
-        let lanes_result = lanes_answer(&config_cwd, &registry_path, &mut warnings);
+        // quota evidence that explains a busy fleet. The probe reads the
+        // named spawn's own odds: a reservation minted for that name redeems
+        // at the gate, so the readout skips it the same way the gate does.
+        let probe_name = opt_str_of(payload, "name");
+        let lanes_result = lanes_answer(
+            &config_cwd,
+            &registry_path,
+            probe_name.as_deref().filter(|n| !n.is_empty()),
+            &mut warnings,
+        );
         if let Ok(lanes) = &lanes_result {
             out.insert("lanes".into(), lanes.clone());
         }
@@ -860,6 +868,7 @@ fn share_json(reading: &spawn_gate_lanes::ShareReading) -> Value {
 fn lanes_answer(
     config_cwd: &std::path::Path,
     registry_path: &std::path::Path,
+    redeemer: Option<&str>,
     warnings: &mut Vec<String>,
 ) -> Result<Value, spawn_gate_lanes::LaneFault> {
     let home = crate::paths::AgentsHome::from_env();
@@ -920,7 +929,7 @@ fn lanes_answer(
             registry_path,
             &provider,
             &questions_raw,
-            None,
+            redeemer,
             warnings,
         ) {
             Ok(reading) => {
@@ -1541,7 +1550,7 @@ mod tests {
         let reg = agents.join("registry.json");
         std::fs::write(&reg, r#"{"schema_version":1,"entries":[]}"#).unwrap();
         let mut warnings = Vec::new();
-        let lanes = lanes_answer(&dir, &reg, &mut warnings).unwrap();
+        let lanes = lanes_answer(&dir, &reg, None, &mut warnings).unwrap();
         assert_eq!(
             lanes["zai"]["reserved"][0]["name"],
             json!("t-reserved-x-4444")
