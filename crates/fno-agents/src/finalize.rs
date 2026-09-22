@@ -3078,8 +3078,11 @@ fn assistant_text_blocks(val: &Value) -> String {
 }
 
 /// Best-effort: append a pointer line to `~/.fno/corrections.log` so the
-/// autocorrect monthly review picks the postmortem up. Only writes when the log
-/// already exists (the autocorrect feature creates it) - never creates it.
+/// autocorrect monthly review picks the postmortem up. Creates the log when
+/// absent (mode 0600): both launchd jobs were live while the file never
+/// existed, so every pointer before 2026-09 was dropped on "autocorrect not
+/// enabled here" - the writer starved its own reader. An existing file keeps
+/// its mode; `corrections-log-init.sh` stays the manual creator.
 /// Format mirrors the pre-wedge generator:
 /// `{ts} | S1 | target-postmortem | {path} | {reason}: {detail_truncated}`.
 ///
@@ -3087,30 +3090,59 @@ fn assistant_text_blocks(val: &Value) -> String {
 /// 2). Resolution order mirrors scripts/lib/corrections-lock.sh's
 /// corrections_log_path(): POSTMORTEM_CORRECTIONS_LOG override, then
 /// FNO_HOME, then home-relative default.
-fn append_corrections_pointer(home: Option<&Path>, postmortem: &Path, reason: &str, detail: &str) {
-    let log = match std::env::var_os("POSTMORTEM_CORRECTIONS_LOG") {
-        Some(p) => PathBuf::from(p),
+/// The corrections.log path, the ONE resolution for the finalize writer and
+/// the corrections-verify reader alike: POSTMORTEM_CORRECTIONS_LOG override,
+/// then FNO_HOME, then home-relative default. None when no home resolves
+/// (mirrors scripts/lib/corrections-lock.sh corrections_log_path()).
+pub(crate) fn corrections_log_path(home: Option<&Path>) -> Option<PathBuf> {
+    match std::env::var_os("POSTMORTEM_CORRECTIONS_LOG") {
+        Some(p) => Some(PathBuf::from(p)),
         None => match std::env::var_os("FNO_HOME") {
-            Some(p) => PathBuf::from(p).join("corrections.log"),
-            None => match home {
-                Some(h) => h.join(".fno/corrections.log"),
-                None => return,
-            },
+            Some(p) => Some(PathBuf::from(p).join("corrections.log")),
+            None => home.map(|h| h.join(".fno/corrections.log")),
         },
-    };
-    if !log.is_file() {
-        return; // autocorrect not enabled here; nothing to feed
     }
+}
+
+/// The state root that holds the loop journals (events.jsonl sits directly
+/// under it): FNO_HOME override, then home-relative `.fno`. None when no
+/// home resolves.
+pub(crate) fn loop_state_root(home: Option<&Path>) -> Option<PathBuf> {
+    std::env::var_os("FNO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.map(|h| h.join(".fno")))
+}
+
+fn append_corrections_pointer(home: Option<&Path>, postmortem: &Path, reason: &str, detail: &str) {
+    let log = match corrections_log_path(home) {
+        Some(p) => p,
+        None => return,
+    };
     // Fixture guard: a postmortem outside the postmortems root of
     // the home this log resolved through is a unit-test temp dir that fell
     // through the ladder - 360 of 418 live rows. Refuse at the one writer
     // rather than filtering in every reader. The FNO_HOME read stays HERE
     // (one carrier of the ladder, per the reachable-paths twin baseline);
-    // the predicate itself reads no environment.
+    // the predicate itself reads no environment. It gates BEFORE creation:
+    // a refused row must not materialize an empty log either.
     let fno_home = std::env::var_os("FNO_HOME").map(PathBuf::from);
     let pm_root = crate::real_session::postmortems_root_for_home(fno_home.as_deref(), home);
     if !crate::real_session::is_real_run(pm_root.as_deref(), postmortem) {
         return;
+    }
+    if !log.is_file() {
+        // Create at 0600 rather than drop the row. create_new keeps the
+        // mode decision on the creator: an existing file (or a losing
+        // race) never has its mode touched.
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Some(parent) = log.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::OpenOptions::new()
+            .append(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&log);
     }
     let detail_trunc: String = detail.replace(['\n', '\r'], " ").chars().take(80).collect();
     let detail_trunc = if detail_trunc.trim().is_empty() {
@@ -3130,6 +3162,10 @@ fn append_corrections_pointer(home: Option<&Path>, postmortem: &Path, reason: &s
 }
 
 // ── unit tests (process-free) ────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "finalize_pointer_tests.rs"]
+mod finalize_pointer_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4201,37 +4237,6 @@ mod tests {
 
         let contents = fs::read_to_string(&log_path).unwrap();
         assert!(contents.contains("target-postmortem"), "{contents}");
-        let _ = fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn corrections_pointer_refuses_temp_dir_postmortem() {
-        // AC1-EDGE: the 360-fixture-row shape. A postmortem under a per-test
-        // temp dir with the log resolved through a real home appends NOTHING;
-        // the log must be byte-identical afterwards. Uses a sibling of the
-        // accepted root, not a /tmp name match (AC1-ERR).
-        let _guard = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let fno_home = std::env::temp_dir().join(format!("fin-corr-fx-{}", std::process::id()));
-        let home = std::env::temp_dir().join(format!("fin-corr-fxh-{}", std::process::id()));
-        let _ = fs::create_dir_all(&fno_home);
-        let _ = fs::create_dir_all(&home);
-        let log_path = fno_home.join("corrections.log");
-        fs::write(&log_path, "").unwrap();
-        let fixture_pm = fno_home.join("pm-sibling-not-postmortems").join("pm.md");
-
-        std::env::remove_var("POSTMORTEM_CORRECTIONS_LOG");
-        std::env::set_var("FNO_HOME", &fno_home);
-        append_corrections_pointer(Some(&home), &fixture_pm, "NoProgress", "d");
-        std::env::remove_var("FNO_HOME");
-
-        let contents = fs::read_to_string(&log_path).unwrap();
-        assert!(
-            contents.is_empty(),
-            "fixture postmortem must not append: {contents}"
-        );
-        let _ = fs::remove_dir_all(&fno_home);
         let _ = fs::remove_dir_all(&home);
     }
 

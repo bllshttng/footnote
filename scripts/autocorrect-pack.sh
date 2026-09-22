@@ -293,6 +293,18 @@ PY
 fi
 
 # -------------------------------------------------------------------
+# Verify block: score the window's applied corrections against the
+# friction they targeted (crates/fno-agents corrections_verify.rs).
+# -------------------------------------------------------------------
+AGENTS_BIN="${FNO_AGENTS_BIN:-$(command -v fno-agents 2>/dev/null || true)}"
+VERIFY_BLOCK="$TMPDIR_PACK/verify.txt"
+: > "$VERIFY_BLOCK"
+VERIFY_STATUS=unavailable
+if [[ -n "$AGENTS_BIN" ]] && "$AGENTS_BIN" corrections-verify --markdown --since "${WINDOW_DAYS}d" > "$VERIFY_BLOCK" 2>/dev/null; then
+  VERIFY_STATUS=ok
+fi
+
+# -------------------------------------------------------------------
 # Emit yaml.
 # -------------------------------------------------------------------
 emit() {
@@ -367,6 +379,13 @@ OUTPUT="$TMPDIR_PACK/packet.yaml"
     done < "$UNIQ_IMPLICATED"
   else
     emit "  []"
+  fi
+  emit ""
+  emit "verify: |"
+  if [[ "$VERIFY_STATUS" == "ok" ]]; then
+    sed 's/^/  /' "$VERIFY_BLOCK"
+  else
+    emit "  unavailable  # fno-agents corrections-verify did not run"
   fi
   emit ""
   emit "watermark:"

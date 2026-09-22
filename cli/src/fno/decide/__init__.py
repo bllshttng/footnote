@@ -495,10 +495,11 @@ def record_decision(
 ) -> dict[str, Any]:
     """Append the event, then project it onto the subject node.
 
-    Returns ``{"decision_id", "event", "node_id"}`` where ``node_id`` is None
-    when the subject names no graph node (a file or an area): the durable event
-    still lands, because a record that only exists when the subject resolves is
-    a record the operator cannot rely on.
+    Returns ``{"decision_id", "event", "node_id", "projection"}``. ``node_id``
+    is None when no node took the ruling and ``projection`` says why (an
+    unresolvable subject, an external tracker, an unreadable store, a refused
+    write): the durable event still lands, because a record that only exists
+    when the subject resolves is a record the operator cannot rely on.
 
     An index write that fails is not a success, so it raises
     :class:`IndexWriteError`. That error carries the decision_id, because by
@@ -627,15 +628,16 @@ def record_decision(
     # recall, the graph projection is the node view.
     try:
         graph_api.decision_record(event, path=paths.graph_json())
-    except (Exception, SystemExit):  # noqa: BLE001 - graph is a projection
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - graph is a projection
         # The project journal and compatibility index already hold the ruling.
         # A corrupt or unavailable graph must degrade to that durable capture,
         # matching the old JSONL-to-node projection path below.
         _graph_entries()
-        node_id = None
+        node_id, why = None, f"the graph store refused the ruling ({exc!r})"
+        print(f"decide: recorded {decision_id}, but {why}.", file=sys.stderr)
     else:
         try:
-            node_id = _project(event)
+            node_id, why = _project(event)
         except (Exception, SystemExit) as exc:  # noqa: BLE001
             # The projection is the node VIEW, the third of three writes. Both
             # durable stores already hold the decision, so failing the command here
@@ -648,8 +650,8 @@ def record_decision(
                 f"`fno backlog decisions`; the subject node just does not show it.",
                 file=sys.stderr,
             )
-            node_id = None
-    return {"decision_id": decision_id, "event": event, "node_id": node_id}
+            node_id, why = None, f"the graph projection failed ({exc!r})"
+    return {"decision_id": decision_id, "event": event, "node_id": node_id, "projection": why}
 
 
 def _decision_row_by_id(decision_id: str) -> dict[str, Any] | None:
@@ -719,8 +721,10 @@ def retract_decision(
     return {"decision_id": str(target["decision_id"]), "event": event}
 
 
-def _project(event: dict[str, Any]) -> str | None:
+def _project(event: dict[str, Any]) -> tuple[str | None, str]:
     """Write the decision onto the subject node's ``decisions`` list.
+
+    Returns the node id and ``""``, or None and the reason no node took it.
 
     Runs inside the locked mutate cycle, with the subject resolved under the
     lock, so two concurrent decides on one node serialize. Supersession marks
@@ -733,7 +737,7 @@ def _project(event: dict[str, Any]) -> str | None:
     data = event["data"]
     subject = data.get("subject")
     if not subject:
-        return None
+        return None, "the ruling names no subject"
 
     # Pre-check on the unlocked read so an unresolvable subject (a file, an
     # area) does not pay for a full graph rewrite that changes nothing. The
@@ -746,9 +750,9 @@ def _project(event: dict[str, Any]) -> str | None:
     try:
         precheck_entries = read_entries("decide")
     except ExternalMetadataUnavailable:
-        return None
-    except Exception:  # noqa: BLE001 - the store refusing to serve IS unreadable
-        precheck_entries = []
+        return None, "the active tracker is external, so no graph node holds rulings"
+    except Exception as exc:  # noqa: BLE001 - the store refusing to serve IS unreadable
+        return None, f"the graph could not be read ({exc!r})"
     if resolve_node(subject, precheck_entries).kind != "exact":
         # read_entries swallows a corrupt default graph to [], which resolves
         # the same as a genuinely unmatched subject. On the default backend,
@@ -760,7 +764,8 @@ def _project(event: dict[str, Any]) -> str | None:
 
             if active_backend_name() == "graph":
                 _graph_entries()
-        return None
+            return None, "the graph read back no nodes"
+        return None, f"subject {subject!r} names no graph node"
 
     matched: list[str] = []
 
@@ -789,7 +794,7 @@ def _project(event: dict[str, Any]) -> str | None:
         return entries
 
     graph_store.locked_mutate_graph(graph_store.GRAPH_JSON, mutator)
-    return matched[0] if matched else None
+    return (matched[0], "") if matched else (None, "the node left the graph under the write lock")
 
 
 def _read_index(path: "Path | None" = None, *, warn: bool = True) -> "tuple[list[dict], int]":

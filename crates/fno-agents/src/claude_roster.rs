@@ -508,6 +508,21 @@ pub fn read_all_agents_union() -> ClaudeAgentsSnapshot {
 /// who run Claude with a non-default home). When unset, `$HOME/.claude/daemon`.
 pub const DAEMON_DIR_ENV: &str = "FNO_CLAUDE_DAEMON_DIR";
 
+/// The Claude Code config root (`$HOME/.claude`): the rule-file git repo the
+/// corrections post-commit hook watches. `CLAUDE_DIR_OVERRIDE` mirrors the
+/// bash-side override (scripts/autocorrect-pack.sh) so tests and alt-home
+/// setups redirect the whole tree. Read-only consumers; footnote stores no
+/// state there.
+pub fn config_dir() -> PathBuf {
+    if let Some(v) = std::env::var_os("CLAUDE_DIR_OVERRIDE") {
+        return PathBuf::from(v);
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".claude")
+}
+
 /// Resolve the Claude daemon directory (`<home>/.claude/daemon`). Honors
 /// [`DAEMON_DIR_ENV`] first so tests and alt-home setups redirect the whole tree.
 pub fn daemon_dir() -> PathBuf {
