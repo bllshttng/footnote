@@ -140,14 +140,11 @@ fn main() {
     // Transport-only early dispatches, before the runtime builds: every arm
     // in `run` is a client verb the verb-surface ratchet enumerates against
     // ALL_CLIENT_ACTIONS, and the shrink law (d-fe66560a) bars adding one, so
-    // these arms register no verb and no advertised spelling exists. Callers
-    // reach them through resolve_binary or the hook wrappers; each module's
-    // own doc carries the shape it answers.
+    // these arms register no verb. Callers reach them via resolve_binary; each
+    // module's doc carries the shape it answers.
     if args.first().map(String::as_str) == Some("backlog-update") {
         std::process::exit(fno_agents::backlog::patch::run_update(&args[1..]));
     }
-    // question_intake: the `fno inbox outstanding ask` port. Transport-only
-    // like its siblings (the shrink law registers no verb).
     if args.first().map(String::as_str) == Some("question-intake") {
         std::process::exit(fno_agents::question_intake::run_question_intake());
     }

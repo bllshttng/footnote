@@ -97,5 +97,7 @@ fn answer_ack_matches_and_names_the_answer() {
     .unwrap();
     assert_eq!(row["outcome"], "answer:use the narrow reading");
     assert_eq!(row["ref"], "use the narrow reading");
+    // No Python oracle exists for answer (the old leg refused it): the
+    // frozen file pins the new contract from its first run.
     assert_golden("user_ack", "answer_ack", &golden_of(&dir, "s"), None);
 }

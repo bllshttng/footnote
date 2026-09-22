@@ -52,26 +52,27 @@ pub struct IntakeRequest {
     /// `questions_path(home)` when absent.
     #[serde(default)]
     pub index_path: Option<PathBuf>,
+    /// The user's stated name, interpolated into the law-refusal line.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// `fno inbox outstanding`'s render cap, for the does-not-render line.
+    #[serde(default)]
+    pub render_cap: Option<usize>,
 }
 
 #[derive(Serialize)]
 pub struct IntakeAnswer {
     pub exit_code: i32,
+    /// The stderr lines, in print order: the shim echoes them verbatim.
+    pub lines: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qid: Option<String>,
     /// `law` | `node_pointer` | `dedup` | `write` | `index`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
-    /// The raw law verdict; the shim renders its lines verbatim.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub law_answer: Option<crate::law_match::AskAnswer>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub open_id: Option<String>,
     pub truncated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub write_error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub index_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -82,13 +83,11 @@ impl IntakeAnswer {
     fn exit(code: i32) -> Self {
         IntakeAnswer {
             exit_code: code,
+            lines: Vec::new(),
             qid: None,
             refusal: None,
-            law_answer: None,
             open_id: None,
             truncated: false,
-            write_error: None,
-            index_error: None,
             position: None,
             total: None,
         }
@@ -244,6 +243,21 @@ fn mint_id() -> String {
 }
 
 pub fn run_intake(req: &IntakeRequest, home: &AgentsHome) -> IntakeAnswer {
+    // The user's name for the refusal line, and the render cap for the
+    // receipt; both absent read as the plain shapes.
+    let who = req.display_name.as_deref().unwrap_or("the user");
+    let render_cap = req.render_cap.unwrap_or(10);
+
+    let truncated = req.question.chars().count() > QUESTION_CAP;
+    let mut answer = IntakeAnswer::exit(0);
+    if truncated {
+        answer.truncated = true;
+        answer.lines.push(format!(
+            "outstanding: recorded truncated: the question is {} characters, the event stores {QUESTION_CAP}.",
+            req.question.chars().count()
+        ));
+    }
+
     // The law refusal first: a live law on this subject means the question
     // is never recorded (fail-closed, d-0fa92eb9).
     let law_verdict = crate::law_match::ask_answer(&crate::law_match::AskRequest {
@@ -253,11 +267,25 @@ pub fn run_intake(req: &IntakeRequest, home: &AgentsHome) -> IntakeAnswer {
         laws: req.laws.clone(),
     });
     if !law_verdict.exact.is_empty() || law_verdict.nearby_refusal.is_some() {
-        return IntakeAnswer {
-            refusal: Some("law".to_string()),
-            law_answer: Some(law_verdict),
-            ..IntakeAnswer::exit(2)
-        };
+        for hit in &law_verdict.exact {
+            let mut line = format!(
+                "outstanding: refused: live law already rules on '{}' ({}). Read it: \
+fno inbox decisions {} --lane law --state live. Act on the law; do not ask {who}.",
+                hit.subject,
+                hit.ids.join(", "),
+                hit.subject
+            );
+            if req.subject.is_none() {
+                line += " If the question is about another subject, name it with --subject.";
+            }
+            answer.lines.push(line);
+        }
+        if let Some(refusal) = law_verdict.nearby_refusal {
+            answer.lines.push(refusal);
+        }
+        answer.refusal = Some("law".to_string());
+        answer.exit_code = 2;
+        return answer;
     }
 
     let parsed = crate::escalation::parse(&req.question);
@@ -269,10 +297,14 @@ pub fn run_intake(req: &IntakeRequest, home: &AgentsHome) -> IntakeAnswer {
     // Node-pointer rule: a question with choices names its node.
     let node = req.node.as_deref().map(str::trim).filter(|n| !n.is_empty());
     if has_options && node.is_none() {
-        return IntakeAnswer {
-            refusal: Some("node_pointer".to_string()),
-            ..IntakeAnswer::exit(2)
-        };
+        answer.lines.push(
+            "outstanding: refused: a question with options names its node (--node). \
+One line plus a node pointer (law d-59af3235)."
+                .to_string(),
+        );
+        answer.refusal = Some("node_pointer".to_string());
+        answer.exit_code = 2;
+        return answer;
     }
 
     // Dedup: an open question on the same subject and node already waits.
@@ -290,15 +322,18 @@ pub fn run_intake(req: &IntakeRequest, home: &AgentsHome) -> IntakeAnswer {
             row.subject.as_deref().map(str::trim) == Some(s) && row.node.as_deref() == Some(n)
         });
         if let Some(row) = dup {
-            return IntakeAnswer {
-                refusal: Some("dedup".to_string()),
-                open_id: Some(row.id),
-                ..IntakeAnswer::exit(2)
-            };
+            answer.lines.push(format!(
+                "outstanding: refused: an open question on subject '{s}' and node '{n}' \
+already waits ({}). Answer it or clear it; do not ask twice.",
+                row.id
+            ));
+            answer.refusal = Some("dedup".to_string());
+            answer.open_id = Some(row.id);
+            answer.exit_code = 2;
+            return answer;
         }
     }
 
-    let truncated = req.question.chars().count() > QUESTION_CAP;
     let stored_question: String = if from_file {
         title_of(&req.question, &parsed.title)
     } else if truncated {
@@ -385,11 +420,12 @@ pub fn run_intake(req: &IntakeRequest, home: &AgentsHome) -> IntakeAnswer {
         "target",
     );
     if let Err(e) = journal.emit("operator_question", &Value::Object(data.clone())) {
-        return IntakeAnswer {
-            refusal: Some("write".to_string()),
-            write_error: Some(format!("failed to append question to project journal: {e}")),
-            ..IntakeAnswer::exit(1)
-        };
+        answer.lines.push(format!(
+            "outstanding: failed to record question: failed to append question to project journal: {e}"
+        ));
+        answer.refusal = Some("write".to_string());
+        answer.exit_code = 1;
+        return answer;
     }
 
     // Machine-wide recall index: best-effort, reported.
@@ -400,16 +436,43 @@ pub fn run_intake(req: &IntakeRequest, home: &AgentsHome) -> IntakeAnswer {
         "data": Value::Object(data),
     });
     let index_error = write_index_row(&index, &event).err();
-
-    let (position, total) = receipt_position(&index, &qid);
-    IntakeAnswer {
-        qid: Some(qid),
-        truncated,
-        index_error,
-        position,
-        total,
-        ..IntakeAnswer::exit(if index_error.is_some() { 1 } else { 0 })
+    if let Some(e) = index_error {
+        answer.lines.push(format!(
+            "outstanding: recorded {qid} in the project journal, but the recall index \
+write failed: {e}. Run `fno inbox outstanding reindex`; do not retry ask, which \
+would mint a second id for the same question."
+        ));
+        answer.qid = Some(qid);
+        answer.exit_code = 1;
+        return answer;
     }
+
+    answer.lines.push(format!(
+        "outstanding: recorded {qid}. Clear it once answered: \
+fno inbox outstanding clear {qid} --answer \"...\""
+    ));
+    let (position, total) = receipt_position(&index, &qid);
+    answer.position = position;
+    answer.total = total;
+    match position {
+        None => answer.lines.push(
+            "outstanding: recorded, but its render position could not be read; \
+run fno inbox outstanding to check."
+                .to_string(),
+        ),
+        Some(p) if p <= render_cap => {
+            answer.lines.push(format!(
+                "outstanding: {qid} renders at position {p} of {total}."
+            ));
+        }
+        Some(p) => answer.lines.push(format!(
+            "outstanding: {qid} does NOT render: position {p} of {total}, and \
+fno inbox outstanding prints {render_cap}. Nothing will show it to the operator; \
+raise it another way or answer it yourself."
+        )),
+    }
+    answer.qid = Some(qid);
+    answer
 }
 
 fn write_index_row(index: &Path, event: &Value) -> Result<(), String> {

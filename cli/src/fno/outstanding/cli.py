@@ -154,13 +154,8 @@ def report(
 
 
 def _law_rows() -> "list[dict]":
-    """Live law-lane rows the Rust intake matches against. This side keeps
-    only the decision-lifecycle read: `list_decisions` owns live-row state,
-    and the verb takes rows, not a filesystem. Losing the lookup is worse
-    than one unneeded ask, so a read failure lands as empty rows (the arm
-    records instead of refusing; d-0fa92eb9, q-8a3bf752: no agent asks a
-    question the operator already settled).
-    """
+    """Live law rows the Rust intake matches against (d-0fa92eb9, q-8a3bf752:
+    no agent asks a question the operator already settled)."""
     from fno.decide import list_decisions
 
     _, rows, _damaged = list_decisions(None, limit=None, lane="law", state="live")
@@ -201,10 +196,11 @@ def ask(
     The capture is the point: `session_truth` classifies from the transcript
     tail, so an unrecorded question stops existing the moment another turn
     lands. The leg is the Rust `question-intake` transport; this side keeps
-    identity resolution, the law-row read and the user-facing words.
+    identity resolution, the law-row read, and the flag surface.
     """
     from fno.claims.self_identity import resolve_self_identity
     from fno.harness_identity import canonical_handle
+    from fno.outstanding.core import QUESTION_RENDER_CAP
     from fno.paths import questions_jsonl
     from fno.rust_binary import verb_call
     from fno.text_or_file import read_text_arg
@@ -225,119 +221,36 @@ def ask(
             err=True,
         )
         laws = []
-    try:
-        answer = verb_call(
-            "question-intake",
-            {
-                "question": question,
-                "ask": ask,
-                "options": option,
-                "blocks": blocks,
-                "node": node,
-                "subject": subject,
-                "session_id": _session_id(),
-                "cwd": str(Path.cwd()),
-                "asker": canonical_handle(ident.session_id)
-                if ident.session_id and ident.harness
-                else None,
-                "laws": laws,
-                "storage_root": str(_storage_root()),
-                # The caller's resolved index: the sandbox stays the single
-                # path authority under test.
-                "index_path": str(questions_jsonl()),
-            },
-        )
-    except Exception as exc:  # noqa: BLE001 - a failed capture is never a silent success
-        typer.echo(f"outstanding: failed to record question: {exc}", err=True)
-        raise typer.Exit(1)
-
-    if answer.get("truncated"):
-        typer.echo(
-            f"outstanding: recorded truncated: the question is {len(question)} "
-            "characters, the event stores 2000.",
-            err=True,
-        )
-    if answer.get("refusal") == "law":
-        for hit in answer.get("law_answer", {}).get("exact") or []:
-            key = hit["subject"]
-            ids = hit["ids"]
-            line = (
-                f"outstanding: refused: live law already rules on '{key}' "
-                f"({', '.join(ids)}). Read it: fno inbox decisions {key} "
-                f"--lane law --state live. Act on the law; do not ask {display_name()}."
-            )
-            if not subject:
-                line += " If the question is about another subject, name it with --subject."
-            typer.echo(line, err=True)
-        refusal = answer.get("law_answer", {}).get("nearby_refusal")
-        if refusal:
-            typer.echo(refusal, err=True)
-        raise typer.Exit(2)
-    if answer.get("refusal") == "node_pointer":
-        typer.echo(
-            "outstanding: refused: a question with options names its node "
-            "(--node). One line plus a node pointer (law d-59af3235).",
-            err=True,
-        )
-        raise typer.Exit(2)
-    if answer.get("refusal") == "dedup":
-        typer.echo(
-            f"outstanding: refused: an open question on subject '{subject}' and "
-            f"node '{node}' already waits ({answer.get('open_id')}). Answer it or "
-            "clear it; do not ask twice.",
-            err=True,
-        )
-        raise typer.Exit(2)
-    if answer.get("write_error"):
-        typer.echo(
-            f"outstanding: failed to record question: {answer['write_error']}",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    qid = answer["qid"]
-    if answer.get("index_error"):
-        typer.echo(
-            f"outstanding: recorded {qid} in the project journal, "
-            f"but the recall index write failed: {answer['index_error']}. Run "
-            "`fno inbox outstanding reindex`; do not retry ask, which would mint a "
-            "second id for the same question.",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    typer.echo(
-        f"outstanding: recorded {qid}. Clear it once answered: "
-        f'fno inbox outstanding clear {qid} --answer "..."',
-        err=True,
+    answer = verb_call(
+        "question-intake",
+        {
+            "question": question,
+            "ask": ask,
+            "options": option,
+            "blocks": blocks,
+            "node": node,
+            "subject": subject,
+            "session_id": _session_id(),
+            "cwd": str(Path.cwd()),
+            "asker": canonical_handle(ident.session_id)
+            if ident.session_id and ident.harness
+            else None,
+            "laws": laws,
+            "storage_root": str(_storage_root()),
+            # The caller's resolved index: the sandbox stays the single path
+            # authority under test.
+            "index_path": str(questions_jsonl()),
+            "display_name": display_name(),
+            "render_cap": QUESTION_RENDER_CAP,
+        },
     )
-    # A receipt that names an id but says nothing about visibility is the shape
-    # that made two fleet blockers invisible (q-90982503, q-e6dc2881): the
-    # queue prints QUESTION_RENDER_CAP rows, so say where this one lands. The
-    # Rust ranking folds with no liveness probe, the same zero-budget read the
-    # Python leg made.
-    position = answer.get("position")
-    total = answer.get("total")
-    if position is None:
-        typer.echo(
-            "outstanding: recorded, but its render position could not be read; "
-            "run fno inbox outstanding to check.",
-            err=True,
-        )
-    elif position <= 10:
-        typer.echo(
-            f"outstanding: {qid} renders at position {position} of {total}.",
-            err=True,
-        )
-    else:
-        typer.echo(
-            f"outstanding: {qid} does NOT render: position {position} of {total}, "
-            "and fno inbox outstanding prints 10. Nothing will "
-            "show it to the operator; raise it another way or answer it yourself.",
-            err=True,
-        )
-    # stdout carries the value: the new question id.
-    typer.echo(qid)
+    # Every human word rides the answer's lines, composed Rust-side; the shim
+    # prints them, puts the id on stdout, and carries the exit code.
+    for line in answer.get("lines") or ():
+        typer.echo(line, err=True)
+    if (code := answer.get("exit_code")) and code != 0:
+        raise typer.Exit(code)
+    typer.echo(answer["qid"])
 
 
 @outstanding_app.command("clear")

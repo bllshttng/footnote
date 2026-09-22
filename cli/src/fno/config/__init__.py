@@ -3924,14 +3924,10 @@ class ConfigBlock(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _lift_legacy_reach_me(cls, data: object) -> object:
-        """``[[reach_me]]`` is the retired name of ``[[attention]]``; it reads
-        for one release, and loading it warns and names the new key."""
-        if not isinstance(data, dict) or "reach_me" not in data:
-            return data
-        if data.get("attention") is None:
+        """``[[reach_me]]`` is the retired ``[[attention]]``; it reads for one release."""
+        if isinstance(data, dict) and data.get("attention") is None and "reach_me" in data:
             _LOG.warning(
-                "config key [[reach_me]] is now [[attention]]; rename it "
-                "(the old name reads for one release)"
+                "config key [[reach_me]] is now [[attention]]; rename it (the old name reads for one release)"
             )
             data["attention"] = data.pop("reach_me")
         return data
