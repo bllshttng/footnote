@@ -33,9 +33,8 @@ use crate::bounded_cmd::output_with_timeout;
 /// night were that read, three of them live.
 pub(crate) const SETUP_WINDOW_SECS: u64 = 1800;
 
-/// The done-node grace: a tree younger than 48 hours stays, whatever its
-/// node reads. The crown's hand pass kept every tree under two days.
-pub(crate) const DONE_GRACE_SECS: u64 = 48 * 3600;
+/// A finished node's tree is removable within 30 minutes of its merge.
+pub(crate) const DONE_GRACE_SECS: u64 = 30 * 60;
 
 /// Per-subprocess budget, matching the Python gate's remove bound.
 const GIT_TIMEOUT_SECS: u64 = 30;
@@ -531,12 +530,11 @@ fn done_node_arm(
                 return Verdict::block("claim-live", format!("node:{id} holds a live claim"));
             }
         }
-        // The grace window on the NODE path: a tree younger than 48 hours
-        // stays whatever its node reads (the crown kept every tree under two
-        // days). An unreadable mtime reads as young.
+        // The grace window on the NODE path: a tree younger than 30 minutes
+        // stays whatever its node reads. An unreadable mtime reads as young.
         match git_file_age_secs(target) {
             Some(age) if age >= DONE_GRACE_SECS => {}
-            _ => return Verdict::block("done-grace", "tree is younger than the 48h grace"),
+            _ => return Verdict::block("done-grace", "tree is younger than the 30m grace"),
         }
         evidence = format!("node:{}", ids.join(","));
     } else if branch_merged(&target.to_string_lossy()) == Some(true) {
@@ -552,7 +550,7 @@ fn done_node_arm(
         // by the caller first. The grace window protects the fresh ones.
         match git_file_age_secs(target) {
             Some(age) if age >= DONE_GRACE_SECS => {}
-            _ => return Verdict::block("done-grace", "tree is younger than the 48h grace"),
+            _ => return Verdict::block("done-grace", "tree is younger than the 30m grace"),
         }
         evidence = "merged".to_string();
     } else {
@@ -1536,7 +1534,7 @@ mod tests {
     fn a_younger_tree_reads_done_grace() {
         let tmp = tempfile::tempdir().unwrap();
         let wt = done_node_fixture(tmp.path(), "x-abc123");
-        backdate(&wt, 47 * 3600);
+        backdate(&wt, 20 * 60);
         let fakes = FakeReaders {
             rows: vec![value_row("x-abc123", "done")],
             claims: vec![],
@@ -1546,6 +1544,22 @@ mod tests {
 
         assert!(!v.reapable);
         assert_eq!(v.reason, "done-grace");
+    }
+
+    #[test]
+    fn a_31_minute_tree_reads_done_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = done_node_fixture(tmp.path(), "x-abc123");
+        backdate(&wt, 31 * 60);
+        let fakes = FakeReaders {
+            rows: vec![value_row("x-abc123", "done")],
+            claims: vec![],
+        };
+
+        let v = fakes.reap(wt.to_str().unwrap(), true);
+
+        assert!(v.reapable, "line was: {}", v.line());
+        assert_eq!(v.reason, "done-node");
     }
 
     #[test]

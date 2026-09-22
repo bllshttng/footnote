@@ -50,7 +50,6 @@ from fno._subprocess_util import fno_py_cmd
 from fno.agents.naming import mint_or_none
 from fno.agents.events import (
     emit_merge_cleanup_requested,
-    merge_cleanup_request_id,
     pr_node_ids,
     rows_for_cleanup,
 )
@@ -544,10 +543,9 @@ class Ritual:
         can only travel toward MERGED during a run, so a cached OPEN refuses
         more, never less.
 
-        `state` is the whole point. This call already existed and read only the
-        branch, so an OPEN PR resolved a branch, found its worktree, and handed
-        it to the archive script - whose own checks (clean, pushed, no live
-        session) a worker who finished and now waits on review passes cleanly.
+        `state` is the whole point. This call already existed and reads the
+        branch needed by the daemon cleanup request; an OPEN PR must not mint
+        that request or defer tree removal.
 
         The merge is not self-evident on every trigger. The pr-watch daemon
         fires on a gh-backed `state == MERGED`, but `fno do pr merged <n>` reaches
@@ -624,40 +622,8 @@ class Ritual:
         (agents_home_dir() / "worktree-sweep.stamp").unlink(missing_ok=True)
         return f"cleanup-requested request_id={request_id}; {why}"
 
-    def _remove_rows_after_archive(
-        self, worktree: str, request_id: str, reclaimed_bytes: int
-    ) -> bool:
-        if Path(worktree).exists():
-            return False
-        names = rows_for_cleanup(worktree, self.ctx.node_ids, runner=self._sh)
-        if not names:
-            # An empty candidate set is not a successful removal: True here
-            # would emit the daemon's completion and tombstone an order that
-            # removed nothing.
-            return False
-        removed = True
-        for name in names:
-            result = self._sh(
-                [
-                    "agents",
-                    "rm",
-                    name,
-                    "--audit-actor",
-                    "post-merge",
-                    "--audit-reason",
-                    "pr-merged",
-                    "--audit-request-id",
-                    request_id,
-                    "--audit-worktree-touched",
-                    "--audit-reclaimed-bytes",
-                    str(reclaimed_bytes),
-                ],
-            )
-            removed = removed and result.ok
-        return removed
-
     def leg_archive(self) -> None:
-        """Step 4: best-effort worktree archive; defer when run from inside it."""
+        """Step 4: mint the daemon cleanup request after a confirmed merge."""
         state, branch, _merged_at = self._merged_state()
         if state is None:
             self._emit("archive", _SKIPPED, "gh-unavailable")
@@ -668,106 +634,13 @@ class Ritual:
         if not branch:
             self._emit("archive", _SKIPPED, "no-branch")
             return
-        wt = self._find_worktree(branch)
-        order = self._register_cleanup_request(branch, wt, "merged-pr")
+        order = self._register_cleanup_request(branch, None, "merged-pr")
         order_written = "cleanup-requested" in order and "reap-order-unwritten" not in order
-        if not wt:
-            self._emit(
-                "archive",
-                _DEFERRED if order_written else _FAILED,
-                f"{order}; no worktree for {branch}",
-            )
-            return
-        if Path(wt).resolve() == self.cwd.resolve():
-            # Never self-remove. This is the DOMINANT path, because the worker
-            # that merged its own PR is standing in its own worktree - which is
-            # why the freshest merged worktrees were the ones that survived.
-            # `deferred` says the work is still owed; `skipped` plus a command
-            # in the detail line read as done and nobody ever ran it. The
-            # order makes "later" a fact in the world: the daemon's sweep pays
-            # this debt instead of a human remembering to.
-            self._emit(
-                "archive",
-                _DEFERRED if order_written else _FAILED,
-                f"{order}; worktree={wt}",
-            )
-            return
-        script = self.canon / "scripts" / "setup" / "archive-worktree.sh"
-        if not script.exists():
-            self._emit(
-                "archive",
-                _DEFERRED if order_written else _FAILED,
-                f"{order}; archive-worktree.sh missing; worktree={wt}",
-            )
-            return
-        worktree_bytes = 0
-        try:
-            worktree_bytes = sum(
-                os.lstat(Path(root) / name).st_size
-                for root, dirs, files in os.walk(wt, followlinks=False)
-                for name in files
-            )
-        except OSError:
-            worktree_bytes = 0
-        try:
-            # env(1) prefixes the caller into the removal event the script
-            # emits; the runner has no env parameter by design (test seams).
-            r = self.runner(["env", f"FNO_AGENTS_HOME={agents_home_dir()}",
-                             "FNO_WT_REMOVE_CALLER=post-merge ritual",
-                             "bash", str(script), str(wt), "--merge-triggered"],
-                            cwd=str(self.canon), timeout=120.0)
-        except subprocess.TimeoutExpired:
-            self._emit("archive", _FAILED, f"worktree={wt}; timeout; {order}")
-            return
-        except (ToolMissing, subprocess.SubprocessError) as exc:
-            self._emit(
-                "archive", _FAILED, f"worktree={wt}; spawn-error: {exc}; {order}"
-            )
-            return
-        if r.ok:
-            request_id = merge_cleanup_request_id(self.ctx.project, self.ctx.pr, branch)
-            rows_removed = self._remove_rows_after_archive(wt, request_id, worktree_bytes)
-            if rows_removed:
-                from fno.agents.events import _emit_daemon_envelope
-
-                _emit_daemon_envelope(
-                    "merge_cleanup_completed",
-                    {
-                        "request_id": request_id,
-                        "repo": str(self.canon),
-                        "pr": self.ctx.pr,
-                        "reclaimed_bytes": worktree_bytes,
-                    },
-                )
-            self._emit(
-                "archive",
-                _OK if order_written else _FAILED,
-                f"worktree={wt}; archived; {order}",
-            )
-            return
-        # A guarded refusal (live session in the tree, salvage, confirmation)
-        # leaves the tree in place: the work is still owed, so the order
-        # stands for the sweep to retry once the guard's cause is gone.
         self._emit(
             "archive",
-            _FAILED,
-            f"worktree={wt}; exit={r.returncode} (worktree left in place); {order}",
+            _DEFERRED if order_written else _FAILED,
+            f"{order}; daemon resolves the tree from {branch}",
         )
-
-    def _find_worktree(self, branch: str) -> Optional[str]:
-        out = _git_text(["worktree", "list", "--porcelain"], self.canon)
-        canonical = str(self.canon.resolve())
-        for block in out.split("\n\n"):
-            path = ""
-            for line in block.splitlines():
-                if line.startswith("worktree "):
-                    path = line[len("worktree "):]
-            if not path or path == canonical:
-                continue
-            hb = _git_text(["rev-parse", "--abbrev-ref", "HEAD"], Path(path))
-            if hb == branch:
-                return path
-        return None
 
     # -- judgment ----------------------------------------------------------
 
