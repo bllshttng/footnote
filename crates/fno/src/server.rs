@@ -66,6 +66,7 @@ mod agent_actions;
 mod agent_launch;
 mod agent_rows_join;
 mod drift_retire;
+mod human_input;
 mod keeper_adopt;
 pub(crate) mod lifecycle_target;
 mod pane_close;
@@ -1817,32 +1818,6 @@ pub(crate) struct Core {
     /// the fill refuses and names both. Cleared when the seat fills live
     /// (ownership is then the reach's, not the store's).
     portal_session_guards: BTreeMap<u8, String>,
-}
-
-/// At most one `human_touch(inject)` per pane per window: the first keystroke
-/// of a burst means "operator started steering this pane".
-/// ponytail: fixed 5s window; tune only if real bursts split.
-const TOUCH_COALESCE_WINDOW: Duration = Duration::from_secs(5);
-
-/// Whether an inject emit should fire now for `pane` (recording `now`), or be
-/// coalesced into the burst whose start time is already stored.
-fn touch_coalesce(last: &mut HashMap<u64, Instant>, pane: u64, now: Instant) -> bool {
-    match last.entry(pane) {
-        std::collections::hash_map::Entry::Occupied(mut e) => {
-            // saturating: a `now` behind the stored instant (clock quirks
-            // under virtualization) coalesces instead of panicking.
-            if now.saturating_duration_since(*e.get()) < TOUCH_COALESCE_WINDOW {
-                false
-            } else {
-                e.insert(now);
-                true
-            }
-        }
-        std::collections::hash_map::Entry::Vacant(v) => {
-            v.insert(now);
-            true
-        }
-    }
 }
 
 /// Wheel-passthrough rate gate: forward at most [`WHEEL_GATE_BUDGET`]
@@ -10025,97 +10000,6 @@ impl Core {
         self.touch(pane, "answer", false);
     }
 
-    /// (graph node id, squad cwd) for a `human_touch` emit on `pane`. Node id:
-    /// the pane's `FNO_NODE` provenance; fallback, the owning squad's
-    /// cwd basename when it is node-id shaped (the worktree-per-node
-    /// convention). Neither -> None, and the event carries resolution=failed
-    /// rather than being dropped (AC4-FR).
-    fn pane_touch_provenance(&self, pane: u64) -> (Option<String>, Option<String>) {
-        let cwd = self
-            .session
-            .find_pane(pane)
-            .and_then(|(sid, _)| self.session.squad(sid))
-            .map(|sq| sq.canonical_cwd().to_string());
-        let node = self
-            .panes
-            .get(&pane)
-            .and_then(|e| e.node.clone())
-            .or_else(|| {
-                cwd.as_deref()
-                    .and_then(|c| Path::new(c).file_name())
-                    .and_then(|b| b.to_str())
-                    .filter(|b| node_id_shaped(b))
-                    .map(str::to_owned)
-            });
-        (node, cwd)
-    }
-
-    /// Emit `human_touch` for one steering action on `pane` (W4 touch
-    /// telemetry). `coalesced` applies the per-pane window (inject bursts);
-    /// answer submits are one emit per action. The write rides the Python
-    /// `type` envelope via a fire-and-forget `fno doctor event emit` shell-out (the
-    /// digest idiom) - no Rust-side `kind`, so the three-places rule
-    /// never applies. The shell-out runs in the squad's cwd so the event
-    /// lands in that project's events.jsonl. A failure bumps
-    /// `touch_emit_failures` and never touches the steering path (AC4-ERR).
-    fn touch(&mut self, pane: u64, source: &'static str, coalesced: bool) {
-        if coalesced && !touch_coalesce(&mut self.touch_last_emit, pane, Instant::now()) {
-            return;
-        }
-        // cfg!(test): in unit tests current_exe is the test binary, and
-        // exec'ing it with event-emit args would re-enter the test harness.
-        // FNO_TOUCH_EMIT=0 is the operator kill switch.
-        if cfg!(test) || std::env::var_os("FNO_TOUCH_EMIT").is_some_and(|v| v == "0") {
-            return;
-        }
-        let (node, cwd) = self.pane_touch_provenance(pane);
-        let failures = Arc::clone(&self.touch_emit_failures);
-        tokio::spawn(async move {
-            let resolution = if node.is_some() { "ok" } else { "failed" };
-            let data = serde_json::json!({
-                "graph_node_id": node,
-                "source": source,
-                "resolution": resolution,
-            })
-            .to_string();
-            const TOUCH_EMIT_TIMEOUT: Duration = Duration::from_secs(10);
-            let mut cmd = crate::process_admission::tokio_command(fno_bin());
-            cmd.args([
-                "doctor",
-                "event",
-                "emit",
-                "--type",
-                "human_touch",
-                "--source",
-                "daemon",
-                "--data",
-                &data,
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-            if let Some(dir) = cwd {
-                cmd.current_dir(dir);
-            }
-            let ok = matches!(
-                tokio::time::timeout(
-                    TOUCH_EMIT_TIMEOUT,
-                    crate::process_admission::tokio_status(&mut cmd),
-                )
-                .await,
-                Ok(Ok(s)) if s.success()
-            );
-            if !ok {
-                // Counted AND visible (never swallowed): a 100%-failing
-                // emitter silently inflates the autonomy rate, so each miss
-                // logs to the server's stderr alongside the running total.
-                let n = failures.fetch_add(1, Ordering::Relaxed) + 1;
-                eprintln!("fno mux: human_touch({source}) emit failed ({n} this session)");
-            }
-        });
-    }
-
     /// The `mux_pane_counters` event payload for the current live pane set:
     /// every pane's monotonic totals plus its provenance (the join keys the
     /// spawn gate prices a pane against a bg session with). `None` when no
@@ -12167,6 +12051,11 @@ impl Core {
                     // a human steering this pane; PaneSend (script API) and
                     // relay writes never reach here.
                     self.touch(focus, "inject", true);
+                    // A submit key past the relay guard is a human pressing
+                    // Enter: one operator_submit witness row (human_input).
+                    if human_input::is_submit(&bytes) {
+                        self.witness_submit(focus);
+                    }
                 }
                 Flow::Continue
             }
