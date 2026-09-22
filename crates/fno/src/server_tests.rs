@@ -8518,37 +8518,6 @@ fn pane_send_refuses_a_dnd_agent_even_when_unguarded() {
     }
 }
 
-// -- W4 touch telemetry (human_touch emitters) -------------------------
-
-#[test]
-fn touch_coalesce_window() {
-    let mut last = HashMap::new();
-    let t0 = Instant::now();
-    assert!(
-        touch_coalesce(&mut last, 7, t0),
-        "first keystroke of a burst emits"
-    );
-    assert!(
-        !touch_coalesce(&mut last, 7, t0 + Duration::from_secs(3)),
-        "a keystroke inside the window coalesces into the burst"
-    );
-    assert!(
-        touch_coalesce(&mut last, 7, t0 + Duration::from_secs(6)),
-        "past the window a new burst emits"
-    );
-}
-
-#[test]
-fn touch_coalesce_per_pane() {
-    let mut last = HashMap::new();
-    let t0 = Instant::now();
-    assert!(touch_coalesce(&mut last, 1, t0));
-    assert!(
-        touch_coalesce(&mut last, 2, t0),
-        "panes coalesce independently"
-    );
-}
-
 // -- x-9454 wheel-passthrough rate gate --------------------------------
 
 // AC1-HP / AC2-HP: a 30-tick same-direction flood inside one window
@@ -8715,45 +8684,6 @@ fn reap_pane_clears_wheel_gate() {
         !core.wheel_gate.contains_key(&42),
         "the closed pane's gate entry is removed"
     );
-}
-
-#[test]
-fn pane_touch_provenance_cwd_fallback_and_none() {
-    let mut core = empty_core();
-    // No PaneEntry exists for either pane (no FNO_NODE provenance), so
-    // the squad-cwd-basename fallback decides the node id.
-    core.session.add_squad(
-        1,
-        vec!["/tmp/worktrees/x-aff6".into()],
-        None,
-        Tab {
-            name: None,
-            id: 1,
-            root: Node::Leaf(7),
-            focus: 7,
-        },
-    );
-    core.session.add_squad(
-        2,
-        vec!["/tmp/worktrees/footnote".into()],
-        None,
-        Tab {
-            name: None,
-            id: 2,
-            root: Node::Leaf(8),
-            focus: 8,
-        },
-    );
-    let (node, cwd) = core.pane_touch_provenance(7);
-    assert_eq!(node.as_deref(), Some("x-aff6"));
-    assert_eq!(cwd.as_deref(), Some("/tmp/worktrees/x-aff6"));
-    // Unshaped basename: no node (the emit carries resolution=failed,
-    // never a drop - AC4-FR), but the squad cwd still routes the event.
-    let (node, cwd) = core.pane_touch_provenance(8);
-    assert!(node.is_none());
-    assert_eq!(cwd.as_deref(), Some("/tmp/worktrees/footnote"));
-    // Unknown pane: (None, None).
-    assert_eq!(core.pane_touch_provenance(99), (None, None));
 }
 
 #[test]

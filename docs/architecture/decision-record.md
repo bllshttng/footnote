@@ -87,6 +87,8 @@ There is no new recording gate, and none is needed. `crates/fno-agents/src/loopc
 | Decision index | Local project-policy recall | `~/.fno/decisions.jsonl` via `paths.decisions_jsonl()` |
 | Graph projection | The node view, for anyone reading the node | the subject node's `decisions` array |
 
+Rust readers do not read the JSONL alone. `decision_index::default_store_live` reads graph.db decisions plus the JSONL rows the db lacks. The merge keys match `_read_index`, so a ruling the db holds is never invisible to a Rust reader.
+
 One `fno backlog decide` call writes the journal, then the index, then the projection. A failed index write is not a success: the command exits 1, because a write the operator cannot read back is worse than a refusal.
 
 It does NOT ask for a retry. The durable event has already landed by then, so a second run records one ruling twice under two ids. Both producers say so and name `fno backlog decide-reindex` as the recovery.
@@ -211,6 +213,8 @@ Three rules bind the gate:
 - **A contradicted citation refuses whatever is attached.** The contradiction can be an untracked path. It can be an ambiguous basename or a line past EOF. The refusal fires before any read runs. The note lane (`fno backlog note`) splits on purpose. A contradicted citation refuses the note, even under `--quiet`. A claim with no read only warns: the note verb advises and never refuses a body.
 
 The gate lives inside `record_decision` beside the session gates, not in the command bodies. The library is importable. A check only the CLI enforces is a check anything using the library walks around. The claim vocabulary is two shapes and nothing else. One shape is a `path:line` citation over a source extension. The other is a count bound to a fixed noun list, negatives included: `lines`, `call sites`, `callers`, `consumers`, `usages`, `occurrences`, `matches`, `files`. The list lives in one constant in `crates/fno-agents/src/evidence.rs`, so a reviewer audits it in one read. A false positive on ordinary prose is the failure that gets this gate disabled.
+
+A decision id is a citable fact too. A worker once named a deletion-offset ruling that was never made, and only a hand read of the record caught it. The gate now refuses the citable shape. `check_decision_citations` refuses any `\bd-[0-9a-f]{8}\b` id that no ruling on this machine carries. The shape is case-sensitive, so the all-capitals form is the escape for an illustrative id. It runs on four surfaces. The note lane and the ruling lane cover `fno backlog note`, `fno inbox decide`, and `fno inbox law set`. The commit-message scan covers every `fno do pr push`. The PR check covers the title plus body at `fno-agents pr-body-check` before `gh pr create`. The predicate is no-row, not no-LIVE-row. Supersession history honestly cites retired ids, so retired ids stay known to the gate. A retired id presented as in force remains with review. Some surfaces stay uncovered. A ruling named in prose with no id stays with review. Mail bodies stay unchecked because the mail CLI is shrink-only. A body edited after create with `gh pr edit` is unchecked. A raw `git push` outside the guarded verb is unchecked. `fno backlog update --details` is unchecked. There is no CI arm: the decision store is local to the machine, so a CI copy refuses every real citation.
 
 ## The chat-law trade, measured
 

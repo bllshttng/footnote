@@ -766,9 +766,13 @@ def _sync_graph_merge_status(merge_status: str, pr_number: int, cwd: str = "") -
             # recorded-openness test can settle its do rows. Unrecorded stays
             # open everywhere - this is the recorder, never the assertion.
             for e in entries:
-                if e.get("pr_number") == pr_number:
-                    e["merge_status"] = merge_status
-                    return entries
+                if e.get("pr_number") != pr_number or our_slug is None:
+                    continue
+                their_slug = repo_slug_from_url(e.get("pr_url") or "")
+                if their_slug is not None and their_slug.lower() != our_slug.lower():
+                    continue
+                e["merge_status"] = merge_status
+                return entries
             for e in entries:
                 for extra in e.get("additional_prs") or []:
                     if not isinstance(extra, dict) or extra.get("number") != pr_number:

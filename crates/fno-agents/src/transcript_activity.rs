@@ -475,8 +475,10 @@ fn process_line(
         return;
     }
     // The bus join drops a mail row injected as a user turn: a body delivered
-    // to this session reads as a relay, never as the operator speaking.
-    if classify_turn(&obj, bus, &file.session) != Provenance::Operator {
+    // to this session reads as a relay, never as the operator speaking. The
+    // compare reads UNWITNESSED turns: recall-first, so the hint list keeps
+    // possibly-human speech the submit join could not witness.
+    if classify_turn(&obj, bus, &file.session) != Provenance::Unknown {
         return;
     }
     let Ok(cleaned) = classify(&turn_text(&obj)) else {

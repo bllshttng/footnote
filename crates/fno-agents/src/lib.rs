@@ -224,6 +224,7 @@ pub mod opencode_serve;
 pub mod opencode_transcript;
 pub mod operator_notice;
 pub mod operator_turns;
+pub mod operator_witness;
 pub mod orphan_reap;
 pub mod osc;
 pub mod pane_keeper;
