@@ -647,8 +647,42 @@ async fn await_lock_holder(home: &AgentsHome) -> Option<(u32, Option<u64>)> {
 
 /// Lazy-start a fresh daemon and return its pid. Shared by every restart exit.
 async fn start_fresh(home: &AgentsHome, daemon_bin: &Path) -> Result<u32, RestartError> {
-    ensure_daemon(home, daemon_bin).await?;
-    read_daemon_pid(home).await
+    let started = Instant::now();
+    let budget = Duration::from_secs(10);
+    loop {
+        ensure_daemon(home, daemon_bin).await?;
+        match read_daemon_pid(home).await {
+            Ok(pid) => return Ok(pid),
+            Err(error) if restart_transition_error(&error) && started.elapsed() < budget => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn restart_transition_error(error: &RestartError) -> bool {
+    fn transient_io(error: &std::io::Error) -> bool {
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound
+                | std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::NotConnected
+        )
+    }
+
+    match error {
+        RestartError::Client(ClientError::DaemonNotRunning) => true,
+        RestartError::Client(ClientError::Io(error)) => transient_io(error),
+        RestartError::Client(ClientError::Protocol(ProtocolError::UnexpectedEof)) => true,
+        RestartError::Client(ClientError::Protocol(ProtocolError::Io(error))) => {
+            transient_io(error)
+        }
+        _ => false,
+    }
 }
 
 /// Restart the daemon: SIGTERM the running one (graceful drain; PTY workers

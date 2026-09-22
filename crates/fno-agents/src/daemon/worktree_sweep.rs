@@ -312,7 +312,7 @@ mod tests {
         );
 
         assert_eq!(swept, 2, "a tick that finds nothing must still report");
-        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let log = crate::events::committed_journal_text(&home.events_jsonl());
         assert_eq!(log.matches("worktree_sweep").count(), 2);
         assert!(log.contains("report-only"));
         assert!(!log.contains("apply-orders"));
@@ -344,7 +344,7 @@ mod tests {
         );
 
         assert_eq!(swept, 1);
-        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let log = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(log.contains("apply-orders"));
         assert!(!log.contains("report-only"));
     }
@@ -404,7 +404,7 @@ mod tests {
 
         assert_eq!(swept, 0);
         assert!(!ran_cleanup.load(std::sync::atomic::Ordering::Relaxed));
-        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let log = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(log.contains("\"error\":\"unreadable-orders\""));
         assert!(log.contains("\"exit_code\":7"));
         assert!(log.contains("\"stderr\":\"claim store unreadable\""));
@@ -492,7 +492,7 @@ mod tests {
         );
 
         assert_eq!(swept, 0);
-        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let log = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(log.contains("unreadable-summary"));
         assert!(!log.contains("\"eligible\""));
     }
@@ -517,7 +517,7 @@ mod tests {
         );
 
         assert_eq!(swept, 0);
-        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let log = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(log.contains("\"exit_code\":7"));
         assert!(log.contains("\"stderr\":\"permission denied\""));
         assert!(!log.contains("extra detail"));
@@ -542,7 +542,7 @@ mod tests {
         );
 
         assert_eq!(swept, 0);
-        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let log = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(log.contains("\"exit_code\":0"));
         assert!(log.contains("\"stderr\":\"\""));
     }

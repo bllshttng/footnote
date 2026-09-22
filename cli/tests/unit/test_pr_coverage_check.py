@@ -2567,10 +2567,14 @@ def test_law_authority_reads_the_real_index_three_ways(tmp_path):
     from fno import paths
 
     def _seed(*rows):
-        paths.decisions_jsonl().parent.mkdir(parents=True, exist_ok=True)
-        paths.decisions_jsonl().write_text(
-            "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8"
-        )
+        p = paths.decisions_jsonl()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        # Each scenario is a fresh history: the store beside the index
+        # accumulates, so a leftover db would resurrect earlier rows.
+        from fno.events.store_client import store_db_path
+
+        store_db_path(p).unlink(missing_ok=True)
+        p.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
     def _row(decision):
         return {

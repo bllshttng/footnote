@@ -405,6 +405,9 @@ def test_spawn_worker_forwards_vendor_in_spawn_argv(tmp_path, monkeypatch):
         # bridge's verbs run here too; they delegate, the launch is faked.
         if len(cmd) > 1 and cmd[1] in ("name-mint", "name-codes"):
             return original_run(cmd, **kwargs)
+        if {"doctor", "event"} <= {str(part) for part in cmd}:
+            # Event emission rides the same seam; it is not the spawn argv.
+            return original_run(cmd, **kwargs)
         captured["cmd"] = cmd
         return SimpleNamespace(
             returncode=0,

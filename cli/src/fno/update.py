@@ -1560,7 +1560,11 @@ def update_command(
             root=claims_root_for(_UPDATE_CLAIM_KEY),
         )
     except CLAIM_UNAVAILABLE as exc:
-        holder = getattr(exc, "holder", "another session")
+        # Only ClaimHeldByOther carries .holder (the CLAIM_UNAVAILABLE
+        # contract). A holder-less member is a door/sweep failure, not a
+        # live peer: name the class and detail instead of inventing
+        # "another session".
+        holder = getattr(exc, "holder", None) or f"unavailable: {type(exc).__name__}: {exc}"
         try:
             from fno import doctor
 

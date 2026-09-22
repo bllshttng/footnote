@@ -2377,7 +2377,7 @@ mod tests {
         assert!(target.get("progress_notes").is_some(), "target row moved");
         // Positive marker: the gate event names the mutation in the space journal.
         let journal = crate::paths::events_path(&std::env::current_dir().unwrap());
-        let text = std::fs::read_to_string(journal).unwrap();
+        let text = crate::events::committed_journal_text(&journal);
         assert!(text.contains("graph_write_gate") && text.contains("comment_create"));
     }
 

@@ -668,9 +668,7 @@ fn a_holder_in_its_test_phase_yields_the_slot_after_the_idle_window() {
 
     // The claims lifecycle is an ephemeral event class: it lands in the
     // sibling journal beside .fno/events.jsonl.
-    let events = std::fs::read_to_string(tree_b.join(".fno/events.jsonl.ephemeral"))
-        .or_else(|_| std::fs::read_to_string(tree_b.join(".fno/events.jsonl")))
-        .expect("the waiter worktree records the release");
+    let events = fno_agents::event_store::journal_text(&tree_b.join(".fno/events.jsonl"), &[]);
     assert!(
         events.contains("claim_released") && events.contains(&old_holder),
         "the events journal must name the released idle holder"

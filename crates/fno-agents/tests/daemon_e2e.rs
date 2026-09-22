@@ -181,8 +181,7 @@ fn start_daemon_env_in(home: &AgentsHome, dir: &Path, extra: &[(&str, &str)]) ->
 fn wait_for_successor_reconcile_order(home: &AgentsHome, successor_pid: u32, budget: Duration) {
     let start = Instant::now();
     while start.elapsed() < budget {
-        let events: Vec<serde_json::Value> = std::fs::read_to_string(home.events_jsonl())
-            .unwrap_or_default()
+        let events: Vec<serde_json::Value> = common::event_text(home)
             .lines()
             .filter_map(|line| serde_json::from_str(line).ok())
             .collect();
@@ -233,8 +232,7 @@ fn wait_for_successor_reconcile_order(home: &AgentsHome, successor_pid: u32, bud
 /// from the home's own event log rather than a process scan, which would also
 /// see every other parallel test's daemon.
 fn daemon_started_pids(home: &AgentsHome) -> Vec<u32> {
-    std::fs::read_to_string(home.events_jsonl())
-        .unwrap_or_default()
+    common::event_text(home)
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter(|v| v["type"] == "daemon_started")
@@ -422,7 +420,7 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
     );
     assert_eq!(entry.pid, None, "ask row never carries a pid");
 
-    let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    let events = common::event_text(&home);
     assert!(
         events.contains("startup_reconcile_done"),
         "startup_reconcile_done event not emitted"
@@ -482,7 +480,7 @@ async fn startup_reconcile_failure_degrades_to_serving() {
         "failed sweep must not mutate stored status"
     );
 
-    let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    let events = common::event_text(&home);
     assert!(
         events.contains("startup_reconcile_failed"),
         "a failed startup sweep must emit startup_reconcile_failed"
@@ -974,8 +972,7 @@ fn seed_codex_source(home: &AgentsHome, name: &str, uuid: &str, status: fno_agen
 
 /// Read one typed event of `kind` from the home's event log, newest-last.
 fn last_event_of(home: &AgentsHome, kind: &str) -> Option<serde_json::Value> {
-    std::fs::read_to_string(home.events_jsonl())
-        .unwrap_or_default()
+    common::event_text(home)
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter(|v| v["type"] == kind)
@@ -1008,7 +1005,7 @@ fn a_daemon_restart_over_a_loss_shaped_registry_loses_no_rows() {
         Some("sess-0007"),
         "a surviving row keeps its identity, not just its slot"
     );
-    let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    let events = common::event_text(&home);
     assert!(
         !events.contains("registry_row_removed"),
         "a restart that keeps every row must announce nothing: {events}"
@@ -1045,7 +1042,7 @@ fn a_future_schema_registry_is_refused_not_dropped_on_restart() {
     );
     let reg = state::load_registry(&home.registry_json()).unwrap();
     assert_eq!(reg.entries.len(), 29, "no row is silently dropped");
-    let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    let events = common::event_text(&home);
     assert!(
         !events.contains("registry_row_removed"),
         "a refusal keeps every row, so nothing is announced: {events}"
@@ -1404,8 +1401,7 @@ exit 2
     assert_eq!(String::from_utf8_lossy(&post_claude.stdout).trim(), "[]");
     assert_eq!(String::from_utf8_lossy(&post_mux.stdout).trim(), "[]");
 
-    let removed = std::fs::read_to_string(home.events_jsonl())
-        .unwrap_or_default()
+    let removed = common::event_text(&home)
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .find(|event| event.get("type").and_then(|value| value.as_str()) == Some("agent_removed"))
@@ -2212,7 +2208,7 @@ async fn registry_lookup_distinguishes_unreadable_from_absent() {
     // not wait" into "lookup succeeded".
     let deadline = Instant::now() + common::RECONCILE_BUDGET;
     loop {
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let events = common::event_text(&home);
         if events.contains("startup_reconcile_done") || events.contains("startup_reconcile_failed")
         {
             break;
@@ -2370,7 +2366,7 @@ async fn registry_runtime_upgrade_refuses_a_partial_roster() {
     // the future-schema fixture lands (same race the lookup test fences).
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let events = common::event_text(&home);
         if events.contains("daemon_started") {
             break;
         }

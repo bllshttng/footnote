@@ -161,20 +161,26 @@ fn read_gate() -> GateReading {
 /// The journal IS the notice dedup: one operator notice per schedule window
 /// needs no state file of its own.
 fn last_stale_ts(events: &Path) -> Option<DateTime<Utc>> {
-    let text = std::fs::read_to_string(events).ok()?;
-    let newest = text
-        .lines()
+    // Committed rows, newest first: the store commit is the write boundary,
+    // so the dedup reads what a reader would see.
+    let rows = crate::event_store::query_events(
+        events,
+        &crate::event_store::EventQuery {
+            types: vec!["evals_stale".to_string()],
+            ..Default::default()
+        },
+    )
+    .ok()?;
+    rows.iter()
         .rev()
-        .take(500)
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(|row| row.get("type").and_then(Value::as_str) == Some("evals_stale"))
+        .filter_map(|r| serde_json::from_str::<Value>(&r.line).ok())
         .filter_map(|row| {
             row.get("ts")
                 .and_then(Value::as_str)
                 .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
         })
-        .max()?;
-    Some(newest.with_timezone(&Utc))
+        .max()
+        .map(|newest| newest.with_timezone(&Utc))
 }
 
 /// Journal `evals_stale`, then notify at most once per schedule window, the

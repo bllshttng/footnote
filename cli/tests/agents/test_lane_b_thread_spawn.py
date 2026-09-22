@@ -69,8 +69,25 @@ def _fake_keeper(monkeypatch, tmp_path):
     class _FakeProc:
         pid = 4242
 
+        args: list[str] = []
+
         def kill(self) -> None:  # pragma: no cover - failure paths only
             recorded["killed"] = True
+
+        def __enter__(self) -> "_FakeProc":
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+        def wait(self, timeout: object = None) -> int:
+            return 0
+
+        def poll(self) -> int:
+            return 0
+
+        def communicate(self, input: object = None, timeout: object = None):
+            return ("", "")
 
     def _fake_popen(argv, **kwargs):  # noqa: ANN001, ANN202
         # The keeper stub sits on the shared subprocess module, so the launch-
@@ -79,8 +96,15 @@ def _fake_keeper(monkeypatch, tmp_path):
         # subprocess.run's own context-manager use and starve the door.
         if argv and str(argv[0]).endswith("fno-agents"):
             return real_popen(argv, **kwargs)
+        # Only the keeper launch is the behavior under test. Native event
+        # commits (subprocess.run -> Popen with the fno CLI) ride the real
+        # binary, or the emit is starved and the capture clobbered.
+        if "--keeper" not in [str(part) for part in argv]:
+            return real_popen(argv, **kwargs)
         recorded["argv"] = argv
-        return _FakeProc()
+        proc = _FakeProc()
+        proc.args = list(argv)
+        return proc
 
     def _fake_identify(sock, timeout_sec=10.0):  # noqa: ANN001
         argv = list(recorded["argv"])  # type: ignore[arg-type]

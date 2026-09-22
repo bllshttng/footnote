@@ -382,23 +382,30 @@ def collect_eval_session_ids(
     # ------------------------------------------------------------------ #
     events_path = workdir / ".fno" / "events.jsonl"
     if events_path.exists():
-        try:
-            for line in events_path.read_text(encoding="utf-8").splitlines():
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    event = json.loads(stripped)
-                    sid = (
-                        event.get("session_id")
-                        or event.get("data", {}).get("session_id")
-                    )
-                    if sid and isinstance(sid, str):
-                        ids.add(sid)
-                except (json.JSONDecodeError, AttributeError):
-                    continue
-        except OSError:
-            pass
+        # The store commit is the write boundary: committed rows carry the
+        # history, raw bytes are only the pre-store fallback.
+        from fno.events.store_client import native_rows
+
+        lines = native_rows(events_path)
+        if lines is None:
+            try:
+                lines = events_path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                lines = []
+        for line in lines:
+            stripped = line.strip() if isinstance(line, str) else ""
+            if not stripped:
+                continue
+            try:
+                event = json.loads(stripped)
+                sid = (
+                    event.get("session_id")
+                    or event.get("data", {}).get("session_id")
+                )
+                if sid and isinstance(sid, str):
+                    ids.add(sid)
+            except (json.JSONDecodeError, AttributeError):
+                continue
 
     # ------------------------------------------------------------------ #
     # 3. Transcript files under ~/.claude/projects/<encoded-workdir>/     #

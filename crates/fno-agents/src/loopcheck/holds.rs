@@ -43,9 +43,9 @@ pub(crate) fn scan_unrecorded_decisions(
         std::collections::HashSet::new();
     let mut recorded: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in journals {
-        let Ok(content) = std::fs::read_to_string(path) else {
+        let Ok(content) = crate::loopcheck::event_lines(path).map(|l| l.join("\n")) else {
             continue;
-        };
+        }; // committed rows, commit order
         for line in content.lines() {
             if !(line.contains("operator_question") || line.contains("operator_decision")) {
                 continue;
@@ -130,9 +130,9 @@ pub(crate) fn scan_open_holds(
     let mut closed: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut blocked_once: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in journals {
-        let Ok(content) = std::fs::read_to_string(path) else {
+        let Ok(content) = crate::loopcheck::event_lines(path).map(|l| l.join("\n")) else {
             continue;
-        };
+        }; // committed rows, commit order
         for line in content.lines() {
             if !(line.contains("operator_question") || line.contains("held_on_question")) {
                 continue;
@@ -384,8 +384,15 @@ mod tests {
     #[test]
     fn open_blocking_question_holds_the_node_once() {
         let raw = [qrow("q-1", "sess-a", &["x-n"]), brow("q-1", "sess-a")].join("\n");
-        let path = std::env::temp_dir().join("fno-holds-test-1.jsonl");
-        std::fs::write(&path, &raw).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "fno-holds-test-1-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, format!("{raw}\n")).unwrap();
         let journals = vec![path.clone()];
         let holds = scan_open_holds(&journals, "sess-a", "x-n");
         assert_eq!(holds.len(), 1);
@@ -397,8 +404,15 @@ mod tests {
     #[test]
     fn second_fire_without_a_prior_block_is_a_first_fire() {
         let raw = qrow("q-2", "sess-b", &["x-n"]);
-        let path = std::env::temp_dir().join("fno-holds-test-2.jsonl");
-        std::fs::write(&path, &raw).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "fno-holds-test-2-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, format!("{raw}\n")).unwrap();
         let journals = vec![path.clone()];
         let holds = scan_open_holds(&journals, "sess-b", "x-n");
         assert_eq!(holds.len(), 1);
@@ -414,8 +428,15 @@ mod tests {
             qrow("q-4", "sess-c", &["x-n"]),
         ]
         .join("\n");
-        let path = std::env::temp_dir().join("fno-holds-test-3.jsonl");
-        std::fs::write(&path, &raw).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "fno-holds-test-3-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, format!("{raw}\n")).unwrap();
         let journals = vec![path.clone()];
         let mine = scan_open_holds(&journals, "sess-c", "x-n");
         assert_eq!(mine.len(), 1, "only the open one holds");

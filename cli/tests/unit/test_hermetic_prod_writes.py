@@ -115,7 +115,9 @@ def test_append_event_allows_a_write_under_the_sandbox(monkeypatch, tmp_path):
     monkeypatch.setenv("TMPDIR", str(home))
 
     append_event(_event(), inside)
-    assert inside.read_text().strip()
+    from tests._event_rows import event_rows
+
+    assert event_rows(inside)
 
 
 def test_append_event_allows_the_pinned_journal(monkeypatch, tmp_path):
@@ -129,7 +131,9 @@ def test_append_event_allows_the_pinned_journal(monkeypatch, tmp_path):
     monkeypatch.setenv("FNO_EVENTS_PATH", str(pinned))
 
     append_event(_event(), pinned)
-    assert pinned.read_text().strip()
+    from tests._event_rows import event_rows
+
+    assert event_rows(pinned)
 
 
 def test_append_event_guard_is_inert_outside_a_hermetic_run(monkeypatch, tmp_path):
@@ -138,7 +142,9 @@ def test_append_event_guard_is_inert_outside_a_hermetic_run(monkeypatch, tmp_pat
     monkeypatch.setenv("FNO_TEST_HERMETIC", "0")
     outside = tmp_path / "checkout" / ".fno" / "events.jsonl"
     append_event(_event(), outside)
-    assert outside.read_text().strip()
+    from tests._event_rows import event_rows
+
+    assert event_rows(outside)
 
 
 def test_append_event_refuses_a_symlink_that_resolves_outside(monkeypatch, tmp_path):

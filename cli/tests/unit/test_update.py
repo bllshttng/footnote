@@ -1394,7 +1394,12 @@ def test_ac1_hp_cli_rust_fires_before_execvp(
     recorded_cargo: list[list[str]] = []
     state = {"built": False}
 
+    real_run = update.subprocess.run
+
     def _fake_run(cmd, **kwargs):
+        if cmd and {"doctor", "event"} <= {str(p) for p in cmd}:
+            # Event emission rides the same seam; the real binary answers.
+            return real_run(cmd, **kwargs)
         if cmd and cmd[0] == "cargo":
             call_order.append("cargo")
             recorded_cargo.append(list(cmd))
@@ -1524,7 +1529,12 @@ def test_ac1_err_cli_execvp_still_called_after_cargo_failure(
 
     execvp_called = []
 
+    real_run = update.subprocess.run
+
     def _fake_run(cmd, **kwargs):
+        if cmd and {"doctor", "event"} <= {str(p) for p in cmd}:
+            # Event emission rides the same seam; the real binary answers.
+            return real_run(cmd, **kwargs)
         if cmd and cmd[0] == "cargo":
             return types.SimpleNamespace(returncode=1, stdout="", stderr="")
         # stdout/stderr: the update:fno claim guard's hostid probe reads them.

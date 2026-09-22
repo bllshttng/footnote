@@ -543,9 +543,11 @@ pub async fn run_digest(rest: &[String], home: &AgentsHome) -> i32 {
 
     let mut events_raw = String::new();
     for p in &event_paths {
-        if let Ok(content) = std::fs::read_to_string(p) {
-            events_raw.push_str(&content);
-            if !content.ends_with('\n') {
+        // SQL authority: committed rows in commit order; the import pulls any
+        // journal bytes a pre-cutover writer (or fixture) left behind.
+        if let Ok(lines) = crate::loopcheck::event_lines(p) {
+            for line in lines {
+                events_raw.push_str(&line);
                 events_raw.push('\n');
             }
         }

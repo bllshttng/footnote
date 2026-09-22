@@ -871,7 +871,7 @@ mod tests {
     /// The last event of `kind` on this home's log, framed `{ts, type,
     /// source, data}` by the unified envelope.
     fn last_event(home: &AgentsHome, kind: &str) -> Value {
-        let text = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let text = crate::events::committed_journal_text(&home.events_jsonl());
         text.lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
             .filter(|v| v.get("type").and_then(Value::as_str) == Some(kind))

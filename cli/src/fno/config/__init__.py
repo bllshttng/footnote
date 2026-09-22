@@ -41,7 +41,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, Optional, cast
 
-import tomli_w
 import yaml
 from pydantic import (
     BaseModel,
@@ -4374,6 +4373,11 @@ def _atomic_write_toml(target: Path, data: dict[str, object]) -> None:
     try:
         with os.fdopen(fd, "wb") as f:
             clean = cast("dict[str, Any]", _strip_none(data))
+            # Lazy: only config WRITERS pay this dependency. A module-level
+            # import made a bare `import fno.events` (receipt emission from a
+            # bare python3) fail on machines without tomli_w installed.
+            import tomli_w
+
             f.write(tomli_w.dumps(clean).encode("utf-8"))
         os.replace(str(tmp), str(target))
     except BaseException:

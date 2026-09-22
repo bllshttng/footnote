@@ -330,10 +330,11 @@ def size_of(marker):
 def rotated(name):
     """Did `name` shrink because a rotator moved its body to a sibling?
 
-    `events.jsonl` is renamed to `events.jsonl.1` past 8 MB and a small active
-    file takes its place. That is an ordinary write, and it has a truncation's
-    exact size profile, so without this every rotation would fail a live root
-    on a guard that is supposed to leave ordinary churn alone.
+    The legacy emitter renamed the active journal to its `.1` generation past
+    8 MB, with a small active file taking its place. A mixed binary window can
+    still do this, and it has a truncation's exact size profile, so without
+    this every such rename would fail a live root on a guard that is supposed
+    to leave ordinary churn alone.
     """
     sibling = f"{name}.1"
     if sibling not in after:

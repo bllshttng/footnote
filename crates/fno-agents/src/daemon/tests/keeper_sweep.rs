@@ -255,7 +255,7 @@ async fn keeper_thread_stop_confirms_the_kill_and_stamps_the_row_exited() {
         ));
     })
     .unwrap();
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
 
     let response = handle_stop(
         &ctx,
@@ -306,7 +306,7 @@ async fn keeper_thread_stop_refuses_when_the_keeper_never_confirms() {
         ));
     })
     .unwrap();
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
 
     let response = handle_stop(
         &ctx,
@@ -342,7 +342,7 @@ async fn stop_worker_confirmed_routes_a_keeper_row_to_its_own_socket() {
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let keeper = spawn_killable_keeper(&sock, Arc::clone(&stop));
     let entry = lane_b_thread_row("wk-rm", "sess-3", "/repo", Some(555), &sock);
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
 
     let confirmed = stop_worker_confirmed(&ctx, &entry).await;
     keeper.join().unwrap();

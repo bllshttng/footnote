@@ -40,6 +40,19 @@ BIN="$TMP/bin"; mkdir -p "$BIN"
 WT_BASE="$TMP/wtbase"; mkdir -p "$WT_BASE"
 GLOBAL_EVENTS="$TMP/global-events.jsonl"
 : > "$GLOBAL_EVENTS"
+rm -f "$TMP/global-events.db"
+# The store commit is the write boundary: a receipt lands in events.db beside
+# the journal, so every read here goes through the rows verb and a reset
+# removes the sibling store too.
+ROWS_BIN="${FNO_BIN:-}"
+if [[ -z "$ROWS_BIN" ]]; then
+    for _profile in debug release; do
+        [[ -x "$REPO_ROOT/crates/fno/target/$_profile/fno" ]] && { ROWS_BIN="$REPO_ROOT/crates/fno/target/$_profile/fno"; break; }
+    done
+fi
+[[ -n "$ROWS_BIN" ]] || ROWS_BIN=$(command -v fno 2>/dev/null)
+rows_lines() { "$ROWS_BIN" doctor event rows --events "$1" 2>/dev/null | jq -r '.[]' 2>/dev/null; }
+export ROWS_BIN
 
 cat > "$BIN/fno" <<EOF
 #!/usr/bin/env bash
@@ -60,13 +73,9 @@ if [[ "\${1:-} \${2:-}" == "pr next-receipt-generation" ]]; then
             *) shift ;;
         esac
     done
-    if [[ -s "$GLOBAL_EVENTS" ]]; then
-        jq -sr --arg sha "\$sha" \
-            '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == \$sha) | .data.generation] | (max // 0) + 1' \
-            "$GLOBAL_EVENTS"
-    else
-        echo 1
-    fi
+    # A stub subprocess inherits ROWS_BIN but no shell functions: inline the read.
+    "$ROWS_BIN" doctor event rows --events "$GLOBAL_EVENTS" 2>/dev/null | jq -r '.[]' 2>/dev/null | jq -sr --arg sha "\$sha" \
+        '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == \$sha) | .data.generation] | (max // 0) + 1'
     exit 0
 fi
 if [[ "\${1:-} \${2:-}" == "pr global-receipt-events-path" ]]; then
@@ -76,10 +85,8 @@ fi
 if [[ "\${1:-} \${2:-}" == "pr evidence-check" ]]; then
     sha="\$(git rev-parse HEAD)"
     events="$GLOBAL_EVENTS"
-    [[ -s "\$events" ]] || exit 1
-    jq -se --arg sha "\$sha" \
-        '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == \$sha)] | sort_by(.ts) | last | .data.mode == "full" and .data.result == "passed"' \
-        "\$events" >/dev/null
+    "\$ROWS_BIN" doctor event rows --events "\$events" 2>/dev/null | jq -r '.[]' 2>/dev/null | jq -se --arg sha "\$sha" \
+        '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == \$sha)] | sort_by(.ts) | last | .data.mode == "full" and .data.result == "passed"' >/dev/null
     exit \$?
 fi
 exit 0
@@ -237,21 +244,21 @@ grep <<<"$out" -q "GREEN - safe to push" && ok "reports GREEN" || fail "no GREEN
 grep <<<"$out" -q "cargo fmt --check (fno-agents" && ok "fmt leg in summary (AC3-HP)" || fail "no fmt leg"
 grep <<<"$out" -q "cargo test --lib --bins (fno-agents)" && ok "cargo test leg in summary (AC3-HP)" || fail "no test leg"
 grep <<<"$out" -q "ADVISORY" && ok "audit ADVISORY row present" || fail "no ADVISORY row"
-jq -se --arg sha "$GREEN_FULL" \
+rows_lines "$EVENTS" | jq -se --arg sha "$GREEN_FULL" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "full" and .data.result == "passed" and .data.generation >= 1' \
-    "$EVENTS" >/dev/null \
+    >/dev/null \
     && ok "full green emits exact-SHA full/passed evidence" \
     || fail "missing exact-SHA full/passed event receipt"
-jq -se --arg sha "$GREEN_FULL" \
+rows_lines "$GLOBAL_EVENTS" | jq -se --arg sha "$GREEN_FULL" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.result == "passed"' \
-    "$GLOBAL_EVENTS" >/dev/null \
+    >/dev/null \
     && ok "full green mirrors evidence to the global journal" \
     || fail "missing global exact-SHA receipt"
-jq -se --arg sha "$GREEN_FULL" \
+rows_lines "$GLOBAL_EVENTS" | jq -se --arg sha "$GREEN_FULL" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] as $r
      | any($r[]; .data.result == "pending")
        and (($r | map(.data.generation) | max) == ($r | last | .data.generation))' \
-    "$GLOBAL_EVENTS" >/dev/null \
+    >/dev/null \
     && ok "canonical pending receipt precedes the final verdict" \
     || fail "missing canonical pending-to-final transition"
 
@@ -346,9 +353,9 @@ out="$(PREFLIGHT_TEST_FAIL_AUDIT=1 run_pf --force 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "advisory audit failure stays non-blocking" || fail "expected green got $rc: $out"
 [[ "$(wc -l < "$PREFLIGHT_AUDIT_LOG" | tr -d ' ')" == "2" ]] \
     && ok "both audit commands executed" || fail "audit short-circuited: $(cat "$PREFLIGHT_AUDIT_LOG")"
-jq -se --arg sha "$GREEN_FULL" \
+rows_lines "$EVENTS" | jq -se --arg sha "$GREEN_FULL" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha and .data.mode == "advisory")] | last | .data.result == "failed" and .data.steps_executed == 2' \
-    "$EVENTS" >/dev/null \
+    >/dev/null \
     && ok "advisory receipt records failed with two actual executions" \
     || fail "advisory receipt execution count/result wrong"
 
@@ -382,9 +389,9 @@ printf 'rustfmt:fno\n' > "$LEGREC"
 out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "retry-failed subset passes" || fail "expected 0 got $rc: $out"
 [[ ! -f "$(cur_att)" ]] && ok "subset run wrote no attestation" || fail "subset run minted a full-run attestation"
-jq -se --arg sha "$GREEN_FULL" \
+rows_lines "$EVENTS" | jq -se --arg sha "$GREEN_FULL" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "subset" and .data.result == "passed"' \
-    "$EVENTS" >/dev/null \
+    >/dev/null \
     && ok "subset run records subset evidence distinctly" \
     || fail "subset run did not emit subset/passed evidence"
 # The load-bearing half: a subsequent caller on the same SHA finds no FULL
@@ -413,9 +420,9 @@ grep <<<"$out" -q "cargo test explicit integration targets --test-threads=1 (fno
 grep <<<"$out" -q "=== cargo test explicit integration targets --test-threads=1 (fno) ===" \
     && ok "the failed leg re-ran" || fail "failed leg did not run: $out"
 [[ ! -f "$(cur_att)" ]] && ok "leg-scoped subset mints no attestation" || fail "subset minted an attestation"
-jq -se --arg sha "$(git -C "$FIX" rev-parse HEAD)" \
+rows_lines "$EVENTS" | jq -se --arg sha "$(git -C "$FIX" rev-parse HEAD)" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "subset" and .data.steps_executed < .data.steps_expected' \
-    "$EVENTS" >/dev/null \
+    >/dev/null \
     && ok "leg-scoped retry records subset with partial coverage" \
     || fail "leg-scoped retry receipt is not a partial-coverage subset"
 [[ ! -s "$LEGREC" ]] && ok "green retry truncated the record" || fail "record not truncated: $(cat "$LEGREC")"
@@ -425,9 +432,9 @@ rm -f "$(cur_att)" "$LEGREC"
 out="$(run_pf --retry-failed 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "fallback retry passes" || fail "expected 0 got $rc: $out"
 [[ -f "$(cur_att)" ]] && ok "fallback retry minted the FULL attestation it earned" || fail "no attestation after full-coverage retry"
-jq -se --arg sha "$(git -C "$FIX" rev-parse HEAD)" \
+rows_lines "$EVENTS" | jq -se --arg sha "$(git -C "$FIX" rev-parse HEAD)" \
     '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | last | .data.mode == "full" and .data.steps_executed == .data.steps_expected' \
-    "$EVENTS" >/dev/null \
+    >/dev/null \
     && ok "fallback retry receipt is full with equal coverage" \
     || fail "fallback retry receipt is not full"
 
@@ -941,9 +948,9 @@ lock_sha="$(git -C "$FIX" rev-parse HEAD)"
 GLOBAL_RECEIPT_LOCKDIR="$TMP/.preflight-receipt-locks/$lock_sha.d"
 mkdir -p "$GLOBAL_RECEIPT_LOCKDIR"
 printf 'pid=%s started=NOW host=x sha=%s\n' "$$" "$lock_sha" > "$GLOBAL_RECEIPT_LOCKDIR/holder"
-before="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
+before="$(rows_lines "$GLOBAL_EVENTS" | jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length')"
 out="$(run_pf --force --wait-timeout 0 2>&1)"; rc=$?
-after="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
+after="$(rows_lines "$GLOBAL_EVENTS" | jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length')"
 [[ $rc -eq 3 ]] && ok "same-candidate global lock refuses the second run" || fail "expected 3 got $rc: $out"
 [[ "$after" == "$before" ]] && ok "refused run appended no unmatched pending" || fail "receipt count changed: $before -> $after"
 rm -rf "$GLOBAL_RECEIPT_LOCKDIR"
@@ -956,11 +963,11 @@ out="$(run_pf --force 2>&1)"; rc=$?
 rm -rf "$GLOBAL_RECEIPT_LOCKDIR"
 
 echo "== canonical lock signal: cancellation after mkdir cleans both owned locks =="
-before="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
+before="$(rows_lines "$GLOBAL_EVENTS" | jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length')"
 export PREFLIGHT_TEST_SIGNAL_LOCK=1
 out="$(run_pf --force 2>&1)"; rc=$?
 unset PREFLIGHT_TEST_SIGNAL_LOCK
-after="$(jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length' "$GLOBAL_EVENTS")"
+after="$(rows_lines "$GLOBAL_EVENTS" | jq -s --arg sha "$lock_sha" '[.[] | select(.type == "verification_receipt" and .data.candidate_sha == $sha)] | length')"
 [[ $rc -eq 130 ]] && ok "deferred signal exits 130 after ownership is complete" || fail "expected 130 got $rc: $out"
 [[ ! -d "$LOCKDIR" && ! -d "$GLOBAL_RECEIPT_LOCKDIR" ]] \
     && ok "signal cleanup releases both owned locks" || fail "signal left a lock behind"
