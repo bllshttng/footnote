@@ -78,7 +78,7 @@ pub(crate) fn reserve_spawn_gate(config_cwd: &std::path::Path, args: &[String]) 
         || args.first().map(String::as_str) == Some("-h")
     {
         println!("usage: fno-agents spawn-gate reserve <name> --provider <p> [--ttl 10m] --reason \"<why>\" [--node <id>]");
-        println!("{}", crate::spawn_gate::RESERVATION_RULE);
+        println!("{}", crate::spawn_gate_reservations::RESERVATION_RULE);
         return 0;
     }
     let mut name: Option<String> = None;
@@ -108,7 +108,7 @@ pub(crate) fn reserve_spawn_gate(config_cwd: &std::path::Path, args: &[String]) 
     }
     let Some(name) = name else {
         eprintln!("spawn-gate: reserve needs a worker name and --provider");
-        println!("{}", crate::spawn_gate::RESERVATION_RULE);
+        println!("{}", crate::spawn_gate_reservations::RESERVATION_RULE);
         return 2;
     };
     let Some(provider) = provider else {
@@ -160,7 +160,7 @@ pub(crate) fn reserve_spawn_gate(config_cwd: &std::path::Path, args: &[String]) 
                  plus this one would reach the lane cap {cap}, and at least one slot on \
                  every capped lane stays winnable first-come. {}",
                 held + 1,
-                crate::spawn_gate::RESERVATION_RULE
+                crate::spawn_gate_reservations::RESERVATION_RULE
             );
             return 2;
         }
@@ -1515,7 +1515,7 @@ mod tests {
             "--reason",
             "four parked PRs",
             "--node",
-            "x-447c",
+            "x-4444",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -1558,7 +1558,7 @@ mod tests {
         );
         assert_eq!(
             rec.metadata.get("node").and_then(Value::as_str),
-            Some("x-447c")
+            Some("x-4444")
         );
         assert!(
             rec.expires_at.unwrap_or(0) > now,
@@ -1677,7 +1677,9 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let code = reserve_spawn_gate(std::path::Path::new("."), &["--help".to_string()]);
         assert_eq!(code, 0);
-        assert!(spawn_gate::RESERVATION_RULE.contains("first-come"));
-        assert!(spawn_gate::RESERVATION_RULE.contains("expires within 15 minutes"));
+        assert!(crate::spawn_gate_reservations::RESERVATION_RULE.contains("first-come"));
+        assert!(
+            crate::spawn_gate_reservations::RESERVATION_RULE.contains("expires within 15 minutes")
+        );
     }
 }

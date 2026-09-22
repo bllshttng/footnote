@@ -293,6 +293,7 @@ pub mod spawn_contract;
 pub mod spawn_edge;
 pub mod spawn_gate;
 pub mod spawn_gate_lanes;
+pub mod spawn_gate_reservations;
 pub mod spawn_gate_verb;
 pub mod spawn_lineage;
 pub mod spawn_overlay;
