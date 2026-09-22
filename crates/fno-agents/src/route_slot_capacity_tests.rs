@@ -1,4 +1,4 @@
-//! The route preview reads the capacity the spawn gate reads (x-b661).
+//! The route preview reads the capacity the spawn gate reads.
 //! AC1-AC3: the states leg arms the walk's one refresh and its lane rows read
 //! the map the walk judged. AC6-AC7: an all-unknown walk-out refuses as
 //! unknown, not exhausted. Helpers come from route_slot's own `tests` module.
