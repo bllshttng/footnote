@@ -32,7 +32,6 @@ use ratatui_widgets::table::{
     Cell as RtCell, HighlightSpacing, Row as RtRow, Table as RtTable, TableState,
 };
 use tokio::sync::mpsc;
-use unicode_width::UnicodeWidthStr;
 
 use crate::agents_view::{lineage_layout, lineage_parent};
 use crate::chrome;
@@ -76,10 +75,12 @@ mod row_stamp;
 // (v75) The sideline's density width rules, moved out under the file-budget
 // ratchet while the SessionRetired arms landed.
 mod density_width;
+mod name_fit;
 use self::row_stamp::{no_pane_notice, paint_notice_overlay, paint_row_stamp, RowArm, RowStamp};
 use density_width::{
     canonical_width, density_glyph, min_admit_width, min_render_width, sideline_max_width,
 };
+pub(crate) use name_fit::{fit_name, pad_to};
 
 /// How long to wait for a just-spawned server to accept.
 const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -7696,28 +7697,6 @@ fn status_word(s: LatticeState) -> &'static str {
     }
 }
 
-/// Truncate `s` to `w` display columns, ending a truncation in the ellipsis
-/// glyph - the padded-name-column look the operator asked for. Whole chars
-/// only, so the result stays char-boundary safe.
-fn fit_ellipsis(s: &str, w: usize) -> String {
-    if s.width() <= w {
-        return s.to_string();
-    }
-    let budget = w.saturating_sub(1);
-    let mut out = String::new();
-    let mut cols = 0usize;
-    for ch in s.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if cols + cw > budget {
-            break;
-        }
-        cols += cw;
-        out.push(ch);
-    }
-    out.push('\u{2026}');
-    out
-}
-
 /// The message column's markdown strip: bold markers, backtick code spans
 /// and a leading `#` header marker come off - the row reads the sentence,
 /// not the markup.
@@ -9593,19 +9572,6 @@ fn peek_overlay_lines(
         )),
     }
     lines
-}
-
-pub(crate) fn pad_to(s: &str, w: usize) -> String {
-    let count = s.chars().count();
-    if count > w {
-        let mut t: String = s.chars().take(w.saturating_sub(1)).collect();
-        t.push('…');
-        t
-    } else {
-        let mut t = s.to_string();
-        t.push_str(&" ".repeat(w - count));
-        t
-    }
 }
 
 // ---------------------------------------------------------------------------

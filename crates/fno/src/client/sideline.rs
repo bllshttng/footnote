@@ -4,6 +4,8 @@
 //! file-budget gate names this module the answer to "how does the sideline
 //! column paint".
 
+use unicode_width::UnicodeWidthStr;
+
 use super::*;
 
 impl View {
@@ -376,43 +378,56 @@ impl View {
                 } else {
                     ' '
                 };
-                let dnd = if a.dnd { " [DND]" } else { "" };
-                let mut name = if depth > 0 {
-                    format!("{}{mark} {}", "  ".repeat(depth), a.name)
+                let prefix = if depth > 0 {
+                    format!("{}{mark} ", "  ".repeat(depth))
                 } else {
-                    format!("{mark} {}", a.name)
+                    format!("{mark} ")
                 };
-                name.push_str(dnd);
+                let mut suffix = if a.dnd {
+                    " [DND]".to_string()
+                } else {
+                    String::new()
+                };
                 if let Some(tok) =
                     sideline_color::deviation_token(a.harness.as_deref(), a.model.as_deref())
                 {
-                    name.push_str(&format!(" {tok}"));
+                    suffix.push_str(&format!(" {tok}"));
                 }
                 if let Some(idx) = a.portal {
-                    name.push_str(&format!(" \u{25ab}{idx}"));
+                    suffix.push_str(&format!(" \u{25ab}{idx}"));
                 }
                 match self.agent_tab_context(a.squad, a.tab) {
                     Some(_)
                         if a.squad == Some(self.layout.active_squad)
                             && a.tab == self.active_squad_active_tab_id() => {}
-                    Some(TabContext::Named(ctx)) => name.push_str(&format!(" \u{b7}{ctx}")),
-                    Some(TabContext::Ordinal(ord)) => name.push_str(&format!(" \u{b7}{ord}")),
+                    Some(TabContext::Named(ctx)) => suffix.push_str(&format!(" \u{b7}{ctx}")),
+                    Some(TabContext::Ordinal(ord)) => suffix.push_str(&format!(" \u{b7}{ord}")),
                     None => {
                         if a.squad.is_none() {
                             if let Some(base) = a.cwd_base.as_deref() {
-                                name.push_str(&format!(" ({base})"));
+                                suffix.push_str(&format!(" ({base})"));
                             }
                         }
                     }
                 }
                 if let Some(reason) = a.reason.as_deref().filter(|x| !x.is_empty()) {
-                    name.push_str(": ");
-                    name.push_str(reason);
+                    suffix.push_str(": ");
+                    suffix.push_str(reason);
                 }
                 if let Some(level) = a.crown_level {
                     let scope = a.crown_scope.as_deref().unwrap_or("?");
-                    name.push_str(&format!(" [L{level} {scope}]"));
+                    suffix.push_str(&format!(" [L{level} {scope}]"));
                 }
+                let prefix_width = prefix.width();
+                let suffix_width = suffix.width();
+                let base_width = name_w.saturating_sub(prefix_width);
+                let name = if suffix_width < base_width {
+                    let base = fit_name(&a.name, base_width - suffix_width);
+                    format!("{prefix}{base}{suffix}")
+                } else {
+                    let base = fit_name(&a.name, base_width);
+                    format!("{prefix}{base}")
+                };
                 // The message column reads the sentence, not the markup, and
                 // leads with the separator. A PR row with no output names the
                 // session driving it (the server's graph join: the live claim
@@ -446,7 +461,7 @@ impl View {
                         // the margin, so the word sits one spacing column
                         // from the name instead of mid-cell.
                         rt_cell(status_word(lat).to_string(), cell_fg, cell_flags_v, true),
-                        rt_cell(fit_ellipsis(&name, name_w), cell_fg, cell_flags_v, false),
+                        rt_cell(fit_name(&name, name_w), cell_fg, cell_flags_v, false),
                         rt_cell(tail, cell_fg, quiet | focus_bit, false),
                         rt_cell(pr, cell_fg, quiet | focus_bit, true),
                         rt_cell(age, cell_fg, quiet | focus_bit, true),
