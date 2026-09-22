@@ -1081,6 +1081,7 @@ mod tests {
     #[test]
     fn read_items_carries_a_store_committed_question() {
         // AC11-ARM: a store-only operator_question reaches the projection.
+        let _root = crate::paths::DeclaredRoot::declare("attention_store_questio");
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().join("repo");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -1101,6 +1102,7 @@ mod tests {
     #[test]
     fn read_items_names_an_unreadable_store() {
         // AC11-ARM: an unreadable store names itself in `unreadable`.
+        let _root = crate::paths::DeclaredRoot::declare("attention_unreadable_s");
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().join("repo");
         let space_dir = crate::paths::space_dir(&cwd);

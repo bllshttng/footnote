@@ -4843,6 +4843,7 @@ mod tests {
     fn coverage_satisfied_reads_a_store_committed_covered_row() {
         // AC5-EDGE: an older imported row with count 0 and a newer covered
         // store-only row — the newest committed row answers.
+        let _root = crate::paths::DeclaredRoot::declare("fin_coverage_store_row");
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
         let old = serde_json::json!({

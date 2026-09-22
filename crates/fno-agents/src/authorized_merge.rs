@@ -3830,6 +3830,7 @@ mod tests {
     #[test]
     fn covered_head_reads_a_store_committed_coverage_row() {
         // AC5-HP: a covered row at HEAD committed to the store only.
+        let _root = crate::paths::DeclaredRoot::declare("am_covered_head_store");
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
         let head = std::process::Command::new("git")

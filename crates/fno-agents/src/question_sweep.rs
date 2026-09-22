@@ -259,6 +259,7 @@ mod tests {
     #[test]
     fn journals_raw_reads_a_store_committed_question() {
         // AC11-SWEEP: the sweep's raw read reaches the store now.
+        let _root = crate::paths::DeclaredRoot::declare("qswp_journals_raw_stor");
         let home = tmp_home("store");
         let cwd = home.root().join("repo");
         std::fs::create_dir_all(&cwd).unwrap();
