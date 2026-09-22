@@ -2061,17 +2061,23 @@ def collect_open_binding_heals(
     return heals, advisories
 
 
+def _in_checkout(cwd: str) -> bool:
+    p = Path(cwd)
+    return p.is_dir() and any((d / ".git").exists() for d in (p, *p.parents))
+
+
 def _effective_reconcile_cwd(cwd: str, project: Optional[str]) -> str:
     """The dir reconcile should run a node's gh query / post-close routing in.
 
     Usually the node's recorded ``cwd`` (a worktree). When that worktree was
-    archived (dir gone), fall back to the node's OWN project checkout so gh
+    archived (dir gone) or is not a git checkout (e.g. a node filed from a
+    stray dir), fall back to the node's OWN project checkout so gh
     queries the right repo and post-close routing (advance/auto-continue) probes
     the campaign-arm marker under the real root, not a missing dir - but only
     when that root exists, else keep the original cwd so the existing degrade
     (per-node warning / node-cwd routing) is strictly unchanged.
     """
-    if cwd and not os.path.isdir(cwd):
+    if cwd and not _in_checkout(cwd):
         from fno.graph._intake import project_root_from_settings
 
         root = project_root_from_settings(project)
