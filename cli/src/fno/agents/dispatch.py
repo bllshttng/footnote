@@ -7990,8 +7990,6 @@ def dispatch_send(
                             to_session=mail_ctx.to_session,
                         )
                         from fno import style as _hstyle
-
-                        _hosted_words = _hstyle.word_count(message)
                         try:
                             record_hosted_delivery(
                                 msg_id=msg_id,
@@ -8000,10 +7998,11 @@ def dispatch_send(
                                 body=hosted_body,
                                 from_harness=from_harness,
                                 to_harness=existing.harness,
+                                to_session=mail_ctx.to_session,
                                 from_session=from_session,
                                 from_model=mail_ctx.model,
                                 to_kind="session",
-                                word_count=_hosted_words,
+                                word_count=_hstyle.word_count(message),
                             )
                         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
                             print(
