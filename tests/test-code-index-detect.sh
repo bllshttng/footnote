@@ -159,6 +159,13 @@ check_contains "AC1-EDGE: the line carries the user roles" \
 check_contains "AC1-EDGE: the line names the repo manifest path" \
   "$SBX1/repo/.fno/code-index/providers/codegraph.toml" "$CG2"
 
+# AC1-REL: a caller may pass a ..-carrying repo root; the repo override leg
+# prints what it is given, so the root resolves and the path stays canonical.
+OUT_REL="$(cd "$SBX1/repo" && PATH="$SYS_PATH:$STUB1" HOME="$SBX1/home" \
+  bash "$DETECT" "$SBX1/repo/.fno/.." 2>/dev/null)"
+check_contains "AC1-REL: a .. root still prints its canonical override path" \
+  "$SBX1/repo/.fno/code-index/providers/codegraph.toml" "$OUT_REL"
+
 # ---------------------------------------------------------------------------
 # AC2-ERR: malformed manifests are skipped by name; the others still print
 # ---------------------------------------------------------------------------

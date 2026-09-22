@@ -29,6 +29,9 @@ if [[ -z "$REPO_ROOT" ]]; then
     REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
     [[ -n "$REPO_ROOT" ]] || REPO_ROOT="$PWD"
 fi
+# A caller may pass a relative or ..-carrying root; the repo override leg
+# prints what it is given, so resolve it here to keep every path canonical.
+[[ -d "$REPO_ROOT" ]] && REPO_ROOT="$(cd "$REPO_ROOT" && pwd)"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
