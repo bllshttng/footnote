@@ -94,7 +94,7 @@ The first line after the frontmatter is the question. Each numbered option carri
 fno inbox outstanding ask --question-file q.md --node <node-id> --subject <subject> --blocks <blocked-node-id>
 ```
 
-`--node` is required when options are present: an ask is one line plus a node pointer. A question missing a context field is not delivered, and its asker is mailed once, naming the missing fields.
+When options are present, `--node` is required: an ask is one line plus a node pointer. A question missing a context field is not delivered, and its asker is mailed once, naming the missing fields.
 
 ## The `md` sink
 
