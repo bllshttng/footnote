@@ -516,7 +516,7 @@ pub(crate) fn respawn_and_deliver_with<F, I, S>(
 ) -> i32
 where
     F: Fn(&crate::reentry::ReentryPlan, &str) -> i32,
-    I: Fn(&str, &str) -> Result<(), String>,
+    I: FnMut(&str, &str) -> Result<(), String>,
     S: Fn(std::time::Duration),
 {
     let Some(message) = message else {
@@ -1044,11 +1044,11 @@ fn deliver_after_claim_with<I, S>(
     wrapped: &str,
     revived: bool,
     claims_root: Option<&Path>,
-    inject: I,
+    mut inject: I,
     sleep_fn: S,
 ) -> Result<(), DeliveryRefusal>
 where
-    I: Fn(&str, &str) -> Result<(), String>,
+    I: FnMut(&str, &str) -> Result<(), String>,
     S: Fn(std::time::Duration),
 {
     // The same single-writer key the Python wake takes, so two
