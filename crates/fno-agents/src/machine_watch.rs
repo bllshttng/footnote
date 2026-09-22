@@ -225,7 +225,7 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
         .unwrap_or(0.9);
         sample.busy_band = Some(busy_band);
         sample.load_band_per_core = Some(LOAD_PER_CORE_BAND);
-        match crate::session_cost::price(&home.root().to_path_buf(), &sample.procs) {
+        match crate::session_cost::price(&home, &sample.procs) {
             Ok(value) => {
                 sample.sessions = value.get("sessions").cloned();
                 sample.unresolved = Some(

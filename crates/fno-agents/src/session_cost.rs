@@ -8,7 +8,6 @@ use crate::census::ProcRow;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionRoot {
@@ -320,12 +319,10 @@ fn test_pids() -> HashSet<u32> {
         .collect()
 }
 
-pub fn price(home: &Path, table: &[ProcRow]) -> Result<Value, String> {
-    let agents_home = crate::paths::AgentsHome::from_env();
-    let roots = session_roots(&agents_home, table);
-    let phases = phase_rows(&agents_home)?;
+pub fn price(home: &crate::paths::AgentsHome, table: &[ProcRow]) -> Result<Value, String> {
+    let roots = session_roots(home, table);
+    let phases = phase_rows(home)?;
     let test_pids = test_pids();
-    let _ = home;
     let out = attribute(table, &roots, &phases, &test_pids);
     Ok(json!({ "sessions": out.sessions, "unresolved": out.unresolved, "top_rss": out.top_rss }))
 }
