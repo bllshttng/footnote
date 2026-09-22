@@ -2892,8 +2892,7 @@ async fn run_status(json_out: bool) -> i32 {
     }
 }
 
-/// The control-plane arms rows, from the journals the arms write (agents home
-/// + the global mirror) plus their `.1` rotations, and the pr_watch tick
+/// The control-plane arms rows from the arm journals plus the pr_watch tick
 /// trace the readout's cause rules consult.
 fn arms_readout(
     home: &AgentsHome,
