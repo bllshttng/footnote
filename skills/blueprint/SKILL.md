@@ -325,12 +325,14 @@ fi
    NODE_READBACK="$(mktemp)"
    test -s "${CLOSE_RECEIPT:-}" || { echo "Blueprint close refused: no close receipt." >&2; exit 2; }
    fno backlog get "$NODE_ID" >"$NODE_READBACK"
-   python3 - "$CLOSE_RECEIPT" "$NODE_READBACK" <<'PY'
+   python3 - "$CLOSE_RECEIPT" "$NODE_READBACK" "$PLAN_PATH" <<'PY'
    import json
+   import re
    import sys
 
    receipt = json.load(open(sys.argv[1]))
    node = json.load(open(sys.argv[2]))
+   plan_path = sys.argv[3]
    entry = next(
        (
            row for row in node.get("sessions", [])
@@ -343,6 +345,46 @@ fi
    )
    if entry is None:
        print("Blueprint close refused: exact blueprint session entry was not read back.", file=sys.stderr)
+       raise SystemExit(2)
+
+   # The close readback is the one place that sees both the doc and the node
+   # after the projection ran: every blocker the plan declares must have
+   # landed on the adopted node's blocked_by. Intake warns and skips (a bulk
+   # intake of historical plans must not fail on a sibling that was never
+   # filed); a close refuses instead, naming the id and the repair verb.
+   declared = []
+   with open(plan_path, encoding="utf-8") as f:
+       lines = f.read().splitlines()
+   if lines and lines[0].strip() == "---":
+       in_blockers = False
+       for line in lines[1:]:
+           if line.strip() == "---":
+               break
+           m = re.match(r"^blocked_by:\s*(.*)$", line)
+           if m:
+               tail = m.group(2).strip()
+               if tail.startswith("[") and tail.endswith("]"):
+                   declared += [v.strip().strip("'\"") for v in tail[1:-1].split(",") if v.strip()]
+                   in_blockers = False
+               elif tail:
+                   declared.append(tail.strip("'\""))
+                   in_blockers = False
+               else:
+                   in_blockers = True
+           elif in_blockers and re.match(r"^\s*-\s+\S", line):
+               declared.append(line.split("-", 1)[1].strip().strip("'\""))
+           elif line.strip() and not line.startswith((" ", "\t")):
+               in_blockers = False
+
+   missing = [bid for bid in declared if bid not in (node.get("blocked_by") or [])]
+   if missing:
+       print(
+           "Blueprint close refused: the plan declares blocker(s) the adopted "
+           f"node does not carry: {', '.join(missing)}. Repair with "
+           f"`fno backlog update {node.get('id')} --add-blocker <id>` (or fix "
+           "the plan's blocked_by), then re-run the close.",
+           file=sys.stderr,
+       )
        raise SystemExit(2)
    print("blueprint close readback: matched")
    PY
