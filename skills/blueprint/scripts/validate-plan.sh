@@ -10,6 +10,32 @@ ERRORS=0
 WARNINGS=0
 TMPDIR_BASE_VAL="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_BASE_VAL"' EXIT
+_DECISION_READS=""
+_DECISION_VERDICT=""
+
+_decision_read() {
+    local id="$1" cached="" out="" rc=0 stderr_line="" verdict=""
+    cached=$(grep -m1 "^${id}"$'\t' <<< "$_DECISION_READS" || true)
+    if [[ -n "$cached" ]]; then
+        _DECISION_VERDICT="${cached#*$'\t'}"
+        return 0
+    fi
+    if out=$(fno backlog decisions "$id" 2>"$TMPDIR_BASE_VAL/decisions.err"); then
+        rc=0
+    else
+        rc=$?
+    fi
+    if (( rc != 0 )); then
+        stderr_line=$(sed -n '$p' "$TMPDIR_BASE_VAL/decisions.err")
+        verdict="unread exit $rc: ${stderr_line:-no stderr}"
+    elif grep -qE "^LIVE[[:space:]].*$id" <<< "$out"; then
+        verdict="live"
+    else
+        verdict="notlive"
+    fi
+    _DECISION_READS+="${id}"$'\t'"${verdict}"$'\n'
+    _DECISION_VERDICT="$verdict"
+}
 
 # New single-doc plans carry either the canonical Execution Strategy YAML or
 # the explicit quick-plan kind. Their executable contract is validated by the
@@ -1558,11 +1584,14 @@ check_python_rows_file() {
     # back to the ruling's starting value, so a checkout without the key
     # still gates. The budget is read only when a Grant row exists, so the
     # common Port/Delete plan pays no fno subprocess.
-    local grant_budget=30 declared grant_total=0
-    # || true: the read fails on a checkout whose fno predates the key, which
-    # is the fallback case, never a reason to skip the plan's other findings.
+    local grant_budget=30 declared grant_total=0 grant_config_out="" grant_config_rc=0
     if grep -qi 'grant' <<< "$rows"; then
-        grant_budget=$(fno config get blueprint.python_repair_added_lines 2>/dev/null | sed -n 1p || true)
+        if grant_config_out=$(fno config get blueprint.python_repair_added_lines 2>"$TMPDIR_BASE_VAL/grant-budget.err"); then
+            grant_budget=$(printf '%s\n' "$grant_config_out" | sed -n 1p)
+        else
+            grant_config_rc=$?
+            warn "$label: grant budget NOT READ (exit $grant_config_rc), using the default 30"
+        fi
         [[ "$grant_budget" =~ ^[0-9]+$ ]] || grant_budget=30
     fi
     while IFS=$'\t' read -r path act; do
@@ -1574,8 +1603,22 @@ check_python_rows_file() {
             delete) ;;
             grant)
                 id=$(printf '%s' "$act" | grep -oE 'd-[0-9a-f]{8}' | sed -n 1p || true)
-                if [[ -z "$id" ]] || ! fno backlog decisions "$id" 2>/dev/null | grep -qE "^LIVE[[:space:]].*$id"; then
+                if [[ -z "$id" ]]; then
                     findings+=("$path is a Grant, but ${id:-no decision id} reads no LIVE line in fno backlog decisions ${id:-<id>}")
+                else
+                    local decision_verdict decision_detail
+                    _decision_read "$id"
+                    decision_verdict="$_DECISION_VERDICT"
+                    case "$decision_verdict" in
+                        live) ;;
+                        notlive)
+                            findings+=("$path is a Grant, but $id reads no LIVE line in fno backlog decisions $id")
+                            ;;
+                        unread\ *)
+                            decision_detail="${decision_verdict#unread }"
+                            findings+=("$path is a Grant, but fno backlog decisions $id could not be read ($decision_detail) - re-run; this is not a verdict on the ruling")
+                            ;;
+                    esac
                 fi
                 declared=$(printf '%s' "$act" | grep -oE '\+[0-9]+' | sed -n 1p || true)
                 if [[ -z "$declared" ]]; then

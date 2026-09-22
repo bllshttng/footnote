@@ -1256,6 +1256,150 @@ else
     fail "AC11m: expected unread warning plus missing-law ERROR (exit $EXIT_CODE): $OUTPUT"
 fi
 
+# AC11n (AC3-HP): capture the complete decisions output before matching it, so
+# a two-write LIVE response cannot be mistaken for a broken ruling read.
+STUB_FNO_SLOW_DIR="$TMPDIR_BASE/stub-slow"
+mkdir -p "$STUB_FNO_SLOW_DIR"
+STUB_FNO_SLOW="$STUB_FNO_SLOW_DIR/fno"
+cat > "$STUB_FNO_SLOW" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "backlog decisions" && "${3:-}" == "d-1234abcd" ]]; then
+    echo "LIVE  LAW  d-1234abcd  2026-09-12T00:00:00Z  new-code-language  stub"
+    sleep 0.3
+    echo "    rationale: stub"
+    exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
+    echo 30
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_FNO_SLOW"
+OUTPUT=$(PATH="$STUB_FNO_SLOW_DIR:$PATH" bash "$VALIDATE" "$PLAN_NNPY_E" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if [[ -z "$NNPY_OUT" ]]; then
+    pass "AC11n: two-write LIVE ruling is captured before matching"
+else
+    fail "AC11n: two-write LIVE ruling should be clean: $NNPY_OUT"
+fi
+
+# AC11o (AC3-ERR): a nonzero decisions read is named as unread, not as a
+# completed read with no LIVE line.
+STUB_FNO_UNREAD_DIR="$TMPDIR_BASE/stub-unread"
+mkdir -p "$STUB_FNO_UNREAD_DIR"
+STUB_FNO_UNREAD="$STUB_FNO_UNREAD_DIR/fno"
+cat > "$STUB_FNO_UNREAD" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then
+    echo "database is locked" >&2
+    exit 1
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
+    echo 30
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_FNO_UNREAD"
+OUTPUT=$(PATH="$STUB_FNO_UNREAD_DIR:$PATH" bash "$VALIDATE" "$PLAN_NNPY_E" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if grep -q "could not be read (exit 1: database is locked)" <<< "$NNPY_OUT" \
+    && ! grep -q "reads no LIVE line" <<< "$NNPY_OUT"; then
+    pass "AC11o: failed decisions read is named unread"
+else
+    fail "AC11o: expected the unread Grant finding: $NNPY_OUT"
+fi
+
+# AC11p (AC3-EDGE): exit 0 with empty stdout is a completed non-live read.
+STUB_FNO_EMPTY_DIR="$TMPDIR_BASE/stub-empty"
+mkdir -p "$STUB_FNO_EMPTY_DIR"
+STUB_FNO_EMPTY="$STUB_FNO_EMPTY_DIR/fno"
+cat > "$STUB_FNO_EMPTY" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then
+    echo "no decision carries it" >&2
+    exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
+    echo 30
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_FNO_EMPTY"
+OUTPUT=$(PATH="$STUB_FNO_EMPTY_DIR:$PATH" bash "$VALIDATE" "$PLAN_NNPY_E" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if grep -q "reads no LIVE line" <<< "$NNPY_OUT" && ! grep -q "could not be read" <<< "$NNPY_OUT"; then
+    pass "AC11p: empty successful decisions read stays not-live"
+else
+    fail "AC11p: expected the not-live Grant finding: $NNPY_OUT"
+fi
+
+# AC11q (AC3-CACHE): duplicate Grant rows share one decisions subprocess.
+STUB_FNO_CACHE_DIR="$TMPDIR_BASE/stub-cache"
+mkdir -p "$STUB_FNO_CACHE_DIR"
+STUB_FNO_CACHE="$STUB_FNO_CACHE_DIR/fno"
+cat > "$STUB_FNO_CACHE" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then
+    printf '%s\n' "${3:-}" >> "$DECISION_LOG"
+    echo "LIVE  LAW  ${3:-}  2026-09-12T00:00:00Z  new-code-language  stub"
+    exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
+    echo 30
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_FNO_CACHE"
+PLAN_NNPY_Q="$TMPDIR_BASE/nnpy_q.md"
+cat > "$PLAN_NNPY_Q" <<'EOF'
+---
+claims: x-nnpyq
+created: 2099-01-01
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/mail/cli.py` | Grant d-1234abcd +5 |
+| `cli/src/fno/other/cli.py` | Grant d-1234abcd +5 |
+EOF
+DECISION_LOG="$TMPDIR_BASE/decision-calls" PATH="$STUB_FNO_CACHE_DIR:$PATH" bash "$VALIDATE" "$PLAN_NNPY_Q" >/dev/null 2>&1 || true
+if [[ "$(wc -l < "$TMPDIR_BASE/decision-calls" | tr -d ' ')" == 1 ]]; then
+    pass "AC11q: duplicate Grant rows read one decision once"
+else
+    fail "AC11q: expected one decisions subprocess call"
+fi
+
+# AC11r (AC3-BUDGET): a failed budget read warns and uses the default ceiling.
+STUB_FNO_BUDGET_DIR="$TMPDIR_BASE/stub-budget"
+mkdir -p "$STUB_FNO_BUDGET_DIR"
+STUB_FNO_BUDGET="$STUB_FNO_BUDGET_DIR/fno"
+cat > "$STUB_FNO_BUDGET" <<'STUB'
+#!/bin/bash
+if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then
+    echo "LIVE  LAW  d-1234abcd  2026-09-12T00:00:00Z  new-code-language  stub"
+    exit 0
+fi
+if [[ "${1:-} ${2:-} ${3:-}" == "config get blueprint.python_repair_added_lines" ]]; then
+    echo "config unavailable" >&2
+    exit 1
+fi
+exit 3
+STUB
+chmod +x "$STUB_FNO_BUDGET"
+OUTPUT=$(PATH="$STUB_FNO_BUDGET_DIR:$PATH" bash "$VALIDATE" "$PLAN_NNPY_E" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "grant budget NOT READ (exit 1), using the default 30" <<< "$OUTPUT" \
+    && ! grep -q "against a budget of" <<< "$OUTPUT"; then
+    pass "AC11r: failed Grant budget read warns and uses 30"
+else
+    fail "AC11r: expected the default-budget warning: $OUTPUT"
+fi
+
 # AC12: Plan Node Binding. A filename-encoded node id with no node:/claims:
 # key in the frontmatter binds to nothing and mutes both id-keyed gates, and
 # every gate skip must say NOT CHECKED instead of reading green.
