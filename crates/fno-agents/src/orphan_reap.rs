@@ -51,7 +51,7 @@ fn argv0(command: &str) -> &str {
     command.split_whitespace().next().unwrap_or("")
 }
 
-fn is_deps_test_binary(command: &str) -> bool {
+pub(crate) fn is_deps_test_binary(command: &str) -> bool {
     deps_binary_re().is_match(argv0(command))
 }
 
