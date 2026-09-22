@@ -179,6 +179,23 @@ def test_the_rust_binary_is_built_in_the_shard_that_needs_it() -> None:
                 "the binary that build produces")
 
 
+def test_the_dev_build_harness_runs_after_the_build_in_one_rest_leg() -> None:
+    """The door tests skip in every pytest leg; this harness is where they run."""
+    names = _names()
+    harness = "tests/test-dev-build-suites.sh"
+    assert harness in names, "the dev-build harness left the registry, so the door tests run nowhere"
+    assert names.index(harness) > names.index(_RUST_BUILD_STEP)
+    legs = [
+        (job, set(_selected(names, flag, globs, shard, total)))
+        for job, shard, total, flag, globs in _shard_selectors()
+    ]
+    carriers = [(job, picked) for job, picked in legs if harness in picked]
+    assert len(carriers) == 1, carriers
+    job, picked = carriers[0]
+    assert job == "smoke-rest"
+    assert _RUST_BUILD_STEP in picked
+
+
 def test_only_prerequisites_run_in_more_than_one_shard() -> None:
     """A prerequisite may run twice; a test may not.
 

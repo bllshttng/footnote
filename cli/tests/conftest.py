@@ -282,6 +282,8 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             item.add_marker(pytest.mark.xdist_group(name="serial"))
         if keeper_absent and nodeid.startswith(_NEEDS_STORE_KEEPER):
             item.add_marker(skip_no_keeper)
+        if "native_backlog_door" in getattr(item, "fixturenames", ()):
+            item.add_marker(pytest.mark.dev_build)
     spec = os.environ.get("FNO_PYTEST_SHARD", "").strip()
     if spec:
         items[:] = [
@@ -906,7 +908,9 @@ def native_backlog_door(monkeypatch):
     may be any installed copy. `$FNO_AGENTS_BIN` outranks all of it, so the
     fixture pins the dev build - and skips when this checkout has none (the
     smoke CI shard deletes it on purpose, the same contract
-    ``_store_keeper_absent`` implements for the keeper binary).
+    ``_store_keeper_absent`` implements for the keeper binary). The smoke
+    pytest legs skip these tests by design; tests/test-dev-build-suites.sh
+    runs them after the build step.
     """
     from fno.rust_binary import find_dev_binary
 
