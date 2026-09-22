@@ -751,13 +751,12 @@ def test_live_root_pids_keeps_a_roster_held_row_whose_pid_entry_is_not_usable(
     assert isinstance(error, doctor_footprint.AttributionGap)
 
 
-def test_live_root_pids_suppresses_on_a_roster_held_row_with_a_dead_pid(
+def test_live_root_pids_gaps_on_a_roster_held_row_with_a_dead_pid(
     monkeypatch,
 ) -> None:
     """A daemon-held record whose pid died is the same fact as a dead
-    socket-map pid: the socket arm suppresses the report for it, so the
-    roster arm must not answer "corpse" instead - the keeper may be mid
-    re-adoption."""
+    socket-map pid: the row becomes a named gap instead of voiding the
+    reading - the keeper may be mid re-adoption."""
     from fno import doctor_footprint
     from types import SimpleNamespace
 
@@ -784,14 +783,17 @@ def test_live_root_pids_suppresses_on_a_roster_held_row_with_a_dead_pid(
 
     roots, error = doctor_footprint._live_root_pids()
     assert roots == set()
-    _assert_named_cause(error, "roster-resolved pid 404")
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "hosted" in error.text
+    assert "roster pid=404" in error.text
+    assert "worker root liveness unavailable" not in error.text
 
 
-def test_live_root_pids_refuses_a_socket_resolved_root_whose_start_is_unreadable(
+def test_live_root_pids_gaps_a_socket_resolved_root_whose_start_is_unreadable(
     monkeypatch,
 ) -> None:
     """The socket map answers with a pid whose start time cannot be read:
-    the liveness oracle returns None and the refusal names the door."""
+    the row becomes a named gap, never a fleet-wide refusal."""
     from fno import doctor_footprint
     from types import SimpleNamespace
 
@@ -812,14 +814,17 @@ def test_live_root_pids_refuses_a_socket_resolved_root_whose_start_is_unreadable
 
     roots, error = doctor_footprint._live_root_pids()
     assert roots == set()
-    _assert_named_cause(error, "socket-resolved pid 404 start time could not be read")
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "socketed" in error.text
+    assert "404" in error.text
+    assert "worker root liveness unavailable" not in error.text
 
 
-def test_live_root_pids_refuses_a_socket_resolved_root_that_is_dead(
+def test_live_root_pids_gaps_a_socket_resolved_root_that_is_dead(
     monkeypatch,
 ) -> None:
-    """A socket-resolved pid that is readably dead refuses with its own
-    cause, distinct from the unreadable-start arm above."""
+    """A socket-resolved pid that is readably dead gaps its row, distinct
+    from the unreadable-start arm above."""
     from fno import doctor_footprint
     from types import SimpleNamespace
 
@@ -840,8 +845,53 @@ def test_live_root_pids_refuses_a_socket_resolved_root_that_is_dead(
 
     roots, error = doctor_footprint._live_root_pids()
     assert roots == set()
-    _assert_named_cause(error, "socket-resolved pid 404 for row socketed is not live")
-    assert "start time could not be read" not in error
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "socketed" in error.text
+    assert "404" in error.text
+    assert "start time could not be read" not in error.text
+    assert "worker root liveness unavailable" not in error.text
+
+
+def test_live_root_pids_gaps_one_dead_socket_row_and_keeps_the_live_one(
+    monkeypatch,
+) -> None:
+    """The x-fafd repro: one live row's socket holder churned to a
+    short-lived pid that died between the lsof read and the liveness check.
+    That row becomes a named gap; the live sibling keeps the reading alive."""
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    king = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="810d8070",
+        name="king-4d9b-opus-g5",
+    )
+    peer = SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness="claude",
+        short_id="aaaaaaaa",
+        name="live-peer",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [king, peer])
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: {"810d8070": 38786, "aaaaaaaa": 98176},
+    )
+    monkeypatch.setattr(
+        doctor_footprint, "_root_pid_is_live", lambda pid, start: pid == 98176
+    )
+
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == {98176}
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "king-4d9b-opus-g5" in error.text
+    assert "38786" in error.text
+    assert "live-peer" not in error.text
 
 
 def test_live_root_pids_drops_unrouted_row_with_expired_claim(monkeypatch) -> None:
@@ -1007,9 +1057,10 @@ def test_live_root_pids_keeps_an_unresolved_codex_row_as_a_named_gap(monkeypatch
     assert "t-codex-thread" in error.text
 
 
-def test_live_root_pids_refuses_a_resolved_codex_root_that_is_dead(monkeypatch) -> None:
-    """A rollout pid that died between the walk and the liveness check is the
-    same hard unreadable the claude routed arm refuses on."""
+def test_live_root_pids_gaps_a_resolved_codex_root_that_is_dead(monkeypatch) -> None:
+    """A rollout pid that died between the walk and the liveness check gaps
+    its row instead of voiding the reading - and stays out of the
+    pidless-row gap line."""
     from fno import doctor_footprint
 
     row = _codex_thread_row("t-codex-thread", "tid-907")
@@ -1022,7 +1073,10 @@ def test_live_root_pids_refuses_a_resolved_codex_root_that_is_dead(monkeypatch) 
 
     roots, error = doctor_footprint._live_root_pids()
     assert roots == set()
-    _assert_named_cause(error, "codex rollout root pid 907")
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "t-codex-thread" in error.text
+    assert "907" in error.text
+    assert "no identity route" not in error.text
 
 
 def test_live_root_pids_spares_an_advancing_row_and_names_only_the_silent_one(
@@ -1650,6 +1704,73 @@ def test_cause_reading_keeps_the_reading_over_a_recycled_pid(monkeypatch) -> Non
     assert reading.attribution_gap is not None
     assert "bp-recycled-worker" in reading.attribution_gap
     assert "worker root liveness unavailable" not in reading.attribution_gap
+
+
+def test_cause_reading_keeps_the_reading_over_a_dead_socket_pid(monkeypatch) -> None:
+    from fno import doctor_footprint
+    from fno.agents.spawn_gate import _cpu_axis
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_root_pid_is_live",
+        lambda pid, _start: pid == 98176,
+    )
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_live_shared_serve_root_pids",
+        lambda **_kwargs: (set(), None),
+    )
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_codex_app_server_serve",
+        lambda _snapshot: (set(), "absent"),
+    )
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: SimpleNamespace(agents=SimpleNamespace(max_load_per_cpu=4.0)),
+    )
+    monkeypatch.setattr(
+        "fno.config.load_settings_for_repo",
+        lambda _root: SimpleNamespace(
+            agents=SimpleNamespace(footprint_sustained_cpu_cores=None)
+        ),
+    )
+    monkeypatch.setattr(
+        "fno.agents.session_procs.bg_socket_pid_map",
+        lambda **_kwargs: {"810d8070": 38786},
+    )
+    ps_output = _ps_with(
+        "PID PPID ELAPSED %CPU RSS COMMAND",
+        "902 1 00:01 0.0 1024 /usr/bin/filevaultd",
+        "501 1 01:00:00 0.5 1024 /usr/bin/tool",
+    )
+    _fake_runner(
+        monkeypatch,
+        ps_output,
+        [
+            {
+                "pid": None,
+                "pid_start_time": None,
+                "harness": "claude",
+                "short_id": "810d8070",
+                "name": "king-4d9b-opus-g5",
+            }
+        ],
+        [],
+    )
+
+    reading, error = doctor_footprint.cause_reading()
+
+    # The x-fafd refusal shape, retired: a dead socket-resolved holder names
+    # its row as a gap and the reading, with it the admission, stands.
+    assert error is None
+    assert reading is not None
+    assert reading.attribution_gap is not None
+    assert "king-4d9b-opus-g5" in reading.attribution_gap
+    assert "worker root liveness unavailable" not in reading.attribution_gap
+    admission = _cpu_axis((reading, None))
+    assert admission.verdict == "admit"
 
 
 def test_ac2_hp_the_refusal_names_the_masked_row_and_the_failing_field(
