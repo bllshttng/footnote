@@ -149,6 +149,19 @@ def encode_cwd(cwd: Path | str) -> str:
     return "--" + raw.lstrip("/").replace("/", "-") + "--"
 
 
+def pi_sessions_root() -> Path:
+    """pi's session store root, honouring a relocated ``PI_HOME``."""
+    home = os.environ.get("PI_HOME") or os.path.join(
+        os.environ.get("HOME", ""), ".pi"
+    )
+    return Path(home) / "agent" / "sessions"
+
+
+def session_dir(cwd: Path | str) -> Path:
+    """The cwd-scoped directory pi keeps ``cwd``'s sessions in."""
+    return pi_sessions_root() / encode_cwd(cwd)
+
+
 @dataclass(frozen=True)
 class SessionLookup:
     """What a lookup of one ``(cwd, session_id)`` pair found on disk.

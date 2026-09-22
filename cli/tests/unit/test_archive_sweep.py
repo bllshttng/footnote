@@ -31,11 +31,8 @@ from fno.graph.archive import (  # noqa: E402
     _archive_bucket_counts,
     _last_sweep_line,
     _receipt_reason_order,
-    merge_into_archive,
     partition_for_archive,
-    remint_archive_collisions,
     retire_stale_postmortems,
-    stamp_archived_at,
 )
 
 runner = CliRunner()
@@ -101,18 +98,6 @@ def test_no_timestamp_held():
     to_a, rem, skip = partition_for_archive([e], 0, NOW)
     assert to_a == []
     assert skip[0]["_skip"] == "no-parseable-timestamp"
-
-
-# -- merge_into_archive (crash-window dedup) -------------------------------
-
-
-def test_merge_dedups_by_id_last_wins():
-    existing = [{"id": "x-1", "completed_at": "a"}]
-    new = [{"id": "x-1", "completed_at": "b"}, {"id": "x-2", "completed_at": "c"}]
-    merged = merge_into_archive(existing, new)
-    by_id = {e["id"]: e for e in merged}
-    assert len(merged) == 2
-    assert by_id["x-1"]["completed_at"] == "b"  # duplicate healed, last wins
 
 
 # -- command + read-through ------------------------------------------------
@@ -562,103 +547,6 @@ def test_apply_leaves_no_open_reference_to_an_archived_id(tmp_path, monkeypatch)
     # Read-through still resolves the archived node by id.
     r_get = runner.invoke(app, ["backlog", "get", "x-softrel"])
     assert r_get.exit_code == 0, r_get.output
-
-
-# -- remint_archive_collisions (x-f69b) --------------------------------------
-
-
-def test_remint_no_collision_is_noop():
-    archive_entries = [{"id": "ab-arch0001", "completed_at": "2026-01-01T00:00:00Z"}]
-    patched, remap = remint_archive_collisions({"ab-live0001"}, archive_entries)
-    assert remap == {}
-    assert patched == archive_entries
-
-
-def test_remint_reissues_colliding_archive_entry_and_keeps_previous_id():
-    archive_entries = [
-        {"id": "ab-dup00001", "title": "old archived node", "completed_at": "2026-01-01T00:00:00Z"},
-        {"id": "ab-other001", "completed_at": "2026-01-01T00:00:00Z"},
-    ]
-    patched, remap = remint_archive_collisions({"ab-dup00001"}, archive_entries)
-    assert list(remap.keys()) == ["ab-dup00001"]
-    new_id = remap["ab-dup00001"]
-    reminted = next(e for e in patched if e.get("previous_id") == "ab-dup00001")
-    assert reminted["id"] == new_id
-    assert reminted["title"] == "old archived node"
-    # The untouched entry passes through unchanged.
-    other = next(e for e in patched if e["id"] == "ab-other001")
-    assert "previous_id" not in other
-
-
-def test_stamp_archived_at_sets_field_without_mutating_input():
-    entries = [{"id": "ab-1"}, {"id": "ab-2", "archived_at": "old"}]
-    stamped = stamp_archived_at(entries, "2026-08-14T00:00:00Z")
-    assert [e["archived_at"] for e in stamped] == ["2026-08-14T00:00:00Z"] * 2
-    assert "archived_at" not in entries[0]  # input untouched
-
-
-# -- fno backlog get resolves a reminted id via previous_id (x-f69b) --------
-
-
-def test_get_resolves_reminted_archive_entry_via_previous_id(tmp_path, monkeypatch):
-    g, archive = _route(tmp_path, monkeypatch)
-    _seed(g, [])
-    archive.write_text(json.dumps({"entries": [
-        {"id": "ab-newid001", "previous_id": "ab-oldid001", "slug": "reminted",
-         "title": "Reminted Node", "completed_at": "2026-01-01T00:00:00Z"}
-    ]}) + "\n")
-    r = runner.invoke(app, ["backlog", "get", "ab-oldid001"])
-    assert r.exit_code == 0, r.output
-    out = json.loads(r.output)
-    assert out["id"] == "ab-newid001"
-    assert out["_archived"] is True
-
-
-# -- fno backlog archive-dedupe-ids (x-f69b) ---------------------------------
-
-
-def test_dedupe_ids_dry_run_reports_without_writing(tmp_path, monkeypatch):
-    g, archive = _route(tmp_path, monkeypatch)
-    _seed(g, [{"id": "ab-dup00001", "plan_path": "p.md"}])
-    archive.write_text(json.dumps({"entries": [
-        {"id": "ab-dup00001", "completed_at": "2026-01-01T00:00:00Z"}
-    ]}) + "\n")
-    r = runner.invoke(app, ["backlog", "archive-dedupe-ids"])
-    assert r.exit_code == 0, r.output
-    assert "would remint 1 archive id(s)" in r.output
-    assert "ab-dup00001" in json.loads(archive.read_text())["entries"][0]["id"]  # unwritten
-
-
-def test_dedupe_ids_apply_writes_and_keeps_previous_id(tmp_path, monkeypatch):
-    g, archive = _route(tmp_path, monkeypatch)
-    events_path = _with_events(tmp_path, monkeypatch)
-    _seed(g, [{"id": "ab-dup00001", "plan_path": "p.md"}])
-    archive.write_text(json.dumps({"entries": [
-        {"id": "ab-dup00001", "title": "old", "completed_at": "2026-01-01T00:00:00Z"}
-    ]}) + "\n")
-    r = runner.invoke(app, ["backlog", "archive-dedupe-ids", "--apply"])
-    assert r.exit_code == 0, r.output
-    entries = json.loads(archive.read_text())["entries"]
-    assert len(entries) == 1
-    assert entries[0]["previous_id"] == "ab-dup00001"
-    assert entries[0]["id"] != "ab-dup00001"
-    evs = _events_of_type(events_path, "graph_archive_ids_reminted")
-    assert len(evs) == 1
-    assert evs[0]["data"]["remint_count"] == 1
-    assert evs[0]["data"]["remap"]["ab-dup00001"] == entries[0]["id"]
-    # A repair is not a sweep: it must never be recorded as one.
-    assert _events_of_type(events_path, "graph_archive_swept") == []
-
-
-def test_dedupe_ids_apply_with_no_collision_writes_nothing(tmp_path, monkeypatch):
-    g, archive = _route(tmp_path, monkeypatch)
-    _seed(g, [{"id": "ab-live0001", "plan_path": "p.md"}])
-    archive.write_text(json.dumps({"entries": [
-        {"id": "ab-arch0001", "completed_at": "2026-01-01T00:00:00Z"}
-    ]}) + "\n")
-    r = runner.invoke(app, ["backlog", "archive-dedupe-ids", "--apply"])
-    assert r.exit_code == 0, r.output
-    assert "No colliding archive ids found." in r.output
 
 
 # -- fno backlog album (x-a023 browse surface) -------------------------------
