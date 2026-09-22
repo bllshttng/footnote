@@ -68,11 +68,9 @@ pub(crate) struct MergeCleanupRequest {
     harness: Option<String>,
 }
 
-/// Every pending request across repos, in one journal read spanning one
-/// rotation: the `.1` generation is read before the active file, so a request
-/// minted shortly before a rotation stays pending across it instead of
-/// dropping with no event. Duplicate envelopes that share a request id (the
-/// merge mint and the ritual mint for one merge) fold field by field.
+/// Every pending request across repos, in one store-aware journal read:
+/// duplicate envelopes that share a request id (the merge mint and the
+/// ritual mint for one merge) fold field by field.
 fn pending_merge_cleanup_requests_all(home: &AgentsHome) -> Vec<MergeCleanupRequest> {
     let (requested, finished) = scan_merge_cleanup_events(home);
     requested
@@ -82,106 +80,108 @@ fn pending_merge_cleanup_requests_all(home: &AgentsHome) -> Vec<MergeCleanupRequ
 }
 
 /// Every repo a merge-cleanup request names, pending or settled: what
-/// `registry_repo_roots` collects, so a repo whose only request rotated into
-/// the `.1` generation stays in the reaper's roots.
+/// `registry_repo_roots` collects, so a repo whose request left the live
+/// file stays in the reaper's roots.
 pub(crate) fn merge_cleanup_request_repos(home: &AgentsHome) -> Vec<String> {
     let (requested, _) = scan_merge_cleanup_events(home);
     let repos: HashSet<String> = requested.into_values().map(|r| r.repo).collect();
     repos.into_iter().collect()
 }
 
-/// The merge-cleanup envelopes across the active journal and its one rotated
-/// generation, folded per request id, plus the settled tombstone ids. A line
-/// that does not name a merge_cleanup_ kind is skipped before JSON parsing,
-/// so the second file does not double the parse cost.
+/// The merge-cleanup kinds the reaper folds, one vocabulary for the reader.
+const MERGE_CLEANUP_TYPES: &[&str] = &[
+    "merge_cleanup_requested",
+    "merge_cleanup_completed",
+    "merge_cleanup_refused",
+    "merge_cleanup_expired",
+];
+
+/// The merge-cleanup envelopes across one journal's committed rows plus the
+/// unseen live lines, folded per request id, plus the settled tombstone ids.
+/// A line that does not name a merge_cleanup_ kind is skipped before JSON
+/// parsing.
 fn scan_merge_cleanup_events(
     home: &AgentsHome,
 ) -> (BTreeMap<String, MergeCleanupRequest>, HashSet<String>) {
-    let active = home.events_jsonl();
-    let rotated = crate::events::rotated_path(&active);
+    let contents = crate::event_store::journal_text(&home.events_jsonl(), MERGE_CLEANUP_TYPES);
     let mut requested = BTreeMap::<String, MergeCleanupRequest>::new();
     let mut finished = HashSet::<String>::new();
-    for file in [rotated, active] {
-        let Ok(contents) = std::fs::read_to_string(&file) else {
-            continue; // a missing generation reads as empty
+    for line in contents.lines() {
+        if !line.contains("\"merge_cleanup_") {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
         };
-        for line in contents.lines() {
-            if !line.contains("\"merge_cleanup_") {
-                continue;
-            }
-            let Ok(event) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            let Some(kind) = event.get("type").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(data) = event.get("data") else {
-                continue;
-            };
-            let Some(request_id) = data.get("request_id").and_then(Value::as_str) else {
-                continue;
-            };
-            match kind {
-                "merge_cleanup_requested" => {
-                    let Some(request_repo) = data.get("repo").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let Some(pr) = data.get("pr").and_then(Value::as_i64) else {
-                        continue;
-                    };
-                    let ts_unix = event
-                        .get("ts")
+        let Some(kind) = event.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(data) = event.get("data") else {
+            continue;
+        };
+        let Some(request_id) = data.get("request_id").and_then(Value::as_str) else {
+            continue;
+        };
+        match kind {
+            "merge_cleanup_requested" => {
+                let Some(request_repo) = data.get("repo").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(pr) = data.get("pr").and_then(Value::as_i64) else {
+                    continue;
+                };
+                let ts_unix = event
+                    .get("ts")
+                    .and_then(Value::as_str)
+                    .and_then(crate::tick_ledger::parse_rfc3339_unix)
+                    .map(|v| v as i64)
+                    .unwrap_or(0);
+                let merged_at = data
+                    .get("merged_at")
+                    .and_then(Value::as_str)
+                    .and_then(crate::tick_ledger::parse_rfc3339_unix)
+                    .map(|v| v as i64);
+                let string_field = |key: &str| {
+                    data.get(key)
                         .and_then(Value::as_str)
-                        .and_then(crate::tick_ledger::parse_rfc3339_unix)
-                        .map(|v| v as i64)
-                        .unwrap_or(0);
-                    let merged_at = data
-                        .get("merged_at")
-                        .and_then(Value::as_str)
-                        .and_then(crate::tick_ledger::parse_rfc3339_unix)
-                        .map(|v| v as i64);
-                    let string_field = |key: &str| {
-                        data.get(key)
-                            .and_then(Value::as_str)
-                            .filter(|v| !v.is_empty())
-                            .map(str::to_owned)
-                    };
-                    let strings = |key: &str| {
-                        data.get(key)
-                            .and_then(Value::as_array)
-                            .into_iter()
-                            .flatten()
-                            .filter_map(Value::as_str)
-                            .map(str::to_owned)
-                            .collect()
-                    };
-                    let mint = MergeCleanupRequest {
-                        request_id: request_id.to_owned(),
-                        repo: request_repo.to_owned(),
-                        pr,
-                        branch: string_field("branch"),
-                        worktree: string_field("worktree"),
-                        node_ids: strings("node_ids"),
-                        candidate_row_names: strings("candidate_row_names"),
-                        merged_at,
-                        ts_unix,
-                        session_id: string_field("session_id"),
-                        harness: string_field("harness"),
-                    };
-                    match requested.remove(request_id) {
-                        Some(kept) => {
-                            requested.insert(request_id.to_owned(), fold_request(kept, mint));
-                        }
-                        None => {
-                            requested.insert(request_id.to_owned(), mint);
-                        }
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_owned)
+                };
+                let strings = |key: &str| {
+                    data.get(key)
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                };
+                let mint = MergeCleanupRequest {
+                    request_id: request_id.to_owned(),
+                    repo: request_repo.to_owned(),
+                    pr,
+                    branch: string_field("branch"),
+                    worktree: string_field("worktree"),
+                    node_ids: strings("node_ids"),
+                    candidate_row_names: strings("candidate_row_names"),
+                    merged_at,
+                    ts_unix,
+                    session_id: string_field("session_id"),
+                    harness: string_field("harness"),
+                };
+                match requested.remove(request_id) {
+                    Some(kept) => {
+                        requested.insert(request_id.to_owned(), fold_request(kept, mint));
+                    }
+                    None => {
+                        requested.insert(request_id.to_owned(), mint);
                     }
                 }
-                "merge_cleanup_completed" | "merge_cleanup_refused" | "merge_cleanup_expired" => {
-                    finished.insert(request_id.to_owned());
-                }
-                _ => {}
             }
+            "merge_cleanup_completed" | "merge_cleanup_refused" | "merge_cleanup_expired" => {
+                finished.insert(request_id.to_owned());
+            }
+            _ => {}
         }
     }
     (requested, finished)
@@ -1002,7 +1002,7 @@ mod tests {
         // AC2-HP: a request that rotated into the .1 generation stays pending,
         // and a tombstone in the active file still settles it.
         let home = temp_home("rotation-span");
-        let rotated = crate::events::rotated_path(&home.events_jsonl());
+        let rotated = std::path::PathBuf::from(format!("{}.1", home.events_jsonl().display()));
         std::fs::create_dir_all(home.root()).unwrap();
         std::fs::write(
             &rotated,
@@ -1023,6 +1023,9 @@ mod tests {
                 json!(["x-2"]),
             )],
         );
+        // Production rotation ingests a generation before the rename, so the
+        // store already holds the rotated row when the reader runs.
+        crate::event_store::sync(&home.events_jsonl()).unwrap();
         let ids: Vec<String> = pending_merge_cleanup_requests_all(&home)
             .into_iter()
             .map(|r| r.request_id)
@@ -1047,6 +1050,33 @@ mod tests {
             .map(|r| r.request_id)
             .collect();
         assert_eq!(ids, vec!["merge-cleanup-2".to_string()]);
+        std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn pending_read_sees_store_committed_requests() {
+        // AC3-HP: a request and its completion committed to the store only.
+        let home = temp_home("store-committed");
+        std::fs::create_dir_all(home.root()).unwrap();
+        let requested = request_line("2026-09-06T00:00:00Z", "store-req-1", None, json!(["x-1"]));
+        crate::event_store::append_envelope(&home.events_jsonl(), &requested, None).unwrap();
+        assert_eq!(
+            pending_merge_cleanup_requests(&home, "/repo").len(),
+            1,
+            "the request alone is pending"
+        );
+        let completed = json!({
+            "ts": "2026-09-06T02:00:00Z",
+            "type": "merge_cleanup_completed",
+            "source": "daemon",
+            "data": {"request_id": "store-req-1", "repo": "/repo", "pr": 42}
+        })
+        .to_string();
+        crate::event_store::append_envelope(&home.events_jsonl(), &completed, None).unwrap();
+        assert!(
+            pending_merge_cleanup_requests(&home, "/repo").is_empty(),
+            "the store-only tombstone settles the store-only request"
+        );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
     }
 
@@ -1120,9 +1150,11 @@ mod tests {
             }
         })
         .to_string();
-        let rotated = crate::events::rotated_path(&home.events_jsonl());
+        let rotated = std::path::PathBuf::from(format!("{}.1", home.events_jsonl().display()));
         std::fs::create_dir_all(home.root()).unwrap();
         std::fs::write(&rotated, line + "\n").unwrap();
+        // Production rotation ingests a generation before the rename.
+        crate::event_store::sync(&home.events_jsonl()).unwrap();
         assert!(merge_cleanup_request_repos(&home).contains(&repo_dir.display().to_string()));
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
     }

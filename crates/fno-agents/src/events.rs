@@ -155,12 +155,6 @@ impl EventEmitter {
     }
 }
 
-pub(crate) fn rotated_path(path: &Path) -> PathBuf {
-    let mut s = path.as_os_str().to_os_string();
-    s.push(".1");
-    PathBuf::from(s)
-}
-
 /// Wall-clock timestamp in RFC3339 with millisecond precision and a `Z` suffix.
 /// Event `ts` is wall-clock for human audit (drive-window math uses the
 /// monotonic clock instead; LD17). Implemented without `chrono` to keep the

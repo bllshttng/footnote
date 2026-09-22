@@ -1954,9 +1954,7 @@ fn detect_flakes(
 /// Every `(sha, run id, check)` the flake ledger already recorded, read once
 /// per drive-loop run and consulted in memory.
 fn journal_flake_guards(path: &std::path::Path) -> std::collections::HashSet<String> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Default::default();
-    };
+    let text = crate::event_store::journal_text(path, &["pr_heal_flake"]);
     text.lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .filter(|row| row.get("type").and_then(Value::as_str) == Some("pr_heal_flake"))
@@ -1971,9 +1969,7 @@ fn journal_flake_guards(path: &std::path::Path) -> std::collections::HashSet<Str
 
 /// The node ids already filed for a flake key, and how many rows carry it.
 fn journal_flake_rows_for_key(path: &std::path::Path, key: &str) -> Vec<Option<String>> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
+    let text = crate::event_store::journal_text(path, &["pr_heal_flake"]);
     text.lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .filter(|row| row.get("type").and_then(Value::as_str) == Some("pr_heal_flake"))
@@ -4323,12 +4319,10 @@ echo '[]'
             .map(|n| format!(",\"node_id\":\"{n}\""))
             .unwrap_or_default();
         let row = format!(
-            "{{\"ts\":\"2026-09-17T12:00:00Z\",\"type\":\"pr_heal_flake\",\"data\":{{\"key_guard\":\"old:1:ci\",\"key\":\"ci\",\"sha\":\"old\",\"run_id\":\"1\",\"check\":\"ci\"{node_json}}}}}\n"
+            "{{\"ts\":\"2026-09-17T12:00:00Z\",\"type\":\"pr_heal_flake\",\"data\":{{\"key_guard\":\"old:1:ci\",\"key\":\"ci\",\"sha\":\"old\",\"run_id\":\"1\",\"check\":\"ci\"{node_json}}}}}"
         );
         let path = dir.join("events.jsonl");
-        let mut text = std::fs::read_to_string(&path).unwrap_or_default();
-        text.push_str(&row);
-        std::fs::write(&path, text).unwrap();
+        crate::event_store::append_envelope(&path, row.trim_end(), None).unwrap();
     }
 
     /// Seed the journal with a tick row carrying rerun keys.
