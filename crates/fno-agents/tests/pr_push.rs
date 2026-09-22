@@ -75,6 +75,13 @@ case "$1" in
       *--merges*)
         if [ -f "$D/remote-only-merge" ]; then echo "m1234567 b0000000 m0000000"; fi
         exit 0 ;;
+      *--format=*)
+        if [ -f "$D/bad-commit-msg" ]; then
+          printf 'abc1234\037per d-deadbeef we ruled\036'
+        elif [ -f "$D/live-commit-msg" ]; then
+          printf 'abc1234\037per d-aaaa0001 we ruled\036'
+        fi
+        exit 0 ;;
     esac
     if [ -f "$D/remote-only" ]; then echo abc1234; fi
     exit 0 ;;
@@ -636,4 +643,72 @@ fn a_clean_remote_merge_still_lands() {
         head.trim(),
         "the remote branch equals the rebased HEAD"
     );
+}
+
+/// A seeded FNO_HOME so the commit-message scan never touches the machine
+/// store: one live id, d-aaaa0001.
+fn seed_fno_home(root: &Path) -> PathBuf {
+    let home = root.join("fno-home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("decisions.jsonl"),
+        "{\"type\":\"operator_decision\",\"ts\":\"2026-09-12T00:00:00Z\",\"data\":\
+         {\"decision_id\":\"d-aaaa0001\",\"subject\":\"s\",\"decision\":\"R.\",\
+         \"text\":\"R.\",\"authority_source\":\"operator\"}}\n",
+    )
+    .unwrap();
+    home
+}
+
+fn run_verb_with_fno_home(dir: &Path, fno_home: &Path) -> (i32, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+        .envs(fno_agents::test_run::self_owner_env())
+        .env("FNO_HOME", fno_home)
+        .args(["pr-push"])
+        .arg("--cwd")
+        .arg(dir)
+        .arg("--git-bin")
+        .arg(dir.join("git"))
+        .arg("--gh-bin")
+        .arg(dir.join("gh"))
+        .arg("--fno-bin")
+        .arg(dir.join("fno"))
+        .arg("--stamps-dir")
+        .arg(dir.join("stamps"))
+        .output()
+        .expect("run fno-agents");
+    (
+        out.status.code().unwrap_or(1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+// AC4-ERR: the scan refuses before anything moves and names commit + id.
+#[test]
+fn a_commit_message_citing_an_unknown_id_refuses_the_push() {
+    let (_t, d) = tmpdir();
+    std::fs::write(d.join("bad-commit-msg"), "").unwrap();
+    let home = seed_fno_home(&d);
+    let (code, out, err) = run_verb_with_fno_home(&d, &home);
+    assert_eq!(code, 3, "{out}\n{err}");
+    assert!(err.contains("commit abc1234"), "{err}");
+    assert!(err.contains("d-deadbeef"), "{err}");
+    assert!(err.contains("Reword that commit message"), "{err}");
+    assert!(
+        !log_of(&d, "git.log").contains("git push"),
+        "nothing pushed"
+    );
+}
+
+// AC4-HP: live ids read clean and the push path continues unchanged.
+#[test]
+fn commit_messages_citing_only_live_ids_push_unchanged() {
+    let (_t, d) = tmpdir();
+    std::fs::write(d.join("live-commit-msg"), "").unwrap();
+    let home = seed_fno_home(&d);
+    let (code, out, err) = run_verb_with_fno_home(&d, &home);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("pushed=1"), "{out}");
+    assert_eq!(log_of(&d, "git.log").matches("git push").count(), 1);
 }

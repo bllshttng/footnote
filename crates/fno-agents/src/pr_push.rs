@@ -726,6 +726,27 @@ fn behind(git_bin: &str, cwd: &Path) -> String {
     }
 }
 
+/// One refusal line per commit in a `git log --format=%h%x1f%B%x1e` capture
+/// whose message cites a decision id no ruling carries. Records split on
+/// \x1e, the short sha joins its message on \x1f.
+fn commit_citation_failures(log: &str) -> Vec<String> {
+    let mut failures = Vec::new();
+    for record in log.split('\u{1e}').map(str::trim).filter(|r| !r.is_empty()) {
+        let mut parts = record.splitn(2, '\u{1f}');
+        let short = parts.next().unwrap_or("?").trim();
+        let message = parts.next().unwrap_or("");
+        let bad = crate::evidence::check_decision_citations(message);
+        if !bad.is_empty() {
+            failures.push(format!(
+                "commit {short} cites a decision id no ruling carries: {}. \
+                 Reword that commit message, then re-run the push.",
+                bad.join("; ")
+            ));
+        }
+    }
+    failures
+}
+
 /// The guarded push, verb entry. Sequence: refuse protected/dirty, fetch,
 /// measure behind-before, rebase onto origin/main (refuse on conflict,
 /// naming the rebase verb as the resolver door), measure behind-after,
@@ -816,6 +837,36 @@ pub fn run_push(argv: &[String]) -> i32 {
 
     // (5) behind-after.
     let after = behind(&git, &cwd);
+
+    // (5b) Ruling citations in the commit messages of exactly the commits
+    // this push sends: the rebase has landed, so origin/main..HEAD is the
+    // range the push sends. A fabricated ruling converts a refused gate
+    // into a claimed pass, and the commit message is where such a claim
+    // reaches every downstream reader.
+    let (ok, out, err) = match run_labeled(
+        "pr-push",
+        &git,
+        &["log", "--format=%h%x1f%B%x1e", "origin/main..HEAD"],
+        &cwd,
+        READ_TIMEOUT,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("pr-push: the commit-log read failed: {e}");
+            return 4;
+        }
+    };
+    if !ok {
+        eprintln!("pr-push: the commit-log read failed: {}", err.trim());
+        return 4;
+    }
+    let failures = commit_citation_failures(&out);
+    if !failures.is_empty() {
+        for line in &failures {
+            eprintln!("pr-push: refusing: {line}");
+        }
+        return 3;
+    }
 
     // (6) The fetched remote head of the SAME-NAME branch, read BEFORE
     // preflight: a doomed push must not first spend a rehearsal of up to an
@@ -1094,5 +1145,16 @@ exit 1
         let err = read_checks_rows(gh.to_str().unwrap(), dir.path(), "abc123")
             .expect_err("the status read failed");
         assert!(err.contains("status"), "err names the status read: {err}");
+    }
+
+    // The record parser: clean and torn captures read empty without touching
+    // the store (no id, no read); the unknown-id path is the integration
+    // test's, which seeds FNO_HOME.
+    #[test]
+    fn commit_citation_failures_split_records_and_pass_clean_messages() {
+        let log = "abc1234\u{1f}clean one\u{1e}\ndef5678\u{1f}clean two\u{1e}";
+        assert!(commit_citation_failures(log).is_empty());
+        assert!(commit_citation_failures("").is_empty());
+        assert!(commit_citation_failures("abc1234\u{1f}no separator").is_empty());
     }
 }
