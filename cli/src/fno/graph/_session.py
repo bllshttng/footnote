@@ -15,6 +15,8 @@ import typer
 from fno.claims.core import BLUEPRINT_HOLDER_PREFIX, HANDOVER_HOLDER_PREFIX
 from fno.config._dispatch_verbs import parse_verb_token
 
+_BLUEPRINT_CLAIM_TTL_MS = 2 * 60 * 60 * 1000
+
 
 def _graph_path():
     """Resolve through fno.graph.cli at call time (same seam as tests patch)."""
@@ -462,15 +464,18 @@ def cmd_session_open(
         from fno.claims.session_pid import resolve_session_pid
 
         pid = resolve_session_pid()
-    except Exception:  # noqa: BLE001 - degrade to acquire_claim's transient-pid default
+    except Exception:  # noqa: BLE001 - no durable pid; the lease and session witness hold the claim
         pid = None
     try:
         claim = acquire_claim(
             claim_key,
             holder,
             reason=f"blueprint session for {node_id}",
+            ttl_ms=_BLUEPRINT_CLAIM_TTL_MS,
             pid=pid,
+            pid_unavailable=pid is None,
             harness=eff_harness,
+            harness_session_id=eff_session,
             root=claims_root_for(claim_key),
         )
     except ClaimHeldByOther as exc:
@@ -767,4 +772,3 @@ def cmd_session_reap_open(
             f"row_closed={receipt.get('row_closed')} "
             f"status={receipt['status_after']} remaining_open_do={remaining}"
         )
-
