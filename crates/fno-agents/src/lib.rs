@@ -198,6 +198,8 @@ pub mod loop_target;
 pub mod loopcheck;
 pub mod loops_pause;
 pub mod machine_watch;
+pub mod machine_sample;
+pub mod session_cost;
 pub mod mail_inject;
 pub mod manifest;
 pub mod manifest_lookup;
