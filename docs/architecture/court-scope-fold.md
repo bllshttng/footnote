@@ -76,6 +76,8 @@ When `claim_state` is `live` or `suspect`, `worker` names the holder. On any oth
 
 The board's HTML section renders `claim` and `age` as their own columns, because the section and the JSON come from one fold.
 
+`owned` says which crown answers for a node. An L1 fold lists every node its L2 folds list, and two L2 folds can share a node. In one read, each node is owned by exactly one fold: the deepest crown level, then the lowest scope string on a tie. A caller that acts only on its own `owned` rows never acts twice on one node. A fold that did not run owns nothing, and its nodes fall to the next crown that lists them. Measured 2026-09-21: 11 of the L1 crown's 13 PR-bearing rows also sat in an L2 fold.
+
 ## The stuck verdict
 
 The counts say how much. `stuck` says whether anything needs a hand, which is the only part of the read worth a glance. It is computed in `court_fold.rs`, beside the rows it judges, so no second reader can disagree about what a row means. The fold returns it as `stuck`, plus a rendered `stuck_line` for the node half of the one-line answer.

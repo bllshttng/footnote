@@ -563,6 +563,41 @@ fn with_epic_load(
     }
 }
 
+/// One owner per active node across every fold in this read: the deepest
+/// crown level that lists it, then the lowest scope on a tie. An L1 fold
+/// lists every node its L2 folds list, so a caller acting on its own rows
+/// needs this mark to act once.
+fn mark_owners(folds: &mut BTreeMap<String, Value>, levels: &BTreeMap<String, i64>) {
+    let mut owner: BTreeMap<String, (i64, String)> = BTreeMap::new();
+    for (scope, fold) in folds.iter() {
+        let level = levels.get(scope).copied().unwrap_or(i64::MIN);
+        for node in fold
+            .get("nodes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(id) = s_str(node, "id") else {
+                continue;
+            };
+            if owner.get(id).is_none_or(|(l, _)| level > *l) {
+                owner.insert(id.to_string(), (level, scope.clone()));
+            }
+        }
+    }
+    for (scope, fold) in folds.iter_mut() {
+        let Some(nodes) = fold.get_mut("nodes").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for node in nodes {
+            let owned = s_str(node, "id")
+                .and_then(|id| owner.get(id))
+                .is_some_and(|(_, s)| s == scope);
+            node["owned"] = json!(owned);
+        }
+    }
+}
+
 /// The whole read: fold every crown, then answer as JSON.
 pub fn court_fold(
     graph_path: &PathBuf,
@@ -625,6 +660,15 @@ pub fn court_fold(
         );
         refolded.insert(scope.to_string(), fold);
     }
+    let levels: BTreeMap<String, i64> = crowns
+        .iter()
+        .filter_map(|crown| {
+            let scope = s_str(crown, "scope")?;
+            let level = crown.get("level").and_then(|l| l.as_i64())?;
+            Some((scope.to_string(), level))
+        })
+        .collect();
+    mark_owners(&mut refolded, &levels);
     let mut folds = with_per_scope_stuck(refolded);
     with_epic_load(
         &mut folds,
@@ -1256,6 +1300,71 @@ mod tests {
             folds["e-1"]["epics"],
             json!([{"id": "e-1", "open_children": 1, "full": false}])
         );
+    }
+
+    /// Owned marks the deepest crown level, then the lowest scope on a
+    /// level tie (AC1-HP, AC1-EDGE).
+    #[test]
+    fn owned_marks_the_deepest_crown_then_the_lowest_scope() {
+        let node = |id: &str| json!({"id": id});
+        let mut folds: BTreeMap<String, Value> = BTreeMap::new();
+        folds.insert(
+            "proj".to_string(),
+            json!({"status": "ok", "total": 3, "counts": {}, "omitted": 0,
+                   "nodes": [node("a"), node("b"), node("c")]}),
+        );
+        folds.insert(
+            "e-1".to_string(),
+            json!({"status": "ok", "total": 2, "counts": {}, "omitted": 0,
+                   "nodes": [node("a"), node("c")]}),
+        );
+        folds.insert(
+            "e-2".to_string(),
+            json!({"status": "ok", "total": 1, "counts": {}, "omitted": 0,
+                   "nodes": [node("c")]}),
+        );
+        let levels: BTreeMap<String, i64> = [
+            ("proj".to_string(), 1),
+            ("e-1".to_string(), 2),
+            ("e-2".to_string(), 2),
+        ]
+        .into_iter()
+        .collect();
+        mark_owners(&mut folds, &levels);
+        let row_owned = |scope: &str, id: &str| {
+            folds[scope]["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|n| n["id"] == json!(id))
+                .map(|n| n["owned"].as_bool().unwrap())
+                .unwrap()
+        };
+        assert!(!row_owned("proj", "a"));
+        assert!(row_owned("proj", "b"));
+        assert!(!row_owned("proj", "c"));
+        assert!(row_owned("e-1", "a"));
+        assert!(row_owned("e-1", "c"));
+        assert!(!row_owned("e-2", "c"));
+    }
+
+    /// A fold that did not run owns nothing and gains no key (AC1-ERR).
+    #[test]
+    fn owned_leaves_a_fold_without_nodes_alone() {
+        let mut folds: BTreeMap<String, Value> = BTreeMap::new();
+        folds.insert(
+            "dead".to_string(),
+            json!({"status": "unresolved", "reason": "the fold timed out"}),
+        );
+        folds.insert(
+            "e-1".to_string(),
+            json!({"status": "ok", "total": 1, "counts": {}, "omitted": 0,
+                   "nodes": [{"id": "a"}]}),
+        );
+        let levels: BTreeMap<String, i64> = [("e-1".to_string(), 2)].into_iter().collect();
+        mark_owners(&mut folds, &levels);
+        assert!(folds["dead"].get("owned").is_none());
+        assert_eq!(folds["e-1"]["nodes"][0]["owned"], json!(true));
     }
 
     /// -J and `--format json` select the same bytes; the flag never reaches
