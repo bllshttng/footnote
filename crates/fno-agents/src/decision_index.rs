@@ -156,11 +156,21 @@ pub fn derive_live(text: &str) -> Index {
     Index { rows, damaged }
 }
 
-/// Read an index file into its live rows. A missing or unreadable file is
+/// Read an index into its live rows: the committed rows plus the unseen live
+/// lines of the journal. A journal with neither a live file nor a store is
 /// `Err` naming the path: a caller that cannot read the index must say so,
 /// never render an empty list that reads as "no rulings exist".
 pub fn read_live(path: &Path) -> Result<Index, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if !path.exists() && !crate::event_store::store_path(path).exists() {
+        return Err(format!(
+            "{}: neither the journal nor its store exists",
+            path.display()
+        ));
+    }
+    let text = crate::event_store::journal_text_checked(
+        path,
+        &crate::event_store::EventQuery::of_types(&[]),
+    )?;
     Ok(derive_live(&text))
 }
 
@@ -314,5 +324,29 @@ mod tests {
         let index = live_laws(&path).expect("valid rows still return");
         assert_eq!(index.rows.len(), 2);
         assert_eq!(index.damaged, 2);
+    }
+
+    #[test]
+    fn read_live_reads_a_store_committed_decision() {
+        // AC13-LIVE
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("decisions.jsonl");
+        let row = envelope(
+            "d-abcd1234",
+            "2026-09-12T00:00:00Z",
+            "operator",
+            "topic-a",
+            "",
+        );
+        crate::event_store::append_envelope(&path, &row, None).unwrap();
+        let index = read_live(&path).unwrap();
+        assert_eq!(index.rows.len(), 1);
+        assert_eq!(
+            index.rows[0].get("decision_id").and_then(Value::as_str),
+            Some("d-abcd1234")
+        );
+        let missing = dir.path().join("absent.jsonl");
+        let err = read_live(&missing).unwrap_err();
+        assert!(err.contains("absent.jsonl"), "{err}");
     }
 }

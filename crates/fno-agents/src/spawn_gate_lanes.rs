@@ -332,14 +332,18 @@ pub(crate) fn read_questions_journal(registry_path: &Path, warnings: &mut Vec<St
     match registry_path.parent().and_then(Path::parent) {
         Some(fno_dir) => {
             let path = fno_dir.join("questions.jsonl");
-            std::fs::read_to_string(path).unwrap_or_else(|e| {
-                if e.kind() != std::io::ErrorKind::NotFound {
+            match crate::event_store::journal_text_checked(
+                &path,
+                &crate::event_store::EventQuery::of_types(crate::needs::QUESTION_TYPES),
+            ) {
+                Ok(text) => text,
+                Err(e) => {
                     warnings.push(format!(
                         "operator questions unreadable ({e}); waiting workers counted"
                     ));
+                    String::new()
                 }
-                String::new()
-            })
+            }
         }
         None => String::new(),
     }
@@ -1883,5 +1887,23 @@ mod tests {
         let mut warnings = Vec::new();
         assert!(check_account_login_with(None, "makers", binding, probe, &mut warnings).is_ok());
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn questions_journal_read_reaches_the_store() {
+        // AC12-GATE: a store-only open question feeds the waiting read.
+        let dir = tempfile::tempdir().unwrap();
+        let registry = dir.path().join("agents").join("registry.json");
+        std::fs::create_dir_all(dir.path().join("agents")).unwrap();
+        let questions = dir.path().join("questions.jsonl");
+        let row = serde_json::json!({
+            "ts": "2026-09-17T12:00:00Z", "type": "operator_question", "source": "agent",
+            "data": {"question_id": "q-gate-1", "question": "proceed?", "blocks": ["x-1"]}
+        });
+        crate::event_store::append_envelope(&questions, &row.to_string(), None).unwrap();
+        let mut warnings = Vec::new();
+        let raw = read_questions_journal(&registry, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(raw.contains("q-gate-1"), "{raw}");
     }
 }

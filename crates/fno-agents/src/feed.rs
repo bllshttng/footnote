@@ -589,14 +589,20 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         .parent()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".fno"));
-    let questions_raw =
-        std::fs::read_to_string(fno_dir.join("questions.jsonl")).unwrap_or_else(|_| {
+    let questions_path = fno_dir.join("questions.jsonl");
+    let questions_raw = match crate::event_store::journal_text_checked(
+        &questions_path,
+        &crate::event_store::EventQuery::of_types(&[]),
+    ) {
+        Ok(raw) => raw,
+        Err(e) => {
             eprintln!(
-                "fno-agents feed: questions store unreadable, skipped: {}",
-                fno_dir.join("questions.jsonl").display()
+                "fno-agents feed: questions store unreadable, skipped: {} ({e})",
+                questions_path.display()
             );
             String::new()
-        });
+        }
+    };
 
     let (graph_entries, graph_note): (Vec<Value>, Option<String>) = {
         // The lifecycle leg reads the store, never the file. An absent store
@@ -1058,5 +1064,23 @@ mod tests {
             kinds(&p.rows),
             ["node_created", "node_started", "node_ended"]
         );
+    }
+
+    #[test]
+    fn the_feed_reads_a_store_committed_question() {
+        // AC12-FEED: a store-only operator_question reaches the questions leg.
+        let dir = tempfile::tempdir().unwrap();
+        let questions = dir.path().join("questions.jsonl");
+        let row = serde_json::json!({
+            "ts": "2026-09-17T12:00:00Z", "type": "operator_question", "source": "agent",
+            "data": {"question_id": "q-feed-1", "question": "proceed?", "blocks": []}
+        });
+        crate::event_store::append_envelope(&questions, &row.to_string(), None).unwrap();
+        let raw = crate::event_store::journal_text_checked(
+            &questions,
+            &crate::event_store::EventQuery::of_types(&[]),
+        )
+        .unwrap();
+        assert!(raw.contains("q-feed-1"), "{raw}");
     }
 }
