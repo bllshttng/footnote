@@ -58,6 +58,8 @@ The per-turn policy never fabricates a posture. It echoes the server's RESOLVED 
 
 The yolo scalar caveat stands as a SERVER fact, not an fno gap: a thread started with the `danger-full-access` scalar may still run `workspaceWrite` server-side. fno names what it asked for (`sandbox_posture`), what the server resolved (`resolved_sandbox`), and what each turn carries (`granted_writable_roots` + `turn_policy_source`), so the gap is measurable instead of silent.
 
+A thread can also be narrowed AFTER launch by a settings change fno did not send: a measured 2026-09-21 `thread_settings_applied` moved a live yolo thread to the `:workspace` profile with no fno event at that second. The held driver already echoes the posture recorded at `thread/start` on every turn it drives. The mail and resume-wake lane reads the row's recorded posture too, and a row recording full access gets a `{"type":"dangerFullAccess"}` turn policy that skips the live-posture probe, so the next `fno agents mail send` or resume wake restores the thread. A turn another client starts is the remaining gap: it runs under whatever the server last resolved until fno's next delivered turn.
+
 The pre-launch sandbox probe judges the worker's OWN requested posture (never a hardcoded `workspace-write`), and proves access with a harmless canary write inside the granted roots beside the `gh` and git ref-lock checks. Its negative control closes the detector gap: a write OUTSIDE the granted roots must fail, and when that control succeeds the verdict is `unknown`, never `reachable` - a detector that cannot fail has proved nothing. Exit 85 and the `sandbox-probe:` marker are unchanged.
 
 ## The default scope (an operator decision, recorded open)
