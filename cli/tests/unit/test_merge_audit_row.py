@@ -10,7 +10,6 @@ Every assertion here is a POSITIVE marker (a row, a field value), never the
 absence of a diagnostic.
 """
 
-import json
 from pathlib import Path
 
 import pytest
@@ -100,3 +99,73 @@ def test_manifest_file_degrades_to_the_checkout_path(tmp_path: Path, monkeypatch
     monkeypatch.setattr("fno.paths.target_state_path_or_legacy", _boom)
 
     assert _merge._manifest_file(str(root)) == str(root / ".fno" / "target-state.md")
+
+
+def test_an_absent_manifest_records_the_ambient_session(tmp_path: Path, journal: Path, monkeypatch) -> None:
+    """A canonical checkout has no manifest; the merging process names itself."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-king")
+
+    _merge._emit_session_satisfied(
+        "https://github.com/o/r/pull/1", str(tmp_path / ".fno" / "target-state.md")
+    )
+
+    data = _rows(journal)[0]["data"]
+    assert data["session_id"] == "sess-king"
+    # The hash needs a manifest to hash, so it still degrades to the sentinel.
+    assert data["gate_state_hash"] == _merge._MERGE_ROW_UNKNOWN
+
+
+def test_the_manifest_session_still_wins_over_ambient(
+    tmp_path: Path, journal: Path, monkeypatch
+) -> None:
+    manifest = tmp_path / "target-state.md"
+    manifest.write_text("session_id: sess-42\nharness: claude\n", encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-king")
+
+    _merge._emit_session_satisfied("", str(manifest))
+
+    assert _rows(journal)[0]["data"]["session_id"] == "sess-42"
+
+
+def test_mixed_family_markers_degrade_to_unknown(
+    tmp_path: Path, journal: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-king")
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-other")
+
+    _merge._emit_session_satisfied(
+        "https://github.com/o/r/pull/1", str(tmp_path / ".fno" / "target-state.md")
+    )
+
+    data = _rows(journal)[0]["data"]
+    assert data["session_id"] == _merge._MERGE_ROW_UNKNOWN
+
+
+def test_an_absent_manifest_prints_one_honest_line(
+    tmp_path: Path, journal: Path, capsys
+) -> None:
+    """One absent file is one cause, so one line - not a missing-key line
+    for a file that was never there plus an unreadable line for the same
+    file."""
+    _merge._emit_session_satisfied("", str(tmp_path / ".fno" / "target-state.md"))
+
+    err = capsys.readouterr().err
+    pr_lines = [ln for ln in err.splitlines() if ln.startswith("pr-merge:")]
+    assert len(pr_lines) == 1, err
+    assert "no target manifest at" in pr_lines[0]
+    assert "no session_id on" not in pr_lines[0]
+    assert "unreadable" not in pr_lines[0]
+
+
+def test_a_readable_manifest_without_a_session_prints_one_line(
+    tmp_path: Path, journal: Path, capsys
+) -> None:
+    manifest = tmp_path / "target-state.md"
+    manifest.write_text("harness: claude\n", encoding="utf-8")
+
+    _merge._emit_session_satisfied("", str(manifest))
+
+    err = capsys.readouterr().err
+    pr_lines = [ln for ln in err.splitlines() if ln.startswith("pr-merge:")]
+    assert len(pr_lines) == 1, err
+    assert pr_lines[0].startswith(f"pr-merge: no session_id on {manifest}")

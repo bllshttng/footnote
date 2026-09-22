@@ -1169,6 +1169,17 @@ def _post_merge_remote_delete(pr_number: int, repo: str, auto_merge) -> str:
 _MERGE_ROW_UNKNOWN = "unknown"
 
 
+def _merge_identity(state_file: str) -> Tuple[Optional[str], Optional[str]]:
+    """The session and harness a merge row records: the manifest (which names
+    the run the PR belongs to) wins; else the merging process names itself."""
+    sid = _read_state_field(state_file, "session_id")
+    if sid and sid != "null":
+        return sid, _read_state_field(state_file, "harness") or None
+    from fno.harness_identity import resolve_harness_identity
+    ident = resolve_harness_identity()
+    return ident.session_id or None, ident.harness or None
+
+
 def _emit_session_satisfied(pr_url: str, state_file: str) -> None:
     """Emit a ``session_satisfied{source:pr_merge}`` row for EVERY merge.
 
@@ -1181,16 +1192,21 @@ def _emit_session_satisfied(pr_url: str, state_file: str) -> None:
     gate from one that did not, and it cannot change a merge outcome. So a
     missing input degrades to a NAMED sentinel with a diagnostic.
     """
-    sid = _read_state_field(state_file, "session_id")
-    if not sid or sid == "null":
-        sys.stderr.write(
-            f"pr-merge: no session_id on {state_file}; recording the merge row "
-            f"as {_MERGE_ROW_UNKNOWN}\n"
-        )
-        sid = _MERGE_ROW_UNKNOWN
+    sid = _merge_identity(state_file)[0] or _MERGE_ROW_UNKNOWN
     try:
         with open(state_file, "rb") as fh:
             gate_hash = hashlib.md5(fh.read()).hexdigest()
+        if sid == _MERGE_ROW_UNKNOWN:
+            sys.stderr.write(
+                f"pr-merge: no session_id on {state_file}; recording the merge "
+                f"row as {sid}\n"
+            )
+    except FileNotFoundError:
+        sys.stderr.write(
+            f"pr-merge: no target manifest at {state_file}; recording the "
+            f"merge row as session {sid}\n"
+        )
+        gate_hash = _MERGE_ROW_UNKNOWN
     except OSError as exc:
         sys.stderr.write(
             f"pr-merge: manifest {state_file} unreadable ({exc}); recording the "
@@ -1307,6 +1323,7 @@ def _emit_merge_cleanup_skip(
     merge the same way a request row is, so one reader answers both."""
     from fno.agents.events import emit_merge_cleanup_skipped
 
+    session_id, harness = _merge_identity(state_file)
     repo, project = _merge_request_repo_and_project(cwd)
     emit_merge_cleanup_skipped(
         repo=repo,
@@ -1315,8 +1332,8 @@ def _emit_merge_cleanup_skip(
         reason=reason,
         detail=detail,
         branch=branch,
-        session_id=_read_state_field(state_file, "session_id") or None,
-        harness=_read_state_field(state_file, "harness") or None,
+        session_id=session_id,
+        harness=harness,
     )
 
 
@@ -1362,6 +1379,7 @@ def _emit_merge_cleanup_request(
         _emit_merge_cleanup_skip(pr_number, cwd, state_file, "no-branch")
         return
     branch = meta["headRefName"]
+    session_id, harness = _merge_identity(state_file)
     repo, project = _merge_request_repo_and_project(cwd)
     # A linked worktree's `.git` is a FILE; the canonical checkout's is a
     # directory. Inlined from the deleted Python gate: one line, so
@@ -1375,8 +1393,8 @@ def _emit_merge_cleanup_request(
         worktree=worktree,
         node_ids=bound_node_ids,
         repo_slug=repo_slug_from_url(meta.get("url") or ""),
-        session_id=_read_state_field(state_file, "session_id") or None,
-        harness=_read_state_field(state_file, "harness") or None,
+        session_id=session_id,
+        harness=harness,
         merged_at=meta.get("mergedAt") or None,
         # always emit the exact candidates - name-matched rows count
         # even when the merge ran outside a linked worktree.
@@ -1418,7 +1436,7 @@ def _run_post_merge_followups(
         ):
             mode = "autonomous"
         plan_path = _read_state_field(state_file, "plan_path")
-        session_id = _read_state_field(state_file, "session_id")
+        session_id = _merge_identity(state_file)[0] or ""
         pr_url = ""
         res = _gh(["pr", "view", str(pr_number), "--json", "url", "-q", ".url"], cwd)
         if res.ok:
