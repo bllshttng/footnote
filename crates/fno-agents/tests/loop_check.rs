@@ -526,19 +526,14 @@ fn ac1_hp_promise_green_pr_done() {
     );
     assert_eq!(d.fires, 1);
 
-    // Verify: target-state.md bytes unchanged (read-only invariant)
     let manifest_after = fs::read(&manifest_path).unwrap();
     assert_eq!(
         manifest_before, manifest_after,
         "target-state.md must not be mutated"
     );
 
-    // Verify: termination event appended to project events
     let events_path = project_events(&cwd);
-    assert!(
-        fno_agents::event_store::store_path(&events_path).exists(),
-        "project events.db must exist"
-    );
+    assert!(fno_agents::event_store::store_path(&events_path).exists());
     let events_content = event_text(&events_path);
     assert!(
         events_content.contains("\"termination\""),
@@ -1918,14 +1913,8 @@ fn events_appended_to_both_project_and_global() {
         ),
     ]);
 
-    assert!(
-        fno_agents::event_store::store_path(&project_events(&cwd)).exists(),
-        "project events.db must exist"
-    );
-    assert!(
-        fno_agents::event_store::store_path(&global_events).exists(),
-        "global events.db must exist"
-    );
+    assert!(fno_agents::event_store::store_path(&project_events(&cwd)).exists());
+    assert!(fno_agents::event_store::store_path(&global_events).exists());
 
     let proj_events = event_text(&project_events(&cwd));
     let glob_events = event_text(&global_events);
