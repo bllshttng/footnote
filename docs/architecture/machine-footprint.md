@@ -63,8 +63,8 @@ Two bounds upstream keep the leak from forming in the first place. The suite run
 
 ## The machine band never gates
 
-The `machine` object is computed on every spawn's own footprint reading and rides that payload to every consumer, but it never decides a spawn. The fleet's attributed CPU share is the only CPU axis that gates, and it reads the machine only through the attribution gap: a gap widens the share interval, and with no gap the machine's own cores reach no verdict at all.
+The `machine` object is computed on every spawn's own footprint reading and rides that payload to every consumer, but it never decides a spawn. The fleet's attributed CPU share is the only CPU axis that gates. It reads the machine only through the attribution gap: a gap widens the share interval. With no gap, the machine's own cores reach no verdict at all.
 
-Measured on 2026-09-18 on the fleet box: the admission read a 5.3 percent fleet share with `gap: null` and answered `admit`, while the same payload's machine band read 3.873 of 12.00 cores, 32.3 percent of its 90 percent band, and answered `calm`. On a machine foreign work has saturated, the band answers `hot` and still gates nothing.
+Measured on 2026-09-18 on the fleet box: the admission read a 5.3 percent fleet share with `gap: null` and answered `admit`. The same payload's machine band read 3.873 of 12.00 cores, 32.3 percent of its 90 percent band, and answered `calm`. On a machine foreign work has saturated, the band answers `hot` and still gates nothing.
 
-Both costs of a gating band were weighed when the load backstop was deleted. Gating holds the whole fleet for a browser. Not gating leaves an operator whose box is melting with one number that never moves. Whether the band should gate is open with the superuser; this page records the behavior as it ships, and no line here claims a ruling that has not landed.
+When the load backstop was deleted, the run weighed both costs of a gating band. Gating holds the whole fleet for a browser. Not gating leaves an operator whose box is melting with one number that never moves. Whether the band gates is open with the superuser. This page records the behavior as it ships. No line here claims a ruling that has not landed.
