@@ -75,16 +75,16 @@ pub(crate) struct AskRequest {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-pub(crate) struct LawRow {
-    pub(crate) decision_id: String,
+pub struct LawRow {
+    pub decision_id: String,
     // Option, not String+default: Python rows carry null for a missing
     // decision body or ts, and serde's `default` covers absent keys only.
     #[serde(default)]
-    pub(crate) subject: Option<String>,
+    pub subject: Option<String>,
     #[serde(default)]
-    pub(crate) decision: Option<String>,
+    pub decision: Option<String>,
     #[serde(default)]
-    pub(crate) ts: Option<String>,
+    pub ts: Option<String>,
 }
 
 #[derive(Deserialize)]
