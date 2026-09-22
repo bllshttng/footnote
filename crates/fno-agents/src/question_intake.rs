@@ -219,6 +219,7 @@ fn title_of(text: &str, parsed_title: &str) -> String {
     let mut lines = text.lines().map(str::trim).peekable();
     if lines.peek() == Some(&"---") {
         // Skip a leading frontmatter block; the title is the first prose line.
+        lines.next();
         for line in lines.by_ref() {
             if line == "---" {
                 break;
