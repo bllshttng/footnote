@@ -362,7 +362,7 @@ fi
                break
            m = re.match(r"^blocked_by:\s*(.*)$", line)
            if m:
-               tail = m.group(2).strip()
+               tail = m.group(1).strip()
                if tail.startswith("[") and tail.endswith("]"):
                    declared += [v.strip().strip("'\"") for v in tail[1:-1].split(",") if v.strip()]
                    in_blockers = False
