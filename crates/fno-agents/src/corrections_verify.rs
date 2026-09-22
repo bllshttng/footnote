@@ -70,11 +70,14 @@ fn resolve_events(flag: Option<&str>) -> Option<PathBuf> {
     crate::finalize::loop_state_root(home.as_deref()).map(|p| p.join("events.jsonl"))
 }
 
-/// The `key=value` token a writer appended to DETAILS, as its value.
+/// The `key=value` token a writer appended to DETAILS, as its value. The
+/// hook appends its tokens after the commit subject, so the LAST match
+/// wins when the subject itself carries a `key=` token.
 fn detail_token(details: &str, key: &str) -> Option<String> {
     details
         .split_whitespace()
-        .find_map(|t| t.strip_prefix(key))
+        .filter_map(|t| t.strip_prefix(key))
+        .next_back()
         .map(str::to_string)
 }
 

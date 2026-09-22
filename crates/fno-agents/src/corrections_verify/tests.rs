@@ -237,6 +237,19 @@ fn skill_commit_rows_score_and_carry_their_link() {
 }
 
 #[test]
+fn a_subject_embedded_token_does_not_shadow_the_hook_token() {
+    let log = "2026-09-10T12:00:00Z | S1 | skill-commit | skills/target/SKILL.md | see sha=deadbeefdead docs sha=abc123def456 ref=r1#1\n";
+    let rows = read_corrections(log, parse_ts("2026-01-01T00:00:00Z").unwrap());
+    assert_eq!(
+        rows[0].sha.as_deref(),
+        Some("abc123def456"),
+        "the hook appends last, so its sha wins: {:?}",
+        rows[0].sha
+    );
+    assert_eq!(rows[0].reference.as_deref(), Some("r1#1"));
+}
+
+#[test]
 fn since_bounds_the_corrections_considered() {
     let log = concat!(
         "2026-09-01T12:00:00Z | S1 | git-rule-edit | rules/old.md | old\n",
