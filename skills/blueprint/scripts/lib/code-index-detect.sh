@@ -11,8 +11,10 @@
 # `fresh` or `refresh`.
 #
 # Search order, later wins by name: the bundled code-index/providers/ next to
-# this script (deployed skill layout, then sibling-skill layout, then repo
-# layout), ~/.fno/code-index/providers/, <repo>/.fno/code-index/providers/.
+# this script (deployed skill layout, then repo layout),
+# ~/.fno/code-index/providers/, <repo>/.fno/code-index/providers/. The fourth
+# column is the manifest's canonical absolute path: every directory is
+# resolved before the glob, so no printed path carries a . or .. segment.
 # A valid name shadows lower-priority manifests before its index presence is
 # checked: an override whose index is absent never falls back to the bundled
 # provider of the same name.
@@ -61,13 +63,14 @@ PROVIDER_FILES=()
 add_dir() {
     local dir="$1" f
     [[ -d "$dir" ]] || return 0
+    # Logical pwd, never -P: a /var mktemp path must keep its spelling.
+    dir="$(cd "$dir" && pwd)"
     for f in "$dir"/*.toml; do
         [[ -f "$f" ]] || continue
         PROVIDER_FILES+=("$f")
     done
 }
 add_dir "$SCRIPT_DIR/../../code-index/providers"
-add_dir "$SCRIPT_DIR/../../blueprint/code-index/providers"
 add_dir "$SCRIPT_DIR/../../skills/blueprint/code-index/providers"
 add_dir "${HOME:-}/.fno/code-index/providers"
 add_dir "$REPO_ROOT/.fno/code-index/providers"
