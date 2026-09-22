@@ -10,7 +10,7 @@ type = "md"
 path = "~/c3po/me/inbox/jc-todos.md"
 ```
 
-The key was named `[[reach_me]]`; that name still reads for one release, and loading it warns and names this key.
+The key was named `[[reach_me]]`. That name still reads for one release, and loading it warns and names this key.
 
 `path` is the only required key. `type` defaults to `md`.
 
