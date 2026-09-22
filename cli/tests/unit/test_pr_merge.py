@@ -2941,6 +2941,71 @@ def test_a_foreign_repo_same_number_additional_pr_is_not_stamped(monkeypatch, tm
     assert "merge_status" not in saved["additional_prs"][0]
 
 
+def test_a_foreign_repo_same_number_primary_pr_is_not_stamped(monkeypatch, tmp_path):
+    """A primary PR number collision skips the foreign node and stamps ours."""
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [
+        {
+            "id": "x-other",
+            "pr_number": 1060,
+            "pr_url": "https://github.com/other/repo/pull/1060",
+        },
+        {
+            "id": "x-ours",
+            "pr_number": 1060,
+            "pr_url": "https://github.com/o/r/pull/1060",
+        },
+    ]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
+    monkeypatch.setattr(
+        "fno.graph._reconcile.resolve_current_repo_slug", lambda cwd: "o/r"
+    )
+
+    _merge._sync_graph_merge_status("merged", 1060)
+
+    saved = json.loads(graph.read_text())["entries"]
+    assert saved[0]["merge_status"] is None
+    assert saved[1]["merge_status"] == "merged"
+
+
+def test_a_primary_pr_is_not_stamped_when_our_repo_is_unknown(monkeypatch, tmp_path):
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [{
+        "id": "x-ours",
+        "pr_number": 1060,
+        "pr_url": "https://github.com/o/r/pull/1060",
+    }]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
+    monkeypatch.setattr(
+        "fno.graph._reconcile.resolve_current_repo_slug", lambda cwd: None
+    )
+
+    _merge._sync_graph_merge_status("merged", 1060)
+
+    saved = json.loads(graph.read_text())["entries"][0]
+    assert saved["merge_status"] is None
+
+
+def test_a_url_less_primary_pr_is_stamped_for_a_known_repo(monkeypatch, tmp_path):
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [{
+        "id": "x-ours",
+        "pr_number": 1060,
+    }]}))
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.tracker.active_backend_name", lambda: "graph")
+    monkeypatch.setattr(
+        "fno.graph._reconcile.resolve_current_repo_slug", lambda cwd: "o/r"
+    )
+
+    _merge._sync_graph_merge_status("merged", 1060)
+
+    saved = json.loads(graph.read_text())["entries"][0]
+    assert saved["merge_status"] == "merged"
+
+
 def test_an_unrelated_additional_pr_number_stamps_nothing(monkeypatch, tmp_path):
     """A number matching no primary and no additional ref is a no-op: the
     sync never guesses a node."""
