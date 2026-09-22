@@ -11336,8 +11336,8 @@ async fn selector_enter_refusal_keeps_selector_open() {
         .iter_mut()
         .find(|a| a.name == "bg-other")
         .unwrap()
-        .exited = true; // the dead paneless row (bg-other, row 8)
-    for row in [8usize] {
+        .exited = true; // the dead paneless row (bg-other, row 9)
+    for row in [9usize] {
         v.selector = Some(row);
         v.notice = None;
         let mut buf: Vec<u8> = Vec::new();
