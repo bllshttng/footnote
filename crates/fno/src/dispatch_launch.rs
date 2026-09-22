@@ -150,20 +150,20 @@ pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &s
     if !req.model_names_harness {
         argv.extend(["--harness".to_string(), req.harness.clone()]);
     }
+    argv.extend(["--cwd".to_string(), req.cwd.clone()]);
+    // An EMPTY substrate means the door's default (thread where the harness
+    // seats one); only an explicit lane rides the argv, in the same
+    // position it always has, so a pane request stays byte-identical.
+    if !req.substrate.is_empty() {
+        argv.extend(["--substrate".to_string(), req.substrate.clone()]);
+    }
     argv.extend([
-        "--cwd".to_string(),
-        req.cwd.clone(),
-        // An EMPTY substrate means the door's default (thread where the
-        // harness seats one); only an explicit lane rides the argv.
         "--mux-session".to_string(),
         session.to_string(),
         // Fail immediately on a full spawn gate rather than queueing: a
         // popup launch that silently waits reads as a hung button.
         "--no-wait".to_string(),
     ]);
-    if !req.substrate.is_empty() {
-        argv.extend(["--substrate".to_string(), req.substrate.clone()]);
-    }
     if let Some(m) = &req.model {
         argv.extend(["--model".to_string(), m.clone()]);
     }
