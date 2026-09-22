@@ -18,6 +18,7 @@
 //! allows none.
 
 use serde_json::{json, Value};
+use std::io::Read;
 use std::path::Path;
 
 /// The question prefixes this plan moved off the question channel. A match
