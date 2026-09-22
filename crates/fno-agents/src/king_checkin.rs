@@ -493,11 +493,8 @@ fn epic_line(court: &Value) -> String {
     if rows.is_empty() {
         return "epics: none in scope holds an open child".into();
     }
-    let cap = court
-        .get("epic_cap")
-        .and_then(Value::as_u64)
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| "-".into());
+    let cap_raw = court.get("epic_cap").and_then(Value::as_u64);
+    let cap = cap_raw.map(|c| c.to_string()).unwrap_or_else(|| "-".into());
     let cells: Vec<String> = rows
         .iter()
         .map(|row| {
@@ -506,16 +503,19 @@ fn epic_line(court: &Value) -> String {
                 .get("open_children")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            let full = if row.get("full").and_then(Value::as_bool) == Some(true) {
-                " full"
-            } else {
-                ""
-            };
+            // `full` is a cap word: with no cap configured the producer
+            // never emits it, and a stray one must not read as a refusal.
+            let full =
+                if cap_raw.is_some() && row.get("full").and_then(Value::as_bool) == Some(true) {
+                    " full"
+                } else {
+                    ""
+                };
             format!("{id} {n}/{cap}{full}")
         })
         .collect();
     let body = crate::court_fold::named_ids(&cells);
-    if court.get("epic_cap").and_then(Value::as_u64).is_none() {
+    if cap_raw.is_none() {
         format!("epics: {body} (cap unset)")
     } else {
         format!("epics: {body}")

@@ -499,7 +499,9 @@ mod tests {
                          "type": "epic", "status": "done", "priority": "p2",
                          "domain": "code"}),
         );
-        rows.push(child("f-1", "e-1"));
+        rows.push(json!({"id": "f-1", "slug": "f-1", "title": "f-1",
+                         "type": "feature", "status": "in_progress", "priority": "p2",
+                         "domain": "code"}));
         let ids: BTreeSet<String> = ["e-1", "e-empty", "f-1"]
             .iter()
             .map(|s| s.to_string())
