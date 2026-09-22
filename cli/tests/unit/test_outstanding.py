@@ -2341,7 +2341,10 @@ def test_clear_with_answer_to_a_dead_asker_closes_and_wakes_nobody(
     cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "ship it"])
 
     assert cleared.exit_code == 0, cleared.output
-    assert not sent, "a dead asker must never reach the mail subprocess"
+    # `clear` shells out for journal reads, so the recorder holds more than
+    # mail; what must never appear is a mail send to the dead asker.
+    mail_sends = [argv for argv in sent if argv[1:3] == ["mail", "send"]]
+    assert not mail_sends, "a dead asker must never reach the mail subprocess"
     assert "is not live, so nobody was woken" in cleared.output
     after = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)
     assert after["questions"] == [], "an undeliverable answer still closes the question"
