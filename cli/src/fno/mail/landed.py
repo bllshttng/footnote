@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from random import shuffle
+from time import monotonic
 from typing import Optional
 
 from fno.bus.log import (
@@ -16,8 +18,8 @@ from fno.bus.log import (
     withdrawn_ids,
 )
 from fno.mail.reply_resolve import mail_ids_in_transcript
-
-# Defang a literal </system-reminder> that could break out of the hook wrapper.
+# The nag renders inside hooks/inject-mail-notify.sh's 2s timeout; bound reads.
+_LANDED_READ_BUDGET_S = 0.5
 _REMINDER_TAG = re.compile(r"<\s*(/?)\s*system-reminder\s*>", re.IGNORECASE)
 
 
@@ -55,50 +57,45 @@ def _age_exceeds(ts: str, ttl_seconds: int, now: datetime) -> bool:
     return sent_at is not None and (now - sent_at).total_seconds() > ttl_seconds
 
 
-def _distinct_recipients(msgs: list) -> list[str]:
-    """Recipients in first-seen order, one entry each."""
-    return list(dict.fromkeys(m.to for m in msgs))
-
-
 def _is_self_send(m: Envelope) -> bool:
     """Recipient IS the sender: its own transcript trivially carries the id."""
     to_session = (m.meta or {}).get("to_session")
     return bool(to_session) and to_session == m.from_session
 
 
-def _landed_map(msgs: list[Envelope]) -> dict[str, Optional[bool]]:
+def _landed_map(msgs: list[Envelope], budget_s: float | None = None) -> dict[str, bool | None]:
     """Per-message landed verdict, one transcript read per recipient session.
     ``None`` when coordinates are missing, self-send, or unreadable."""
-    out: dict[str, Optional[bool]] = {}
+    out: dict[str, Optional[bool]] = dict.fromkeys(m.id for m in msgs)
     by_store: dict[tuple[str, str], list[Envelope]] = {}
     for m in msgs:
         if _is_self_send(m):
-            out[m.id] = None
             continue
         to_session = (m.meta or {}).get("to_session")
         to_harness = (m.meta or {}).get("to_harness")
-        if not to_session or not to_harness:
-            out[m.id] = None
+        if not to_session or not to_harness or f'id="{m.id}"' not in (m.body or ""):
             continue
         by_store.setdefault((to_harness, to_session), []).append(m)
-    for (harness, session_id), rows in by_store.items():
+    stores = list(by_store.items())
+    shuffle(stores)
+    stop = None if budget_s is None else monotonic() + budget_s
+    for (harness, session_id), rows in stores:
         ids = mail_ids_in_transcript(harness, session_id)
         for m in rows:
             out[m.id] = None if ids is None else m.id in ids
+        if stop is not None and monotonic() > stop:
+            break
     return out
 
 
-def landed_states(all_msgs: list[Envelope], msgs: list[Envelope]) -> dict[str, Optional[bool]]:
+def landed_states(
+    all_msgs: list[Envelope], msgs: list[Envelope], budget_s: Optional[float] = None
+) -> dict[str, Optional[bool]]:
     """Landed tri-state for ``msgs``: durable proof first, then a transcript read."""
     already = landed_ids(all_msgs)
-    out: dict[str, Optional[bool]] = {}
-    to_check = []
-    for m in msgs:
-        if m.id in already:
-            out[m.id] = True
-        else:
-            to_check.append(m)
-    out.update(_landed_map(to_check))
+    to_check = [m for m in msgs if m.id not in already]
+    out: dict[str, Optional[bool]] = dict.fromkeys((m.id for m in msgs), True)
+    out.update(_landed_map(to_check, budget_s))
     return out
 
 
@@ -124,8 +121,6 @@ def _sent_unclaimed(handle: str, ttl_seconds: int) -> list:
     if not sent:
         return []
     pos = {m.id: i for i, m in enumerate(all_msgs)}
-    # A hosted row has no cursor; comparing it to one advanced by an unrelated
-    # later durable message would misread a never-consumed send as claimed.
     cursor_pos: dict[str, int] = {}
     for r in {m.to for m in sent if m.delivery != HOSTED_DELIVERY}:
         try:
@@ -143,13 +138,15 @@ def _sent_unclaimed(handle: str, ttl_seconds: int) -> list:
         candidates.append(m)
     if not candidates:
         return []
-    states = landed_states(all_msgs, candidates)
+    states = landed_states(all_msgs, candidates, budget_s=_LANDED_READ_BUDGET_S)
     out = []
     for m in candidates:
         if states.get(m.id) is True:
             # Persists past a transcript rotation; later scans skip the grep.
             record_landed(msg_id=m.id, sender=m.from_, recipient=m.to)
             continue
+        if m.delivery == HOSTED_DELIVERY and states.get(m.id) is not False:
+            continue  # hosted: unknown is not a proven miss
         out.append(m)
     return out
 
@@ -158,7 +155,7 @@ def nag_line(unclaimed: list) -> Optional[str]:
     """Turn-boundary nag line for outstanding mail, or ``None`` when all landed."""
     if not unclaimed:
         return None
-    who = _bounded_names(_distinct_recipients(unclaimed))
+    who = _bounded_names([m.to for m in unclaimed])
     age_min = age_minutes(unclaimed[0].ts) or 0
     n = len(unclaimed)
     noun = "message" if n == 1 else "messages"

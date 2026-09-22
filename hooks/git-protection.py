@@ -69,9 +69,10 @@ OVERRIDE_LOG = FNO_HOME / "merge-gate-overrides.log"
 MARKER_TTL_SECONDS = 300
 # Push debounce: the timestamp of the last allowed push, one file per branch.
 PUSH_STAMP_DIR = FNO_HOME / "push-stamps"
-# The one debounce instrument: a push within this window of the last one
-# waits, because GitHub may not have registered the previous run yet.
+# The stamp covers the registration window; the probe covers a run that is
+# already visible after the stamp expires.
 PUSH_DEBOUNCE_SECONDS = 120
+_PUSH_PROBE_TIMEOUT = 15
 
 # Substitution forms that run a command without being a separate segment. Any of
 # them disqualifies an authorization: a command substitution IS a second
@@ -260,12 +261,10 @@ def _push_stamp_path(branch):
 def push_debounce_refusal(command, branch):
     """Refusal text when this push should wait, or None to allow.
 
-    One instrument, the stamp of the last allowed push: a push within
-    PUSH_DEBOUNCE_SECONDS of the previous one waits, because GitHub may not
-    have registered that run yet and pushing again only cancels it and starts
-    the wait over. Every failure path allows. `FNO_PUSH_NOW=1` allows and
-    leaves an event row, so a bypass is recoverable from the journal rather
-    than invisible.
+    The stamp handles the first 120 seconds, then the guarded verb asks
+    GitHub whether a registered check is still running. Every probe failure
+    allows. `FNO_PUSH_NOW=1` allows and leaves an event row, so a bypass is
+    recoverable from the journal rather than invisible.
 
     The verb's own internal push never re-enters this hook: the hook reads
     the Bash command string, and `fno do pr push` is not a `git push` at
@@ -289,6 +288,43 @@ def push_debounce_refusal(command, branch):
     except OSError:
         pass
 
+    probe = _read_in_flight(branch)
+    if isinstance(probe, dict) and probe.get("in_flight") is True:
+        check = str(probe.get("check") or "?")
+        job = str(probe.get("job") or "?")
+        head = str(probe.get("head") or "?")
+        return (
+            f"[fno push debounce] check {check!r} (job {job}, head {head}) is still "
+            "running. A push now cancels that run and restarts the wait. Run "
+            "`fno do pr wait <n> --until settled` then `fno do pr push`, or "
+            "supersede on purpose with `fno do pr push --force-ci-cancel` or "
+            "FNO_PUSH_NOW=1."
+        )
+
+    return None
+
+
+def _read_in_flight(branch):
+    """Ask the guarded push verb whether this branch's remote head is live.
+
+    The hook runs before the push, so a missing binary, usage error, malformed
+    output, or timeout must allow the command rather than turn diagnostics into
+    a new push gate.
+    """
+    try:
+        result = subprocess.run(
+            ["fno", "do", "pr", "push", "--in-flight", branch],
+            capture_output=True,
+            text=True,
+            timeout=_PUSH_PROBE_TIMEOUT,
+            check=False,
+        )
+        for line in reversed(result.stdout.splitlines()):
+            if line.lstrip().startswith("{"):
+                value = json.loads(line)
+                return value if isinstance(value, dict) else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
     return None
 
 

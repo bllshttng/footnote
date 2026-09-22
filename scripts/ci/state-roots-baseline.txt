@@ -107,3 +107,4 @@ A	crates/fno/src/agents_view.rs	claims	unowned	call the resolver STATE_FILES nam
 A	crates/fno/src/agents_view.rs	registry.json	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno/src/backlog_view.rs	graph.json	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno/src/review_invocation.rs	events.jsonl	unowned	the mux client's ProjectJournalPath site, moved verbatim out of mux_cli.rs ; owns draining these and carries a standing warning against re-adding the events pin here.
+A	crates/fno-agents/src/question_intake.rs	events.jsonl	ask-port	Fallback when the request carries no journal_path; the shim always passes paths.project_log("events.jsonl"). Drains with the ask-port PR: the fallback moves to state_path::resolve when a Rust caller appears.
