@@ -1358,8 +1358,8 @@ def resolve_dispatch(
     Raises :class:`DispatchResolveError` on an unknown/refused harness, a
     missing substrate lane, an unsupported autonomous pane, an unknown trigger
     or substrate, an out-of-allowlist verb, an oversized brief, an empty or
-    unsubstituted command, or an unanswerable node lifecycle.
-    ``dispatch_cfg`` overrides the config read (for tests)."""
+    unsubstituted command. ``dispatch_cfg`` overrides the config read (for
+    tests)."""
     decision: list[str] = []
     lifecycle_verb: Optional[str] = None
     if command is None or not command.strip():

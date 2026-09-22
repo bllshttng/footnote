@@ -434,7 +434,7 @@ def _verb_answer(row: Optional[dict], *, node_id: Optional[str] = None) -> tuple
         answer = client.request("effective_verb", {"entries": [payload]})
         return answer["verb"], answer["note"]
     except RuntimeError as exc:
-        raise DispatchResolveError(str(exc)) from exc
+        raise DispatchResolveError(str(exc).replace("store error (invalid): ", "")) from exc
 
 
 def node_effective_verb(
