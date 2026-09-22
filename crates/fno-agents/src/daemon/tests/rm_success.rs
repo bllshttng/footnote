@@ -765,7 +765,8 @@ async fn rm_ends_a_swept_pane_row_through_its_session_record_holder() {
         .unwrap()
         .format("%a %b %d %H:%M:%S %Y")
         .to_string();
-    let sessions = home.root().join(".claude").join("sessions");
+    let home_dir = tempfile::tempdir().unwrap();
+    let sessions = home_dir.path().join(".claude").join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
     std::fs::write(
         sessions.join(format!("{pid}.json")),
@@ -775,8 +776,11 @@ async fn rm_ends_a_swept_pane_row_through_its_session_record_holder() {
     )
     .unwrap();
     // The record reader resolves $HOME at call time: pin it over the rm.
+    // The pin dir must sit INSIDE std::env::temp_dir(): a leaked
+    // FNO_TEST_HERMETIC=1 fences every env-resolved root against
+    // temp_dir, and short_home's /tmp path is outside it on macOS.
     let home_backup = std::env::var_os("HOME");
-    std::env::set_var("HOME", home.root());
+    std::env::set_var("HOME", home_dir.path());
     state::update_registry(&home.registry_json(), |registry| registry.entries.push(row)).unwrap();
     let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
     let request = Request::new(1, "agent.rm", json!({"name": "swept-pane"}));
