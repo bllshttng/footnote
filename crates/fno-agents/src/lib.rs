@@ -233,6 +233,7 @@ pub mod pane_relaunch;
 pub mod pane_stop;
 pub mod paths;
 pub mod pi;
+pub mod plans_dirs;
 pub mod plugin_install;
 pub mod pr_body_check;
 pub mod pr_nudge;
