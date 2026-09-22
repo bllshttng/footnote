@@ -60,7 +60,7 @@ def test_legacy_scalar_aliases_to_list(tmp_path):
     assert s.review.external_reviewers == ["gemini"]
 
 
-def test_attention_legacy_rows_survive_a_half_migrated_config(tmp_path, capsys):
+def test_attention_legacy_rows_survive_a_half_migrated_config(tmp_path, caplog):
     """Both keys present: the legacy rows merge in, they are never dropped."""
     from fno.config import settings_from_files
 
@@ -71,10 +71,9 @@ def test_attention_legacy_rows_survive_a_half_migrated_config(tmp_path, capsys):
         "  reach_me:\n    - name: old\n      path: p-old.md\n",
     )
     s = settings_from_files([f])
-    names = [row.name for row in s.config.attention]
+    names = [row.name for row in s.attention]
     assert names == ["new", "old"]
-    out = capsys.readouterr().err
-    assert "[[reach_me]] is now [[attention]]" in out
+    assert "[[reach_me]] is now [[attention]]" in caplog.text
 
 
 def test_top_level_project_aliases_id_and_vision(tmp_path):

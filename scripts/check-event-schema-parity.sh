@@ -391,6 +391,10 @@ dual_owner_kinds = {
     # Python side carries it in schema.yaml for the validator and
     # `doctor event find`, the way the scratch pair above does.
     "pr_watch_unparked",
+    # operator_question: the ask leg is the Rust question-intake transport;
+    # the king-wake, session-register, and stale-escalate Python arms still
+    # emit their own asks until they port.
+    "operator_question",
 }
 collisions -= dual_owner_kinds
 if collisions:
