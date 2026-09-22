@@ -1524,6 +1524,65 @@ else
     fail "AC13h: expected the bad-name ERROR: $CIA_OUT"
 fi
 
+# AC13i/j/k: the audit reads the checkout of the plan's node, not the plan
+# directory's repo. A stub fno answers the strict node lookup hermetically;
+# the fixture plan sits in a git-init'd vault dir holding no index, the
+# shape that used to pass clean while checking nothing.
+CIA_STUB="$TMPDIR_BASE/cia-stub"
+mkdir -p "$CIA_STUB"
+{
+    echo '#!/bin/bash'
+    echo 'if [[ "${1:-} ${2:-} ${3:-} ${4:-} ${5:-} ${6:-}" == "backlog get x-cixa --strict --field _resolved_cwd" ]] && [[ -n "${CIA_STUB_CWD:-}" ]]; then'
+    echo '    printf "%s\n" "$CIA_STUB_CWD"'
+    echo '    exit 0'
+    echo 'fi'
+    echo 'exit 1'
+} > "$CIA_STUB/fno"
+chmod +x "$CIA_STUB/fno"
+
+CIA_VAULT="$TMPDIR_BASE/cia-vault"
+mkdir -p "$CIA_VAULT"
+git -C "$CIA_VAULT" init -q
+CIA_NODE_REPO="$TMPDIR_BASE/cia-node-repo"
+mkdir -p "$CIA_NODE_REPO/.codegraph"
+printf 'stub\n' > "$CIA_NODE_REPO/.codegraph/db"
+
+PLAN_CIA_I="$CIA_VAULT/cia_i.md"
+sed -e 's/^claims: x-ciaa$/claims: x-cixa/' \
+    -e '/^    - name: codegraph$/,/^      fresh: yes$/d' \
+    -e 's/^  providers:$/  providers: []/' "$PLAN_CIA_A" > "$PLAN_CIA_I"
+
+# AC13i (AC2-HP): the node's cwd holds .codegraph -> the section errors on
+# the unrecorded index and the plan exits 1, though the vault repo is empty.
+OUTPUT=$(PATH="$CIA_STUB:$PATH" CIA_STUB_CWD="$CIA_NODE_REPO" bash "$VALIDATE" "$PLAN_CIA_I" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "code index codegraph is present" <<< "$CIA_OUT"; then
+    pass "AC13i: a vault plan audits its node's checkout"
+else
+    fail "AC13i: expected the node-cwd present-index ERROR (exit $EXIT_CODE): $CIA_OUT"
+fi
+
+# AC13j (AC2-EDGE): an unreadable node lookup keeps the plan-directory
+# fallback - the empty vault repo detects nothing, so the section is clean.
+OUTPUT=$(PATH="$CIA_STUB:$PATH" bash "$VALIDATE" "$PLAN_CIA_I" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if [[ -z "$CIA_OUT" ]]; then
+    pass "AC13j: a failed node lookup falls back to the plan directory"
+else
+    fail "AC13j: expected a clean section: $CIA_OUT"
+fi
+
+# AC13k (AC2-ERR): a node whose cwd does not exist warns with the node, the
+# path and the fallback, and never errors on a present index.
+OUTPUT=$(PATH="$CIA_STUB:$PATH" CIA_STUB_CWD="$TMPDIR_BASE/cia-gone" bash "$VALIDATE" "$PLAN_CIA_I" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+CIA_OUT=$(cia "$OUTPUT")
+if grep -q "node x-cixa names cwd $TMPDIR_BASE/cia-gone, which is not a directory" <<< "$CIA_OUT" \
+    && ! grep -q "code index codegraph is present" <<< "$CIA_OUT"; then
+    pass "AC13k: a dead node cwd warns and falls back"
+else
+    fail "AC13k: expected the dead-cwd WARN without a present-index ERROR: $CIA_OUT"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Test Results ==="
