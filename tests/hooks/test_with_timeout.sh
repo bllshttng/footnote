@@ -218,6 +218,15 @@ badrc=$?
     && pass "refused bound runs nothing" \
     || fail "a refused bound still ran the command: $badout"
 
+# 3c. The caller's stdin reaches the command. Bash hands an async job /dev/null
+#     for stdin when job control is off, so before the explicit `<&0` a piped
+#     caller got silence - the defect that kept law-stage-inject printing no law
+#     at all (measured 2026-09-22, x-cc15).
+stdinout="$(/bin/bash -c 'set -uo pipefail; source "$1"; printf through | with_timeout 5 cat' _ "$LIB" 2>/dev/null)"
+[[ "$stdinout" == "through" ]] \
+    && pass "caller's stdin passes through to the command" \
+    || fail "piped stdin was dropped: got [$stdinout], expected [through]"
+
 # 4. Nothing reaches the caller's stderr. An unwaited job killed by a signal
 #    makes bash announce "Terminated" on whoever sourced the helper.
 errfile="$TMP/err"

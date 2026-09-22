@@ -52,16 +52,20 @@ SKILL_PAYLOAD='{"hook_event_name":"PostToolUse","tool_name":"Skill","tool_input"
 PROMPT_PAYLOAD='{"hook_event_name":"UserPromptSubmit","prompt":"/fno:review low"}'
 
 # AC3-HP: the answer's hook_output object reaches stdout as compact JSON,
-# nothing else.
+# nothing else. Both happy stubs read stdin and answer only a "mode":"stage"
+# request, so a wrapper that drops stdin (the async-job /dev/null defect,
+# x-cc15) fails here instead of passing on an answer that was never fed.
 out="$(run_with_stub \
-    'echo "{\"ok\":true,\"stage\":\"review\",\"hook_output\":{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"x\"}}}"' \
+    'read -r req
+     [[ "$req" == *"mode\":\"stage\""* ]] && echo "{\"ok\":true,\"stage\":\"review\",\"hook_output\":{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"x\"}}}"' \
     "$SKILL_PAYLOAD")"
 check "the hook_output object is stdout, exactly" \
     '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"x"}}' \
     "$out"
 
 out="$(run_with_stub \
-    'echo "{\"ok\":true,\"stage\":\"review\",\"hook_output\":{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"## Law governing review\"}}}"' \
+    'read -r req
+     [[ "$req" == *"mode\":\"stage\""* ]] && echo "{\"ok\":true,\"stage\":\"review\",\"hook_output\":{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"## Law governing review\"}}}"' \
     "$PROMPT_PAYLOAD")"
 check "a prompt payload carries the block through" \
     '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"## Law governing review"}}' \
@@ -80,7 +84,12 @@ out="$(run_with_stub 'echo "{\"ok\":true,\"stage\":null,\"hook_output\":null}"' 
 check "a null hook_output renders nothing" "" "$out"
 
 rm "$STUB/fno-agents"
-out="$(printf '%s' "$SKILL_PAYLOAD" | PATH="$STUB:$PATH" bash "$HOOK" 2>/dev/null)"
+# With the wrapper passing stdin through, a real fno-agents elsewhere on PATH
+# would answer here, so the missing-binary case must confine PATH to system
+# dirs. jq is symlinked in because the hook needs it before its binary guard.
+mkdir -p "$TMP/sys"
+ln -sf "$(command -v jq)" "$TMP/sys/jq"
+out="$(printf '%s' "$SKILL_PAYLOAD" | PATH="$TMP/sys:/usr/bin:/bin" bash "$HOOK" 2>/dev/null)"
 check "a missing fno-agents renders nothing" "" "$out"
 
 echo
