@@ -102,6 +102,8 @@ A	refused-newer-than-transcript	py=cli/src/fno/agents/row_contradiction.py;rs=cr
 A	registry read failed: {exc}	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/mux_spawn.py;rs=crates/fno-agents/src/attach.rs	# msg-twin
 A	registry name must be 1-64 letters, numbers, underscores, or hyphens	py=cli/src/fno/agents/registry.py;rs=crates/fno-agents/src/state.rs	# msg-twin: the rename grammar refusal is the Python port's verbatim string
 A	review coverage waived for this head	py=cli/src/fno/pr/_coverage_gate.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol: the affirmative waiver value both gates demand on the single law row; review_coverage_paths.rs pins both carriers
+A	.[] | .filename // empty	py=cli/src/fno/pr/_merge.py;rs=crates/fno-agents/src/merge_gates.rs	# protocol: the GitHub pull-request file listing jq expression is shared by the Python and Rust merge readers
+A	stub-manifest-{node_id}.json	py=cli/src/fno/stub_manifest.py;rs=crates/fno-agents/src/merge_gates.rs	# data: both stub-manifest readers resolve the same per-node filename
 A	repos/:owner/:repo/statuses/{head}	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol
 A	resume-attach:{short_id}	py=cli/src/fno/agents/resume_cli.py;rs=crates/fno-agents/src/resume_wake.rs	# protocol; one carrier per language by construction - every Rust caller goes through resume_wake.rs's resume_attach_claim_key, and Python's _resume_claude_wake must keep building the same key or the two runtimes stop contending for one lock
 A	roster-live-inject-failed	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# protocol
