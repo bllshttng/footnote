@@ -117,7 +117,7 @@ impl Journey {
 
     fn journal(&self) -> Vec<serde_json::Value> {
         let text =
-            std::fs::read_to_string(self.root.path().join("events.jsonl")).unwrap_or_default();
+            fno_agents::event_store::journal_text(&self.root.path().join("events.jsonl"), &[]);
         text.lines()
             .filter(|l| !l.trim().is_empty())
             .map(|l| serde_json::from_str(l).unwrap())

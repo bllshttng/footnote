@@ -216,6 +216,7 @@ _RUNNER_PASSTHROUGH = (
     # Native claim-door tests pin the checkout binary; without this runner
     # channel hermetic children resolve an older PATH binary.
     "FNO_AGENTS_BIN",
+    "FNO_BIN",  # the event store client pins the checkout's fno front door
     "FNO_AGENTS_FRONT",  # .github/actions/smoke-setup/action.yml
     "FNO_REAL_CODEX_PLUGIN_TEST",  # .github/workflows/cli-ci.yml
     "FNO_RUST_FRONT",  # .github/workflows/cli-ci.yml, via $GITHUB_ENV

@@ -29,47 +29,27 @@
 
 use serde::Serialize;
 use serde_json::{Map, Value};
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-
-/// Rotate `events.jsonl` once it exceeds this many bytes. The active file is
-/// renamed to `events.jsonl.1` and one generation stays on disk; every
-/// durable row of the renamed file is already ingested into its `events.db`
-/// first, so the rename never destroys history.
-pub const ROTATE_AT_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Sibling journal suffix for ephemeral-class rows. The Python
 /// `fno.events` module declares the same string; a parity test
 /// (`cli/tests/events/test_ephemeral_set_parity.py`) holds the two equal so
-/// both languages write the same sibling file.
-pub const EPHEMERAL_SUFFIX: &str = ".ephemeral";
+/// both languages write the same sibling file. Owned by the `event_store`
+/// module; re-exported here for the write boundary.
+pub use crate::event_store::{is_ephemeral_event, EPHEMERAL_EVENT_TYPES, EPHEMERAL_SUFFIX};
 
-/// Event types the schema declares `retention: ephemeral`. These are
-/// routed to the `.ephemeral` sibling journal at the write boundary so a
-/// high-cadence gauge (mux_pane_counters: 30s samples, ~5KB a row) cannot
-/// consume the durable journal's rotation budget. Kept equal to
-/// `cli/src/fno/events/schema.yaml` by the same parity test; flip the class in
-/// both places or the two write boundaries route differently.
-pub const EPHEMERAL_EVENT_TYPES: &[&str] = &[
-    "claim_acquired",
-    "claim_clock_skew_rejected",
-    "claim_force_overridden",
-    "claim_idempotent_reacquired",
-    "claim_rebound",
-    "claim_refreshed",
-    "claim_released",
-    "claim_stale_reclaimed",
-    "graph_tx_conflict",
-    "human_touch",
-    "mux_pane_counters",
-    "orphan_reap_sweep",
-    "single_flight_gate",
-];
-
-/// Whether an event kind belongs to the schema-declared ephemeral class.
-pub fn is_ephemeral_event(kind: &str) -> bool {
-    EPHEMERAL_EVENT_TYPES.contains(&kind)
+/// Test-only journal text: the committed rows as one line-joined string.
+/// The store cutover stopped journal appends, so tests asserting on emitted
+/// content read here instead of the raw file.
+#[cfg(test)]
+pub(crate) fn committed_journal_text(journal: &std::path::Path) -> String {
+    let _ = crate::event_store::import_all(journal);
+    crate::event_store::query_events(journal, &crate::event_store::EventQuery::default())
+        .unwrap_or_default()
+        .iter()
+        .map(|r| r.line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Errors the emitter surfaces to its caller. Emission failures are logged by
@@ -81,6 +61,8 @@ pub enum EmitError {
     Io(#[from] std::io::Error),
     #[error("event payload was not a JSON object")]
     NotAnObject,
+    #[error("event store refused the write: {0}")]
+    Store(String),
 }
 
 /// Appends structured events to a JSONL file. Cheap to clone (just a path); the
@@ -156,76 +138,14 @@ impl EventEmitter {
         obj.insert("type".into(), Value::String(event_type.to_string()));
         obj.insert("source".into(), Value::String(self.source.clone()));
         obj.insert("data".into(), Value::Object(payload));
-        let mut line = serde_json::to_string(&Value::Object(obj))
+        let line = serde_json::to_string(&Value::Object(obj))
             .map_err(|e| EmitError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-        line.push('\n');
 
-        // Honor the declared retention class: an ephemeral row goes to
-        // the sibling journal beside this emitter's file, rotating on its own
-        // size; every other class keeps the emitter's path. The sibling shares
-        // the emitter's directory, so the append/rotate machinery below runs
-        // unchanged against whichever file the row targets.
-        let ephemeral_target = is_ephemeral_event(event_type).then(|| {
-            // Follow a journal symlink before deriving the sibling (a worktree
-            // journal linked into the repo space routes its ephemeral rows to
-            // that space's sibling, mirroring the Python writer's resolve-then-
-            // derive order). A journal that does not exist yet has no symlink
-            // to follow, so the unresolved path is the right base there.
-            let base = std::fs::canonicalize(&self.path).unwrap_or_else(|_| self.path.clone());
-            ephemeral_path(&base)
-        });
-        let target: &Path = ephemeral_target.as_deref().unwrap_or(&self.path);
-
-        // The retention class is also the durability boundary: a durable
-        // target's rotation must ingest first; an ephemeral target's
-        // rotation stays ingest-free, those rows are disposable by design.
-        self.maybe_rotate(target, ephemeral_target.is_none())?;
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        // O_APPEND open-write-close: the append is atomic for a sub-PIPE_BUF
-        // line, so concurrent emitters never interleave a single line.
-        let mut f = OpenOptions::new().create(true).append(true).open(target)?;
-        f.write_all(line.as_bytes())?;
-        Ok(())
-    }
-
-    /// Rename the active file aside once it grows past [`ROTATE_AT_BYTES`].
-    /// Best-effort: a rotation race (two emitters both seeing the file large)
-    /// is harmless because the rename is idempotent at the path level and the
-    /// next `open(..., append)` recreates the active file.
-    ///
-    /// A durable target syncs its store FIRST: a rename whose rows the store
-    /// does not hold would destroy history, so a failed ingest leaves the
-    /// journal growing past the threshold instead (the sync retries on the
-    /// next emit past 8 MiB). After a successful sync the file is re-stat'd,
-    /// so a second emitter that raced the ingest is not stripped of a fresh
-    /// file it just recreated.
-    fn maybe_rotate(&self, path: &Path, durable: bool) -> Result<(), EmitError> {
-        let size = match std::fs::metadata(path) {
-            Ok(m) => m.len(),
-            Err(_) => return Ok(()), // not yet created; nothing to rotate
-        };
-        if size <= ROTATE_AT_BYTES {
-            return Ok(());
-        }
-        if durable {
-            if let Err(e) = crate::events_store::sync(path) {
-                eprintln!(
-                    "events: rotation deferred, store ingest failed ({}: {e})",
-                    crate::events_store::store_path(path).display()
-                );
-                return Ok(());
-            }
-            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            if size <= ROTATE_AT_BYTES {
-                return Ok(());
-            }
-        }
-        let rotated = rotated_path(path);
-        // Ignore a rename failure (another emitter already rotated): the goal is
-        // bounded file size, not exclusive rotation ownership.
-        let _ = std::fs::rename(path, rotated);
+        // The store commit is the acknowledgement boundary: one SQL
+        // transaction (WAL, FULL sync, positive readback) replaces the file
+        // append, the sibling routing, and the rotation. The retention class
+        // is store metadata derived from the type, never a journal route.
+        crate::event_store::append_envelope(&self.path, &line, None).map_err(EmitError::Store)?;
         Ok(())
     }
 
@@ -238,15 +158,6 @@ impl EventEmitter {
 pub(crate) fn rotated_path(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push(".1");
-    PathBuf::from(s)
-}
-
-/// The sibling journal an ephemeral-class row is routed to (same directory,
-/// same stem, the [`EPHEMERAL_SUFFIX`] tail). Shared with the claims audit
-/// writer so every Rust journal writer routes identically.
-pub(crate) fn ephemeral_path(path: &Path) -> PathBuf {
-    let mut s = path.as_os_str().to_os_string();
-    s.push(EPHEMERAL_SUFFIX);
     PathBuf::from(s)
 }
 
@@ -291,7 +202,9 @@ pub(crate) fn civil_from_unix(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event_store::{query_events, EventQuery};
     use serde_json::json;
+    use std::path::PathBuf;
 
     fn temp_events_path(tag: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
@@ -308,11 +221,17 @@ mod tests {
         p
     }
 
-    fn read_lines(path: &Path) -> Vec<Value> {
-        std::fs::read_to_string(path)
-            .unwrap_or_default()
-            .lines()
-            .map(|l| serde_json::from_str::<Value>(l).expect("each line is valid json"))
+    fn committed_lines(path: &Path) -> Vec<Value> {
+        let rows = query_events(
+            path,
+            &EventQuery {
+                include_rejected: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_default();
+        rows.iter()
+            .filter_map(|r| serde_json::from_str::<Value>(&r.line).ok())
             .collect()
     }
 
@@ -323,7 +242,7 @@ mod tests {
         em.emit("daemon_started", &json!({"pid": 4242, "version": "0.1.0"}))
             .unwrap();
 
-        let lines = read_lines(&path);
+        let lines = committed_lines(&path);
         assert_eq!(lines.len(), 1);
         let l = &lines[0];
         assert_eq!(l["type"], "daemon_started");
@@ -332,7 +251,6 @@ mod tests {
         assert!(l.get("kind").is_none(), "no legacy kind field");
         assert!(l["ts"].as_str().unwrap().ends_with('Z'));
         assert!(l["ts"].as_str().unwrap().starts_with("20"));
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -342,7 +260,7 @@ mod tests {
         let huge = "x".repeat(crate::events_limits::max_data_bytes() + 1);
         em.emit("agent_spawned", &json!({"blob": huge})).unwrap();
 
-        let lines = read_lines(&path);
+        let lines = committed_lines(&path);
         assert_eq!(lines.len(), 1, "exactly one line: the meta-event");
         let l = &lines[0];
         assert_eq!(l["type"], "event_payload_too_large");
@@ -350,7 +268,6 @@ mod tests {
         assert!(
             l["data"]["size"].as_u64().unwrap() > crate::events_limits::max_data_bytes() as u64
         );
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -360,13 +277,12 @@ mod tests {
         for i in 0..10 {
             em.emit("tick", &json!({"seq": i})).unwrap();
         }
-        let lines = read_lines(&path);
+        let lines = committed_lines(&path);
         let seqs: Vec<u64> = lines
             .iter()
             .map(|l| l["data"]["seq"].as_u64().unwrap())
             .collect();
         assert_eq!(seqs, (0..10).collect::<Vec<_>>());
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -374,11 +290,10 @@ mod tests {
         let path = temp_events_path("null");
         let em = EventEmitter::new(&path, "worker:wkA");
         em.emit("heartbeat", &Value::Null).unwrap();
-        let lines = read_lines(&path);
+        let lines = committed_lines(&path);
         assert_eq!(lines[0]["type"], "heartbeat");
         assert_eq!(lines[0]["source"], "worker:wkA");
         assert_eq!(lines[0]["data"], json!({}));
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -390,30 +305,28 @@ mod tests {
     }
 
     #[test]
-    fn ephemeral_kind_lands_in_sibling_never_main() {
+    fn ephemeral_kind_is_stored_with_its_class_no_sibling() {
         let path = temp_events_path("ephemeral");
         let em = EventEmitter::new(&path, "daemon");
         em.emit("mux_pane_counters", &json!({"session": "s1", "panes": []}))
             .unwrap();
 
+        let rows = query_events(&path, &EventQuery::default()).unwrap();
+        assert_eq!(rows.len(), 1, "the gauge is stored");
+        assert_eq!(rows[0].retention_class, "ephemeral");
         assert!(
-            read_lines(&path).is_empty(),
-            "ephemeral row reached the durable journal"
+            !PathBuf::from(format!(
+                "{}{}",
+                path.display(),
+                crate::event_store::EPHEMERAL_SUFFIX
+            ))
+            .exists(),
+            "the sibling journal is never created"
         );
-        let sibling = ephemeral_path(&path);
-        let rows = read_lines(&sibling);
-        assert_eq!(
-            rows.len(),
-            1,
-            "the gauge must be provably alive in the sibling"
-        );
-        assert_eq!(rows[0]["type"], "mux_pane_counters");
-        std::fs::remove_file(&path).ok();
-        std::fs::remove_file(&sibling).ok();
     }
 
     #[test]
-    fn durable_kind_keeps_emitter_path() {
+    fn durable_kind_keeps_the_emitter_path_no_sibling() {
         let path = temp_events_path("durable");
         let em = EventEmitter::new(&path, "daemon");
         em.emit(
@@ -422,87 +335,18 @@ mod tests {
         )
         .unwrap();
 
-        let rows = read_lines(&path);
+        let rows = query_events(&path, &EventQuery::default()).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["type"], "operator_decision");
+        assert_eq!(rows[0].r#type, "operator_decision");
+        assert_eq!(rows[0].retention_class, "durable");
         assert!(
-            !ephemeral_path(&path).exists(),
-            "non-ephemeral emit created the sibling"
-        );
-        std::fs::remove_file(&path).ok();
-    }
-
-    /// Fill a journal past [`ROTATE_AT_BYTES`] with generation-marked rows.
-    fn fill_past_threshold(path: &Path, gen: u64) {
-        let mut fh = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .unwrap();
-        let blob = "x".repeat(4096);
-        for n in 0..2100 {
-            writeln!(
-                fh,
-                "{}",
-                json!({"ts": "2026-09-10T00:00:00Z", "type": "generation_marker",
-                       "source": "test", "data": {"gen": gen, "n": n, "blob": blob}})
-            )
-            .unwrap();
-        }
-    }
-
-    fn store_count(store: &Path, event_type: &str) -> u64 {
-        crate::events_store::open_read(store)
-            .unwrap()
-            .query_row(
-                "SELECT count(*) FROM events WHERE type = ?1",
-                [&event_type],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap() as u64
-    }
-
-    #[test]
-    fn durable_rotation_ingests_before_rename() {
-        // AC2-HP: two rotations later, the store answers for every
-        // generation, not just the one still on disk.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("events.jsonl");
-        fill_past_threshold(&path, 1);
-        let em = EventEmitter::new(&path, "daemon");
-        em.emit("operator_decision", &json!({"decision_id": "d-1"}))
-            .unwrap();
-        assert!(
-            path.metadata().unwrap().len() < super::ROTATE_AT_BYTES,
-            "the emitter rotated the full journal"
-        );
-        fill_past_threshold(&path, 2);
-        em.emit("operator_decision", &json!({"decision_id": "d-2"}))
-            .unwrap();
-        let store = crate::events_store::store_path(&path);
-        assert_eq!(store_count(&store, "generation_marker"), 4200);
-        // The tail row of the live file ingests lazily: it is IN the next
-        // sync (rotation or history read), never after. d-1 was ingested by
-        // the second rotation; d-2 is the live tail.
-        assert_eq!(store_count(&store, "operator_decision"), 1);
-    }
-
-    #[test]
-    fn blocked_store_defers_the_rotation() {
-        // AC2-ERR: a store that cannot be created stops the rename; the
-        // journal keeps every row rather than dropping them unstored.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("events.jsonl");
-        fill_past_threshold(&path, 1);
-        std::fs::create_dir(dir.path().join("events.db")).unwrap();
-        let em = EventEmitter::new(&path, "daemon");
-        em.emit("operator_decision", &json!({"decision_id": "d-1"}))
-            .unwrap();
-        let lines = std::fs::read_to_string(&path).unwrap().lines().count();
-        assert!(lines > 2100, "the journal kept its rows (got {lines})");
-        assert!(
-            !dir.path().join("events.jsonl.1").exists(),
-            "no rotation happened"
+            !PathBuf::from(format!(
+                "{}{}",
+                path.display(),
+                crate::event_store::EPHEMERAL_SUFFIX
+            ))
+            .exists(),
+            "non-ephemeral emit created no sibling"
         );
     }
 }

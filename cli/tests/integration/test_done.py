@@ -94,7 +94,16 @@ def _stub_subprocess_no_git(monkeypatch):
             self.returncode = rc
             self.stderr = ""
 
-    monkeypatch.setattr(done_cli.subprocess, "run", lambda *a, **kw: _Res())
+    real_run = done_cli.subprocess.run
+
+    def fake_run(*a, **kw):
+        cmd = a[0] if a else kw.get("cmd")
+        if cmd and {"doctor", "event"} <= {str(p) for p in cmd}:
+            # Event emission rides the same seam; the real binary answers.
+            return real_run(*a, **kw)
+        return _Res()
+
+    monkeypatch.setattr(done_cli.subprocess, "run", fake_run)
 
     # `--pr` now demands gh-resolved merge evidence; without a stub
     # these collision tests would exit 4 on the gh outage instead of reaching
@@ -487,7 +496,7 @@ def test_done_collision_without_force_overwrite_skips_rollup(
     }])
     _stub_subprocess_no_git(monkeypatch)
 
-    result = runner.invoke(app, ["done", "ab-bare-collide-001", "--link", "https://example.com/z"])
+    result = runner.invoke(app, ["backlog", "done", "ab-bare-collide-001", "--link", "https://example.com/z"])
     assert result.exit_code == 0, f"Exit {result.exit_code}: {result.output}"
 
     entry = next(e for e in _read(tmp_graph) if e["id"] == "ab-bare-collide-001")

@@ -1685,15 +1685,7 @@ pub(crate) struct KingFireHistory {
 ///    outlive the only action a king has for them, and a reset-on-repeat
 ///    counter would never converge.
 pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFireHistory {
-    let Ok(content) = std::fs::read_to_string(events_path) else {
-        return KingFireHistory {
-            total: 0,
-            dry: 0,
-            last_ids: Vec::new(),
-            last_undelivered: None,
-            last_terminal: None,
-        };
-    };
+    let content = crate::event_store::journal_text(events_path, &[]);
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut total: u64 = 0;
     let mut dry: u64 = 0;

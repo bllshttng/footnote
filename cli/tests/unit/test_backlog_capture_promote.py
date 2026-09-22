@@ -198,6 +198,8 @@ def test_cli_promote_emits_event(tmp_path: Path) -> None:
     fu = json.loads(add.stdout)["id"]
     res = runner.invoke(cli, ["promote", fu, "--difficulty", "medium"])
     assert res.exit_code == 0, res.output
-    events = (tmp_path / ".fno" / "events.jsonl").read_text().splitlines()
-    types = [json.loads(l)["type"] for l in events if l.strip()]
+    from tests._event_rows import event_rows
+
+    events = (tmp_path / ".fno" / "events.jsonl")
+    types = [e["type"] for e in event_rows(events)]
     assert "capture_promote" in types

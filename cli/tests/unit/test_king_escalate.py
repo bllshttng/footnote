@@ -225,11 +225,14 @@ def test_an_unreadable_store_is_not_an_empty_one(tmp_path: Path) -> None:
     every fire, which is the pathology the dedupe exists to prevent - arriving
     through the error path instead of the happy one.
     """
+    from fno.events.store_client import store_db_path
     from fno.outstanding.core import OutstandingError, events_path
 
     path = events_path(tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.mkdir()  # a directory where the journal should be: unreadable, not absent
+    # The journal is store-located now: a directory standing in for events.db
+    # is unreadable, not absent.
+    store_db_path(path).mkdir()
 
     with pytest.raises(OutstandingError):
         _run(tmp_path, STALLED)

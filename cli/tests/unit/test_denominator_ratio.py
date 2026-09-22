@@ -47,8 +47,11 @@ def test_record_denominator_choice_classifies_each_exit(monkeypatch, tmp_path):
     target_cli._record_denominator_choice("", 1, None)  # deliverables:1
     target_cli._record_denominator_choice("", None, None)  # none
 
-    lines = (tmp_path / ".fno" / "events.jsonl").read_text().strip().splitlines()
-    denom = sorted(json.loads(ln)["data"]["denominator"] for ln in lines)
+    from tests._event_rows import event_rows
+
+    denom = sorted(
+        e["data"]["denominator"] for e in event_rows(tmp_path / ".fno" / "events.jsonl")
+    )
     assert denom == ["deliverables", "none", "plan"]
 
 

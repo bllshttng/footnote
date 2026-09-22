@@ -78,10 +78,9 @@ def test_king_cancel_sets_signal_and_emits_event(tmp_path: Path, monkeypatch) ->
     assert result.exit_code == 0, result.output
     sentinel = manifest.with_suffix(".cancelled")
     assert sentinel.is_file()
-    events = [
-        json.loads(line)
-        for line in space_dir(tmp_path).joinpath("events.jsonl").read_text().splitlines()
-    ]
+    from tests._event_rows import event_rows
+
+    events = event_rows(space_dir(tmp_path).joinpath("events.jsonl"))
     assert any(
         event["type"] == "cancel_signal_set"
         and event["data"]["lane"] == "king"

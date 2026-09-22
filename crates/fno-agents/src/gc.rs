@@ -1242,17 +1242,30 @@ mod tests {
     }
 
     fn count_retire_rows(path: &std::path::Path) -> usize {
-        std::fs::read_to_string(path)
-            .map(|content| {
-                content
-                    .lines()
-                    .filter(|l| {
-                        l.contains("\"type\":\"control_plane_tick\"")
-                            && l.contains("\"arm\":\"retire\"")
-                    })
-                    .count()
-            })
-            .unwrap_or(0)
+        // Committed rows, not journal bytes: the store cutover stopped journal
+        // appends, so emitted ticks live only in the store beside the journal.
+        let _ = crate::event_store::import_all(path);
+        crate::event_store::query_events(
+            path,
+            &crate::event_store::EventQuery {
+                types: vec!["control_plane_tick".to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| {
+            serde_json::from_str::<serde_json::Value>(&r.line)
+                .ok()
+                .and_then(|row| {
+                    row.get("data")
+                        .and_then(|d| d.get("arm"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(|arm| arm == "retire")
+                })
+                .unwrap_or(false)
+        })
+        .count()
     }
 
     fn wait_for_retire_row(path: &std::path::Path) -> usize {
@@ -1373,8 +1386,7 @@ mod tests {
                 noop_crown_sweep,
             );
             wait_for_retire_row(&home.events_jsonl());
-            let row = std::fs::read_to_string(home.events_jsonl())
-                .unwrap()
+            let row = crate::events::committed_journal_text(&home.events_jsonl())
                 .lines()
                 .filter(|l| {
                     l.contains("\"type\":\"control_plane_tick\"")
@@ -1456,8 +1468,7 @@ mod tests {
             // subprocesses; in a sandbox without a transcript store those
             // probes run out their whole timeout before the tick lands.
             wait_for_retire_row_within(&home.events_jsonl(), 30);
-            std::fs::read_to_string(home.events_jsonl())
-                .unwrap()
+            crate::events::committed_journal_text(&home.events_jsonl())
                 .lines()
                 .filter(|l| {
                     l.contains("\"type\":\"control_plane_tick\"")
@@ -1850,8 +1861,7 @@ mod tests {
             wait_for_line(&home.events_jsonl(), "\"arm\":\"retire\"", 90);
             wait_for_line(&home.events_jsonl(), "\"type\":\"retire_holds\"", 90);
         });
-        let holds_row = std::fs::read_to_string(home.events_jsonl())
-            .unwrap()
+        let holds_row = crate::events::committed_journal_text(&home.events_jsonl())
             .lines()
             .find(|l| l.contains("\"type\":\"retire_holds\""))
             .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
@@ -1900,8 +1910,7 @@ mod tests {
             || crate::reap_render::MuxSweep::Skipped,
             noop_roster_sweep,
         );
-        let count = std::fs::read_to_string(home.events_jsonl())
-            .unwrap()
+        let count = crate::events::committed_journal_text(&home.events_jsonl())
             .lines()
             .filter(|l| l.contains("\"type\":\"retire_holds\""))
             .count();
@@ -1914,10 +1923,7 @@ mod tests {
     fn wait_for_line(path: &std::path::Path, needle: &str, secs: u64) {
         let deadline = Instant::now() + Duration::from_secs(secs);
         loop {
-            if std::fs::read_to_string(path)
-                .map(|c| c.contains(needle))
-                .unwrap_or(false)
-            {
+            if crate::events::committed_journal_text(path).contains(needle) {
                 return;
             }
             if Instant::now() >= deadline {
@@ -1973,11 +1979,11 @@ mod tests {
         assert!(!claim.exists());
         let quiet = state_file_sweep(&home, &emitter, &cwd);
         assert_eq!(quiet.totals.scanned, 0);
-        let lines: Vec<serde_json::Value> = std::fs::read_to_string(home.events_jsonl())
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
+        let lines: Vec<serde_json::Value> =
+            crate::events::committed_journal_text(&home.events_jsonl())
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
         assert_eq!(lines.len(), 2, "each periodic pass must emit one event");
         let event = &lines[0];
         assert_eq!(event["type"], "state_reap");
@@ -2076,7 +2082,7 @@ mod tests {
         let summary = state_file_sweep(&home, &emitter, &cwd);
 
         assert_eq!(summary.skip_reason.as_deref(), Some("disabled"));
-        let raw = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let raw = crate::events::committed_journal_text(&home.events_jsonl());
         let event: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
         assert_eq!(event["type"], "state_reap");
         assert_ne!(event["type"], "event_payload_too_large");
@@ -2208,11 +2214,30 @@ mod tests {
         // hold it back anyway.
         let reaped = orphan_sweep(&emitter, Duration::from_secs(0), None);
         assert_eq!(reaped, 0);
-        // orphan_reap_sweep is ephemeral-class, so retention routing lands the
-        // row in the .ephemeral sibling, never in the journal proper.
-        let line = std::fs::read_to_string(crate::events::ephemeral_path(&path)).unwrap();
-        assert!(line.contains("\"skipped\":true"), "{line}");
-        assert!(line.contains("\"candidates\":0"), "{line}");
+        // orphan_reap_sweep is ephemeral-class: the store keeps the row in the
+        // same journal with retention_class ephemeral; the sibling is never
+        // created.
+        let rows =
+            crate::event_store::query_events(&path, &crate::event_store::EventQuery::default())
+                .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].retention_class, "ephemeral");
+        assert!(
+            rows[0].line.contains("\"skipped\":true"),
+            "{}",
+            rows[0].line
+        );
+        assert!(
+            rows[0].line.contains("\"candidates\":0"),
+            "{}",
+            rows[0].line
+        );
+        assert!(!PathBuf::from(format!(
+            "{}{}",
+            path.display(),
+            crate::event_store::EPHEMERAL_SUFFIX
+        ))
+        .exists());
     }
 
     /// A pid that changed identity between the table read and the signal is
@@ -2256,10 +2281,25 @@ mod tests {
         // A threshold no live process can reach, so the sweep finds nothing.
         let reaped = orphan_sweep(&emitter, Duration::from_secs(u32::MAX as u64), Some(&[]));
         assert_eq!(reaped, 0);
-        // Same retention routing as above: the sweep row lives in the sibling.
-        let line = std::fs::read_to_string(crate::events::ephemeral_path(&path)).unwrap();
-        assert!(line.contains(ORPHAN_SWEEP_EVENT), "{line}");
-        assert!(line.contains("\"reaped\":0"), "{line}");
+        // Same store routing as above: the sweep row is committed with
+        // retention_class ephemeral and no sibling journal is ever created.
+        let rows =
+            crate::event_store::query_events(&path, &crate::event_store::EventQuery::default())
+                .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].retention_class, "ephemeral");
+        assert!(
+            rows[0].line.contains(ORPHAN_SWEEP_EVENT),
+            "{}",
+            rows[0].line
+        );
+        assert!(rows[0].line.contains("\"reaped\":0"), "{}", rows[0].line);
+        assert!(!PathBuf::from(format!(
+            "{}{}",
+            path.display(),
+            crate::event_store::EPHEMERAL_SUFFIX
+        ))
+        .exists());
     }
 
     /// The process table read is one `ps` for the whole machine: a sweep whose

@@ -44,11 +44,13 @@ def test_emit_event_writes_real_event_to_events_jsonl(tmp_path: Path) -> None:
         events_path=events_path,
     )
 
-    assert events_path.exists(), "events.jsonl was not created"
-    lines = events_path.read_text().strip().splitlines()
-    assert len(lines) == 1, f"expected 1 event line, got {len(lines)}"
+    from tests._event_rows import event_rows
 
-    event = json.loads(lines[0])
+    rows = event_rows(events_path)
+    assert rows, "no committed event"
+    assert len(rows) == 1, f"expected 1 committed event, got {len(rows)}"
+
+    event = rows[0]
     # Verify the envelope: source must be 'daemon' (matching the schema)
     assert event["type"] == "pr_watch_tick"
     assert event["source"] == "daemon"
@@ -66,8 +68,9 @@ def test_emit_event_dispatched_writes_valid_event(tmp_path: Path) -> None:
     events_path = tmp_path / "events.jsonl"
     _emit_event("pr_watch_dispatched", {"kind": "review", "pr": 42}, events_path=events_path)
 
-    lines = events_path.read_text().strip().splitlines()
-    event = json.loads(lines[0])
+    from tests._event_rows import event_rows
+
+    event = event_rows(events_path)[0]
     assert event["type"] == "pr_watch_dispatched"
     assert event["source"] == "daemon"
     validate(event)
@@ -182,7 +185,9 @@ route = "zai/glm-5.3[1m]"
     )
 
     assert result.sweep_failures == 0
-    event = json.loads(events_path.read_text(encoding="utf-8").strip())
+    from tests._event_rows import event_rows
+
+    event = event_rows(events_path)[-1]
     assert event["type"] == "pr_watch_tick"
     assert event["data"]["swept_count"] == 2
     assert event["data"]["swept"] == {"owner/repo": [889, 1134]}

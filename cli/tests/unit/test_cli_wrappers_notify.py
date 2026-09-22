@@ -118,7 +118,9 @@ def test_headless_with_sink_routes_operator_notice_delivers(monkeypatch, tmp_pat
     code, err = _impl.send_notification("T", "3 open questions.", "fno inbox outstanding")
 
     assert (code, err) == (0, "")
-    rows = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+    from tests._event_rows import event_rows
+
+    rows = event_rows(tmp_path / "events.jsonl")
     notices = [r for r in rows if r["type"] == "operator_notice"]
     assert len(notices) == 1
     assert notices[0]["data"] == {

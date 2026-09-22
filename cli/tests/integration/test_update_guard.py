@@ -83,10 +83,19 @@ def _isolate(
     # rather than AttributeError-ing on a bare namespace. Empty stdout => the
     # rev is undeterminable for the fake source, so the marker chain is skipped.
     fake_result = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def _fake_run(cmd, *a, **kw):
+        # Native event commits answer through the real store; a stubbed empty
+        # receipt would turn every best-effort audit emit into a hard failure.
+        parts = [str(p) for p in (cmd if isinstance(cmd, (list, tuple)) else [cmd])]
+        if {"doctor", "event"} <= set(parts):
+            return _REAL_SUBPROCESS_RUN(cmd, *a, **kw)
+        return fake_result
+
     monkeypatch.setattr(
         update_mod.subprocess,
         "run",
-        lambda *a, **kw: fake_result,
+        _fake_run,
     )
     yield
 
@@ -395,6 +404,8 @@ def test_cargo_failure_preserves_python_update_and_refuses_freshness(
     def _fake_run(cmd, *a, **kw):
         if cmd and cmd[0] == "cargo":
             return types.SimpleNamespace(returncode=2, stdout="", stderr="")
+        if {"doctor", "event"} <= {str(p) for p in cmd}:
+            return _REAL_SUBPROCESS_RUN(cmd, *a, **kw)
         return fake_ok
 
     monkeypatch.setattr(update_mod.subprocess, "run", _fake_run)
@@ -433,7 +444,12 @@ def test_malformed_version_output_halts_the_rust_leg(
     monkeypatch.setattr(update_mod, "_cargo_installed_bin", lambda: garbage_bin)
 
     fake_ok = types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(update_mod.subprocess, "run", lambda *a, **kw: fake_ok)
+    def _fake_run(cmd, *a, **kw):
+        if {"doctor", "event"} <= {str(p) for p in cmd}:
+            return _REAL_SUBPROCESS_RUN(cmd, *a, **kw)
+        return fake_ok
+
+    monkeypatch.setattr(update_mod.subprocess, "run", _fake_run)
     captured: dict[str, object] = {}
     monkeypatch.setattr(
         update_mod.os, "execvp", lambda f, a: captured.update(file=f, args=a)
@@ -474,7 +490,12 @@ def test_missing_cargo_names_component_evidence_and_still_installs_python(
         lambda name, **kw: None if name == "cargo" else real_which(name),
     )
     fake_ok = types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(update_mod.subprocess, "run", lambda *a, **kw: fake_ok)
+    def _fake_run(cmd, *a, **kw):
+        if {"doctor", "event"} <= {str(p) for p in cmd}:
+            return _REAL_SUBPROCESS_RUN(cmd, *a, **kw)
+        return fake_ok
+
+    monkeypatch.setattr(update_mod.subprocess, "run", _fake_run)
     captured: dict[str, object] = {}
     monkeypatch.setattr(
         update_mod.os, "execvp", lambda f, a: captured.update(file=f, args=a)
@@ -570,7 +591,13 @@ def test_doctor_fix_python_stale_delegates_to_real_update_command(
 
     import types
     fake_result = types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(update.subprocess, "run", lambda *a, **kw: fake_result)
+
+    def _fake_run(cmd, *a, **kw):
+        if {"doctor", "event"} <= {str(p) for p in cmd}:
+            return _REAL_SUBPROCESS_RUN(cmd, *a, **kw)
+        return fake_result
+
+    monkeypatch.setattr(update.subprocess, "run", _fake_run)
 
     execvp_calls: list[tuple] = []
 

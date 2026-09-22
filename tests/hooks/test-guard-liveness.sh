@@ -26,9 +26,30 @@ trap 'rm -rf "$TMP"' EXIT
 EVENTS="$TMP/events.jsonl"
 export FNO_EVENTS_PATH="$EVENTS"
 
-count_for() { # <guard> <decision> -> row count in the pinned events file
+# Same resolution order as scripts/lib/events.sh: checkout build first, PATH
+# second, so assertions never read through a stale installed binary.
+ROWS_BIN="${FNO_BIN:-}"
+if [[ -z "$ROWS_BIN" ]]; then
+    for _profile in debug release; do
+        if [[ -x "$REPO_ROOT/crates/fno/target/$_profile/fno" ]]; then
+            ROWS_BIN="$REPO_ROOT/crates/fno/target/$_profile/fno"
+            break
+        fi
+    done
+fi
+[[ -n "$ROWS_BIN" ]] || ROWS_BIN=$(command -v fno 2>/dev/null)
+
+committed_rows() {
+    # The store commit is the write boundary: the pinned journal keeps no
+    # byte trace, so rows read through the verb and jq -r unwraps the
+    # escaped envelope strings back to plain JSON lines.
+    [[ -n "$ROWS_BIN" ]] || return 0
+    "$ROWS_BIN" doctor event rows --events "$EVENTS" 2>/dev/null | jq -r '.[]' 2>/dev/null
+}
+
+count_for() { # <guard> <decision> -> committed row count for the pair
     local n
-    n=$(grep -c "\"guard\":\"$1\",\"decision\":\"$2\"" "$EVENTS" 2>/dev/null || true)
+    n=$(committed_rows | grep -c "\"guard\":\"$1\",\"decision\":\"$2\"" || true)
     printf '%s' "${n:-0}"
 }
 
@@ -61,7 +82,7 @@ expect_row() {
     fi
     after=$(count_for "$guard_name" "$want")
     if [[ $((after - before)) -ne 1 ]]; then
-        fail "$name: expected exactly 1 new '$want' row for $guard_name, delta $((after - before)) (events: $(cat "$EVENTS" 2>/dev/null || printf none))"
+        fail "$name: expected exactly 1 new '$want' row for $guard_name, delta $((after - before)) (rows: $(committed_rows | head -3))"
         return
     fi
     pass "$name"
@@ -148,11 +169,12 @@ expect_row "bpg denies an unbounded yes" bg-process-guard block \
 
 # ── row shape: one deep check that a row is valid JSON with the contract ──────
 SHAPE_OK=0
-if [[ -s "$EVENTS" ]] && command -v jq >/dev/null 2>&1; then
-    if jq -e 'select(.type == "guard_decision" and .source == "hook"
+if [[ -n "$ROWS_BIN" ]] && command -v jq >/dev/null 2>&1; then
+    if "$ROWS_BIN" doctor event rows --events "$EVENTS" 2>/dev/null \
+       | jq -e '.[] | fromjson | select(.type == "guard_decision" and .source == "hook"
                  and (.data.guard | type == "string")
                  and (.data.decision == "allow" or .data.decision == "block")
-                 and (.ts | type == "string"))' "$EVENTS" >/dev/null 2>&1; then
+                 and (.ts | type == "string"))' >/dev/null 2>&1; then
         SHAPE_OK=1
     fi
 fi

@@ -194,7 +194,7 @@ mod tests {
             Ok("fleet.html rendered: 1 readings".into())
         });
         assert_eq!(success.acted, 1);
-        let success_log = std::fs::read_to_string(success_home.events_jsonl()).unwrap();
+        let success_log = crate::events::committed_journal_text(&success_home.events_jsonl());
         assert!(success_log.contains("\"arm\":\"fleet_page\""));
         assert!(success_log.contains("\"interval_s\":1800"));
 
@@ -202,7 +202,7 @@ mod tests {
         let failure = emit_one(&failure_home, || Err("cannot read state".into()));
         assert_eq!(failure.acted, 0);
         assert_eq!(failure.skip_reason.as_deref(), Some("error"));
-        let failure_log = std::fs::read_to_string(failure_home.events_jsonl()).unwrap();
+        let failure_log = crate::events::committed_journal_text(&failure_home.events_jsonl());
         assert!(failure_log.contains("\"acted\":0"));
         assert!(failure_log.contains("\"skip_reason\":\"error\""));
     }

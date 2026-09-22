@@ -113,7 +113,7 @@ fn attestation_line(reviewer: &str, head: &str, attester: &str) -> String {
 
 /// The last `review_coverage` data object in one events log, or None.
 fn last_coverage(path: &Path) -> Option<serde_json::Value> {
-    let text = fs::read_to_string(path).ok()?;
+    let text = fno_agents::event_store::journal_text(path, &[]);
     let mut last = None;
     for line in text.lines() {
         if !line.contains("review_coverage") {

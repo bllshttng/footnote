@@ -86,3 +86,16 @@ fn missing_stderr_capture_refuses_to_verdict() {
     assert!(!v.contains("the event did not occur"), "{v}");
     assert!(!v.contains("the writer could not write"), "{v}");
 }
+
+#[test]
+fn event_text_reads_committed_rows_without_a_raw_journal() {
+    let dir = workdir("committed");
+    let home = fno_agents::paths::AgentsHome::at(dir);
+    let journal = home.events_jsonl();
+    fno_agents::events::EventEmitter::new(&journal, "test")
+        .emit("startup_reconcile_done", &serde_json::json!({"updated": 1}))
+        .unwrap();
+
+    assert!(!journal.exists());
+    assert!(common::event_text(&home).contains("startup_reconcile_done"));
+}

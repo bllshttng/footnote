@@ -3421,32 +3421,25 @@ def _drained_msg_ids() -> set[str]:
     Read once per sweep so the dead-letter sweep prefers a positive drain marker
     over cursor inference: a message with a marker was drained and never
     escalates, while cursor logic stays as the fallback for legacy mail written
-    before the marker existed. A torn or unreadable log reads as empty, so the
+    before the marker existed. A torn or unreadable store reads as empty, so the
     sweep degrades to cursor-only (its prior behavior) rather than crashing or
     silently clearing its findings.
     """
     from fno.paths import state_dir
 
-    path = state_dir() / "events.jsonl"
     ids: set[str] = set()
     try:
-        # Stream line-by-line: the events log grows unboundedly, so never slurp
-        # it whole just to collect drained ids (mirrors gate_escape.py's reader).
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                if "agent_mail_drained" not in line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (ValueError, TypeError):
-                    continue
-                if not isinstance(rec, dict):
-                    continue
-                if rec.get("kind") == "agent_mail_drained":
-                    mid = rec.get("msg_id")
-                    if isinstance(mid, str) and mid:
-                        ids.add(mid)
-    except OSError:
+        # Committed rows, not journal bytes: the store commit is the write
+        # boundary, so a marker the emitter committed is only visible there.
+        from fno.events.store_client import query_rows
+
+        for rec in query_rows(state_dir() / "events.jsonl", types=["agent_mail_drained"]):
+            mid = rec.get("msg_id")
+            if not isinstance(mid, str):
+                mid = (rec.get("data") or {}).get("msg_id")
+            if isinstance(mid, str) and mid:
+                ids.add(mid)
+    except Exception:
         return ids
     return ids
 

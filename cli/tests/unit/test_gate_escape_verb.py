@@ -16,13 +16,10 @@ runner = CliRunner()
 
 
 def _escapes(ev: Path, reason: str | None = None) -> list[dict]:
-    if not ev.exists():
-        return []
+    from tests._event_rows import event_rows
+
     out = []
-    for line in ev.read_text().splitlines():
-        if not line.strip():
-            continue
-        e = json.loads(line)
+    for e in event_rows(ev):
         if e.get("type") != "gate_escape":
             continue
         if reason is None or e["data"]["reason"] == reason:

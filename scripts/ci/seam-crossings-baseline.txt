@@ -18,13 +18,13 @@ crossing	crates/fno-agents/src/daemon.rs	6444	let out = std::process::Command::n
 crossing	crates/fno-agents/src/distress.rs	148	.or_else(|| newest_assistant_text_via_reader(&loopcheck_fno_bin(), transcript_path, cwd));
 crossing	crates/fno-agents/src/distress.rs	271	std::ffi::OsStr::new(&loopcheck_fno_bin()),
 crossing	crates/fno-agents/src/distress.rs	350	let text = newest_assistant_text_via_reader(&loopcheck_fno_bin(), &transcript, &cwd);
-crossing	crates/fno-agents/src/finalize.rs	515	let mut cmd = Command::new("fno");
-crossing	crates/fno-agents/src/finalize.rs	1964	let mut command = Command::new("fno");
-crossing	crates/fno-agents/src/finalize.rs	2020	let ok = Command::new("fno")
-crossing	crates/fno-agents/src/finalize.rs	2393	let ok = Command::new("fno")
-crossing	crates/fno-agents/src/finalize.rs	2475	let ok = Command::new("fno")
-crossing	crates/fno-agents/src/finalize.rs	2845	let out = match Command::new("fno")
-crossing	crates/fno-agents/src/finalize.rs	2865	let mut cmd = Command::new("fno");
+crossing	crates/fno-agents/src/finalize.rs	1809	let mut command = Command::new("fno");
+crossing	crates/fno-agents/src/finalize.rs	1865	let ok = Command::new("fno")
+crossing	crates/fno-agents/src/finalize.rs	2238	let ok = Command::new("fno")
+crossing	crates/fno-agents/src/finalize.rs	2320	let ok = Command::new("fno")
+crossing	crates/fno-agents/src/finalize.rs	2690	let out = match Command::new("fno")
+crossing	crates/fno-agents/src/finalize.rs	2710	let mut cmd = Command::new("fno");
+crossing	crates/fno-agents/src/finalize_run_summary.rs	164	let mut cmd = Command::new("fno");
 crossing	crates/fno-agents/src/gc.rs	1017	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/gc_native.rs	312	let mut child = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/king_checkin.rs	164	let mut argv = vec![fno_bin()];

@@ -961,10 +961,12 @@ def _list_decisions(
                 return
 
         from fno import paths
+        from fno.events.store_client import store_db_path
 
+        index_path = Path(paths.decisions_jsonl())
         hint = (
             ""
-            if Path(paths.decisions_jsonl()).exists()
+            if index_path.exists() or store_db_path(index_path).exists()
             else " (no index yet on this machine - run `fno backlog "
             "decide-reindex` to backfill what is already on disk)"
         )

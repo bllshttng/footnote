@@ -32,9 +32,9 @@ def claimed_node(tmp_path, monkeypatch):
 
 
 def _read_events(path: Path) -> list[dict]:
-    if not path.is_file():
-        return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    from tests._event_rows import event_rows
+
+    return event_rows(path)
 
 
 def test_ac1_hp_records_and_delivers(events_path, claimed_node, monkeypatch):
@@ -185,8 +185,13 @@ def test_empty_text_refused_writes_nothing(events_path, claimed_node):
     assert _read_events(events_path) == []
 
 
-def test_list_skips_non_dict_json_lines(events_path):
-    """A valid-JSON but non-object line (bare list/number) is skipped, not a crash."""
+def test_list_skips_non_dict_json_lines(events_path, monkeypatch):
+    """A valid-JSON but non-object line (bare list/number) is skipped, not a crash.
+
+    Legacy shape only: the store cannot commit a non-object row, so this
+    exercises the raw-journal fallback by taking the native reader offline.
+    """
+    monkeypatch.setattr("fno.events.store_client.native_rows", lambda *a, **k: None)
     events_path.write_text(
         "[1,2,3]\n"
         "123\n"

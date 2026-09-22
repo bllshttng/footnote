@@ -127,7 +127,10 @@ def test_emit_verdict_event_per_path_independence(tmp_path: Path, capsys) -> Non
         verdict="pass", node_id="x-1", pr_number=None, session_id="s",
         events_paths=[bad, good],
     )
-    assert good.exists() and "verifier_verdict" in good.read_text()
+    from tests._event_rows import event_rows
+
+    rows = event_rows(good)
+    assert rows and rows[0]["type"] == "verifier_verdict"
     assert "event emit to" in capsys.readouterr().err
 
 
@@ -151,7 +154,9 @@ def test_emit_verdict_event_validates_and_lands(tmp_path: Path) -> None:
         session_id="sid-1",
         events_paths=[events],
     )
-    lines = [json.loads(ln) for ln in events.read_text().splitlines()]
+    from tests._event_rows import event_rows
+
+    lines = event_rows(events)
     assert len(lines) == 1
     e = lines[0]
     assert e["type"] == "verifier_verdict" and e["source"] == "target"
@@ -169,7 +174,9 @@ def test_emit_verdict_event_null_node_allowed(tmp_path: Path) -> None:
         session_id="",
         events_paths=[events],
     )
-    e = json.loads(events.read_text().splitlines()[0])
+    from tests._event_rows import event_rows
+
+    e = event_rows(events)[0]
     assert e["data"]["graph_node_id"] is None
 
 
@@ -267,9 +274,11 @@ def test_retried_fire_backfills_without_respawn(tmp_path: Path, monkeypatch, cap
     )
     assert rc == 0
     assert "already recorded" in capsys.readouterr().out
-    assert len(events.read_text().splitlines()) == 1  # project log NOT duplicated
+    from tests._event_rows import event_rows
+
+    assert len(event_rows(events)) == 1  # project log NOT duplicated
     # The missing global event and ledger field are repaired with the PRIOR verdict.
-    gev = json.loads((tmp_path / "gev.jsonl").read_text().splitlines()[0])
+    gev = event_rows(tmp_path / "gev.jsonl")[0]
     assert gev["data"]["verdict"] == "pass" and gev["data"]["session_id"] == "sid-1"
     assert json.loads(ledger.read_text())["entries"][0]["verifier_verdict"] == "pass"
 
@@ -304,8 +313,10 @@ def test_main_exits_zero_on_happy_path(tmp_path: Path, monkeypatch, capsys) -> N
     )
     assert rc == 0
     assert "verdict=pass" in capsys.readouterr().out
-    # Event landed in BOTH logs; ledger row carries the field (AC6-HP).
-    assert (tmp_path / "ev.jsonl").exists() and (tmp_path / "gev.jsonl").exists()
+    # Event landed in BOTH stores; ledger row carries the field (AC6-HP).
+    from tests._event_rows import event_rows
+
+    assert event_rows(tmp_path / "ev.jsonl") and event_rows(tmp_path / "gev.jsonl")
     assert json.loads(ledger.read_text())["entries"][0]["verifier_verdict"] == "pass"
 
 

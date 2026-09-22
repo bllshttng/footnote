@@ -174,11 +174,10 @@ from fno.paths import repo_identity as _repo_identity  # noqa: E402
 def journal_lines(path: Path, types: tuple[str, ...]) -> Iterator[str]:
     """The lines of ``path``'s journal for ``types``, across rotations.
 
-    The Python half of ``events_store::journal_text``. Rotation ingests a
-    generation into ``<stem>.db`` before the rename, so the store holds every
-    row that left the live file: yield the store rows whose line is not in the
-    live file (oldest first), then the live file verbatim. Any store failure
-    yields the live file alone.
+    Rotation ingests a generation into ``<stem>.db`` before the rename, so the
+    store holds every row that left the live file: yield the store rows whose
+    line is not in the live file (oldest first), then the live file verbatim.
+    Any store failure yields the live file alone.
     """
     live = path.resolve()
     name = re.sub(r"\.\d+$", "", live.name)

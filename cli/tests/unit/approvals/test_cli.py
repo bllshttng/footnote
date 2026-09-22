@@ -102,7 +102,9 @@ def test_ac10_ui_inspection_never_executes_the_effect(db: Path, tmp_path: Path) 
     _invoke("ls", "--db", str(db))
     _invoke("show", digest, "--db", str(db))
 
-    events = (tmp_path / "events.jsonl").read_text().splitlines()
+    from tests._event_rows import event_rows
+
+    events = [json.dumps(e) for e in event_rows(tmp_path / "events.jsonl")]
     types = [json.loads(line)["type"] for line in events if line.strip()]
     assert types == ["approval_requested"]
 
