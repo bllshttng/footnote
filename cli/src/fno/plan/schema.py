@@ -443,10 +443,8 @@ class PlanFrontmatter(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _fill_node_from_claims(cls, data: Any) -> Any:
-        """One release: `claims` is a synonym for `node` and blueprint
-        authors write only `claims`, so an empty `node` fills from it -
-        matching validate-plan.sh's node-then-claims read. Neither key
-        present still refuses (`node: Field required`)."""
+        """One release: blueprint authors write `claims:` only; fill `node`
+        from the synonym (validate-plan.sh's node-then-claims read)."""
         if isinstance(data, dict) and not str(data.get("node") or "").strip():
             claims = str(data.get("claims") or "").strip()
             if claims:

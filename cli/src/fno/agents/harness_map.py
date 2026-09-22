@@ -1344,15 +1344,14 @@ def resolve_dispatch(
     Full contract: docs/architecture/backlog-graph-verb-contracts.md. Field
     precedence (each independent): harness explicit > stage table >
     ``claude``; substrate explicit > config > per-harness default; command
-    explicit > lifecycle derivation > node ``verb`` (allowlist-checked;
+    explicit > lifecycle answer > node ``verb`` (allowlist-checked;
     a graph field is a trust boundary) > ``config.dispatch.command`` >
     per-harness builtin. ``lifecycle`` is the ported verb decision
-    (backlog_ready.rs via the store door) as ``(verb, note)``; it runs BEFORE
-    the stage-table read so ``agents.profiles.<resolved-verb>`` drives the
-    harness, and the note joins the decision trail. An explicit command
-    bypasses it (reconcile and the other explicit doors spell their own
-    verb). When it is absent the chain falls through to the allowlist-checked
-    ``verb`` rung, config, then the per-harness builtin, unchanged. ``brief`` rides ``env['TARGET_BRIEF']`` only, capped
+    (backlog_ready.rs via the store door) as ``(verb, note)``; the verb runs
+    BEFORE the stage-table read so ``agents.profiles.<resolved-verb>`` drives
+    the harness, and the note joins the decision trail; absent, the chain
+    falls through to the verb rung, config, then the builtin. ``brief``
+    rides ``env['TARGET_BRIEF']`` only, capped
     at 8 KB, never truncated. ``route`` is the stage table's vendor lane beside
     the harness ("" when unset), returned so a caller forwarding the harness
     can forward the vendor too. ``trigger`` is autonomous or attended (pane
@@ -1363,8 +1362,8 @@ def resolve_dispatch(
     Raises :class:`DispatchResolveError` on an unknown/refused harness, a
     missing substrate lane, an unsupported autonomous pane, an unknown trigger
     or substrate, an out-of-allowlist verb, an oversized brief, an empty or
-    unsubstituted command, or an unanswerable node lifecycle.
-    ``dispatch_cfg`` overrides the config read (for tests)."""
+    unsubstituted command. ``dispatch_cfg`` overrides the config read (for
+    tests)."""
     decision: list[str] = []
     # The ported lifecycle answer rides in as (verb, note) and lands BEFORE
     # the config read so the stage table resolves the RESOLVED verb's profile
