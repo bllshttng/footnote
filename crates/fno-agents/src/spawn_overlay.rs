@@ -17,7 +17,8 @@
 //!   Python). Returns canonical links or the exact refusal the Python raised.
 //! - kind `crown-settle`: whether a crowned spawn is granted, transfers, or
 //!   refuses (`crown_settle::resolve`), a port of Python's
-//!   `settle_spawn_crown` with a new human-succession branch.
+//!   `settle_spawn_crown` with a new human-succession branch and ladder-aware
+//!   rivalry through `loop_king::crown_rivals`.
 //! - kind `crown-widen`: whether an agent can add an epic its own session
 //!   created to its own epic-set crown (`crown_widen::resolve`).
 
