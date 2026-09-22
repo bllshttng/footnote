@@ -201,6 +201,40 @@ def test_bg_spawn_refuses_a_duplicate_crown_before_launch(bg_home, monkeypatch) 
     assert "--succeed" in result.output
 
 
+def test_bg_spawn_refuses_a_crown_over_one_member_of_a_live_set(bg_home, monkeypatch) -> None:
+    """A live epic-set crown rules each member, so a spawn crowned over ONE
+    member refuses before launch the way `fno agents crown` does: the rivalry
+    rule is ladder-aware, not an exact scope string."""
+    update_registry(
+        lambda rows: rows
+        + [
+            AgentEntry(
+                name="sitting-king",
+                cwd=str(bg_home),
+                log_path="",
+                harness="claude",
+                harness_session_id="sess-sitting-king",
+                status="busy",
+                crown_level=2,
+                crown_scope="epic-x,epic-y",
+                crown_grantor="human",
+            )
+        ]
+    )
+
+    result = _spawn(
+        "spawn", "--name", "pretender", "-H", "claude", "reign",
+        "--substrate", "bg", "--crown", "epic-x",
+    )
+    assert result.exit_code == 2
+
+    assert not [e for e in load_registry() if e.name == "pretender"], (
+        "a refused crown must launch nothing"
+    )
+    assert "sitting-king" in result.output
+    assert "epic-x,epic-y" in result.output
+
+
 def test_bg_spawn_crowns_over_a_scope_whose_king_is_terminal(bg_home, monkeypatch) -> None:
     """A dead king does not block succession - that is the orphaned scope the
     crown exists to let someone reclaim."""
