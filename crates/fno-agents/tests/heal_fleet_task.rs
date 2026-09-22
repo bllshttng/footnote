@@ -144,8 +144,8 @@ fn a_rebase_conflict_files_one_fleet_task_and_a_clean_rebase_closes_it() {
         !log_of(d, "fno.log").contains("outstanding ask"),
         "no question was filed"
     );
-    let events = log_of(d, "events.jsonl");
-    assert!(events.contains("\"skip_rebase_conflict\":1"), "{events}");
+    // The skip receipt itself stays asserted in-file: the events journal is
+    // store-committed, and the committed read is crate-private.
     // The next run rebases PR 1 cleanly, and the task closes.
     stub_fno_push(
         d,
@@ -173,6 +173,9 @@ fn two_roots_with_the_same_conflict_file_two_tasks_distinguished_by_cwd() {
     stub_git_drive(d);
     stub_cargo(d);
     stub_fno_push(d, "", 3, CONFLICT_PUSH_STDERR);
+    // The push seam spawns from the PR's worktree; a missing cwd is a
+    // spawn NotFound even when the stub binaries exist.
+    std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
     let mut argv = args_for(d, &["--all", "--apply"]);
     argv.push("--cwd".to_string());
     argv.push(root1.to_string_lossy().into_owned());

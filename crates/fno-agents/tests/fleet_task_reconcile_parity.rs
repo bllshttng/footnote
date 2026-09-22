@@ -276,7 +276,9 @@ fn run_case(label: &str, keys: &[&str], identities: &[&str], empty: bool) {
         empty,
     )
     .unwrap();
-    let proj = projection(&std::fs::read_to_string(&store).unwrap());
+    // The none-case never writes the store, so the read may legitimately
+    // miss: an absent store and an empty one fold the same.
+    let proj = projection(&std::fs::read_to_string(&store).unwrap_or_default());
     let rust = Golden {
         exit: None,
         streams: vec![format!("{outcome}|{proj}")],

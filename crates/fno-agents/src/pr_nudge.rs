@@ -1696,7 +1696,7 @@ mod tests {
         let mut quiet_row = r.clone();
         // The write is inside the grace: the pass waits, the reset stands.
         quiet_row.transcript_age_s = Some(10);
-        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
+        let mut runner = |_argv: &[String], _cwd: &str| -> (i32, String, String) {
             (0, String::new(), String::new())
         };
         let emitter = EventEmitter::new(home.events_jsonl(), "test");
