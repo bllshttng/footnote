@@ -1063,6 +1063,10 @@ struct View {
     /// inherits the emulator's own colors so every pre-theme render is
     /// byte-identical.
     theme: Theme,
+    /// The board's work-queue cards, verbatim off the wire Layout. The
+    /// sidebar renders none of them (the lane is gone); the launcher's
+    /// `@` node picker composes its suggestions over this feed.
+    backlog: Vec<crate::proto::BacklogCard>,
     /// Which settings tab is in front (general toggles / theme picker).
     settings_tab: SettingsTab,
     /// Focus-follows-mouse debounce: the pane the pointer is settling on
@@ -2271,6 +2275,7 @@ impl View {
             search_esc: Vec::new(),
             hover_focus: true,
             theme: Theme::default_theme(),
+            backlog: Vec::new(),
             settings_tab: SettingsTab::General,
             lane: LaneColorsUi::default(),
             hover_pending: None,
@@ -9217,6 +9222,7 @@ async fn attach_and_run(
                 area,
                 agents,
                 focus_node,
+                backlog,
                 ..
             }) => {
                 view.set_layout(LayoutView {
@@ -9228,6 +9234,9 @@ async fn attach_and_run(
                     agents,
                     focus_node,
                 });
+                // The launcher's node picker composes over the feed even
+                // though the sidebar no longer renders it.
+                view.backlog = backlog;
                 break;
             }
             Ok(ServerMsg::ModeSync { bytes }) => stashed_modesync.extend_from_slice(&bytes),
@@ -9734,8 +9743,9 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, .. }) => {
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, .. }) => {
                     view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node });
+                    view.backlog = backlog;
                     // a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).

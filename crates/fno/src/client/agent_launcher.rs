@@ -955,7 +955,7 @@ pub(crate) async fn launcher_keys(
                         open_picker_at(
                             l,
                             &view.launcher_catalog,
-                            &view.layout.backlog,
+                            &view.backlog,
                             Some(anchor),
                             l.focus,
                         );
@@ -1060,7 +1060,7 @@ pub(crate) async fn launcher_keys(
                             open_picker_at(
                                 l,
                                 &view.launcher_catalog,
-                                &view.layout.backlog,
+                                &view.backlog,
                                 anchor,
                                 f,
                             );
@@ -1084,7 +1084,7 @@ pub(crate) async fn launcher_keys(
                             open_picker_at(
                                 l,
                                 &view.launcher_catalog,
-                                &view.layout.backlog,
+                                &view.backlog,
                                 at_anchor,
                                 Focus::Message,
                             );
@@ -1351,7 +1351,7 @@ pub(crate) fn open_picker(l: &mut Launcher, view: &View) -> bool {
     open_picker_at(
         l,
         &view.launcher_catalog,
-        &view.layout.backlog,
+        &view.backlog,
         Some(anchor),
         l.focus,
     )
@@ -2245,7 +2245,7 @@ pub(crate) async fn launcher_mouse(
             open_picker_at(
                 l,
                 &view.launcher_catalog,
-                &view.layout.backlog,
+                &view.backlog,
                 anchor,
                 focus,
             );
