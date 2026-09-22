@@ -1337,7 +1337,7 @@ mod tests {
         // the pass takes the expiry branch. A huge grace (the in-grace
         // test's pin) would keep every request in the window forever.
         consume_merge_cleanup_requests(&home, &["/repo".to_string()], &emitter, 0);
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let events = crate::events::committed_journal_text(&home.events_jsonl());
         let expired = events
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
@@ -1382,7 +1382,7 @@ mod tests {
         // Grace 0, as in an_expiry_names_the_reason_of_its_last_hold: the
         // request must land in the expiry branch for the stamp to be read.
         consume_merge_cleanup_requests(&home, &["/repo".to_string()], &emitter, 0);
-        let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
+        let events = crate::events::committed_journal_text(&home.events_jsonl());
         let expired = events
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
