@@ -171,6 +171,13 @@ verified provider goal as primary continuation state, but never infer Stop from
 it. A readable quiet state parks by pausing the goal and preserving its
 objective; it does not clear the goal or create a replacement session.
 
+Continuation proof has five separate receipts: packaged capability, machine
+plugin installation, exact-session lifecycle readiness, the correlated Stop
+decision, and the useful consumer action. A plugin cache, a native goal, a
+global arms row, daemon acceptance, or a user-shaped message proves only its
+own layer. The consumer proof must join the full thread id, turn id,
+correlation id, continuation owner, action hash, and exactly one user message.
+
 Every Codex `Stop` handler must exit 0 with empty stdout or one Stop JSON object. Exit 2 with non-empty stderr is a block. Plain text fails the hook, and `cli/tests/hooks/test_codex_stop_output_contract.py` enforces it.
 
 Raw mail to an app-server Codex thread is not a prompt-line transport. Declared
@@ -179,6 +186,44 @@ refused with the controller replacement. Ordinary wrapped text continues over
 the turn transport, and `/review` continues over structured `review/start`.
 Use provider-backed compact and goal receipts. Manual Escape followed by
 `/compact` is a fallback only for a measured mux-hosted pane.
+
+The exact-session command journey is opt-in and must use a disposable session
+and the isolated roots below. It covers idle, busy refusal, pending-composer
+preservation, the `/rc` picker, timeout with no retry, provider compaction, and
+paused-to-active goal resume. The command controller refuses a short selector,
+an identity mismatch, an unreadable registry, or any root outside this private
+set; it never creates or re-points a live session.
+
+```bash
+FNO_HOME=/private/tmp/fno-x-e64a-4.2.sYZyNb \
+FNO_AGENTS_HOME=/private/tmp/fno-x-e64a-4.2.sYZyNb/agents \
+FNO_CLAIMS_ROOT=/private/tmp/fno-x-e64a-4.2.sYZyNb/claims \
+FNO_SPACES_DIR=/private/tmp/fno-x-e64a-4.2.sYZyNb/spaces \
+HOME=/private/tmp/fno-x-e64a-4.2.sYZyNb/home \
+CODEX_HOME=/private/tmp/fno-x-e64a-4.2.sYZyNb/codex \
+bash scripts/diagnostics/harness-command-control-smoke.sh \
+  --session <full-disposable-session-id> --harness <codex|claude>
+```
+
+The independent continuation smoke creates its own private Git repository,
+`CODEX_HOME`, and FNO state. It sends one initial prompt, never sends mail or
+queue input, and writes a receipt only when an independent Stop block precedes
+a useful nonce action. The receipt also records provider versions, full ids,
+correlation, owner, action hash, user-message count, requested/default/max/
+percent/effective window facts, goal before/after, park interval, wake result,
+and repeated compaction/resume/private-daemon-replacement boundaries.
+
+```bash
+python3 scripts/diagnostics/codex-reign-continuation-smoke.py --run
+python3 scripts/diagnostics/codex-reign-continuation-smoke.py \
+  --verify-latest --max-age-hours 24
+```
+
+The verifier reports one primary failure class and its failed reader for
+missing plugin/session refresh, disabled hooks, stale lifecycle markers,
+identity misses, malformed or rejected Stop output, explicit park, and wake
+refusals. The observed Escape plus `/compact` sequence is interruption and
+compaction-boundary evidence only; it is not autonomous continuation proof.
 
 Do not copy the full Claude hook manifest into Codex. Codex does not support every
 Claude lifecycle event in `hooks/hooks.json`; `WorktreeCreate`, `CwdChanged`,
