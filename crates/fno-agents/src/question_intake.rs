@@ -236,7 +236,7 @@ fn mint_id() -> String {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let mix = nanos as u64 ^ ((std::process::id() as u64) << 32);
-        bytes = mix.to_le_bytes();
+        bytes.copy_from_slice(&mix.to_le_bytes()[..4]);
     }
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     format!("q-{hex}")
@@ -401,14 +401,16 @@ already waits ({}). Answer it or clear it; do not ask twice.",
             context.insert(key.into(), json!(value.trim()));
         }
     }
-    if parsed.recommend > 0 && parsed.recommend <= parsed.options.len() {
-        let mut recommendation = Map::new();
-        recommendation.insert("option".into(), json!(parsed.recommend));
-        recommendation.insert("why".into(), json!(parsed.recommendation.trim()));
-        if !parsed.downside.trim().is_empty() {
-            recommendation.insert("downside".into(), json!(parsed.downside.trim()));
+    if let Some(rec) = parsed.recommend {
+        if rec >= 1 && rec <= parsed.options.len() {
+            let mut recommendation = Map::new();
+            recommendation.insert("option".into(), json!(rec));
+            recommendation.insert("why".into(), json!(parsed.recommendation.trim()));
+            if !parsed.downside.trim().is_empty() {
+                recommendation.insert("downside".into(), json!(parsed.downside.trim()));
+            }
+            context.insert("recommendation".into(), Value::Object(recommendation));
         }
-        context.insert("recommendation".into(), Value::Object(recommendation));
     }
     if !context.is_empty() {
         data.insert("context".into(), Value::Object(context));
@@ -452,8 +454,9 @@ would mint a second id for the same question."
 fno inbox outstanding clear {qid} --answer \"...\""
     ));
     let (position, total) = receipt_position(&index, &qid);
+    let total = total.unwrap_or(0);
     answer.position = position;
-    answer.total = total;
+    answer.total = Some(total);
     match position {
         None => answer.lines.push(
             "outstanding: recorded, but its render position could not be read; \
@@ -548,6 +551,8 @@ mod tests {
             laws: vec![],
             storage_root: root.to_path_buf(),
             index_path: None,
+            display_name: None,
+            render_cap: None,
         }
     }
 
@@ -597,7 +602,7 @@ stops
         let mut r = req(QUESTION_FILE, &root);
         r.node = Some("x-aaaa".to_string());
         let answer = run_intake(&r, &home);
-        assert_eq!(answer.exit_code, 0, "index_error: {:?}", answer.index_error);
+        assert_eq!(answer.exit_code, 0, "lines: {:?}", answer.lines);
         let qid = answer.qid.clone().unwrap();
         assert!(qid.starts_with("q-"));
         assert_eq!(qid.len(), 10);
@@ -661,7 +666,7 @@ stops
         r.options = vec!["a".to_string(), "b".to_string()];
         r.node = Some("x-aaaa".to_string());
         let answer = run_intake(&r, &home);
-        assert_eq!(answer.exit_code, 0, "index_error: {:?}", answer.index_error);
+        assert_eq!(answer.exit_code, 0, "lines: {:?}", answer.lines);
         let row: Value = journal_text(&root)
             .lines()
             .last()
@@ -712,9 +717,11 @@ stops
         let answer = run_intake(&r, &home);
         assert_eq!(answer.exit_code, 2);
         assert_eq!(answer.refusal.as_deref(), Some("law"));
-        let law = answer.law_answer.unwrap();
-        assert_eq!(law.exact.len(), 1);
-        assert_eq!(law.exact[0].ids, vec!["d-test0001"]);
+        assert!(
+            answer.lines.iter().any(|l| l.contains("d-test0001")),
+            "the refusal names the law id: {:?}",
+            answer.lines
+        );
         assert!(journal_text(&root).is_empty());
     }
 

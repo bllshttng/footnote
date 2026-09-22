@@ -74,7 +74,7 @@ pub(crate) struct AskRequest {
     pub(crate) laws: Vec<LawRow>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct LawRow {
     pub(crate) decision_id: String,
     // Option, not String+default: Python rows carry null for a missing
