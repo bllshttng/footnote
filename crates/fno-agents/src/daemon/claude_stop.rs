@@ -495,16 +495,29 @@ mod tests {
     }
 
     /// AC2-EDGE: no session id on the row and two workers sharing the short
-    /// id: ambiguous, refused.
+    /// id: ambiguous, refused. The roster map is keyed by the short id, so a
+    /// second insert under the same key would silently replace the first;
+    /// the fixture uses distinct keys, the way a torn roster could list one
+    /// session twice.
     #[test]
     fn capture_target_refuses_an_ambiguous_short_id() {
-        let mut roster = roster_with("ee99ff00-7777-8888-9999-aaaabbbbcccc", Some(5002));
+        let first = roster_with("ee99ff00-7777-8888-9999-aaaabbbbcccc", Some(5002));
         let second = RosterWorker {
             session_id: "ee99ff00-dead-beef-4242-aaaabbbbcccc".to_string(),
             pid: Some(5003),
-            ..roster.workers.values().next().unwrap().clone()
+            ..first.workers.values().next().unwrap().clone()
         };
-        roster.workers.insert(second.short_id().to_string(), second);
+        let mut roster = ClaudeRoster {
+            proto: 1,
+            supervisor_pid: Some(4242),
+            updated_at: None,
+            workers: Default::default(),
+        };
+        roster.workers.insert(
+            "torn-one".to_string(),
+            first.workers.values().next().unwrap().clone(),
+        );
+        roster.workers.insert("torn-two".to_string(), second);
         assert!(capture_target(&roster, "ee99ff00", None, &[], &start_of_every).is_err());
     }
 
