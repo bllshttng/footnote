@@ -130,6 +130,10 @@ struct KillTarget {
     pid: u32,
     start: Option<u64>,
     found: Option<String>,
+    /// An open-file holder carries no start-time proof, so the signal
+    /// escalation may not reach it directly: its pane kill (or a confirmed
+    /// death) is the whole case. The row's own pid keeps today's path.
+    require_pane: bool,
 }
 
 /// Resolve what one pane stop must end. Rules, in order: the row's own
@@ -163,6 +167,7 @@ fn resolve_stop_target(e: &RegistryEntry, seams: &PaneStopSeams) -> StopTarget {
             pid,
             start: e.pid_start_time,
             found: None,
+            require_pane: false,
         });
     }
     StopTarget::Refuse(format!(
@@ -215,6 +220,7 @@ fn ask_holder(
                 pid: holder,
                 start: (seams.pid_start)(holder),
                 found: Some(why),
+                require_pane: !proven,
             })
         }
         SessionHolder::Held { pid: None, why, .. } => StopTarget::Refuse(format!(
@@ -241,9 +247,11 @@ fn kill_target_confirmed(t: KillTarget, e: &RegistryEntry, seams: &PaneStopSeams
     //    id and read the missing pane as absent.
     let sightings = (seams.pane_lookup)(e.mux.as_ref().map(|m| m.session.as_str()));
     let pane_hosts = sightings.iter().any(|p| p.child_pid == Some(pid));
+    let mut pane_killed = false;
     match sightings.iter().find(|p| p.child_pid == Some(pid)) {
         Some(pane) => match (seams.pane_kill)(&pane.session, pane.pane_id) {
             Ok(true) => {
+                pane_killed = true;
                 ran.push(format!(
                     "pane {}:{} (child {pid}) killed",
                     pane.session, pane.pane_id
@@ -278,10 +286,23 @@ fn kill_target_confirmed(t: KillTarget, e: &RegistryEntry, seams: &PaneStopSeams
         return confirmed(ran, pid);
     }
     // 4. Escalate while the pid lives, re-checking ownership before every
-    //    signal: a recycled pid is never ours to signal. A pid whose
-    //    incarnation is unproven - no recorded start time and no live pane
-    //    hosting it - is never signalled: guessing costs someone else's
-    //    process (mirrors stop_claude_pid_confirmed).
+    //    signal: a recycled pid is never ours to signal. An open-file
+    //    holder never reaches the signal directly: its pane proof is the
+    //    kill itself, so a pane that vanished between resolve and kill
+    //    holds the row for a retry instead of gambling on a host process.
+    if t.require_pane && !pane_killed {
+        return PaneStop {
+            confirmed: false,
+            detail: format!(
+                "{}; pid {pid} outlived its pane, and an open-file holder is never \
+                 signalled without the pane kill as its proof",
+                ran.join("; ")
+            ),
+        };
+    }
+    // A pid whose incarnation is unproven - no recorded start time and no
+    // live pane hosting it - is never signalled: guessing costs someone
+    // else's process (mirrors stop_claude_pid_confirmed).
     if !pane_hosts && t.start.is_none() {
         return PaneStop {
             confirmed: false,
@@ -1323,6 +1344,40 @@ mod tests {
         assert!(
             stop.detail
                 .contains("claude bg job J (pid 500) holds session abcd1234"),
+            "{}",
+            stop.detail
+        );
+    }
+
+    /// An unproven holder whose pane vanishes between resolve and kill is
+    /// never signalled directly: the pane kill is the whole case, so the
+    /// row holds for a retry instead of gambling on a host process.
+    #[test]
+    fn x1530_unproven_holder_whose_pane_vanished_is_never_signalled() {
+        let log = Shared::new(RefCell::new(Log::default()));
+        let mut sx = seams(
+            log.clone(),
+            vec![x1530_sighting(7)],
+            Ok(false),
+            false,
+            true,
+            true,
+        );
+        sx.session_holder = Box::new(|_| SessionHolder::Held {
+            pid: Some(7),
+            proven: false,
+            why: "pid 7 holds codex rollout x.jsonl".into(),
+        });
+        let precheck = precheck_pane_stop_with(&x1530_row(true), &sx);
+        assert_eq!(precheck, PanePrecheck::NeedsKill);
+        let stop = stop_pane_process_confirmed_with(&x1530_row(true), &sx);
+        assert!(!stop.confirmed);
+        assert_eq!(log.borrow().signals, vec![]);
+        assert!(
+            stop.detail.contains("outlived its pane")
+                && stop
+                    .detail
+                    .contains("never signalled without the pane kill"),
             "{}",
             stop.detail
         );
