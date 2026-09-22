@@ -146,8 +146,9 @@ def _worker_reachability(worker: dict):
     falsifier = pid_falsifier(pid, worker.get("pid_start_time")) if proven else None
     if falsifier is None:
         falsifier = pane_falsifier(worker.get("mux"))
+    stamp = worker.get("stopped_at")
     try:
-        stop_epoch = datetime.fromisoformat(worker.get("stopped_at").replace("Z", "+00:00")).timestamp() if worker.get("stopped_at") else None
+        stop_epoch = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp() if stamp else None
     except (AttributeError, ValueError):
         stop_epoch = None
     if facts is None:
