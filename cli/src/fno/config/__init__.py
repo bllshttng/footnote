@@ -3924,12 +3924,8 @@ class ConfigBlock(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _lift_legacy_keys(cls, data: object) -> object:
-        """Lift retired key names: ``[[reach_me]]`` reads as ``[[attention]]``
-        for one release, and loading it warns; then the watchdog's grace lift."""
         if isinstance(data, dict) and data.get("attention") is None and "reach_me" in data:
-            _LOG.warning(
-                "config key [[reach_me]] is now [[attention]]; rename it (the old name reads for one release)"
-            )
+            _LOG.warning("[[reach_me]] is now [[attention]]; the old name reads one release")
             data["attention"] = data.pop("reach_me")
         return _watchdog.lift_retire_grace(data)
 
@@ -3940,10 +3936,7 @@ class ConfigBlock(BaseModel):
         if isinstance(v, list):
             return v
         if v is not None:
-            _LOG.warning(
-                "config.attention is %s, not an array of tables - ignoring it (use [[attention]], not [attention.<name>])",
-                type(v).__name__,
-            )
+            _LOG.warning("config.attention is %s, not an array of tables", type(v).__name__)
         return []
 
     @field_validator("status_sinks", mode="before")

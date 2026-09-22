@@ -147,20 +147,11 @@ def _ledger_path(session_id: str) -> Path:
 
 
 def ack_turn(session_id: str, turn_id: str, outcome: str, why: str) -> dict:
-    """Append one ack row; the file is the receipt and the watermark at once.
-
-    The leg is the Rust `compaction ack` write (an `answer:` outcome also
-    records a `user_ask_answered` row); this side keeps session resolution.
-    """
+    """Append one ack row; the file is the receipt and the watermark at once."""
     from fno.rust_binary import call_binary_json
 
-    args = [
-        "ack", "--session", session_id, "--turn", turn_id,
-        "--outcome", outcome,
-    ]
-    if (why or "").strip():
-        args += ["--why", why]
-    args += ["--capture-dir", str(_capture_dir())]
+    args = ["ack", "--session", session_id, "--turn", turn_id, "--outcome", outcome]
+    args += ["--why", why, "--capture-dir", str(_capture_dir())]
     err, payload = call_binary_json("compaction", args)
     if err is not None or not isinstance(payload, dict):
         raise OperatorCaptureError(f"the ack write failed: {err or 'no JSON object'}")

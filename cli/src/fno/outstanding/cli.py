@@ -154,8 +154,8 @@ def report(
 
 
 def _law_rows() -> "list[dict]":
-    """Live law rows the Rust intake matches against (d-0fa92eb9, q-8a3bf752:
-    no agent asks a question the operator already settled)."""
+    """Live law rows the Rust intake matches against (d-0fa92eb9: no agent
+    asks a question the operator already settled)."""
     from fno.decide import list_decisions
 
     _, rows, _damaged = list_decisions(None, limit=None, lane="law", state="live")
@@ -193,13 +193,11 @@ def ask(
 ) -> None:
     """Record a question for the operator so it survives the next turn.
 
-    The capture is the point: the leg is the Rust `question-intake` transport,
-    which owns the law refusal, the context parse, the writes and the receipt;
-    this side keeps identity, the law-row read, and the flag surface.
+    The leg is the Rust `question-intake` transport (law refusal, context
+    parse, writes, receipt); this side keeps identity and the law-row read.
     """
     from fno.claims.self_identity import resolve_self_identity
     from fno.harness_identity import canonical_handle
-    from fno.outstanding.core import QUESTION_RENDER_CAP
     from fno.paths import questions_jsonl
     from fno.rust_binary import verb_call
     from fno.text_or_file import read_text_arg
@@ -215,14 +213,9 @@ def ask(
     try:
         laws = _law_rows()
     except Exception as exc:  # noqa: BLE001 - fail open: record the question
-        typer.echo(
-            f"outstanding: live-law lookup failed ({exc}); recording anyway",
-            err=True,
-        )
         laws = []
-    asker = (
-        canonical_handle(ident.session_id) if ident.session_id and ident.harness else None
-    )
+        typer.echo(f"outstanding: live-law lookup failed ({exc}); recording anyway", err=True)
+    asker = canonical_handle(ident.session_id) if ident.session_id and ident.harness else None
     answer = verb_call(
         "question-intake",
         {
@@ -230,12 +223,10 @@ def ask(
             "node": node, "subject": subject, "session_id": _session_id(),
             "cwd": str(Path.cwd()), "asker": asker, "laws": laws,
             "storage_root": str(_storage_root()),
-            "index_path": str(questions_jsonl()),
-            "display_name": display_name(), "render_cap": QUESTION_RENDER_CAP,
+            "index_path": str(questions_jsonl()), "display_name": display_name(),
         },
     )
-    # Every human word rides the answer's lines, composed Rust-side; the shim
-    # prints them, puts the id on stdout, and carries the exit code.
+    # Every human word rides the answer's lines, composed Rust-side.
     for line in answer.get("lines") or ():
         typer.echo(line, err=True)
     if (code := answer.get("exit_code")) and code != 0:
