@@ -272,7 +272,7 @@ def _member_rung(raw: str, canon: Optional[str], *, graph_entry=None) -> str:
     return f"{raw} (not a configured project or a known node)"
 
 
-def resolve_crown(scopes: list[str]) -> "tuple[int, str]":
+def resolve_crown(scopes: list[str], *, graph_entry=None) -> "tuple[int, str]":
     """``scopes`` -> the (rung, stored scope) they imply, both derived together.
 
     ONE call rather than a derive-then-encode pair, because the two answers must
@@ -304,8 +304,8 @@ def resolve_crown(scopes: list[str]) -> "tuple[int, str]":
         # ONE graph parse serves every per-member refusal below; a graph this
         # rung could not read answers None, and the per-call fallback keeps
         # the single-read behavior for that machine.
-        by_id = _graph_index()
-        entry_of = _graph_entry if by_id is None else by_id.get
+        by_id = None if graph_entry else _graph_index()
+        entry_of = graph_entry or (_graph_entry if by_id is None else by_id.get)
         if not projects:
             # Rung 2 rules a SET of epics, stored with the same separator: a
             # king over two epics at once is one crown, not a failed portfolio.
@@ -321,7 +321,7 @@ def resolve_crown(scopes: list[str]) -> "tuple[int, str]":
     raw = members[0]
     if projects:
         return 1, projects[0]
-    return 2, _epic_or_refuse(raw)
+    return 2, _epic_or_refuse(raw, graph_entry=graph_entry)
 
 
 def derive_crown_level(scopes: list[str]) -> int:
