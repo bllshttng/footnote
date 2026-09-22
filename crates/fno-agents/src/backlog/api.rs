@@ -1137,11 +1137,12 @@ pub fn session_open_parked(
         None,
         merge_grant.as_ref(),
     )
-    .map_err(ApiError)?;
+    .map_err(|e| ApiError(e.to_string()))?;
     let mut found = false;
     mutate(store, "session_append", |rows| {
         let (node_found, _added) =
-            crate::graph_keeper::session_append(rows, node_id, record.clone())?;
+            crate::graph_keeper::session_append(rows, node_id, record.clone())
+                .map_err(|e| e.to_string())?;
         found = node_found;
         Ok(node_found)
     })?;
