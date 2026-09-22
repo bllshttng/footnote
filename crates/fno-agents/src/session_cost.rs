@@ -133,6 +133,8 @@ pub fn attribute(
             continue;
         }
         let (stage, node) = stage_for(root, phases, test_pids, &owned[index]);
+        let session_pids: Vec<u32> = owned[index].iter().map(|row| row.pid).collect();
+        let (footprint, footprint_unread) = footprint_mb(&session_pids);
         let mut row = json!({
             "session_id": root.session_id,
             "harness": root.harness,
@@ -141,6 +143,8 @@ pub fn attribute(
             "procs": owned[index].len(),
             "rss_mb": owned[index].iter().map(|r| r.rss_kb).sum::<u64>() as f64 / 1024.0,
             "cpu_pct": owned[index].iter().map(|r| r.cpu_pct).sum::<f64>(),
+            "footprint_mb": footprint,
+            "footprint_unread": footprint_unread,
         });
         let mut buckets: MapBuckets = BTreeMap::new();
         for process in &owned[index] {
