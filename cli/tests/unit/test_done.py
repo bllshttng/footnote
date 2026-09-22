@@ -130,10 +130,16 @@ def _stub_subprocess(
         def __init__(self, stdout: str = "", rc: int = 0):
             self.stdout = stdout
             self.returncode = rc
+            self.stderr = ""
+
+    real_run = done_cli.subprocess.run
 
     def fake_run(cmd, **kwargs):
         if not cmd:
             return _Result("", 1)
+        if {"doctor", "event"} <= {str(part) for part in cmd}:
+            # Event emission rides the same seam; reach the real binary.
+            return real_run(cmd, **kwargs)
         if cmd[0] == "git" and "branch" in cmd:
             return _Result((branch or "") + "\n", 0 if branch else 0)
         if cmd[0] == "git" and "remote" in cmd:

@@ -736,63 +736,18 @@ fn is_subagent_transcript(transcript: &str, sid: &str) -> bool {
 
 /// The sync-limb shape: the transcript's newest tool_use is Task/Agent with no
 /// tool_result yet. Tail-only (the open entry sits at the end of a live
-/// transcript); unreadable falls through fail-closed.
+/// transcript); unreadable falls through fail-closed. The pairing is the one
+/// shared walk (`interrupt_classify::trailing_open_call`), not a private leg.
 fn transcript_is_open_spawn(transcript: &str) -> bool {
     if transcript.is_empty() {
         return false;
     }
-    let (meta, mut file) = match (
-        std::fs::metadata(transcript),
-        std::fs::File::open(transcript),
-    ) {
-        (Ok(m), Ok(f)) => (m, f),
-        _ => return false,
-    };
-    use std::io::{Read as _, Seek, SeekFrom};
-    let mut buf = String::new();
-    if file
-        .seek(SeekFrom::Start(meta.len().saturating_sub(262_144)))
-        .is_err()
-        || file.read_to_string(&mut buf).is_err()
-    {
-        return false;
-    }
-    let mut open_spawn: Option<String> = None;
-    let mut done: std::collections::HashSet<String> = Default::default();
-    for line in buf.lines() {
-        let Ok(e) = serde_json::from_str::<Value>(line.trim()) else {
-            continue;
-        };
-        let Some(content) = e
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(Value::as_array)
-        else {
-            continue;
-        };
-        for c in content {
-            let Some(c) = c.as_object() else {
-                continue;
-            };
-            match c.get("type").and_then(Value::as_str) {
-                Some("tool_use") => {
-                    let name = c.get("name").and_then(Value::as_str).unwrap_or("");
-                    open_spawn = if name == "Task" || name == "Agent" {
-                        c.get("id").and_then(Value::as_str).map(str::to_string)
-                    } else {
-                        None
-                    };
-                }
-                Some("tool_result") => {
-                    if let Some(id) = c.get("tool_use_id").and_then(Value::as_str) {
-                        done.insert(id.to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    open_spawn.is_some_and(|id| !done.contains(&id))
+    crate::tail_text_strict(Path::new(transcript), 262_144)
+        .and_then(|tail| {
+            crate::interrupt_classify::trailing_open_call(&tail)
+                .filter(|c| c.name == "Task" || c.name == "Agent")
+        })
+        .is_some()
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1024,6 +979,77 @@ mod tests {
             "/base/456/subagents/a.jsonl",
             "123"
         ));
+    }
+
+    /// Characterization fixtures for `transcript_is_open_spawn`: plant a
+    /// transcript whose tail matches the named shape.
+    fn plant_transcript(tag: &str, lines: &[String]) -> String {
+        let dir = std::env::temp_dir().join(format!("kgd-spawn-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    fn spawn_line(id: &str, name: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"{id}","name":"{name}","input":{{}}}}]}}}}"#
+        )
+    }
+
+    fn result_line(id: &str) -> String {
+        format!(
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"{id}","content":"ok"}}]}}}}"#
+        )
+    }
+
+    // (a) The newest tool_use is an unanswered Task call: the limb is allowed.
+    #[test]
+    fn open_task_at_the_tail_is_an_open_spawn() {
+        let path = plant_transcript(
+            "open-task",
+            &[spawn_line("t1", "Bash"), spawn_line("t2", "Task")],
+        );
+        assert!(transcript_is_open_spawn(&path));
+    }
+
+    // (b) The same call with its result reads closed.
+    #[test]
+    fn answered_task_is_not_an_open_spawn() {
+        let path = plant_transcript("done-task", &[spawn_line("t1", "Task"), result_line("t1")]);
+        assert!(!transcript_is_open_spawn(&path));
+    }
+
+    // (c) A newer open Bash call means the spawn is no longer the newest call.
+    #[test]
+    fn newer_plain_call_closes_an_older_spawn() {
+        let path = plant_transcript(
+            "bash-after",
+            &[spawn_line("t1", "Task"), spawn_line("t2", "Bash")],
+        );
+        assert!(!transcript_is_open_spawn(&path));
+    }
+
+    // (d) A missing transcript fails closed, unchanged.
+    #[test]
+    fn missing_transcript_is_never_an_open_spawn() {
+        assert!(!transcript_is_open_spawn(""));
+        assert!(!transcript_is_open_spawn(
+            "/nonexistent/kgd/no-such-transcript.jsonl"
+        ));
+    }
+
+    // (e) A tail that is not valid UTF-8 is unreadable evidence: fail closed
+    // the way the deleted private leg did, never a repaired guess.
+    #[test]
+    fn corrupt_tail_fails_closed() {
+        let dir = std::env::temp_dir().join(format!("kgd-spawn-corrupt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let mut body = spawn_line("t1", "Task").into_bytes();
+        body.push(0xFF);
+        std::fs::write(&path, body).unwrap();
+        assert!(!transcript_is_open_spawn(&path.to_string_lossy()));
     }
 
     #[test]

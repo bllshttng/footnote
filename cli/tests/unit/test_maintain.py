@@ -654,11 +654,22 @@ def test_streak_malformed_event_skipped(tmp_path):
     # AC2-ERR: a truncated/non-JSON line is skipped, valid lines still read.
     log = tmp_path / "events.jsonl"
     log.write_text(
-        '{"type":"node_failed","data":{"unit_id":"ab-x"}}\n'
-        '{"type":"node_failed","data":{"unit_id":"ab-x"\n'  # truncated
+        '{"ts":"2026-07-24T01:00:00Z","source":"test","type":"node_failed","data":{"unit_id":"ab-x"}}\n'
+        '{"ts":"2026-07-24T02:00:00Z","source":"test","type":"node_failed","data":{"unit_id":"ab-x"\n'  # truncated
         "not json at all\n"
-        '{"type":"node_failed","data":{"unit_id":"ab-x"}}\n'
     )
+    from fno.events.store_client import emit_envelope, native_rows
+
+    emit_envelope(
+        {
+            "ts": "2026-07-24T03:00:00Z",
+            "source": "test",
+            "type": "node_failed",
+            "data": {"unit_id": "ab-x"},
+        },
+        log,
+    )
+    native_rows(log)  # commit the pre-store bytes; malformed lines skip
     events = f.read_events(log)
     assert len(events) == 2  # two well-formed lines survive
     assert f.consecutive_failures("ab-x", events) == 2
@@ -673,15 +684,22 @@ def test_read_events_spans_rotated_history_before_active(tmp_path):
     active = tmp_path / "events.jsonl"
     rotated = tmp_path / "events.jsonl.1"
     rotated.write_text(
-        '{"type":"node_failed","data":{"unit_id":"ab-x"}}\n'
-        '{"type":"node_failed","data":{"unit_id":"ab-x"}}\n',
+        '{"ts":"2026-07-24T01:00:00Z","source":"test","type":"node_failed","data":{"unit_id":"ab-x"}}\n'
+        '{"ts":"2026-07-24T02:00:00Z","source":"test","type":"node_failed","data":{"unit_id":"ab-x"}}\n',
         encoding="utf-8",
     )
-    active.write_text(
-        '{"type":"node_failed","data":{"unit_id":"ab-x"}}\n',
-        encoding="utf-8",
-    )
+    from fno.events.store_client import emit_envelope, native_rows
 
+    emit_envelope(
+        {
+            "ts": "2026-07-24T03:00:00Z",
+            "source": "test",
+            "type": "node_failed",
+            "data": {"unit_id": "ab-x"},
+        },
+        active,
+    )
+    native_rows(active)  # fold the rotated generation's pre-store bytes
     events = f.read_events(active)
 
     assert f.consecutive_failures("ab-x", events) == 3
@@ -708,6 +726,10 @@ def test_read_events_consumes_rust_agents_mirror_with_custom_state_dir(tmp_path,
         json.dumps(first) + "\n" + json.dumps(second) + "\n",
         encoding="utf-8",
     )
+    from fno.events.store_client import native_rows
+
+    native_rows(configured)  # commit each journal's pre-store bytes
+    native_rows(rust_mirror)
     monkeypatch.setattr(f, "events_path", lambda: configured)
     monkeypatch.setenv("FNO_AGENTS_HOME", str(agents_home))
 

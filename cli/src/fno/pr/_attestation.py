@@ -59,15 +59,7 @@ def find_pass(
     except Exception:  # noqa: BLE001 - an unresolvable mirror path degrades to the project log alone
         pass
     for log in logs:
-        try:
-            text = log.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        for line in text.splitlines():
-            try:
-                val = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+        for val in _committed_or_raw(log):
             if val.get("type") != "review_attestation":
                 continue
             data = val.get("data") or {}
@@ -82,6 +74,33 @@ def find_pass(
             if data.get("verdict") == "pass":
                 match = data
     return match
+
+
+def _committed_or_raw(events_path: Path) -> list:
+    """Envelopes for one journal: committed rows first, raw bytes as fallback.
+
+    The store commit is the write boundary, so a pass emitted after the
+    cutover leaves no byte trace in the journal; a pre-store journal holds
+    only raw lines. The rows verb covers both (it imports before querying);
+    its absence degrades to the raw read so an offline machine can still
+    retract what it can see."""
+    from fno.events.store_client import native_rows
+
+    committed = native_rows(events_path, types=["review_attestation"])
+    if committed is not None:
+        lines = committed
+    else:
+        try:
+            lines = events_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+    out = []
+    for line in lines:
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
 
 
 def _current_branch() -> str:

@@ -2545,7 +2545,9 @@ def emit_session_satisfied_for_record(
             evidence_url=record.pr_url,
             source="backlog",
         )
-        events.append_event(event, events_path)
+        from fno.events.store_client import emit_envelope
+
+        emit_envelope(event, events_path)
     except Exception as exc:  # best-effort: never abort the close on emit failure
         print(
             f"reconcile: session_satisfied emit failed for {record.node_id} "
@@ -2567,7 +2569,7 @@ def emit_human_touch_for_record(record: MergeDriftRecord) -> Optional[Path]:
     diagnostic and never aborts the close.
     """
     try:
-        from fno.events import _build, append_event
+        from fno.events import _build
 
         event = _build(
             "human_touch",
@@ -2578,11 +2580,15 @@ def emit_human_touch_for_record(record: MergeDriftRecord) -> Optional[Path]:
                 "resolution": "ok",
             },
         )
+        from fno.events.store_client import emit_envelope
+
+        from fno.paths import project_events_json
+
         if isinstance(record.cwd, str) and record.cwd:
             events_path = Path(record.cwd) / ".fno" / "events.jsonl"
-            append_event(event, events_path=events_path)
+            emit_envelope(event, events_path)
             return events_path
-        append_event(event)
+        emit_envelope(event, project_events_json())
         return None
     except Exception as exc:  # best-effort: never abort the close on emit failure
         print(

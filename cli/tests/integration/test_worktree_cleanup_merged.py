@@ -472,12 +472,11 @@ def test_apply_removal_emits_event_row(repo: Path, tmp_path: Path, monkeypatch):
     assert not wt.exists(), diag
 
     def _rows(path: Path) -> list[dict]:
-        assert path.exists(), f"missing journal: {path}"
-        return [
-            _json.loads(line)
-            for line in path.read_text().splitlines()
-            if line.strip()
-        ]
+        from tests._event_rows import event_rows
+
+        rows = event_rows(path)
+        assert rows, f"no committed rows beside journal: {path}"
+        return rows
 
     # The emit resolves the repo's space journal (the accessor the writers
     # use); the checkout copy is retired.
@@ -1425,9 +1424,12 @@ def test_done_node_apply_salvages_untracked_and_keeps_branch(repo: Path, tmp_pat
     assert salvaged, "the untracked file was not salvaged" + diag
     assert salvaged[0].read_text() == "salvage me\n"
     journal = sandbox_state / "events.jsonl"
-    assert journal.exists(), f"no removal row was emitted; stderr had: {r.stderr[-400:]}"
+    from tests._event_rows import event_rows
+
+    rows = event_rows(journal)
+    assert rows, f"no removal row was emitted; stderr had: {r.stderr[-400:]}"
     assert any(
-        "done-node; tree removed, branch kept" in line for line in journal.read_text().splitlines()
+        "done-node; tree removed, branch kept" in json.dumps(row) for row in rows
     ), "the removal row does not name the done-node reason"
 
 

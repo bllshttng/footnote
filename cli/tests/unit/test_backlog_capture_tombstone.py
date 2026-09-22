@@ -117,10 +117,23 @@ def test_backlog_capture_hidden_but_invocable() -> None:
 # AC4-EDGE + AC6-FR: event dual-read
 # --------------------------------------------------------------------------
 
+_seq = {"n": 0}
+
+
 def _write_event(events_path: Path, etype: str, session_id: str) -> None:
     events_path.parent.mkdir(parents=True, exist_ok=True)
-    with events_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"type": etype, "data": {"session_id": session_id}}) + "\n")
+    from fno.events.store_client import emit_envelope
+
+    _seq["n"] += 1
+    emit_envelope(
+        {
+            "ts": "2026-07-24T%02d:%02d:00Z" % (_seq["n"] // 60, _seq["n"] % 60),
+            "source": "test",
+            "type": etype,
+            "data": {"session_id": session_id},
+        },
+        events_path,
+    )
 
 
 def test_capture_pass_counts_mixed_vocabulary(tmp_path: Path) -> None:
@@ -177,7 +190,8 @@ def test_empty_pass_read_back_accepts_new_vocabulary(tmp_path: Path) -> None:
     )
     assert res.exit_code == 0, res.output
     events = tmp_path / ".fno" / "events.jsonl"
-    types = [
-        json.loads(l)["type"] for l in events.read_text().splitlines() if l.strip()
-    ]
+
+    from tests._event_rows import event_rows
+
+    types = [e["type"] for e in event_rows(events)]
     assert "capture_empty_pass" in types

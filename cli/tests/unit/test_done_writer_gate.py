@@ -401,7 +401,16 @@ def _stub_no_git(monkeypatch):
         stderr = ""
         returncode = 1
 
-    monkeypatch.setattr(done_cli.subprocess, "run", lambda *a, **kw: _Res())
+    real_run = done_cli.subprocess.run
+
+    def fake_run(*a, **kw):
+        cmd = a[0] if a else kw.get("cmd")
+        if cmd and {"doctor", "event"} <= {str(p) for p in cmd}:
+            # Event emission rides the same seam; reach the real binary.
+            return real_run(*a, **kw)
+        return _Res()
+
+    monkeypatch.setattr(done_cli.subprocess, "run", fake_run)
 
 
 def test_bare_done_gates_on_the_nodes_pr_when_autodetect_fails(done_graph, monkeypatch):

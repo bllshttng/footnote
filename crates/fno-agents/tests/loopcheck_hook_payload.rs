@@ -199,7 +199,7 @@ fn spawn_loop_check(fx: &Fixture, stdin_payload: Option<&str>) -> (i32, serde_js
 
 /// Last loop_check event's intent_source from the events file.
 fn last_intent_source(events: &Path) -> Option<String> {
-    let content = fs::read_to_string(events).ok()?;
+    let content = fno_agents::event_store::journal_text(events, &[]);
     content
         .lines()
         .rev()

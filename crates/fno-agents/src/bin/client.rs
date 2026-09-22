@@ -210,12 +210,14 @@ fn main() {
     if args.first().map(String::as_str) == Some("evals-arm") {
         std::process::exit(fno_agents::evals_arm::run_evals_arm(&args[1..]));
     }
-    // `evals-trend`: the eval report fold and the windowed trend,
-    // native under d-b6cc1a2a. Transport-only, dispatched here like
-    // evals-arm: the Python report/trend leaves pass --history and
-    // --stale-days and forward the rest.
+    // `evals-trend` and `corrections-verify`: transport-only folds (the
+    // shrink law allows no new `run` arm); their module docs carry the
+    // contract, autocorrect-pack.sh embeds the verify one.
     if args.first().map(String::as_str) == Some("evals-trend") {
         std::process::exit(fno_agents::evals_trend::run_evals_trend(&args[1..]));
+    }
+    if args.first().map(String::as_str) == Some("corrections-verify") {
+        std::process::exit(fno_agents::corrections_verify::run(&args[1..]));
     }
     // `evals-attempt`: the native attempt-eligibility verdict for eval history
     // rows. Transport-only, dispatched here like evals-trend: the
@@ -2890,8 +2892,7 @@ async fn run_status(json_out: bool) -> i32 {
     }
 }
 
-/// The control-plane arms rows, from the journals the arms write (agents home
-/// + the global mirror) plus their `.1` rotations, and the pr_watch tick
+/// The control-plane arms rows from the arm journals plus the pr_watch tick
 /// trace the readout's cause rules consult.
 fn arms_readout(
     home: &AgentsHome,
@@ -2903,10 +2904,10 @@ fn arms_readout(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // The journal list is owned by tick_ledger::journals, so the readout and
-    // the arm_watch daemon arm fold the same files and cannot drift.
+    // The journal list is owned by tick_ledger::journals, so the readout
+    // and the arm_watch fold the same files and cannot drift.
     let journals = fno_agents::tick_ledger::journals(home);
-    let arms = fno_agents::tick_ledger::read_arms(&journals, now_unix);
+    let arms = fno_agents::tick_ledger::read_arms_starved(&journals, now_unix);
     let trace = fno_agents::tick_ledger::read_tick_trace_live(&journals, &arms, now_unix);
     (arms, trace)
 }
@@ -2947,6 +2948,8 @@ fn print_status_human(result: &Value, arms: &[fno_agents::tick_ledger::ArmStatus
     for arm in arms {
         println!("  {}", arm.line);
     }
+    // The readout teaches its own detail verb (the loops table).
+    println!("  loop detail: fno agents loops table");
     if let Some(stuck) = result.get("stuck_work") {
         for line in fno_agents::stuck_work::render_lines(stuck) {
             println!("{line}");

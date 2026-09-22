@@ -108,6 +108,14 @@ pub struct Pin {
     pub marketing_name: Option<String>,
 }
 
+/// Why a resume cannot pin its model, and the route that would serve it.
+#[derive(Debug, Clone)]
+pub struct Unpinned {
+    pub text: String,
+    /// (provider, model) when a recorded route or the row names the provider.
+    pub lost_route: Option<(String, String)>,
+}
+
 /// Which provider serves `candidate`, answered from the recorded route
 /// settings. `None` is a MISS - no file names the model, or the matches
 /// disagree - and the caller treats a miss as UNKNOWN, never unrouted.
@@ -123,7 +131,7 @@ pub fn resolve(
     routed: bool,
     session_id: &str,
     route_provider_of: RouteProviderOf<'_>,
-) -> Result<Pin, String> {
+) -> Result<Pin, Unpinned> {
     let effort = row
         .as_ref()
         .and_then(|r| r.requested_effort.clone().or_else(|| r.effort.clone()));
@@ -160,19 +168,25 @@ pub fn resolve(
             Some(p) => format!("no model identity in {}", p.display()),
             None => "no transcript found".to_string(),
         };
-        return Err(format!(
-            "session {session_id} records no model: {row_read}; {transcript_read}; \
-             pass --model to resume it"
-        ));
+        return Err(Unpinned {
+            text: format!(
+                "session {session_id} records no model: {row_read}; {transcript_read}; \
+                 pass --model to resume it"
+            ),
+            lost_route: None,
+        });
     };
 
     match route_provider_of(Some(&candidate)) {
-        Some(p) if p != "anthropic" => Err(format!(
-            "session {session_id} last ran {candidate}, which only route {p} serves, \
-             and this resume restores no route; resume it with: \
-             fno agents spawn --resume {session_id} -P {p} -m {}",
-            crate::spawn_axes::repr(&candidate)
-        )),
+        Some(p) if p != "anthropic" => Err(Unpinned {
+            text: format!(
+                "session {session_id} last ran {candidate}, which only route {p} serves, \
+                 and this resume restores no route; resume it with: \
+                 fno agents spawn --resume {session_id} -P {p} -m {}",
+                crate::spawn_axes::repr(&candidate)
+            ),
+            lost_route: Some((p, candidate)),
+        }),
         Some(_) => Ok(Pin {
             argv_model: Some(candidate),
             route_model: None,
@@ -181,31 +195,50 @@ pub fn resolve(
             marketing_name: marketing,
         }),
         None => {
-            let non_anthropic_row = row
+            let row_provider = row
                 .as_ref()
                 .and_then(|r| r.provider.as_deref())
-                .is_some_and(|p| !p.is_empty() && p != "anthropic");
+                .filter(|p| !p.is_empty() && *p != "anthropic");
             // Rowless: glm stamps marketingName null on its model identity;
             // Anthropic stamps "Opus 5"/"Sonnet 5". A null name means the
             // provider cannot be established, and a default-endpoint resume
             // would bill the wrong vendor.
             let rowless_unknown = row.is_none() && marketing.is_none();
-            if non_anthropic_row || rowless_unknown {
-                Err(format!(
-                    "session {session_id} last ran {candidate}, but no recorded route names \
-                     its provider and this resume restores no route; resume it with: \
-                     fno agents spawn --resume {session_id} -P <provider> -m {}",
-                    crate::spawn_axes::repr(&candidate)
-                ))
-            } else {
-                Ok(Pin {
-                    argv_model: Some(candidate),
-                    route_model: None,
-                    effort,
-                    source,
-                    marketing_name: marketing,
-                })
+            if row_provider.is_some() || rowless_unknown {
+                return Err(Unpinned {
+                    lost_route: row_provider.map(|p| (p.to_string(), candidate.clone())),
+                    text: format!(
+                        "session {session_id} last ran {candidate}, but no recorded route names \
+                         its provider and this resume restores no route; resume it with: \
+                         fno agents spawn --resume {session_id} -P <provider> -m {}",
+                        crate::spawn_axes::repr(&candidate)
+                    ),
+                });
             }
+            Ok(Pin {
+                argv_model: Some(candidate),
+                route_model: None,
+                effort,
+                source,
+                marketing_name: marketing,
+            })
+        }
+    }
+}
+
+/// Push `--model`/`--effort` unless the argv already names them: an explicit
+/// token an earlier arm added always wins.
+pub fn append_axes(argv: &mut Vec<String>, model: Option<&str>, effort: Option<&str>) {
+    if !argv.iter().any(|t| t == "--model") {
+        if let Some(m) = model {
+            argv.push("--model".into());
+            argv.push(m.to_string());
+        }
+    }
+    if !argv.iter().any(|t| t == "--effort") {
+        if let Some(e) = effort {
+            argv.push("--effort".into());
+            argv.push(e.to_string());
         }
     }
 }
@@ -239,7 +272,10 @@ pub fn decide(payload: &Value) -> Value {
             "effort": pin.effort,
             "source": pin.source,
         }),
-        Err(text) => json!({ "refusal": text }),
+        Err(u) => json!({
+            "refusal": u.text,
+            "lost_route": u.lost_route.map(|(p, m)| json!({"provider": p, "model": m})),
+        }),
     }
 }
 
@@ -290,8 +326,18 @@ mod tests {
         None
     }
 
-    fn refusal_text(answer: Result<Pin, String>) -> String {
-        answer.err().expect("expected a refusal")
+    fn refusal_text(answer: Result<Pin, Unpinned>) -> String {
+        let Err(unpinned) = answer else {
+            panic!("expected a refusal")
+        };
+        unpinned.text
+    }
+
+    fn refusal_route(answer: Result<Pin, Unpinned>) -> Option<(String, String)> {
+        let Err(unpinned) = answer else {
+            panic!("expected a refusal")
+        };
+        unpinned.lost_route
     }
 
     #[test]
@@ -661,5 +707,116 @@ mod tests {
         std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
         std::fs::remove_dir_all(&base).ok();
         std::fs::remove_dir_all(&route_dir).ok();
+    }
+
+    #[test]
+    fn ac1_hp_lookup_named_route_carries_lost_route() {
+        // AC1-HP: the named-route refusal names the route that would serve
+        // the birth model as (provider, model) data.
+        let lookup: RouteProviderOf<'_> =
+            &|m| (m == Some("glm-5.3-flash[1m]")).then(|| "zai".to_string());
+        let answer = resolve(
+            row(Some("glm-5.3-flash[1m]"), Some("anthropic")),
+            None,
+            false,
+            "a1b2c3d4-0001-4000-8000-000000000001",
+            &lookup,
+        );
+        assert!(refusal_text(answer.clone()).contains("route zai serves"));
+        assert_eq!(
+            refusal_route(answer),
+            Some(("zai".into(), "glm-5.3-flash[1m]".into()))
+        );
+    }
+
+    #[test]
+    fn ac1_err_row_provider_carries_lost_route_rowless_miss_does_not() {
+        // AC1-ERR: a row naming a non-anthropic provider carries the route;
+        // a rowless null-marketing miss names no provider, so it does not.
+        let row_answer = resolve(
+            row(Some("glm-5.3-flash[1m]"), Some("zai")),
+            None,
+            false,
+            "a1b2c3d4-0002-4000-8000-000000000002",
+            &no_lookup,
+        );
+        assert_eq!(
+            refusal_route(row_answer),
+            Some(("zai".into(), "glm-5.3-flash[1m]".into()))
+        );
+        let rowless_answer = resolve(
+            None,
+            None,
+            false,
+            "a1b2c3d4-0003-4000-8000-000000000003",
+            &no_lookup,
+        );
+        assert_eq!(refusal_route(rowless_answer), None);
+    }
+
+    #[test]
+    fn ac1_edge_decide_emits_lost_route_object() {
+        // AC1-EDGE: decide answers lost_route as {provider, model} JSON, null
+        // when no provider is known. The route dir is empty here, so the row
+        // arm of the lookup-miss refusal fires and names the provider.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let route_dir = std::env::temp_dir().join(format!(
+            "resume-pin-routes-lost-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&route_dir).unwrap();
+        std::env::set_var("FNO_ROUTE_SETTINGS_DIR", &route_dir);
+        let decided = decide(&json!({"session_id": "", "routed": false, "row": {
+            "requested_model": "glm-5.3-flash[1m]", "provider": "zai"}}));
+        assert_eq!(
+            decided["lost_route"],
+            json!({"provider": "zai", "model": "glm-5.3-flash[1m]"})
+        );
+        assert!(decided["refusal"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("-P <provider>"));
+
+        let rowless = decide(&json!({"session_id": "", "routed": false, "row": null}));
+        assert!(rowless["refusal"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("records no model"));
+        assert!(rowless["lost_route"].is_null());
+        std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+        std::fs::remove_dir_all(&route_dir).ok();
+    }
+
+    #[test]
+    fn append_axes_adds_missing_flags_only() {
+        // AC1-EDGE: an explicit --model an earlier arm added always wins, and
+        // a plan with neither flag gains both.
+        let mut argv = vec!["claude".into(), "--resume".into(), "u".into()];
+        append_axes(&mut argv, Some("claude-opus-5"), Some("high"));
+        assert_eq!(
+            argv,
+            vec![
+                "claude".to_string(),
+                "--resume".to_string(),
+                "u".to_string(),
+                "--model".to_string(),
+                "claude-opus-5".to_string(),
+                "--effort".to_string(),
+                "high".to_string()
+            ]
+        );
+        let mut pinned = vec!["claude".into(), "--model".into(), "m".into()];
+        append_axes(&mut pinned, Some("claude-opus-5"), Some("high"));
+        assert_eq!(pinned.iter().filter(|t| *t == "--model").count(), 1);
+        assert_eq!(pinned.iter().filter(|t| *t == "--effort").count(), 1);
+        let mut no_pin = vec!["claude".into()];
+        append_axes(&mut no_pin, None, None);
+        assert_eq!(no_pin, vec!["claude".to_string()]);
     }
 }

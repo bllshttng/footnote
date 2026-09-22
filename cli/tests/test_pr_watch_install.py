@@ -1280,10 +1280,9 @@ def test_bounce_records_caller_sidecar_and_event(tmp_launch_agents):
     assert isinstance(sidecar["parent"], str)
     assert sidecar["deferred"] is False
     assert _time.time() - sidecar["ts"] < 60
-    events = [
-        json.loads(line)
-        for line in (state_root / "events.jsonl").read_text().splitlines()
-    ]
+    from tests._event_rows import event_rows
+
+    events = event_rows(state_root / "events.jsonl")
     bounces = [e for e in events if e["type"] == "pr_watch_bounce"]
     assert len(bounces) == 1
     assert bounces[0]["data"]["caller"] == "heal"
@@ -1306,10 +1305,9 @@ def test_bounce_defer_emits_event_but_no_sidecar(tmp_launch_agents, monkeypatch)
     assert calls == []
     state_root = Path(fno.paths.state_dir())
     assert not (state_root / "pr-watch-bounce.json").exists()
-    events = [
-        json.loads(line)
-        for line in (state_root / "events.jsonl").read_text().splitlines()
-    ]
+    from tests._event_rows import event_rows
+
+    events = event_rows(state_root / "events.jsonl")
     bounces = [e for e in events if e["type"] == "pr_watch_bounce"]
     assert len(bounces) == 1
     assert bounces[0]["data"]["deferred"] is True

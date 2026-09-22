@@ -850,20 +850,25 @@ fn states_leg(payload: &Value) -> Value {
     let on_low = policy_raw("on_low", "prefer_healthy");
     let on_unknown = policy_raw("on_unknown", "allow");
     // The lane a spawn would take right now: the same walk a dispatch runs,
-    // node-less, so the preview can never disagree with the gate.
-    let walk_verdict = |payload: &Value| -> (Value, &'static str, Value) {
+    // node-less and with the same one refresh armed, so the preview can never
+    // disagree with the gate. An explicit capacity keeps the tests' seam: the
+    // walk judges the map it is given and never probes.
+    let walk_verdict = |payload: &Value| -> (Value, &'static str, Value, Option<Value>) {
         let mut slot_payload = payload.clone();
+        let explicit_capacity = slot_payload.get("capacity").is_some();
         if let Some(obj) = slot_payload.as_object_mut() {
             obj.remove("mode");
-            // The readout never refreshes: display judges on current
-            // evidence, and its preview walk must not probe either.
-            obj.remove("capacity_refresh");
-            // The walk reuses the map this readout computed instead of
-            // reading the state file a second time.
-            obj.entry("capacity".to_string())
-                .or_insert_with(|| capacity.clone());
+            if explicit_capacity {
+                obj.remove("capacity_refresh");
+            } else {
+                // The readout arms the walk: no injected map, the same refresh
+                // the spawn door runs, at the readout's tighter bound.
+                obj.insert("capacity_refresh".into(), json!(true));
+                obj.insert("capacity_refresh_timeout_secs".into(), json!(20));
+            }
         }
-        let slot_out = resolve_slot_payload(&slot_payload);
+        let mut judged: Option<Value> = None;
+        let slot_out = resolve_slot_walk(&slot_payload, &mut judged);
         let candidate = slot_out.get("candidate");
         let lane_rung = candidate
             .and_then(|c| c.get("lane_rung"))
@@ -876,7 +881,9 @@ fn states_leg(payload: &Value) -> Value {
         } else {
             match slot_out.get("reason_kind").and_then(Value::as_str) {
                 Some("policy-refusal") => "policy-held",
-                Some("capacity-queue") | Some("capacity-exhausted") => "capacity-held",
+                Some("capacity-queue") | Some("capacity-exhausted") | Some("capacity-unknown") => {
+                    "capacity-held"
+                }
                 _ => "unarmed",
             }
         };
@@ -952,9 +959,9 @@ fn states_leg(payload: &Value) -> Value {
                 .cloned()
                 .unwrap_or(json!(""))
         };
-        (would_take, routing, facts)
+        (would_take, routing, facts, judged)
     };
-    let (would_take, routing, facts) = walk_verdict(payload);
+    let (would_take, routing, facts, judged) = walk_verdict(payload);
     let with_facts = |mut out: Value| -> Value {
         if let (Some(obj), Some(f)) = (out.as_object_mut(), facts.as_object()) {
             for (k, v) in f {
@@ -1071,7 +1078,7 @@ fn states_leg(payload: &Value) -> Value {
                 let harness = row_value(r, "harness");
                 let account = row_value(r, "account");
                 let route = row_value(r, "route");
-                let detail = capacity.get(&harness);
+                let detail = judged.as_ref().unwrap_or(&capacity).get(&harness);
                 let (s, w, _age) = row_capacity(r, detail);
                 // Display evidence: the attribution owner's verdict for the
                 // row's named account, and where the observation came from.
@@ -1574,8 +1581,9 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
     // A lane the walk would skip on an outdated reading (unknown with a stale
     // or never-probed window) gets ONE refresh before the judging loop: a
     // skipped lane never launches, so nothing else would ever probe it. The
-    // dispatch seam arms this; display and explicit-capacity payloads never
-    // refresh.
+    // dispatch seam and the readout's preview walk arm this; an
+    // explicit-capacity payload never refreshes (the walk judges the map it
+    // is given).
     let capacity_refresh_armed = capacity_computed
         && payload
             .get("capacity_refresh")
@@ -1584,20 +1592,28 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
     if capacity_refresh_armed && on_unknown == "skip" {
         let outdated = outdated_lane_count(&plan, &rows, &capacity);
         if outdated > 0 {
-            chain.push(json!(
-                match crate::route_capacity::refresh_usage_readings(&slot_cwd()) {
-                    Some(refreshed) => {
-                        capacity = crate::route_capacity::capacity(
-                            &payload.get("inventory").cloned().unwrap_or(json!({})),
-                            &slot_cwd(),
-                            slot_now(),
-                            Some(&refreshed),
-                        );
-                        format!("slot refresh accounts usage ({outdated} lanes outdated)")
-                    }
-                    None => "slot refresh unavailable".to_string(),
+            // The readout's arm travels through the states leg, which bounds
+            // its probe tighter than the dispatch seam's 60s.
+            let timeout = payload
+                .get("capacity_refresh_timeout_secs")
+                .and_then(Value::as_u64)
+                .map(std::time::Duration::from_secs)
+                .unwrap_or(crate::route_capacity::REFRESH_TIMEOUT);
+            chain.push(json!(match crate::route_capacity::refresh_usage_readings(
+                &slot_cwd(),
+                timeout
+            ) {
+                Some(refreshed) => {
+                    capacity = crate::route_capacity::capacity(
+                        &payload.get("inventory").cloned().unwrap_or(json!({})),
+                        &slot_cwd(),
+                        slot_now(),
+                        Some(&refreshed),
+                    );
+                    format!("slot refresh accounts usage ({outdated} lanes outdated)")
                 }
-            ));
+                None => "slot refresh unavailable".to_string(),
+            }));
         }
     }
     *judged = Some(capacity.clone());
@@ -1626,6 +1642,7 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
     let mut demoted: Vec<(usize, String, String, String, String)> = Vec::new();
     let mut identity_skips: Vec<String> = Vec::new();
     let mut policy_skips: usize = 0;
+    let mut capacity_unknown_skips: usize = 0;
     let mut resets_seen: Vec<f64> = Vec::new();
 
     for (index, (rung, row_name)) in plan.iter().enumerate() {
@@ -1840,6 +1857,7 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
         }
         if state != "ok" && state != "low" && state != "available" {
             if on_unknown == "skip" {
+                capacity_unknown_skips += 1;
                 chain.push(json!(format!(
                     "slot skip {} capacity={state} (on_unknown=skip){}",
                     lane_label(rung, row_name),
@@ -1966,6 +1984,21 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
         }
         return out;
     }
+    // Every lane was skipped ONLY for unknown capacity: naming this
+    // "exhausted" would send the operator to wait for a quota reset that is
+    // not coming. The terminal names the real cause; the refresh verb is the
+    // fix.
+    if capacity_unknown_skips > 0
+        && capacity_unknown_skips == plan.len()
+        && on_exhausted == "refuse"
+    {
+        chain.push(json!("slot=unknown refuse"));
+        let mut out = none(chain);
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert("reason_kind".into(), json!("capacity-unknown"));
+        }
+        return out;
+    }
     chain.push(json!(format!("slot=exhausted {on_exhausted}")));
     exhausted_decision(chain)
 }
@@ -2071,7 +2104,8 @@ fn none(chain: Vec<Value>) -> Value {
         .map(|terminal| {
             if terminal.starts_with("slot=config ") || terminal.starts_with("slot=strict-refusal") {
                 "policy-held"
-            } else if terminal.starts_with("slot=exhausted") {
+            } else if terminal.starts_with("slot=exhausted") || terminal.starts_with("slot=unknown")
+            {
                 "capacity-held"
             } else {
                 "unarmed"
@@ -2113,6 +2147,19 @@ fn refusal_terminal(chain: &[Value]) -> Option<(String, String)> {
             "manual-account".to_string(),
             "every lane needs a manual canonical account switch".to_string(),
         ));
+    }
+    if terminal == "slot=unknown refuse" {
+        // None of the lanes was exhausted, so the text must not send the
+        // operator to wait for a quota reset: the cause is unknown capacity
+        // and the refresh verb is the fix.
+        let text = match oldest_evidence(chain) {
+            Some((label, src)) => format!(
+                "every configured lane reads capacity unknown (on_unknown=skip); none is exhausted; oldest evidence {label} old (source={src}). Run `fno config accounts usage --refresh` to re-measure."
+            ),
+            None => "every configured lane reads capacity unknown (on_unknown=skip); none is exhausted. Run `fno config accounts usage --refresh` to re-measure."
+                .to_string(),
+        };
+        return Some(("unknown-refuse".to_string(), text));
     }
     if terminal == "slot=exhausted refuse" {
         // The refusal is the one verdict a caller has to argue with, so it
@@ -3024,7 +3071,7 @@ pub(crate) fn audit_load_snapshot(
 mod tests {
     use super::*;
 
-    fn payload(overrides: Value) -> Value {
+    pub(super) fn payload(overrides: Value) -> Value {
         let mut base = json!({
             "rung_base": "agents.profiles.target",
             "lanes_raw": ["flash-x", "sonnet-x"],
@@ -3052,7 +3099,7 @@ mod tests {
         base
     }
 
-    fn chain_of(out: &Value) -> Vec<String> {
+    pub(super) fn chain_of(out: &Value) -> Vec<String> {
         out["chain"]
             .as_array()
             .unwrap()
@@ -3444,14 +3491,14 @@ mod tests {
 
     // --- the capacity verdict carries its age ------------------------------ //
 
-    fn now_epoch() -> f64 {
+    pub(super) fn now_epoch() -> f64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0)
     }
 
-    fn age_token(line: &str) -> String {
+    pub(super) fn age_token(line: &str) -> String {
         line.split(" age=")
             .nth(1)
             .unwrap_or("")
@@ -4634,15 +4681,15 @@ mod tests {
     /// A hermetic config + runtime-state env: FNO_CONFIG pins the sole config
     /// candidate (no canonical/global tier), FNO_RUNTIME_STATE_PATH pins the
     /// state file. Drop clears both.
-    struct CapacityEnv {
+    pub(super) struct CapacityEnv {
         _guard: std::sync::MutexGuard<'static, ()>,
-        dir: tempfile::TempDir,
+        pub(super) dir: tempfile::TempDir,
     }
 
     impl CapacityEnv {
         /// `fno_bin` pins the refresh subprocess: the stub script's path, or
         /// None to leave no FNO_BIN in the environment.
-        fn new(state_json: &str, fno_bin: Option<&str>) -> Self {
+        pub(super) fn new(state_json: &str, fno_bin: Option<&str>) -> Self {
             let guard = claims::test_env_lock()
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
@@ -4673,7 +4720,7 @@ mod tests {
         }
     }
 
-    fn slot_env_payload(overrides: Value) -> Value {
+    pub(super) fn slot_env_payload(overrides: Value) -> Value {
         let mut base = json!({
             "rung_base": "agents.profiles.target",
             "lanes_raw": ["codex-luna", "sonnet-x"],
@@ -4706,21 +4753,25 @@ mod tests {
         base
     }
 
-    fn now_secs() -> f64 {
+    pub(super) fn now_secs() -> f64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs_f64()
     }
 
-    fn fresh_codex_row() -> String {
+    pub(super) fn fresh_codex_row() -> String {
         format!(
             r#"{{"codex": {{"source": "probe", "probed_at": {:.0}, "partial": false, "windows": [{{"label": "weekly", "used_pct": 70.0, "resets_at": null}}]}}}}"#,
             now_secs()
         )
     }
 
-    fn write_refresh_stub(dir: &std::path::Path, body: &str, marker: &std::path::Path) -> String {
+    pub(super) fn write_refresh_stub(
+        dir: &std::path::Path,
+        body: &str,
+        marker: &std::path::Path,
+    ) -> String {
         let script = dir.join("refresh-stub.sh");
         std::fs::write(
             &script,
@@ -4737,14 +4788,14 @@ mod tests {
         script.display().to_string()
     }
 
-    fn makers_row() -> String {
+    pub(super) fn makers_row() -> String {
         format!(
             r#"{{"probed_at": {:.0}, "partial": false, "windows": [{{"label": "daily", "used_pct": 10.0, "resets_at": null}}]}}"#,
             now_secs()
         )
     }
 
-    fn stale_codex_row() -> String {
+    pub(super) fn stale_codex_row() -> String {
         format!(
             r#"{{"probed_at": {:.0}, "partial": false, "windows": [{{"label": "weekly", "used_pct": 5.0, "resets_at": null}}]}}"#,
             now_secs() - 600.0
@@ -4752,7 +4803,7 @@ mod tests {
     }
 
     /// State file: the claude fallback account fresh, codex stale or absent.
-    fn state_json(codex_row: Option<&str>) -> String {
+    pub(super) fn state_json(codex_row: Option<&str>) -> String {
         match codex_row {
             Some(r) => format!(
                 r#"{{"usage": {{"codex": {}, "makers": {}}}}}"#,
@@ -4853,3 +4904,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "route_slot_capacity_tests.rs"]
+mod capacity_tests;

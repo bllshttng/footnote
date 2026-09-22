@@ -133,7 +133,7 @@ fn unpark_clears_parked_resets_retries_and_emits() {
     assert_eq!(entry["retries"], json!(0));
     // The other rows keep their parks, and one unpark row was emitted.
     assert!(!data["other/repo#55"]["parked"].is_null());
-    let events = std::fs::read_to_string(&paths.events).unwrap();
+    let events = crate::events::committed_journal_text(&paths.events);
     assert!(events.contains("\"pr_watch_unparked\""), "{events}");
     assert!(events.contains("\"by\":\"manual\""), "{events}");
     let _ = std::fs::remove_dir_all(paths.state.parent().unwrap());
@@ -176,7 +176,7 @@ fn sweep_unparks_on_head_change_and_holds_on_same_head() {
     let data: Value =
         serde_json::from_str(&std::fs::read_to_string(&paths.state).unwrap()).unwrap();
     assert!(data["owner/repo#101"]["parked"].is_null());
-    let events = std::fs::read_to_string(&paths.events).unwrap();
+    let events = crate::events::committed_journal_text(&paths.events);
     assert!(events.contains("\"by\":\"sweep\""), "{events}");
     let _ = std::fs::remove_dir_all(paths.state.parent().unwrap());
 }

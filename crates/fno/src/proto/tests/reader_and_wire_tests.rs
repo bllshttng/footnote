@@ -91,9 +91,12 @@ fn proto_v83_agent_launch_roundtrips() {
         harness: "codex".into(),
         substrate: "pane".into(),
         model: None,
+        model_names_harness: false,
         effort: Some("high".into()),
         permission_mode: None,
         placement: Some("name:work".into()),
+        portal: None,
+        split: None,
         message: "line one\nline \"two\" $ ` \u{1f600}".into(),
     };
     let mut buf = std::io::Cursor::new(Vec::new());

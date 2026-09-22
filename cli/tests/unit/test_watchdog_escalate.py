@@ -109,11 +109,14 @@ def test_large_finding_set_keeps_marker_count_and_cap(tmp_path: Path) -> None:
 
 
 def test_unreadable_store_raises_instead_of_recording_again(tmp_path: Path) -> None:
+    from fno.events.store_client import store_db_path
     from fno.outstanding.core import OutstandingError, events_path
 
     path = events_path(tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.mkdir()
+    # The journal is store-located now: an unreadable STORE is the unreadable
+    # index, so the directory stands in for events.db.
+    store_db_path(path).mkdir()
 
     with pytest.raises(OutstandingError):
         _run(tmp_path, [_finding("x-a")])

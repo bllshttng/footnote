@@ -7,6 +7,13 @@ map_version = 20
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
+# LAUNCHER CHOICE LISTS. The mux composer's picker chips read these. Three
+# states: key ABSENT = no surface at all (the chip reads "not offered");
+# EMPTY list = the axis exists but the values are provider passthrough (the
+# picker offers free text); a filled list = the enumerable choices. Every
+# list is read off this harness's own mapper or `--help`, never from memory.
+efforts = ["low", "medium", "high", "xhigh", "max"]
+permission_modes = ["default", "acceptEdits", "auto", "dontAsk", "plan", "bypassPermissions"]
 resume = "native-session"
 autonomous_pane = false
 route_on_pane = true
@@ -165,6 +172,16 @@ state = "native"
 
 [harness.codex]
 permission_bypass = ["--dangerously-bypass-approvals-and-sandbox"]
+# efforts: the keys of model_switch_strategy.effort_labels below.
+# permission_modes: the two shortcuts plus every <sandbox>:<approval> pair
+# resolve_thread_posture maps (codex_posture.rs).
+efforts = ["low", "medium", "high", "xhigh", "max"]
+permission_modes = [
+    "full-auto", "yolo",
+    "read-only:untrusted", "read-only:on-failure", "read-only:on-request", "read-only:never",
+    "workspace-write:untrusted", "workspace-write:on-failure", "workspace-write:on-request", "workspace-write:never",
+    "danger-full-access:untrusted", "danger-full-access:on-failure", "danger-full-access:on-request", "danger-full-access:never",
+]
 resume = "native-thread"
 # A codex thread lives on the SHARED `codex app-server daemon`, which owns it.
 # So it survives mux death AND `fno-agents-daemon` death: neither process
@@ -331,6 +348,9 @@ state = "native"
 
 [harness.gemini]
 permission_bypass = ["--yolo"]
+# No efforts key: the spawn refuses a gemini effort. permission_modes: the
+# `--approval-mode` choices off `gemini --help` plus the `--yolo` spelling.
+permission_modes = ["default", "auto_edit", "yolo", "plan"]
 resume = "native-continue"
 autonomous_pane = false
 route_on_pane = false
@@ -429,6 +449,10 @@ state = "capable"
 
 [harness.agy]
 permission_bypass = ["--dangerously-skip-permissions"]
+# efforts: agy's own `--effort (low|medium|high)`. permission_modes: exactly
+# the vocabulary permission_pane_tokens maps (codex_posture.rs).
+efforts = ["low", "medium", "high"]
+permission_modes = ["default", "skip", "accept-edits", "plan", "sandbox", "accept-edits+sandbox", "plan+sandbox"]
 resume = "native-continue"
 autonomous_pane = false
 route_on_pane = false
@@ -567,6 +591,10 @@ clear_modal = ["trust (?:this )?folder|do you trust", "\r"]
 
 [harness.opencode]
 permission_bypass = ["--dangerously-skip-permissions"]
+# efforts EMPTY: the door passes provider values through, so the picker
+# offers free text rather than a list.
+efforts = []
+permission_modes = ["auto"]
 resume = "native-session"
 # The serve lane is steerable through the same attach writer used at launch.
 # `POST /session` returns the full id, so this lane does not use opencode's
@@ -716,6 +744,9 @@ state = "native"
 # project-local FILES for a run, which is a different axis. So there is no
 # prompt to bypass and nothing honest to put here.
 permission_bypass = []
+# No efforts or permission_modes key: `pi --help` names no effort list, and
+# pi ships no permission popups (see permission_bypass above), so both axes
+# have no surface here.
 resume = "native-session"
 # TRUE, and the seven-step restart journey is the evidence
 # (cli/tests/agents/test_thread_keeper_journey.py, journey wk-x61bc, first
@@ -902,6 +933,7 @@ resume_refusal = "is not supported on the pi thread lane yet; the keeper row res
 
 [harness.cursor-agent]
 permission_bypass = ["--force"]
+permission_modes = ["force", "yolo"]
 resume = "native-session"
 # TRUE, and the live journey is the evidence
 # (cli/scripts/smoke/cursor-agent-keeper-journey.py, journey wk-cursor, first
@@ -1142,6 +1174,11 @@ takes_add_dir = true
 
 [harness.grok]
 permission_bypass = ["--always-approve"]
+# permission_modes: grok's own --help (1.0.13) names this set for
+# --permission-mode. efforts EMPTY: --reasoning-effort exists but the help
+# names no fixed choice list, so the picker offers free text.
+efforts = []
+permission_modes = ["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"]
 resume = "native-session"
 # TRUE, and the live measurement is the evidence (2026-09-02, grok 1.0.13
 # [stable], worktree pty sessions): `grok --session-id <uuid>` adopted the

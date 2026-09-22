@@ -419,10 +419,9 @@ class TestQuotaRotationDeclinedEvent:
     journal (the assert-a-positive-marker pitfall)."""
 
     def _events(self, tmp_path):
-        events_path = tmp_path / ".fno" / "events.jsonl"
-        if not events_path.exists():
-            return []
-        return [json.loads(ln) for ln in events_path.read_text().splitlines() if ln.strip()]
+        from tests._event_rows import event_rows
+
+        return event_rows(tmp_path / ".fno" / "events.jsonl")
 
     def test_unknown_proceed_emits_exactly_one_declined_event(
         self, monkeypatch, tmp_path,

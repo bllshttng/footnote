@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pytest
 
+from fno.events.store_client import read_committed_lines
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SKILL_MD = _REPO_ROOT / "skills" / "review" / "SKILL.md"
 _EMIT = _REPO_ROOT / "skills" / "review" / "scripts" / "emit-attestation.sh"
@@ -98,9 +100,7 @@ def _events(repo: Path) -> list[dict]:
     from fno.paths import project_log
 
     path = project_log("events.jsonl", project_root=repo)
-    if not path.exists():
-        return []
-    return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+    return [json.loads(ln) for ln in read_committed_lines(path) if ln.strip()]
 
 
 def _base_env() -> dict:
@@ -604,7 +604,7 @@ def test_unfinished_work_events_build_and_land(tmp_path, monkeypatch):
             },
         )
 
-    rows = [json.loads(ln) for ln in events_file.read_text().splitlines() if ln.strip()]
+    rows = [json.loads(ln) for ln in read_committed_lines(events_file) if ln.strip()]
     types = [r["type"] for r in rows]
     assert "watchdog_unfinished_work_scan" in types
     assert "watchdog_unfinished_work_finding" in types

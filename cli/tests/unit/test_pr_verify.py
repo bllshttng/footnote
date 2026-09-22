@@ -197,8 +197,10 @@ def test_closed_blocks_exit_1_and_audits(tmp_path, gh_on, monkeypatch):
     assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path)) == 1
     from fno.paths import project_log
 
-    events = project_log("events.jsonl", project_root=tmp_path).read_text()
-    assert "pr_closed_without_merge" in events
+    from tests._event_rows import event_rows
+
+    audit = event_rows(project_log("events.jsonl", project_root=tmp_path))
+    assert "pr_closed_without_merge" in [e["data"].get("reason") for e in audit]
 
 
 def test_plan_dispatch_hold_refuses_direct_remediation_merge(
@@ -216,60 +218,40 @@ def test_plan_dispatch_hold_refuses_direct_remediation_merge(
     assert not any(call[:3] == ["gh", "pr", "merge"] for call in fake.calls)
 
 
-def test_audit_writer_locks_the_canonical_symlink_target(tmp_path, monkeypatch):
+def test_audit_writer_commits_beside_the_canonical_target(tmp_path, monkeypatch):
     canonical = tmp_path / "canonical" / "events.jsonl"
     canonical.parent.mkdir()
     canonical.touch()
     worktree = tmp_path / "worktree" / "events.jsonl"
     worktree.parent.mkdir()
     worktree.symlink_to(canonical)
-    acquired = []
-
-    def acquire(lock_dir, timeout, **kwargs):
-        acquired.append(lock_dir)
-        return "token"
-
-    monkeypatch.setattr(_verify, "acquire_dir_mutex", acquire)
-    monkeypatch.setattr(_verify, "release_dir_mutex", lambda lock_dir, token: None)
 
     _verify._append_event_lenient(
         str(worktree),
-        {"ts": "2026-08-11T00:00:00Z", "type": "probe", "data": {}},
+        {"ts": "2026-08-11T00:00:00Z", "type": "probe", "source": "hook", "data": {}},
         "probe",
     )
 
-    assert acquired == [canonical.with_name("events.jsonl.lock.d")]
+    from tests._event_rows import event_rows
+
+    assert [e["type"] for e in event_rows(worktree)] == ["probe"]
 
 
-def test_audit_writer_retries_when_setup_retargets_leaf_while_waiting(tmp_path, monkeypatch):
+def test_audit_writer_survives_a_symlinked_leaf(tmp_path, monkeypatch):
     local = tmp_path / "worktree-events.jsonl"
-    local.touch()
     canonical = tmp_path / "canonical-events.jsonl"
     canonical.touch()
-    acquired = []
-
-    def acquire(lock_dir, timeout, **kwargs):
-        acquired.append(lock_dir)
-        if len(acquired) == 1:
-            local.unlink()
-            local.symlink_to(canonical)
-        return f"token-{len(acquired)}"
-
-    monkeypatch.setattr(_verify, "acquire_dir_mutex", acquire)
-    monkeypatch.setattr(_verify, "release_dir_mutex", lambda lock_dir, token: None)
+    local.symlink_to(canonical)
 
     _verify._append_event_lenient(
         str(local),
-        {"ts": "2026-08-11T00:00:00Z", "type": "probe", "data": {}},
+        {"ts": "2026-08-11T00:00:00Z", "type": "probe", "source": "hook", "data": {}},
         "probe",
     )
 
-    assert acquired == [
-        tmp_path / "worktree-events.jsonl.lock.d",
-        tmp_path / "canonical-events.jsonl.lock.d",
-    ]
-    assert local.is_symlink()
-    assert canonical.read_text(encoding="utf-8").count("\n") == 1
+    from tests._event_rows import event_rows
+
+    assert [e["type"] for e in event_rows(local)] == ["probe"]
 
 
 def test_draft_blocks_exit_1(tmp_path, gh_on, monkeypatch, capsys):
@@ -511,10 +493,13 @@ def test_reviews_no_qualifying_reply_flips_exit_1(tmp_path, monkeypatch, capsys)
     assert "flipped back to false" in out and "bot" in out
     from fno.paths import project_log
 
-    events = project_log("events.jsonl", project_root=tmp_path).read_text()
-    audit = json.loads(events.strip().splitlines()[-1])
-    assert audit["data"]["gate"] == "external_review_passed"
-    assert audit["data"]["reviewer"] == "bot"
+    events = project_log("events.jsonl", project_root=tmp_path)
+
+    from tests._event_rows import event_rows
+
+    audit = event_rows(events)
+    assert audit[-1]["data"]["gate"] == "external_review_passed"
+    assert audit[-1]["data"]["reviewer"] == "bot"
 
 
 def _boom_project_log(*args, **kwargs):

@@ -454,12 +454,19 @@ def last_run_is_fresh(
     now = _parse_ts(now_iso) if now_iso else datetime.now(timezone.utc).timestamp()
     if now is None:
         return False
-    try:
-        text = Path(events_path).read_text(encoding="utf-8")
-    except OSError:
-        return False
+    # The store commit is the write boundary: committed rows carry the
+    # history, raw bytes are only the pre-store fallback.
+    from fno.events.store_client import native_rows
+
+    lines = native_rows(Path(events_path), types=list(_TERMINAL_TYPES))
+    if lines is None:
+        try:
+            text = Path(events_path).read_text(encoding="utf-8")
+        except OSError:
+            return False
+        lines = text.splitlines()
     newest: Optional[float] = None
-    for line in text.splitlines():
+    for line in lines:
         line = line.strip()
         if not line or not any(t in line for t in _TERMINAL_TYPES):
             continue

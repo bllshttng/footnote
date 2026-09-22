@@ -334,8 +334,8 @@ def _record(
     # recoverable exactly like one that does.
     if result["node_id"] is None:
         typer.echo(
-            f"decide: recorded {did}; subject names no graph node, so no "
-            f"projection was written (the event and the index are the record). "
+            f"decide: recorded {did}; no projection was written because "
+            f"{result['projection']} (the event and the index are the record). "
             f"Recover with: fno backlog decisions {subject}",
             err=True,
         )
@@ -961,10 +961,12 @@ def _list_decisions(
                 return
 
         from fno import paths
+        from fno.events.store_client import store_db_path
 
+        index_path = Path(paths.decisions_jsonl())
         hint = (
             ""
-            if Path(paths.decisions_jsonl()).exists()
+            if index_path.exists() or store_db_path(index_path).exists()
             else " (no index yet on this machine - run `fno backlog "
             "decide-reindex` to backfill what is already on disk)"
         )

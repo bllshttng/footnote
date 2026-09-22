@@ -531,6 +531,73 @@ fn with_per_scope_stuck(folds: BTreeMap<String, Value>) -> BTreeMap<String, Valu
     out
 }
 
+/// Stamp each ok fold with its scope's epic load: the same count the write
+/// cap judges with, so a lead reads how close every scope epic sits to the
+/// cap before a write bounces. A fold that is not `ok` gets neither key: an
+/// unread scope must never read as a scope with no epics.
+fn with_epic_load(
+    folds: &mut BTreeMap<String, Value>,
+    crowns: &[Value],
+    entries: &[Value],
+    projects: &Result<HashMap<String, String>, String>,
+    cap: Option<usize>,
+) {
+    for crown in crowns {
+        let (Some(scope), Some(level)) = (
+            s_str(crown, "scope"),
+            crown.get("level").and_then(|l| l.as_i64()),
+        ) else {
+            continue;
+        };
+        let Some(fold) = folds.get_mut(scope) else {
+            continue;
+        };
+        if s_str(fold, "status") != Some("ok") {
+            continue;
+        }
+        let Ok(ids) = compile_forced(scope, entries, projects, level) else {
+            continue;
+        };
+        fold["epics"] = json!(crate::backlog::epic_cap::epic_load(entries, &ids, cap));
+        fold["epic_cap"] = json!(cap);
+    }
+}
+
+/// One owner per active node across every fold in this read: the deepest
+/// crown level that lists it, then the lowest scope on a tie. An L1 fold
+/// lists every node its L2 folds list, so a caller acting on its own rows
+/// needs this mark to act once.
+fn mark_owners(folds: &mut BTreeMap<String, Value>, levels: &BTreeMap<String, i64>) {
+    let mut owner: BTreeMap<String, (i64, String)> = BTreeMap::new();
+    for (scope, fold) in folds.iter() {
+        let level = levels.get(scope).copied().unwrap_or(i64::MIN);
+        for node in fold
+            .get("nodes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(id) = s_str(node, "id") else {
+                continue;
+            };
+            if owner.get(id).is_none_or(|(l, _)| level > *l) {
+                owner.insert(id.to_string(), (level, scope.clone()));
+            }
+        }
+    }
+    for (scope, fold) in folds.iter_mut() {
+        let Some(nodes) = fold.get_mut("nodes").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for node in nodes {
+            let owned = s_str(node, "id")
+                .and_then(|id| owner.get(id))
+                .is_some_and(|(_, s)| s == scope);
+            node["owned"] = json!(owned);
+        }
+    }
+}
+
 /// The whole read: fold every crown, then answer as JSON.
 pub fn court_fold(
     graph_path: &PathBuf,
@@ -593,7 +660,23 @@ pub fn court_fold(
         );
         refolded.insert(scope.to_string(), fold);
     }
-    let folds = with_per_scope_stuck(refolded);
+    let levels: BTreeMap<String, i64> = crowns
+        .iter()
+        .filter_map(|crown| {
+            let scope = s_str(crown, "scope")?;
+            let level = crown.get("level").and_then(|l| l.as_i64())?;
+            Some((scope.to_string(), level))
+        })
+        .collect();
+    mark_owners(&mut refolded, &levels);
+    let mut folds = with_per_scope_stuck(refolded);
+    with_epic_load(
+        &mut folds,
+        crowns,
+        &entries,
+        &projects,
+        crate::backlog::epic_cap::configured_cap(graph_path),
+    );
     let stuck = stuck_verdict(&folds);
     let line = stuck_line(&stuck);
     Ok(json!({"scope_nodes": folds, "stuck": stuck, "stuck_line": line}))
@@ -1110,6 +1193,178 @@ mod tests {
         let nodes = fold["scope_nodes"]["e-1"]["nodes"].as_array().unwrap();
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[1]["id"], "x-1");
+    }
+
+    /// An ok fold carries its scope's epic load and the configured cap;
+    /// done and deferred children never count, and a sub-epic is its own
+    /// row (AC1-HP).
+    #[test]
+    fn an_ok_fold_carries_the_epic_load_and_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::paths::pin_test_claims_root(dir.path());
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[backlog]\nepic_max_open_children = 3\n",
+        )
+        .unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            serde_json::to_string(&json!({"entries": [
+                {"id": "e-1", "type": "epic", "status": "in_progress", "title": "Epic",
+                 "slug": "e-1", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"},
+                {"id": "x-1", "parent": "e-1", "status": "in_progress", "title": "Child",
+                 "slug": "x-1", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"},
+                {"id": "x-2", "parent": "e-1", "status": "ready", "title": "Child",
+                 "slug": "x-2", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"},
+                {"id": "x-3", "parent": "e-1", "status": "idea", "title": "Child",
+                 "slug": "x-3", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"},
+                {"id": "x-done", "parent": "e-1", "status": "done", "title": "Closed",
+                 "slug": "x-done", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"},
+                {"id": "x-def", "parent": "e-1", "status": "deferred", "title": "Parked",
+                 "slug": "x-def", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"},
+                {"id": "e-2", "type": "epic", "parent": "e-1", "status": "in_progress",
+                 "title": "Sub-epic", "slug": "e-2", "priority": "p2",
+                 "created_at": "2026-09-11T00:00:00+00:00"},
+                {"id": "k-1", "parent": "e-2", "status": "in_progress", "title": "Grand",
+                 "slug": "k-1", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"},
+                {"id": "k-2", "parent": "e-2", "status": "ready", "title": "Grand",
+                 "slug": "k-2", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let cwd = dir.path().to_path_buf();
+        let crowns = vec![json!({"scope": "e-1", "level": 2})];
+        let fold = court_fold(&graph, &cwd, None, &crowns).unwrap();
+        let scope = &fold["scope_nodes"]["e-1"];
+        assert_eq!(scope["epic_cap"], json!(3));
+        assert_eq!(
+            scope["epics"],
+            json!([
+                {"id": "e-1", "open_children": 4, "full": true},
+                {"id": "e-2", "open_children": 2, "full": false}
+            ])
+        );
+    }
+
+    /// A fold that is not ok carries neither key: an unread scope must never
+    /// read as a scope with no epics (AC1-ERR).
+    #[test]
+    fn a_fold_that_is_not_ok_carries_no_epic_load() {
+        let entries = vec![
+            json!({"id": "e-1", "type": "epic", "status": "in_progress"}),
+            json!({"id": "x-1", "parent": "e-1", "status": "in_progress"}),
+        ];
+        let mut folds: BTreeMap<String, Value> = BTreeMap::new();
+        folds.insert(
+            "e-1".to_string(),
+            json!({"status": "unresolved", "reason": "the fold timed out"}),
+        );
+        with_epic_load(
+            &mut folds,
+            &[json!({"scope": "e-1", "level": 2})],
+            &entries,
+            &Ok(HashMap::new()),
+            Some(3),
+        );
+        assert!(folds["e-1"].get("epics").is_none());
+        assert!(folds["e-1"].get("epic_cap").is_none());
+    }
+
+    /// No cap configured: `epic_cap` reads null and no row says full; an
+    /// epic in scope with no open child is absent (AC1-EDGE).
+    #[test]
+    fn with_no_cap_every_row_reads_open() {
+        let entries = vec![
+            json!({"id": "e-1", "type": "epic", "status": "in_progress"}),
+            json!({"id": "e-full", "type": "epic", "status": "in_progress"}),
+            json!({"id": "e-quiet", "type": "epic", "status": "done"}),
+            json!({"id": "x-1", "parent": "e-1", "status": "in_progress"}),
+            json!({"id": "y-1", "parent": "e-full", "status": "in_progress"}),
+        ];
+        let mut folds: BTreeMap<String, Value> = BTreeMap::new();
+        folds.insert(
+            "e-1".to_string(),
+            json!({"status": "ok", "total": 5, "counts": {}, "nodes": [], "omitted": 0}),
+        );
+        with_epic_load(
+            &mut folds,
+            &[json!({"scope": "e-1", "level": 2})],
+            &entries,
+            &Ok(HashMap::new()),
+            None,
+        );
+        assert_eq!(folds["e-1"]["epic_cap"], Value::Null);
+        assert_eq!(
+            folds["e-1"]["epics"],
+            json!([{"id": "e-1", "open_children": 1, "full": false}])
+        );
+    }
+
+    /// Owned marks the deepest crown level, then the lowest scope on a
+    /// level tie (AC1-HP, AC1-EDGE).
+    #[test]
+    fn owned_marks_the_deepest_crown_then_the_lowest_scope() {
+        let node = |id: &str| json!({"id": id});
+        let mut folds: BTreeMap<String, Value> = BTreeMap::new();
+        folds.insert(
+            "proj".to_string(),
+            json!({"status": "ok", "total": 3, "counts": {}, "omitted": 0,
+                   "nodes": [node("a"), node("b"), node("c")]}),
+        );
+        folds.insert(
+            "e-1".to_string(),
+            json!({"status": "ok", "total": 2, "counts": {}, "omitted": 0,
+                   "nodes": [node("a"), node("c")]}),
+        );
+        folds.insert(
+            "e-2".to_string(),
+            json!({"status": "ok", "total": 1, "counts": {}, "omitted": 0,
+                   "nodes": [node("c")]}),
+        );
+        let levels: BTreeMap<String, i64> = [
+            ("proj".to_string(), 1),
+            ("e-1".to_string(), 2),
+            ("e-2".to_string(), 2),
+        ]
+        .into_iter()
+        .collect();
+        mark_owners(&mut folds, &levels);
+        let row_owned = |scope: &str, id: &str| {
+            folds[scope]["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|n| n["id"] == json!(id))
+                .map(|n| n["owned"].as_bool().unwrap())
+                .unwrap()
+        };
+        assert!(!row_owned("proj", "a"));
+        assert!(row_owned("proj", "b"));
+        assert!(!row_owned("proj", "c"));
+        assert!(row_owned("e-1", "a"));
+        assert!(row_owned("e-1", "c"));
+        assert!(!row_owned("e-2", "c"));
+    }
+
+    /// A fold that did not run owns nothing and gains no key (AC1-ERR).
+    #[test]
+    fn owned_leaves_a_fold_without_nodes_alone() {
+        let mut folds: BTreeMap<String, Value> = BTreeMap::new();
+        folds.insert(
+            "dead".to_string(),
+            json!({"status": "unresolved", "reason": "the fold timed out"}),
+        );
+        folds.insert(
+            "e-1".to_string(),
+            json!({"status": "ok", "total": 1, "counts": {}, "omitted": 0,
+                   "nodes": [{"id": "a"}]}),
+        );
+        let levels: BTreeMap<String, i64> = [("e-1".to_string(), 2)].into_iter().collect();
+        mark_owners(&mut folds, &levels);
+        assert!(folds["dead"].get("owned").is_none());
+        assert_eq!(folds["e-1"]["nodes"][0]["owned"], json!(true));
     }
 
     /// -J and `--format json` select the same bytes; the flag never reaches

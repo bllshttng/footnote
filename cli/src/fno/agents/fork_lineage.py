@@ -47,6 +47,31 @@ def resume_axes(src, session_id, effort, route_model, *, routed):
     return get("model"), effort or get("effort"), route_model or get("route_model")
 
 
+def wake_route(src, session_id):
+    """The route a wake launches on: the row's recorded one (dispatch_spawn
+    restores it), else the lost route resume_pin names, rebuilt from config."""
+    if getattr(src, "route_settings_path", None):
+        return getattr(src, "provider", None), None
+    try:
+        lost = spawn_axes_call({"resume_pin": {
+            "session_id": session_id, "routed": False,
+            "row": vars(src) if src else None}}).get("lost_route")
+    except SpawnAxesUnavailable:
+        return None, None
+    from fno.agents.model_routing import bind_route_provider, resolve_explicit_route
+    env = lost and resolve_explicit_route(lost["provider"], lost["model"])
+    return (lost["provider"], bind_route_provider(env, lost["provider"])) if env else (None, None)
+
+
+def launch_overlay(account_id):
+    """The env of the account a resumed session launched on, so it bills there."""
+    from fno.agents.account_env import AccountResolutionError, resolve_account_overlay
+    try:
+        return dict(resolve_account_overlay(account_id).env)
+    except AccountResolutionError as exc:
+        raise ResumeUnpinned(f"account {account_id!r} does not resolve: {exc}", exit_code=2) from exc
+
+
 def predecessor_ids(resume_session_id: Optional[str], revive: bool) -> list[str]:
     """A fork to a new name retires the resumed uuid, so the row records it as
     a predecessor: mail addressed to the old id still lands on the surviving

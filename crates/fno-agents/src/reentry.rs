@@ -124,6 +124,24 @@ pub struct ReentryPlan {
     pub env: BTreeMap<String, String>,
 }
 
+impl ReentryPlan {
+    /// Copy this plan's `--model`/`--effort` pin onto `argv`, the argv a door
+    /// built itself, and hand the plan back.
+    pub fn carry_pins(self, argv: &mut Vec<String>) -> Self {
+        let value_after = |flag: &str| -> Option<String> {
+            self.argv
+                .iter()
+                .position(|t| t == flag)
+                .and_then(|i| self.argv.get(i + 1))
+                .cloned()
+        };
+        let model = value_after("--model");
+        let effort = value_after("--effort");
+        crate::resume_pin::append_axes(argv, model.as_deref(), effort.as_deref());
+        self
+    }
+}
+
 /// How an account id resolves: its config dir when the lane has one. `Err`
 /// carries the refusal receipt (unknown account, unresolvable record).
 pub type AccountBinding = dyn Fn(&str) -> Result<Option<String>, String>;
@@ -590,18 +608,11 @@ pub fn resolve_reentry_with(
             &session_id,
             lookup,
         ) {
-            if !argv.iter().any(|t| t == "--model") {
-                if let Some(m) = pin.argv_model {
-                    argv.push("--model".into());
-                    argv.push(m);
-                }
-            }
-            if !argv.iter().any(|t| t == "--effort") {
-                if let Some(e) = pin.effort {
-                    argv.push("--effort".into());
-                    argv.push(e);
-                }
-            }
+            crate::resume_pin::append_axes(
+                &mut argv,
+                pin.argv_model.as_deref(),
+                pin.effort.as_deref(),
+            );
         }
     }
 
@@ -1820,5 +1831,74 @@ mod tests {
             ]
         );
         std::env::remove_var("FNO_ROUTE_SETTINGS_DIR");
+    }
+
+    fn pinned_plan(model: &str, effort: &str) -> ReentryPlan {
+        ReentryPlan {
+            resolved: true,
+            transition: "resume".into(),
+            mechanism: "resume".into(),
+            name: "w".into(),
+            fno_id: None,
+            node: None,
+            session_id: "123e4567-0000-0000-0000-000000000000".into(),
+            short_id: "123e4567".into(),
+            launch_account: "default".into(),
+            claude_config_dir: None,
+            route_settings_path: None,
+            cwd: "/tmp".into(),
+            substrate: "pane".into(),
+            mux: None,
+            argv: vec![
+                "claude".into(),
+                "--resume".into(),
+                "123e4567-0000-0000-0000-000000000000".into(),
+                "--model".into(),
+                model.into(),
+                "--effort".into(),
+                effort.into(),
+            ],
+            env: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn ac4_hp_carry_pins_copies_the_plan_pin_onto_the_door_argv() {
+        let mut argv = vec![
+            "claude".to_string(),
+            "--resume".to_string(),
+            "u".to_string(),
+        ];
+        let plan = pinned_plan("claude-opus-5", "high");
+        let returned = plan.clone().carry_pins(&mut argv);
+        assert_eq!(returned, plan);
+        assert_eq!(
+            argv.iter().filter(|t| *t == "--model").count(),
+            1,
+            "exactly one --model"
+        );
+        assert_eq!(argv.iter().filter(|t| *t == "--effort").count(), 1);
+        assert!(argv.contains(&"claude-opus-5".to_string()));
+        assert!(argv.contains(&"high".to_string()));
+    }
+
+    #[test]
+    fn ac4_edge_carry_pins_never_duplicates_an_explicit_flag() {
+        // An argv that already names --model keeps it; a plan with no pin
+        // (attach, or a routed plan) leaves the argv unchanged.
+        let mut argv = vec!["claude".to_string(), "--model".to_string(), "m".to_string()];
+        pinned_plan("claude-opus-5", "high").carry_pins(&mut argv);
+        assert_eq!(argv.iter().filter(|t| *t == "--model").count(), 1);
+        assert!(argv.contains(&"m".to_string()));
+        assert_eq!(argv.iter().filter(|t| *t == "--effort").count(), 1);
+
+        let bare = ReentryPlan {
+            argv: vec!["claude".to_string()],
+            ..pinned_plan("claude-opus-5", "high")
+        };
+        let mut untouched = vec!["claude".to_string()];
+        let returned = bare.carry_pins(&mut untouched);
+        assert_eq!(untouched, vec!["claude".to_string()]);
+        assert_eq!(returned.argv, vec!["claude".to_string()]);
     }
 }

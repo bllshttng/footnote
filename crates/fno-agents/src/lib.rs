@@ -112,6 +112,7 @@ mod completion_output;
 pub mod component_update;
 pub mod context_run;
 pub mod convert;
+pub mod corrections_verify;
 pub mod court_fold;
 pub mod crown_alarm;
 pub mod crown_reap;
@@ -134,6 +135,7 @@ pub mod eval_attempt;
 pub mod evals_arm;
 pub mod evals_macro;
 pub mod evals_trend;
+pub mod event_store;
 pub mod events;
 pub mod events_limits;
 pub mod events_store;
@@ -141,6 +143,7 @@ pub mod evidence;
 pub mod fallback_chain;
 pub mod feed;
 pub mod finalize;
+pub mod finalize_run_summary;
 pub mod fleet_incident;
 pub mod fleet_load;
 pub mod fleet_page;
@@ -598,6 +601,46 @@ pub fn path_with(dir: &std::path::Path) -> std::ffi::OsString {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // AC2-HP: the host boot reading is a real past instant, and on macOS its
+    // second count matches what `sysctl -n kern.boottime` prints.
+    #[test]
+    fn host_boot_epoch_ms_reads_a_past_boot() {
+        let boot = host_boot_epoch_ms().expect("this host exposes a boot time");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        assert!(boot > 0, "boot must be positive: {boot}");
+        assert!(boot < now_ms, "boot must predate now: {boot} vs {now_ms}");
+        let sysctl = std::process::Command::new("sysctl")
+            .args(["-n", "kern.boottime"])
+            .output();
+        if let Ok(out) = sysctl {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if let Some(sec) = text
+                .split("sec = ")
+                .nth(1)
+                .and_then(|rest| rest.split([',', ' ', '}']).next())
+                .and_then(|v| v.parse::<i64>().ok())
+            {
+                let window_start = sec * 1000;
+                assert!(
+                    boot >= window_start && boot < window_start + 1000,
+                    "boot ms {boot} outside boot second {sec}"
+                );
+            }
+        }
+    }
+
+    // AC2-ERR: a non-positive boot second count is a failed reading.
+    #[test]
+    fn boot_ms_from_refuses_a_non_positive_second() {
+        assert_eq!(boot_ms_from(0, 0), None);
+        assert_eq!(boot_ms_from(-5, 0), None);
+        assert_eq!(boot_ms_from(1, 0), Some(1000));
+        assert_eq!(boot_ms_from(1789997638, 500_000), Some(1789997638500));
+    }
 
     #[test]
     fn short_id_rejects_empty() {
@@ -1456,4 +1499,102 @@ pub fn emit_schema_json() -> serde_json::Value {
             "data_size_encoding": events_limits::data_size_encoding()
         }
     })
+}
+
+/// A file's tail, at most `cap` bytes, starting on a line boundary: a seek
+/// into the middle of a line drops that partial line, so every admitted row
+/// is whole. Empty on any read failure, never a guess. The one tail walk:
+/// `tail_text` lossy-repairs it for observational readers, and a guard that
+/// must fail closed takes [`tail_text_strict`] instead.
+pub(crate) fn tail_bytes(path: &std::path::Path, cap: u64) -> Vec<u8> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let len = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => return Vec::new(),
+    };
+    let start = len.saturating_sub(cap);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    if file.read_to_end(&mut buf).is_err() {
+        return Vec::new();
+    }
+    if start > 0 {
+        match buf.iter().position(|&b| b == b'\n') {
+            // No whole line inside the window: nothing to admit.
+            Some(p) => buf.split_off(p + 1),
+            None => Vec::new(),
+        }
+    } else {
+        buf
+    }
+}
+
+/// [`tail_bytes`] as lossy text: observational readers never fail on bytes.
+pub(crate) fn tail_text(path: &std::path::Path, cap: u64) -> String {
+    String::from_utf8_lossy(&tail_bytes(path, cap)).into_owned()
+}
+
+/// [`tail_bytes`] as text, None when the tail is not valid UTF-8: a guard
+/// that answers with an allow reads corrupt evidence as unreadable, never
+/// as a repaired guess.
+pub(crate) fn tail_text_strict(path: &std::path::Path, cap: u64) -> Option<String> {
+    String::from_utf8(tail_bytes(path, cap)).ok()
+}
+
+/// Host boot as epoch ms. Linux reuses `claims::linux_boot_time_s` (the
+/// cached `/proc/stat` btime); macOS reads sysctl `kern.boottime`. None on
+/// any failure, never "now": a caller that cannot know the boot must drop
+/// the boot clause, not invent one.
+#[cfg(target_os = "linux")]
+pub fn host_boot_epoch_ms() -> Option<i64> {
+    crate::claims::linux_boot_time_s().and_then(|s| boot_ms_from(s, 0))
+}
+
+/// The macOS leg: sysctl `kern.boottime` into a zeroed timeval, the same
+/// call shape `census.rs` uses for its CTL_KERN probes. Cached like the
+/// Linux btime: constant for the life of the host, read once per process.
+#[cfg(target_os = "macos")]
+pub fn host_boot_epoch_ms() -> Option<i64> {
+    static BOOT: std::sync::OnceLock<Option<i64>> = std::sync::OnceLock::new();
+    *BOOT.get_or_init(|| {
+        let mut mib = [libc::CTL_KERN, libc::KERN_BOOTTIME];
+        let mut tv: libc::timeval = unsafe { std::mem::zeroed() };
+        let mut size = std::mem::size_of::<libc::timeval>();
+        // SAFETY: sysctl fills a caller-owned zeroed buffer; mib and size live
+        // in this frame and are read only during the call.
+        let done = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                2,
+                &mut tv as *mut _ as *mut libc::c_void,
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if done != 0 {
+            return None;
+        }
+        boot_ms_from(tv.tv_sec as i64, tv.tv_usec as i64)
+    })
+}
+
+/// Platforms with neither reader read absent, like every other bound.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn host_boot_epoch_ms() -> Option<i64> {
+    None
+}
+
+/// Boot epoch ms from a boot-time second count. A non-positive count is a
+/// failed reading, not "the host booted at the epoch".
+fn boot_ms_from(sec: i64, usec: i64) -> Option<i64> {
+    if sec <= 0 {
+        return None;
+    }
+    Some(sec * 1000 + usec / 1000)
 }

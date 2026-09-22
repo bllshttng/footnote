@@ -51,7 +51,11 @@ def runner() -> CliRunner:
 def journal(tmp_path: Path) -> Path:
     events = tmp_path / ".fno" / "events.jsonl"
     events.parent.mkdir(parents=True)
-    events.write_text(_pass_line() + "\n")
+    # Seed through the store: the reader answers committed rows, so a raw
+    # journal write never reaches the history the verb asserts on.
+    from fno.events import append_event
+
+    append_event(json.loads(_pass_line()), events)
     return events
 
 
@@ -84,9 +88,11 @@ def test_retract_revokes_the_named_pair_and_records_the_retractor(
     result = _invoke(runner, journal)
     assert result.exit_code == 0, result.stderr
 
-    lines = journal.read_text().splitlines()
-    assert len(lines) == 2
-    data = json.loads(lines[1])["data"]
+    from tests._event_rows import event_rows
+
+    rows = event_rows(journal)
+    assert len(rows) == 2
+    data = next(r["data"] for r in rows if "retracts_attester" in r["data"])
     assert data["verdict"] == "fail"
     assert data["retracts_attester"] == "sess-A"
     assert data["attester_session_id"] == "sess-operator"
@@ -134,7 +140,10 @@ def test_retract_refuses_the_identity_override_shape(
     result = _invoke(runner, journal)
     assert result.exit_code == 1
     assert "sess-true" in result.stderr and "sess-forged" in result.stderr
-    assert len(journal.read_text().splitlines()) == 1
+    # The refusal emits nothing: the store keeps exactly the seeded pass.
+    from tests._event_rows import event_rows
+
+    assert len(event_rows(journal)) == 1
 
 
 def test_retract_mirrors_the_revocation_to_the_global_log(
@@ -230,7 +239,9 @@ def test_retract_reaches_a_pass_that_lives_only_in_the_global_log(
     )
     capsys.readouterr()
     assert rc == 0, "a mirrored-only pass must be retractable, not refused"
-    assert "retracts_attester" in project.read_text(encoding="utf-8")
+    from tests._event_rows import event_rows
+
+    assert any("retracts_attester" in r["data"] for r in event_rows(project))
 
 
 # --- classify --attest: the review verb records its own round ----------------
@@ -323,10 +334,12 @@ def test_attest_measures_fail_on_blocking_findings(
 
     from fno.paths import project_log
 
+    from tests._event_rows import event_rows
+
     journal = project_log("events.jsonl", project_root=attest_env)
-    lines = [ln for ln in journal.read_text().splitlines() if ln.strip()]
-    assert len(lines) == 1, "the classify call is the whole emit; no second command"
-    event = json.loads(lines[0])
+    rows = event_rows(journal)
+    assert len(rows) == 1, "the classify call is the whole emit; no second command"
+    event = rows[0]
     assert event["type"] == "review_attestation"
     data = event["data"]
     assert data["verdict"] == "fail"
@@ -359,8 +372,10 @@ def test_attest_measures_pass_on_zero_blocking_findings(
 
     from fno.paths import project_log
 
+    from tests._event_rows import event_rows
+
     journal = project_log("events.jsonl", project_root=attest_env)
-    data = json.loads(journal.read_text().splitlines()[-1])["data"]
+    data = event_rows(journal)[-1]["data"]
     assert data["verdict"] == "pass"
     assert data["reviewer"] == "code-review"
     assert data["findings_blocking"] == 0

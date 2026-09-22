@@ -121,6 +121,16 @@ pub struct ProbeDecl {
 #[serde(deny_unknown_fields)]
 pub struct HarnessCapabilities {
     pub permission_bypass: Vec<String>,
+    /// The mux composer's effort-picker list. `None` = no effort surface at
+    /// all; `Some([])` = the axis exists but values are provider passthrough
+    /// (free text); a filled list is the enumerable choices. Absent on a row
+    /// whose authority names no surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub efforts: Option<Vec<String>>,
+    /// The mux composer's permission-picker list, same three states as
+    /// `efforts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_modes: Option<Vec<String>>,
     pub resume: String,
     pub autonomous_pane: bool,
     pub route_on_pane: bool,

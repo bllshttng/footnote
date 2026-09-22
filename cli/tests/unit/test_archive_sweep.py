@@ -251,14 +251,9 @@ def _with_events(tmp_path, monkeypatch):
 
 
 def _events_of_type(events_path: Path, type_name: str) -> list[dict]:
-    if not events_path.exists():
-        return []
-    out = []
-    for line in events_path.read_text().splitlines():
-        ev = json.loads(line)
-        if ev.get("type") == type_name:
-            out.append(ev)
-    return out
+    from tests._event_rows import event_rows
+
+    return [ev for ev in event_rows(events_path) if ev.get("type") == type_name]
 
 
 def test_dry_run_prints_all_four_buckets_zero_filled(tmp_path, monkeypatch):

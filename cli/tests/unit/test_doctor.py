@@ -1083,7 +1083,6 @@ def test_parse_field_meta_keys_broken_or_absent_returns_none() -> None:
 
 def _init_git_source(root: Path, registry_text: str) -> None:
     """Commit a registry.py into a throwaway git repo laid out like the cli source."""
-    import subprocess
 
     reg = root / "src" / "fno" / "config" / "registry.py"
     reg.parent.mkdir(parents=True)
@@ -2223,7 +2222,6 @@ def test_ac3_fr_fix_rust_only_stale_runs_refresh_never_raw_cargo(
 
 def _fake_run(returncode: int, stdout: str):
     """Build a subprocess.run stub returning a fixed CompletedProcess."""
-    import subprocess
 
     def _run(cmd, *args, **kwargs):
         return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr="")
@@ -2711,32 +2709,42 @@ def test_fix_skips_the_install_when_the_agent_is_already_there(
     runner.invoke(app, ["doctor", "--fix"])
 
 
-def test_agent_scan_parses_last_exit_not_current_state(
+def test_agent_scan_maps_the_rust_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A `-` in the PID column is normal for a periodic job; only col 2 counts."""
-    import subprocess as sp
+    """Doctor keeps the dead-list shape; the launchctl parse lives in the Rust fold."""
+    import fno.rust_binary as rust_binary
 
-    monkeypatch.setattr(doctor.sys, "platform", "darwin")
-    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/bin/launchctl")
-    listing = (
-        "PID\tStatus\tLabel\n"
-        "-\t0\tsh.fno.groom\n"
-        "-\t78\tsh.fno.pr-watcher\n"
-        "412\t0\tsh.fno.mux\n"
-        "-\t127\tcom.other.thing\n"
-        "-\t-\tsh.fno.idle\n"
+    stdout = json.dumps(
+        {
+            "launchd": {
+                "applicable": True,
+                "dead": [{"label": "com.user.autocorrect-watcher", "exit": 78}],
+            }
+        }
     )
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: Path("/bin/true"))
     monkeypatch.setattr(
         doctor.subprocess,
         "run",
-        lambda *a, **kw: sp.CompletedProcess(a[0], 0, listing, ""),
+        lambda *a, **kw: subprocess.CompletedProcess(a[0], 1, stdout, ""),
     )
     report = doctor._launch_agent_failures()
     assert report["applicable"] is True
-    assert report["dead"] == [{"label": "sh.fno.pr-watcher", "exit": 78}], (
-        "only nonzero-exit sh.fno.* labels count; foreign labels and `-` do not"
+    assert report["dead"] == [{"label": "com.user.autocorrect-watcher", "exit": 78}], (
+        "exit 1 is the table's red verdict; the payload still parses, and the "
+        "autocorrect labels the old sh.fno. prefix filter missed now count"
     )
+
+
+def test_agent_scan_refuses_closed_without_a_binary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable fold reads not-applicable and fabricates no alarm."""
+    import fno.rust_binary as rust_binary
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
+    assert doctor._launch_agent_failures() == {"applicable": False, "dead": []}
 
 
 def test_never_run_remedy_is_platform_appropriate(monkeypatch: pytest.MonkeyPatch) -> None:

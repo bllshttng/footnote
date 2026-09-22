@@ -559,7 +559,7 @@ async fn recovery_stamps_a_failed_codex_thread_resume_orphaned() {
         registry.entries.push(entry);
     })
     .unwrap();
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
     recover_codex_threads(&ctx).await;
     let registry = load_registry_offloaded(home.registry_json())
         .await
@@ -587,7 +587,7 @@ async fn recovery_refuses_a_codex_thread_row_whose_cwd_is_gone() {
     let received = std::sync::Arc::clone(&behavior.received);
     with_fake_codex_daemon(behavior, async {
         let home = tmp_home("codex-recover-live-cwd");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let worktree = home.root().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         state::update_registry(&home.registry_json(), |registry| {
@@ -634,7 +634,7 @@ async fn recovery_refuses_a_codex_thread_row_whose_cwd_is_gone() {
     let received = std::sync::Arc::clone(&behavior.received);
     with_fake_codex_daemon(behavior, async {
         let home = tmp_home("codex-recover-gone-cwd");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         state::update_registry(&home.registry_json(), |registry| {
             let mut entry = thread_entry("t-gone", AgentStatus::Live, None);
             entry.cwd = "/nonexistent-cwd-for-gone-f313".into();
@@ -864,7 +864,7 @@ async fn codex_thread_lane_refuses_a_provider_it_cannot_serve() {
 async fn handle_spawn_thread_absent_provider_defaults_to_codex_lane() {
     with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
         let home = tmp_home("spawn-thread-default-provider");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let worktree = home.root().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         let req = Request::new(
@@ -915,7 +915,7 @@ async fn spawn_codex_thread_for_test(ctx: &Ctx, home: &AgentsHome, seed: &str) -
 async fn codex_thread_ask_while_driving_steers_instead_of_queueing() {
     with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
         let home = tmp_home("codex-steer");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "seed turn").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
 
@@ -956,7 +956,7 @@ async fn a_seedless_codex_thread_spawn_takes_the_warmup_turn() {
     let received = std::sync::Arc::clone(&behavior.received);
     with_fake_codex_daemon(behavior, async {
         let home = tmp_home("codex-warmup");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         // Seedless: the spawn request carries no message at all.
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
@@ -1003,7 +1003,7 @@ async fn a_seeded_codex_thread_spawn_drives_its_own_seed_only() {
     let received = std::sync::Arc::clone(&behavior.received);
     with_fake_codex_daemon(behavior, async {
         let home = tmp_home("codex-real-seed");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "do the actual work").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
 
@@ -1050,7 +1050,7 @@ async fn a_seeded_codex_thread_spawn_drives_its_own_seed_only() {
 async fn codex_thread_stop_interrupts_and_stamps_exited_without_killing_the_daemon() {
     with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::long(), async {
         let home = tmp_home("codex-stop");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "long seed turn").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
         let registry = load_registry_offloaded(home.registry_json())
@@ -1141,7 +1141,7 @@ async fn codex_thread_stop_refuses_over_a_turn_the_interrupt_never_settled() {
         std::env::set_var("FNO_CODEX_INTERRUPT_BOUND_MS", "1500");
         let _bound = BoundGuard;
         let home = tmp_home("codex-zombie-stop");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "long seed turn").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
         await_driving_turn(&ctx, "t").await;
@@ -1187,7 +1187,7 @@ async fn codex_thread_ask_returns_in_flight_when_turn_exceeds_bound() {
     with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::long(), async {
         std::env::set_var("FNO_CODEX_ASK_WAIT_MS", "200");
         let home = tmp_home("codex-inflight");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "long seed turn").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
         await_driving_turn(&ctx, "t").await;
@@ -1230,7 +1230,7 @@ async fn codex_thread_ask_returns_in_flight_when_turn_exceeds_bound() {
 async fn switchboard_to_codex_thread_delivers_on_steering_ack_mid_turn() {
     with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
         let home = tmp_home("codex-mail");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "seed turn").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
         let registry = load_registry_offloaded(home.registry_json())
@@ -1296,7 +1296,7 @@ async fn switchboard_to_codex_thread_delivers_on_steering_ack_mid_turn() {
 async fn switchboard_to_idle_codex_thread_delivers_on_start_ack() {
     with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
         let home = tmp_home("codex-mail-idle");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         // No seed: the row is idle at mail time.
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
@@ -1339,7 +1339,7 @@ async fn switchboard_to_idle_codex_thread_delivers_on_start_ack() {
 async fn codex_thread_row_reports_working_then_done_with_no_pane() {
     with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
         let home = tmp_home("codex-inside-leg-e2e");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "seed turn").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
         await_driving_turn(&ctx, "t").await;
@@ -1394,7 +1394,7 @@ async fn codex_thread_working_report_refreshes_while_the_turn_drives() {
         std::env::set_var("FNO_THREAD_TURN_REFRESH_MS", "100");
         let _refresh = RefreshGuard;
         let home = tmp_home("codex-inside-leg-refresh");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "long seed turn").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
         await_driving_turn(&ctx, "t").await;
@@ -1454,7 +1454,7 @@ async fn codex_thread_resume_writes_above_the_row_seq() {
         registry.entries.push(entry);
     })
     .unwrap();
-    let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+    let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
     let entry = state::load_registry(&home.registry_json())
         .unwrap()
         .find("t-seq")
@@ -1695,7 +1695,7 @@ async fn codex_thread_spawn_carries_harness_args_config_add_dir_and_effort() {
     let received = std::sync::Arc::clone(&behavior.received);
     with_fake_codex_daemon(behavior, async {
         let home = tmp_home("codex-harness-args");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let worktree = home.root().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         let req = Request::new(
@@ -1793,7 +1793,7 @@ async fn codex_thread_spawn_without_harness_args_keeps_todays_frames() {
     let received = std::sync::Arc::clone(&behavior.received);
     with_fake_codex_daemon(behavior, async {
         let home = tmp_home("codex-no-harness-args");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let spawned = spawn_codex_thread_for_test(&ctx, &home, "seed turn").await;
         assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
 
@@ -1839,7 +1839,7 @@ async fn recovery_resume_carries_the_stored_config() {
     let received = std::sync::Arc::clone(&behavior.received);
     with_fake_codex_daemon(behavior, async {
         let home = tmp_home("codex-resume-config");
-        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
         let worktree = home.root().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         let req = Request::new(

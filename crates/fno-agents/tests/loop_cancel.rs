@@ -92,8 +92,7 @@ impl Dispatcher for TerminatingDispatcher {
 }
 
 fn read_events(path: &Path) -> Vec<serde_json::Value> {
-    fs::read_to_string(path)
-        .unwrap_or_default()
+    fno_agents::event_store::journal_text(path, &[])
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect()
