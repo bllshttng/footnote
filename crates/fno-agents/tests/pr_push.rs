@@ -75,6 +75,9 @@ case "$1" in
       *--merges*)
         if [ -f "$D/remote-only-merge" ]; then echo "m1234567 b0000000 m0000000"; fi
         exit 0 ;;
+      *--cherry-pick*)
+        if [ -f "$D/remote-only" ]; then echo abc1234; fi
+        exit 0 ;;
       *--format=*)
         if [ -f "$D/bad-commit-msg" ]; then
           printf 'abc1234\037per d-deadbeef we ruled\036'
