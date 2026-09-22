@@ -590,7 +590,9 @@ mod tests {
     }
 
     fn journal_text(root: &Path) -> String {
-        std::fs::read_to_string(root.join(".fno/events.jsonl")).unwrap_or_default()
+        // Writes commit to the store beside the journal; the raw file is
+        // never appended, so tests read committed rows.
+        crate::events::committed_journal_text(&root.join(".fno/events.jsonl"))
     }
 
     const QUESTION_FILE: &str = "\
