@@ -1802,7 +1802,12 @@ fn handle_export_now(state: &StoreState) -> Result<Value, StoreError> {
 }
 
 fn handle_export_status(state: &StoreState) -> Result<Value, StoreError> {
-    if state.backend() != Backend::Sqlite {
+    if state.backend() != Backend::Sqlite && crate::backlog::database_path(&state.graph).exists() {
+        // Only an explicit json NAME in graph_meta is the rollback door. An
+        // absent db is the store before its first open: answering json here
+        // flips to sqlite on the next request (the first read materializes
+        // the db), and an identity keyed on this probe - the king drain
+        // memo - strands a json-stat identity that can never hit again.
         return Ok(json!({"backend": "json", "stale": false}));
     }
     let (current, exported) =

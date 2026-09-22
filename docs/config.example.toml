@@ -113,6 +113,8 @@ python_repair_added_lines = 30
 id_hex_width = 8
 # Age (days) before an unmoved ready node is quarantined from selection.
 staleness_days = 21
+# Most open children an epic may hold. A write that would parent one more open child under a full epic is refused and names the new-epic verb. Unset means no cap. The graph store reads it from the config.toml beside graph.json, the global config on a default install.
+# epic_max_open_children = <unset>   # optional; no default
 # Auto-rendered projections (GLOBAL config file only): every graph mutation re-renders each {path, scope, projection=local|backlog|roadmap} target; public targets use the leak gate and local is full-detail.
 render_targets = []
 # Seconds an open local board or reign.html tab waits, visible and untouched, before it reloads itself (default 60; 0 is off).
