@@ -1344,8 +1344,7 @@ def resolve_dispatch(
     ``claude``; substrate explicit > config > per-harness default; command
     explicit > lifecycle derivation > node ``verb`` (allowlist-checked;
     a graph field is a trust boundary) > ``config.dispatch.command`` >
-    per-harness builtin. ``lifecycle`` is the ported verb decision, (verb,
-    note) from the backlog_ready.rs table; it runs BEFORE the
+    per-harness builtin. ``lifecycle`` (the ported decision) runs BEFORE the
     stage-table read so ``agents.profiles.<derived-verb>`` drives the harness;
     an explicit command bypasses it (reconcile and the other explicit doors
     spell their own verb). ``brief`` rides ``env['TARGET_BRIEF']`` only, capped
