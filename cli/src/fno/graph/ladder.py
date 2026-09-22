@@ -108,9 +108,7 @@ class Rung(Enum):
     ``idea``: ``NONE`` (nothing on disk) is COLD-DISPATCHABLE - the derived
     verb authors the plan (low -> ``/target``, medium/high -> ``/blueprint``)
     - while ``IDEA`` (a linked-but-undesigned decompose scaffold) needs warm
-    inline-fill, so it stays gated behind ``--include-ideas``. See
-    :func:`is_cold_dispatchable` and the ported lifecycle table in
-    ``crates/fno-agents/src/backlog_ready.rs``.
+    inline-fill, so it stays gated behind ``--include-ideas``.
     """
 
     NONE = "none"  # no usable plan_path - nothing on disk

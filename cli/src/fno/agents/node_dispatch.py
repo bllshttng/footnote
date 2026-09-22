@@ -124,9 +124,7 @@ def resolve_node_spawn(
         str(node.get("dispatch_verb") or "").strip() if isinstance(node, dict) else ""
     )
     # the verb code resolves (and refuses) BEFORE the resolver.
-    verb_code = "t" if is_reconcile else verb_code_for(
-        effective_verb or node_verb or declared_verb
-    )
+    verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb)
     # A node's own raw pin is a sanctioned source (route_resolve reads the same
     # field), so fold it in before the grid consult: the gate below must see
     # every pin the node carries, whatever its door passed.
@@ -430,7 +428,6 @@ def find_node_row(node: str) -> Optional[dict]:
 
 
 def _verb_answer(row: Optional[dict], *, node_id: Optional[str] = None) -> tuple:
-    """(verb, note) from the ported lifecycle table; refusal raises."""
     from fno.agents.harness_map import DispatchResolveError
     from fno.graph.store import GRAPH_JSON, _client_for
 

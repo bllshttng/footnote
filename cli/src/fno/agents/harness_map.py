@@ -1362,7 +1362,6 @@ def resolve_dispatch(
     unsubstituted command, or an unanswerable node lifecycle.
     ``dispatch_cfg`` overrides the config read (for tests)."""
     decision: list[str] = []
-    # The ported lifecycle answer (verb, note) lands BEFORE the config read.
     lifecycle_verb: Optional[str] = None
     if command is None or not command.strip():
         if lifecycle is not None:
