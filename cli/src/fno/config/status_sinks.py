@@ -129,7 +129,7 @@ class StatusSinkConfig(BaseModel):
 
 
 class ReachMeRow(BaseModel):
-    """One ``[[reach_me]]`` row: where questions reach the user. The Rust attention arm reads the same key."""
+    """One ``[[attention]]`` row: where questions reach the user. The Rust attention arm reads the same key (the retired ``[[reach_me]]`` name reads for one release)."""
 
     model_config = ConfigDict(extra="allow")
 

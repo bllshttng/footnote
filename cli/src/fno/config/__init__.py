@@ -3917,20 +3917,35 @@ class ConfigBlock(BaseModel):
     loops: dict[str, LoopEntry] = Field(default_factory=dict)
     status_sinks: list[StatusSinkConfig] = Field(default_factory=list)
     status_fanout: StatusFanoutConfig = Field(default_factory=StatusFanoutConfig)
-    reach_me: list[ReachMeRow] = Field(default_factory=list)
+    attention: list[ReachMeRow] = Field(default_factory=list)
     king: KingBlock = Field(default_factory=KingBlock)
     accounts: AccountsBlock = Field(default_factory=AccountsBlock)
 
-    @field_validator("reach_me", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _coerce_reach_me(cls, v: object) -> object:
+    def _lift_legacy_reach_me(cls, data: object) -> object:
+        """``[[reach_me]]`` is the retired name of ``[[attention]]``; it reads
+        for one release, and loading it warns and names the new key."""
+        if not isinstance(data, dict) or "reach_me" not in data:
+            return data
+        if data.get("attention") is None:
+            _LOG.warning(
+                "config key [[reach_me]] is now [[attention]]; rename it "
+                "(the old name reads for one release)"
+            )
+            data["attention"] = data.pop("reach_me")
+        return data
+
+    @field_validator("attention", mode="before")
+    @classmethod
+    def _coerce_attention(cls, v: object) -> object:
         """Fail-safe like ``status_sinks``: wrong shape degrades to [] with a warning."""
         if isinstance(v, list):
             return v
         if v is not None:
             _LOG.warning(
-                "config.reach_me is %s, not an array of tables - ignoring it "
-                "(use [[reach_me]], not [reach_me.<name>])",
+                "config.attention is %s, not an array of tables - ignoring it "
+                "(use [[attention]], not [attention.<name>])",
                 type(v).__name__,
             )
         return []
