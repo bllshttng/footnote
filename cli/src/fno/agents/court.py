@@ -193,7 +193,7 @@ def find_presiding_crown(
     return None
 
 
-def gather_court(rows: Optional[list] = None, *, agree: bool = True) -> dict[str, Any]:
+def gather_court(rows: Optional[list] = None, *, agree: Optional[bool] = True) -> dict[str, Any]:
     """The whole court: every crown, its verdict, and any territorial conflict.
 
     ``rows`` overrides the live registry read for callers that already hold
