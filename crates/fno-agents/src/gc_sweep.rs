@@ -1961,41 +1961,14 @@ pub(crate) fn run_with_release(
         // non-empty ended_at) rides beside them. A quiet replanning worker
         // dispatched onto a node a previous blueprint moved to `ready`
         // inherits no completion it did not write.
-        let is_planning = graph
-            .phases
-            .get(&sid.to_ascii_lowercase())
-            .is_some_and(|phases| phases.iter().any(|p| p == "blueprint" || p == "think"))
-            || crate::naming::is_blueprint_name(&e.name);
-        let planning = if is_planning {
-            Some(
-                graph
-                    .index
-                    .get(&sid.to_ascii_lowercase())
-                    .cloned()
-                    .unwrap_or_default(),
-            )
-        } else {
-            None
-        };
-        let planning_closed = if is_planning {
-            graph
-                .closed_planning
-                .get(&sid.to_ascii_lowercase())
-                .map(|set| set.iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        // Marker 2 (d-81c6da7e): the nodes where THIS session wrote the
-        // plan - the second finished marker, beside the closed set.
-        let planning_plan_written = if is_planning {
-            graph
-                .plan_written
-                .get(&sid.to_ascii_lowercase())
-                .map(|set| set.iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
+        let planning = crate::planning_lane::signals(graph, sid, &e.name);
+        let (planning, planning_closed, planning_plan_written) = match planning {
+            Some(signals) => (
+                Some(signals.assignments),
+                signals.closed,
+                signals.plan_written,
+            ),
+            None => (None, Vec::new(), Vec::new()),
         };
         // changes 1, 3 and 6: the session-shaped releases. The
         // harness's terminal state, a live newer peer on the same node, a
