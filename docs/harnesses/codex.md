@@ -164,7 +164,21 @@ transcript marker, then runs
 carries claim heartbeat/context monitoring, compact handoff hooks, subagent
 guards, and the PreToolUse state/git protection guards.
 
+Codex provider goals are a separate controller surface. The provider goal
+receipt proves the objective and continuation owner; the Footnote `Stop`
+receipt separately proves that the loop hook can drive the next turn. Treat the
+verified provider goal as primary continuation state, but never infer Stop from
+it. A readable quiet state parks by pausing the goal and preserving its
+objective; it does not clear the goal or create a replacement session.
+
 Every Codex `Stop` handler must exit 0 with empty stdout or one Stop JSON object. Exit 2 with non-empty stderr is a block. Plain text fails the hook, and `cli/tests/hooks/test_codex_stop_output_contract.py` enforces it.
+
+Raw mail to an app-server Codex thread is not a prompt-line transport. Declared
+native non-review commands such as `/compact`, `/model`, and `/status` are
+refused with the controller replacement. Ordinary wrapped text continues over
+the turn transport, and `/review` continues over structured `review/start`.
+Use provider-backed compact and goal receipts. Manual Escape followed by
+`/compact` is a fallback only for a measured mux-hosted pane.
 
 Do not copy the full Claude hook manifest into Codex. Codex does not support every
 Claude lifecycle event in `hooks/hooks.json`; `WorktreeCreate`, `CwdChanged`,

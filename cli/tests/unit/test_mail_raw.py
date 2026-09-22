@@ -605,12 +605,11 @@ def test_raw_refuses_unparsed_codex_review_remainder_before_rpc(
     assert "unrecognized remainder ignored" not in err
 
 
-@pytest.mark.parametrize("payload", ["/compact", "/reviewboard"])
+@pytest.mark.parametrize("payload", ["/reviewboard"])
 def test_raw_delivers_non_review_payload_to_codex_daemon(
     mailbox, monkeypatch, capsys, payload
 ):
-    """A codex app-server thread takes any payload over turn/start (x-4a68);
-    only review verbs keep review/start."""
+    """Unknown raw text still uses Codex turn/start; reviews use review/start."""
     from fno.mail.cli import _raw_send
 
     _seed_codex_app_server(mailbox, monkeypatch)
@@ -630,6 +629,49 @@ def test_raw_delivers_non_review_payload_to_codex_daemon(
     assert capsys.readouterr().out.strip() == "injected"
     assert calls == [(SID_CODEX, payload)]
     assert not review_calls
+
+
+@pytest.mark.parametrize("payload", ["/compact", "/model", "/status"])
+def test_raw_refuses_codex_native_non_review_command_with_controller_replacement(
+    mailbox, monkeypatch, capsys, payload
+):
+    """AC5-HP: app-server raw mail cannot pretend to be Codex's prompt line."""
+    from fno.mail.cli import _raw_send
+
+    _seed_codex_app_server(mailbox, monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_codex",
+        lambda session, text, **_k: calls.append((session, text)) or True,
+    )
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("codexpeer", payload, self_ok=False)
+
+    assert exc.value.exit_code != 0
+    assert calls == []
+    err = capsys.readouterr().err
+    assert "declared Codex native command" in err
+    assert "fno agents ask codexpeer" in err
+
+
+def test_raw_check_refuses_codex_native_non_review_command(
+    mailbox, monkeypatch, capsys
+):
+    """AC5-ERR: --check reports the same refusal without injecting anything."""
+    from fno.mail.cli import _raw_send
+
+    _seed_codex_app_server(mailbox, monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_codex",
+        lambda *args, **_kwargs: calls.append(args) or True,
+    )
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("codexpeer", "/compact", self_ok=False, check=True)
+
+    assert exc.value.exit_code == 1
+    assert calls == []
+    assert "not-injectable" in capsys.readouterr().out
 
 
 def test_raw_delivers_codex_verb_to_codex_daemon(mailbox, monkeypatch, capsys):
