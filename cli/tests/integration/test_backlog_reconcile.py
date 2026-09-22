@@ -526,7 +526,8 @@ def test_forward_dead_cwd_no_repo_context_is_error(tmp_path, monkeypatch):
 
 
 def test_reverse_map_existing_cwd_skips_resolver(tmp_path, monkeypatch):
-    """AC3-EDGE: a live recorded cwd is used as-is; the resolver never runs."""
+    """AC3-EDGE: a live recorded checkout cwd is used as-is; the resolver never
+    runs (x-b59f: the cwd must BE a checkout - a bare existing dir resolves)."""
     import fno.graph._intake as intake
 
     def _no_resolve(project):
@@ -541,11 +542,68 @@ def test_reverse_map_existing_cwd_skips_resolver(tmp_path, monkeypatch):
         return [{"number": 7, "url": "u7", "headRefName": "feature/ab-live",
                  "mergedAt": "2026-07-08T00:00:00Z"}]
 
-    live = str(tmp_path)  # exists on disk
+    live_dir = tmp_path / "live-checkout"
+    live_dir.mkdir()
+    (live_dir / ".git").mkdir()  # a checkout
+    live = str(live_dir)
     entries = [_node("ab-live", cwd=live, project="whatever")]
     records = scan_merge_drift(entries, list_merged=_spy)
     assert seen["cwd"] == live
     assert len(records) == 1 and records[0].pr_number == 7
+
+
+def test_reverse_map_non_checkout_cwd_falls_back_to_project_root(tmp_path, monkeypatch):
+    """AC1-HP (x-b59f): a recorded cwd that EXISTS but is not a git checkout
+    (a node filed from /private/tmp) reverse-maps from the project root."""
+    import fno.graph._intake as intake
+
+    root = tmp_path / "proj-root"
+    root.mkdir()
+    (root / ".git").mkdir()  # a checkout
+    monkeypatch.setattr(
+        intake, "project_root_from_settings",
+        lambda project: str(root) if project == "myproj" else None,
+    )
+
+    seen: dict = {}
+
+    def _spy(**kw):
+        seen["cwd"] = kw.get("cwd")
+        return [{"number": 5, "url": "u5", "headRefName": "feature/ab-stray",
+                 "mergedAt": "2026-07-08T00:00:00Z"}]
+
+    stray_dir = tmp_path / "stray"  # exists, no .git
+    stray_dir.mkdir()
+    entries = [_node("ab-stray", cwd=str(stray_dir), project="myproj")]
+    records = scan_merge_drift(entries, list_merged=_spy)
+    assert seen["cwd"] == str(root)  # resolved root, not the stray cwd
+    assert len(records) == 1 and records[0].closeable
+    assert records[0].pr_number == 5
+
+
+def test_reverse_map_non_checkout_cwd_unresolvable_keeps_cwd(tmp_path, monkeypatch):
+    """AC2-ERR (x-b59f): a non-checkout cwd whose project maps to no root keeps
+    its cwd; the gh failure from it still lands as an error record."""
+    import fno.graph._intake as intake
+    monkeypatch.setattr(intake, "project_root_from_settings", lambda project: None)
+
+    seen: dict = {}
+
+    def _boom(**kw):
+        seen["cwd"] = kw.get("cwd")
+        raise rec.ReconcileError(
+            "gh pr list (merged) failed (rc=1): failed to run git: "
+            "fatal: not a git repository (or any of the parent directories)"
+        )
+
+    stray_dir = tmp_path / "stray"
+    stray_dir.mkdir()
+    entries = [_node("ab-stray2", cwd=str(stray_dir), project="nomap")]
+    records = scan_merge_drift(entries, list_merged=_boom)
+    assert seen["cwd"] == str(stray_dir)  # unmapped project: cwd unchanged
+    assert len(records) == 1
+    assert not records[0].closeable
+    assert "not a git repository" in records[0].error
 
 
 def test_reverse_map_gone_cwd_same_project_one_call(tmp_path, monkeypatch):
@@ -590,10 +648,17 @@ def test_effective_reconcile_cwd(tmp_path, monkeypatch):
         lambda project: str(real_root) if project == "p" else None,
     )
 
-    live = str(tmp_path)  # exists on disk
+    live_dir = tmp_path / "live-checkout"
+    live_dir.mkdir()
+    (live_dir / ".git").mkdir()  # a checkout
+    live = str(live_dir)
+    stray_dir = tmp_path / "stray"  # exists, not a checkout
+    stray_dir.mkdir()
     gone = str(tmp_path / "gone-wt")
 
-    assert rec._effective_reconcile_cwd(live, "p") == live          # live -> untouched
+    assert rec._effective_reconcile_cwd(live, "p") == live          # live checkout -> untouched
+    assert rec._effective_reconcile_cwd(str(stray_dir), "p") == str(real_root)  # non-checkout -> project root
+    assert rec._effective_reconcile_cwd(str(stray_dir), "other") == str(stray_dir)  # unmapped -> original
     assert rec._effective_reconcile_cwd(gone, "p") == str(real_root)  # gone -> project root
     assert rec._effective_reconcile_cwd(gone, "other") == gone      # unmapped -> original
 
