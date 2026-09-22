@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from fno.config import AutoMergeBlock
 from fno.pr import _merge
 from fno.pr._merge_grant import (
@@ -262,8 +264,6 @@ def test_manifest_arm_ignores_the_durable_receipt(tmp_path, monkeypatch, capsys)
         "coverage_verdict",
         lambda pr, repo, recompute=False: (_coverage_gate.COVERED, "", "abc123", ""),
     )
-    monkeypatch.setattr(_merge, "_plan_path_for_pr", lambda pr, repo=None: None)
-    monkeypatch.setattr(_merge, "_live_lane_count", lambda: 0)
     monkeypatch.setattr(_base_lineage, "lineage_verdict", lambda pr, cwd: ("ok", ""))
 
     seen: dict = {}

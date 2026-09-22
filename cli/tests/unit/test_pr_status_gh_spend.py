@@ -90,6 +90,30 @@ class _FakeGh:
         except json.JSONDecodeError:
             return SimpleNamespace(returncode=2, stdout="", stderr="bad payload")
         op = payload.get("op")
+        if op == "status-cache-key":
+            # The mint hashes live machine state; this world has no hold, no
+            # slots, and no review evidence, so the honest answer is the
+            # head-only key the row helpers below address.
+            return self._json(
+                {
+                    "key": (
+                        f"owner--repo-{payload.get('pr')}-"
+                        f"{str(payload.get('head_sha'))[:12]}"
+                    )
+                }
+            )
+        if payload.get("effect") == "preview":
+            # The one merge decision: a red supplied verdict holds; anything
+            # else clears, exactly the wire shape the status read renders.
+            held = payload.get("verdict") not in (None, "green")
+            blockers = (
+                [{"code": "ci_red", "class": "refused", "detail": "fake"}]
+                if held
+                else []
+            )
+            return self._json(
+                {"outcome": "held" if held else "authorized", "blockers": blockers}
+            )
         if op == "status-failure-cause":
             return self._json({"items": [{"cause": None}] * len(payload.get("items") or [])})
         if op == "status-merge-blocker":
@@ -380,8 +404,9 @@ def test_f6_miss_sends_at_most_15_spawns(gh, capsys):
     assert len(c["logs"]) == 5 and len(c["jobs"]) == 5
     assert not c["other"]
     # One fno-agents cause read per detailed failure (MAX_DETAILED_FAILURES),
-    # not a gh spawn: the class is bounded, never unclassified.
-    assert len(c["agents"]) == 5
+    # plus the preview ask and the row-key mint, not a gh spawn: the class is
+    # bounded, never unclassified.
+    assert len(c["agents"]) == 7
     assert json.loads(capsys.readouterr().out)["verdict"] == "red"
 
 
@@ -392,8 +417,11 @@ def test_f6_second_read_inside_ttl_spends_exactly_one(gh, capsys):
     before = len(gh.argvs)
     assert _cache.cached_status("42") == 1
     calls = _classes(gh.since(before))
-    assert len(gh.since(before)) == 1, "the head read is the only spawn"
-    assert calls["pulls"] == 1
+    # The row key is minted on every call, hit or miss: one cheap local
+    # fno-agents spawn beside the single gh head read. No other read reruns.
+    assert calls["pulls"] == 1, "the head read is the only gh spawn"
+    assert len(calls["agents"]) == 1, "the mint is the one local spawn"
+    assert not calls["logs"] and not calls["jobs"] and not calls["checks"]
     capsys.readouterr()
 
 
@@ -406,7 +434,10 @@ def test_f6_same_head_refresh_reuses_failure_detail_by_job_id(gh, capsys):
     assert _cache.cached_status("42") == 1
     calls = _classes(gh.since(before))
     assert len(calls["logs"]) == 0 and len(calls["jobs"]) == 0
-    assert len(gh.since(before)) <= 5
+    # The re-read budget: the same gh reads as before (pulls, status for the
+    # rerun facts), plus the two sanctioned local spawns the port added (the
+    # row-key mint and the preview ask). Logs and jobs stay at zero above.
+    assert len(gh.since(before)) <= 6
     second = json.loads(capsys.readouterr().out)
     assert second["failures"] == first["failures"]
 

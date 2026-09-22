@@ -1319,7 +1319,9 @@ def run_execute_queue(
                 counts["held"] += 1
                 entry["retries"] = prior_retries
                 bare = _merge.reason_after_outcome(reason)
-                if bare.startswith(_merge.ALREADY_TERMINAL):
+                # Terminal answers: decide's wording and the retired pre-gate's.
+                if (bare.startswith(_merge.ALREADY_TERMINAL)
+                        or "already merged" in bare or "already closed" in bare):
                     entry["last_seen_state"] = "NOT_OPEN"
                 store.set(key, entry)
                 _grant("held", pr, cand, grant_fields, reason=reason)
