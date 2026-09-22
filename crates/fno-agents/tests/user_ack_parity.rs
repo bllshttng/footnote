@@ -10,7 +10,7 @@
 //! matches the same shape, and it additionally lands one user_ask_answered
 //! row (covered by unit tests in operator_turns.rs).
 
-use common::{assert_golden, golden_dir, Golden};
+use common::{assert_golden, Golden};
 use fno_agents::operator_turns::ack_turn;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -52,7 +52,7 @@ fn normalized_row(dir: &Path, session: &str) -> String {
     )
 }
 
-fn golden_of(dir: &Path, session: &str) -> Golden {
+fn golden_of(dir: &Path, _session: &str) -> Golden {
     Golden {
         exit: Some(0),
         streams: vec![normalized_row(dir, "s")],

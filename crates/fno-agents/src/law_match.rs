@@ -117,11 +117,11 @@ pub(crate) struct ExactHit {
 }
 
 #[derive(Serialize)]
-struct NearbyHit {
-    decision_id: String,
-    subject: String,
-    decision: String,
-    shared: Vec<String>,
+pub(crate) struct NearbyHit {
+    pub(crate) decision_id: String,
+    pub(crate) subject: String,
+    pub(crate) decision: String,
+    pub(crate) shared: Vec<String>,
 }
 
 #[derive(Serialize)]

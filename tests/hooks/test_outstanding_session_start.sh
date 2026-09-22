@@ -56,7 +56,13 @@ check() {
 }
 
 run_hook() {
-    FNO_HOME="$TMP/home" PATH="$STUB:$PATH" bash "$HOOK" 2>/dev/null
+    FNO_HOME="$TMP/home" PATH="$STUB:$PATH" bash "$HOOK" 2>"$TMP/hook-err"
+    local rc=$?
+    if [[ -s "$TMP/hook-err" ]]; then
+        printf '[hook stderr rc=%s] %s\n' "$rc" "$(cat "$TMP/hook-err")" >&2
+    elif [[ $rc -ne 0 ]]; then
+        printf '[hook rc=%s, no stderr]\n' "$rc" >&2
+    fi
 }
 
 write_cache() {
