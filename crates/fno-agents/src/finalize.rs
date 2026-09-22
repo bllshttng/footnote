@@ -4858,6 +4858,18 @@ mod tests {
         let events = crate::paths::events_path(cwd);
         crate::event_store::append_envelope(&events, &old, None).unwrap();
         crate::event_store::append_envelope(&events, &new, None).unwrap();
+        let rows = crate::event_store::query_events(
+            &events,
+            &crate::event_store::EventQuery::of_types(&["review_coverage"]),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2, "both rows committed, oldest first");
+        assert_eq!(
+            rows[1].line.contains("\"reviewed_count\":3"),
+            true,
+            "seq order puts the covered row last: {}",
+            rows[1].line
+        );
         assert!(
             coverage_satisfied_in_latest_event(cwd),
             "the store-only covered row satisfies"

@@ -48,8 +48,8 @@ fn fixture(paths: &Paths) {
     write(&paths.delivery, &delivery_text);
     // The open row's failure detail, as the merge phase committed it.
     for line in [
-        r#"{"ts":"2026-09-16T15:29:00Z","type":"unrelated","data":{"pr":101}}"#,
-        r#"{"ts":"2026-09-16T15:29:30Z","type":"merge_grant_execution","data":{"phase":"failed","actor":"pr-watch","pr":101,"exit_code":1}}"#,
+        r#"{"ts":"2026-09-16T15:29:00Z","type":"unrelated","source":"test","data":{"pr":101}}"#,
+        r#"{"ts":"2026-09-16T15:29:30Z","type":"merge_grant_execution","source":"pr-watch","data":{"phase":"failed","actor":"pr-watch","pr":101,"exit_code":1}}"#,
     ] {
         crate::event_store::append_envelope(&paths.events, line, None).unwrap();
     }

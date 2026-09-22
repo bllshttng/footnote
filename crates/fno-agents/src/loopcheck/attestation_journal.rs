@@ -385,7 +385,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project-events.jsonl");
         let global = dir.path().join("global-events.jsonl");
-        let line = global_attest_line("t1", "aaaaaaaaaa", "feature/x", "github.com/o/r");
+        let line = global_attest_line(
+            "2026-09-17T17:11:47Z",
+            "aaaaaaaaaa",
+            "feature/x",
+            "github.com/o/r",
+        );
         crate::event_store::append_envelope(&global, &line, None).unwrap();
         let merged = super::super::review_journal_text(&project, &global, "github.com/o/r");
         assert!(merged.contains("aaaaaaaaaa"), "{merged}");

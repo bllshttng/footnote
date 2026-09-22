@@ -4319,7 +4319,7 @@ echo '[]'
             .map(|n| format!(",\"node_id\":\"{n}\""))
             .unwrap_or_default();
         let row = format!(
-            "{{\"ts\":\"2026-09-17T12:00:00Z\",\"type\":\"pr_heal_flake\",\"data\":{{\"key_guard\":\"old:1:ci\",\"key\":\"ci\",\"sha\":\"old\",\"run_id\":\"1\",\"check\":\"ci\"{node_json}}}}}"
+            "{{\"ts\":\"2026-09-17T12:00:00Z\",\"type\":\"pr_heal_flake\",\"source\":\"heal\",\"data\":{{\"key_guard\":\"old:1:ci\",\"key\":\"ci\",\"sha\":\"old\",\"run_id\":\"1\",\"check\":\"ci\"{node_json}}}}}"
         );
         let path = dir.join("events.jsonl");
         crate::event_store::append_envelope(&path, row.trim_end(), None).unwrap();
