@@ -186,7 +186,7 @@ fn projection(text: &str) -> Value {
 
 /// The Python fold on the state-equivalent fixture; capture mode only.
 /// Prints `outcome|projection` on stdout, panics with its stderr otherwise.
-fn python_leg(keys: &[&str], identities: &[&str], empty: bool, dir: &Path) -> String {
+fn python_leg(keys: &[&str], identities: &[&str], empty: bool, dir: &Path) -> Golden {
     let store = dir.join("py-questions.jsonl");
     std::fs::remove_file(&store).ok();
     seed_question_rows(&store, keys);
@@ -250,7 +250,10 @@ sys.stderr.write(outcome + "\n")
     );
     let outcome = String::from_utf8_lossy(&out.stderr).trim().to_string();
     let projection = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    format!("{outcome}|{projection}")
+    Golden {
+        exit: None,
+        streams: vec![format!("{outcome}|{projection}")],
+    }
 }
 
 /// One case through both legs. `keys` seeds the open lane set; `identities`

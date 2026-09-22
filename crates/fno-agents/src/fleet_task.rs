@@ -465,17 +465,18 @@ mod tests {
 
     #[test]
     fn ac3_err_unreadable_store_errors_and_missing_store_is_created() {
-        let dir = temp_store("ac3-dir");
-        // A directory in place of the store: exists, cannot be read.
-        let err = file_once(&dir, "heal", "k", "/r", "t", None, None).unwrap_err();
+        let store = temp_store("ac3-dir");
+        // A DIRECTORY standing in for the store: the path exists, reads fail.
+        std::fs::create_dir_all(&store).unwrap();
+        let err = file_once(&store, "heal", "k", "/r", "t", None, None).unwrap_err();
         assert!(
-            err.contains(&dir.display().to_string()),
+            err.contains(&store.display().to_string()),
             "naming path: {err}"
         );
         let missing = temp_store("ac3-missing");
         let filed = file_once(&missing, "heal", "k", "/r", "t", None, None).unwrap();
         assert!(matches!(filed, Filed::New(_)));
-        assert!(missing.exists());
+        assert!(missing.is_file());
     }
 
     #[test]

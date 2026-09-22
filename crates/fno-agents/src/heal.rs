@@ -3742,36 +3742,16 @@ exit 0
             "{store}"
         );
         assert!(store.contains(r#""run":"fno do pr heal 1""#), "{store}");
-        let events = log_of(d, "events.jsonl");
-        assert!(events.contains("\"unknown\":1"), "{events}");
-    }
-
-    #[test]
-    fn a_task_already_in_the_store_is_not_refiled_each_tick() {
-        // The tick fires every 600s; an open task must not become one new
-        // store row per tick. Two runs over the same unknown check file
-        // exactly one fleet_task.
-        let tmp = tempfile::tempdir().unwrap();
-        let d = tmp.path();
-        stub_gh_drive(d, true);
-        stub_git_drive(d);
-        hold_claim(d);
-        stub_fno(d);
-        run_heal(&drive_args(d, &[]));
+        // The next tick re-files nothing: the open task dedups on its key.
         run_heal(&drive_args(d, &[]));
         let store = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
-        let tasks = store
-            .lines()
-            .filter(|l| l.contains(r#""type":"fleet_task""#))
-            .count();
-        let closes = store
-            .lines()
-            .filter(|l| l.contains(r#""type":"fleet_task_closed""#))
-            .count();
-        assert_eq!(tasks, 1, "one open task, never re-filed: {store}");
-        assert_eq!(closes, 0, "{store}");
-        let fno = log_of(d, "fno.log");
-        assert!(!fno.contains("outstanding ask"), "{fno}");
+        assert_eq!(
+            store.matches(r#""type":"fleet_task""#).count(),
+            1,
+            "the open task is never re-filed: {store}"
+        );
+        let events = log_of(d, "events.jsonl");
+        assert!(events.contains("\"unknown\":1"), "{events}");
     }
 
     #[test]

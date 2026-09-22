@@ -1723,6 +1723,8 @@ mod tests {
             pr_gates: SourceRead::ok(json!([])),
             outstanding: empty.clone(),
             needs: empty.clone(),
+            tasks: empty.clone(),
+            repo_root: String::new(),
             lane: empty.clone(),
             undispatched: SourceRead::ok(json!([])),
             blocked_child: empty.clone(),

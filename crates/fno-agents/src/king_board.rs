@@ -558,7 +558,6 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         ready,
         outstanding,
         needs,
-        tasks,
         holder_activity,
         holder_activity_error,
     ) = std::thread::scope(|s| {
@@ -787,41 +786,6 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 .map(|items| SourceRead::ok(serde_json::to_value(&items).unwrap_or(json!([]))))
                 .unwrap_or_else(|_| SourceRead::err("needs: reader panicked")),
         };
-        // The fleet-task read: open tasks fold straight off questions.jsonl,
-        // in-process, the same home the needs fold reads. An unreadable
-        // store degrades the queue, never the board.
-        let t_tasks = s_needs.map(|_slice| {
-            s.spawn(move || {
-                let home = crate::paths::AgentsHome::from_env();
-                let store = crate::provider_cap::questions_path(&home);
-                match crate::fleet_task::open_tasks(&store) {
-                    Ok(tasks) => SourceRead::ok(Value::Array(
-                        tasks
-                            .iter()
-                            .map(|t| {
-                                json!({
-                                    "id": t.id,
-                                    "lane": t.lane,
-                                    "key": t.key,
-                                    "cwd": t.cwd,
-                                    "text": t.text,
-                                    "run": t.run,
-                                    "node": t.node,
-                                    "ts": t.ts,
-                                })
-                            })
-                            .collect(),
-                    )),
-                    Err(e) => SourceRead::err(e),
-                }
-            })
-        });
-        let tasks = match t_tasks {
-            None => SourceRead::err(budget.spent_error()),
-            Some(h) => h
-                .join()
-                .unwrap_or_else(|_| SourceRead::err("tasks: reader panicked")),
-        };
         let (holder_activity, holder_activity_error): (
             HashMap<String, crate::truth_probe::TruthProbe>,
             Option<String>,
@@ -857,7 +821,6 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             ready,
             outstanding,
             needs,
-            tasks,
             holder_activity,
             holder_activity_error,
         )
@@ -1108,6 +1071,38 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     let repos = scope::project_repo_paths(&cwd);
     let stranded = read_stranded_trees(&repos, &candidates, &mut budget);
     mark(&mut sources, "stranded", &stranded, false);
+
+    // The fleet-task read: a local questions.jsonl fold, sub-millisecond,
+    // so it runs inline instead of taking a budget slice or a thread. An
+    // unreadable store degrades the queue, never the board; catch_unwind
+    // for the same reason held_nodes above wraps its fold - from_env
+    // panics under a test process with no declared root.
+    let tasks = std::panic::catch_unwind(|| {
+        let home = crate::paths::AgentsHome::from_env();
+        let store = crate::provider_cap::questions_path(&home);
+        match crate::fleet_task::open_tasks(&store) {
+            Ok(tasks) => SourceRead::ok(Value::Array(
+                tasks
+                    .iter()
+                    .map(|t| {
+                        json!({
+                            "id": t.id,
+                            "lane": t.lane,
+                            "key": t.key,
+                            "cwd": t.cwd,
+                            "text": t.text,
+                            "run": t.run,
+                            "node": t.node,
+                            "ts": t.ts,
+                        })
+                    })
+                    .collect(),
+            )),
+            Err(e) => SourceRead::err(e),
+        }
+    })
+    .unwrap_or_else(|_| SourceRead::err("tasks: reader panicked"));
+    mark(&mut sources, "tasks", &tasks, false);
 
     let inputs = BoardInputs {
         ready,

@@ -198,7 +198,10 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let home = AgentsHome::at(&p);
+        // The question store resolves one level ABOVE the home root, so the
+        // home gets an "agents" child: the store then lands beside it, in
+        // this test's own unique directory instead of the shared temp root.
+        let home = AgentsHome::at(p.join("agents"));
         home.ensure_root().unwrap();
         home
     }
@@ -297,29 +300,25 @@ mod tests {
         assert_eq!(question_sweep_in(&home, &emitter, 1_000_000, &read), 1);
         let questions =
             std::fs::read_to_string(crate::provider_cap::questions_path(&home)).unwrap_or_default();
-        assert_eq!(
+        // The store beside the temp home is shared by sibling tests, so the
+        // count is scoped per seeded id, never global.
+        let moved = |qid: &str| {
             questions
-                .matches(r#""reason":"moved-to-fleet-task""#)
-                .count(),
-            2,
-            "q-heal and q-hold retired: {questions}"
-        );
-        assert!(
-            questions.contains("q-agent") == false || {
-                // q-agent must NOT carry a moved-to-fleet-task close.
-                let closes = questions
-                    .lines()
-                    .filter(|l| l.contains("q-agent") && l.contains("moved-to-fleet-task"))
-                    .count();
-                closes == 0
-            },
-            "{questions}"
-        );
-        assert!(
-            !questions
                 .lines()
-                .any(|l| l.contains("q-branch") && l.contains("moved-to-fleet-task")),
-            "{questions}"
+                .filter(|l| l.contains(qid) && l.contains("moved-to-fleet-task"))
+                .count()
+        };
+        assert_eq!(moved("q-heal"), 1, "q-heal retired: {questions}");
+        assert_eq!(moved("q-hold"), 1, "q-hold retired: {questions}");
+        assert_eq!(
+            moved("q-agent"),
+            0,
+            "the agent ask quoting a marker mid-text stays open: {questions}"
+        );
+        assert_eq!(
+            moved("q-branch"),
+            0,
+            "the markers this plan did not move stay open: {questions}"
         );
         let events = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(events.contains(r#""legacy_moved":2"#), "{events}");

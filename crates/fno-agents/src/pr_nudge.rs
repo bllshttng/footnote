@@ -1616,8 +1616,11 @@ mod tests {
     fn the_escalate_rung_files_one_fleet_task_and_never_an_ask() {
         // AC6-HP: two passes over a spent, quiet row file exactly one open
         // fleet task naming the resume; the runner never sees an inbox ask.
-        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-task-file"));
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-task-file").join("agents"));
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        // The store sits above the home root: start each run from empty.
+        let store = crate::provider_cap::questions_path(&home);
+        let _ = std::fs::remove_file(&store);
         let r = row(false);
         let spent = LadderState {
             attempts: 3,
@@ -1651,7 +1654,6 @@ mod tests {
             &mut runner,
         );
         assert!(asks.is_empty(), "no ask: {asks:?}");
-        let store = crate::provider_cap::questions_path(&home);
         let open = crate::fleet_task::open_tasks(&store).unwrap();
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].lane, "pr-nudge");
@@ -1664,8 +1666,15 @@ mod tests {
     fn an_activity_reset_closes_the_open_escalation_task() {
         // AC16-EDGE: the session answered, so the fleet task the Escalate
         // rung filed closes with reason `activity`.
-        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-task-close"));
+        let home = AgentsHome::at(
+            std::env::temp_dir()
+                .join("fno-pn-task-close")
+                .join("agents"),
+        );
         let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        // The store sits above the home root: start each run from empty.
+        let store = crate::provider_cap::questions_path(&home);
+        let _ = std::fs::remove_file(&store);
         let r = row(false);
         let spent = LadderState {
             attempts: 3,
