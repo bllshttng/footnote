@@ -1657,15 +1657,13 @@ def test_two_epics_crown_in_place_as_one_set(
 def test_a_king_cannot_crown_itself_even_to_a_strict_subset(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """"The crown is stamped by a grantor, never self-declared" held for free
-    while every agent caller was refused. Once a king may grant, self-crowning
-    needs its own check: the row would record ITSELF as its own grantor, the
-    one claim an external reader cannot verify.
-
-    A strict SUBSET is the case the succession refusal misses, since that one
-    fires only on an equal scope. Here a portfolio king over alpha,beta narrows
-    itself to alpha, which passes containment AND passes succession, and used
-    to land - vacating the wider scope on the way."""
+    """The crown self-edit decision lives in the Rust crown-widen rule. A
+    strict SUBSET is the case the succession refusal misses, since that one
+    fires only on an equal scope: here a portfolio king over alpha,beta
+    narrows itself to alpha, which passes containment AND passes succession.
+    beta is still live, so the drop refuses and the hint names the command
+    that would succeed - the registry never moves."""
+    import fno.agents.crown as crown_mod
     from fno.agents.registry import load_registry
 
     caller = _entry(
@@ -1678,15 +1676,22 @@ def test_a_king_cannot_crown_itself_even_to_a_strict_subset(
         crown_grantor="human",
     )
     _prepare_crown_cli(monkeypatch, tmp_path, [caller])
+    rows = {
+        "alpha": {"id": "alpha", "type": "epic", "status": "ready"},
+        "beta": {"id": "beta", "type": "epic", "status": "ready"},
+    }
+    monkeypatch.setattr(crown_mod, "_graph_index", lambda: rows)
+    monkeypatch.setattr(crown_mod, "_graph_entry", lambda node_id: rows.get(node_id))
     before = [asdict(row) for row in load_registry()]
     monkeypatch.setenv("CODEX_THREAD_ID", "caller-session")
 
     result = _invoke_crown("caller", "--scope", "alpha")
 
     assert result.exit_code == 2
-    assert "never self-declared" in result.output
-    # The mutation this refusal exists to prevent: no self-grantor, and the
-    # wider scope is not vacated on the way out.
+    assert "beta" in result.output
+    assert "--scope alpha --scope beta" in result.output
+    # The mutation this refusal exists to prevent: the wider scope is not
+    # vacated on the way out.
     assert [asdict(row) for row in load_registry()] == before
 
 
@@ -1727,7 +1732,8 @@ def test_a_king_adds_an_epic_its_own_session_created_to_its_crown(
 ) -> None:
     """AC4-HP: the lead the epic child cap creates (a new small epic) can
     crown itself over it. The lead holds e-1; its own session created e-2;
-    naming both widens its own crown in place, with the lead as grantor."""
+    naming both widens its own crown in place, keeping the upstream grantor
+    instead of self-declaring the row."""
     from fno.agents.registry import load_registry
 
     _prepare_crown_cli(monkeypatch, tmp_path, [_widen_lead()])
@@ -1739,11 +1745,11 @@ def test_a_king_adds_an_epic_its_own_session_created_to_its_crown(
     assert result.exit_code == 0, result.output
     receipt = json.loads(result.stdout)
     assert (receipt["level"], receipt["scope"]) == (2, "e-1,e-2")
-    assert receipt["grantor"] == "lead-a"
+    assert receipt["grantor"] == "human"
     assert receipt["vacated_scope"] == "e-1"
     row = next(r for r in load_registry() if r.name == "lead-a")
     assert (row.crown_level, row.crown_scope, row.crown_grantor) == (
-        2, "e-1,e-2", "lead-a",
+        2, "e-1,e-2", "human",
     )
 
 
@@ -1844,7 +1850,159 @@ def test_a_self_widen_fails_closed_without_the_binary(
     assert "neither contains nor equals" in result.output
     assert [asdict(row) for row in load_registry()] == before
     # The helper, called directly, answers the empty dict fail-closed form.
-    assert crown_mod._widen_answer("e-1,e-2", _widen_lead()) == {}
+    assert crown_mod._widen_answer("e-1,e-2", _widen_lead(), "lead-a") == {}
+
+
+def test_a_king_drops_a_done_epic_and_keeps_the_prior_grantor(
+    tmp_path: Path, monkeypatch, native_backlog_door
+) -> None:
+    """AC4-HP (drop): a crowned king narrows its own crown over a done
+    member with no attended shell, the receipt names the vacated scope and
+    the skipped self-mail, and the recorded grantor survives the edit."""
+    import fno.agents.crown as crown_mod
+    from fno.agents.registry import load_registry
+
+    lead = _entry(
+        "lead-a",
+        harness_session_id=WIDEN_LEAD_SESSION,
+        status="busy",
+        crown_level=2,
+        crown_scope="e-1,e-2",
+        crown_grantor="human",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [lead])
+    rows = {
+        "e-1": {"id": "e-1", "type": "epic", "status": "ready"},
+        "e-2": {"id": "e-2", "type": "epic", "status": "done"},
+    }
+    monkeypatch.setattr(crown_mod, "_graph_index", lambda: rows)
+    monkeypatch.setattr(crown_mod, "_graph_entry", lambda node_id: rows.get(node_id))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", WIDEN_LEAD_SESSION)
+
+    result = _invoke_crown("lead-a", "--scope", "e-1")
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.stdout)
+    assert receipt["scope"] == "e-1"
+    assert receipt["grantor"] == "human"
+    assert receipt["vacated_scope"] == "e-1,e-2"
+    assert (
+        receipt["reign_delivery"] == "skipped: self-edit, this session already reigns"
+    )
+    row = next(r for r in load_registry() if r.name == "lead-a")
+    assert (row.crown_level, row.crown_scope, row.crown_grantor) == (
+        2, "e-1", "human",
+    )
+
+
+def test_a_noop_self_rescope_is_refused_as_self_declared(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-ERR: a self re-scope onto the same territory adds and drops
+    nothing, which is the succession shape - refused with the moved
+    never-self-declared text, not a stamped crown."""
+    import fno.agents.crown as crown_mod
+    from fno.agents.registry import load_registry
+
+    caller = _entry(
+        "caller",
+        harness_session_id="caller-session",
+        status="busy",
+        crown_level=1,
+        crown_scope="alpha,beta",
+        crown_grantor="human",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [caller])
+    monkeypatch.setattr(
+        crown_mod,
+        "_graph_index",
+        lambda: {
+            "alpha": {"id": "alpha", "type": "epic", "status": "ready"},
+            "beta": {"id": "beta", "type": "epic", "status": "ready"},
+        },
+    )
+    before = [asdict(row) for row in load_registry()]
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "caller-session")
+
+    result = _invoke_crown("caller", "--scope", "alpha", "--scope", "beta")
+
+    assert result.exit_code == 2
+    assert "never self-declared" in result.output
+    assert [asdict(row) for row in load_registry()] == before
+
+
+def test_a_pure_drop_without_the_binary_refuses_fail_closed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC6-EDGE: no crown-widen answer (an old or missing binary) refuses a
+    pure drop too - a self edit never fires on a guess."""
+    from fno.agents.registry import load_registry
+    from fno.agents import spawn_overlay_client
+
+    caller = _entry(
+        "caller",
+        harness_session_id="caller-session",
+        status="busy",
+        crown_level=1,
+        crown_scope="alpha,beta",
+        crown_grantor="human",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [caller])
+    import fno.agents.crown as crown_mod
+
+    rows = {
+        "alpha": {"id": "alpha", "type": "epic", "status": "ready"},
+        "beta": {"id": "beta", "type": "epic", "status": "ready"},
+    }
+    monkeypatch.setattr(crown_mod, "_graph_index", lambda: rows)
+    monkeypatch.setattr(crown_mod, "_graph_entry", lambda node_id: rows.get(node_id))
+    before = [asdict(row) for row in load_registry()]
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "caller-session")
+
+    def _unavailable(payload):
+        raise spawn_overlay_client.SpawnOverlayUnavailable("no binary")
+
+    monkeypatch.setattr(spawn_overlay_client, "spawn_overlay_call", _unavailable)
+
+    result = _invoke_crown("caller", "--scope", "alpha")
+
+    assert result.exit_code == 2
+    assert "was unavailable" in result.output
+    assert [asdict(row) for row in load_registry()] == before
+
+
+def test_a_self_add_answer_without_a_grantor_refuses_fail_closed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC6-EDGE: a widen-true answer with no grantor key is an OLD binary
+    (it predates the grantor echo); stamping would self-declare the row,
+    so the self edit refuses and names the update remedy."""
+    from fno.agents.registry import load_registry
+    from fno.agents import spawn_overlay_client
+
+    lead = _entry(
+        "lead-a",
+        harness_session_id=WIDEN_LEAD_SESSION,
+        status="busy",
+        crown_level=2,
+        crown_scope="e-1",
+        crown_grantor="human",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [lead])
+    _widen_graph(monkeypatch, created_by=WIDEN_LEAD_SESSION)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", WIDEN_LEAD_SESSION)
+    before = [asdict(row) for row in load_registry()]
+
+    def _old_binary(payload):
+        return {"widen": True, "added": ["e-2"], "hint": None}
+
+    monkeypatch.setattr(spawn_overlay_client, "spawn_overlay_call", _old_binary)
+
+    result = _invoke_crown("lead-a", "--scope", "e-1", "--scope", "e-2")
+
+    assert result.exit_code == 2
+    assert "update the fno-agents binary" in result.output
+    assert [asdict(row) for row in load_registry()] == before
 
 
 def test_succession_by_an_agent_caller_is_refused_with_a_reachable_remedy(
