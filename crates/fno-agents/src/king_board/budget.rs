@@ -51,6 +51,7 @@ impl Budget {
 /// Why a bounded read produced no stdout. A budget kill is a different event
 /// from a source failure: the source may have been healthy, the board just
 /// stopped paying for it, and downstream the two must not render as one word.
+#[derive(Debug)]
 pub(crate) enum RunFailure {
     Failed(String),
     KilledAtSlice(String),
@@ -80,6 +81,7 @@ impl RunFailure {
 /// the real `fno` front door), which then keep writing into whatever HOME the
 /// caller staged - under test, a tempdir that dies with the test, recreating
 /// it after the drop (measured: 23.5 GB of leaked `.tmp*` fake-HOMEs).
+#[derive(Debug)]
 pub(crate) struct RunOutput {
     pub(crate) stdout: Vec<u8>,
     pub(crate) stderr: Vec<u8>,

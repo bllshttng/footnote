@@ -1,5 +1,5 @@
 //! One PR listing, binding classification, mergeable filter (pr/_status).
-use super::budget::{fno_py_cmd, run_json, run_with_timeout};
+use super::budget::{fno_py_cmd, run_json, run_with_timeout_accepting};
 use super::queues::NODE_ID_BODY;
 use super::{is_terminal, s_i64, s_str, SourceRead};
 use crate::graph_store::entry_id;
