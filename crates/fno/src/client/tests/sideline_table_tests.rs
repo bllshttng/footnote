@@ -12,13 +12,13 @@ mod sideline_name_fit_tests;
 // ---------------------------------------------------------------------------
 
 #[test]
-fn sideline_name_truncates_with_ellipsis_and_one_gap_to_the_message() {
-    // acceptance: a 30-char name at a 60-column panel ends in the
-    // ellipsis glyph, and one space separates the name cell from the message.
+fn sideline_name_middle_elides_and_keeps_suffix_gap_to_the_message() {
+    // acceptance: a long worker name at a 60-column panel keeps its
+    // distinguishing suffix after the middle ellipsis.
     let mut view = two_pane_view();
     view.sideline_width = 60;
     let mut a = tab_agent(None, None, false);
-    a.name = "x".repeat(30);
+    a.name = "blueprinter-fno-8bef7b".into();
     a.tail = Some("**PR 2113 merged as `84fa`.**".into());
     view.layout.agents = vec![a];
     let frame = view.compose();
@@ -28,10 +28,14 @@ fn sideline_name_truncates_with_ellipsis_and_one_gap_to_the_message() {
     let row = 1; // row 0 is the squad header
     let name = &frame.cells
         [row * cols + rects[1].x as usize..row * cols + (rects[1].x + rects[1].width) as usize];
-    assert_eq!(
-        name.last().map(|c| c.c),
-        Some('\u{2026}'),
-        "the name cell ends in the ellipsis glyph"
+    assert!(
+        name.iter().any(|c| c.c == '\u{2026}'),
+        "the name cell contains the middle ellipsis"
+    );
+    let rendered_name: String = name.iter().map(|c| c.c).collect();
+    assert!(
+        rendered_name.contains("8bef7b"),
+        "the name cell keeps the distinguishing suffix: {rendered_name:?}"
     );
 }
 
