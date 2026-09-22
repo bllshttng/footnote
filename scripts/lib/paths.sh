@@ -17,6 +17,7 @@ REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 HOME="${HOME:-$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f6 || echo ~)}"
 
 export STATE_DIR="$HOME/.fno"
+export GRAPH_JSON_PATH="$STATE_DIR/graph.json"
 export LEDGER_JSON_PATH="$STATE_DIR/ledger.json"
 export BRIEFS_DIR="$STATE_DIR/briefs"
 export FLEET_DIR="$STATE_DIR/fleet"

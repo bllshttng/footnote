@@ -140,7 +140,6 @@ def test_import_without_a_file_stamps_nothing_and_folds_later(tmp_path, monkeypa
     from fno.graph.api import wire_rows
     from fno.graph import store as store_mod
 
-    if store_mod._worker_binary() is None:
     graph = tmp_path / "graph.json"
     _seed(graph, _row("x-live", title="here"))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
@@ -173,7 +172,6 @@ def test_a_v1_poisoned_stamp_voids_and_the_file_folds(tmp_path, monkeypatch):
     from fno.graph.api import wire_rows
     from fno.graph import store as store_mod
 
-    if store_mod._worker_binary() is None:
     graph = tmp_path / "graph.json"
     _seed(graph, _row("x-live", title="here"))
     monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
