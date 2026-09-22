@@ -488,7 +488,10 @@ mod tests {
             None,
             &|_| true,
             &|_, _| Some(true),
-            &|_| row("stopped", Some(999_999_999)),
+            &|_| {
+                reads.set(reads.get() + 1);
+                row("stopped", Some(999_999_999))
+            },
             &|_, _| None,
             &|_| {},
             15,
