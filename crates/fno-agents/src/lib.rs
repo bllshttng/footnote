@@ -1286,10 +1286,6 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // agent_raw_inject records a payload delivered without the <fno_mail>
     // envelope, so the provenance marker survives in the ledger, not transcript.
     "agent_raw_inject",
-    // Operator-turn witness (mux-emitted): the mux appends one
-    // operator_submit row per human Enter at its input choke point; the
-    // intel fold joins those rows to transcript turns by session and time.
-    "operator_submit",
     // Review invocation attempt/outcome join (daemon-emitted): the
     // canonical repo-local event records how a Codex review was fired and
     // whether its transport confirmed delivery.
