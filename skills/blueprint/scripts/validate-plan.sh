@@ -15,9 +15,15 @@ trap 'rm -rf "$TMPDIR_BASE_VAL"' EXIT
 # the explicit quick-plan kind. Their executable contract is validated by the
 # Python authority; the heading-oriented checks below remain only for legacy
 # plans that predate the single-doc shape.
+# grep reads all input into /dev/null, never -q: -q exits at the first match,
+# the writer upstream dies of SIGPIPE, and pipefail reports a failed pipeline.
+_fm_has() {
+    awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "${2:-$PLAN_DIR}" 2>/dev/null \
+        | grep -E "$1" >/dev/null
+}
+
 _is_quick_plan() {
-    awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" 2>/dev/null \
-        | grep -qE "^[[:space:]]*kind:[[:space:]]*['\"]?quick-plan['\"]?([[:space:]]*(#.*)?)?$"
+    _fm_has "^[[:space:]]*kind:[[:space:]]*['\"]?quick-plan['\"]?([[:space:]]*(#.*)?)?$"
 }
 
 _has_execution_strategy() {
@@ -273,7 +279,7 @@ _semantic_validate() {
         echo "fno CLI not found; install or update it before validating executable plans" >&2
         return 2
     fi
-    if ! fno do plan validate --help 2>&1 | grep -q -- '--execution'; then
+    if ! fno do plan validate --help 2>&1 | grep -- '--execution' >/dev/null; then
         echo "installed fno predates semantic plan validation; run 'fno doctor update' or 'fno doctor --fix'" >&2
         return 2
     fi
@@ -364,8 +370,7 @@ except yaml.YAMLError as exc:
             # passing silently, which would read as "the frontmatter is fine".
             warn "frontmatter YAML parse not checked (no python3 with PyYAML)"
         fi
-        if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
-                | grep -qE '^[[:space:]]*project:'; then
+        if _fm_has '^[[:space:]]*project:'; then
             ok "has 'project:' field"
         else
             warn "missing 'project:' field in frontmatter (intake will fall back to cwd-based inference)"
@@ -374,15 +379,12 @@ except yaml.YAMLError as exc:
         # plan with no done_probes simply has no runtime evidence declared;
         # name the absence and the reason so the omission is a choice on the
         # record, not a default nobody noticed.
-        if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
-                | grep -qE '^[[:space:]]*done_probes:'; then
+        if _fm_has '^[[:space:]]*done_probes:'; then
             ok "declares done_probes (runtime evidence bound at ship)"
-        elif awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
-                | grep -qE '^[[:space:]]*domain:[[:space:]]*code'; then
+        elif _fm_has '^[[:space:]]*domain:[[:space:]]*code'; then
             warn "code plan declares no done_probes; runtime evidence is undeclared (advisory: add a probe or record why not - /fno:review prove-it is the lane)"
         fi
-        if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
-                | grep -qE '^dispatch_hold:'; then
+        if _fm_has '^dispatch_hold:'; then
             _hold_out=""
             if _hold_out=$(_dispatch_hold_validate 2>&1); then
                 ok "dispatch_hold has reason, release_when, review_on, and set_by"
@@ -450,11 +452,7 @@ if [[ -f "$PLAN_DIR" ]]; then
     # non-empty `## Why (from epic)` - the transcribed intent grounds its tasks
     # (US4). Only enforced for group children; a normal quick/full plan has no
     # Why section and is not required to grow one.
-    # grep redirected to /dev/null (not -q): under `set -o pipefail`, grep -q can
-    # exit early and SIGPIPE the upstream awk (exit 141), failing the pipeline and
-    # spuriously skipping the check for a real group child.
-    if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
-            | grep -E '^[[:space:]]*parent_epic:' >/dev/null; then
+    if _fm_has '^[[:space:]]*parent_epic:'; then
         _why_body="$(awk '
             /^##[ \t]+Why \(from epic\)[ \t]*$/{f=1; next}
             f && /^##?[ \t]/{exit}
@@ -533,19 +531,19 @@ else
         task_name="${heading_rest# }"
         block=$(_task_block "$lineno")
 
-        if ! echo "$block" | grep -q "Acceptance Criteria"; then
+        if ! grep -q "Acceptance Criteria" <<< "$block"; then
             warn "$task_name: missing Acceptance Criteria section"
         else
             ok "$task_name: has Acceptance Criteria"
         fi
 
-        if ! echo "$block" | grep -qE "(Steps:|Step 1:)"; then
+        if ! grep -qE "(Steps:|Step 1:)" <<< "$block"; then
             warn "$task_name: missing Steps section"
         else
             ok "$task_name: has Steps"
         fi
 
-        if ! echo "$block" | grep -qiE "^(Files?:|## Files?)"; then
+        if ! grep -qiE "^(Files?:|## Files?)" <<< "$block"; then
             warn "$task_name: missing Files section"
         else
             ok "$task_name: has Files section"
@@ -688,7 +686,7 @@ elif [[ -f "$PLAN_DIR" ]]; then
             while IFS= read -r line; do
                 [[ -z "$line" ]] && continue
                 ((TOTAL_STUBS++)) || true
-                if ! echo "$line" | grep -qE '\[Task [0-9]+\.[0-9]+\]'; then
+                if ! grep -qE '\[Task [0-9]+\.[0-9]+\]' <<< "$line"; then
                     ((UNRESOLVED++)) || true
                 fi
             done <<< "$STUB_LINES"
@@ -858,12 +856,7 @@ check_consolidation_file() {
 
     # Presence only. Shape is the model's job (see below), but whether a block
     # exists at all is a policy date rather than a shape, so it stays here.
-    # `grep -q` exits at the first match and SIGPIPEs the upstream awk, which
-    # `pipefail` then reports as a failed pipeline - and this one is NEGATED,
-    # so the plan would be told it has no block when it has one. Same trap the
-    # parent_epic check below documents. Read all the input instead.
-    if ! awk '/^---/ { c++; if (c==2) exit; next } c==1 { print }' "$file" \
-            | grep -E '^consolidation:' >/dev/null; then
+    if ! _fm_has '^consolidation:' "$file"; then
         # Grandfather: the gate governs plans written AFTER it shipped. Every
         # pre-existing plan would otherwise halt /execute and /target on work
         # already in flight, so they WARN until backfilled. The boundary is
@@ -1286,27 +1279,38 @@ PYEOF
             else
                 # The block rides one JSON string: cut additionalContext,
                 # split its escaped newlines, read `- <id> (<subject>):`.
+                local stage_context
+                stage_context=$(printf '%s' "$stage_out" \
+                    | sed -n 's/.*"additionalContext":"//p' \
+                    | sed 's/\\n/\n/g')
                 local -a stage_laws=()
                 local s_line
                 while IFS= read -r s_line; do
                     if [[ "$s_line" =~ ^-[[:space:]](d-[0-9a-f]{8})[[:space:]]\((.+)\): ]]; then
                         stage_laws+=("${BASH_REMATCH[1]}"$'\t'"${BASH_REMATCH[2]}")
                     fi
-                done < <(printf '%s' "$stage_out" \
-                    | sed -n 's/.*"additionalContext":"//p' \
-                    | sed 's/\\n/\n/g')
-                local acked_list="" acked_id
+                done <<< "$stage_context"
+                local stage_unread=0 unread_line
+                while IFS= read -r unread_line; do
+                    [[ "$unread_line" == Unread:\ * ]] || continue
+                    stage_unread=$((stage_unread + 1))
+                    warn "$label: stage-law check NOT CHECKED (${unread_line#Unread: }) - not a pass"
+                done <<< "$stage_context"
+                local acked_list="" acked_lc="" acked_id
                 while IFS= read -r acked_id; do
                     [[ -n "$acked_id" ]] && acked_list+="${acked_id}"$'\n'
                 done < <(_acknowledged_ids "$file")
-                local s_created s_did s_subj stage_missing=0
+                acked_lc=$(printf '%s' "$acked_list" | tr '[:upper:]' '[:lower:]')
+                local s_created s_did s_did_lc s_subj stage_missing=0
                 s_created=$(_plan_created_date "$file")
                 for s_line in ${stage_laws[@]+"${stage_laws[@]}"}; do
                     s_did="${s_line%%$'\t'*}"
                     s_subj="${s_line#*$'\t'}"
-                    if [[ -n "$acked_list" ]] \
-                        && printf '%s' "$acked_list" | grep -qixF "$s_did"; then
-                        continue
+                    if [[ -n "$acked_lc" ]]; then
+                        s_did_lc=$(printf '%s' "$s_did" | tr '[:upper:]' '[:lower:]')
+                        case $'\n'"$acked_lc"$'\n' in
+                            *$'\n'"$s_did_lc"$'\n'*) continue ;;
+                        esac
                     fi
                     stage_missing=$((stage_missing + 1))
                     if [[ ! "$s_created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
@@ -1317,6 +1321,10 @@ PYEOF
                         c_error "$label: decisions_acknowledged is missing $s_did ($s_subj) - the blueprint-stage block lists it as a live ruling governing this work"
                     fi
                 done
+                if [[ $c_errors -eq 0 && $stage_unread -eq 0 ]]; then
+                    local stage_acknowledged=$(( ${#stage_laws[@]} - stage_missing ))
+                    ok "$label: stage-law check: ${#stage_laws[@]} law(s) listed, $stage_acknowledged acknowledged"
+                fi
             fi
         fi
     fi

@@ -1192,6 +1192,70 @@ else
     fail "AC11k: expected no d-a11b0002 finding: $OUTPUT"
 fi
 
+# AC11l (AC2-HP): the stage-law receipt compares acknowledged ids without
+# spawning a piped grep, including an uppercase id from the plan.
+STUB_AGENTS_HP="$STUBBIN/fno-agents-hp"
+cat > "$STUB_AGENTS_HP" <<'STUB'
+#!/bin/bash
+if [[ "${1:-}" == "law-match" ]]; then
+    printf '%s' '{"ok":true,"stage":"blueprint","hook_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"## Law governing blueprint\n\n- d-a11b0002 (stub-epic-ruling): A stub ruling names the epic.\n- d-a11b0003 (stub-project-ruling): A stub ruling names the project.\n"}}}'
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_AGENTS_HP"
+PLAN_NNPY_L="$TMPDIR_BASE/nnpy_l.md"
+cat > "$PLAN_NNPY_L" <<'EOF'
+---
+claims: x-a11b003
+created: 2099-01-01
+consolidation:
+  outcome: proceed_alone
+  rejected: []
+  decisions_acknowledged:
+    - decision_id: D-A11B0002
+      reason: "fixture acknowledgment"
+    - decision_id: D-A11B0003
+      reason: "fixture acknowledgment"
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `crates/fno-agents/src/mail.rs` | Modify |
+EOF
+OUTPUT=$(FNO_AGENTS_BIN="$STUB_AGENTS_HP" bash "$VALIDATE" "$PLAN_NNPY_L" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "stage-law check: 2 law(s) listed, 2 acknowledged" <<< "$OUTPUT" \
+    && ! grep -q "stage-law.*ERROR\|decisions_acknowledged is missing d-a11b000" <<< "$OUTPUT"; then
+    pass "AC11l: stage-law receipt counts uppercase acknowledgments"
+else
+    fail "AC11l: expected a clean stage-law receipt (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# AC11m (AC2-ERR): an unread stage scope is NOT CHECKED, while a listed law
+# that is not acknowledged still fails closed.
+STUB_AGENTS_UNREAD="$STUBBIN/fno-agents-unread"
+cat > "$STUB_AGENTS_UNREAD" <<'STUB'
+#!/bin/bash
+if [[ "${1:-}" == "law-match" ]]; then
+    printf '%s' '{"ok":true,"stage":"blueprint","hook_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"## Law governing blueprint\n\nUnread: the node'"'"'s epic and project (graph: invalid graph)\n- d-a11b0002 (stub-epic-ruling): A stub ruling names the epic.\n- d-a11b0003 (stub-project-ruling): A stub ruling names the project.\n"}}}'
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_AGENTS_UNREAD"
+PLAN_NNPY_M="$TMPDIR_BASE/nnpy_m.md"
+sed 's/x-a11b003/x-a11b004/; /D-A11B0003/{N;d;}' "$PLAN_NNPY_L" > "$PLAN_NNPY_M"
+OUTPUT=$(FNO_AGENTS_BIN="$STUB_AGENTS_UNREAD" bash "$VALIDATE" "$PLAN_NNPY_M" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 1 ]] \
+    && grep -q "stage-law check NOT CHECKED (the node's epic and project (graph: invalid graph)" <<< "$OUTPUT" \
+    && grep -q "decisions_acknowledged is missing d-a11b0003" <<< "$OUTPUT"; then
+    pass "AC11m: stage-law unread is named and missing law still errors"
+else
+    fail "AC11m: expected unread warning plus missing-law ERROR (exit $EXIT_CODE): $OUTPUT"
+fi
+
 # AC12: Plan Node Binding. A filename-encoded node id with no node:/claims:
 # key in the frontmatter binds to nothing and mutes both id-keyed gates, and
 # every gate skip must say NOT CHECKED instead of reading green.
