@@ -86,16 +86,93 @@ pub fn resume_hint(home: &AgentsHome, name: &str) -> Option<String> {
     out.push_str(&format!("  original cwd: {}\n", receipt.cwd));
     if !receipt.cwd.is_empty() && !Path::new(&receipt.cwd).exists() {
         out.push_str(
-            "  note: the original cwd is gone; resume from a replacement checkout with the native command below.\n",
+            "  note: the original cwd is gone; resume from a replacement checkout with the command below.\n",
         );
     }
-    out.push_str(&format!(
-        "  native resume: {}\n",
-        if receipt.resume_argv.is_empty() {
-            receipt.resume.clone()
-        } else {
-            receipt.resume_argv.join(" ")
-        }
-    ));
+    // The receipt's own rendered line is the one form a human copies; the
+    // deleted branch printed an unquoted argv join that a `[1m]` glob breaks.
+    out.push_str(&format!("  resume: {}\n", receipt.resume));
+    if receipt.resume_argv.first().map(String::as_str) == Some("fno") {
+        out.push_str(
+            "  note: this seeds a new session from the transcript on its recorded route; the session id changes.\n",
+        );
+    }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn home_with_receipt(receipt: serde_json::Value) -> (tempfile::TempDir, AgentsHome) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("agents");
+        let dir_path = root.join("reap-receipts");
+        std::fs::create_dir_all(&dir_path).unwrap();
+        let sid = receipt["harness_session_id"].as_str().unwrap().to_string();
+        std::fs::write(
+            dir_path.join(format!("claude-{sid}.json")),
+            serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+        (dir, AgentsHome::at(&root))
+    }
+
+    fn receipt_value(sid: &str, resume: &str) -> serde_json::Value {
+        serde_json::json!({
+            "row_name": "w1",
+            "short_id": "w1-id",
+            "harness": "claude",
+            "harness_session_id": sid,
+            "cwd": std::env::temp_dir().to_string_lossy(),
+            "created_at": "2026-09-01T00:00:00Z",
+            "reaped_at": "2026-09-22T00:00:00Z",
+            "resume": resume
+        })
+    }
+
+    const SID: &str = "11111111-2222-3333-4444-555555555555";
+
+    #[test]
+    fn ac2_hp_zai_door_hint_prints_the_receipt_line_and_the_note() {
+        // AC2-HP: the route-door receipt prints its own line and names the
+        // session-id change a copied command causes.
+        let mut receipt = receipt_value(
+            SID,
+            "fno agents spawn --resume 11111111-2222-3333-4444-555555555555 -P zai -m 'glm-5.3-flash[1m]'",
+        );
+        receipt["resume_argv"] = serde_json::json!([
+            "fno",
+            "agents",
+            "spawn",
+            "--resume",
+            SID,
+            "-P",
+            "zai",
+            "-m",
+            "glm-5.3-flash[1m]"
+        ]);
+        let (_dir, home) = home_with_receipt(receipt);
+        let hint = resume_hint(&home, SID).unwrap();
+        assert!(
+            hint.contains(&format!(
+                "  resume: fno agents spawn --resume {SID} -P zai -m 'glm-5.3-flash[1m]'\n"
+            )),
+            "{hint}"
+        );
+        assert!(hint.contains("the session id changes"), "{hint}");
+    }
+
+    #[test]
+    fn ac2_edge_bare_receipt_prints_no_note() {
+        // AC2-EDGE: a v1-shaped receipt (no resume_argv) prints the same
+        // string it always printed, with no new-session note.
+        let (_dir, home) = home_with_receipt(receipt_value(SID, &format!("claude --resume {SID}")));
+        let hint = resume_hint(&home, SID).unwrap();
+        assert!(
+            hint.contains(&format!("  resume: claude --resume {SID}\n")),
+            "{hint}"
+        );
+        assert!(!hint.contains("the session id changes"), "{hint}");
+    }
 }
