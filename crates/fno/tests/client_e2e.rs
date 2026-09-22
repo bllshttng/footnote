@@ -288,3 +288,74 @@ fn output_line_guard_finds_no_exact_trim_match() {
         hits.join("\n")
     );
 }
+
+/// The shared R-shape: one lone ESC byte after an open overlay, then quiet
+/// past the 40ms flush window, then the overlay's marker gone and the next
+/// command reaching the shell.
+fn assert_overlay_closes_on_lone_esc(h: &mut ClientHarness, chord: &[u8], marker: &'static str) {
+    h.type_bytes(chord);
+    h.wait_screen(15, |s| s.contains(marker));
+    let before = h.screen();
+    h.type_bytes(&[0x1b]);
+    std::thread::sleep(Duration::from_millis(500));
+    let after = h.screen();
+    assert!(
+        !after.contains(marker),
+        "one Esc must close it; {marker:?} still on screen:\n{after}\n--- screen before Esc ---\n{before}"
+    );
+    // The keyboard returned: the next command runs in the shell.
+    h.type_bytes(b"echo after-\"esc\"\r");
+    h.wait_screen(15, |s| s.contains("after-esc"));
+}
+
+#[test]
+fn a_lone_esc_closes_the_which_key_table() {
+    // R1: a raw-fed overlay stalls on a lone Esc until the next key
+    // on main; the client's quiet-window flush releases it.
+    let scratch = Scratch::new("esc-which-key");
+    let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
+    h.wait_screen(15, |s| !s.trim().is_empty());
+    h.wait_input_ready(15);
+    assert_overlay_closes_on_lone_esc(&mut h, b"\x02?", "this key table");
+}
+
+#[test]
+fn a_lone_esc_closes_the_search_input() {
+    // R2: the search input line (` /_`) is gone after one Esc and
+    // one quiet window, with no second key.
+    let scratch = Scratch::new("esc-search");
+    let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
+    h.wait_screen(15, |s| !s.trim().is_empty());
+    h.wait_input_ready(15);
+    assert_overlay_closes_on_lone_esc(&mut h, b"\x02/", " /_");
+}
+
+#[test]
+fn a_lone_esc_closes_the_navigator() {
+    // R3: the navigator's `find` line is gone after one Esc and
+    // one quiet window.
+    let scratch = Scratch::new("esc-navigator");
+    let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
+    h.wait_screen(15, |s| !s.trim().is_empty());
+    h.wait_input_ready(15);
+    assert_overlay_closes_on_lone_esc(&mut h, b"\x02f", " find \u{203a} ");
+}
+
+#[test]
+fn a_lone_esc_closes_the_row_selector() {
+    // R4: the selector paints no text of its own, so the proof is
+    // behavioral. On the stalled build the lone ESC sits in the selector's
+    // carry: the next `q` resolves it (Esc close, q swallowed) and nothing
+    // reaches the shell. With the flush the selector closed in the quiet
+    // window, so `q` runs in the shell and sh answers "not found".
+    let scratch = Scratch::new("esc-selector");
+    let mut h = ClientHarness::spawn_sized(&scratch, 24, 120);
+    h.wait_screen(15, |s| !s.trim().is_empty());
+    h.wait_input_ready(15);
+    h.type_bytes(b"\x02w");
+    std::thread::sleep(Duration::from_millis(200));
+    h.type_bytes(&[0x1b]);
+    std::thread::sleep(Duration::from_millis(500));
+    h.type_bytes(b"q\r");
+    h.wait_screen(15, |s| s.contains("not found"));
+}
