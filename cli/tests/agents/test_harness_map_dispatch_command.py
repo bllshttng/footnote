@@ -16,7 +16,6 @@ from fno.agents.harness_map import (
     dispatch_command,
     normalize_command,
     resolve_dispatch,
-    resolve_effective_verb,
 )
 
 
@@ -427,23 +426,31 @@ def test_dispatch_command_defaults_to_no_merge():
         ("opencode", "/fno:target --no-merge x-abcd"),
     ],
 )
-def test_intake_low_difficulty_planless_resolves_target(harness, expected):
+def test_intake_lifecycle_answer_resolves_target_and_rides_the_note(harness, expected):
+    # The table lives in backlog_ready.rs; the resolver is its client and the
+    # note rides the decision trail verbatim.
     out = resolve_dispatch(
-        harness=harness, node_id="x-abcd", difficulty="low", plan_rung="none"
+        harness=harness,
+        node_id="x-abcd",
+        lifecycle=("/target", "verb=lifecycle(intake difficulty=low -> /target)"),
     )
     assert out["command"] == expected
     assert out["verb"] == "/target"
-    assert any("difficulty=low" in d for d in out["decision"])
+    assert any("intake difficulty=low" in d for d in out["decision"])
 
 
-@pytest.mark.parametrize("difficulty", ["medium", "high"])
-def test_intake_planning_difficulties_planless_resolve_blueprint(difficulty):
-    out = resolve_dispatch(
-        harness="claude", node_id="x-abcd", difficulty=difficulty, plan_rung="none"
-    )
-    assert out["command"] == f"/blueprint x-abcd"
-    assert out["verb"] == "/blueprint"
-    assert any(f"difficulty={difficulty}" in d for d in out["decision"])
+@pytest.mark.parametrize(
+    "answer,note",
+    [
+        ("/blueprint", "verb=lifecycle(intake difficulty=high -> /blueprint)"),
+        ("/blueprint", "verb=lifecycle(plan ready not a blueprint -> /blueprint)"),
+    ],
+)
+def test_lifecycle_blueprint_answer_renders_blueprint(answer, note):
+    out = resolve_dispatch(harness="claude", node_id="x-abcd", lifecycle=(answer, note))
+    assert out["command"] == "/blueprint x-abcd"
+    assert out["verb"] == answer
+    assert any(note in d for d in out["decision"])
 
 
 @pytest.mark.parametrize(
@@ -452,62 +459,158 @@ def test_intake_planning_difficulties_planless_resolve_blueprint(difficulty):
 )
 def test_derived_blueprint_renders_harness_native(harness, expected):
     out = resolve_dispatch(
-        harness=harness, node_id="x-abcd", difficulty="medium", plan_rung="none"
+        harness=harness,
+        node_id="x-abcd",
+        lifecycle=("/blueprint", "verb=lifecycle(intake difficulty=medium -> /blueprint)"),
     )
     assert out["command"] == expected
 
 
-def test_redispatch_design_rung_keeps_blueprint_despite_stored_target():
+def test_redispatch_design_rung_declared_target_wins_naming_lifecycle_answer():
+    # A declared verb is never silently reconciled away. The decision trail
+    # still names what the lifecycle would have answered.
     out = resolve_dispatch(
         harness="claude",
         node_id="x-abcd",
         verb="/fno:target",
-        difficulty="low",
-        plan_rung="design",
-    )
-    assert out["command"] == "/blueprint x-abcd"
-    assert any("reconciled" in d for d in out["decision"])
-
-
-@pytest.mark.parametrize("rung", ["ready", "in_progress", "in_review"])
-def test_redispatch_build_rungs_advance_to_target_despite_stored_blueprint(rung):
-    out = resolve_dispatch(
-        harness="claude", node_id="x-abcd", verb="/blueprint", plan_rung=rung
+        lifecycle=(
+            "/target",
+            "verb=declared(/target; lifecycle answers /blueprint: plan design)",
+        ),
     )
     assert out["command"] == "/target --no-merge x-abcd"
     assert out["verb"] == "/target"
-    assert any(f"plan {rung}" in d for d in out["decision"])
+    assert any(
+        "verb=declared(/target; lifecycle answers /blueprint: plan design)" in d
+        for d in out["decision"]
+    )
+
+
+def test_redispatch_build_rung_declared_blueprint_wins():
+    out = resolve_dispatch(
+        harness="claude",
+        node_id="x-abcd",
+        verb="/blueprint",
+        lifecycle=(
+            "/blueprint",
+            "verb=declared(/blueprint; lifecycle answers /target: plan ready)",
+        ),
+    )
+    assert out["command"] == "/blueprint x-abcd"
+    assert out["verb"] == "/blueprint"
+    assert any(
+        "verb=declared(/blueprint; lifecycle answers /target: plan ready)" in d
+        for d in out["decision"]
+    )
+
+
+def _stub_door(monkeypatch, answers):
+    """Stub the store door: ``answers`` is the reply row list, or a callable
+    replacing ``request_effective_verb`` itself (a raising door)."""
+    import fno.graph.store as store
+
+    if callable(answers):
+        monkeypatch.setattr(store, "request_effective_verb", answers)
+    else:
+        monkeypatch.setattr(store, "request_effective_verb", lambda entries: answers)
 
 
 @pytest.mark.parametrize("rung", ["unreadable", "done", "superseded"])
-def test_unanswerable_plan_rungs_refuse(rung):
+def test_unanswerable_plan_rungs_refuse(monkeypatch, rung):
+    from fno.agents.node_dispatch import node_effective_verb
+
+    _stub_door(
+        monkeypatch,
+        [
+            {
+                "refusal": (
+                    f"dispatch verb cannot be derived for node x-abcd: plan rung "
+                    f"{rung!r} with difficulty '' answers no lifecycle rung"
+                )
+            }
+        ],
+    )
     with pytest.raises(DispatchResolveError, match=rung) as exc_info:
-        resolve_dispatch(harness="claude", node_id="x-abcd", plan_rung=rung)
+        node_effective_verb({"id": "x-abcd"})
     assert_refusal_names_subject_and_cites_no_node(exc_info.value)
 
 
-def test_planless_node_without_difficulty_refuses_naming_the_field():
+def test_planless_node_without_difficulty_refuses_naming_the_field(monkeypatch):
+    from fno.agents.node_dispatch import node_effective_verb
+
+    _stub_door(
+        monkeypatch,
+        [
+            {
+                "refusal": (
+                    "dispatch verb cannot be derived for node x-abcd: plan rung "
+                    "'none' with difficulty '' answers no lifecycle rung"
+                )
+            }
+        ],
+    )
     with pytest.raises(DispatchResolveError, match="difficulty") as exc_info:
-        resolve_dispatch(harness="claude", node_id="x-abcd", plan_rung="none")
+        node_effective_verb({"id": "x-abcd"})
     assert_refusal_names_subject_and_cites_no_node(exc_info.value)
 
 
-def test_planless_node_with_invalid_difficulty_refuses():
+def test_planless_node_with_invalid_difficulty_refuses(monkeypatch):
+    from fno.agents.node_dispatch import node_effective_verb
+
+    _stub_door(
+        monkeypatch,
+        [
+            {
+                "refusal": (
+                    "dispatch verb cannot be derived for node x-abcd: plan rung "
+                    "'none' with difficulty 'spicy' answers no lifecycle rung"
+                )
+            }
+        ],
+    )
     with pytest.raises(DispatchResolveError, match="difficulty") as exc_info:
-        resolve_dispatch(
-            harness="claude", node_id="x-abcd", difficulty="spicy", plan_rung="none"
-        )
+        node_effective_verb({"id": "x-abcd", "difficulty": "spicy"})
     assert_refusal_names_subject_and_cites_no_node(exc_info.value)
 
 
-def test_direct_refusal_without_node_id_keeps_subjectless_shape():
-    # No node in scope: the sentence keeps its values but still carries no
-    # citation for a reader to mistake for the subject.
+def test_refusal_without_node_id_names_unknown_not_a_citation(monkeypatch):
+    # No node id anywhere in scope: the sentence names "unknown" and still
+    # carries no citation for a reader to mistake for the subject.
+    from fno.agents.node_dispatch import node_effective_verb
+
+    _stub_door(
+        monkeypatch,
+        [
+            {
+                "refusal": (
+                    "dispatch verb cannot be derived for node unknown: plan rung "
+                    "'none' with difficulty '' answers no lifecycle rung"
+                )
+            }
+        ],
+    )
     with pytest.raises(DispatchResolveError) as exc_info:
-        resolve_effective_verb(plan_rung="none")
+        node_effective_verb({})
     message = str(exc_info.value)
-    assert "for node" not in message
+    assert "for node unknown" in message
     assert "(x-" not in message
+
+
+def test_missing_runtime_refuses_naming_the_remedy(monkeypatch):
+    # The binary being absent is a refusal, never a guessed verb and never a
+    # Python fallback table.
+    from fno.agents.node_dispatch import node_effective_verb
+    from fno.graph.store import STATE_SPAWN_FAILED, StoreUnavailable
+
+    def absent(entries):
+        raise StoreUnavailable(
+            STATE_SPAWN_FAILED,
+            "fno-agents-worker not found (set FNO_AGENTS_WORKER or install the runtime)",
+        )
+
+    _stub_door(monkeypatch, absent)
+    with pytest.raises(DispatchResolveError, match="fno doctor update --rust"):
+        node_effective_verb({"id": "x-abcd"})
 
 
 def assert_refusal_names_subject_and_cites_no_node(exc: DispatchResolveError) -> None:
@@ -527,35 +630,26 @@ def test_bare_resolve_without_node_context_keeps_target_template():
 
 
 def test_out_of_family_declared_verb_keeps_declared_precedence():
-    # /think is outside the lifecycle table: it dispatches as declared, even
-    # though a ready plan would otherwise advance to /target.
+    # /think is outside the lifecycle table: the door abstains and the node's
+    # own declaration rides the allowlist-checked verb rung as declared.
     out = resolve_dispatch(
         harness="claude",
         node_id="x-abcd",
         verb="/think",
-        difficulty="high",
-        plan_rung="ready",
+        lifecycle=(None, "verb=lifecycle(out-of-family /think; declared precedence holds)"),
     )
     assert out["command"] == "/think x-abcd"
     assert out["verb"] is None
-
-
-def test_dollar_namespaced_stored_verb_resolves_like_the_slash_spelling():
-    """x-c976: a `$fno:` dispatch_verb canonicalizes before the family read,
-    so it answers exactly what `/fno:` answers."""
-    for spelling in ("/fno:blueprint", "$fno:blueprint"):
-        answer, _note = resolve_effective_verb(verb=spelling, plan_rung="none", difficulty="high")
-        assert answer == "/blueprint"
+    assert any("out-of-family /think" in d for d in out["decision"])
 
 
 def test_explicit_command_bypasses_the_lifecycle_refusal():
-    # A done rung would refuse the lifecycle; reconcile (and any other
-    # explicit-command door) never consults it.
+    # Reconcile (and any other explicit-command door) spells its own verb and
+    # never consults the lifecycle at all.
     out = resolve_dispatch(
         harness="claude",
         node_id="x-abcd",
         command="/target --reconcile /tmp/m.md {id}",
-        plan_rung="done",
     )
     assert out["command"] == "/target --reconcile /tmp/m.md x-abcd"
 
@@ -573,8 +667,7 @@ def test_derived_target_reads_the_auto_merge_grant():
     out = resolve_dispatch(
         harness="claude",
         node_id="x-abcd",
-        difficulty="low",
-        plan_rung="none",
+        lifecycle=("/target", "verb=lifecycle(intake difficulty=low -> /target)"),
         dispatch_cfg={"auto_merge": True},
     )
     assert out["command"] == "/target x-abcd"
@@ -586,8 +679,7 @@ def test_derived_blueprint_ignores_the_operator_target_template():
     out = resolve_dispatch(
         harness="claude",
         node_id="x-abcd",
-        difficulty="high",
-        plan_rung="none",
+        lifecycle=("/blueprint", "verb=lifecycle(intake difficulty=high -> /blueprint)"),
         dispatch_cfg={"command": "/target --special {id}"},
     )
     assert out["command"] == "/blueprint x-abcd"
@@ -608,7 +700,9 @@ def test_stage_table_resolves_the_derived_verb_profile():
         dispatch=None,
     )
     out = resolve_dispatch(
-        node_id="x-abcd", difficulty="medium", plan_rung="none", settings=stub
+        node_id="x-abcd",
+        lifecycle=("/blueprint", "verb=lifecycle(intake difficulty=medium -> /blueprint)"),
+        settings=stub,
     )
     assert out["harness"] == "codex"
     assert out["command"] == "$fno:blueprint x-abcd"

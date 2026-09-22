@@ -109,7 +109,8 @@ class Rung(Enum):
     verb authors the plan (low -> ``/target``, medium/high -> ``/blueprint``)
     - while ``IDEA`` (a linked-but-undesigned decompose scaffold) needs warm
     inline-fill, so it stays gated behind ``--include-ideas``. See
-    :func:`is_cold_dispatchable` and ``harness_map.resolve_effective_verb``.
+    :func:`is_cold_dispatchable` and the ported lifecycle table in
+    ``crates/fno-agents/src/backlog_ready.rs``.
     """
 
     NONE = "none"  # no usable plan_path - nothing on disk

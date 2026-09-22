@@ -1319,59 +1319,10 @@ _BRIEF_MAX_BYTES = 8192
 # _HARNESS_CAPS), not a single template - see the resolve builtin branch.
 
 
-#: The verbs the lifecycle table owns; anything else abstains.
+#: The verbs the lifecycle table owns; anything else abstains. The table
+#: itself lives once in crates/fno-agents/src/backlog_ready.rs; this is the
+#: family vocabulary the lost-verb scan shares.
 _TARGET_FAMILY_VERBS = ("/target", "/blueprint")
-#: Intake keys on difficulty (law d-834b6ff1); re-dispatch on the plan's rung.
-_DIFFICULTY_ANSWERS = {"low": "/target", "medium": "/blueprint", "high": "/blueprint"}
-_RUNG_ANSWERS = {
-    "idea": "/blueprint",
-    "design": "/blueprint",
-    "ready": "/target",
-    "in_progress": "/target",
-    "in_review": "/target",
-}
-
-
-def resolve_effective_verb(
-    *,
-    verb: Optional[str] = None,
-    difficulty: Optional[str] = None,
-    plan_rung: Optional[str] = None,
-    node_id: Optional[str] = None,
-) -> tuple[Optional[str], str]:
-    """The target/blueprint lifecycle conditional; full table:
-    docs/architecture/backlog-graph-verb-contracts.md. Intake (rung "none"):
-    difficulty decides. Re-dispatch: the plan rung decides. The stored
-    ``verb`` reconciles through the table; out-of-family abstains to declared
-    precedence. Returns ``(canonical_verb, decision)``; ``None`` = abstain.
-    Raises :class:`DispatchResolveError` on a refusal rung, or planless
-    without low/medium/high difficulty. ``plan_rung`` is a Rung value. The
-    refusal leads with ``node_id`` when the caller holds one, so the subject
-    of the failure is never read off a citation."""
-    raw_verb = (verb or "").strip()
-    if parse_verb_token(raw_verb):
-        raw_verb = canonical_verb_key(raw_verb)
-    if raw_verb and raw_verb not in _TARGET_FAMILY_VERBS:
-        return None, f"verb=lifecycle(out-of-family {raw_verb}; declared precedence holds)"
-    if plan_rung is None:
-        return None, "verb=lifecycle(no-node-context)"
-    rung = plan_rung.strip().lower()
-    d = (difficulty or "").strip().lower()
-    if rung == "none" and d in _DIFFICULTY_ANSWERS:
-        answer = _DIFFICULTY_ANSWERS[d]
-        note = f"verb=lifecycle(intake difficulty={d} -> {answer}"
-    elif rung in _RUNG_ANSWERS:
-        answer = _RUNG_ANSWERS[rung]
-        note = f"verb=lifecycle(plan {rung} -> {answer}"
-    else:
-        who = f" for node {node_id}" if node_id else ""
-        raise DispatchResolveError(
-            f"dispatch verb cannot be derived{who}: plan rung {rung!r} with "
-            f"difficulty {d!r} answers no lifecycle rung"
-        )
-    if raw_verb and raw_verb != answer:
-        note += f"; stored dispatch_verb {raw_verb} reconciled"
-    return answer, note + ")"
 
 
 def resolve_dispatch(
@@ -1381,8 +1332,7 @@ def resolve_dispatch(
     node_id: Optional[str] = None,
     command: Optional[str] = None,
     verb: Optional[str] = None,
-    difficulty: Optional[str] = None,
-    plan_rung: Optional[str] = None,
+    lifecycle: Optional[tuple[Optional[str], str]] = None,
     brief: Optional[str] = None,
     merge_posture: Optional[str] = None,
     trigger: str = "autonomous",
@@ -1396,11 +1346,13 @@ def resolve_dispatch(
     ``claude``; substrate explicit > config > per-harness default; command
     explicit > lifecycle derivation > node ``verb`` (allowlist-checked;
     a graph field is a trust boundary) > ``config.dispatch.command`` >
-    per-harness builtin. ``difficulty``/``plan_rung`` feed the lifecycle
-    derivation (see :func:`resolve_effective_verb`), which runs BEFORE the
-    stage-table read so ``agents.profiles.<derived-verb>`` drives the harness;
-    an explicit command bypasses it (reconcile and the other explicit doors
-    spell their own verb). ``brief`` rides ``env['TARGET_BRIEF']`` only, capped
+    per-harness builtin. ``lifecycle`` is the ported verb decision
+    (backlog_ready.rs via the store door) as ``(verb, note)``; it runs BEFORE
+    the stage-table read so ``agents.profiles.<resolved-verb>`` drives the
+    harness, and the note joins the decision trail. An explicit command
+    bypasses it (reconcile and the other explicit doors spell their own
+    verb). When it is absent the chain falls through to the allowlist-checked
+    ``verb`` rung, config, then the per-harness builtin, unchanged. ``brief`` rides ``env['TARGET_BRIEF']`` only, capped
     at 8 KB, never truncated. ``route`` is the stage table's vendor lane beside
     the harness ("" when unset), returned so a caller forwarding the harness
     can forward the vendor too. ``trigger`` is autonomous or attended (pane
@@ -1414,14 +1366,15 @@ def resolve_dispatch(
     unsubstituted command, or an unanswerable node lifecycle.
     ``dispatch_cfg`` overrides the config read (for tests)."""
     decision: list[str] = []
-    # The lifecycle rung derives the effective verb BEFORE the config read so
-    # the stage table resolves the DERIVED verb's profile row.
+    # The ported lifecycle answer rides in as (verb, note) and lands BEFORE
+    # the config read so the stage table resolves the RESOLVED verb's profile
+    # row. Absent, the chain falls through to the allowlist-checked verb
+    # rung, config, then the per-harness builtin.
     lifecycle_verb: Optional[str] = None
     if command is None or not command.strip():
-        lifecycle_verb, lifecycle_note = resolve_effective_verb(
-            verb=verb, difficulty=difficulty, plan_rung=plan_rung, node_id=node_id
-        )
-        decision.append(lifecycle_note)
+        if lifecycle is not None:
+            lifecycle_verb, lifecycle_note = lifecycle
+            decision.append(lifecycle_note)
     cfg = (
         dict(dispatch_cfg)
         if dispatch_cfg is not None

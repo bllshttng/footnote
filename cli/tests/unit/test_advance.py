@@ -3881,13 +3881,17 @@ def test_spawn_worker_grid_account_skips_on_a_non_claude_harness(monkeypatch):
 
 
 def test_spawn_worker_lifecycle_matrix_agrees_across_axes(iso, tmp_path, monkeypatch):
-    """x-ebd2 acceptance: for the four lifecycle shapes, command, worker-name
-    qualifier, and receipt verb all state the SAME derived verb, and a stale
-    stored verb reconciles through the table instead of winning."""
+    """x-ebd2 acceptance: for the lifecycle shapes, command, worker-name
+    qualifier, and receipt verb all state the SAME verb, and a declared verb
+    WINS over the table's answer with the disagreement on the trail. A build
+    rung derives /target only for a blueprint doc - a research doc with
+    `status: ready` keeps /blueprint."""
     design_plan = tmp_path / "design-plan.md"
     design_plan.write_text("---\nstatus: design\n---\n# draft\n")
     ready_plan = tmp_path / "ready-plan.md"
-    ready_plan.write_text("---\nstatus: ready\n---\n# contract\n")
+    ready_plan.write_text("---\nstatus: ready\nkind: quick-plan\n---\n# contract\n")
+    research_doc = tmp_path / "research-doc.md"
+    research_doc.write_text("---\nkind: research\nstatus: ready\n---\n# findings\n")
     cfg = tmp_path / "config.toml"
     cfg.write_text("[auto_merge]\nenabled = false\n")
     monkeypatch.setenv("FNO_CONFIG", str(cfg))
@@ -3916,7 +3920,7 @@ def test_spawn_worker_lifecycle_matrix_agrees_across_axes(iso, tmp_path, monkeyp
                 "dispatch_verb": "/fno:target",
                 "plan_path": str(design_plan), "cwd": str(tmp_path),
             },
-            "/blueprint x-design", "bp", "/blueprint", "declared",
+            "/target --no-merge x-design", "t", "/target", "declared",
         ),
         (
             {
@@ -3924,7 +3928,46 @@ def test_spawn_worker_lifecycle_matrix_agrees_across_axes(iso, tmp_path, monkeyp
                 "dispatch_verb": "/fno:blueprint",
                 "plan_path": str(ready_plan), "cwd": str(tmp_path),
             },
-            "/target --no-merge x-ready", "t", "/target", "declared",
+            "/blueprint x-ready", "bp", "/blueprint", "declared",
+        ),
+        # The research-doc specimen: a crown declared /blueprint on a research
+        # doc that merely carried status: ready. The declared verb dispatches
+        # /blueprint; the worker never edits hooks on a research brief again.
+        (
+            {
+                "difficulty": "high", "priority": "p1",
+                "dispatch_verb": "/fno:blueprint",
+                "plan_path": str(research_doc), "cwd": str(tmp_path),
+            },
+            "/blueprint x-specimen", "bp", "/blueprint", "declared",
+        ),
+        # An out-of-family declared verb rides as declared: the table abstains
+        # and the stored /think dispatches.
+        (
+            {
+                "difficulty": "high", "priority": "p1",
+                "dispatch_verb": "/fno:think",
+                "plan_path": str(ready_plan), "cwd": str(tmp_path),
+            },
+            "/think x-think", "th", "/think", "declared",
+        ),
+        # Undeclared on a ready rung: the doc kind decides. A research doc
+        # keeps /blueprint; a quick-plan advances to /target.
+        (
+            {
+                "difficulty": "high", "priority": "p1",
+                "dispatch_verb": "",
+                "plan_path": str(research_doc), "cwd": str(tmp_path),
+            },
+            "/blueprint x-undeclared-research", "bp", "/blueprint", "none-declared",
+        ),
+        (
+            {
+                "difficulty": "high", "priority": "p1",
+                "dispatch_verb": "",
+                "plan_path": str(ready_plan), "cwd": str(tmp_path),
+            },
+            "/target --no-merge x-undeclared-qp", "t", "/target", "none-declared",
         ),
     ]
     for i, (fields, command, verb_code, verb, source) in enumerate(cases):

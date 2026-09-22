@@ -902,6 +902,25 @@ def request_scoreboard_classify(
     )
 
 
+def request_effective_verb(entries: list[dict]) -> list[dict]:
+    """The lifecycle verb decision (backlog_ready.rs) over client-shipped
+    rows: one ``{"verb", "note", "refusal"}`` answer per row, in order. It
+    carries no decision of its own; a refusal rides its own row. A keeper
+    predating the verb answers ``StoreUnavailable(STATE_STALE_KEEPER, ...)``
+    with the restart remedy, the same mapping ``request_ready`` performs."""
+    try:
+        result = _client_for(GRAPH_JSON).request("effective_verb", {"entries": entries})
+    except RuntimeError as exc:
+        if "unknown store method" in str(exc):
+            raise StoreUnavailable(
+                STATE_STALE_KEEPER,
+                "the running store keeper predates this verb; restart it on a "
+                "current fno-agents-worker (`fno doctor` names binary lag)",
+            ) from None
+        raise
+    return list(result.get("answers") or [])
+
+
 def _plan_rung_map(entries: list[dict]) -> "dict[str, str]":
     """Node id -> the rung of the node's linked plan, computed client-side.
 
