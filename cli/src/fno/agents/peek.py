@@ -111,13 +111,11 @@ def _parse_codex_record(rec: dict) -> Optional[Record]:
         timestamp=timestamp if isinstance(timestamp, str) else None,
     )
 
-
 _TAIL_BYTES = 4 << 20  # 4 MiB holds the last 40 records of every live king transcript
 
 
 def _records_from_jsonl(
-    path: Path, n: Optional[int], parse: Callable[[dict], Optional[Record]],
-    tail: bool = True,
+    path: Path, n: Optional[int], parse: Callable[[dict], Optional[Record]], tail: bool = True
 ) -> list[Record]:
     """Parse the last ``n`` renderable records from a JSONL transcript.
 
