@@ -234,8 +234,7 @@ fn daemon_dies_within_8s_of_its_test_owner() {
         std::thread::sleep(Duration::from_millis(25));
     }
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !std::fs::read_to_string(home.join("events.jsonl"))
-        .unwrap_or_default()
+    while !fno_agents::event_store::journal_text(&home.join("events.jsonl"), &[])
         .contains("daemon_started")
     {
         assert!(
@@ -256,7 +255,7 @@ fn daemon_dies_within_8s_of_its_test_owner() {
         }
         if Instant::now() >= deadline {
             let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
-            let events = std::fs::read_to_string(home.join("events.jsonl")).unwrap_or_default();
+            let events = fno_agents::event_store::journal_text(&home.join("events.jsonl"), &[]);
             panic!("daemon {daemon_pid} was still unreaped 8s after SIGKILL; stderr={stderr:?}; events={events:?}");
         }
         std::thread::sleep(Duration::from_millis(25));
@@ -268,8 +267,7 @@ fn daemon_dies_within_8s_of_its_test_owner() {
         "daemon stderr must identify owner reaping; stderr={stderr:?}"
     );
     assert!(
-        std::fs::read_to_string(home.join("events.jsonl"))
-            .unwrap_or_default()
+        fno_agents::event_store::journal_text(&home.join("events.jsonl"), &[])
             .contains(r#""type":"daemon_exited""#),
         "daemon event log must carry a positive exit marker"
     );
