@@ -1,14 +1,18 @@
-"""Plan verification 7, second half: one stalled board is ONE question.
+"""Plan verification 7, second half: one stalled board is ONE fleet task.
 
 The first half - that both king terminals reach the verb, over the same stalled
 set - is `both_king_terminals_escalate_over_the_same_stalled_set` in
 `crates/fno-agents/tests/loop_check.rs`. It drives the two real paths against a
 mock `fno` and asserts the `--stalled` argument they produce. This file takes
-that argument and asserts what the verb does with it twice.
+that argument and asserts what the verb does with it.
 
-Neither half is the verification alone. The seam between them is the `--stalled`
-string: the Rust test pins that both arms emit it identically, this one pins
-that an identical string never records a second question.
+After the fleet-task port, the fold behind `escalate` lives in
+`crates/fno-agents/src/fleet_task.rs`; the Python channel is ONE transport
+call. The fold's behavior (dedupe, supersede, close, lane scoping) is
+characterized in Rust: `fleet_task_reconcile_parity.rs` and the `fleet_task`
+unit tests. What stays testable here is the seam: the marker+key the renderer
+receives, the lane+key payload the transport receives, and the refusals that
+raise before either.
 """
 from __future__ import annotations
 
@@ -18,7 +22,7 @@ import pytest
 
 from fno.agents.stale_escalate import dedupe_key
 from fno.king.escalate import escalate
-from fno.outstanding.core import read_open_questions, read_question_events
+from fno.outstanding.core import read_open_questions
 
 STALLED = ["undispatched:x-1234", "undispatched:x-5678"]
 
@@ -66,124 +70,58 @@ def crate_render_stub(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("fno.king.escalate._render", _fake_render)
 
 
+def _capture_transport(monkeypatch: pytest.MonkeyPatch, *, answer: dict) -> list:
+    """Stub the fleet-task transport; returns the captured payloads."""
+    import fno.rust_binary
+
+    captured: list = []
+
+    def fake_verb_call(verb, payload, *args, **kwargs):
+        assert verb == "fleet-task", verb
+        captured.append(payload)
+        return dict(answer)
+
+    monkeypatch.setattr(fno.rust_binary, "verb_call", fake_verb_call)
+    return captured
+
+
 def _run(root: Path, ids: list[str], reason: str = "NoProgress") -> tuple[str, str]:
     return escalate(ids, reason=reason, root=root, session_id="k-test", cwd=root)
 
 
-def test_one_stalled_board_records_exactly_one_question(tmp_path: Path) -> None:
-    """Both terminals escalating the same set leaves one question, not two.
-
-    This is the whole point of the verb existing instead of a bare
-    `fno outstanding ask`: the walk arm parks and the stop hook terminates over
-    the same stalled board, and an operator handed two identical questions stops
-    reading the queue this feature depends on.
-    """
+def test_one_stalled_board_sends_one_task_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both terminals escalating the same set key on the same dedupe key: the
+    payload is identical whichever order the ids arrive in."""
+    captured = _capture_transport(
+        monkeypatch, answer={"outcome": "asked", "id": "ft-kingfeed"}
+    )
     first_outcome, first_id = _run(tmp_path, STALLED)
     second_outcome, second_id = _run(tmp_path, list(reversed(STALLED)))
 
     assert first_outcome == "recorded"
+    assert first_id == "ft-kingfeed"
     assert second_outcome == "duplicate"
     assert second_id == first_id
-    assert len(read_open_questions(tmp_path)) == 1
+    assert len(captured) == 2
+    assert captured[0]["key"] == captured[1]["key"] == dedupe_key(sorted(STALLED))
+    assert captured[0]["lane"] == "king-escalation"
+    assert captured[0]["empty"] is False
+    # The rendered question text flows through as the task text.
+    assert captured[0]["text"] == _fake_render(
+        sorted(STALLED), dedupe_key(sorted(STALLED)), "NoProgress"
+    )["question"]
 
 
-def test_a_changed_board_supersedes_and_asks_fresh(tmp_path: Path) -> None:
-    """The board is a SNAPSHOT of a measured set, so the newest reading
-    supersedes: the old row closes mechanically and one question stays open.
-
-    This reverses the original rule ("a different board is a different ask"):
-    379 near-identical open rows showed the board churns while the question
-    does not, so arrival-order piling was the defect, not the dedupe.
-    """
-    _first_outcome, first_id = _run(tmp_path, STALLED)
-    outcome, new_id = _run(tmp_path, ["undispatched:x-9999"])
-
-    assert outcome == "recorded"
-    assert new_id != first_id
-    open_qs = read_open_questions(tmp_path)
-    assert [q.id for q in open_qs] == [new_id]
-
-    closes = [
-        rec["data"]
-        for rec in read_question_events()
-        if rec.get("type") == "operator_question_closed"
-        and rec.get("data", {}).get("question_id") == first_id
-    ]
-    assert len(closes) == 1
-    assert closes[0]["closed_by"] == "king-escalation-escalate"
-    assert "superseded by" in closes[0]["answer"]
-
-
-def test_an_identity_keyed_family_is_never_swept(tmp_path: Path) -> None:
-    """A family outside the snapshot markers (here a
-    session-transition-branch row) is a distinct question per key: a king
-    escalation supersedes king rows only, never it."""
-    from fno.events import operator_question
-    from fno.outstanding.core import append_question_event
-
-    branch_id = "q-bcc11a22"
-    append_question_event(
-        operator_question(
-            question_id=branch_id,
-            question="[session-transition-branch:k1:p0:p1] which successor holds the lane?",
-            session_id="watchdog-test",
-            cwd=str(tmp_path),
-            ask="decide",
-            source="daemon",
-        ),
-        tmp_path,
-    )
-    _run(tmp_path, STALLED)
-
-    remaining = {q.id for q in read_open_questions(tmp_path)}
-    assert branch_id in remaining
-    assert len(remaining) == 2
-
-
-def test_a_failed_supersede_close_still_records_the_new_ask(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The channel appends BEFORE it closes: a store failure mid-supersede
-    costs a duplicate ask, never a dropped one."""
-    _run(tmp_path, STALLED)
-
-    def broken(*_a, **_k):
-        raise RuntimeError("close failed")
-
-    monkeypatch.setattr("fno.agents.stale_escalate._close_question", broken)
-    outcome, qid = _run(tmp_path, ["undispatched:x-9999"])
-
-    assert outcome == "recorded"
-    assert qid in [q.id for q in read_open_questions(tmp_path)]
-
-
-def test_the_key_ignores_order_and_repeats(tmp_path: Path) -> None:
-    assert dedupe_key(["b", "a"]) == dedupe_key(["a", "b", "a"])
-    assert dedupe_key(["a"]) != dedupe_key(["a", "b"])
-
-
-def test_a_refused_render_raises_and_touches_no_question(
+def test_an_empty_refused_set_never_reaches_the_transport(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A refusal is the gate speaking (x-ff27): the renderer refuses an
-    empty set, and the fold must never run for it. The channel's empty
-    branch closes open asks, so reaching it with a refused set would read a
-    refused board as a clean one.
-    """
-    from fno.events import operator_question
-    from fno.outstanding.core import append_question_event
-
-    seeded = "q-seeded01"
-    append_question_event(
-        operator_question(
-            question_id=seeded,
-            question="[king-escalation:seeded] seeded open row",
-            session_id="k-seed",
-            cwd=str(tmp_path),
-            ask="decide",
-            source="daemon",
-        ),
-        tmp_path,
+    empty set, and the transport must never see one - reaching the fold with
+    a refused set would read a refused board as a clean one."""
+    captured = _capture_transport(
+        monkeypatch, answer={"outcome": "asked", "id": "ft-shouldnot"}
     )
     monkeypatch.setattr(
         "fno.king.escalate._render",
@@ -195,8 +133,13 @@ def test_a_refused_render_raises_and_touches_no_question(
     with pytest.raises(ValueError, match="king escalation refused"):
         _run(tmp_path, [])
 
-    remaining = [q.id for q in read_open_questions(tmp_path)]
-    assert remaining == [seeded], "the refused escalation closed nothing, asked nothing"
+    assert captured == []
+    assert read_open_questions(tmp_path) == []
+
+
+def test_the_key_ignores_order_and_repeats(tmp_path: Path) -> None:
+    assert dedupe_key(["b", "a"]) == dedupe_key(["a", "b", "a"])
+    assert dedupe_key(["a"]) != dedupe_key(["a", "b"])
 
 
 def test_the_fold_renders_with_the_dedupe_key_of_its_ids(
@@ -216,79 +159,6 @@ def test_the_fold_renders_with_the_dedupe_key_of_its_ids(
     assert seen["ids"] == sorted(STALLED)
     assert seen["key"] == dedupe_key(STALLED)
     assert seen["reason"] == "NoProgress"
-
-
-def test_an_unreadable_store_is_not_an_empty_one(tmp_path: Path) -> None:
-    """A read failure must raise, never look like "nothing asked yet".
-
-    A reader that could not tell those apart would file a fresh question on
-    every fire, which is the pathology the dedupe exists to prevent - arriving
-    through the error path instead of the happy one.
-    """
-    from fno.events.store_client import store_db_path
-    from fno.outstanding.core import OutstandingError, events_path
-
-    path = events_path(tmp_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # The journal is store-located now: a directory standing in for events.db
-    # is unreadable, not absent.
-    store_db_path(path).mkdir()
-
-    with pytest.raises(OutstandingError):
-        _run(tmp_path, STALLED)
-
-
-def test_a_huge_stalled_board_still_dedupes(tmp_path: Path) -> None:
-    """The marker must survive `operator_question`'s truncation.
-
-    The defect: the marker sat at the END, after the full comma-joined id list.
-    `operator_question` caps the recorded text at QUESTION_CAP, so a board with
-    enough stalled rows pushed the marker off the end. `already_asked` then
-    matched nothing and every respawned king filed a duplicate - precisely the
-    failure this module claims to prevent, reached through its own happy path.
-
-    Six queues at the board's 25-row cap is ~150 rows, so this size is
-    reachable, not hypothetical.
-    """
-    from fno.events import QUESTION_CAP
-
-    huge = [f"undispatched:x-{i:04d}" for i in range(150)]
-
-    first_outcome, first_id = _run(tmp_path, huge)
-    second_outcome, second_id = _run(tmp_path, list(reversed(huge)))
-
-    (question,) = read_open_questions(tmp_path)
-    assert len(question.question) <= QUESTION_CAP
-    assert f"[king-escalation:{dedupe_key(huge)}]" in question.question, (
-        "the marker must survive truncation, so it leads the text"
-    )
-    assert first_outcome == "recorded"
-    assert second_outcome == "duplicate"
-    assert second_id == first_id
-    # The count is load-bearing even when the rows are elided.
-    assert "150 board row(s)" in question.question
-
-
-def test_escalations_carry_the_king_session_as_asker(tmp_path: Path) -> None:
-    """BREAK 1: an answered escalation must be deliverable to a successor king.
-
-    The king that asked is dead when the operator answers, but the durable mail
-    tier reaches the respawned one; neither works without an address on the row.
-    """
-    from fno.harness_identity import canonical_handle
-
-    _, _qid = _run(tmp_path, STALLED)
-    (question,) = read_open_questions(tmp_path)
-
-    assert question.asker == canonical_handle("k-test")
-
-
-def test_a_sessionless_escalation_records_without_an_asker(tmp_path: Path) -> None:
-    """No session id is the legacy shape; the question still lands, asker None."""
-    escalate(STALLED, reason="NoProgress", root=tmp_path, session_id=None, cwd=tmp_path)
-    (question,) = read_open_questions(tmp_path)
-
-    assert question.asker is None
 
 
 # ---------------------------------------------------------------------------
@@ -435,71 +305,34 @@ def _escalate_as(root: Path, session: str, ids: "list[str]") -> "tuple[str, str]
     return escalate(ids, reason="NoProgress", root=root, session_id=session, cwd=root)
 
 
-def test_two_reigning_kings_never_close_each_others_question(
-    tmp_path: Path, monkeypatch
+def test_two_reigning_kings_send_distinct_scoped_lanes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Two kings with different stuck sets reconcile in turn: each keeps one
-    open question and neither closes the other.
-
-    The crown measured 8 asks and 7 mechanical supersedes in 41 minutes on
-    2026-09-15 because the channel keyed on the marker alone; a king's ask
-    must match on the king too, or the operator never sees a stable question.
-    """
+    """Two kings with different stuck sets reconcile in turn: each carries its
+    own scoped lane, so neither ever touches the other's open tasks. The
+    crown measured 8 asks and 7 mechanical supersedes in 41 minutes on
+    2026-09-15 because the channel keyed on the marker alone."""
     _two_channels()
-    reaper_set = ["unheld_progress:x-9"]
-
-    first_a = _escalate_as(tmp_path, "king-a-session", STALLED)
-    first_b = _escalate_as(tmp_path, "king-b-session", reaper_set)
-    assert first_a[0] == "recorded"
-    assert first_b[0] == "recorded"
-
-    assert _escalate_as(tmp_path, "king-a-session", list(reversed(STALLED))) == (
-        "duplicate",
-        first_a[1],
-    )
-    assert _escalate_as(tmp_path, "king-b-session", reaper_set) == (
-        "duplicate",
-        first_b[1],
+    captured = _capture_transport(
+        monkeypatch, answer={"outcome": "asked", "id": "ft-scoped00"}
     )
 
-    assert {q.id for q in read_open_questions(tmp_path)} == {first_a[1], first_b[1]}
+    _escalate_as(tmp_path, "king-a-session", STALLED)
+    _escalate_as(tmp_path, "king-b-session", ["unheld_progress:x-9"])
+
+    lanes = [p["lane"] for p in captured]
+    assert lanes == ["king-escalation:fno", "king-escalation:reaper"]
 
 
-def test_a_kings_changed_set_supersedes_only_its_own_question(
-    tmp_path: Path, monkeypatch
+def test_a_scopeless_caller_stays_on_the_shared_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A changed board still supersedes, within the king's own channel."""
-    _two_channels()
-
-    first_a = _escalate_as(tmp_path, "king-a-session", STALLED)
-    first_b = _escalate_as(tmp_path, "king-b-session", ["unheld_progress:x-9"])
-    outcome, new_id = _escalate_as(tmp_path, "king-a-session", ["undispatched:x-9999"])
-
-    assert outcome == "recorded"
-    assert {q.id for q in read_open_questions(tmp_path)} == {new_id, first_b[1]}
-    closes = [
-        rec["data"]
-        for rec in read_question_events()
-        if rec.get("type") == "operator_question_closed"
-        and rec.get("data", {}).get("question_id") == first_a[1]
-    ]
-    assert len(closes) == 1
-    assert "superseded by" in closes[0]["answer"]
-
-
-def test_a_crowned_ask_never_sweeps_the_uncrowned_shared_channel(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """A scopeless caller stays on the legacy shared marker, and a crowned
-    ask never closes its row: the scoped sweep cannot match the unscoped
-    prefix. Legacy rows open at deploy time linger until a human answers."""
-    SCOPES.update({"king-a-session": "fno"})
-    legacy = _escalate_as(tmp_path, "k-test", STALLED)
-    crowned = _escalate_as(tmp_path, "king-a-session", ["undispatched:x-1"])
-
-    assert legacy[0] == "recorded"
-    assert crowned[0] == "recorded"
-    assert {q.id for q in read_open_questions(tmp_path)} == {legacy[1], crowned[1]}
+    """A scopeless caller stays on the legacy shared marker."""
+    captured = _capture_transport(
+        monkeypatch, answer={"outcome": "asked", "id": "ft-shared00"}
+    )
+    _escalate_as(tmp_path, "k-test", STALLED)
+    assert captured[0]["lane"] == "king-escalation"
 
 
 # --- the reign verdict rides the renderer (x-4d4f) ------------------------------
@@ -533,7 +366,9 @@ def test_escalate_threads_verdict_and_scope_to_the_renderer(tmp_path: Path, monk
 
 def test_escalate_raises_on_a_renderer_refusal(tmp_path: Path, monkeypatch) -> None:
     """``ok: false`` is a refusal, not a fallback: the caller raises while the
-    channel is untouched - no question is recorded from refused text."""
+    channel is untouched - no task is filed from refused text."""
+    _capture_transport(monkeypatch, answer={"outcome": "asked", "id": "ft-refused0"})
+
     def _refuse(ids, key, reason, **_kw) -> dict:
         return {"ok": False, "message": "king escalation refused: empty set"}
 
@@ -541,4 +376,3 @@ def test_escalate_raises_on_a_renderer_refusal(tmp_path: Path, monkeypatch) -> N
     with pytest.raises(ValueError, match="refused"):
         escalate(STALLED, reason="Budget", root=tmp_path, session_id="k-test", cwd=tmp_path)
     assert read_open_questions(tmp_path) == []
-
