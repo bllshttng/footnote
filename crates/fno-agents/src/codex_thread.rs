@@ -216,6 +216,48 @@ pub fn thread_resume_request_json(thread_id: &str, cwd: &str, approval_policy: &
     .to_string()
 }
 
+/// Build the typed native compaction action. The caller must prove completion
+/// from the same thread's `contextCompaction` lifecycle item; this frame is
+/// only the submit half of that transaction.
+pub fn thread_compact_start_request_json(id: u64, thread_id: &str) -> String {
+    json!({
+        "id": id,
+        "method": "thread/compact/start",
+        "params": { "threadId": thread_id }
+    })
+    .to_string()
+}
+
+/// Read the native goal for one exact full thread id.
+pub fn thread_goal_get_request_json(id: u64, thread_id: &str) -> String {
+    json!({
+        "id": id,
+        "method": "thread/goal/get",
+        "params": { "threadId": thread_id }
+    })
+    .to_string()
+}
+
+/// Set or pause a native goal without exposing a clear operation. The
+/// controller preserves the objective and usage across a pause.
+pub fn thread_goal_set_request_json(
+    id: u64,
+    thread_id: &str,
+    objective: &str,
+    status: &str,
+) -> String {
+    json!({
+        "id": id,
+        "method": "thread/goal/set",
+        "params": {
+            "threadId": thread_id,
+            "goal": objective,
+            "status": status,
+        }
+    })
+    .to_string()
+}
+
 /// Build a `turn/start` request for the held driver.
 pub fn turn_start_request_json_with_id(id: u64, thread_id: &str, text: &str) -> String {
     turn_start_request_json_with_effort(id, thread_id, text, None)
@@ -1040,6 +1082,42 @@ impl CodexThread {
         // accept the ack shape and let the caller's own loaded-list check
         // prove the effect.
         Ok(())
+    }
+
+    pub async fn compact(&mut self) -> Result<Value, ThreadDriverError> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.request_value(id, thread_compact_start_request_json(id, &self.thread_id))
+            .await
+            .and_then(provider_response)
+    }
+
+    pub async fn goal_get(&mut self) -> Result<Value, ThreadDriverError> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.request_value(id, thread_goal_get_request_json(id, &self.thread_id))
+            .await
+            .and_then(provider_response)
+    }
+
+    pub async fn goal_set(
+        &mut self,
+        objective: &str,
+        status: &str,
+    ) -> Result<Value, ThreadDriverError> {
+        if objective.trim().is_empty() || !matches!(status, "active" | "paused") {
+            return Err(ThreadDriverError::Protocol(
+                "goal set needs a non-empty objective and active|paused status".into(),
+            ));
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.request_value(
+            id,
+            thread_goal_set_request_json(id, &self.thread_id, objective, status),
+        )
+        .await
+        .and_then(provider_response)
     }
 
     /// Unarchive this thread id so `thread/resume` finds it in the same
@@ -1987,6 +2065,13 @@ fn thread_resume_request_with_options(
     json!({"id": id, "method": "thread/resume", "params": params}).to_string()
 }
 
+fn provider_response(value: Value) -> Result<Value, ThreadDriverError> {
+    if let Some(error) = value.get("error") {
+        return Err(ThreadDriverError::Protocol(server_error(error)));
+    }
+    Ok(value)
+}
+
 fn server_error(error: &Value) -> String {
     error
         .get("message")
@@ -2011,6 +2096,31 @@ mod tests {
         assert_eq!(value["method"], "thread/resume");
         assert_eq!(value["params"]["threadId"], "thread-1");
         assert_eq!(value["params"]["cwd"], "/tmp/worktree");
+    }
+
+    #[test]
+    fn native_provider_actions_pin_the_full_thread_id() {
+        let compact: Value = serde_json::from_str(&thread_compact_start_request_json(
+            7,
+            "01a0acac-9c64-72f3-99b5-e26620eb1c6d",
+        ))
+        .unwrap();
+        assert_eq!(compact["method"], "thread/compact/start");
+        assert_eq!(
+            compact["params"]["threadId"],
+            "01a0acac-9c64-72f3-99b5-e26620eb1c6d"
+        );
+
+        let goal: Value = serde_json::from_str(&thread_goal_set_request_json(
+            8,
+            "thread-full",
+            "$fno:reign x-e64a",
+            "active",
+        ))
+        .unwrap();
+        assert_eq!(goal["method"], "thread/goal/set");
+        assert_eq!(goal["params"]["status"], "active");
+        assert_eq!(goal["params"]["goal"], "$fno:reign x-e64a");
     }
 
     #[test]

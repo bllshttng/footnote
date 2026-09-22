@@ -110,6 +110,8 @@ enum Role {
     /// `mux shell-init <zsh|bash> [--json]`: print the OSC 133 shell-integration
     /// snippet (v6). `None` / an unsupported shell is an error in the verb.
     MuxShellInit(Option<String>, bool),
+    /// `mux command <selector> ...`: one identity-pinned native action.
+    MuxCommand(fno::cli_args::MuxCommandArgs),
     /// `mux serve --web [--session <name>] [--bind <addr>] [--port <n>]`: the
     /// read-only web bridge. Attaches to a session as an observer and
     /// serves its frame stream to browsers over HTTP+WebSocket. No TTY needed.
@@ -242,6 +244,7 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
                 all,
             }),
             cli_args::MuxCmd::ShellInit { shell, json } => Role::MuxShellInit(shell, json.json),
+            cli_args::MuxCmd::Command(args) => Role::MuxCommand(args),
             cli_args::MuxCmd::Attach { name } => {
                 if is_tty {
                     Role::Client(Some(name))
@@ -335,6 +338,7 @@ fn main() {
         Role::MuxShellInit(shell, json) => {
             std::process::exit(mux_cli::shell_init(shell.as_deref(), json))
         }
+        Role::MuxCommand(args) => exit_mux(mux_cli::command(args, env_session.as_deref())),
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
         Role::DoctorEvent(rest) => std::process::exit(fno::event_cli::run(&rest)),
         Role::MuxStats(json) => std::process::exit(mux_cli::stats(json)),

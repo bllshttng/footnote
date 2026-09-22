@@ -88,6 +88,8 @@ pub enum MuxCmd {
         #[command(flatten)]
         json: JsonOnly,
     },
+    /// `mux command <selector> --text <native-command> --proof <kind>`
+    Command(MuxCommandArgs),
     /// `mux serve --web|--stop|--status ...`: the read-only web bridge
     /// `--web`, `--stop` or `--status` is required; the flags are
     /// the bridge's own (parse_web_args keeps them exact).
@@ -158,6 +160,32 @@ pub enum MuxCmd {
         #[command(subcommand)]
         op: WorkspaceOp,
     },
+}
+
+/// The identity-pinned native action door. Keep this declaration typed so the
+/// flag registry, help, and front-door classifier all share one contract.
+#[derive(Args, Debug, PartialEq, Eq, Clone)]
+pub struct MuxCommandArgs {
+    /// Agent name, node id, or full harness session id.
+    pub selector: String,
+    /// Native command to execute, for example `/compact` or `/rc`.
+    #[arg(long)]
+    pub text: String,
+    /// Postcondition recipe: compact, goal-active, or screen.
+    #[arg(long, value_parser = ["compact", "goal-active", "screen"])]
+    pub proof: String,
+    /// Optional bounded screen assertion for the screen recipe.
+    #[arg(long)]
+    pub expect: Option<String>,
+    /// Maximum seconds spent waiting for the command-specific proof.
+    #[arg(long, default_value_t = 30)]
+    pub timeout_seconds: u64,
+    /// Defer a typed provider action until the next lifecycle boundary.
+    #[arg(long)]
+    pub at_next_boundary: bool,
+    /// Stable id used to make retries idempotent.
+    #[arg(long)]
+    pub request_id: Option<String>,
 }
 
 /// The kill-server request the role carries: a NAME with the break-glass
@@ -1080,6 +1108,39 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn native_command_door_accepts_identity_proof_and_boundary_flags() {
+        let args = os(&[
+            "mux",
+            "command",
+            "codex-thread-full-id",
+            "--text",
+            "/compact",
+            "--proof",
+            "compact",
+            "--expect",
+            "contextCompaction",
+            "--timeout-seconds",
+            "9",
+            "--at-next-boundary",
+            "--request-id",
+            "req-1",
+        ]);
+        match classify(&args) {
+            FrontDoor::Mux(MuxParsed {
+                cmd: MuxCmd::Command(parsed),
+            }) => {
+                assert_eq!(parsed.selector, "codex-thread-full-id");
+                assert_eq!(parsed.text, "/compact");
+                assert_eq!(parsed.proof, "compact");
+                assert_eq!(parsed.timeout_seconds, 9);
+                assert!(parsed.at_next_boundary);
+                assert_eq!(parsed.request_id.as_deref(), Some("req-1"));
+            }
+            other => panic!("native command door parsed incorrectly: {other:?}"),
+        }
     }
 
     #[test]
