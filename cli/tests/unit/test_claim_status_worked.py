@@ -33,7 +33,9 @@ def _fresh_tail(monkeypatch, last_event_epoch: float) -> None:
     monkeypatch.setattr(
         "fno.agents.watchdog.tail_facts",
         lambda *_a, **_kw: TailFacts(
+            records=None,
             last_event_epoch=last_event_epoch,
+            tail_text="progress update",
             last_role="assistant",
             last_text="progress update",
         ),
