@@ -674,16 +674,13 @@ fn table_daemon_facts(home: &crate::paths::AgentsHome) -> crate::tick_ledger::Da
 /// `unarmed`, `starved`, `PAUSED` and `UNOBSERVED` exit 0, because none of
 /// them is a loop that stopped while it was supposed to be running.
 pub fn run_loops_table(json_out: bool, markdown: bool) -> i32 {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let home = crate::paths::AgentsHome::from_env();
     let journals = crate::tick_ledger::journals(&home);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let mut rows = crate::tick_ledger::read_arms(&journals, now);
-    let threshold = crate::agents_config::notify_arm_starved_after_s(&cwd);
-    crate::tick_ledger::mark_starved(&journals, &mut rows, now, threshold);
+    let mut rows = crate::tick_ledger::read_arms_starved(&journals, now);
     let trace = crate::tick_ledger::read_tick_trace_live(&journals, &rows, now);
     let daemon = table_daemon_facts(&home);
     crate::arm_repair::explain(&mut rows, &daemon, &trace);

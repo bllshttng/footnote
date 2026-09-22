@@ -2906,13 +2906,7 @@ fn arms_readout(
     // The journal list is owned by tick_ledger::journals, so the readout and
     // the arm_watch daemon arm fold the same files and cannot drift.
     let journals = fno_agents::tick_ledger::journals(home);
-    let mut arms = fno_agents::tick_ledger::read_arms(&journals, now_unix);
-    // The starved mark rides the status readout too, so the vocabulary is
-    // one fold everywhere: the table and the status arms never disagree.
-    let threshold = fno_agents::agents_config::notify_arm_starved_after_s(
-        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-    );
-    fno_agents::tick_ledger::mark_starved(&journals, &mut arms, now_unix, threshold);
+    let arms = fno_agents::tick_ledger::read_arms_starved(&journals, now_unix);
     let trace = fno_agents::tick_ledger::read_tick_trace_live(&journals, &arms, now_unix);
     (arms, trace)
 }

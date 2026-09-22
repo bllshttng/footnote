@@ -558,6 +558,17 @@ pub fn mark_starved(journals: &[PathBuf], rows: &mut [ArmStatus], now_unix: u64,
     }
 }
 
+/// [`read_arms`] plus the starved mark: the one read every arms readout
+/// makes, so the table and the status arms never disagree about the
+/// vocabulary. The threshold comes from `notify.arm_starved_after_s`.
+pub fn read_arms_starved(journals: &[PathBuf], now_unix: u64) -> Vec<ArmStatus> {
+    let mut rows = read_arms(journals, now_unix);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let threshold = crate::agents_config::notify_arm_starved_after_s(&cwd);
+    mark_starved(journals, &mut rows, now_unix, threshold);
+    rows
+}
+
 /// One fold collecting every `(ts, acted, skip_explains)` triple an arm's
 /// journal holds.
 fn collect_tick_history(path: &Path, history: &mut HashMap<String, Vec<(u64, u64, bool)>>) {
