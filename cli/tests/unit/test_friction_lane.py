@@ -9,6 +9,7 @@ fleet-enumeration seams injected; the fold under test is
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -146,7 +147,11 @@ def test_a_friction_close_records_friction_provenance(tmp_path: Path) -> None:
         "<promise>PR is green and reviewed</promise>", 1800
     )
     _friction_run(tmp_path, rows, quiet)
-    raw = (tmp_path / "questions.jsonl").read_text()
+    from tests._event_rows import event_rows
+
+    raw = "".join(
+        json.dumps(e) + "\n" for e in event_rows(tmp_path / "questions.jsonl")
+    )
     # The close and its decision row must name the friction lane, not the
     # stale lane whose close helper the channel shares.
     assert '"closed_by":"friction-escalate"' in raw.replace(" ", "")

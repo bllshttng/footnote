@@ -151,11 +151,12 @@ def test_a_held_message_lands_after_expiry_with_no_operator_input(state, tmp_pat
     assert result["outcome"] in ("delivered", "inject-missed")
 
     # The positive marker, on the release, in the durable event log.
-    events = (home / ".fno" / "events.jsonl").read_text(encoding="utf-8")
+    from tests._event_rows import event_rows
+
     released = [
-        json.loads(line)
-        for line in events.splitlines()
-        if line.strip() and json.loads(line).get("kind") == "mail_hold_released"
+        e
+        for e in event_rows(home / ".fno" / "events.jsonl")
+        if e.get("kind") == "mail_hold_released"
     ]
     assert len(released) == 1, "the release must emit exactly one marker"
     assert released[0]["handle"] == HANDLE
@@ -173,9 +174,11 @@ def test_the_timer_exits_quietly_when_the_hold_was_lifted_by_hand(state):
 
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == ""
+    from tests._event_rows import event_rows
+
     events_path = home / ".fno" / "events.jsonl"
-    assert not events_path.exists() or "mail_hold_released" not in events_path.read_text(
-        encoding="utf-8"
+    assert not any(
+        e.get("kind") == "mail_hold_released" for e in event_rows(events_path)
     )
 
 

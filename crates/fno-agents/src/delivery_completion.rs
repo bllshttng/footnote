@@ -434,8 +434,42 @@ pub fn selected_receipt(
     expected_node: Option<&str>,
     session_id: &str,
 ) -> Option<DeliveryReceipt> {
+    // SQL authority: the store commit is the write boundary, so the verdict
+    // event the shim emitted lives in the store, not the raw journal. A
+    // journal with no store beside it (pre-store writer) is still scanned
+    // raw, newest first, exactly the pre-store read.
+    if events.exists() {
+        // Fold any uncommitted raw bytes; a store-only journal skips this.
+        let _ = crate::event_store::import_all(events);
+    }
+    if crate::event_store::store_path(events).exists() {
+        if let Ok(rows) = crate::event_store::query_events(
+            events,
+            &crate::event_store::EventQuery {
+                types: vec!["delivery_verdict_evaluated".to_string()],
+                ..Default::default()
+            },
+        ) {
+            return scan_verdict_rows(
+                rows.iter().map(|r| r.line.as_str()),
+                expected_node,
+                session_id,
+            );
+        }
+    }
     let content = std::fs::read_to_string(events).ok()?;
-    for line in content.lines().rev() {
+    scan_verdict_rows(content.lines(), expected_node, session_id)
+}
+
+fn scan_verdict_rows<'a, I>(
+    lines: I,
+    expected_node: Option<&str>,
+    session_id: &str,
+) -> Option<DeliveryReceipt>
+where
+    I: Iterator<Item = &'a str> + std::iter::DoubleEndedIterator,
+{
+    for line in lines.rev() {
         let event: Value = match serde_json::from_str(line) {
             Ok(event) => event,
             Err(_) => continue,

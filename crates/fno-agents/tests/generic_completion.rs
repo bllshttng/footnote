@@ -200,9 +200,17 @@ fn canonical_setup() -> GenericEnv {
     env
 }
 
-fn event_types(path: &Path) -> Vec<String> {
-    fs::read_to_string(path)
+fn event_text(path: &Path) -> String {
+    fno_agents::event_store::query_events(path, &Default::default())
         .unwrap_or_default()
+        .into_iter()
+        .map(|row| row.line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn event_types(path: &Path) -> Vec<String> {
+    event_text(path)
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter_map(|event| event.get("type")?.as_str().map(str::to_owned))
@@ -356,7 +364,7 @@ fn generic_completion_ac_d7_hp_passed_canonical_verdict_terminates_without_gh() 
     );
     assert!(message.contains("sha256:abc"), "{message}");
     assert!(event_types(&env.events).contains(&"delivery_verdict_evaluated".to_string()));
-    let events = fs::read_to_string(&env.events).unwrap();
+    let events = event_text(&env.events);
     assert!(events.lines().any(|line| {
         let event: Value = serde_json::from_str(line).unwrap();
         event["type"] == "loop_check"
@@ -494,7 +502,7 @@ fn generic_completion_ac_d8_inv_passed_observation_cannot_unlock() {
 fn generic_completion_ac_d10_err_verdict_must_be_durably_appended() {
     let env = setup(&passed_response());
     fs::remove_file(&env.events).unwrap();
-    fs::create_dir(&env.events).unwrap();
+    fs::create_dir(fno_agents::event_store::store_path(&env.events)).unwrap();
 
     let output = run(&env);
 

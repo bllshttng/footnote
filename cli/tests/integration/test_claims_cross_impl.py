@@ -167,11 +167,11 @@ def events(_cwd: Path | None = None) -> list[dict]:
     """
     from fno.paths import journal_and_ephemeral_sibling
 
+    from tests._event_rows import event_rows
+
     rows: list[dict] = []
     for p in journal_and_ephemeral_sibling(Path(os.environ["FNO_EVENTS_PATH"])):
-        if not p.exists():
-            continue
-        rows.extend(json.loads(line) for line in p.read_text().splitlines() if line.strip())
+        rows.extend(event_rows(p))
     return rows
 
 

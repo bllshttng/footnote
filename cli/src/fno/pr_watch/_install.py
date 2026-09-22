@@ -894,20 +894,41 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
         except Exception:
             return marks
 
-    if not events_path.exists():
+    store_exists = False
+    try:
+        from fno.events.store_client import store_db_path
+
+        store_exists = store_db_path(events_path).exists()
+    except Exception:
+        store_exists = False
+
+    if not events_path.exists() and not store_exists:
         return marks
 
     chunks_by_receipt: dict[str, list[dict]] = {}
     try:
-        for line in events_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-                if not isinstance(ev, dict):
+        # The store commit is the write boundary: committed rows are the
+        # history. A journal with no store beside it (pre-store daemon, a
+        # seeded fixture) is still read from its raw bytes.
+        if store_exists:
+            from fno.events.store_client import query_rows
+
+            rows: "list[dict]" = query_rows(events_path)
+        else:
+            rows = []
+            for line in events_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
                     continue
-            except json.JSONDecodeError:
+                try:
+                    ev = json.loads(line)
+                    if isinstance(ev, dict):
+                        rows.append(ev)
+                except json.JSONDecodeError:
+                    continue
+
+        for ev in rows:
+            if not isinstance(ev, dict):
                 continue
             etype = ev.get("type")
             if etype == "pr_watch_sweep_chunk":
@@ -951,7 +972,7 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
                 recent = marks["recent_ends"]
                 recent.append(marks["last_end"])
                 del recent[:-_RECENT_ENDS_KEEP]
-    except OSError:
+    except Exception:
         pass
     return marks
 

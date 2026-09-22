@@ -154,6 +154,13 @@ pub(crate) fn cascade_harness_session_result_with(
                 );
             };
             let snapshot = claude_agents.expect("Claude cascade requires an agent-list snapshot");
+            // A pane row runs claude as a foreground TUI, which the bg-only
+            // roster never lists: no `claude rm` exists for it, and its stop
+            // is the pane stop's job. The find guard keeps today's claude rm
+            // for the odd pane row the roster does list.
+            if e.substrate.as_deref() == Some("pane") && snapshot.find(&short_id).is_none() {
+                return CascadeOutcome::NotApplicable;
+            }
             if crate::daemon::roster_death::claude_row_provably_absent(
                 Some(snapshot),
                 Some(&short_id),
@@ -550,5 +557,83 @@ mod tests {
             &|_| Ok(1),
         );
         assert!(matches!(outcome, CascadeOutcome::Failed(_)));
+    }
+
+    /// A counting claude_rm seam with the row's id.
+    fn x1530_cascade(
+        e: &RegistryEntry,
+        snapshot: crate::claude_roster::ClaudeAgentsSnapshot,
+    ) -> (CascadeOutcome, usize) {
+        let calls = std::cell::Cell::new(0usize);
+        let outcome = cascade_harness_session_result_with(
+            e,
+            Some(&snapshot),
+            &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
+            &|short_id| {
+                calls.set(calls.get() + 1);
+                let _ = short_id;
+                Ok(())
+            },
+        );
+        (outcome, calls.get())
+    }
+
+    /// AC7-HP: a claude pane row the bg-only roster does not list skips
+    /// the claude rm leg entirely - stop for a pane row is the pane
+    /// stop's job, not a removal.
+    #[test]
+    fn x1530_ac7_claude_pane_row_not_in_roster_skips_claude_rm() {
+        let mut e = row("claude", Some("pane"), None);
+        e.harness_session_id = Some("aaaaaaaa-1111-2222-3333-444444444444".into());
+        let (outcome, calls) = x1530_cascade(
+            &e,
+            crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
+        );
+        assert!(matches!(outcome, CascadeOutcome::NotApplicable));
+        assert_eq!(calls, 0, "claude rm must never run for a pane row");
+    }
+
+    /// AC8-ERR: an unreadable roster snapshot proves nothing, and for a
+    /// pane row that still means no claude rm: the pane leg is skipped on
+    /// every snapshot answer.
+    #[test]
+    fn x1530_ac8_claude_pane_row_on_unreadable_roster_still_skips_claude_rm() {
+        let mut e = row("claude", Some("pane"), None);
+        e.harness_session_id = Some("aaaaaaaa-1111-2222-3333-444444444444".into());
+        let (outcome, calls) = x1530_cascade(
+            &e,
+            crate::claude_roster::ClaudeAgentsSnapshot::unknown("roster unreadable: boom"),
+        );
+        assert!(matches!(outcome, CascadeOutcome::NotApplicable));
+        assert_eq!(calls, 0);
+    }
+
+    /// AC9-EDGE: the guard changes only the pane-not-listed shape. A pane
+    /// row the roster DOES list keeps claude rm, and a thread row on an
+    /// empty roster still reads already-absent.
+    #[test]
+    fn x1530_ac9_listed_pane_row_keeps_claude_rm_and_thread_row_stays_already_absent() {
+        let mut listed = row("claude", Some("pane"), None);
+        listed.short_id = "abcd1234".into();
+        let snapshot = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+            crate::claude_roster::ClaudeAgentRow::new("abcd1234", Some("exited")),
+        ]);
+        let (outcome, calls) = x1530_cascade(&listed, snapshot);
+        assert!(matches!(outcome, CascadeOutcome::Removed), "{outcome:?}");
+        assert_eq!(calls, 1);
+
+        let mut thread = row("claude", Some("thread"), None);
+        thread.short_id = "beef5678".into();
+        let (outcome, calls) = x1530_cascade(
+            &thread,
+            crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
+        );
+        match &outcome {
+            CascadeOutcome::AlreadyAbsent(detail) => {
+                assert!(detail.contains("beef5678"), "{detail}");
+            }
+            other => panic!("expected AlreadyAbsent, got {other:?}"),
+        }
+        assert_eq!(calls, 0);
     }
 }

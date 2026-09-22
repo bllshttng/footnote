@@ -316,40 +316,54 @@ def settle_lost_invocations(
     cutoff = observed_at - timedelta(minutes=ttl_minutes)
     sent: "dict[str, tuple[datetime, dict[str, Any]]]" = {}
     answered: "set[str]" = set()
+    # The store commit is the write boundary: committed rows are the history,
+    # and a pre-store invocation seed rides the rows verb's import. A missing
+    # binary degrades to raw journal bytes (the pre-store read).
+    from fno.events.store_client import native_rows
+
+    # include_rejected: a settle sweep is history-shaped; rows the schema
+    # rejects (a pre-store seed with extra fields) still answer the dedupe.
+    committed = native_rows(Path(events_path), include_rejected=True)
+    if committed is not None:
+        lines: "list[str] | None" = committed
+    else:
+        try:
+            lines = Path(events_path).read_text(encoding="utf-8").splitlines()
+        except (FileNotFoundError, OSError):
+            return []
     try:
-        with Path(events_path).open(encoding="utf-8") as stream:
-            for raw in stream:  # prefiltered: the journal is tens of MB on the stop path
-                if "review_invocation" not in raw and "review_attestation" not in raw:
-                    continue
-                try:
-                    event = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                data = event.get("data")
-                if not isinstance(data, dict):
-                    continue
-                invocation_id = data.get("invocation_id")
-                if not isinstance(invocation_id, str) or not invocation_id:
-                    continue
-                if invocation_id == _UNJOINED:
-                    continue
-                if event.get("type") == "review_invocation":
-                    if data.get("stage") == "sent":
-                        try:
-                            event_time = datetime.fromisoformat(
-                                str(event.get("ts", "")).replace("Z", "+00:00")
-                            )
-                        except ValueError:
-                            continue
-                        if event_time.tzinfo is None:
-                            event_time = event_time.replace(tzinfo=timezone.utc)
-                        # First sent row wins: the OLDER timestamp is the
-                        # conservative TTL input.
-                        sent.setdefault(invocation_id, (event_time, data))
-                    elif data.get("stage") == "refused":
-                        answered.add(invocation_id)
-                elif event.get("type") == "review_attestation":
+        for raw in lines or []:
+            if "review_invocation" not in raw and "review_attestation" not in raw:
+                continue
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            data = event.get("data")
+            if not isinstance(data, dict):
+                continue
+            invocation_id = data.get("invocation_id")
+            if not isinstance(invocation_id, str) or not invocation_id:
+                continue
+            if invocation_id == _UNJOINED:
+                continue
+            if event.get("type") == "review_invocation":
+                if data.get("stage") == "sent":
+                    try:
+                        event_time = datetime.fromisoformat(
+                            str(event.get("ts", "")).replace("Z", "+00:00")
+                        )
+                    except ValueError:
+                        continue
+                    if event_time.tzinfo is None:
+                        event_time = event_time.replace(tzinfo=timezone.utc)
+                    # First sent row wins: the OLDER timestamp is the
+                    # conservative TTL input.
+                    sent.setdefault(invocation_id, (event_time, data))
+                elif data.get("stage") == "refused":
                     answered.add(invocation_id)
+            elif event.get("type") == "review_attestation":
+                answered.add(invocation_id)
     except (FileNotFoundError, OSError):
         return []
 

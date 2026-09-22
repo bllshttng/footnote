@@ -149,13 +149,13 @@ Any other action, such as `Modify` or `Create`, plans new Python. Move that chan
 
 ## Code Index Audit (every plan - step 2-index)
 
-A plan built on node text can send a worker after work that already shipped. The gate checks that the planner asked the code indexes a repo holds. It never checks what an index answered. Detection is the validator's bundled sibling `lib/code-index-detect.sh`. A repo with no provider prints nothing, and a plan with `providers: []` plus the audit section is clean. No index is not a refusal.
+A plan built on node text can send a worker after work that already shipped. The gate checks that the planner asked the code indexes a repo holds. It never checks what an index answered. Detection is the validator's bundled sibling `lib/code-index-detect.sh`. The gate audits the checkout of the plan's node. It reads the node with `fno backlog get <id> --strict --field _resolved_cwd`. A plan saved in a notes vault is checked against the code it plans. A plan with no readable node falls back to the git root of its own directory. A repo with no provider prints nothing, and a plan with `providers: []` plus the audit section is clean. No index is not a refusal.
 
 The plan must carry:
 
 - a `code_index:` frontmatter block with `main_sha:` (the 7-to-40-hex sha the plan read) and `providers:` (a list, or `[]`)
 - one `- name: <name>` entry per provider detection prints for the plan's repo, whatever its status
-- `status:` (`answered` | `unavailable` | `error`) and `fresh:` (`yes` | `no` | `unknown`) on every entry
+- `status:` (`answered` | `unavailable` | `error`) and `fresh:` (`yes` | `no` | `unknown`) on every entry. A finalized `true` or `false` reads as `yes` or `no`, since finalize re-serializes YAML
 - `## Existence audit` as the plan's first `##` heading, with at least one table row
 - a verdict cell starting `exists`, `absent`, `partial` or `unanswered` on every row
 - an `absent` row's evidence stating the confirming search (`after <exact command>`)

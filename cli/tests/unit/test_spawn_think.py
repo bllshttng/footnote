@@ -41,14 +41,9 @@ def iso(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _events(events_path: Path) -> list[dict]:
-    if not events_path.exists():
-        return []
-    return [
-        event
-        for line in events_path.read_text().splitlines()
-        if line.strip()
-        and not (event := json.loads(line))["type"].startswith("claim_")
-    ]
+    from tests._event_rows import event_rows
+
+    return [e for e in event_rows(events_path) if not e["type"].startswith("claim_")]
 
 
 def _node(**over) -> dict:
@@ -828,6 +823,9 @@ def test_codex_ambient_pointer_keeps_default_worker_provider_claude(
 
     def fake_run(cmd, **kw):
         if _is_naming_verb(cmd):
+            return _REAL_SUBPROCESS_RUN(cmd, **kw)
+        if {"doctor", "event"} <= {str(part) for part in cmd}:
+            # Event emission rides the same seam; it is not the spawn argv.
             return _REAL_SUBPROCESS_RUN(cmd, **kw)
         seen["cmd"] = cmd
         return _Proc()

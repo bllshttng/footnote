@@ -13,6 +13,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from fno.events.store_client import read_committed_lines
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCRIPT = _REPO_ROOT / "skills" / "review" / "scripts" / "emit-attestation.sh"
 
@@ -58,7 +60,7 @@ def _events_file(repo: Path) -> Path:
 
 def _last_event(repo: Path) -> dict:
     lines = [
-        ln for ln in _events_file(repo).read_text().splitlines()
+        ln for ln in read_committed_lines(_events_file(repo))
         if ln.strip()
     ]
     return json.loads(lines[-1])
@@ -107,7 +109,7 @@ def test_attestation_adopts_sidecar_by_harness_session_id(tmp_path: Path) -> Non
     assert r.returncode == 0, r.stderr
     events = [
         json.loads(line)
-        for line in _events_file(repo).read_text().splitlines()
+        for line in read_committed_lines(_events_file(repo))
         if line.strip()
     ]
     started = [
@@ -135,7 +137,7 @@ def test_attestation_marks_missing_sidecar_unjoined(tmp_path: Path) -> None:
     assert r.returncode == 0, r.stderr
     events = [
         json.loads(line)
-        for line in _events_file(repo).read_text().splitlines()
+        for line in read_committed_lines(_events_file(repo))
         if line.strip()
     ]
     started = [

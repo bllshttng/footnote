@@ -60,16 +60,17 @@ def emit_undefer_boundary(node_id: str, path: Optional[Path] = None) -> None:
     target: Optional[Path] = None
     try:
         target = path if path is not None else events_path()
+        # The flat envelope the old file append wrote becomes canonical at the
+        # storage boundary; _classify accepts either shape on the read side.
         record = {
-            "unit_id": node_id,
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "kind": _UNDEFER_TYPE,
+            "type": _UNDEFER_TYPE,
+            "source": "backlog",
+            "data": {"unit_id": node_id},
         }
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # A single JSONL record is well under PIPE_BUF (4096), so an 'a'-mode
-        # write is atomic and interleaves at line boundaries with the walker.
-        with open(target, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+        from fno.events.store_client import emit_envelope
+
+        emit_envelope(record, target)
     except Exception as exc:  # noqa: BLE001 - never break the undefer
         print(
             f"fno backlog: warning: {_UNDEFER_TYPE} boundary for {node_id} "
@@ -110,24 +111,12 @@ def read_events(path: Optional[Path] = None) -> list[dict]:
     targets = [path] if path is not None else _default_event_paths()
     histories: list[list[dict]] = []
     for target in targets:
-        out: list[dict] = []
-        rotated = target.with_name(target.name + ".1")
-        for source in (rotated, target):
-            try:
-                with source.open(encoding="utf-8") as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            rec = json.loads(line)
-                        except (json.JSONDecodeError, ValueError):
-                            continue
-                        if isinstance(rec, dict):
-                            out.append(rec)
-            except OSError:
-                continue
-        histories.append(out)
+        # SQL authority: the store beside each journal answers in commit
+        # order; the import inside the native writer already folded the
+        # rotated generation, so no per-file walk remains here.
+        from fno.events.store_client import query_rows
+
+        histories.append(query_rows(target))
     return merge_event_histories(*histories)
 
 

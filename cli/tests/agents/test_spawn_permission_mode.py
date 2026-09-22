@@ -378,6 +378,9 @@ def _capture_spawn(monkeypatch, module):
         # real binary and keep it out of the capture, which pins the SPAWN argv.
         if {"name-mint", "name-codes", "name-parse"} & {str(p) for p in cmd}:
             return real_run(cmd, **kwargs)
+        # Native event commits are infrastructure: ride the real binary too.
+        if {"doctor", "event"} <= {str(p) for p in cmd}:
+            return real_run(cmd, **kwargs)
         captured["cmd"] = cmd
         return SimpleNamespace(
             returncode=0, stdout='{"name":"w","short_id":"abcd1234"}', stderr=""

@@ -92,6 +92,7 @@ fn a_quiet_board_with_undelivered_scope_blocks_then_parks_at_the_dry_ceiling() {
         set_env("FNO_CONFIG", &config),
         set_env("FNO_AGENTS_HOME", dir.path().join("agents")),
         set_env("FNO_CLAIMS_ROOT", dir.path().join("claims")),
+        set_env("FNO_PY", bin.join("fno-py")),
         set_env("PATH", path),
     ];
 

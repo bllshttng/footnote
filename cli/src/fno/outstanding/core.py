@@ -264,6 +264,35 @@ def append_question_event(event: dict[str, Any], root: Path) -> None:
 
 def _read_question_events(path: Path, *, missing_hint: bool) -> "list[dict[str, Any]]":
     """Read valid question envelopes, distinguishing absent from unreadable."""
+    # The store commit is the write boundary: with a store beside the index,
+    # committed rows are the whole history and the raw check never runs.
+    from fno.events.store_client import native_rows, store_db_path
+
+    committed = native_rows(path, include_rejected=True)
+    if committed is not None:
+        events: "list[dict[str, Any]]" = []
+        for line in committed:
+            try:
+                rec = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(rec, dict) or rec.get("type") not in {
+                QUESTION_EVENT,
+                QUESTION_CLOSED_EVENT,
+                "operator_decision",
+            }:
+                continue
+            data = rec.get("data")
+            if isinstance(data, dict) and data.get("question_id"):
+                events.append(rec)
+        if not events and not store_db_path(path).exists() and not path.exists():
+            if missing_hint:
+                print(
+                    f"outstanding: question index {path} is missing; run "
+                    "`fno inbox outstanding reindex` to recover project questions.",
+                    file=sys.stderr,
+                )
+        return events
     try:
         path.stat()
     except FileNotFoundError:
@@ -283,23 +312,22 @@ def _read_question_events(path: Path, *, missing_hint: bool) -> "list[dict[str, 
     except OSError as exc:
         raise OutstandingError(f"cannot read question index {path}: {exc}") from exc
 
-    events: "list[dict[str, Any]]" = []
+    events = []
     try:
-        with path.open(encoding="utf-8") as fh:
-            for line in _iter_question_lines(fh):
-                try:
-                    rec = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if not isinstance(rec, dict) or rec.get("type") not in {
-                    QUESTION_EVENT,
-                    QUESTION_CLOSED_EVENT,
-                    "operator_decision",
-                }:
-                    continue
-                data = rec.get("data")
-                if isinstance(data, dict) and data.get("question_id"):
-                    events.append(rec)
+        for line in _iter_question_lines(path.read_text(encoding="utf-8").splitlines()):
+            try:
+                rec = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(rec, dict) or rec.get("type") not in {
+                QUESTION_EVENT,
+                QUESTION_CLOSED_EVENT,
+                "operator_decision",
+            }:
+                continue
+            data = rec.get("data")
+            if isinstance(data, dict) and data.get("question_id"):
+                events.append(rec)
     except (OSError, UnicodeDecodeError) as exc:
         raise OutstandingError(f"cannot read question index {path}: {exc}") from exc
     return events
@@ -551,10 +579,15 @@ def _question_journals(root: Path) -> "list[Path]":
     """Every graph-named project journal, deduped by physical file."""
     seen: "set[tuple[int, int]]" = set()
     journals: "list[Path]" = []
+    from fno.events.store_client import store_db_path
+
     for project_root in _capture_project_roots(root):
         path = events_path(project_root)
+        # The store commit is the write boundary: a journal whose bytes were
+        # never written still owns a readable store beside it.
+        probe = path if path.exists() else store_db_path(path)
         try:
-            stat = path.stat()
+            stat = probe.stat()
         except OSError:
             continue
         key = (stat.st_dev, stat.st_ino)

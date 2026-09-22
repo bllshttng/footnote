@@ -1669,21 +1669,26 @@ fn run_detached(
     EXIT_CLEAN
 }
 
-/// The newest `pr_heal_tick` row: (ts, data), or None when the journal holds
-/// none. `read_to_string` loads the whole journal and `rev()` walks it; fine
-/// while the journal is small, and the honest tail read (seek to the end,
-/// keep the last N KB) is the upgrade path when it is not.
+/// The newest `pr_heal_tick` row: (ts, data), or None when none exists.
+/// Committed store rows are the record (the cutover stopped journal
+/// appends); commit order via `seq` makes the last row the newest.
 fn newest_heal_tick(path: &std::path::Path) -> Option<(String, Value)> {
-    let text = std::fs::read_to_string(path).ok()?;
-    text.lines()
-        .rev()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .find(|row| row.get("type").and_then(Value::as_str) == Some("pr_heal_tick"))
-        .and_then(|row| {
-            let ts = row.get("ts").and_then(Value::as_str)?.to_string();
-            let data = row.get("data").cloned().unwrap_or(Value::Null);
-            Some((ts, data))
-        })
+    let _ = crate::event_store::import_all(path);
+    crate::event_store::query_events(
+        path,
+        &crate::event_store::EventQuery {
+            types: vec!["pr_heal_tick".to_string()],
+            ..Default::default()
+        },
+    )
+    .ok()?
+    .last()
+    .and_then(|row| serde_json::from_str::<Value>(&row.line).ok())
+    .and_then(|row| {
+        let ts = row.get("ts").and_then(Value::as_str)?.to_string();
+        let data = row.get("data").cloned().unwrap_or(Value::Null);
+        Some((ts, data))
+    })
 }
 
 /// Minutes under 24h, else days: one age vocabulary for the status line.
@@ -1810,33 +1815,46 @@ fn status_line(a: &Args) -> String {
 /// the state; a second red verdict on the same pair means the rerun reached a
 /// real result.
 fn journal_has_rerun(path: &std::path::Path, key: &str) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let _ = crate::event_store::import_all(path);
+    let Ok(rows) = crate::event_store::query_events(
+        path,
+        &crate::event_store::EventQuery {
+            types: vec!["pr_heal_tick".to_string()],
+            ..Default::default()
+        },
+    ) else {
         return false;
     };
-    text.lines().any(|l| {
-        serde_json::from_str::<Value>(l).ok().is_some_and(|row| {
-            row.get("type").and_then(Value::as_str) == Some("pr_heal_tick")
-                && row
-                    .get("data")
+    rows.iter().any(|r| {
+        serde_json::from_str::<Value>(&r.line)
+            .ok()
+            .is_some_and(|row| {
+                row.get("data")
                     .and_then(|d| d.get("rerun_keys"))
                     .and_then(|v| v.as_array())
                     .is_some_and(|keys| keys.iter().any(|k| k.as_str() == Some(key)))
-        })
+            })
     })
 }
 
 /// Every `(sha, run id)` pair any tick ever reran, newest last. The drive
-/// loop's one journal read per run; flake detection filters it per PR head.
-// ponytail: O(journal) per run; the drive loop runs every 30m and already
+/// loop's one store read per run; flake detection filters it per PR head.
+// ponytail: O(rows) per run; the drive loop runs every 30m and already
 // reads GitHub several times per PR. A keyed sidecar is the upgrade path if
-// the journal ever gets big enough to measure.
+// the row count ever gets big enough to measure.
 fn journal_rerun_keys(path: &std::path::Path) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let _ = crate::event_store::import_all(path);
+    let Ok(rows) = crate::event_store::query_events(
+        path,
+        &crate::event_store::EventQuery {
+            types: vec!["pr_heal_tick".to_string()],
+            ..Default::default()
+        },
+    ) else {
         return Vec::new();
     };
-    text.lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(|row| row.get("type").and_then(Value::as_str) == Some("pr_heal_tick"))
+    rows.iter()
+        .filter_map(|r| serde_json::from_str::<Value>(&r.line).ok())
         .filter_map(|row| {
             row.get("data")
                 .and_then(|d| d.get("rerun_keys"))
@@ -3339,6 +3357,11 @@ exit 0
     }
 
     fn log_of(dir: &Path, name: &str) -> String {
+        // The events journal is store-committed: read committed rows, not
+        // journal bytes. Other stub logs (gh.log, fno.log) stay raw files.
+        if name == "events.jsonl" {
+            return crate::events::committed_journal_text(&dir.join(name));
+        }
         std::fs::read_to_string(dir.join(name)).unwrap_or_default()
     }
 

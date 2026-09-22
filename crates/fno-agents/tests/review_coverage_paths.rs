@@ -134,19 +134,15 @@ fn every_coverage_status_return_has_a_positive_marker() {
 }
 
 fn coverage_exists(path: &Path) -> bool {
-    fs::read_to_string(path)
-        .map(|t| {
-            t.lines()
-                .filter(|l| l.contains("review_coverage"))
-                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-                .any(|ev| ev.get("type").and_then(|t| t.as_str()) == Some("review_coverage"))
-        })
-        .unwrap_or(false)
+    fno_agents::event_store::journal_text(path, &[])
+        .lines()
+        .filter(|l| l.contains("review_coverage"))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .any(|ev| ev.get("type").and_then(|t| t.as_str()) == Some("review_coverage"))
 }
 
 fn coverage_review_state(path: &Path) -> Option<String> {
-    fs::read_to_string(path)
-        .ok()?
+    fno_agents::event_store::journal_text(path, &[])
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .find(|event| {

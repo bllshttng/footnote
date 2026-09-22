@@ -541,7 +541,16 @@ mod tests {
     }
 
     fn read_events(dir: &Path) -> Vec<serde_json::Value> {
-        let Ok(content) = fs::read_to_string(dir.join("events.jsonl")) else {
+        // The store commit is the write boundary: committed rows carry the
+        // event, raw journal bytes are only the pre-store fallback.
+        let events = dir.join("events.jsonl");
+        if let Ok(rows) = crate::event_store::query_events(&events, &Default::default()) {
+            return rows
+                .iter()
+                .filter_map(|row| serde_json::from_str(&row.line).ok())
+                .collect();
+        }
+        let Ok(content) = fs::read_to_string(&events) else {
             return vec![];
         };
         content

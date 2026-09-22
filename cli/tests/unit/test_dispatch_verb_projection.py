@@ -151,11 +151,11 @@ def _write_graph(
 
 
 def _events(p: Path) -> list[dict]:
-    """Envelope rows only: the journal also carries claim-stamp rows (no
+    """Envelope rows only: the store also carries claim-stamp rows (no
     `type` key) from the graph lock stamp."""
-    if not p.exists():
-        return []
-    rows = [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+    from tests._event_rows import event_rows
+
+    rows = event_rows(p)
     return [r for r in rows if isinstance(r, dict) and "type" in r]
 
 

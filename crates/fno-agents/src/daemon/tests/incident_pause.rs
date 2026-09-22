@@ -72,7 +72,7 @@ fn stale_sweep_emits_on_a_quiet_run() {
         };
 
         assert_eq!(stale_sweep(&home, &emitter, 1_000_000, &out), 1);
-        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let log = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(log.contains("stale_sweep"));
         assert!(log.contains("\"stale_count\":0"));
     });
@@ -85,7 +85,7 @@ fn stale_sweep_records_an_unreadable_summary_rather_than_inventing_zeros() {
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
 
         assert_eq!(stale_sweep(&home, &emitter, 1_000_000, &|| None), 0);
-        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let log = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(log.contains("unreadable-summary"));
         assert!(!log.contains("\"stale_count\""));
     });
@@ -144,14 +144,13 @@ fn stale_sweep_suspends_without_consuming_cadence_while_dispatch_paused() {
         !stamp.exists(),
         "a paused sweep must not consume its cadence"
     );
-    let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    let log = crate::events::committed_journal_text(&home.events_jsonl());
     assert!(log.contains("\"outcome\":\"skipped\"") && log.contains("fleet_stop"));
     // The idle tick reaches this arm every ~5s: the skip row is paced by the
     // sidecar stamp at the sweep's own interval, so a second due tick inside
     // the window stays silent (and still consumes no cadence).
     assert_eq!(stale_sweep(&home, &emitter, now + 60, &run), 0);
-    let rows = std::fs::read_to_string(home.events_jsonl())
-        .unwrap_or_default()
+    let rows = crate::events::committed_journal_text(&home.events_jsonl())
         .lines()
         .filter(|l| l.contains("\"outcome\":\"skipped\""))
         .count();
@@ -227,7 +226,7 @@ fn park_sweep_honours_its_own_6h_floor_and_emits_on_a_quiet_run() {
             park_sweep(&home, &emitter, now + PARK_SWEEP_INTERVAL_SECS + 1, &out),
             1
         );
-        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let log = crate::events::committed_journal_text(&home.events_jsonl());
         assert!(log.contains("park_sweep"));
         assert!(log.contains("\"outcome\":\"ok\""));
         assert!(
@@ -284,11 +283,10 @@ fn park_sweep_suspends_without_consuming_cadence_while_dispatch_paused() {
         !stamp.exists(),
         "a paused sweep must not consume its cadence"
     );
-    let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    let log = crate::events::committed_journal_text(&home.events_jsonl());
     assert!(log.contains("\"outcome\":\"skipped\"") && log.contains("fleet_stop"));
     assert_eq!(park_sweep(&home, &emitter, now + 60, &run), 0);
-    let rows = std::fs::read_to_string(home.events_jsonl())
-        .unwrap_or_default()
+    let rows = crate::events::committed_journal_text(&home.events_jsonl())
         .lines()
         .filter(|l| l.contains("\"outcome\":\"skipped\""))
         .count();

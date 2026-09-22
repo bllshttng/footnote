@@ -199,12 +199,14 @@ pub(crate) fn headroom(
         };
     }
     // Absent, stale, or window-less: UNKNOWN never means exhausted and stays
-    // a legal failover destination.
+    // a legal failover destination. A stale reading was still observed: its
+    // probe time names the real evidence age, so only a never-probed account
+    // reads age=never.
     if snap.is_none() {
         return HeadroomVerdict {
             verdict: Verdict::Unknown,
             source: window,
-            observed_at: None,
+            observed_at: usage.map(|s| s.probed_at),
             resets_at: None,
         };
     }
@@ -783,5 +785,28 @@ mod tests {
                 "pane"
             ]
         );
+    }
+
+    /// A stale reading was still OBSERVED, so it keeps its probe time and the
+    /// evidence line names a real age; only `absent` reads age=never.
+    #[test]
+    fn a_stale_reading_keeps_its_probe_time() {
+        let probed = 1000.0 - 15.0 * 3600.0;
+        let u = Snapshot {
+            probed_at: probed,
+            partial: false,
+            windows: vec![Window {
+                used_pct: 5.0,
+                resets_at: None,
+            }],
+        };
+        let hv = headroom(None, Some(&u), 1000.0);
+        assert_eq!(hv.verdict, Verdict::Unknown);
+        assert_eq!(hv.source, "stale");
+        assert_eq!(hv.observed_at, Some(probed));
+        // The never-probed case is the only one that reads never.
+        let hv = headroom(None, None, 1000.0);
+        assert_eq!(hv.source, "absent");
+        assert_eq!(hv.observed_at, None);
     }
 }
