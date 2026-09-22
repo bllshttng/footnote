@@ -157,8 +157,8 @@ pub fn parse_meminfo_memory(text: &str) -> Option<(f64, f64, Option<f64>)> {
     };
     let total = kb("SwapTotal")? / 1024.0 / 1024.0;
     let free = kb("SwapFree")? / 1024.0 / 1024.0;
-    let zswap = kb("Zswap").map(|value| value / 1024.0 / 1024.0);
-    Some((total - free, total, zswap))
+    let zswapped = kb("Zswapped").map(|value| value / 1024.0 / 1024.0);
+    Some((total - free, total, zswapped))
 }
 
 fn now_ms() -> u128 {
