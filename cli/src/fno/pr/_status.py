@@ -826,7 +826,12 @@ def run_status(
         )
 
     github_merge = None if is_terminal else _github_merge_blockers(pr_json, rollup, cwd)
-    branch_history = _branch_history(pr_json, generic_rollup, cwd, prior_payload) if verdict == "red" and not is_terminal else None
+    history_needed = verdict == "red" and not is_terminal and any(
+        str(_alt(check.get("conclusion"), check.get("state"), "")).upper()
+        in {"CANCELLED", "TIMED_OUT"}
+        for check in _latest_per_name(generic_rollup)
+    )
+    branch_history = _branch_history(pr_json, generic_rollup, cwd, prior_payload) if history_needed else None
     # Rerun recovery, probed on every green read of a live PR (fail-open).
     rerun: Optional[dict] = None
     if verdict == "green" and not is_terminal:
