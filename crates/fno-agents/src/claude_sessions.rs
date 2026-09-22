@@ -75,10 +75,11 @@ pub(crate) fn row_liveness_indexed(
     row_liveness_with_indexed(entry, sockets, None, family1_truth_state)
 }
 
-/// Every dir claude writes its per-process records to: the ambient
-/// `~/.claude/sessions`, then each isolated account's `sessions`, deduped.
-/// Dedup compares what the path IS (`fs::canonicalize`), because an
-/// account dir can be a symlink onto the ambient store.
+/// Every dir claude writes its per-process records to: the ambient home's
+/// `sessions` dir (see [`ClaudeHome::sessions_dir`]), then each isolated
+/// account's `sessions`, deduped. Dedup compares what the path IS
+/// (`fs::canonicalize`), because an account dir can be a symlink onto the
+/// ambient store.
 pub(crate) fn session_record_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = vec![ClaudeHome::from_env().sessions_dir()];
     for (_, dir) in crate::claude_roster::isolated_account_dirs() {
@@ -101,8 +102,9 @@ pub(crate) fn session_record_dirs() -> Vec<std::path::PathBuf> {
 }
 
 /// Which live claude process holds `session_id`, read from claude's own
-/// per-process records (`~/.claude/sessions/<pid>.json`, removed on clean
-/// exit). `create_ms` answers the pid's epoch create time, so a record's
+/// per-process records (one `<pid>.json` per running process under the
+/// sessions dir, removed on clean exit). `create_ms` answers the pid's
+/// epoch create time, so a record's
 /// `procStart` proves the incarnation: a pid whose create time disagrees
 /// with the record is a recycle, and a pid with no create time is a crash
 /// leftover. Both are skipped, never named as the holder.
