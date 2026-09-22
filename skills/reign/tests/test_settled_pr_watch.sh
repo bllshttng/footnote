@@ -74,6 +74,7 @@ fi
 grep -q 'reign watch probe failed:' "$MAIL_LOG"
 
 : > "$CALL_LOG"
+export WATCH_MODE=ok
 cat > "$EVENT_JSON" <<'EOF'
 {"matches":[],"unreadable_files":[{"path":"events.jsonl","error":"permission denied"}]}
 EOF
