@@ -293,7 +293,7 @@ event_types:
           description: "The target run id of the worktree the attestation was emitted in (fno_id, mirrored). NOT the attesting actor: it is grepped from the worktree manifest, so it equals manifest.session_id for every emitter in that worktree, including a reviewer who is not the author. A join on it returns self by construction; key the authorship join on attester_session_id instead."
         harness:
           type: string
-          description: "The harness that ran the attesting session (claude | codex | gemini | opencode | agy), read from the live manifest. Names the session_id namespace."
+          description: "The harness of the worktree's target run (claude | codex | gemini | opencode | agy), read from the live manifest beside session_id. It is NOT the attesting actor's harness; attester_session_id names that actor."
         repo:
           type: string
           description: "Full repository identity `host/owner/repo`, lowercased, from the git remote. Present ONLY on the copy mirrored into the cross-project global log (`fno.events.cli` GLOBAL_MIRROR_TYPES); the project-log copy needs no scoping and omits it. Same producer and same meaning as `review_coverage.repo`: one parser, `fno.paths.repo_identity_from_remote_url`, in parity with `repo_identity_from_remote_url` in crates/fno-agents/src/finalize.rs. It is the FULL identity, never the last path segment, because `org-a/widget` and `org-b/widget` would otherwise share a key. Without it a global-log reader can match only on `head_sha`, and a fork shares those. Omitted (never null) when no remote resolves or it has fewer than two path segments; a reader must then decline to match the row rather than guess."
@@ -422,7 +422,7 @@ event_types:
           description: "Review verb, including its leading slash, as observed by the speaker."
         reason:
           type: string
-          description: "The refusal class, present only on stage=refused rows. empty_diff = the reviewer's measured diff changed no file; unresolvable_base = the reviewer's checkout could not resolve the base to a merge-base, so nothing could be measured. Both name an ATTEMPT that produced no verdict; neither attests anything."
+          description: "The refusal class, present only on stage=refused rows. empty_diff = the reviewer's measured diff changed no file; unresolvable_base = the reviewer's checkout could not resolve the base to a merge-base; target_not_checked_out = the review's named branch has no matching worktree; target_head_moved = that worktree no longer matches the reviewed head. All name an ATTEMPT that produced no verdict; none attests anything."
         args_raw:
           type: string
           description: "Everything after the verb, preserved verbatim when observable."
