@@ -1081,19 +1081,23 @@ mod tests {
         project(row, &[], "", 0)
     }
 
-    #[test]
-    fn ac9_hp_the_bounce_mails_once_then_stays_quiet() {
-        let dir = std::env::temp_dir().join(format!(
-            "attention-bounce-{}-{}",
+    fn bounce_dir(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "attention-bounce-{tag}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        ))
+    }
+
+    #[test]
+    fn ac9_hp_the_bounce_mails_once_then_stays_quiet() {
         let items = not_ready_items();
         assert!(!items[0].ready);
+        let dir = bounce_dir("once");
+        std::fs::create_dir_all(&dir).unwrap();
         let sends = std::sync::atomic::AtomicUsize::new(0);
         {
             let send = |asker: &str, body: &str| {
@@ -1109,11 +1113,18 @@ mod tests {
             };
             bounce_not_ready_with(&items, &dir, &send);
         }
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
         // Second beat: quiet.
         bounce_not_ready_with(&items, &dir, &|_a, _b| {
             panic!("a second beat must stay quiet");
         });
-        // A failed send is retried on the next beat.
+    }
+
+    #[test]
+    fn ac9_hp_a_failed_bounce_send_is_retried_next_beat() {
+        let items = not_ready_items();
+        let dir = bounce_dir("retry");
+        std::fs::create_dir_all(&dir).unwrap();
         bounce_not_ready_with(&items, &dir, &|_a, _b| false);
         let retried = std::sync::atomic::AtomicUsize::new(0);
         bounce_not_ready_with(&items, &dir, &|a, b| {

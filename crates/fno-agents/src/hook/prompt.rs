@@ -105,19 +105,16 @@ fn render_block(items: &[Value]) -> String {
             }
         })
         .collect();
-    let count = if total > MAX_ITEMS {
+    if total > MAX_ITEMS {
         lines.push(format!(
             "... and {} more; the full list is on your questions file.",
             total - MAX_ITEMS
         ));
-        MAX_ITEMS
-    } else {
-        total
-    };
+    }
     if lines.is_empty() {
         return String::from("Nothing is waiting on you.");
     }
-    let mut out = format!("Waiting on you ({}):\n", count);
+    let mut out = format!("Waiting on you ({}):\n", total);
     out.push_str(&lines.join("\n"));
     out
 }
