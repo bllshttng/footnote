@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use crate::evals_trend::round4;
 
 const EXIT_USAGE: i32 = 2;
-const USAGE: &str = "usage: fno-agents corrections-verify (--json | --markdown) [--since <Nd>] [--log <path>] [--events <path>] [--now <rfc3339>]";
+const USAGE: &str = "usage: fno-agents corrections-verify (--json | -J | --markdown) [--since <Nd>] [--log <path>] [--events <path>] [--now <rfc3339>]";
 
 /// One applied correction from corrections.log.
 /// Line shape: `{ts} | {severity} | {source} | {location} | {details}`
@@ -364,7 +364,7 @@ pub fn run(args: &[String]) -> i32 {
         };
         match name.as_str() {
             "--markdown" => markdown_out = true,
-            "--json" => json_out = true,
+            x if crate::json_output::is_flag(x) => json_out = true,
             "--since" => match flag_value(args, &mut i, inline) {
                 Some(v) => match v.strip_suffix('d').unwrap_or(&v).parse::<i64>() {
                     Ok(d) if d >= 0 => since_days = d,
