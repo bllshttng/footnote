@@ -88,10 +88,10 @@ def _patch_headroom(monkeypatch, n: int):
 def _read_epic(epic_id="x-EPIC"):
     """Read the epic node via the (test-patched) graph_json, resolved at call time."""
     import fno.paths as _p
-    from fno.graph.store import read_graph_strict
+    from fno.graph.store import read_graph
     from fno.graph._intake import _find_node
 
-    return _find_node(read_graph_strict(_p.graph_json()), epic_id)
+    return _find_node(read_graph(_p.graph_json()), epic_id)
 
 
 def _patch_spawn(monkeypatch, *, claim_node=True, fail_on=None):

@@ -2051,6 +2051,163 @@ def test_a_self_add_answer_without_a_grantor_refuses_fail_closed(
     assert [asdict(row) for row in load_registry()] == before
 
 
+WIDEN_LEAD_SESSION = "aaaaaaaa-1111-4aaa-8aaa-aaaaaaaaaaaa"
+WIDEN_OTHER_SESSION = "bbbbbbbb-2222-4bbb-8bbb-bbbbbbbbbbbb"
+
+
+def _widen_graph(monkeypatch, created_by: str) -> None:
+    """Stub crown._graph_index with epic rows whose source_session_id names
+    who filed them: e-1 predates the lead, e-2 is created_by's birth."""
+    import fno.agents.crown as crown_mod
+
+    monkeypatch.setattr(
+        crown_mod,
+        "_graph_index",
+        lambda: {
+            "e-1": {"id": "e-1", "type": "epic", "project": "fno",
+                    "source_session_id": "human"},
+            "e-2": {"id": "e-2", "type": "epic", "project": "fno",
+                    "source_session_id": created_by},
+        },
+    )
+
+
+def _widen_lead() -> object:
+    return _entry(
+        "lead-a",
+        harness_session_id=WIDEN_LEAD_SESSION,
+        status="busy",
+        crown_level=2,
+        crown_scope="e-1",
+        crown_grantor="human",
+    )
+
+
+def test_a_king_adds_an_epic_its_own_session_created_to_its_crown(
+    tmp_path: Path, monkeypatch, native_backlog_door
+) -> None:
+    """AC4-HP: the lead the epic child cap creates (a new small epic) can
+    crown itself over it. The lead holds e-1; its own session created e-2;
+    naming both widens its own crown in place, with the lead as grantor."""
+    from fno.agents.registry import load_registry
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [_widen_lead()])
+    _widen_graph(monkeypatch, created_by=WIDEN_LEAD_SESSION)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", WIDEN_LEAD_SESSION)
+
+    result = _invoke_crown("lead-a", "--scope", "e-1", "--scope", "e-2")
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.stdout)
+    assert (receipt["level"], receipt["scope"]) == (2, "e-1,e-2")
+    assert receipt["grantor"] == "lead-a"
+    assert receipt["vacated_scope"] == "e-1"
+    row = next(r for r in load_registry() if r.name == "lead-a")
+    assert (row.crown_level, row.crown_scope, row.crown_grantor) == (
+        2, "e-1,e-2", "lead-a",
+    )
+
+
+def test_a_king_cannot_add_an_epic_another_session_created(
+    tmp_path: Path, monkeypatch, native_backlog_door
+) -> None:
+    """AC5-ERR: the widen answers false when the new epic's birth record
+    names another session, so today's containment refusal stands alone and
+    the registry never moves."""
+    from fno.agents.registry import load_registry
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [_widen_lead()])
+    _widen_graph(monkeypatch, created_by=WIDEN_OTHER_SESSION)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", WIDEN_LEAD_SESSION)
+    before = [asdict(row) for row in load_registry()]
+
+    result = _invoke_crown("lead-a", "--scope", "e-1", "--scope", "e-2")
+
+    assert result.exit_code == 2
+    assert "neither contains nor equals" in result.output
+    assert [asdict(row) for row in load_registry()] == before
+
+
+def test_a_widen_into_an_epic_another_live_king_holds_is_refused(
+    tmp_path: Path, monkeypatch, native_backlog_door
+) -> None:
+    """AC5-ERR: the widen passes the authority gates, then the rival scan
+    under the registry lock refuses: another live row already crowns e-2."""
+    from fno.agents.registry import load_registry
+
+    rival = _entry(
+        "lead-c",
+        harness_session_id=WIDEN_OTHER_SESSION,
+        status="busy",
+        crown_level=2,
+        crown_scope="e-2",
+        crown_grantor="human",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [_widen_lead(), rival])
+    _widen_graph(monkeypatch, created_by=WIDEN_LEAD_SESSION)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", WIDEN_LEAD_SESSION)
+    before = [asdict(row) for row in load_registry()]
+
+    result = _invoke_crown("lead-a", "--scope", "e-1", "--scope", "e-2")
+
+    assert result.exit_code == 2
+    assert "already held by live row 'lead-c'" in result.output
+    assert [asdict(row) for row in load_registry()] == before
+
+
+def test_a_widen_shaped_grant_to_another_row_is_refused(
+    tmp_path: Path, monkeypatch, native_backlog_door
+) -> None:
+    """AC6-EDGE: the widen answer belongs to this session's own row. The
+    same scopes aimed at another row meet the ordinary containment refusal,
+    never a stamped crown."""
+    from fno.agents.registry import load_registry
+
+    other = _entry(
+        "lead-c",
+        harness_session_id=WIDEN_OTHER_SESSION,
+        status="idle",
+    )
+    _prepare_crown_cli(monkeypatch, tmp_path, [_widen_lead(), other])
+    _widen_graph(monkeypatch, created_by=WIDEN_LEAD_SESSION)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", WIDEN_LEAD_SESSION)
+    before = [asdict(row) for row in load_registry()]
+
+    result = _invoke_crown("lead-c", "--scope", "e-1", "--scope", "e-2")
+
+    assert result.exit_code == 2
+    assert "neither contains nor equals" in result.output
+    assert [asdict(row) for row in load_registry()] == before
+
+
+def test_a_self_widen_fails_closed_without_the_binary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC6-EDGE: no crown-widen answer (an old or missing binary) means
+    today's refusal stands - the widen never fires on a guess."""
+    from fno.agents.registry import load_registry
+    from fno.agents import spawn_overlay_client
+    import fno.agents.crown as crown_mod
+
+    _prepare_crown_cli(monkeypatch, tmp_path, [_widen_lead()])
+    _widen_graph(monkeypatch, created_by=WIDEN_LEAD_SESSION)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", WIDEN_LEAD_SESSION)
+
+    def _unavailable(payload):
+        raise spawn_overlay_client.SpawnOverlayUnavailable("no binary")
+
+    monkeypatch.setattr(spawn_overlay_client, "spawn_overlay_call", _unavailable)
+    before = [asdict(row) for row in load_registry()]
+
+    result = _invoke_crown("lead-a", "--scope", "e-1", "--scope", "e-2")
+
+    assert result.exit_code == 2
+    assert "neither contains nor equals" in result.output
+    assert [asdict(row) for row in load_registry()] == before
+    # The helper, called directly, answers the empty dict fail-closed form.
+    assert crown_mod._widen_answer("e-1,e-2", _widen_lead()) == {}
+
+
 def test_succession_by_an_agent_caller_is_refused_with_a_reachable_remedy(
     tmp_path: Path, monkeypatch
 ) -> None:
