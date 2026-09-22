@@ -461,9 +461,10 @@ def test_every_closed_ask_carries_a_decision_record(tmp_path: Path) -> None:
     outcome, _closed = _stale_run(tmp_path, [_stale_row()], {})
 
     assert outcome == "closed"
+    from tests._event_rows import event_rows
+
     records = []
-    for line in events_path(tmp_path).read_text(encoding="utf-8").splitlines():
-        event = json.loads(line)
+    for event in event_rows(events_path(tmp_path)):
         if event.get("type") == "operator_decision":
             records.append(event["data"])
     mine = [r for r in records if r.get("question_id") == asked_id]

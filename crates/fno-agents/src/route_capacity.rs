@@ -22,7 +22,7 @@ pub(crate) const DEFAULT_PROVIDERS: [&str; 4] = ["claude", "codex", "gemini", "o
 /// How long the one refresh subprocess may run: the verb probes every
 /// account record, each network probe bounded at 10s, so the walk pays this
 /// at most once per call.
-const REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+pub(crate) const REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The provider runtime-state payload: `$FNO_RUNTIME_STATE_PATH`, else the
 /// configured state root's `provider-runtime-state.json`. An unreadable file
@@ -127,11 +127,14 @@ fn identity_evidence(harness: &str, accounts: &[String], root: &Path) -> Map<Str
 /// Run the existing probe verb once and parse its one JSON object. Returns
 /// None on spawn failure, timeout, AC4-EDGE, or bad JSON: fail-open, the
 /// readings stay as they were.
-pub(crate) fn refresh_usage_readings(cwd: &Path) -> Option<Map<String, Value>> {
+pub(crate) fn refresh_usage_readings(
+    cwd: &Path,
+    timeout: std::time::Duration,
+) -> Option<Map<String, Value>> {
     let stdout = crate::provider_cap_verbs::run_fno_output(
         &["config", "accounts", "usage", "--refresh", "--json"],
         Some(cwd),
-        REFRESH_TIMEOUT,
+        timeout,
     )?;
     match serde_json::from_str::<Value>(&stdout) {
         Ok(Value::Object(m)) => Some(m),
@@ -525,15 +528,15 @@ mod tests {
             path.display().to_string()
         };
         std::env::set_var("FNO_BIN", stub("#!/bin/sh\nexit 1\n"));
-        assert!(refresh_usage_readings(dir.path()).is_none());
+        assert!(refresh_usage_readings(dir.path(), REFRESH_TIMEOUT).is_none());
         std::env::set_var("FNO_BIN", stub("#!/bin/sh\nprintf 'not json'\n"));
-        assert!(refresh_usage_readings(dir.path()).is_none());
+        assert!(refresh_usage_readings(dir.path(), REFRESH_TIMEOUT).is_none());
         // A stub missing entirely is the same fail-open answer.
         std::env::set_var(
             "FNO_BIN",
             dir.path().join("absent.sh").display().to_string(),
         );
-        assert!(refresh_usage_readings(dir.path()).is_none());
+        assert!(refresh_usage_readings(dir.path(), REFRESH_TIMEOUT).is_none());
         std::env::remove_var("FNO_BIN");
     }
 }

@@ -73,7 +73,7 @@ PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && p
 # shellcheck source=../scripts/lib/events.sh
 source "$PLUGIN_ROOT/scripts/lib/events.sh" 2>/dev/null || true
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-EVENT_LINE=$(printf '{"ts":"%s","type":"stop_failure","error_type":"%s","status_code":"%s"}' "$TS" "$ERROR_TYPE" "$STATUS_CODE")
+EVENT_LINE=$(printf '{"ts":"%s","type":"stop_failure","source":"hook","data":{"error_type":"%s","status_code":"%s"}}' "$TS" "$ERROR_TYPE" "$STATUS_CODE")
 if declare -F _append_bounded_event >/dev/null 2>&1; then
     _append_bounded_event target_stopfailure "$EVENT_LINE" "${REPO_ROOT}/.fno/events.jsonl" || true
 else

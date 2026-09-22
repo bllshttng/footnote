@@ -2722,6 +2722,10 @@ fn attention_row(
         repair: None,
         heal: None,
         upstream: None,
+        arm_key: None,
+        arm_value: None,
+        reader: None,
+        starved: false,
     }
 }
 

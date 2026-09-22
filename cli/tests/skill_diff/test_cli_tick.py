@@ -19,7 +19,11 @@ runner = CliRunner()
 
 def _wire(monkeypatch, tmp_path, events, *, paused=False, level="report"):
     p = tmp_path / "events.jsonl"
-    p.write_text("".join(json.dumps(e) + "\n" for e in events))
+    from fno.events.store_client import emit_envelope
+
+    for i, e in enumerate(events):
+        envelope = {"ts": f"2026-01-01T00:00:{i:02d}Z", "source": "test", **e}
+        emit_envelope(envelope, p)
     monkeypatch.setattr(cli, "_events_paths", lambda: [p])
     monkeypatch.setattr(cli, "loops_paused", lambda: paused)
     monkeypatch.setattr(cli, "loop_level", lambda name: level)
@@ -27,7 +31,9 @@ def _wire(monkeypatch, tmp_path, events, *, paused=False, level="report"):
 
 
 def _events(path):
-    return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+    from tests._event_rows import event_rows
+
+    return event_rows(path)
 
 
 def _rc(run_id, top="collision_free"):
@@ -307,10 +313,21 @@ def _wire_reeval(monkeypatch, path, merged=True, merge_sha="mergesha12345", repl
         if verdict is None:
             return 1  # observer emitted nothing usable (batch failure for this item)
         tf = verdict == "tool_fault"
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(_find(
-                run_id_after, corpus_item,
-                verdict="fail" if tf else verdict, tool_fault=tf)) + "\n")
+        from fno.events.store_client import emit_envelope
+
+        emit_envelope(
+            {
+                "ts": f"2026-01-02T00:00:{len(calls):02d}Z",
+                "source": "test",
+                **_find(
+                    run_id_after,
+                    corpus_item,
+                    verdict="fail" if tf else verdict,
+                    tool_fault=tf,
+                ),
+            },
+            path,
+        )
         return 0
 
     monkeypatch.setattr(cli, "_run_replay", fake_replay)
@@ -385,12 +402,31 @@ def test_reconcile_concurrent_close_is_noop(monkeypatch, tmp_path):  # codex P1 
 
     def racing_replay(corpus_item, skill_ref, run_id_after):
         # Simulate a concurrent reconcile closing the PR during our replay window,
-        # plus our own after-finding.
-        with p.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(_find(run_id_after, corpus_item, verdict="pass")) + "\n")
-            fh.write(json.dumps({"type": "skill_diff_eval_closed",
-                     "data": {"pr_number": 201, "skill_id": "fno:blueprint",
-                              "run_id_before": "r1"}}) + "\n")
+        # plus our own after-finding. Both land as committed rows: the raw file
+        # is legacy only, and reconcile's re-read is store-first.
+        from fno.events.store_client import emit_envelope
+
+        emit_envelope(
+            {
+                "ts": "2026-01-02T00:00:01Z",
+                "source": "test",
+                **_find(run_id_after, corpus_item, verdict="pass"),
+            },
+            p,
+        )
+        emit_envelope(
+            {
+                "ts": "2026-01-02T00:00:02Z",
+                "source": "test",
+                "type": "skill_diff_eval_closed",
+                "data": {
+                    "pr_number": 201,
+                    "skill_id": "fno:blueprint",
+                    "run_id_before": "r1",
+                },
+            },
+            p,
+        )
         return 0
 
     monkeypatch.setattr(cli, "_run_replay", racing_replay)

@@ -471,6 +471,100 @@ pub(crate) fn run_and_confirm_respawn(
     )
 }
 
+/// The dead arm with a message: relaunch the session, then deliver the text
+/// through the parked route's content-confirmed inject, so a `respawned`
+/// receipt cannot read as delivered while the nudge text never reached the
+/// transcript. With no message it is `run_and_confirm_respawn` exactly.
+pub(crate) fn respawn_and_deliver(
+    plan: &crate::reentry::ReentryPlan,
+    name: &str,
+    message: Option<&str>,
+    home: &AgentsHome,
+) -> i32 {
+    respawn_and_deliver_with(
+        plan,
+        name,
+        message,
+        home,
+        |plan, name| run_and_confirm_respawn(plan, name, "resume", "agent_resumed", home),
+        |uuid, wrapped| {
+            crate::mail_inject::deliver_via_control_sock(
+                uuid,
+                wrapped,
+                crate::mail_inject::DEFAULT_ATTEMPTS,
+                crate::mail_inject::DEFAULT_INTERVAL_MS,
+                crate::mail_inject::default_enter_delay_ms(
+                    crate::mail_inject::MailInjectHarness::Claude,
+                ),
+            )
+            .map_err(|e| e.to_string())
+        },
+        std::thread::sleep,
+    )
+}
+
+/// The seam: same steps as [`respawn_and_deliver`], with the relaunch, the
+/// inject and the sleep injected so tests run on literal rows.
+pub(crate) fn respawn_and_deliver_with<F, I, S>(
+    plan: &crate::reentry::ReentryPlan,
+    name: &str,
+    message: Option<&str>,
+    home: &AgentsHome,
+    respawn: F,
+    inject: I,
+    sleep_fn: S,
+) -> i32
+where
+    F: Fn(&crate::reentry::ReentryPlan, &str) -> i32,
+    I: FnMut(&str, &str) -> Result<(), String>,
+    S: Fn(std::time::Duration),
+{
+    let Some(message) = message else {
+        return respawn(plan, name);
+    };
+    let code = respawn(plan, name);
+    if code != 0 {
+        return code;
+    }
+    // Wrap BEFORE the claim: a forged container must refuse without
+    // touching the session.
+    let wrapped = match crate::claude_ask::build_cross_session_container(
+        message,
+        &parked_sender_name(home),
+    ) {
+        Ok(w) => w,
+        Err(reason) => {
+            eprintln!("fno agents resume: {reason}");
+            return 2;
+        }
+    };
+    match deliver_after_claim_with(
+        home,
+        name,
+        "claude",
+        &plan.cwd,
+        &plan.short_id,
+        &plan.session_id,
+        &wrapped,
+        true,
+        None,
+        inject,
+        sleep_fn,
+    ) {
+        Ok(()) => 0,
+        Err(DeliveryRefusal::Claim { code, msg }) => {
+            eprintln!("{msg}");
+            code
+        }
+        Err(DeliveryRefusal::Inject { reason }) => {
+            eprintln!(
+                "fno agents resume: respawned {name}, but the message was NOT delivered ({reason})."
+            );
+            16
+        }
+    }
+}
+
 pub(crate) fn run_and_confirm_respawn_with_truth<F, S>(
     plan: &crate::reentry::ReentryPlan,
     name: &str,
@@ -927,6 +1021,78 @@ pub(crate) fn parked_claude_route(
     )
 }
 
+/// What a delivery after the attach claim can be refused with: the
+/// single-writer claim held (its own message names it), or the inject
+/// missed after its retry.
+enum DeliveryRefusal {
+    Claim { code: i32, msg: String },
+    Inject { reason: String },
+}
+
+/// Steps 5 to 7 of the parked route, shared with the dead arm's delivery:
+/// the single-writer attach claim, the inject with one retry for a late
+/// control.sock, the `agent_resumed` event and the delivered line. The
+/// caller owns its own refusal line on `Err`.
+#[allow(clippy::too_many_arguments)]
+fn deliver_after_claim_with<I, S>(
+    home: &AgentsHome,
+    name: &str,
+    harness: &str,
+    cwd: &str,
+    short_id: &str,
+    session_uuid: &str,
+    wrapped: &str,
+    revived: bool,
+    claims_root: Option<&Path>,
+    mut inject: I,
+    sleep_fn: S,
+) -> Result<(), DeliveryRefusal>
+where
+    I: FnMut(&str, &str) -> Result<(), String>,
+    S: Fn(std::time::Duration),
+{
+    // The same single-writer key the Python wake takes, so two
+    // entrypoints cannot type into one session at once.
+    if let Err((code, msg)) = acquire_named_session_claim(
+        &resume_attach_claim_key(short_id),
+        short_id,
+        claims_root,
+        None,
+    ) {
+        return Err(DeliveryRefusal::Claim { code, msg });
+    }
+    let mut outcome = inject(session_uuid, wrapped);
+    if let Err(reason) = &outcome {
+        if revived && matches!(reason.as_str(), "not-injectable" | "attach-failed") {
+            // A respawned worker binds its control.sock late; give it one
+            // more beat before reporting the miss.
+            sleep_fn(std::time::Duration::from_secs(1));
+            outcome = inject(session_uuid, wrapped);
+        }
+    }
+    match outcome {
+        Ok(()) => {
+            append_agents_event(
+                &trace_events_path(home),
+                "agent_resumed",
+                &[
+                    ("name", Value::String(name.to_string())),
+                    ("provider", Value::String(harness.to_string())),
+                    ("session_id", Value::String(session_uuid.to_string())),
+                    ("cwd", Value::String(cwd.to_string())),
+                ],
+            );
+            eprintln!(
+                "fno agents resume: {}delivered the message to {name} ({short}); the transcript shows it.",
+                if revived { "revived and " } else { "" },
+                short = short_id
+            );
+            Ok(())
+        }
+        Err(reason) => Err(DeliveryRefusal::Inject { reason }),
+    }
+}
+
 /// The seam: same steps as [`parked_claude_route`], with the roster state,
 /// the worker lookup, the revive, the inject and the sleep injected so the
 /// tests run on literal rows with no process env.
@@ -992,46 +1158,27 @@ where
         }
         revived = true;
     }
-    // 5. The same single-writer key the Python wake takes, so two
-    // entrypoints cannot type into one session at once.
-    if let Err((code, msg)) = acquire_named_session_claim(
-        &resume_attach_claim_key(short_id),
+    // 5 to 7: the claim, the inject with one retry, the event and the
+    // delivered line are shared with the dead arm's delivery.
+    match deliver_after_claim_with(
+        home,
+        name,
+        harness,
+        cwd,
         short_id,
+        session_uuid,
+        &wrapped,
+        revived,
         claims_root,
-        None,
+        inject,
+        sleep_fn,
     ) {
-        eprintln!("{msg}");
-        return Some(code);
-    }
-    let mut outcome = inject(session_uuid, &wrapped);
-    if let Err(reason) = &outcome {
-        if revived && matches!(reason.as_str(), "not-injectable" | "attach-failed") {
-            // A respawned worker binds its control.sock late; give it one
-            // more beat before reporting the miss.
-            sleep_fn(std::time::Duration::from_secs(1));
-            outcome = inject(session_uuid, &wrapped);
+        Ok(()) => Some(0),
+        Err(DeliveryRefusal::Claim { code, msg }) => {
+            eprintln!("{msg}");
+            Some(code)
         }
-    }
-    match outcome {
-        Ok(()) => {
-            append_agents_event(
-                &trace_events_path(home),
-                "agent_resumed",
-                &[
-                    ("name", Value::String(name.to_string())),
-                    ("provider", Value::String(harness.to_string())),
-                    ("session_id", Value::String(session_uuid.to_string())),
-                    ("cwd", Value::String(cwd.to_string())),
-                ],
-            );
-            eprintln!(
-                "fno agents resume: {}delivered the message to {name} ({short}); the transcript shows it.",
-                if revived { "revived and " } else { "" },
-                short = short_id
-            );
-            Some(0)
-        }
-        Err(reason) => {
+        Err(DeliveryRefusal::Inject { reason }) => {
             eprintln!(
                 "fno agents resume: {name} ({short}) is {state}; the message was NOT delivered ({reason}).",
                 short = short_id
@@ -1044,6 +1191,106 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dead_plan() -> crate::reentry::ReentryPlan {
+        crate::reentry::ReentryPlan {
+            resolved: true,
+            transition: "resume".into(),
+            mechanism: "respawn".into(),
+            name: "w".into(),
+            fno_id: None,
+            node: None,
+            session_id: "123e4567-0000-0000-0000-000000000000".into(),
+            short_id: "123e4567".into(),
+            launch_account: "default".into(),
+            claude_config_dir: None,
+            route_settings_path: None,
+            cwd: "/tmp/wt".into(),
+            substrate: "thread".into(),
+            mux: None,
+            argv: vec!["claude".into(), "--resume".into(), "123e4567".into()],
+            env: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_respawn_with_a_message_delivers_it() {
+        let _guard = crate::path_test_guard();
+        let plan = dead_plan();
+        let mut inject_calls: Vec<String> = Vec::new();
+        let code = respawn_and_deliver_with(
+            &plan,
+            "w",
+            Some("Reply with the single word pong."),
+            &AgentsHome::at(std::env::temp_dir().join("fno-rw-deliver")),
+            |_, _| 0,
+            |uuid, wrapped| {
+                inject_calls.push(format!("{uuid}|{wrapped}"));
+                Ok(())
+            },
+            |_| {},
+        );
+        assert_eq!(code, 0);
+        assert_eq!(inject_calls.len(), 1);
+        assert!(inject_calls[0].contains("Reply with the single word pong."),);
+        assert!(inject_calls[0].contains(&plan.session_id));
+    }
+
+    #[test]
+    fn a_respawn_whose_delivery_misses_exits_16() {
+        let _guard = crate::path_test_guard();
+        let plan = dead_plan();
+        let mut inject_calls = 0;
+        let code = respawn_and_deliver_with(
+            &plan,
+            "w",
+            Some("Reply with the single word pong."),
+            &AgentsHome::at(std::env::temp_dir().join("fno-rw-miss")),
+            |_, _| 0,
+            |_, _| {
+                inject_calls += 1;
+                Err("not-injectable".into())
+            },
+            |_| {},
+        );
+        assert_eq!(code, 16);
+        assert_eq!(inject_calls, 2, "one retry for a revived worker");
+    }
+
+    #[test]
+    fn a_respawn_without_a_message_never_injects() {
+        let _guard = crate::path_test_guard();
+        let plan = dead_plan();
+        let mut inject_calls = 0;
+        let code = respawn_and_deliver_with(
+            &plan,
+            "w",
+            None,
+            &AgentsHome::at(std::env::temp_dir().join("fno-rw-nomsg")),
+            |_, _| 0,
+            |_, _| {
+                inject_calls += 1;
+                Ok(())
+            },
+            |_| {},
+        );
+        assert_eq!(code, 0);
+        assert_eq!(inject_calls, 0);
+        let code = respawn_and_deliver_with(
+            &plan,
+            "w",
+            None,
+            &AgentsHome::at(std::env::temp_dir().join("fno-rw-nomsg")),
+            |_, _| 7,
+            |_, _| {
+                inject_calls += 1;
+                Ok(())
+            },
+            |_| {},
+        );
+        assert_eq!(code, 7, "a failed respawn returns its own code");
+        assert_eq!(inject_calls, 0);
+    }
 
     #[test]
     fn codex_thread_resume_delivers_over_the_daemon_and_exits_0() {

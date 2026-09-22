@@ -5082,67 +5082,9 @@ fn valid_session_uuid_accepts_only_lowercase_8_4_4_4_12_hex() {
 }
 
 #[test]
-fn an_active_mission_header_renders_but_never_groups_worker_rows() {
-    // The header renders with done/total, and its synthetic id reaches no
-    // agent row: no section draws mission ids, so a row there vanishes.
-    let mut core = empty_core();
-    core.missions = backlog_view::MissionMap {
-        missions: vec![backlog_view::Mission {
-            epic_id: "x-aaaa".into(),
-            slug: "mux-squad".into(),
-            done: 1,
-            total: 2,
-        }],
-        node_to_epic: HashMap::from([
-            ("x-c1b9".to_string(), "x-aaaa".to_string()),
-            ("x-cd1e".to_string(), "x-aaaa".to_string()),
-        ]),
-    };
-    core.agents = vec![
-        bg_row("king-cliverbs-x-c1b9-g2", "/w", None),
-        bg_row("build-xcd1e", "/w", None),
-    ];
-    let sid = crate::mission_squad::mission_sid("x-aaaa");
-    let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
-    let missions = match &msg {
-        ServerMsg::Layout { missions, .. } => missions,
-        _ => unreachable!(),
-    };
-    assert_eq!(missions[0].id, sid);
-    assert_eq!(missions[0].name, "mux-squad  1/2");
-    let rows = core.agent_rows();
-    assert_eq!(rows.len(), 2);
-    assert!(rows.iter().all(|r| r.squad != Some(sid)));
-}
-
-#[test]
-fn empty_but_active_mission_still_renders() {
-    // An active mission with no matching worker rows still shows its
-    // header - "nothing running" stays visible, never vanishes.
-    let mut core = empty_core();
-    core.missions = backlog_view::MissionMap {
-        missions: vec![backlog_view::Mission {
-            epic_id: "x-aaaa".into(),
-            slug: "mux-squad".into(),
-            done: 0,
-            total: 0,
-        }],
-        node_to_epic: HashMap::new(),
-    };
-    let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
-    let missions = match &msg {
-        ServerMsg::Layout { missions, .. } => missions,
-        _ => unreachable!(),
-    };
-    assert!(missions
-        .iter()
-        .any(|s| s.id == crate::mission_squad::mission_sid("x-aaaa")));
-}
-
-#[test]
 fn derive_failure_leaves_workers_ungrouped() {
-    // A malformed/absent graph read leaves `missions` at its default: no
-    // mission squad header, and workers render via their normal path.
+    // A malformed/absent graph read leaves workers rendering via their
+    // normal path: no squad matches, so the rows stay ungrouped.
     let mut core = empty_core();
     core.agents = vec![bg_row("target-x-bbbb-foo", "/w", None)];
     let msg = core.layout_msg_for((0, 0), &[], 0, (0, 0));
@@ -8795,7 +8737,6 @@ pub(super) fn empty_core() -> Core {
         backlog_holders: HashMap::new(),
         backlog_pr: HashMap::new(),
         backlog_driver: HashMap::new(),
-        missions: backlog_view::MissionMap::default(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),

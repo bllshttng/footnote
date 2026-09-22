@@ -219,7 +219,12 @@ async fn rm_keeps_the_audit_event_compact_when_diagnostics_are_oversized() {
     )
     .await;
 
-    assert_eq!(response.result().unwrap()["event_written"], true);
+    assert_eq!(
+        response.result().unwrap()["event_written"],
+        true,
+        "reason: {:?}",
+        response.result().unwrap()["event_reason"]
+    );
     assert!(response.result().unwrap()["event_reason"].is_null());
     std::fs::remove_dir_all(home.root()).ok();
 }

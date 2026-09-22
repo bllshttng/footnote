@@ -54,9 +54,9 @@ def _wire(monkeypatch, tmp_path, items):
 
 
 def _events(path):
-    if not path.exists():
-        return []
-    return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+    from tests._event_rows import event_rows
+
+    return event_rows(path)
 
 
 def _good_plan(tmp_path, name):

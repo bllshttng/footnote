@@ -456,9 +456,9 @@ class TestDecidePostMergeRoute:
 
 class TestEmitReceipt:
     def _read(self, path):
-        import json
+        from tests._event_rows import event_rows
 
-        return [json.loads(line) for line in path.read_text().splitlines() if line]
+        return event_rows(path)
 
     def test_reserved_receipt_lands_in_events(self, tmp_path):
         events = tmp_path / "events.jsonl"

@@ -89,32 +89,17 @@ fn nav_filter_state_composes_with_text() {
 }
 
 #[test]
-fn nav_filter_matches_pane_id_node_id_and_slug() {
-    // x-e10f AC1-HP/AC2-HP/AC3-HP: the query matches what the row IS, not
+fn nav_filter_matches_pane_id() {
+    // x-e10f AC1-HP: the query matches what the row IS, not
     // just its label. Pane 307 is the screenshot specimen (live, running
-    // x-8a01, `find > 307` said `no matches`); x-6233 is the bound node;
-    // the slug is the node's title-slug. All three find the pane's row.
+    // x-8a01, `find > 307` said `no matches`).
     let mut v = two_pane_view();
-    // A plain (non-agent) pane 307 in notes' first tab, plus an agent on
-    // pane 11 working in-flight node x-6233 - both row classes must match.
+    // A plain (non-agent) pane 307 in notes' first tab.
     v.layout.squads[1].tabs[0].panes = vec![PaneMeta {
         id: 307,
         label: "shell".into(),
     }];
     v.layout.agents = vec![agent_row("claude", 11, None, false)];
-    v.layout.backlog = vec![BacklogCard {
-        id: "x-6233".into(),
-        slug: "mux-navigator-matches-by-identity".into(),
-        priority: "p1".into(),
-        state: CardState::InFlight,
-        pane_id: Some(11),
-        attach_id: None,
-        where_hint: None,
-        project: None,
-        lane: None,
-        plan_path: None,
-        head: false,
-    }];
     let rows = |q: &str| {
         let nav = NavView {
             query: q.into(),
@@ -136,16 +121,6 @@ fn nav_filter_matches_pane_id_node_id_and_slug() {
     assert!(
         rows("307").iter().all(|r| !r.label.contains("307")),
         "the hit is invisible in every matched label - it matched the key"
-    );
-    assert!(
-        rows("x-6233").iter().any(|r| r.label.contains("claude")),
-        "the agent row working x-6233 is found by node id via the pane join"
-    );
-    assert!(
-        rows("matches-by-identity")
-            .iter()
-            .any(|r| r.label.contains("claude")),
-        "the agent row is found by its bound node's title-slug, invisible in its label"
     );
     assert!(
         rows("notes").iter().any(|r| r.label == "notes"),

@@ -651,10 +651,13 @@ class TestReapDeadClaims:
 
         reap_dead_claims(roots=[tmp_path], apply=True)  # empty root, nothing to reap
 
+        from fno.events.store_client import store_db_path
+
         events_path = tmp_path / ".fno" / "events.jsonl"
-        assert events_path.exists(), "a silent sweep must still leave a trace"
-        lines = [json.loads(line) for line in events_path.read_text().splitlines()]
-        swept = [e for e in lines if e["type"] == "claim_reap_swept"]
+        assert store_db_path(events_path).exists(), "a silent sweep must still leave a trace"
+        from tests._event_rows import event_rows
+
+        swept = [e for e in event_rows(events_path) if e["type"] == "claim_reap_swept"]
         assert len(swept) == 1
         assert swept[0]["data"]["scanned"] == 0
         assert swept[0]["data"]["reaped"] == 0

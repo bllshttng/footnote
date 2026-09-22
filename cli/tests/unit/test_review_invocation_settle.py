@@ -81,8 +81,9 @@ def test_lost_invocation_settles_once_and_is_idempotent(tmp_path):
     )
     assert len(first) == 1 and first[0]["settled"] is True
 
-    text = events.read_text(encoding="utf-8")
-    rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+    from tests._event_rows import event_rows
+
+    rows = event_rows(events)
     settled = [r for r in rows if r["type"] == "review_attestation"]
     assert len(settled) == 1
     data = settled[0]["data"]

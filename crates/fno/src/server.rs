@@ -1016,8 +1016,6 @@ pub(crate) enum CoreMsg {
         prs: HashMap<String, u64>,
         /// node id -> driving session short id, from the same graph read.
         drivers: HashMap<String, String>,
-        /// Active missions, from the same graph read as `cards`.
-        missions: backlog_view::MissionMap,
     },
     /// The per-pane counter snapshot cadence fired: snapshot every live pane's
     /// monotonic totals and emit one event onto the machine-global events
@@ -1617,9 +1615,6 @@ pub(crate) struct Core {
     /// node id -> driving session short id; joined at layout time into
     /// `AgentRow.pr_session_short` (the PR row's attach handle).
     backlog_driver: HashMap<String, String>,
-    /// Active missions, from the off-loop graph reader; grouped into
-    /// synthetic "mission squad" headers at layout time.
-    missions: backlog_view::MissionMap,
     /// Panes spawned claim-ELIGIBLE (`pane run --claim`, agent panes). A
     /// general pane never appears here and never consults a claim (Locked 5).
     claim_eligible: HashSet<u64>,
@@ -6558,13 +6553,9 @@ impl Core {
     /// Capture squad `sid`'s whole tab topology into store shape -
     /// EVERY tab, hand-split and template alike, ending the three gates
     /// (template-only, named-squad-only, named-tab-only) that left the
-    /// operator's real layouts unpersisted. A mission squad is synthetic and
-    /// never captured. `None` when the squad is gone.
+    /// operator's real layouts unpersisted. `None` when the squad is gone.
     fn stored_tab_trees(&self, sid: u64) -> Option<(Vec<StoredTabTree>, usize)> {
         let sq = self.session.squad(sid)?;
-        if crate::proto::is_mission_squad(sid) {
-            return None;
-        }
         // Reverse the attach join so a pane with an fno id names its slot that
         // id (stable across restarts); anything else is an ordinal shell.
         let mut pane_owner_names: HashMap<u64, String> = self
@@ -9041,24 +9032,30 @@ impl Core {
         let mut dead = Vec::new();
         for (c, (layout_msg, focused_modes, rects)) in self.clients.iter_mut().zip(per) {
             // ModeSync BEFORE the Layout that assumes it (brief ordering).
-            // A failed send means the reliable channel is wedged: the client
-            // is dead, exactly like a failed Layout - a silently dropped
-            // ModeSync would desync its terminal's modes.
+            // Full means the reliable channel is wedged. Closed means its
+            // writer exited; leave membership to the reader so any command
+            // already on the socket stays ordered before `Gone`.
             if c.synced_modes != focused_modes {
                 let bytes = vt::mode_diff(c.synced_modes, focused_modes);
-                if !bytes.is_empty()
-                    && c.reliable_tx
-                        .try_send(ServerMsg::ModeSync { bytes })
-                        .is_err()
-                {
-                    dead.push(c.id);
-                    continue;
+                if !bytes.is_empty() {
+                    match c.reliable_tx.try_send(ServerMsg::ModeSync { bytes }) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            dead.push(c.id);
+                            continue;
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => continue,
+                    }
                 }
                 c.synced_modes = focused_modes;
             }
-            if c.reliable_tx.try_send(layout_msg).is_err() {
-                dead.push(c.id);
-                continue;
+            match c.reliable_tx.try_send(layout_msg) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    dead.push(c.id);
+                    continue;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => continue,
             }
             e2e_log(format_args!(
                 "layout -> client {}: {} rects, reemit={reemit}",
@@ -9199,14 +9196,8 @@ impl Core {
                 panes: s.tabs.iter().map(|t| tree::leaves(&t.root).len()).sum(),
             })
             .collect();
-        // Synthetic "mission squad" headers: one per active mission, done/total
-        // and the rotation `(i of n)` baked into the name. They ride their own
-        // lane, never `squads`, because a mission is a progress header the
-        // client draws as a band. Renders even with zero tagged workers -
-        // "nothing running" must stay visible. Identity: mission_squad.
         ServerMsg::Layout {
             squads,
-            missions: crate::mission_squad::headers(&self.missions.missions),
             active_squad: view.0,
             panes: rects.to_vec(),
             focus,
@@ -12939,7 +12930,6 @@ impl Core {
                 holders,
                 prs,
                 drivers,
-                missions,
             } => {
                 // Same as AgentRows: only sideline data moved, so push the
                 // Layout without a frame re-emit.
@@ -12949,7 +12939,6 @@ impl Core {
                 self.backlog_holders = holders;
                 self.backlog_pr = prs;
                 self.backlog_driver = drivers;
-                self.missions = missions;
                 self.push_layout(false);
                 Flow::Continue
             }
@@ -13273,7 +13262,6 @@ async fn serve(
         backlog_holders: HashMap::new(),
         backlog_pr: HashMap::new(),
         backlog_driver: HashMap::new(),
-        missions: backlog_view::MissionMap::default(),
         claim_eligible: HashSet::new(),
         claims: HashMap::new(),
         touch_last_emit: HashMap::new(),
@@ -14617,15 +14605,7 @@ async fn handle_client(
         return;
     }
     let (read_half, write_half) = stream.into_split();
-    tokio::spawn(client_writer(
-        write_half,
-        reliable_rx,
-        dirty,
-        notify,
-        core_tx.clone(),
-        id,
-        stats,
-    ));
+    tokio::spawn(client_writer(write_half, reliable_rx, dirty, notify, stats));
     client_reader(read_half, core_tx, id).await;
 }
 
@@ -14874,14 +14854,13 @@ where
 /// The per-client writer: reliable messages FIRST (biased select - a Layout
 /// is never stuck behind a frame burst), then the droppable dirty map. `Bye`
 /// is the exception: it flushes the final dirty frames before ending the
-/// stream. A write failure drops THIS client only (AC4-ERR generalized).
+/// stream. A write failure exits this half; the reader owns deregistration so
+/// commands already on the socket stay ordered before its `Gone` message.
 async fn client_writer(
     mut w: OwnedWriteHalf,
     mut reliable_rx: mpsc::Receiver<ServerMsg>,
     dirty: DirtyMap,
     notify: Arc<Notify>,
-    core_tx: mpsc::Sender<CoreMsg>,
-    id: u64,
     stats: PaneStats,
 ) {
     loop {
@@ -14892,10 +14871,7 @@ async fn client_writer(
                 match write_reliable(&mut w, &msg, &dirty, &stats).await {
                     Ok(true) => break,
                     Ok(false) => {}
-                    Err(_) => {
-                        let _ = core_tx.send(CoreMsg::Gone(id)).await;
-                        break;
-                    }
+                    Err(_) => break,
                 }
             }
             _ = notify.notified() => {
@@ -14911,10 +14887,7 @@ async fn client_writer(
                         match write_reliable(&mut w, &msg, &dirty, &stats).await {
                             Ok(true) => return,
                             Ok(false) => {}
-                            Err(_) => {
-                                let _ = core_tx.send(CoreMsg::Gone(id)).await;
-                                return;
-                            }
+                            Err(_) => return,
                         }
                     }
                     let next = {
@@ -14927,7 +14900,6 @@ async fn client_writer(
                         .await
                         .is_err()
                     {
-                        let _ = core_tx.send(CoreMsg::Gone(id)).await;
                         return;
                     }
                     count_frame_emitted(&stats, pane_id);

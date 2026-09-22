@@ -10,9 +10,10 @@ Correctness spine (see the plan's Locked Decisions):
     ``.fno/status-sinks/<name>.cursor`` - a byte offset dies at the 8MB rotation;
     the RFC3339-Z ``ts`` string is rotation-proof. Worktrees sharing one journal
     therefore share the cursor and tick lock too.
-  - **Rotation catch-up:** ``events.jsonl`` renames to ``events.jsonl.1`` (single
-    generation). When a cursor predates the active file's first line the tick
-    drains ``.1`` first, so a rotation between ticks is transparent.
+  - **Store-first:** the committed event rows answer the pass (every retained
+    generation included), so a journal rename between ticks is transparent for
+    any journal with a store; the rotated-file drain remains only for
+    store-less legacy journals.
   - **One shared pass** from ``min(cursors)``, evaluating each line against every
     sink in memory - not one file pass per sink.
   - **At-least-once:** a sink's cursor advances past an event only after that
@@ -171,11 +172,30 @@ def _stream_since(active: Path, since_ts: Optional[str]) -> "tuple[list[dict[str
 
 
 def _stream_pass(active: Path, since_ts: Optional[str]) -> "tuple[list[dict[str, Any]], int]":
-    """One read pass: all events with ts >= since_ts, draining the rotated ``.1``
-    first ONLY when the cursor predates the active file's first line (else ``.1`` is
-    fully covered and re-scanning its up-to-8MB tail every tick is wasted IO).
-    Rotated history is prepended so the returned list stays ts-ordered (both files
-    are individually ordered and ``.1`` is strictly older)."""
+    """One read pass: all events with ts >= since_ts.
+
+    SQL authority first: when a store exists beside the journal, committed
+    rows answer in commit order (which the cursor's per-second occurrence
+    index counts correctly), every retained generation included, so the
+    rotated-generation drain below is a store-less fallback only."""
+    try:
+        from fno.events.store_client import query_rows, store_db_path
+
+        # A store-less journal (fixture or pre-cutover bytes) reads raw below;
+        # an absent store is not an empty history.
+        rows = query_rows(active) if store_db_path(active).exists() else None
+    except Exception:
+        rows = None
+    if rows is not None:
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            ev = _parse_line(json.dumps(row))
+            if ev is None:
+                continue
+            if since_ts is not None and _timestamp_key(ev["ts"]) < _timestamp_key(since_ts):
+                continue
+            events.append(ev)
+        return events, 0
     active_events, active_skipped = _read_events(active, since_ts)
     rotated = active.with_name(active.name + ".1")
     if not rotated.exists():

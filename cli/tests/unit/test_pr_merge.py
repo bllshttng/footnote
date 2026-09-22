@@ -762,8 +762,9 @@ def test_session_satisfied_emitted_when_state_present(enabled, monkeypatch, tmp_
     fake = FakeRun(gh_merge=Result(0, "Merged", ""), toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
     _merge.run_merge(["42"], cwd=str(tmp_path))
-    assert events.exists()
-    line = json.loads(events.read_text().strip().splitlines()[-1])
+    from tests._event_rows import event_rows
+
+    line = event_rows(events)[-1]
     assert line["type"] == "session_satisfied"
     assert line["data"]["source"] == "pr_merge"
     assert line["data"]["session_id"] == "20260613T000000Z-1-abc"

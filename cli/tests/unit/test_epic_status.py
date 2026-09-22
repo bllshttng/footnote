@@ -70,9 +70,12 @@ def _invoke(args):
 
 
 def _write_events(cwd: Path, events: list[dict]) -> None:
+    from fno.events.store_client import emit_envelope
+
     p = cwd / ".fno" / "events.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("".join(json.dumps(e) + "\n" for e in events))
+    for i, e in enumerate(events):
+        emit_envelope({"ts": f"2026-01-01T00:00:{i:02d}Z", "source": "test", **e}, p)
 
 
 # -- table: id / project / status / PR (Success Definition 4) --
@@ -202,19 +205,28 @@ def test_inherited_json_flag_before_leaf(graph_env):
     assert payload["epic"] == "x-epic"
 
 
-def test_null_ts_event_does_not_crash(graph_env):
-    """An explicit ``{"ts": null}`` envelope must not crash the ts-sort."""
+def test_null_ts_event_does_not_crash(graph_env, monkeypatch):
+    """An explicit ``{"ts": null}`` envelope must not crash the ts-sort.
+
+    Legacy raw shape only: the store refuses a ts-less commit, so the native
+    reader goes offline and the seeded journal bytes are what the fold sees.
+    """
     tmp_path, write = graph_env
     write([
         _node("x-epic", type="epic"),
         _node("x-c2", parent="x-epic", status="ready", cwd=str(tmp_path)),
     ])
-    _write_events(tmp_path, [
+    # The store refuses a ts-less commit, so feed the fold directly: the
+    # tolerance under test lives in the ts-sort, not in any writer.
+    rows = [
         {"ts": None, "type": "advance_skipped", "source": "backlog",
          "data": {"reason": "walker-live", "node_id": "x-c2"}},
         {"ts": "2026-07-18T10:00:00Z", "type": "advance_failed", "source": "backlog",
          "data": {"error": "boom", "node_id": "x-c2"}},
-    ])
+    ]
+    monkeypatch.setattr(
+        "fno.events.store_client.query_rows", lambda target: rows
+    )
     r = _invoke(["backlog", "epic", "status", "x-epic"])
     assert r.exit_code == 0, r.output
     assert "boom" in r.output

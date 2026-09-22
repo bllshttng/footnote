@@ -44,6 +44,9 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     import fno.graph.maintain as gm
 
     monkeypatch.setattr(gm, "load_workspaces", lambda: {})
+    from fno.claims import roster
+
+    monkeypatch.setattr(roster, "read_roster", lambda **_kw: roster.RosterReading(True, 0, {}))
     return g
 
 
@@ -423,9 +426,12 @@ def _events_file() -> Path:
 
 
 def _seed_events(records: list[dict]) -> None:
+    from fno.events.store_client import emit_envelope
+
     p = _events_file()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("".join(json.dumps(r) + "\n" for r in records))
+    for i, r in enumerate(records):
+        emit_envelope({"ts": f"2026-01-01T00:00:{i:02d}Z", "source": "test", **r}, p)
 
 
 def _ev_fail(nid: str) -> dict:
@@ -437,11 +443,15 @@ def _ev_parked(nid: str) -> dict:
 
 
 def _append_events(records: list[dict]) -> None:
+    from fno.events.store_client import emit_envelope
+
     p = _events_file()
     p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a", encoding="utf-8") as fh:
-        for r in records:
-            fh.write(json.dumps(r) + "\n")
+    n = 0
+    for r in records:
+        n += 1
+        emit_envelope({"ts": f"2026-01-0{min(n // 3600 + 1, 9)}T{n // 60 % 60:02d}:{n % 60:02d}:00Z",
+                       "source": "test", **r}, p)
 
 
 @pytest.fixture(autouse=True)
@@ -905,20 +915,18 @@ def no_roster_workers(monkeypatch):
 def test_maintain_abandoned_leg_settles_gone_holds_active(
     tmp_graph, tmp_path, no_roster_workers, monkeypatch
 ):
-    """AC1-HP + AC3-HP at the CLI level: a node whose only open do row names a
-    session with a quiet transcript is settled (row filled at the transcript
-    tail instant, status_after idea); its active-transcript twin is held by
-    name and keeps the row open."""
-    _fixture_transcript(tmp_path, monkeypatch, _SID_GONE, age_hours=72)
-    _fixture_transcript(tmp_path, monkeypatch, _SID_LIVE, age_hours=0)
+    """AC1-HP + AC3-HP: idle rows past the bound settle; fresh rows hold."""
+    now = datetime.now(timezone.utc)
+    gone_at = (now - timedelta(hours=72)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    live_at = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     _seed(tmp_graph, [
         _node("ab-gone01", cwd="/repo/x", sessions=[
             {"phase": "do", "harness": "claude", "session_id": _SID_GONE,
-             "started_at": "2026-09-09T15:46:29Z"},
+             "started_at": gone_at},
         ]),
         _node("ab-held01", cwd="/repo/x", sessions=[
             {"phase": "do", "harness": "claude", "session_id": _SID_LIVE,
-             "started_at": "2026-09-09T15:46:29Z"},
+             "started_at": live_at},
         ]),
     ])
 
@@ -929,12 +937,12 @@ def test_maintain_abandoned_leg_settles_gone_holds_active(
     assert "row_closed true" in result.output
     assert "status_after idea" in result.output
     assert "ab-held01" in result.output
-    assert "transcript active" in result.output
+    assert "row idle 1h, inside the 24h bound" in result.output
 
     by_id = {n["id"]: n for n in _read(tmp_graph)}
     gone_rows = by_id["ab-gone01"]["sessions"]
     assert len(gone_rows) == 1, "the settled do row is filled and kept"
-    assert gone_rows[0]["ended_at"], "ended_at comes from the transcript tail"
+    assert gone_rows[0]["ended_at"]
     assert by_id["ab-gone01"]["status"] == "idea"
     live_rows = by_id["ab-held01"]["sessions"]
     assert len(live_rows) == 1

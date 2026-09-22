@@ -133,7 +133,9 @@ def test_bypass_passes_and_emits_gate_escape(tmp_path):  # AC1-FR
     )
     assert code == 0
     assert msg is None
-    lines = [json.loads(x) for x in events.read_text().splitlines() if x.strip()]
+    from tests._event_rows import event_rows
+
+    lines = event_rows(events)
     escapes = [e for e in lines if e.get("type") == "gate_escape"]
     assert escapes, "bypass must emit a gate_escape event"
     assert escapes[-1]["data"]["reason"] == "stale-base"

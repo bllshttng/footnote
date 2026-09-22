@@ -1631,11 +1631,24 @@ check_code_index_file() {
         warn "$label: code-index-detect.sh not found beside the validator - the Code Index Audit runs NOT CHECKED"
         return 0
     fi
-    # The plan audits its own repo, not wherever the validator was invoked:
-    # resolve the root from the plan's directory, falling back to that
-    # directory for a plan that lives outside any checkout.
-    repo_root="$(git -C "$(dirname "$file")" rev-parse --show-toplevel 2>/dev/null || true)"
-    [[ -n "$repo_root" ]] || repo_root="$(cd "$(dirname "$file")" && pwd)"
+    # A plan saved outside its repo (a notes vault) audits the checkout of
+    # the node it claims, read with one strict `fno backlog get` field call;
+    # a plan with no readable node falls back to the git root of its own
+    # directory. --strict matters: a fuzzy match on a fixture id would audit
+    # some other node's repo.
+    local base node_id node_cwd=""
+    base="$(dirname "$file")"
+    node_id="$(_plan_node_id "$file")"
+    if [[ -n "$node_id" ]] && command -v fno >/dev/null 2>&1 \
+        && node_cwd="$(fno backlog get "$node_id" --strict --field _resolved_cwd 2>/dev/null)"; then
+        if [[ -d "$node_cwd" ]]; then
+            base="$node_cwd"
+        elif [[ -n "$node_cwd" ]]; then
+            warn "$label: node $node_id names cwd $node_cwd, which is not a directory - the Code Index Audit read the plan's own directory instead"
+        fi
+    fi
+    repo_root="$(git -C "$base" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$repo_root" ]] || repo_root="$(cd "$base" && pwd)"
     detection=$(bash "$detect_script" "$repo_root" 2>/dev/null)
 
     block=$(awk '
@@ -1683,6 +1696,8 @@ check_code_index_file() {
             ' <<< "$block")
             status=$(sed -n 's/^[[:space:]]*status:[[:space:]]*//p' <<< "$entry" | head -1)
             fresh=$(sed -n 's/^[[:space:]]*fresh:[[:space:]]*//p' <<< "$entry" | head -1)
+            # finalize re-serializes YAML, so a bare yes or no comes back as true or false.
+            case "$fresh" in true) fresh=yes ;; false) fresh=no ;; esac
             if [[ ! "$status" =~ ^(answered|unavailable|error)$ ]]; then
                 findings+=("provider $rname has no readable status: - set status: answered, unavailable or error")
             fi

@@ -482,7 +482,7 @@ mod tests {
 
         stage_removal_accounting(&home, &entry, "test-remover", &emitter);
 
-        let line = std::fs::read_to_string(&events).unwrap();
+        let line = crate::events::committed_journal_text(&events);
         let event: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
         let data = &event["data"];
         assert_eq!(event["type"], "registry_row_removed");

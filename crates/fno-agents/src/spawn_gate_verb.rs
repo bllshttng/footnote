@@ -215,17 +215,29 @@ mod probe {
 
         // The slot count: the same counter the gate refuses on. The rows are
         // named right away, so every verdict this answer can take (refused on
-        // max_live, refused later, accepted) carries them.
-        let (slot_row_entries, slot_claims) =
+        // max_live, refused later, accepted) carries them. Reservations are
+        // named beside the registry rows, each entry tagged with its kind.
+        let (slot_row_entries, slot_reservations) =
             spawn_gate::slot_reading(&registry_path, &mut warnings);
-        let slots = slot_row_entries.len() + slot_claims;
-        out.insert(
-            "slot_rows".into(),
-            json!(slot_row_entries
-                .iter()
-                .map(|r| json!({"name": r.name, "node": r.node, "provider": r.provider}))
-                .collect::<Vec<_>>()),
-        );
+        let slots = slot_row_entries.len() + slot_reservations.len();
+        let mut slot_rows_json: Vec<Value> = slot_row_entries
+            .iter()
+            .map(|r| {
+                json!({"kind": "registry", "name": r.name, "node": r.node, "provider": r.provider})
+            })
+            .collect();
+        slot_rows_json.extend(slot_reservations.iter().map(|r| {
+            json!({
+                "kind": "reservation",
+                "name": r.name,
+                "holder": r.holder,
+                "pid": r.pid,
+                "age_s": r.age_s,
+                "state": r.state,
+                "provider": r.provider,
+            })
+        }));
+        out.insert("slot_rows".into(), json!(slot_rows_json));
 
         let mut ram_row: Option<Value> = None;
         let mut cpu_rows: Vec<Value> = Vec::new();
@@ -933,11 +945,119 @@ mod tests {
         let slot_rows = answer["slot_rows"].as_array().expect("slot_rows array");
         assert_eq!(slot_rows.len(), 3, "{slot_rows:?}");
         for r in slot_rows {
+            assert!(r.get("kind").is_some(), "{r:?}");
             assert!(r.get("name").is_some(), "{r:?}");
             assert!(r.get("node").is_some(), "{r:?}");
             assert!(r.get("provider").is_some(), "{r:?}");
         }
         assert_eq!(answer["live_workers"], 3, "slots stay rows + reservations");
+        assert_eq!(answer["verdict"], "accepted");
+
+        std::env::remove_var(crate::paths::HOME_ENV);
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        match prior_payload {
+            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC2-HP: the probe names a counted reservation in `slot_rows` with its
+    /// kind and the fields an operator needs to free a dead one, and the row
+    /// count still equals `live_workers`.
+    #[test]
+    fn probe_slot_rows_names_reservations() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-res-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        let claims_root = dir.join("claims-root");
+        std::fs::create_dir_all(claims_root.join(".fno/claims")).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 28\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
+        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+        std::env::set_var(
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
+        );
+
+        let me = std::process::id();
+        let good = crate::daemon::process_start_time(me).unwrap_or(0);
+        let row = |name: &str| {
+            format!(
+                r#"{{"name":"{name}","provider":"zai","cwd":"/tmp","status":"live","created_at":"2026-01-01T00:00:00Z","pid":{me},"pid_start_time":{good}}}"#
+            )
+        };
+        std::fs::write(
+            home.join("registry.json"),
+            format!(
+                r#"{{"schema_version":{},"entries":[{}, {}]}}"#,
+                crate::state::REGISTRY_SCHEMA_VERSION,
+                row("p1"),
+                row("p2")
+            ),
+        )
+        .unwrap();
+
+        // One counted reservation beside the two registry rows.
+        let mut m = serde_json::Map::new();
+        m.insert(
+            "model_provider".to_string(),
+            serde_json::Value::String("zai".into()),
+        );
+        let outcome = crate::claims::acquire(
+            "worker:w-res",
+            "spawn-gate:me:w-res",
+            crate::claims::AcquireOpts {
+                pid: Some(me),
+                pid_provenance: Some(crate::claims::HOLDER_PROCESS.to_string()),
+                ttl_ms: Some(3_600_000),
+                metadata: Some(m),
+                root: Some(claims_root.clone()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(outcome, crate::claims::AcquireOutcome::Acquired(_)),
+            "{outcome:?}"
+        );
+
+        let answer = probe::answer(&json!({}));
+        let slot_rows = answer["slot_rows"].as_array().expect("slot_rows array");
+        assert_eq!(slot_rows.len(), 3, "{slot_rows:?}");
+        let res = slot_rows
+            .iter()
+            .find(|r| r["kind"] == "reservation")
+            .expect("the reservation is named");
+        assert_eq!(res["name"], "w-res");
+        assert_eq!(res["state"], "live");
+        assert_eq!(res["pid"], me);
+        assert_eq!(res["provider"], "zai");
+        assert!(res.get("age_s").is_some(), "{res:?}");
+        assert_eq!(res["holder"], "spawn-gate:me:w-res");
+        let registry_kinds: Vec<&str> = slot_rows
+            .iter()
+            .filter(|r| r["kind"] == "registry")
+            .filter_map(|r| r["name"].as_str())
+            .collect();
+        assert_eq!(registry_kinds, ["p1", "p2"]);
+        assert_eq!(answer["live_workers"], 3);
         assert_eq!(answer["verdict"], "accepted");
 
         std::env::remove_var(crate::paths::HOME_ENV);

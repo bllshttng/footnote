@@ -234,6 +234,9 @@ pub struct OpenPrRow {
     /// harnesses: the pid is not gone and the registry status is not
     /// `exited`.
     pub live: bool,
+    /// Claude: the roster row reads `working`, so the session is mid-turn.
+    /// False for every other harness.
+    pub busy: bool,
 }
 
 /// The ruling a `reap --release <row>` carries into the sweep: the
@@ -2286,6 +2289,8 @@ pub(crate) fn run_with_release(
                     } else {
                         !pid_gone && !matches!(e.status, crate::AgentStatus::Exited)
                     };
+                    let busy =
+                        e.harness_name() == "claude" && roster_state.as_deref() == Some("working");
                     summary.kept_open_pr.push((id.clone(), node.clone()));
                     summary.holds.push(Hold {
                         id: id.clone(),
@@ -2308,6 +2313,7 @@ pub(crate) fn run_with_release(
                         cwd: e.cwd.clone(),
                         transcript_age_s: hold_age_s,
                         live,
+                        busy,
                     });
                 }
                 // GraphUnreadable / OpenDoRow are decided above, before the

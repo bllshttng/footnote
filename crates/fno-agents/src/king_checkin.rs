@@ -918,7 +918,11 @@ fn r_control_plane(ctx: &Ctx) -> Result<Value, String> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let journals = crate::tick_ledger::journals(&home);
-    let mut rows = crate::tick_ledger::read_arms(&journals, now_unix);
+    let mut rows = {
+        let mut rows = crate::tick_ledger::read_arms(&journals, now_unix);
+        crate::tick_ledger::fill_arm_values(&mut rows, &ctx.cwd);
+        rows
+    };
     let trace = crate::tick_ledger::read_tick_trace_live(&journals, &rows, now_unix);
     crate::tick_ledger::explain_with_trace(
         &mut rows,
@@ -3036,7 +3040,7 @@ mod tests {
             "loop",
             data.as_object().unwrap()
         ));
-        let rows = std::fs::read_to_string(&path).unwrap();
+        let rows = crate::events::committed_journal_text(&path);
         assert_eq!(rows.lines().count(), 1);
         assert!(rows.contains("reign_checkin"));
         assert!(rows.contains("\"source\":\"loop\""), "rows: {rows}");
@@ -3087,7 +3091,10 @@ mod tests {
             data.as_object().unwrap()
         ));
         assert!(
-            !path.exists() || std::fs::read_to_string(&path).unwrap().trim().is_empty(),
+            !path.exists()
+                || crate::events::committed_journal_text(&path)
+                    .trim()
+                    .is_empty(),
             "the corrupted-scope row must not reach the journal"
         );
     }
@@ -3098,14 +3105,14 @@ mod tests {
         let path = dir.path().join("events.jsonl");
         let data = json!({"scope": "x-bbbb", "change": "beat"});
         assert!(emit_row(&path, "loop", data.as_object().unwrap()));
-        let rows = std::fs::read_to_string(&path).unwrap();
+        let rows = crate::events::committed_journal_text(&path);
         assert_eq!(rows.lines().count(), 1);
         assert!(rows.contains("\"source\":\"loop\""), "rows: {rows}");
 
         // An oversized payload journals the meta-event, never a raw row.
         let huge = json!({"scope": "x-bbbb", "change": "x".repeat(70_000)});
         assert!(emit_row(&path, "loop", huge.as_object().unwrap()));
-        let rows = std::fs::read_to_string(&path).unwrap();
+        let rows = crate::events::committed_journal_text(&path);
         assert_eq!(rows.lines().count(), 2, "rows: {rows}");
         assert!(rows.contains("event_payload_too_large"), "rows: {rows}");
         assert!(
@@ -3195,7 +3202,10 @@ mod tests {
             &history,
             at(479)
         ));
-        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+        assert_eq!(
+            crate::events::committed_journal_text(&path).lines().count(),
+            1
+        );
         // 481 minutes old: the beat is due, one hook row.
         assert!(hook_beat(
             &path,
@@ -3205,7 +3215,7 @@ mod tests {
             &history,
             at(481)
         ));
-        let rows = std::fs::read_to_string(&path).unwrap();
+        let rows = crate::events::committed_journal_text(&path);
         assert_eq!(rows.lines().count(), 2, "rows: {rows}");
         assert!(rows.contains("\"source\":\"hook\""), "rows: {rows}");
         let written: Value = serde_json::from_str(rows.lines().last().unwrap()).unwrap();
@@ -3220,7 +3230,10 @@ mod tests {
             &history,
             at(482)
         ));
-        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
+        assert_eq!(
+            crate::events::committed_journal_text(&path).lines().count(),
+            2
+        );
     }
 
     #[test]
@@ -3264,6 +3277,10 @@ mod tests {
             repair: None,
             heal: None,
             upstream: None,
+            arm_key: None,
+            arm_value: None,
+            reader: None,
+            starved: false,
         };
         r.cause = Some("fleet_stop".to_string());
         r.line = format!(
@@ -3335,6 +3352,10 @@ mod tests {
             repair: None,
             heal: None,
             upstream: None,
+            arm_key: None,
+            arm_value: None,
+            reader: None,
+            starved: false,
         };
         kw.cause = Some("tick_overdue".to_string());
         kw.line = format!(

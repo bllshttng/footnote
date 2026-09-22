@@ -107,8 +107,7 @@ fn store_socket_sweep_unlinks_the_dead_and_leaves_the_live() {
     );
     assert!(shielded_graph.exists(), "non-socket files are untouched");
     assert!(
-        std::fs::read_to_string(home.events_jsonl())
-            .unwrap()
+        crate::events::committed_journal_text(&home.events_jsonl())
             .contains("store_seat_lock_unlinked"),
         "the sweep emits store_seat_lock_unlinked for the orphaned lock"
     );

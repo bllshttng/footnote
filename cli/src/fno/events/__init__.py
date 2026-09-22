@@ -39,8 +39,8 @@ from typing import TYPE_CHECKING, Any, TypeGuard, cast
 import yaml as _yaml
 
 from ..config._dispatch_verbs import is_verb_seed
-from ..mutex import acquire_dir_mutex, release_dir_mutex
 from ..paths import EPHEMERAL_EVENTS_SUFFIX as EPHEMERAL_SUFFIX
+from .store_client import EventStoreUnavailable
 from .verify_child_promise import FanInTally, tally_fan_in, verify_child_promise
 
 
@@ -1854,14 +1854,17 @@ def append_event(
     events_path: Path | None = None,
     *,
     lock_timeout_seconds: float = 30,
-) -> None:
-    """Append a validated event to events.jsonl under a mkdir mutex.
+) -> dict[str, Any] | None:
+    """Commit a validated event to the authoritative store.
 
-    Validates the event before acquiring the lock so a malformed payload
-    cannot block other writers. The mutex directory matches the convention
-    used by ``scripts/migrate-events-shape.py`` and
-    ``crates/fno-agents/src/claims.rs``, so cross-language callers serialize
-    correctly on the same path.
+    Validates the event, then hands the exact envelope to the native binary's
+    SQL transaction (WAL, FULL sync, positive readback). The retention class
+    comes from the store, not a journal route, and there is no file fallback:
+    a failed commit raises :class:`EventStoreUnavailable` instead of
+    reporting a committed event. Returns the native receipt dict.
+
+    ``events_path`` resolves the sibling store (``events.jsonl`` ->
+    ``events.db`` beside it); it is a store locator, never an append target.
     """
     validate(event)
 
@@ -1870,52 +1873,24 @@ def append_event(
 
         events_path = project_events_json()
     requested_path = Path(events_path)
-    # Honor the declared retention class: an ephemeral row goes to the
-    # sibling journal beside the requested one, so a high-cadence gauge cannot
-    # consume the durable journal's rotation budget. Every other class keeps
-    # the requested path. The sibling is derived from the RESOLVED journal
-    # inside the loop, so a worktree journal symlinked into the repo's space
-    # routes its ephemeral rows to that space's sibling, not a worktree-local
-    # file the symlink never covered.
-    ephemeral = retention_for(str(event.get("type", ""))) == "ephemeral"
-    # Before the mkdir: a refused write must not leave a .fno/ behind either.
+    # Before the commit: a refused write must not leave a .fno/ behind either.
     _refuse_hermetic_escape(requested_path)
-    requested_path.parent.mkdir(parents=True, exist_ok=True)
-    while True:
-        # Setup can replace a local journal with a canonical-journal symlink
-        # while this writer waits on the old mutex. Re-resolve after acquiring
-        # and retry whenever the leaf changed during that handoff.
-        resolved_path = requested_path.resolve()
-        # Re-judge the RESOLVED leaf, not just the requested one. The check
-        # above raced: the loop exists precisely because a local journal can be
-        # swapped for a canonical-journal symlink mid-write, and that swap is
-        # the escape this guard targets. Judging only before the resolve leaves
-        # the window the retry loop was written to acknowledge.
-        _refuse_hermetic_escape(resolved_path)
-        target_path = (
-            resolved_path.with_name(resolved_path.name + EPHEMERAL_SUFFIX)
-            if ephemeral
-            else resolved_path
+    from fno.events.store_client import EventStoreUnavailable, emit_envelope
+
+    if requested_path.is_dir():
+        # A directory at the journal path is a corrupt setup, and the store
+        # would silently commit beside it (events.db strips the .jsonl stem),
+        # reporting a mirrored receipt no reader can ever find there.
+        raise EventStoreUnavailable(
+            f"events path is a directory, not a journal: {requested_path}"
         )
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_dir = target_path.parent / (target_path.name + ".lock.d")
-        token = acquire_dir_mutex(lock_dir, lock_timeout_seconds)
-        if token is None:
-            raise TimeoutError(f"events.jsonl lock timeout: {lock_dir}")
-        try:
-            current_path = requested_path.resolve()
-        except (OSError, RuntimeError):
-            release_dir_mutex(lock_dir, token)
-            raise
-        if current_path == resolved_path:
-            break
-        release_dir_mutex(lock_dir, token)
 
     try:
-        with target_path.open("a", encoding="utf-8") as fh:
-            fh.write(_json.dumps(event, separators=(",", ":")) + "\n")
-    finally:
-        release_dir_mutex(lock_dir, token)
+        return emit_envelope(event, requested_path, timeout=lock_timeout_seconds)
+    except EventStoreUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - one named failure class for callers
+        raise EventStoreUnavailable(f"event store commit failed: {exc}") from exc
 
 
 __all__ = [
@@ -1954,6 +1929,7 @@ __all__ = [
     "phase_transition",
     "session_satisfied",
     "retention_for",
+    "EventStoreUnavailable",
     "validate",
     "validate_retention_schema",
     "FanInTally",

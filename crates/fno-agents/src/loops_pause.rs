@@ -480,7 +480,7 @@ const NO_IDENTITY_DETAIL: &str = "no session identity - no mail to hold";
 /// unknown-action early exit that never reaches the sentinel.
 fn decide_loops(args: &[String]) -> Result<(String, Value), i32> {
     let Some(action) = args.first().map(String::as_str) else {
-        eprintln!("fno-agents loops: expected paused, pause-all, resume-all, or status");
+        eprintln!("fno-agents loops: expected paused, pause-all, resume-all, status, or table");
         return Err(2);
     };
     let rest = &args[1..];
@@ -572,6 +572,9 @@ pub fn run_loops(args: &[String]) -> i32 {
         .unwrap_or(&[])
         .iter()
         .any(|arg| arg == "--json");
+    if args.first().map(String::as_str) == Some("table") {
+        return run_loops_table(json_out, args.iter().any(|arg| arg == "--markdown"));
+    }
     let (action, output) = match decide_loops(args) {
         Ok(pair) => pair,
         Err(code) => return code,
@@ -634,10 +637,203 @@ pub fn run_loops(args: &[String]) -> i32 {
     0
 }
 
+/// The receipt event name one loop's rows land under. The fold that reads the
+/// journals maps the heal receipt type onto the `heal` arm; every other arm
+/// ticks `control_plane_tick`.
+fn receipt_event(arm: &str) -> &'static str {
+    if arm == "heal" {
+        "pr_heal_tick"
+    } else {
+        "control_plane_tick"
+    }
+}
+
+/// The daemon facts a CLI-side read holds: the supervisor lock's holder pid
+/// is the liveness truth. `uptime_s: u64::MAX` says "never young" - the same
+/// convention the arm_watch tick uses when it IS the daemon.
+fn table_daemon_facts(home: &crate::paths::AgentsHome) -> crate::tick_ledger::DaemonFacts {
+    match crate::paths::supervisor_lock_holder(home) {
+        Some((pid, _))
+            if !matches!(
+                crate::claims::probe_pid(pid as i32),
+                crate::claims::PidProbe::Absent
+            ) =>
+        {
+            crate::tick_ledger::DaemonFacts::Up {
+                uptime_s: u64::MAX,
+                drifted: false,
+            }
+        }
+        _ => crate::tick_ledger::DaemonFacts::Down,
+    }
+}
+
+/// One `fno agents loops table` read: the fold `fno agents status` runs,
+/// widened with the starved mark and the launchd label fold, printed as one
+/// row per scheduled loop. Exit 1 only when a row reads STALE or FAIL:
+/// `unarmed`, `starved`, `PAUSED` and `UNOBSERVED` exit 0, because none of
+/// them is a loop that stopped while it was supposed to be running.
+pub fn run_loops_table(json_out: bool, markdown: bool) -> i32 {
+    let home = crate::paths::AgentsHome::from_env();
+    let journals = crate::tick_ledger::journals(&home);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut rows = crate::tick_ledger::read_arms_starved(&journals, now);
+    let trace = crate::tick_ledger::read_tick_trace_live(&journals, &rows, now);
+    let daemon = table_daemon_facts(&home);
+    crate::arm_repair::explain(&mut rows, &daemon, &trace);
+    let launchd = crate::tick_ledger::launchd_fold_live();
+    let any_red = rows.iter().any(|r| {
+        !crate::tick_ledger::row_is_unarmed(r)
+            && !r.starved
+            && r.cause.as_deref() != Some("upstream_down")
+            && (r.stale || r.failing)
+    });
+    if json_out {
+        let launchd_json = match &launchd {
+            Some(fold) => json!({
+                "applicable": true,
+                "labels": fold.labels,
+                "dead": fold.dead,
+            }),
+            None => json!({"applicable": false, "labels": [], "dead": []}),
+        };
+        println!(
+            "{}",
+            json!({
+                "arms": rows,
+                "launchd": launchd_json,
+                "any_red": any_red,
+            })
+        );
+    } else if markdown {
+        print!("{}", markdown_doc(&launchd));
+        return 0;
+    } else {
+        println!("control-plane loops, one row per scheduled loop (regenerate the doc: fno agents loops table --markdown):");
+        for row in &rows {
+            println!("{}", row.line);
+        }
+        match &launchd {
+            Some(fold) => {
+                println!("launchd labels, loaded / last exit:");
+                for f in &fold.labels {
+                    let exit = match f.last_exit {
+                        Some(e) => e.to_string(),
+                        None => "-".to_string(),
+                    };
+                    let state = if f.loaded { "loaded" } else { "not loaded" };
+                    println!("  {:<28} {:<10} exit {exit}", f.label, state);
+                }
+                if fold.dead.is_empty() {
+                    println!("launchd: no dead labels");
+                } else {
+                    println!(
+                        "launchd: DEAD labels: {}",
+                        fold.dead
+                            .iter()
+                            .map(|f| format!("{} (exit {})", f.label, f.last_exit.unwrap_or(0)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+            }
+            None => println!("launchd: not applicable on this host"),
+        }
+        println!("detail per loop: run the row's reader verb, or fno agents loops table --json");
+    }
+    if any_red {
+        1
+    } else {
+        0
+    }
+}
+
+/// The generated docs/loops.md body: the same KNOWN_ARMS table, static so a
+/// regenerated file is byte-identical while the loops sit still. One row per
+/// loop, then one paragraph per loop: where it starts (the trigger), where
+/// it ends (the receipt event), and what to run when it looks wrong (the
+/// reader verb).
+fn markdown_doc(launchd: &Option<crate::tick_ledger::LaunchdFold>) -> String {
+    let mut out = String::from(
+        "# Scheduled loops\n\nThe control plane runs every scheduled loop below. One row names its scheduler, its arming key, its journal receipt, and the verb that reads it in detail. This file is generated. Regenerate it with `fno agents loops table --markdown` after changing `KNOWN_ARMS` in `crates/fno-agents/src/tick_ledger.rs`. When a row reads STALE or FAIL, `fno agents loops table` exits 1. Its plain form prints the same rows against the live journals.\n\n",
+    );
+    out.push_str("| loop | scheduler | interval (s) | armed by | ends with receipt | reads with |\n|---|---|---|---|---|---|\n");
+    for spec in crate::tick_ledger::KNOWN_ARMS {
+        out.push_str(&format!(
+            "| `{}` | `{}` | {} | {} | `{}` | {} |\n",
+            spec.arm,
+            spec.scheduler,
+            spec.default_interval_s,
+            spec.arm_key
+                .map(|k| format!("`{k}`"))
+                .unwrap_or_else(|| "always".to_string()),
+            receipt_event(spec.arm),
+            spec.reader
+                .map(|r| format!("`{r}`"))
+                .unwrap_or_else(|| "`fno agents loops table`".to_string()),
+        ));
+    }
+    out.push_str("\nThe launchd labels the pr-watch installer and the autocorrect installer own, as the table reports them: `");
+    out.push_str(&crate::tick_ledger::LAUNCHD_LABELS.join("`, `"));
+    out.push_str(
+        "`. A label the fold shows as `not loaded` cannot run. A nonzero last exit is one run that failed. `fno doctor` lists it under `launch_agents`.\n",
+    );
+    for spec in crate::tick_ledger::KNOWN_ARMS {
+        let reader = spec
+            .reader
+            .map(|r| format!("`{r}`"))
+            .unwrap_or_else(|| "`fno agents loops table`".to_string());
+        out.push_str(&format!(
+            "\n### {}\n\nStart: {} fires, every {}s. End: a `{}` receipt lands in the journal. If it looks wrong, run {}. {}.\n",
+            spec.arm,
+            spec.scheduler,
+            spec.default_interval_s,
+            receipt_event(spec.arm),
+            reader,
+            match spec.arm_key {
+                Some(k) => format!("If the row reads `unarmed`, arm it with `fno config set {k} true`"),
+                None => "If the row reads red, its `cause=` suffix names the next read".to_string(),
+            }
+        ));
+    }
+    if launchd.is_none() {
+        out.push_str("\nThe launchd fold is not applicable on this host, and the table fabricates no alarm for it.\n");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn the_launchd_parse_folds_labels_and_the_dead_list() {
+        let listing = "PID\tStatus\tLabel\n\
+                       -\t0\tsh.fno.groom\n\
+                       -\t78\tsh.fno.pr-watcher\n\
+                       412\t0\tsh.fno.mux\n\
+                       -\t127\tcom.user.autocorrect-watcher\n\
+                       -\t-\tsh.fno.idle\n";
+        let fold = crate::tick_ledger::parse_launchctl_list(listing);
+        assert!(fold.applicable);
+        let groom = fold
+            .labels
+            .iter()
+            .find(|f| f.label == "sh.fno.groom")
+            .unwrap();
+        assert!(groom.loaded);
+        assert_eq!(groom.last_exit, Some(0));
+        let dead: Vec<&str> = fold.dead.iter().map(|f| f.label.as_str()).collect();
+        assert_eq!(
+            dead,
+            vec!["sh.fno.pr-watcher", "com.user.autocorrect-watcher"],
+            "the autocorrect labels the sh.fno. prefix filter missed now count"
+        );
+    }
 
     #[test]
     fn missing_sentinel_is_clear() {

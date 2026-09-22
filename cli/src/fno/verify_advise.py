@@ -212,21 +212,28 @@ def recorded_verdict(session_id: str, events_path: Path) -> Optional[str]:
     if not session_id or not events_path.exists():
         return None
     verdict = None
-    try:
-        for line in events_path.read_text(encoding="utf-8").splitlines():
-            try:
-                e = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if (
-                isinstance(e, dict)
-                and e.get("type") == "verifier_verdict"
-                and isinstance(e.get("data"), dict)
-                and e["data"].get("session_id") == session_id
-            ):
-                verdict = e["data"].get("verdict") or verdict
-    except OSError:
-        return None
+    # The store commit is the write boundary: committed rows carry the
+    # history, raw bytes are only the pre-store fallback.
+    from fno.events.store_client import native_rows
+
+    lines = native_rows(events_path, types=["verifier_verdict"])
+    if lines is None:
+        try:
+            lines = events_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(e, dict)
+            and e.get("type") == "verifier_verdict"
+            and isinstance(e.get("data"), dict)
+            and e["data"].get("session_id") == session_id
+        ):
+            verdict = e["data"].get("verdict") or verdict
     return verdict
 
 

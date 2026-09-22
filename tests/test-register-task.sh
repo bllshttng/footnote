@@ -429,14 +429,25 @@ EOF
         bash -c "cd '$WORKTREE_FIXTURE' && '$PY' '$REGISTER_PY' '$WORKTREE_FIXTURE/.fno/target-state.md' 'transcript-cB-emit'" \
         > "$sandbox/out.log" 2> "$sandbox/err.log"
 
-    # Event MUST land in the worktree's events.jsonl, not the canonical repo's.
-    if [[ -f "$WORKTREE_FIXTURE/.fno/events.jsonl" ]] \
-       && grep -q '"gate":"ledger_updated"' "$WORKTREE_FIXTURE/.fno/events.jsonl" 2>/dev/null; then
+    # Event MUST land in the worktree's store (events.db beside the journal),
+    # not the canonical repo's; read it back through the rows verb.
+    ROWS_BIN="${FNO_BIN:-}"
+    if [[ -z "$ROWS_BIN" ]]; then
+        for _profile in debug release; do
+            if [[ -x "$REPO_ROOT/crates/fno/target/$_profile/fno" ]]; then
+                ROWS_BIN="$REPO_ROOT/crates/fno/target/$_profile/fno"
+                break
+            fi
+        done
+    fi
+    [[ -n "$ROWS_BIN" ]] || ROWS_BIN=$(command -v fno 2>/dev/null)
+    if "$ROWS_BIN" doctor event rows --events "$WORKTREE_FIXTURE/.fno/events.jsonl" 2>/dev/null \
+       | jq -r '.[]' 2>/dev/null | grep -q '"gate":"ledger_updated"'; then
         pass "cB-AC4-EDGE: phase_transition event written to worktree events.jsonl"
     else
         fail "cB-AC4-EDGE: worktree events.jsonl missing the ledger_updated event. stderr=$(cat "$sandbox/err.log")"
     fi
-    if [[ -f "$REPO_ROOT_FIXTURE/.fno/events.jsonl" ]]; then
+    if [[ -f "$REPO_ROOT_FIXTURE/.fno/events.db" ]]; then
         fail "cB-AC4-EDGE: event leaked into canonical repo's events.jsonl"
     else
         pass "cB-AC4-EDGE-neg: canonical repo's events.jsonl NOT created"
