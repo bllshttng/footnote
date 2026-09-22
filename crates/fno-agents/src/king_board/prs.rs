@@ -214,10 +214,13 @@ pub(crate) fn read_prs(
 }
 
 /// One candidate's merge-gate verdict: the payload `fno do pr status` prints
-/// as JSON on stdout. A non-zero exit (the exit code is the CI verdict) reads
-/// as an unanswered gate, not a verdict: the runner keeps only the error text,
-/// so a PR that went red between the listing and the gate renders
-/// not-actionable with a warning naming the exit, never as mergeable.
+/// as JSON on stdout. Exits 0-3 are CI verdicts and carry that payload, so
+/// they are read; exit 4 and every other exit is an unanswered gate - the
+/// reader failed, and no trustworthy `ready` exists to extract. The runner
+/// keeps only the error text, so a PR that went red between the listing and
+/// the gate reads `ready: false` with `ci_red` in `ready_blockers` (a real
+/// verdict, still not mergeable), while a crashed gate read renders
+/// not-actionable with a warning naming the exit.
 fn read_pr_gate(cwd: &Path, number: i64, timeout: Duration) -> Result<Value, String> {
     let mut cmd = fno_py_cmd();
     cmd.extend([
@@ -226,7 +229,7 @@ fn read_pr_gate(cwd: &Path, number: i64, timeout: Duration) -> Result<Value, Str
         "status".to_string(),
         number.to_string(),
     ]);
-    match run_with_timeout(&cmd, cwd, timeout) {
+    match run_with_timeout_accepting(&cmd, cwd, timeout, &[0, 1, 2, 3]).map(|o| o.stdout) {
         Err(f) => Err(f.message().to_string()),
         Ok(stdout) => serde_json::from_slice::<Value>(&stdout)
             .map_err(|e| format!("unparseable status payload: {e}")),
