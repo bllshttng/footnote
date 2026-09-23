@@ -251,7 +251,8 @@ def test_map_covers_current_surface_once():
     # This branch allocates `agents select-read`, the bounded selection read
     # the auto-continue arm calls through call_binary_json (one corpus ref,
     # the architecture doc): 611 -> 612.
-    assert len(mapped) == 612, (
+    # The feed verb retired with the territory blueprinter (x-701c): 612 -> 611.
+    assert len(mapped) == 611, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
