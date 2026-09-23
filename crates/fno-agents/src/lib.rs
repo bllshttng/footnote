@@ -1075,6 +1075,98 @@ mod tests {
         kinds
     }
 
+    // The exec-stub guard: a lib test that writes an executable stub
+    // in-process holds a write fd, and a sibling test thread's fork copies it
+    // into a child; an exec of the stub then fails with ETXTBSY until that
+    // child reaches its own exec. The one writer is `write_exec_stub`, whose
+    // child /bin/sh exits before returning. ponytail: the regex matches only
+    // the literal-mode idiom; a mode built in a variable not named `mode`
+    // evades it.
+    #[test]
+    fn every_exec_stub_goes_through_write_exec_stub() {
+        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs_files(&src_root, &mut files);
+        assert!(!files.is_empty(), "found no .rs files under {src_root:?}");
+
+        // Byte-level scan, like the emit-kind guard: no regex crate here.
+        // Matches the plan regex `(from_mode|set_mode|\.mode)\((0o7[0-7]{2}|mode)\)`
+        // per line: after the needle, trimmed whitespace, either a 0o7xx octal
+        // literal closed by `)`, or the variable form `mode)`.
+        const NEEDLES: [&str; 3] = ["from_mode(", "set_mode(", ".mode("];
+        let mut offenders: Vec<String> = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).expect("read source file");
+            let lines: Vec<&str> = text.lines().collect();
+            for (idx, line) in lines.iter().enumerate() {
+                let mut hit = false;
+                for needle in NEEDLES {
+                    let mut from = 0;
+                    while let Some(pos) = line[from..].find(needle) {
+                        let rest = line[from + pos + needle.len()..].trim_start();
+                        let octal = rest.as_bytes();
+                        let matched = (octal.len() >= 6
+                            && octal[..3] == *b"0o7"
+                            && (b'0'..=b'7').contains(&octal[3])
+                            && (b'0'..=b'7').contains(&octal[4])
+                            && octal[5] == b')')
+                            || rest.starts_with("mode)");
+                        if matched {
+                            hit = true;
+                            break;
+                        }
+                        from += pos + needle.len();
+                    }
+                    if hit {
+                        break;
+                    }
+                }
+                if hit {
+                    let name = file.strip_prefix(&src_root).unwrap_or(file);
+                    offenders.push(format!("{}:{}", name.display(), idx + 1));
+                }
+            }
+        }
+
+        // The five allowed files: production binary repair (install_verify),
+        // a production dir mode (paths), two dir-mode restores in tests
+        // (claims, operator_turns), and the bin test target that cannot see a
+        // cfg(test) lib fn (client_tests).
+        const ALLOWED: &[(&str, usize)] = &[
+            ("install_verify.rs", 1),
+            ("paths.rs", 1),
+            ("king_board/claims.rs", 1),
+            ("operator_turns.rs", 1),
+            ("client_tests.rs", 2),
+        ];
+        let allowed_counts: std::collections::HashMap<&str, usize> =
+            ALLOWED.iter().copied().collect();
+        let mut by_file: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for o in &offenders {
+            let file = o.rsplit_once(':').map(|(f, _)| f.to_string()).unwrap();
+            *by_file.entry(file).or_insert(0) += 1;
+        }
+        for (file, count) in &by_file {
+            let allowed = allowed_counts.get(file.as_str()).copied().unwrap_or(0);
+            assert!(
+                count <= allowed,
+                "this test writes an executable stub from inside the test \
+                 process, where a sibling test's fork can hold the write fd \
+                 open and the exec fails with Text file busy. Write it with \
+                 crate::write_exec_stub. Offenders: {offenders:?}"
+            );
+        }
+        for (file, allowed) in ALLOWED {
+            let actual = by_file.get(*file).copied().unwrap_or(0);
+            assert!(
+                actual <= *allowed,
+                "{file} now matches {actual} times (allowance {allowed}); \
+                 the extra site must go through crate::write_exec_stub. {offenders:?}"
+            );
+        }
+    }
+
     fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         if needle.is_empty() || haystack.len() < needle.len() {
             return None;
