@@ -1033,7 +1033,7 @@ def test_subjectless_outstanding_answer_gets_a_reserved_recovery_subject(
 ):
     from fno.outstanding.cli import outstanding_app
 
-    asked = runner.invoke(outstanding_app, ["ask", "which lane owns this question?"])
+    asked = runner.invoke(outstanding_app, ["ask", "which lane owns this question?", "--ask", "finish the lane"])
     question_id = asked.stdout.strip().splitlines()[-1]
     cleared = runner.invoke(
         outstanding_app,
@@ -1586,7 +1586,7 @@ def test_a_subjectless_decision_is_reachable_only_without_a_subject(
     decision with subject=None. A subject-less list is the only way to it."""
     from fno.outstanding.cli import outstanding_app
 
-    asked = runner.invoke(outstanding_app, ["ask", "which lane owns the retry?"])
+    asked = runner.invoke(outstanding_app, ["ask", "which lane owns the retry?", "--ask", "finish the lane"])
     assert asked.exit_code == 0, asked.output
     qid = asked.stdout.strip().splitlines()[-1]
 
@@ -2117,7 +2117,7 @@ def test_the_second_producer_also_refuses_to_ask_for_a_retry(
     from fno.outstanding.cli import outstanding_app
 
     qid = runner.invoke(
-        outstanding_app, ["ask", "which lane owns the retry?"]
+        outstanding_app, ["ask", "which lane owns the retry?", "--ask", "finish the lane"]
     ).stdout.strip().splitlines()[-1]
 
     real = events_mod.append_event
