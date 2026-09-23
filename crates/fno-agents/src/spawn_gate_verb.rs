@@ -1010,6 +1010,29 @@ mod tests {
     use super::*;
     use crate::spawn_gate::SWAPIN_REFUSE_BYTES_PER_S;
 
+    struct TestEnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl TestEnvRestore {
+        fn capture(keys: &[&'static str]) -> Self {
+            Self(
+                keys.iter()
+                    .map(|key| (*key, std::env::var_os(key)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for TestEnvRestore {
+        fn drop(&mut self) {
+            for (key, value) in self.0.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
     fn mem(
         avail: Option<f64>,
         swap: Option<f64>,
@@ -1568,6 +1591,14 @@ mod tests {
         let _g = crate::claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _env = TestEnvRestore::capture(&[
+            crate::paths::HOME_ENV,
+            "FNO_CLAIMS_ROOT",
+            "FNO_CONFIG",
+            "FNO_SPAWN_GATE",
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            "FNO_NODE",
+        ]);
         let dir = std::env::temp_dir().join(format!("fno-verb-succession-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let agents_home = dir.join("agents-home");
@@ -1583,12 +1614,6 @@ mod tests {
         )
         .unwrap();
 
-        let prior_home = std::env::var_os(crate::paths::HOME_ENV);
-        let prior_claims = std::env::var_os("FNO_CLAIMS_ROOT");
-        let prior_config = std::env::var_os("FNO_CONFIG");
-        let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
-        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
-        let prior_node = std::env::var_os("FNO_NODE");
         std::env::set_var(crate::paths::HOME_ENV, &agents_home);
         std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
         std::env::set_var("FNO_CONFIG", &config);
@@ -1631,30 +1656,6 @@ mod tests {
             "holder_pid": pid,
         }));
 
-        match prior_home {
-            Some(value) => std::env::set_var(crate::paths::HOME_ENV, value),
-            None => std::env::remove_var(crate::paths::HOME_ENV),
-        }
-        match prior_claims {
-            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
-            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
-        }
-        match prior_config {
-            Some(value) => std::env::set_var("FNO_CONFIG", value),
-            None => std::env::remove_var("FNO_CONFIG"),
-        }
-        match prior_spawn_gate {
-            Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
-            None => std::env::remove_var("FNO_SPAWN_GATE"),
-        }
-        match prior_payload {
-            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
-            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
-        }
-        match prior_node {
-            Some(value) => std::env::set_var("FNO_NODE", value),
-            None => std::env::remove_var("FNO_NODE"),
-        }
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(plain["status"], "refused", "{plain}");
