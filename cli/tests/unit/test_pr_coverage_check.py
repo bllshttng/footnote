@@ -2567,8 +2567,26 @@ WAIVE_HEAD = "f" * 40
 
 @pytest.fixture(autouse=True)
 def _sandbox_decision_graph(tmp_path, monkeypatch):
-    """Keep this module's graph-backed decision reads beside its JSONL index."""
+    """Keep this module's decision reads entirely inside the test's tmp.
+
+    The graph-backed reads resolve through paths.graph_json, and the engine's
+    index seam derives decisions.jsonl from paths.ledger_json - both must land
+    in the SAME per-test directory, or the seeder writes one file while the
+    reader reads the worker's shared conftest sandbox, where an earlier
+    test's import leaves rows that shadow the fresh seed.
+    """
     monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / ".decision-index" / "graph.json")
+    monkeypatch.setattr(
+        "fno.paths.ledger_json", lambda: tmp_path / ".decision-index" / "ledger.json"
+    )
+    monkeypatch.setattr(
+        "fno.paths.decisions_jsonl",
+        lambda: tmp_path / ".decision-index" / "decisions.jsonl",
+    )
+    monkeypatch.setattr(
+        "fno.decide._decisions_index_path",
+        lambda: tmp_path / ".decision-index" / "decisions.jsonl",
+    )
 
 
 def test_law_authority_reads_the_real_index_three_ways(tmp_path):
