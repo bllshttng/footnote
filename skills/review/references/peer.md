@@ -311,7 +311,7 @@ The consumer requires the exact terminal JSON record, counts the syntactically d
 A valid clean verdict with zero findings emits `review_attestation` for reviewer `peer` with verdict `pass` at the current HEAD.
 A valid blocked verdict, or any invalid output, emits `fail` when possible and exits non-zero, so the gate remains unmet and loop-check reports local work to do.
 
-After any fix commit, the next review covers the fix delta. The round budget bounds how many rounds that loop can take (`fno do pr status` shows it). Once the configured rounds are spent, the review phase is complete: open findings stay in the PR conversation and the PR merges on green CI. On Claude the Skill-tool hook refuses a further hunting round past the cap; a request that meets no hook is not refused, so read the budget first.
+After a fix commit, the next review covers the fix delta. The round budget bounds how many rounds that loop can take (`fno do pr status` shows it). At the cap, the review phase is complete. Open findings stay in the PR conversation, and the PR merges on green CI. On Claude, the Skill-tool hook refuses a further round past the cap. A request that meets no hook is not refused. Read the budget first.
 
 ### 7. POST (only with `--post`) - the legacy identity-backed gate
 
