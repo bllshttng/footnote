@@ -176,11 +176,11 @@ fn decide_at(command: &str, root: Option<&Path>) -> Option<String> {
     Some(reason.replace("{cmd}", &shown))
 }
 
-fn basename(tok: &str) -> &str {
+pub(crate) fn basename(tok: &str) -> &str {
     tok.rsplit('/').next().unwrap_or(tok)
 }
 
-fn is_python(name: &str) -> bool {
+pub(crate) fn is_python(name: &str) -> bool {
     matches!(name, "python" | "python3") || {
         // python3.N point releases name the same interpreter.
         let Some(rest) = name.strip_prefix("python3") else {
@@ -196,7 +196,7 @@ fn is_python(name: &str) -> bool {
 /// True when argv carries `-m <target>` in either spelling: the split
 /// `python -m pytest -q` and the attached `python -mpytest`, which CPython
 /// accepts identically.
-fn has_dash_m_module(argv: &[String], target: &str) -> bool {
+pub(crate) fn has_dash_m_module(argv: &[String], target: &str) -> bool {
     argv.iter().enumerate().any(|(i, tok)| {
         if tok == "-m" {
             argv.get(i + 1)

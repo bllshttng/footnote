@@ -267,6 +267,7 @@ mod tests {
         RosterWorker {
             session_id: "a1b2c3d4-1111-2222-3333-444455556666".into(),
             pid: Some(5001),
+            repl_pid: None,
             proc_start: Some(99887766),
             pty_sock: Some("/tmp/cc-daemon-501/deadbeef/spare/a1b2c3d4.pty.sock".into()),
             pty_auth: Some("cccc3333dddd4444".into()),

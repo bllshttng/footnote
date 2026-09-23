@@ -262,7 +262,7 @@ pub(crate) fn status_is_liveish(s: &AgentStatus) -> bool {
 
 /// Page size from a `vm_stat` header
 /// ("Mach Virtual Memory Statistics: (page size of 16384 bytes)").
-fn vm_stat_page_size(text: &str) -> Option<u64> {
+pub(crate) fn vm_stat_page_size(text: &str) -> Option<u64> {
     text.lines()
         .next()?
         .split("page size of")
@@ -343,6 +343,11 @@ fn available_bytes() -> Option<u64> {
 /// (`total = 18432.00M  used = 17080.75M  free = 1351.25M  (encrypted)`) to
 /// percent used. `None` when the line does not parse or total is 0.
 pub fn parse_swapusage(text: &str) -> Option<f64> {
+    let (total, used) = parse_swapusage_mb(text)?;
+    Some(used / total * 100.0)
+}
+
+pub(crate) fn parse_swapusage_mb(text: &str) -> Option<(f64, f64)> {
     let mut total_m = None;
     let mut used_m = None;
     let tokens: Vec<&str> = text.split_whitespace().collect();
@@ -364,10 +369,7 @@ pub fn parse_swapusage(text: &str) -> Option<f64> {
         }
     }
     let (total, used) = (total_m?, used_m?);
-    if total <= 0.0 {
-        return None;
-    }
-    Some(used / total * 100.0)
+    (total > 0.0).then_some((total, used))
 }
 
 /// Swap percent used beside [`available_ram_gb`]: available counts reclaimable
@@ -1287,9 +1289,15 @@ pub fn run_gate(
     registry_path: &Path,
     input: GateInput,
 ) -> Result<GateGuard, Refusal> {
-    decide_gate(config_cwd, registry_path, input).inspect_err(|r| {
-        eprintln!("{}", verdict_line(r));
-    })
+    decide_gate(config_cwd, registry_path, input)
+        .map_err(|r| {
+            crate::machine_sample::stamp_refusal(
+                r,
+                &crate::paths::AgentsHome::from_env().events_jsonl(),
+                chrono::Utc::now(),
+            )
+        })
+        .inspect_err(|r| eprintln!("{}", verdict_line(r)))
 }
 
 /// The gate's decision body, split from [`run_gate`] so the wrapper can
@@ -2190,68 +2198,20 @@ pub struct FootprintCausePayload {
     /// as `cpu_instrument_unreadable` rather than guessing (LD3).
     #[serde(default)]
     admission: Option<AdmissionPayload>,
-    /// The whole-machine band's verdict from the ONE Python decider
-    /// (`machine_pressure`); the machine_watch arm reads it verbatim (
-    /// LD3). Absent on a degraded payload: the arm reads that as
-    /// `machine_unreadable`, never as calm.
-    #[serde(default)]
-    pub(crate) machine: Option<MachinePressurePayload>,
     /// Top fleet consumers by summed ps %cpu; the machine_watch escalation
     /// names the first three by their own argv strings (AC7).
     #[serde(default)]
     pub(crate) top: Vec<TopConsumer>,
 }
 
-impl FootprintCausePayload {
-    /// The arm-and-test seam: a payload carrying only the machine verdict and
-    /// the top consumers; everything else defaults.
-    #[cfg(test)]
-    pub(crate) fn from_parts(
-        machine: Option<MachinePressurePayload>,
-        top: Vec<TopConsumer>,
-    ) -> Self {
-        Self {
-            machine,
-            top,
-            ..Default::default()
-        }
-    }
-}
-
 /// One `top` row of the footprint payload.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TopConsumer {
     #[serde(default)]
+    #[allow(dead_code)]
     pub(crate) cpu_percent: f64,
     #[serde(default)]
     pub(crate) command: String,
-}
-
-/// The payload's `machine` object (LD3/LD4): computed by
-/// `machine_pressure` in doctor_footprint.py, read verbatim here. This module
-/// computes no machine verdict of its own.
-#[derive(Debug, Clone, Deserialize)]
-pub struct MachinePressurePayload {
-    pub(crate) verdict: String,
-    #[serde(default)]
-    pub(crate) reason: String,
-    #[serde(default)]
-    pub(crate) busy_fraction: Option<f64>,
-    #[serde(default)]
-    pub(crate) band: f64,
-    #[serde(default)]
-    #[allow(dead_code)] // read only through serde: machine sizing context, no verdict reads it
-    pub(crate) machine_cores: Option<f64>,
-    #[serde(default)]
-    pub(crate) capacity_cores: f64,
-    #[serde(default)]
-    pub(crate) runnable: Option<u64>,
-    #[serde(default)]
-    pub(crate) processes: Option<u64>,
-    #[serde(default)]
-    pub(crate) load_15m: Option<f64>,
-    #[serde(default)]
-    pub(crate) throttle_minutes: u64,
 }
 
 /// The CPU axis's answer for THIS spawn: the admission to branch on plus the
@@ -2377,52 +2337,24 @@ pub fn machine_reading_notes() -> (Option<String>, Option<String>) {
     let payload: Option<FootprintCausePayload> = footprint_cause_raw()
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok());
-    let footer = payload.as_ref().and_then(|p| machine_footer_line(p));
+    let home = crate::paths::AgentsHome::from_env();
+    let footer = crate::machine_sample::newest(&home.events_jsonl())
+        .map(|row| {
+            let mut line = crate::machine_sample::footer_line(&row, chrono::Utc::now());
+            if let Some(payload) = payload.as_ref().filter(|p| p.spare_pool_process_count > 0) {
+                line.push_str(&format!(
+                    " claude_spare_pool={}proc/{:.2}cores",
+                    payload.spare_pool_process_count, payload.spare_pool_cpu_cores
+                ));
+            }
+            line
+        })
+        .or_else(|| Some(crate::machine_sample::no_row_footer()));
     let keeper = payload.as_ref().and_then(|payload| {
         let commands: Vec<String> = payload.top.iter().map(|c| c.command.clone()).collect();
         crate::drift::keeper_path_note(&commands, std::env::current_exe().ok().as_deref())
     });
     (footer, keeper)
-}
-
-/// The footer line from a parsed payload. It reads the `machine` object - the
-/// ONE Python decider's verdict - and leads with the busy fraction against
-/// the band, never with a bare load figure (AC9/LD2).
-fn machine_footer_line(payload: &FootprintCausePayload) -> Option<String> {
-    let machine = payload.machine.as_ref()?;
-    let load = machine
-        .load_15m
-        .filter(|v| v.is_finite())
-        .map(|v| format!("{v:.1}"))
-        .unwrap_or_else(|| "unknown".to_string());
-    let pool = if payload.spare_pool_process_count > 0 {
-        format!(
-            " claude_spare_pool={}proc/{:.2}cores",
-            payload.spare_pool_process_count, payload.spare_pool_cpu_cores
-        )
-    } else {
-        String::new()
-    };
-    match machine.busy_fraction {
-        Some(busy) => Some(format!(
-            "{:.0}% busy of {:.2} cores against band {:.0}% -> {} · load_15m {} · \
-             {} runnable of {} processes{pool}",
-            busy * 100.0,
-            machine.capacity_cores,
-            machine.band * 100.0,
-            machine.verdict,
-            load,
-            machine.runnable.unwrap_or(0),
-            machine.processes.unwrap_or(0)
-        )),
-        None => Some(format!("{} · load_15m {load}{pool}", machine.verdict)),
-    }
-}
-
-/// The test seam for the footer: the same formatter over a raw payload string.
-#[cfg(test)]
-fn format_machine_status_line(raw: &str) -> Option<String> {
-    machine_footer_line(&serde_json::from_str(raw).ok()?)
 }
 
 pub(crate) fn footprint_cause_raw() -> Result<String, String> {
@@ -3269,50 +3201,6 @@ MemAvailable:    8000000 kB\n";
             Some(456)
         );
         assert_eq!(parse_proc_vmstat_pswpin("pgfault 123\n"), None);
-    }
-
-    /// The `fno agents status` machine line: the busy fraction against the
-    /// band, the verdict, and the load and runnable census beside them
-    /// (AC9), with the pool named so a caller sees the pool's share
-    /// before a spawn is ever refused on it.
-    #[test]
-    fn machine_status_line_names_band_verdict_and_census() {
-        let raw = r#"{"fleet_cpu_cores":0.06,"cpu_capacity_cores":12,"fleet_percent_capacity":0.5,"fleet_percent_measured_cpu":1.2,"spare_pool_process_count":45,"spare_pool_cpu_cores":7.98,"machine":{"verdict":"hot","reason":"r","busy_fraction":0.917,"band":0.9,"machine_cores":11.0,"capacity_cores":12.0,"runnable":160,"processes":1100,"load_15m":279.12,"throttle_minutes":30}}"#;
-        let line = format_machine_status_line(raw).expect("payload formats");
-        assert_eq!(
-            line,
-            "92% busy of 12.00 cores against band 90% -> hot · load_15m 279.1 · \
-             160 runnable of 1100 processes claude_spare_pool=45proc/7.98cores"
-        );
-    }
-
-    /// Negative control: no pool, no load reading. The line still prints -
-    /// best-effort status is not all-or-nothing on one field.
-    #[test]
-    fn machine_status_line_omits_pool_and_reads_load_unknown() {
-        let raw = r#"{"cpu_capacity_cores":12,"machine":{"verdict":"calm","reason":"r","busy_fraction":0.432,"band":0.9,"machine_cores":5.186,"capacity_cores":12.0,"runnable":66,"processes":1010,"load_15m":null,"throttle_minutes":60}}"#;
-        let line = format_machine_status_line(raw).expect("payload formats");
-        assert_eq!(
-            line,
-            "43% busy of 12.00 cores against band 90% -> calm · load_15m unknown · \
-             66 runnable of 1010 processes"
-        );
-    }
-
-    /// An absent machine object yields no line at all rather than a
-    /// fabricated one, and the verdict-only shape prints for an unreadable
-    /// sensor (busy_fraction null).
-    #[test]
-    fn machine_status_line_is_none_without_a_machine_object() {
-        assert_eq!(format_machine_status_line("{}"), None);
-        assert_eq!(format_machine_status_line("not json"), None);
-        assert_eq!(
-            format_machine_status_line(r#"{"cpu_capacity_cores":12}"#),
-            None
-        );
-        let unreadable = r#"{"cpu_capacity_cores":12,"machine":{"verdict":"unreadable","reason":"footprint probe did not answer inside 8s","busy_fraction":null,"band":0.9,"machine_cores":null,"capacity_cores":12.0,"runnable":null,"processes":null,"load_15m":null,"throttle_minutes":60}}"#;
-        let line = format_machine_status_line(unreadable).expect("payload formats");
-        assert!(line.starts_with("unreadable · load_15m unknown"), "{line}");
     }
 
     /// AC9: the shared fixture pins the branch this gate takes per

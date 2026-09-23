@@ -429,6 +429,7 @@ mod tests {
         let worker = RosterWorker {
             session_id: session_id.to_string(),
             pid,
+            repl_pid: None,
             proc_start: None,
             pty_sock: None,
             pty_auth: None,
