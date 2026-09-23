@@ -4261,12 +4261,14 @@ echo '[]'
     }
 
     /// Seed one pr_heal_flake row for the `ci` key under a foreign guard.
-    fn seed_flake_row(dir: &Path, node: Option<&str>) {
+    /// The store dedupes by row_hash, so two occurrences need distinct
+    /// run ids to both commit.
+    fn seed_flake_row(dir: &Path, run: &str, node: Option<&str>) {
         let node_json = node
             .map(|n| format!(",\"node_id\":\"{n}\""))
             .unwrap_or_default();
         let row = format!(
-            "{{\"ts\":\"2026-09-17T12:00:00Z\",\"type\":\"pr_heal_flake\",\"source\":\"heal\",\"data\":{{\"key_guard\":\"old:1:ci\",\"key\":\"ci\",\"sha\":\"old\",\"run_id\":\"1\",\"check\":\"ci\"{node_json}}}}}"
+            "{{\"ts\":\"2026-09-17T12:00:00Z\",\"type\":\"pr_heal_flake\",\"source\":\"heal\",\"data\":{{\"key_guard\":\"old:1:ci\",\"key\":\"ci\",\"sha\":\"old\",\"run_id\":\"{run}\",\"check\":\"ci\"{node_json}}}}}"
         );
         let path = dir.join("events.jsonl");
         crate::event_store::append_envelope(&path, row.trim_end(), None).unwrap();
@@ -4310,8 +4312,8 @@ echo '[]'
         stub_fno_push(d, "", 0, "");
         hold_claim(d);
         seed_tick_with_keys(d, &["aaa1:777"]);
-        seed_flake_row(d, None);
-        seed_flake_row(d, None);
+        seed_flake_row(d, "1", None);
+        seed_flake_row(d, "2", None);
         run_heal(&drive_args(d, &[]));
         let fno = log_of(d, "fno.log");
         assert_eq!(fno.matches("backlog idea").count(), 1, "{fno}");
@@ -4329,7 +4331,7 @@ echo '[]'
         stub_fno_push(d, "", 0, "");
         hold_claim(d);
         seed_tick_with_keys(d, &["aaa1:777"]);
-        seed_flake_row(d, Some("fno-abc9"));
+        seed_flake_row(d, "1", Some("fno-abc9"));
         run_heal(&drive_args(d, &[]));
         let fno = log_of(d, "fno.log");
         assert!(!fno.contains("backlog idea"), "{fno}");
