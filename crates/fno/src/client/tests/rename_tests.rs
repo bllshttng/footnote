@@ -112,6 +112,8 @@ async fn selector_r_opens_the_seeded_exited_agent_rename_overlay() {
     let mut row = blocked_row("worker-x", 3, None);
     row.exited = true;
     let mut v = view_with_agents(vec![row]);
+    let key = squad_key(&v.layout, v.layout.active_squad).expect("active squad key");
+    v.set_section_view(key, SectionView::Expanded);
     let idx = agent_row_at(&v, |a| a.name == "worker-x");
     v.selector = Some(idx);
     let mut sent: Vec<u8> = Vec::new();
