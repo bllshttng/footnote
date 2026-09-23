@@ -126,6 +126,7 @@
       "mcp_channel_id",
       "messaging_socket_path",
       "model_name",
+      "pending_session_row",
       "pid_start_time",
       "related_session_id",
       "requested_effort",

@@ -17,30 +17,11 @@ the renderer splices that fragment between markers on the local board.
 The section's CSS ships inside the fragment, so the board never needs to
 know the section exists.
 
-The court's data is the agents runtime's own (registry, claims, crown
-verdicts). `fno/graph/render_html.py` is L1 core and must not import
-`fno/agents/*` (L5 runtime); the company-boundary gate prohibits new
-edges. The contract between the layers is therefore a file: the runtime
-writes `~/.fno/court-section.html` (`fno agents court --update-board`)
-and the renderer splices that fragment between the local board's
-`<!-- court:begin --><!-- court:end -->` markers. The section's CSS ships
-inside the fragment, so the board never needs to know the section exists.
-
-The fragment is one court read behind the board that splices it: a graph
-mutation re-renders the board in-process with the previous fragment, and
-the next `--update-board` closes the gap. Refresh cadence belongs to the
-caller (hooks, or the operator).
+The fragment is one court read behind the board that splices it. A graph mutation re-renders the board in-process with the previous fragment, and the next fragment write closes the gap. Refresh cadence belongs to the caller (hooks, or the operator).
 
 ## The fold lives in the native binary
 
-`fno-agents court-fold` reads graph.json and the claims dir itself,
-compiles each crown's scope with the rules `king_board/scope.rs` applies,
-and names workers through the same native claim verdicts `claim sweep`
-uses, so a fold and the claims surface cannot disagree about who holds a
-node. Python passes the crowns `gather_court` already adjudicated and
-reads the answer back. A fold that cannot run - stale binary, unreadable
-graph, timeout - marks the crown `unresolved` with the reason rather than
-rendering an empty table.
+`fno-agents court-fold` reads the graph, the claims dir, and the registry. It compiles each crown's scope with the rules `king_board/scope.rs` applies. Workers are named through the same native claim verdicts `claim sweep` uses, so a fold and the claims surface cannot disagree about who holds a node. Python passes the crowns `gather_court` already adjudicated and reads the answer back. A fold that cannot run - stale binary, unreadable graph, timeout - marks the crown `unresolved` with the reason rather than rendering an empty table.
 
 The fold resolves its own claims directory. Every key it asks after is a `node:` key. Those route to the global claims root on both the Rust and the Python side. One resolver answers, and no caller passes a path. `--claims-dir` stays as an override for tests.
 
@@ -76,7 +57,11 @@ When `claim_state` is `live` or `suspect`, `worker` names the holder. On any oth
 
 The board's HTML section renders `claim` and `age` as their own columns, because the section and the JSON come from one fold.
 
-`owned` says which crown answers for a node. An L1 fold lists every node its L2 folds list, and two L2 folds can share a node. In one read, each node is owned by exactly one fold: the deepest crown level, then the lowest scope string on a tie. A caller that acts only on its own `owned` rows never acts twice on one node. A fold that did not run owns nothing, and its nodes fall to the next crown that lists them. Measured 2026-09-21: 11 of the L1 crown's 13 PR-bearing rows also sat in an L2 fold.
+`owned` says which live crown answers for a node. The candidates are the registry's live crowns, read the way the drain reads them (`territory::live_crowns`), never the crowns one caller happens to pass. The deepest crown level holds the node, then the lowest canonical scope on a tie. A crown with no live registry row owns nothing. That covers a manifest-only crown and a king whose row went terminal while its session still runs. Its fold reads `owned_total` and `owned_counts` null with `owned_reason`, never 0. A failed owner read makes every fold's `owned` fields null with `owned_reason`. Measured 2026-09-21: 11 of the L1 crown's 13 PR-bearing rows also sat in an L2 fold.
+
+## Owned counts
+
+`owned_total` and `owned_counts` count every status of the nodes this fold owns. The rule is the row `owned` mark. The deepest live crown whose scope holds a node owns it. On a tie, the lowest canonical scope wins (`territory::node_owners`). For an L1 crown that is the work no L2 king holds. That is the work the L1 can crown or dispatch. Measured 2026-09-22 on the live machine. The fno L1 fold reads a total of 2559 with 216 active rows. 76 of the 216 carry `owned: true`. The four live L2 folds own 18, 52, 19 and 51. 76 + 18 + 52 + 19 + 51 = 216. The king's scope line leads with this number.
 
 ## The stuck verdict
 
@@ -106,6 +91,10 @@ Each `ok` fold also carries `epics` and `epic_cap`. `epic_cap` is `backlog.epic_
 The count is `epic_cap::open_child_count`, the same function the write-time refusal counts with, so the read and the refusal cannot disagree. Children are direct: a sub-epic is one child of its parent and carries its own row. An epic with no open child is left out. `full` means the next open child is refused at the current cap.
 
 A fold whose `status` is not `ok` carries neither key, so an unread scope never reads as a scope with no epics.
+
+## Unplanned idea load
+
+Each `ok` fold also carries `idea_cap` and `ideas`. `idea_cap` is `backlog.max_open_ideas` as resolved beside the graph. It reports `{"cap": 25, "source": "default"}`, `{"cap": N, "source": "config"}`, or `{"cap": null, "source": "off"}`. `ideas` lists each nearest-epic or project scope with at least one capped idea as `{"scope", "open_ideas", "full"}`. It uses the same capped-row predicate and scope walk as the write-time refusal. A fold whose status is not `ok` carries neither field.
 
 ## Session ids on a row
 

@@ -87,10 +87,11 @@ def test_source_coverage_accounts_current_agent_entry(monkeypatch) -> None:
     # record (requested_permission_mode, turn_policy_source),
     # storage_only: 64 -> 66. v36 added node_reason (why the row works no
     # node when the spawn NAMED one), storage_only: 66 -> 67, and it joined
-    # the required list: 45 -> 46.
-    assert payload["declared_count"] == 67
+    # the required list: 45 -> 46. v37 added pending_session_row (the spawn
+    # park the deferred sessions-row open consumes), storage_only: 67 -> 68.
+    assert payload["declared_count"] == 68
     assert payload["required_count"] == 46
-    assert payload["accounted_count"] == 67
+    assert payload["accounted_count"] == 68
     assert payload["known_gaps"] == {}
 
 

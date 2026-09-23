@@ -966,12 +966,9 @@ def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str,
 
 
 # Shell harnesses discover_shell_harnesses finds but smoke must not run yet.
-# 16 entries held. 10 are RED on both platforms (pre-existing rot; each its own
-# debugging session, out of scope here). The other 6 are macOS-green and
+# 15 entries held. 10 are RED on both platforms (pre-existing rot; each its own
+# debugging session, out of scope here). The other 5 are macOS-green and
 # Linux-red, so a developer census calls them drainable and CI does not:
-#
-#   tests/hooks/test_hook_events.sh - a non-portable perm check; GNU stat does
-#     not fail on -f, so the Linux fallback branch never runs.
 #
 #   THE `fno`-ON-PATH FAMILY - five live harnesses, one cause, TWO SHAPES.
 #   A fresh runner ships only the venv `fno-py`; a dev machine has a global
@@ -1037,7 +1034,6 @@ def _smoke_discovered_steps(root: Path, referenced: set[str]) -> list[tuple[str,
 _DISCOVERY_DEFERRED: frozenset[str] = frozenset("""
 scripts/tests/test_graph_resolve.sh
 tests/events/test-check-pr-emits-polling.sh
-tests/hooks/test_hook_events.sh
 tests/hooks/test_init_claim_stderr_and_modern_claim.sh
 tests/hooks/test_init_contested_steal_guard.sh
 tests/hooks/test_init_node_guard_tokenize.sh

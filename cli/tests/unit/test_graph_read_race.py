@@ -30,6 +30,11 @@ def scratch(tmp_path, monkeypatch):
     # The graph lock is derived from the graph path, so a scratch graph in
     # tmp_path automatically locks a scratch sibling -- no real /tmp lock taken.
     g = tmp_path / "graph.json"
+    # This stress fixture deliberately publishes 200 rows. Disable the
+    # unplanned-idea cap so the race assertion remains about reads, not intake.
+    (tmp_path / "config.toml").write_text(
+        "[backlog]\nmax_open_ideas = 0\n", encoding="utf-8"
+    )
 
     def _seed(entries):
         entries.append({"id": "x-keep", "title": "present throughout",

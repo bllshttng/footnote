@@ -1075,6 +1075,63 @@ pub fn pull_request_stamp(
     }
 }
 
+/// Stamp the primary PR's outcome. Matches the node's own `primary_pr` by
+/// `number`, and by `url` when the caller passes one. Only an unrecorded
+/// `merge_status` is filled: any recorded value, a mismatched number or
+/// url, or no primary at all writes nothing and returns `success: false`.
+pub fn primary_pr_stamp(
+    store: &Store,
+    id: &str,
+    number: i64,
+    url: Option<&str>,
+    merge_status: &str,
+) -> Result<Payload<Node>, ApiError> {
+    let mut updated: Option<Node> = None;
+    let ok = mutate(store, "primary_pr_stamp", |rows| {
+        for row in rows.iter_mut() {
+            if crate::graph_store::entry_id(row) != Some(id) {
+                continue;
+            }
+            let Ok(mut parsed) = Node::from_json(row) else {
+                return Ok(false);
+            };
+            let Some(primary) = parsed.primary_pr.as_mut() else {
+                return Ok(false);
+            };
+            if primary.number != Some(number) {
+                return Ok(false);
+            }
+            if let Some(want) = url {
+                let matches = primary
+                    .url
+                    .as_deref()
+                    .map(crate::additional_prs::normalize_url)
+                    == Some(crate::additional_prs::normalize_url(want));
+                if !matches {
+                    return Ok(false);
+                }
+            }
+            if primary.merge_status.is_some() {
+                return Ok(false);
+            }
+            primary.merge_status = Some(merge_status.to_string());
+            *row = parsed.to_json();
+            updated = Some(parsed);
+            return Ok(true);
+        }
+        Ok(false)
+    })?;
+    if ok {
+        Ok(Payload {
+            success: true,
+            node: updated,
+            version: fresh_version(store),
+        })
+    } else {
+        refusal(store)
+    }
+}
+
 pub fn session_append(
     store: &Store,
     id: &str,
@@ -1108,6 +1165,45 @@ pub fn session_append(
     } else {
         refusal(store)
     }
+}
+
+/// The deferred sessions-row open (the `pending-session-row` transport arm).
+/// Builds the record through the keeper's validating constructor and appends
+/// through the keeper's idempotent append - one implementation of the
+/// semantics, not a second one. Answers whether the node was found at all.
+/// The caller clears the registry park AFTER this returns Ok, so a failed
+/// graph write keeps the payload.
+#[allow(clippy::too_many_arguments)]
+pub fn session_open_parked(
+    store: &Store,
+    node_id: &str,
+    phase: &str,
+    harness: &str,
+    session_id: &str,
+    effort: Option<&str>,
+    merge_grant: Option<Value>,
+    started_at: &str,
+) -> Result<bool, ApiError> {
+    let record = crate::graph_keeper::session_row(
+        phase,
+        harness,
+        session_id,
+        effort,
+        Some(started_at),
+        None,
+        None,
+        merge_grant.as_ref(),
+    )
+    .map_err(|e| ApiError(e.to_string()))?;
+    let mut found = false;
+    mutate(store, "session_append", |rows| {
+        let (node_found, _added) =
+            crate::graph_keeper::session_append(rows, node_id, record.clone())
+                .map_err(|e| e.to_string())?;
+        found = node_found;
+        Ok(node_found)
+    })?;
+    Ok(found)
 }
 
 pub fn session_end(

@@ -143,6 +143,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_PI_MODEL` | py+rs | unclear: cli/src/fno/agents/harnesses/pi.py:127 |
 | `FNO_PI_PROVIDER` | py+rs | unclear: cli/src/fno/agents/harnesses/pi.py:122 |
 | `FNO_PLATFORM` | rs | unclear: crates/fno-agents/src/hook/king_guard.rs:400 |
+| `FNO_PLANS_DIRS_CACHE_DIR` | rs | Overrides the plans-dirs cache directory the `state plans-dirs` verb reads and writes; default `<state_dir>/cache/plans-dirs-v1.txt`. |
 | `FNO_PROCESS_ADMISSION` | rs | unclear: crates/fno/src/bootstrap.rs:1721 |
 | `FNO_PROCESS_ADMISSION_MAX` | py+rs | unclear: cli/src/fno/agents/mux_spawn.py:1914 |
 | `FNO_PR_STATUS_CACHE_DIR` | py+rs | unclear: cli/src/fno/pr/_cache.py:92 |
