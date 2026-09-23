@@ -25,7 +25,7 @@ def load_diagnostic():
 
 def verified_receipt() -> dict:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "versions": {"codex": "codex-cli 0.155.1", "fno": "0.3.2", "fno_agents": "0.3.2"},
         "session": {
@@ -53,22 +53,34 @@ def verified_receipt() -> dict:
             "cost_policy": "272K",
         },
         "goal": {
-            "before": {"status": "absent", "objective": None, "usage": 0},
+            "before": {"status": "absent", "objective": None, "usage": None},
             "after": {
                 "status": "active",
                 "objective": "$fno:reign disposable",
-                "usage": 1,
+                "usage": {
+                    "token_budget": 50_000,
+                    "tokens_used": 1,
+                    "time_used_seconds": 1,
+                },
                 "thread_id": "01a00000-0000-7000-8000-000000000001",
             },
             "paused": {
                 "status": "paused",
                 "objective": "$fno:reign disposable",
-                "usage": 1,
+                "usage": {
+                    "token_budget": 50_000,
+                    "tokens_used": 1,
+                    "time_used_seconds": 2,
+                },
             },
             "resumed": {
                 "status": "active",
                 "objective": "$fno:reign disposable",
-                "usage": 1,
+                "usage": {
+                    "token_budget": 50_000,
+                    "tokens_used": 1,
+                    "time_used_seconds": 3,
+                },
             },
         },
         "stop": {
@@ -148,6 +160,19 @@ def test_ac10_park_and_ac11_park_require_one_park_zero_samples_and_one_wake():
     assert result["failed_reader"] == "quiet_park.stop_samples_during_hold"
 
 
+def test_ac11_park_rejects_reset_goal_usage():
+    receipt = verified_receipt()
+    receipt["goal"]["paused"]["usage"]["tokens_used"] = 0
+
+    result = load_diagnostic().classify_receipt(receipt)
+
+    assert result == {
+        "ok": False,
+        "class": "explicit-park",
+        "failed_reader": "goal.usage",
+    }
+
+
 def test_ac3_resume_preserves_window_facts_after_private_restart():
     """AC3-RESUME: the explicit window survives with the 828400 effective value."""
     result = load_diagnostic().classify_receipt(verified_receipt())
@@ -198,7 +223,7 @@ def test_missing_positive_evidence_is_malformed_not_verified():
 
 def test_previous_receipt_schema_is_not_accepted_as_current_live_evidence():
     receipt = verified_receipt()
-    receipt["schema_version"] = 1
+    receipt["schema_version"] = 2
 
     result = load_diagnostic().classify_receipt(receipt)
 

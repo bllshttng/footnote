@@ -25,7 +25,7 @@ from typing import Any
 
 DEFAULT_ROOT = Path("/private/tmp/fno-continuation-proof")
 RECEIPT_PREFIX = "codex_reign_continuation_"
-RECEIPT_SCHEMA_VERSION = 2
+RECEIPT_SCHEMA_VERSION = 3
 FAILURE_CLASSES = {
     "plugin-missing",
     "machine-installed-session-refresh-unverified",
@@ -158,7 +158,7 @@ def classify_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
         return _failure("malformed-output", "goal")
     before, after, paused, resumed = (goal.get(name) for name in ("before", "after", "paused", "resumed"))
     objective = "$fno:reign disposable"
-    if before != {"status": "absent", "objective": None, "usage": 0}:
+    if before != {"status": "absent", "objective": None, "usage": None}:
         return _failure("identity-miss", "goal.before")
     if not isinstance(after, dict) or after.get("status") != "active" or after.get("objective") != objective:
         return _failure("identity-miss", "goal.after")
@@ -166,8 +166,31 @@ def classify_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
         return _failure("explicit-park", "goal.paused")
     if not isinstance(resumed, dict) or resumed.get("status") != "active" or resumed.get("objective") != objective:
         return _failure("wake-refused", "goal.resumed")
-    if paused.get("usage") != after.get("usage") or resumed.get("usage") != paused.get("usage"):
+    usage_rows = [row.get("usage") for row in (after, paused, resumed)]
+    if any(not isinstance(usage, dict) for usage in usage_rows):
         return _failure("explicit-park", "goal.usage")
+    if any("token_budget" not in usage for usage in usage_rows):
+        return _failure("malformed-output", "goal.usage.token_budget")
+    if any(
+        usage["token_budget"] is not None
+        and (type(usage["token_budget"]) is not int or usage["token_budget"] < 0)
+        for usage in usage_rows
+    ):
+        return _failure("malformed-output", "goal.usage.token_budget")
+    if any(
+        type(usage.get(field)) is not int or usage[field] < 0
+        for usage in usage_rows
+        for field in ("tokens_used", "time_used_seconds")
+    ):
+        return _failure("malformed-output", "goal.usage")
+    if any(usage.get("token_budget") != usage_rows[0].get("token_budget") for usage in usage_rows[1:]):
+        return _failure("explicit-park", "goal.token_budget")
+    for before_usage, after_usage in zip(usage_rows, usage_rows[1:]):
+        if any(
+            after_usage[field] < before_usage[field]
+            for field in ("tokens_used", "time_used_seconds")
+        ):
+            return _failure("explicit-park", "goal.usage")
 
     quiet = _nested(receipt, "proof", "quiet_park")
     if not isinstance(quiet, dict):

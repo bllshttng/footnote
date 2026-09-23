@@ -105,13 +105,19 @@ pub fn effective_window(receipt: &ContextWindowReceipt) -> Result<u64, ContextWi
             "effective context window percent must be between 1 and 100",
         ));
     }
-    configured
+    let effective = configured
         .min(cap)
         .checked_mul(percent)
         .map(|value| value / 100)
         .ok_or(ContextWindowError::Invalid(
             "context window arithmetic overflow",
-        ))
+        ))?;
+    if effective == 0 {
+        return Err(ContextWindowError::Invalid(
+            "effective context window must be positive",
+        ));
+    }
+    Ok(effective)
 }
 
 pub fn window_for_model(model: &str) -> u64 {
@@ -186,12 +192,21 @@ pub fn is_astra_model(model: &str) -> bool {
     model.to_ascii_lowercase().contains("gpt-6-astra")
 }
 
+/// Round one usage reading to the same whole-percent display used by hooks.
+pub fn used_percent(used_tokens: u64, window_tokens: u64) -> Option<u64> {
+    if window_tokens == 0 {
+        return None;
+    }
+    Some(((used_tokens as u128 * 100 + (window_tokens as u128 / 2)) / window_tokens as u128) as u64)
+}
+
 pub fn compaction_band(model: &str, used_tokens: u64, window_tokens: u64) -> CompactionBand {
     if !is_astra_model(model) || window_tokens == 0 {
         return CompactionBand::None;
     }
-    let used_pct =
-        ((used_tokens as u128 * 100 + (window_tokens as u128 / 2)) / window_tokens as u128) as u64;
+    let Some(used_pct) = used_percent(used_tokens, window_tokens) else {
+        return CompactionBand::None;
+    };
     if used_pct >= ASTRA_ACTION_PERCENT || used_tokens >= ASTRA_ACTION_TOKENS {
         CompactionBand::Action
     } else if used_pct >= ASTRA_PREPARATION_PERCENT {
@@ -227,8 +242,8 @@ pub fn read_last_usage(path: &Path) -> Result<Option<ContextUsage>, ContextWindo
         .metadata()
         .map_err(|error| ContextWindowError::Unreadable(error.to_string()))?
         .len();
-    for limit in [Some(TAIL_BYTES), Some(EXPANDED_TAIL_BYTES), None] {
-        let start = limit.map_or(0, |limit| size.saturating_sub(limit));
+    for limit in [TAIL_BYTES, EXPANDED_TAIL_BYTES] {
+        let start = size.saturating_sub(limit);
         file.seek(SeekFrom::Start(start))
             .map_err(|error| ContextWindowError::Unreadable(error.to_string()))?;
         let mut bytes = Vec::new();
@@ -254,7 +269,7 @@ pub fn read_last_usage(path: &Path) -> Result<Option<ContextUsage>, ContextWindo
                 return Ok(Some(usage));
             }
         }
-        if limit.map_or(true, |limit| size <= limit) {
+        if size <= limit {
             break;
         }
     }
@@ -303,8 +318,11 @@ pub fn verify_compaction_receipt(
 #[cfg(test)]
 mod tests {
     use super::{
-        compaction_band, effective_window, CompactionBand, ContextWindowError, ContextWindowReceipt,
+        compaction_band, effective_window, used_percent, window_for_model, CompactionBand,
+        ContextWindowError, ContextWindowReceipt, ASTRA_DEFAULT_CONTEXT_WINDOW,
+        ASTRA_EFFECTIVE_PERCENT, ASTRA_MAX_CONTEXT_WINDOW,
     };
+    use serde_json::Value;
 
     #[test]
     fn ac3_hp_rust_owns_the_provider_effective_window_calculation() {
@@ -334,6 +352,24 @@ mod tests {
     }
 
     #[test]
+    fn effective_window_refuses_a_zero_result_after_percent_rounding() {
+        let receipt = ContextWindowReceipt {
+            model: "gpt-6-astra".into(),
+            context_window: Some(1),
+            max_context_window: Some(1),
+            effective_context_window_percent: Some(1),
+        };
+
+        assert_eq!(
+            effective_window(&receipt),
+            Err(ContextWindowError::Invalid(
+                "effective context window must be positive"
+            ))
+        );
+        assert_eq!(used_percent(1, 0), None);
+    }
+
+    #[test]
     fn ac3_hp_astra_enters_preparation_then_action_bands() {
         assert_eq!(
             compaction_band("gpt-6-astra", 200_000, 1_000_000),
@@ -346,11 +382,38 @@ mod tests {
     }
 
     #[test]
+    fn context_percent_rounds_half_up() {
+        assert_eq!(used_percent(307_850, 1_000_000), Some(31));
+        assert_eq!(used_percent(265_000, 1_000_000), Some(27));
+    }
+
+    #[test]
     fn ac4_hp_non_astra_keeps_the_compaction_policy_unchanged() {
         assert_eq!(
             compaction_band("gpt-5.6-sol", 999_999, 1_000_000),
             CompactionBand::None
         );
+    }
+
+    #[test]
+    fn non_astra_context_windows_keep_the_model_allowlist() {
+        for model in [
+            "glm-5.2[1m]",
+            "glm-5.2",
+            "glm-5.3",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-fable-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+        ] {
+            assert_eq!(window_for_model(model), 1_000_000, "{model}");
+        }
+        for model in ["claude-haiku-4-5", "claude-opus-4-5", "future-model"] {
+            assert_eq!(window_for_model(model), 200_000, "{model}");
+        }
     }
 
     #[test]
@@ -376,6 +439,30 @@ mod tests {
         let usage = super::read_last_usage(&path).unwrap().unwrap();
         assert_eq!(usage.model, "gpt-6-astra");
         assert_eq!(usage.used_tokens(), Some(22));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn last_usage_reader_does_not_fall_back_to_a_stale_record_before_its_tail_budget() {
+        let path = std::env::temp_dir().join(format!(
+            "fno-context-probe-stale-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(
+            br#"{"type":"assistant","message":{"model":"gpt-6-astra","usage":{"input_tokens":17}}}"#,
+        )
+        .unwrap();
+        file.write_all(b"\n").unwrap();
+        file.write_all(&vec![b'x'; EXPANDED_TAIL_BYTES as usize + 100])
+            .unwrap();
+        drop(file);
+
+        assert!(super::read_last_usage(&path).unwrap().is_none());
         std::fs::remove_file(path).unwrap();
     }
 

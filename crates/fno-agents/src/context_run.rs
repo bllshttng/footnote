@@ -210,8 +210,9 @@ fn run_context_probe(args: &[String]) -> i32 {
                 return 3;
             }
         };
-    let used_pct =
-        ((used_tokens as u128 * 100 + (window_tokens as u128 / 2)) / window_tokens as u128) as u64;
+    let Some(used_pct) = crate::context_window::used_percent(used_tokens, window_tokens) else {
+        return 3;
+    };
     let band = crate::context_window::compaction_band(&usage.model, used_tokens, window_tokens);
     let payload = json!({
         "used_tokens": used_tokens,

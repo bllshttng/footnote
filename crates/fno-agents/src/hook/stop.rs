@@ -1764,6 +1764,7 @@ mod tests {
             thread_id: "session-full".to_string(),
             objective: "$fno:reign scope-a".to_string(),
             status: crate::codex_thread::GoalStatus::Active,
+            usage: crate::codex_thread::GoalUsage::default(),
         };
         assert_eq!(
             arbitrate_codex_continuation_from_reading(

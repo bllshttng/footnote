@@ -1,6 +1,6 @@
 //! Typed provider goal transitions for a crowned Codex reign.
 
-use crate::codex_thread::{CodexThread, GoalStatus, NativeGoal};
+use crate::codex_thread::{CodexThread, GoalStatus, GoalUsage, NativeGoal};
 use crate::king_termination::KingManifest;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -59,6 +59,7 @@ pub(crate) fn pause_reign_goal_receipt(
     scope: &str,
     continuation_owner: &str,
     objective: &str,
+    usage: &GoalUsage,
 ) -> Result<Value, String> {
     if thread_id.trim().is_empty()
         || scope.trim().is_empty()
@@ -74,6 +75,7 @@ pub(crate) fn pause_reign_goal_receipt(
         "objective": objective,
         "status": "paused",
         "continuation_owner": continuation_owner,
+        "usage": usage.receipt_value(),
     }))
 }
 
@@ -177,12 +179,22 @@ async fn apply_action(
                     "continuation_owner": owner,
                 }));
             };
+            if current.objective != expected {
+                return Err(format!(
+                    "Codex provider goal pause refused: objective does not match reign: {:?}",
+                    current.objective
+                ));
+            }
+            if current.status == GoalStatus::Paused {
+                return goal_receipt(session_id, &scope, &owner, &current);
+            }
             verify_goal(&current, &expected, GoalStatus::Active, "pause")?;
             let paused = thread
                 .goal_set_typed(&current.objective, GoalStatus::Paused)
                 .await
                 .map_err(|error| format!("Codex provider goal pause refused: {error}"))?;
             verify_goal(&paused, &expected, GoalStatus::Paused, "pause")?;
+            verify_usage_preserved(&current, &paused, "pause")?;
             goal_receipt(session_id, &scope, &owner, &paused)
         }
         GoalAction::Resume { scope, owner } => {
@@ -198,6 +210,7 @@ async fn apply_action(
                 .await
                 .map_err(|error| format!("Codex provider goal resume refused: {error}"))?;
             verify_goal(&active, &expected, GoalStatus::Active, "resume")?;
+            verify_usage_preserved(&current, &active, "resume")?;
             goal_receipt(session_id, &scope, &owner, &active)
         }
         GoalAction::Provider {
@@ -251,6 +264,7 @@ async fn provider_action(
                 "status": "active",
                 "objective": goal.objective,
                 "continuation_owner": owner,
+                "usage": goal.usage.receipt_value(),
             }))
         }
         "thread/goal/set" => {
@@ -267,6 +281,7 @@ async fn provider_action(
                     .await
                     .map_err(|error| format!("Codex provider goal resume refused: {error}"))?;
                 verify_goal(&active, &objective, GoalStatus::Active, "resume")?;
+                verify_usage_preserved(&current, &active, "resume")?;
                 return Ok(json!({
                     "verified": true,
                     "action": "goal_set",
@@ -276,6 +291,7 @@ async fn provider_action(
                     "previous_status": "paused",
                     "objective": active.objective,
                     "continuation_owner": owner,
+                    "usage": active.usage.receipt_value(),
                 }));
             }
             let current = thread
@@ -295,10 +311,12 @@ async fn provider_action(
                 }
                 Some(current) => {
                     verify_goal(&current, objective, GoalStatus::Paused, "goal-set")?;
-                    thread
+                    let active = thread
                         .goal_set_typed(objective, GoalStatus::Active)
                         .await
-                        .map_err(|error| format!("Codex provider goal set refused: {error}"))?
+                        .map_err(|error| format!("Codex provider goal set refused: {error}"))?;
+                    verify_usage_preserved(&current, &active, "goal-set")?;
+                    active
                 }
                 None => thread
                     .goal_set_typed(objective, GoalStatus::Active)
@@ -314,6 +332,7 @@ async fn provider_action(
                 "status": "active",
                 "objective": goal.objective,
                 "continuation_owner": owner,
+                "usage": goal.usage.receipt_value(),
             }))
         }
         other => Err(format!("unsupported Codex provider action {other:?}")),
@@ -466,7 +485,22 @@ fn goal_receipt(
         "objective": goal.objective,
         "status": status,
         "continuation_owner": owner,
+        "usage": goal.usage.receipt_value(),
     }))
+}
+
+fn verify_usage_preserved(
+    before: &NativeGoal,
+    after: &NativeGoal,
+    action: &str,
+) -> Result<(), String> {
+    if after.usage.preserves(&before.usage) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Codex provider goal {action} refused: token budget or usage regressed"
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -497,6 +531,11 @@ mod tests {
             thread_id: "thread-1".to_string(),
             objective: "$fno:reign x-aaaa".to_string(),
             status: GoalStatus::Paused,
+            usage: GoalUsage {
+                token_budget: Some(20_000),
+                tokens_used: 120,
+                time_used_seconds: 5,
+            },
         };
         let receipt = goal_receipt("thread-1", "x-aaaa", "king:x-aaaa", &goal).unwrap();
         assert_eq!(receipt["provider"], "codex");
@@ -505,6 +544,17 @@ mod tests {
         assert_eq!(receipt["objective"], "$fno:reign x-aaaa");
         assert_eq!(receipt["status"], "paused");
         assert_eq!(receipt["continuation_owner"], "king:x-aaaa");
+        assert_eq!(
+            receipt["usage"],
+            json!({
+                "token_budget": 20_000,
+                "tokens_used": 120,
+                "time_used_seconds": 5,
+            })
+        );
+        assert_eq!(receipt["usage"]["token_budget"], 20_000);
+        assert_eq!(receipt["usage"]["tokens_used"], 120);
+        assert_eq!(receipt["usage"]["time_used_seconds"], 5);
     }
 
     #[test]
@@ -513,6 +563,7 @@ mod tests {
             thread_id: "thread-1".to_string(),
             objective: "$fno:reign x-aaaa".to_string(),
             status: GoalStatus::Active,
+            usage: GoalUsage::default(),
         };
         assert!(goal_receipt("thread-1", "x-aaaa", "king:x-aaaa", &goal).is_err());
     }
@@ -539,6 +590,7 @@ mod tests {
             thread_id: "thread-1".to_string(),
             objective: "$fno:reign x-aaaa".to_string(),
             status: GoalStatus::Paused,
+            usage: GoalUsage::default(),
         };
         assert!(verify_goal(&goal, "$fno:reign x-aaaa", GoalStatus::Paused, "resume").is_ok());
         assert!(verify_goal(&goal, "$fno:reign x-bbbb", GoalStatus::Paused, "resume").is_err());
@@ -546,9 +598,18 @@ mod tests {
 
     #[test]
     fn readable_codex_reign_goal_pauses_without_replacing_its_receipt() {
-        let receipt =
-            pause_reign_goal_receipt("thread-1", "x-aaaa", "king:x-aaaa", "$fno:reign x-aaaa")
-                .expect("the matching active goal can be parked");
+        let receipt = pause_reign_goal_receipt(
+            "thread-1",
+            "x-aaaa",
+            "king:x-aaaa",
+            "$fno:reign x-aaaa",
+            &GoalUsage {
+                token_budget: Some(20_000),
+                tokens_used: 120,
+                time_used_seconds: 5,
+            },
+        )
+        .expect("the matching active goal can be parked");
         assert_eq!(receipt["provider"], "codex");
         assert_eq!(receipt["thread_id"], "thread-1");
         assert_eq!(receipt["objective"], "$fno:reign x-aaaa");

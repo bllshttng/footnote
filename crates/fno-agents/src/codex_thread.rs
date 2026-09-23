@@ -173,6 +173,31 @@ pub struct NativeGoal {
     pub thread_id: String,
     pub objective: String,
     pub status: GoalStatus,
+    pub usage: GoalUsage,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalUsage {
+    pub token_budget: Option<i64>,
+    pub tokens_used: i64,
+    pub time_used_seconds: i64,
+}
+
+impl GoalUsage {
+    pub fn preserves(&self, previous: &Self) -> bool {
+        self.token_budget == previous.token_budget
+            && self.tokens_used >= previous.tokens_used
+            && self.time_used_seconds >= previous.time_used_seconds
+    }
+
+    pub fn receipt_value(&self) -> Value {
+        json!({
+            "token_budget": self.token_budget,
+            "tokens_used": self.tokens_used,
+            "time_used_seconds": self.time_used_seconds,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,10 +410,49 @@ pub fn parse_goal_value(value: &Value) -> Result<Option<NativeGoal>, ThreadDrive
             )))
         }
     };
+    let token_budget_value = object
+        .get("tokenBudget")
+        .or_else(|| object.get("token_budget"))
+        .ok_or_else(|| {
+            ThreadDriverError::Protocol("thread/goal response has no token budget".into())
+        })?;
+    let token_budget = if token_budget_value.is_null() {
+        None
+    } else {
+        Some(
+            token_budget_value
+                .as_i64()
+                .filter(|value| *value >= 0)
+                .ok_or_else(|| {
+                    ThreadDriverError::Protocol("thread/goal token budget is invalid".into())
+                })?,
+        )
+    };
+    let tokens_used = object
+        .get("tokensUsed")
+        .or_else(|| object.get("tokens_used"))
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| {
+            ThreadDriverError::Protocol("thread/goal response has no valid tokens used".into())
+        })?;
+    let time_used_seconds = object
+        .get("timeUsedSeconds")
+        .or_else(|| object.get("time_used_seconds"))
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| {
+            ThreadDriverError::Protocol("thread/goal response has no valid time used".into())
+        })?;
     Ok(Some(NativeGoal {
         thread_id,
         objective,
         status,
+        usage: GoalUsage {
+            token_budget,
+            tokens_used,
+            time_used_seconds,
+        },
     }))
 }
 
@@ -1497,7 +1561,13 @@ impl CodexThread {
         match current {
             Some(goal) if goal.status == GoalStatus::Active => Ok(goal),
             Some(goal) if goal.status == GoalStatus::Paused => {
-                self.goal_set_typed(&objective, GoalStatus::Active).await
+                let resumed = self.goal_set_typed(&objective, GoalStatus::Active).await?;
+                if !resumed.usage.preserves(&goal.usage) {
+                    return Err(ThreadDriverError::Protocol(
+                        "thread/goal/set did not preserve goal usage".into(),
+                    ));
+                }
+                Ok(resumed)
             }
             Some(goal) => Err(ThreadDriverError::Protocol(format!(
                 "refusing to reactivate native goal with status {:?}",
@@ -2572,13 +2642,19 @@ mod tests {
             "result": { "goal": {
                 "threadId": "thread-full",
                 "objective": "$fno:reign x-0000",
-                "status": "budgetLimited"
+                "status": "budgetLimited",
+                "tokenBudget": 50_000,
+                "tokensUsed": 12_345,
+                "timeUsedSeconds": 67
             }}
         }))
         .unwrap()
         .unwrap();
         assert_eq!(goal.thread_id, "thread-full");
         assert_eq!(goal.status, GoalStatus::BudgetLimited);
+        assert_eq!(goal.usage.token_budget, Some(50_000));
+        assert_eq!(goal.usage.tokens_used, 12_345);
+        assert_eq!(goal.usage.time_used_seconds, 67);
 
         assert!(parse_goal_value(&json!({
             "result": { "goal": {
@@ -2590,11 +2666,37 @@ mod tests {
     }
 
     #[test]
+    fn goal_usage_readback_rejects_a_reset_and_allows_monotone_time() {
+        let before = GoalUsage {
+            token_budget: Some(50_000),
+            tokens_used: 12_345,
+            time_used_seconds: 67,
+        };
+        let after = GoalUsage {
+            token_budget: Some(50_000),
+            tokens_used: 12_345,
+            time_used_seconds: 68,
+        };
+        assert!(after.preserves(&before));
+        assert!(!GoalUsage::default().preserves(&before));
+        assert!(!GoalUsage {
+            token_budget: Some(40_000),
+            ..after
+        }
+        .preserves(&before));
+    }
+
+    #[test]
     fn ensure_goal_never_reopens_a_provider_limited_or_completed_goal() {
         let limited = NativeGoal {
             thread_id: "thread-full".into(),
             objective: "$fno:reign x-0000".into(),
             status: GoalStatus::BudgetLimited,
+            usage: GoalUsage {
+                token_budget: Some(50_000),
+                tokens_used: 12_345,
+                time_used_seconds: 67,
+            },
         };
         assert!(ensure_reign_goal(Some(&limited), "x-0000", "king:x-0000").is_err());
         let completed = NativeGoal {

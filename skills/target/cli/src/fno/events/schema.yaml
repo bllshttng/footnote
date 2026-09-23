@@ -6942,7 +6942,7 @@ event_types:
     consumers: [operator]
 
   - name: king_loop_check
-    description: "One king loop-check fire that found actionable work and blocked. Counted by the dry-fire tally: three of these with no intervening king_action naming a new target_id terminate the loop NoProgress rather than letting a board that refuses to shrink run to budget."
+    description: "One king loop-check fire that blocked actionable work or could not verify a quiet Codex goal pause. Counted by the dry-fire tally: three of these with no intervening king_action naming a new target_id terminate the loop NoProgress rather than letting a board that refuses to shrink run to budget."
     sources: [hook]
     data:
       required: [session_id]
@@ -6961,6 +6961,9 @@ event_types:
         board_error:
           type: string
           description: "Why the board could not be read. Present only on a blind fire; a blind king blocks rather than certifying itself finished, and the same dry-fire ceiling bounds it."
+        provider_goal_pause_error:
+          type: string
+          description: "Why a quiet Codex reign could not verify pausing its native goal; the loop-check is counted but omits undelivered so the next fire retries the provider read."
     consumers: [operator]
 
   - name: king_goal_resumed

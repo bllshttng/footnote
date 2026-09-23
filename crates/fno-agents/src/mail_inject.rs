@@ -183,6 +183,9 @@ pub struct MailInjectArgs {
     /// exists, injecting nothing and reading no stdin. Answers the question a
     /// caller has to ask BEFORE it prescribes an inject to someone.
     pub probe: bool,
+    /// `--check`: Codex native-command policy check. Reads one command from
+    /// stdin and reports whether raw turn/start is allowed without injecting.
+    pub check: bool,
     /// `--lane-heal`: run the dead-pane-binding heal for `--session` and print
     /// one JSON verdict instead of injecting. Carried as a flag on this verb,
     /// never a top-level verb (law d-fe66560a).
@@ -232,6 +235,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     let mut origin: Option<String> = None;
     let mut self_send = false;
     let mut probe = false;
+    let mut check = false;
     let mut lane_heal = false;
     let mut no_rebind = false;
     let mut it = rest.iter();
@@ -267,6 +271,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
             }
             "--provider" => return Err((2, PROVIDER_AXIS_TOMBSTONE.to_string())),
             "--probe" => probe = true,
+            "--check" => check = true,
             "--lane-heal" => lane_heal = true,
             "--no-rebind" => no_rebind = true,
             "--sender" => {
@@ -343,6 +348,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
         origin,
         self_send,
         probe,
+        check,
         lane_heal,
         no_rebind,
     })
@@ -1455,6 +1461,37 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
             return code;
         }
     };
+
+    if args.check {
+        if args.probe || args.harness != MailInjectHarness::Codex {
+            eprintln!(
+                "mail-inject: --check requires the Codex harness and cannot combine with --probe"
+            );
+            return 2;
+        }
+        let mut text = String::new();
+        if let Err(error) = std::io::stdin().read_to_string(&mut text) {
+            eprintln!("mail-inject: reading stdin: {error}");
+            return 2;
+        }
+        return match crate::codex_inject::codex_native_command_refusal(&text) {
+            Ok(Some(reason)) => {
+                println!("{}", probe_json(false, reason));
+                0
+            }
+            Ok(None) => {
+                println!("{}", probe_json(true, "codex-daemon turn/start"));
+                0
+            }
+            Err(error) => {
+                println!(
+                    "{}",
+                    probe_json(false, &format!("probe-unavailable: {error}"))
+                );
+                0
+            }
+        };
+    }
 
     // `--probe` answers "does an injection path exist" and stops there: no stdin
     // read (a caller probing has no payload yet), no attach, no keystroke, no
@@ -2816,6 +2853,21 @@ mod tests {
                 .unwrap()
                 .probe
         );
+    }
+
+    #[test]
+    fn parse_args_codex_policy_check_is_explicit_and_non_delivery() {
+        let args = parse_args(&argv(&[
+            "--session",
+            "thread-1",
+            "--harness",
+            "codex",
+            "--check",
+        ]))
+        .unwrap();
+        assert!(args.check);
+        assert!(!args.probe);
+        assert_eq!(args.harness, MailInjectHarness::Codex);
     }
 
     #[test]

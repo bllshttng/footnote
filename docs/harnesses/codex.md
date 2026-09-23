@@ -192,7 +192,9 @@ line regex that matches the blank prompt before typing, plus an
 controller refuses a short selector, identity mismatch, unreadable registry,
 non-empty composer, or any root outside this private set. It opens a new portal
 only for an interactive attach row and closes only its own portal after the
-terminal receipt.
+terminal receipt. Verified provider command receipts retain the readback under
+`provider_receipt`; goal pause and resume receipts include token budget, tokens
+used, and elapsed time, and refuse when those counters regress.
 
 ```bash
 FNO_HOME=/private/tmp/fno-continuation-proof \

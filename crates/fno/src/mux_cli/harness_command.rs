@@ -123,6 +123,8 @@ struct CommandReceipt {
     proof: String,
     expected_screen: Option<String>,
     empty_composer: Option<String>,
+    #[serde(default)]
+    provider_receipt: Option<serde_json::Value>,
     status: String,
     before_digest: String,
     after_digest: String,
@@ -452,6 +454,7 @@ fn provider_receipt_matches(
         "thread/goal/get" | "thread/goal/set" => {
             if expected_proof != "goal-active"
                 || receipt.get("status").and_then(serde_json::Value::as_str) != Some("active")
+                || !provider_goal_usage_is_valid(receipt)
                 || receipt
                     .get("objective")
                     .and_then(serde_json::Value::as_str)
@@ -518,6 +521,26 @@ fn provider_receipt_matches(
         }
         _ => false,
     }
+}
+
+fn provider_goal_usage_is_valid(receipt: &serde_json::Value) -> bool {
+    let Some(usage) = receipt.get("usage").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    let budget = match usage.get("token_budget") {
+        Some(value) if value.is_null() => true,
+        Some(value) => value.as_i64().is_some_and(|budget| budget >= 0),
+        None => false,
+    };
+    budget
+        && usage
+            .get("tokens_used")
+            .and_then(serde_json::Value::as_i64)
+            .is_some_and(|tokens| tokens >= 0)
+        && usage
+            .get("time_used_seconds")
+            .and_then(serde_json::Value::as_i64)
+            .is_some_and(|seconds| seconds >= 0)
 }
 
 fn run_provider_action(
@@ -706,6 +729,7 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
             proof: proof.word().into(),
             expected_screen: args.expect.clone(),
             empty_composer: args.empty_composer.clone(),
+            provider_receipt: None,
             status: CommandStatus::Refused.word().into(),
             before_digest: before_digest.clone(),
             after_digest: after_digest.clone(),
@@ -738,6 +762,7 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
             proof: proof.word().into(),
             expected_screen: args.expect,
             empty_composer: args.empty_composer,
+            provider_receipt: None,
             status: CommandStatus::Refused.word().into(),
             before_digest: String::new(),
             after_digest: String::new(),
@@ -773,6 +798,7 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
         proof: proof.word().into(),
         expected_screen: args.expect.clone(),
         empty_composer: args.empty_composer.clone(),
+        provider_receipt: None,
         status: CommandStatus::Unknown.word().into(),
         before_digest: String::new(),
         after_digest: String::new(),
@@ -814,29 +840,32 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
     }
     if let Some((transport, method, expected_proof)) = recipe.as_ref() {
         let scope = row.crown_scope.as_deref();
-        let (status, before_digest, after_digest, detail) = match run_provider_action(
-            &session_id,
-            &row.cwd,
-            scope,
-            &args.text,
-            transport,
-            method,
-            expected_proof,
-            Duration::from_secs(args.timeout_seconds),
-        ) {
-            Ok((_provider_receipt, raw)) => (
-                CommandStatus::Verified,
-                String::new(),
-                digest(&raw),
-                format!("provider receipt confirmed by {method}"),
-            ),
-            Err(error) => (
-                CommandStatus::Unknown,
-                String::new(),
-                String::new(),
-                format!("provider action result is unconfirmed: {error}"),
-            ),
-        };
+        let (status, before_digest, after_digest, detail, provider_receipt) =
+            match run_provider_action(
+                &session_id,
+                &row.cwd,
+                scope,
+                &args.text,
+                transport,
+                method,
+                expected_proof,
+                Duration::from_secs(args.timeout_seconds),
+            ) {
+                Ok((provider_receipt, raw)) => (
+                    CommandStatus::Verified,
+                    String::new(),
+                    digest(&raw),
+                    format!("provider receipt confirmed by {method}"),
+                    Some(provider_receipt),
+                ),
+                Err(error) => (
+                    CommandStatus::Unknown,
+                    String::new(),
+                    String::new(),
+                    format!("provider action result is unconfirmed: {error}"),
+                    None,
+                ),
+            };
         let receipt = CommandReceipt {
             request_id,
             selector: args.selector,
@@ -848,6 +877,7 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
             proof: proof.word().into(),
             expected_screen: args.expect.clone(),
             empty_composer: args.empty_composer.clone(),
+            provider_receipt,
             status: status.word().into(),
             before_digest,
             after_digest,
@@ -956,6 +986,7 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
             proof: proof.word().into(),
             expected_screen: args.expect.clone(),
             empty_composer: args.empty_composer.clone(),
+            provider_receipt: None,
             status: status.word().into(),
             before_digest: digest(&before),
             after_digest: digest(&before),
@@ -988,6 +1019,7 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
             proof: proof.word().into(),
             expected_screen: args.expect.clone(),
             empty_composer: args.empty_composer.clone(),
+            provider_receipt: None,
             status: CommandStatus::Unknown.word().into(),
             before_digest: digest(&before),
             after_digest: digest(&before),
@@ -1036,6 +1068,7 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
         proof: proof.word().into(),
         expected_screen: args.expect.clone(),
         empty_composer: args.empty_composer.clone(),
+        provider_receipt: None,
         status: status.word().into(),
         before_digest: digest(&before),
         after_digest: digest(&after),
@@ -1087,6 +1120,14 @@ mod tests {
         assert!(action_for("codex", "/goalfoo", ProofKind::GoalActive).is_none());
     }
 
+    fn valid_goal_usage() -> serde_json::Value {
+        serde_json::json!({
+            "token_budget": 50_000,
+            "tokens_used": 12_345,
+            "time_used_seconds": 67
+        })
+    }
+
     #[test]
     fn provider_compaction_receipt_must_match_the_exact_session_and_completion() {
         let receipt = serde_json::json!({
@@ -1121,7 +1162,8 @@ mod tests {
             "thread_id": "thread-1",
             "status": "active",
             "objective": "$fno:reign court",
-            "continuation_owner": "king:court"
+            "continuation_owner": "king:court",
+            "usage": valid_goal_usage()
         });
         assert!(provider_receipt_matches(
             "thread/goal/set",
@@ -1130,6 +1172,16 @@ mod tests {
             Some("court"),
             "/goal $fno:reign court",
             &receipt
+        ));
+        let mut usage_missing = receipt.clone();
+        usage_missing.as_object_mut().unwrap().remove("usage");
+        assert!(!provider_receipt_matches(
+            "thread/goal/set",
+            "goal-active",
+            "thread-1",
+            Some("court"),
+            "/goal $fno:reign court",
+            &usage_missing
         ));
         assert!(!provider_receipt_matches(
             "thread/goal/set",
@@ -1145,7 +1197,8 @@ mod tests {
             "thread_id": "thread-1",
             "status": "active",
             "objective": "$fno:reign court",
-            "continuation_owner": "king:other"
+            "continuation_owner": "king:other",
+            "usage": valid_goal_usage()
         });
         assert!(!provider_receipt_matches(
             "thread/goal/set",
@@ -1161,7 +1214,8 @@ mod tests {
             "thread_id": "thread-1",
             "status": "active",
             "objective": "$fno:reign other",
-            "continuation_owner": "king:court"
+            "continuation_owner": "king:court",
+            "usage": valid_goal_usage()
         });
         assert!(!provider_receipt_matches(
             "thread/goal/set",
@@ -1178,7 +1232,8 @@ mod tests {
             "thread_id": "thread-1",
             "status": "active",
             "objective": "$fno:reign court",
-            "continuation_owner": "king:court"
+            "continuation_owner": "king:court",
+            "usage": valid_goal_usage()
         });
         assert!(provider_receipt_matches(
             "thread/goal/get",
@@ -1204,7 +1259,8 @@ mod tests {
             "status": "active",
             "previous_status": "paused",
             "objective": "$fno:reign court",
-            "continuation_owner": "king:court"
+            "continuation_owner": "king:court",
+            "usage": valid_goal_usage()
         });
         assert!(provider_receipt_matches(
             "thread/goal/set",
@@ -1220,7 +1276,8 @@ mod tests {
             "thread_id": "thread-1",
             "status": "active",
             "objective": "$fno:reign court",
-            "continuation_owner": "king:court"
+            "continuation_owner": "king:court",
+            "usage": valid_goal_usage()
         });
         assert!(!provider_receipt_matches(
             "thread/goal/set",
@@ -1230,6 +1287,41 @@ mod tests {
             "/goal resume",
             &missing_pause
         ));
+    }
+
+    #[test]
+    fn command_receipt_retains_the_verified_provider_readback() {
+        let provider_receipt = serde_json::json!({
+            "verified": true,
+            "action": "goal_set",
+            "thread_id": "thread-1",
+            "status": "active",
+            "objective": "$fno:reign court",
+            "continuation_owner": "king:court",
+            "usage": valid_goal_usage(),
+        });
+        let receipt = CommandReceipt {
+            request_id: "goal-1".into(),
+            selector: "thread-1".into(),
+            session_id: "thread-1".into(),
+            harness: "codex".into(),
+            transport: "app-server".into(),
+            expected_identity: "thread-1".into(),
+            command: "/goal $fno:reign court".into(),
+            proof: "goal-active".into(),
+            expected_screen: None,
+            empty_composer: None,
+            provider_receipt: Some(provider_receipt.clone()),
+            status: CommandStatus::Verified.word().into(),
+            before_digest: String::new(),
+            after_digest: digest(&provider_receipt.to_string()),
+            detail: "provider receipt confirmed by thread/goal/set".into(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(receipt).unwrap()["provider_receipt"],
+            provider_receipt
+        );
     }
 
     #[test]
@@ -1316,6 +1408,7 @@ mod tests {
             proof: "compact".into(),
             expected_screen: None,
             empty_composer: None,
+            provider_receipt: None,
             status: CommandStatus::Unknown.word().into(),
             before_digest: String::new(),
             after_digest: String::new(),

@@ -892,14 +892,11 @@ fn validate_row(harness: &str, caps: &HarnessCapabilities) -> Result<(), Contrac
                 &format!("unknown action {action:?}"),
             ));
         }
-        if !matches!(recipe.transport.as_str(), "app-server" | "pane")
-            || recipe.method.is_empty()
-            || recipe.proof.is_empty()
-        {
+        if recipe.transport != "app-server" || recipe.method.is_empty() || recipe.proof.is_empty() {
             return Err(field_error(
                 harness,
                 &format!("provider_actions.{action}"),
-                "needs transport app-server|pane, method, and proof",
+                "needs the implemented app-server transport, method, and proof",
             ));
         }
     }
@@ -1297,7 +1294,7 @@ mod tests {
 
     #[test]
     fn packaged_contract_is_complete_for_every_harness() {
-        let contract = HarnessContract::packaged().unwrap();
+        let mut contract = HarnessContract::packaged().unwrap();
         assert_eq!(
             contract.harness.keys().cloned().collect::<Vec<_>>(),
             [
@@ -1347,6 +1344,10 @@ mod tests {
         assert_eq!(compact.transport, "app-server");
         assert_eq!(compact.method, "thread/compact/start");
         assert_eq!(compact.proof, "context-compaction");
+
+        let codex = contract.harness.get_mut("codex").unwrap();
+        codex.provider_actions.get_mut("compact").unwrap().transport = "pane".into();
+        assert!(validate_row("codex", codex).is_err());
     }
 
     /// The lane assignment, pinned per harness: lane A where the attach form
