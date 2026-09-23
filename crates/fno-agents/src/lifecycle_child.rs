@@ -363,17 +363,11 @@ mod tests {
     }
 
     fn marked_helper_fno(dir: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let fake_fno = dir.join("fno");
-        std::fs::write(
-            &fake_fno,
+        crate::write_exec_stub(
+            dir,
+            "fno",
             "#!/bin/sh\npwd > \"$FNO_TEST_HELPER_CWD\"\nprintf '%s\\n' \"$5\" > \"$FNO_TEST_HELPER_REGISTRY\"\nexit 0\n",
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&fake_fno).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&fake_fno, permissions).unwrap();
+        );
     }
 
     #[test]

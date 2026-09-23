@@ -67,10 +67,7 @@ esac
             session = session,
             job_dir = job_dir.display(),
         );
-        let bin = bin_dir.join("claude");
-        std::fs::write(&bin, script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bin = crate::write_exec_stub(&bin_dir, "claude", &script);
         if pre_stopped {
             std::fs::write(flags.join("pre_stopped"), "").unwrap();
         }
@@ -462,17 +459,16 @@ fn an_update_registry_drop_stages_receipts_and_removes_both_harness_sessions() {
 fn retiring_a_cursor_agent_row_still_reaps_its_worker_server() {
     use std::io::BufRead;
     let bin_dir = tempfile::tempdir().unwrap();
-    let worker_server = bin_dir.path().join("cursor-agent-worker-server");
-    std::fs::write(&worker_server, "#!/bin/sh\nsleep 30\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&worker_server, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let owner_script = bin_dir.path().join("owner.sh");
-    std::fs::write(
-        &owner_script,
-        format!("#!/bin/sh\n'{}' 30 & wait\n", worker_server.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&owner_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let worker_server = crate::write_exec_stub(
+        bin_dir.path(),
+        "cursor-agent-worker-server",
+        "#!/bin/sh\nsleep 30\n",
+    );
+    let owner_script = crate::write_exec_stub(
+        bin_dir.path(),
+        "owner.sh",
+        &format!("#!/bin/sh\n'{}' 30 & wait\n", worker_server.display()),
+    );
     // The double fork: the outer shell prints the detached owner's pid and
     // exits, so the owner (and the worker server it holds) reparent to
     // launchd and nothing in the reaped tree is this test's child. The

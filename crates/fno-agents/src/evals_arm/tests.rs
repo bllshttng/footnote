@@ -63,9 +63,7 @@ fn write_fixture(tmp: &TempDir, rows: &[String], history: &Path, notify_log: &Pa
     script += "    ;;\n  inbox/notify)\n    echo \"$*\" >> '";
     script += &notify_log.to_string_lossy();
     script += "'\n    ;;\nesac\n";
-    let p = tmp.path().join("fno-bin.sh");
-    fs::write(&p, script).unwrap();
-    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::write_exec_stub(tmp.path(), "fno-bin.sh", &script);
 }
 
 /// The injected spawner: re-parses the child argv (the same contract the real
@@ -403,9 +401,7 @@ fn run_timeout_kills_group_journals_timeout() {
     let mut script = String::from("#!/bin/sh\ncase \"$1/$2\" in\n  doctor/evals)\n    sleep 30\n    ;;\n  inbox/notify)\n    echo \"$*\" >> '");
     script += &notify_log.to_string_lossy();
     script += "'\n    ;;\nesac\n";
-    let bin = tmp.path().join("fno-bin.sh");
-    fs::write(&bin, script).unwrap();
-    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::write_exec_stub(tmp.path(), "fno-bin.sh", &script);
     let args = base_args(
         &tmp,
         &[

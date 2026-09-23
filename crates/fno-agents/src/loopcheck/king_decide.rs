@@ -536,17 +536,15 @@ mod stale_crown_doc_tests {
     /// The CLI stub answers `config paths handoff --scope` with a path inside
     /// `handoffs_dir`, the way the real verb prints the scope's newest doc.
     fn stub_fno(dir: &Path, handoffs_dir: &Path) -> String {
-        let stub = dir.join("fno-stub.sh");
         std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(
-            &stub,
-            format!(
+        let stub = crate::write_exec_stub(
+            dir,
+            "fno-stub.sh",
+            &format!(
                 "#!/bin/sh\nprintf '%s\\n' '{}'\n",
                 handoffs_dir.join("unused-crown-footnote.md").display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         stub.to_string_lossy().into_owned()
     }
 

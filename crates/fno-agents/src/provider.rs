@@ -2058,18 +2058,14 @@ mod tests {
         let plan_dir = dir.path().join("configured-plans");
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
-        let fake_fno = bin.join("fno");
-        std::fs::write(
-            &fake_fno,
-            format!(
+        let fake_fno = crate::write_exec_stub(
+            &bin,
+            "fno",
+            &format!(
                 "#!/bin/sh\n[ \"$*\" = 'do plan path --slug codex-sandbox-grant' ] || exit 64\nprintf '%s\\n' '{}'\n",
                 plan_dir.join("probe.md").display()
             ),
-        )
-        .unwrap();
-        let mut perms = std::fs::metadata(&fake_fno).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&fake_fno, perms).unwrap();
+        );
         let old_path = std::env::var_os("PATH");
         unsafe { std::env::set_var("PATH", crate::path_with(std::path::Path::new(&bin))) };
 
