@@ -4241,7 +4241,7 @@ event_types:
     consumers: [operator]
 
   - name: loop_check_watch_idle
-    description: "Emitted when a loop-check fire idles a session non-terminally on a verified async wait after the agent declared a <watching> tag. The claim lease was extended to cover the watch window; the session parks until its harness-tracked watcher fires. On codex this event doubles as the daemon's watch registration."
+    description: "Emitted when a loop-check fire idles a session non-terminally after the agent declared a <watching> tag. The idle renews the claim lease over the watch window and reads no PR state; the session parks until its harness-tracked watcher fires."
     sources: [hook]
     data:
       required: [session_id, pr, blocker, lease_ms]
@@ -4250,12 +4250,12 @@ event_types:
           type: string
           description: "Target session identifier."
         pr:
-          type: integer
-          description: "PR number the session is watching."
+          type: [integer, "null"]
+          description: "PR number the tag names, or null when the tag names no positive PR number (a local run carries no pr)."
         blocker:
           type: string
-          enum: [ci, review, merge_slot, unknown]
-          description: "The async blocker being waited on, taken from the <watching> tag's reason: 'ci' (checks pending), 'review' (a bot review outstanding), 'merge_slot' (waiting for a merge slot), or 'unknown' (any other reason; the idle verifies nothing)."
+          enum: [ci, review, merge_slot, local, unknown]
+          description: "The blocker being waited on, taken from the <watching> tag's reason: 'ci' (checks pending), 'review' (a bot review outstanding), 'merge_slot' (waiting for a merge slot), 'local' (a run on this machine: a test suite, a build, a review fork), or 'unknown' (any other reason; the idle verifies nothing)."
         declared_timeout:
           type: string
           description: "Optional. The raw timeout attribute from the <watching> tag (e.g. '30m'), or empty when absent."
