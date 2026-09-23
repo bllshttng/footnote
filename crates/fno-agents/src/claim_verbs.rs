@@ -129,7 +129,17 @@ pub fn run_claim(args: &[String]) -> i32 {
                 eprintln!("fno-agents: claim acquire requires --holder");
                 return 2;
             };
-            match crate::claims::acquire(&key, &holder, opts) {
+            let outcome = if key.starts_with("task:") {
+                let witness = |record: &crate::claims::ClaimRecord| {
+                    let (witness, _drain) = default_session_witness();
+                    witness(record)
+                };
+                let witness: crate::claims::SessionWitness<'_> = &witness;
+                crate::claims::acquire_with_session_witness(&key, &holder, opts, Some(witness))
+            } else {
+                crate::claims::acquire(&key, &holder, opts)
+            };
+            match outcome {
                 crate::claims::AcquireOutcome::Acquired(record) => {
                     let mut payload = serde_json::to_value(&record)
                         .unwrap_or_else(|_| Value::Object(Default::default()));
@@ -323,7 +333,17 @@ fn run_claim_reap(args: &[String]) -> i32 {
             }
         }
     }
-    match crate::claim_store::reap(root.as_deref(), apply) {
+    let (session_witness, _drain) = default_session_witness();
+    let recheck_witness = |record: &crate::claims::ClaimRecord| {
+        let (witness, _drain) = default_session_witness();
+        witness(record)
+    };
+    match crate::claim_store::reap_with_session_witness(
+        root.as_deref(),
+        apply,
+        Some(&session_witness),
+        Some(&recheck_witness),
+    ) {
         Ok(payload) => {
             println!("{payload}");
             0

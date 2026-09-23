@@ -70,6 +70,14 @@ pub fn force_release(key: &str, reason: &str, root: Option<&Path>) -> Result<Val
 }
 
 fn reap_one(path: &Path, expected: &ClaimRecord) -> Result<bool, String> {
+    reap_one_with_session_witness(path, expected, None)
+}
+
+fn reap_one_with_session_witness(
+    path: &Path,
+    expected: &ClaimRecord,
+    session_witness: Option<claims::SessionWitness<'_>>,
+) -> Result<bool, String> {
     claims::with_recovery_lock(path, || {
         let current = match claims::read_claim_file(path) {
             Ok(record) => record,
@@ -79,6 +87,9 @@ fn reap_one(path: &Path, expected: &ClaimRecord) -> Result<bool, String> {
             }
         };
         if &current != expected {
+            return Ok(false);
+        }
+        if claims::classify_with_session_witness(&current, session_witness) != ClaimState::Stale {
             return Ok(false);
         }
         let destination = archive_path(path)?;
@@ -103,6 +114,15 @@ fn reap_one(path: &Path, expected: &ClaimRecord) -> Result<bool, String> {
 }
 
 pub fn reap(root: Option<&Path>, apply: bool) -> Result<Value, String> {
+    reap_with_session_witness(root, apply, None, None)
+}
+
+pub(crate) fn reap_with_session_witness(
+    root: Option<&Path>,
+    apply: bool,
+    session_witness: Option<claims::SessionWitness<'_>>,
+    recheck_witness: Option<claims::SessionWitness<'_>>,
+) -> Result<Value, String> {
     let directory = claims_dir(root)?;
     let records = if directory.is_dir() {
         claims::list_in(std::slice::from_ref(&directory), None, true)?
@@ -113,7 +133,7 @@ pub fn reap(root: Option<&Path>, apply: bool) -> Result<Value, String> {
     let mut would_reap = 0usize;
     let mut failures = Vec::new();
     for record in records {
-        if claims::classify(&record, None) != ClaimState::Stale {
+        if claims::classify_with_session_witness(&record, session_witness) != ClaimState::Stale {
             continue;
         }
         would_reap += 1;
@@ -121,7 +141,7 @@ pub fn reap(root: Option<&Path>, apply: bool) -> Result<Value, String> {
             continue;
         }
         let path = claims::claim_path(&record.key, root)?;
-        match reap_one(&path, &record) {
+        match reap_one_with_session_witness(&path, &record, recheck_witness) {
             Ok(true) => reaped += 1,
             Ok(false) => {}
             Err(error) => failures.push(error),
@@ -412,5 +432,171 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("filename does not match key"), "{error}");
+    }
+
+    #[test]
+    fn task_acquire_keeps_an_expired_claim_when_its_session_is_live() {
+        let temp = TempDir::new().unwrap();
+        with_claims_root(temp.path(), || {
+            let key = "task:x-session-witness:1.1";
+            let root = Some(temp.path().to_path_buf());
+            let mut old = match claims::acquire(
+                key,
+                "target-session:thread-holder",
+                claims::AcquireOpts {
+                    pid_unavailable: true,
+                    ttl_ms: Some(60_000),
+                    root: root.clone(),
+                    ..Default::default()
+                },
+            ) {
+                claims::AcquireOutcome::Acquired(record) => record,
+                other => panic!("claim fixture failed: {other:?}"),
+            };
+            let now = claims::now_ms();
+            old.acquired_at = now - 120_000;
+            old.expires_at = Some(now - 60_000);
+            old.pid_provenance = Some("ambient".into());
+            old.session_id = Some("thread-session".into());
+            let path = claims::claim_path(key, Some(temp.path())).unwrap();
+            std::fs::write(&path, claims::serialize_claim(&old).unwrap()).unwrap();
+
+            let live = |_| claims::SessionLiveness::Live("test-session-live");
+            let live_witness: claims::SessionWitness<'_> = &live;
+            let outcome = claims::acquire_with_session_witness(
+                key,
+                "target-session:second",
+                claims::AcquireOpts {
+                    pid: Some(std::process::id()),
+                    root: root.clone(),
+                    ..Default::default()
+                },
+                Some(live_witness),
+            );
+            assert!(
+                matches!(outcome, claims::AcquireOutcome::HeldByOther { holder, .. } if holder == old.holder),
+                "live thread claim was stolen: {outcome:?}"
+            );
+
+            old.expires_at = Some(now + 60_000);
+            std::fs::write(&path, claims::serialize_claim(&old).unwrap()).unwrap();
+            let absent = |_| claims::SessionLiveness::Absent;
+            let absent_witness: claims::SessionWitness<'_> = &absent;
+            let outcome = claims::acquire_with_session_witness(
+                key,
+                "target-session:second",
+                claims::AcquireOpts {
+                    pid: Some(std::process::id()),
+                    root: root.clone(),
+                    ..Default::default()
+                },
+                Some(absent_witness),
+            );
+            assert!(
+                matches!(outcome, claims::AcquireOutcome::Acquired(_)),
+                "absent thread claim stayed held: {outcome:?}"
+            );
+
+            let race_key = "task:x-session-witness:1.3";
+            let mut raced_claim = match claims::acquire(
+                race_key,
+                "target-session:thread-holder",
+                claims::AcquireOpts {
+                    pid_unavailable: true,
+                    ttl_ms: Some(60_000),
+                    root: root.clone(),
+                    ..Default::default()
+                },
+            ) {
+                claims::AcquireOutcome::Acquired(record) => record,
+                other => panic!("claim fixture failed: {other:?}"),
+            };
+            raced_claim.acquired_at = now - 120_000;
+            raced_claim.expires_at = Some(now - 60_000);
+            raced_claim.pid_provenance = Some("ambient".into());
+            raced_claim.session_id = Some("thread-session-race".into());
+            let race_path = claims::claim_path(race_key, Some(temp.path())).unwrap();
+            std::fs::write(&race_path, claims::serialize_claim(&raced_claim).unwrap()).unwrap();
+
+            let observations = std::cell::Cell::new(0usize);
+            let becomes_live = |_| {
+                let count = observations.get();
+                observations.set(count + 1);
+                if count == 0 {
+                    claims::SessionLiveness::Absent
+                } else {
+                    claims::SessionLiveness::Live("test-session-live")
+                }
+            };
+            let witness: claims::SessionWitness<'_> = &becomes_live;
+            let outcome = claims::acquire_with_session_witness(
+                race_key,
+                "target-session:second",
+                claims::AcquireOpts {
+                    pid: Some(std::process::id()),
+                    root,
+                    ..Default::default()
+                },
+                Some(witness),
+            );
+            assert!(
+                matches!(outcome, claims::AcquireOutcome::HeldByOther { holder, .. } if holder == raced_claim.holder),
+                "newly live thread claim was stolen: {outcome:?}"
+            );
+            assert!(
+                observations.get() >= 2,
+                "acquire did not recheck under lock"
+            );
+        });
+    }
+
+    #[test]
+    fn task_reap_rechecks_session_liveness_under_recovery_lock() {
+        let temp = TempDir::new().unwrap();
+        with_claims_root(temp.path(), || {
+            let key = "task:x-session-witness:1.2";
+            let root = Some(temp.path().to_path_buf());
+            let mut old = match claims::acquire(
+                key,
+                "target-session:thread-holder",
+                claims::AcquireOpts {
+                    pid_unavailable: true,
+                    ttl_ms: Some(60_000),
+                    root: root.clone(),
+                    ..Default::default()
+                },
+            ) {
+                claims::AcquireOutcome::Acquired(record) => record,
+                other => panic!("claim fixture failed: {other:?}"),
+            };
+            let now = claims::now_ms();
+            old.acquired_at = now - 120_000;
+            old.expires_at = Some(now - 60_000);
+            old.pid_provenance = Some("ambient".into());
+            old.session_id = Some("thread-session-reap".into());
+            let path = claims::claim_path(key, Some(temp.path())).unwrap();
+            std::fs::write(&path, claims::serialize_claim(&old).unwrap()).unwrap();
+
+            let observations = std::cell::Cell::new(0usize);
+            let becomes_live = |_| {
+                let count = observations.get();
+                observations.set(count + 1);
+                if count == 0 {
+                    claims::SessionLiveness::Absent
+                } else {
+                    claims::SessionLiveness::Live("test-session-live")
+                }
+            };
+            let witness: claims::SessionWitness<'_> = &becomes_live;
+            let result =
+                reap_with_session_witness(root.as_deref(), true, Some(witness), Some(witness))
+                    .unwrap();
+            assert_eq!(
+                result["reaped"], 0,
+                "live thread claim was reaped: {result}"
+            );
+            assert!(path.exists(), "live thread claim file was archived");
+            assert!(observations.get() >= 2, "reaper did not recheck under lock");
+        });
     }
 }

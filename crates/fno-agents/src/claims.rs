@@ -837,6 +837,15 @@ pub fn classify(rec: &ClaimRecord, now: Option<i64>) -> ClaimState {
     classify_with_basis(rec, now, &|pid| probe_pid(pid)).0
 }
 
+pub(crate) fn classify_with_session_witness(
+    rec: &ClaimRecord,
+    session_witness: Option<SessionWitness<'_>>,
+) -> ClaimState {
+    let now = now_ms();
+    let probe = |pid| probe_pid(pid);
+    classify_with_basis_and_exclusivity(rec, Some(now), &probe, None, session_witness).0
+}
+
 /// `classify` beside its basis, with the pid probe injectable (mirrors
 /// `staleness.classify_with_basis`; the parity harness pins the vocabulary).
 /// The basis names WHY, one cause per way a verdict can arise: `live`,
@@ -2208,6 +2217,18 @@ fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
 /// gone-away race (claim released between collision and read) retries from
 /// the top, bounded at [`ACQUIRE_MAX_ATTEMPTS`].
 pub fn acquire(key: &str, holder: &str, opts: AcquireOpts) -> AcquireOutcome {
+    acquire_with_session_witness(key, holder, opts, None)
+}
+
+/// The claim verb supplies a lazy session witness for task leases. It is
+/// consulted when a pid-less thread claim is assessed, so absent sessions can
+/// release claims and live sessions can survive an expired lease.
+pub(crate) fn acquire_with_session_witness(
+    key: &str,
+    holder: &str,
+    opts: AcquireOpts,
+    session_witness: Option<SessionWitness<'_>>,
+) -> AcquireOutcome {
     if let Err(e) = validate_inputs(key, holder, opts.ttl_ms, opts.pid, opts.pid_unavailable) {
         return AcquireOutcome::Error(e);
     }
@@ -2257,11 +2278,17 @@ pub fn acquire(key: &str, holder: &str, opts: AcquireOpts) -> AcquireOutcome {
 
         // Suspect (TTL-unexpired, dead pid) refuses exactly like Live: the TTL
         // still protects a respawned worker's slot, so we never reclaim it.
-        if !matches!(
-            classify(&existing, None),
-            ClaimState::Live | ClaimState::Suspect
-        ) {
-            match recover_stale(&path, key, holder, &opts, events_dir.as_deref()) {
+        let observed_state = classify_with_session_witness(&existing, session_witness);
+        if !matches!(observed_state, ClaimState::Live | ClaimState::Suspect) {
+            match recover_stale_observed(
+                &path,
+                key,
+                holder,
+                &opts,
+                events_dir.as_deref(),
+                &existing,
+                session_witness,
+            ) {
                 RecoverResult::Done(outcome) => return outcome,
                 RecoverResult::Retry => continue,
             }
@@ -2408,6 +2435,25 @@ fn recover_stale(
     opts: &AcquireOpts,
     events_dir: Option<&Path>,
 ) -> RecoverResult {
+    let expected = match read_claim_file(path) {
+        Ok(record) => record,
+        Err(ReadError::GoneAway) => return RecoverResult::Retry,
+        Err(ReadError::Corrupted(error)) => {
+            return RecoverResult::Done(AcquireOutcome::Error(error))
+        }
+    };
+    recover_stale_observed(path, key, holder, opts, events_dir, &expected, None)
+}
+
+fn recover_stale_observed(
+    path: &Path,
+    key: &str,
+    holder: &str,
+    opts: &AcquireOpts,
+    events_dir: Option<&Path>,
+    expected: &ClaimRecord,
+    session_witness: Option<SessionWitness<'_>>,
+) -> RecoverResult {
     let recovery_lock = recovery_lock_path(path);
     let token = match std::fs::create_dir(&recovery_lock) {
         Ok(()) => stamp_owner(&recovery_lock),
@@ -2429,20 +2475,29 @@ fn recover_stale(
     };
 
     // Inside the mutex: release on ALL paths out.
-    let result = recover_stale_locked(path, key, holder, opts, events_dir);
+    let result = recover_stale_locked(
+        path,
+        key,
+        holder,
+        opts,
+        events_dir,
+        expected,
+        session_witness,
+    );
     release_dir_mutex(&recovery_lock, &token);
     result
 }
 
-/// The critical section of [`recover_stale`]: re-read (the holder may have
-/// changed or vanished while we grabbed the mutex), re-classify, then
-/// archive + exclusive-create.
+/// The critical section of [`recover_stale`]: re-read and re-classify under
+/// the recovery mutex, then archive + exclusive-create.
 fn recover_stale_locked(
     path: &Path,
     key: &str,
     holder: &str,
     opts: &AcquireOpts,
     events_dir: Option<&Path>,
+    expected: &ClaimRecord,
+    session_witness: Option<SessionWitness<'_>>,
 ) -> RecoverResult {
     let new_claim = make_claim(key, holder, opts);
     let payload = match serialize_claim(&new_claim) {
@@ -2472,6 +2527,10 @@ fn recover_stale_locked(
         Ok(rec) => rec,
     };
 
+    if &existing != expected {
+        return RecoverResult::Retry;
+    }
+
     if existing.holder == holder {
         // Raced into the idempotent path while grabbing the mutex.
         return RecoverResult::Done(idempotent_reacquire(
@@ -2479,11 +2538,8 @@ fn recover_stale_locked(
         ));
     }
 
-    if matches!(
-        classify(&existing, None),
-        ClaimState::Live | ClaimState::Suspect
-    ) {
-        // Raced — now it's live (or a TTL-protected suspect); back off, no steal.
+    if classify_with_session_witness(&existing, session_witness) != ClaimState::Stale {
+        // Only a fresh stale verdict for this exact record authorizes archive.
         return RecoverResult::Done(AcquireOutcome::HeldByOther {
             holder: existing.holder,
             pid: existing.pid,
