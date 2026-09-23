@@ -70,6 +70,7 @@ def no_profile_network(monkeypatch):
 @pytest.fixture(autouse=True)
 def no_vault_network(monkeypatch):
     """Keep existing switch tests hermetic while the Rust actor owns decisions."""
+    original = managed._vault
     monkeypatch.setattr(
         managed,
         "_vault",
@@ -78,6 +79,7 @@ def no_vault_network(monkeypatch):
             "verdict": "unchanged" if action == "sync" else "fresh",
         },
     )
+    return original
 
 
 @pytest.fixture()
@@ -228,12 +230,13 @@ class TestSwitch:
         assert fake_slot["claude"] == before
 
     def test_missing_vault_binary_refuses_before_writing_the_slot(
-        self, fake_slot, tmp_path, monkeypatch
+        self, fake_slot, tmp_path, monkeypatch, no_vault_network
     ):
         from fno import rust_binary
 
         by_id = _register_two(fake_slot, tmp_path)
         before = fake_slot["claude"]
+        monkeypatch.setattr(managed, "_vault", no_vault_network)
         monkeypatch.setattr(rust_binary, "find_dev_binary", lambda: None)
         monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
         with pytest.raises(managed.ManagedStoreError, match="fno-agents binary not found"):
