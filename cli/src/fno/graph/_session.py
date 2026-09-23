@@ -57,6 +57,17 @@ def _release_into(receipt: dict, claim_key: str, holder: str) -> None:
         )
 
 
+def _own_handover_holder(session_id: str) -> str:
+    """The spawn-handover holder fno agents spawn took for this session, or ""."""
+    env = (os.environ.get("FNO_NODE_CLAIM_HOLDER") or "").strip()
+    if env.startswith(HANDOVER_HOLDER_PREFIX):
+        return env
+    from fno.claims.self_identity import _roster_name_for_session
+
+    name = _roster_name_for_session(session_id)
+    return HANDOVER_HOLDER_PREFIX + name if name else ""
+
+
 def _plan_claims(plan_path: str) -> "set[str]":
     """Delegate to the single parser (``_intake.plan_claims``).
 
@@ -460,6 +471,12 @@ def cmd_session_open(
             err=True,
         )
         raise typer.Exit(code=1)
+    own = _own_handover_holder(eff_session)
+    if own and existing.get("holder") == own and existing.get("state") in ("live", "suspect"):
+        # fno agents spawn claimed the node for this worker: plan under that claim.
+        receipt = {"node_id": node_id, "status": "joined", "claim_key": claim_key, "holder": own}
+        typer.echo(json.dumps(receipt) if json_out else f"joined {node_id} holder={own}")
+        return
     try:
         from fno.claims.session_pid import resolve_session_pid
 
@@ -636,10 +653,7 @@ def cmd_session_close(
         # session may not carry its own handover holder. Resolve the worker
         # name the registry binds to this session and release exactly that
         # holder; any other holder stays held.
-        from fno.claims.self_identity import _roster_name_for_session
-
-        roster_name = _roster_name_for_session(eff_session)
-        handover = HANDOVER_HOLDER_PREFIX + roster_name if roster_name else ""
+        handover = _own_handover_holder(eff_session)
         if handover and claim.get("holder") == handover:
             _release_into(receipt, claim_key, handover)
         else:

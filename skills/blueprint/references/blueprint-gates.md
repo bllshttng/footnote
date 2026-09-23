@@ -619,12 +619,11 @@ was compared - that is NOT a clean result. Fill in the plan's
 `## File Ownership Map` (or `## Files to Modify`) table and re-run before
 adopting.
 
-If any entry in `collisions` has `severity: "high"`, present
-them via AskUserQuestion before adopting - unless `fno do target status` shows
-`authority: full` on the `attended` line (a live `/target beastmode` session), in
-which case take the `recommended_action` for each entry, append one
-`## Autonomous Decisions` entry naming the collision and the action, and
-continue without prompting:
+If any entry in `collisions` has `severity: "high"`, take the first branch that fits and adopt or stop by it:
+
+- **Beastmode.** `fno do target status` shows `authority: full` on the `attended` line (a live `/target beastmode` session). Take the `recommended_action` for each entry, append one `## Autonomous Decisions` entry naming the collision and the action, and continue without prompting.
+- **Nobody can answer.** This session has no AskUserQuestion tool: a codex thread, a subagent, a headless or spawned run. Never ask in chat and wait, because nobody reads that chat and the plan never adopts. Take option 1. After intake, run `fno backlog update <new-id> --acknowledge-collisions <ids>` with every high entry's `with_node_id`. Then run one `fno backlog note <new-id> "collision disposition: proceeded unattended; <id>: <n> shared files, recommended <action>; ..."`, so whoever reads the node can still absorb or supersede.
+- **A person can answer.** Present the entries via AskUserQuestion before adopting, as the block below shows, and apply the choice:
 
 > Your plan touches files also touched by these in-flight plans:
 >
