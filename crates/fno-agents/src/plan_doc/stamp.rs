@@ -234,16 +234,17 @@ fn do_stamp(
             Fv::Scalar(expected_url_count.unwrap().to_string()),
         );
     }
+    if dry_run {
+        return OpResult::ok();
+    }
     if let Err(e) = codec::write_plan_file(&target, &fields, &rest) {
         return OpResult::fail(1, format!("error: {e}"));
     }
-    if !dry_run {
-        emit_plan_event(
-            events_path,
-            "plan_stamped",
-            stamp_event_data(&target, session_id, "stamped", &fields, status_from, None),
-        );
-    }
+    emit_plan_event(
+        events_path,
+        "plan_stamped",
+        stamp_event_data(&target, session_id, "stamped", &fields, status_from, None),
+    );
     OpResult::ok()
 }
 
@@ -367,28 +368,29 @@ fn do_graduate(plan_path: &Path, dry_run: bool, events_path: Option<&Path>) -> O
         if !done_at_present {
             fields.insert("done_at", Fv::Scalar(now_stamp()));
         }
+        if dry_run {
+            return OpResult::ok();
+        }
         if let Err(e) = codec::write_plan_file(&target, &fields, &rest) {
             return OpResult::fail(1, format!("error: {e}"));
         }
-        if !dry_run {
-            let mut data = stamp_event_data(
-                &target,
-                session_id.as_deref().unwrap_or(""),
-                "graduated",
-                &fields,
-                status_from,
-                None,
-            );
-            if let Some(obj) = data.as_object_mut() {
-                obj.insert("expected_url_count".into(), Value::Number(expected.into()));
-            }
-            if session_id.is_none() {
-                if let Some(obj) = data.as_object_mut() {
-                    obj.remove("session_id");
-                }
-            }
-            emit_plan_event(events_path, "plan_graduated", data);
+        let mut data = stamp_event_data(
+            &target,
+            session_id.as_deref().unwrap_or(""),
+            "graduated",
+            &fields,
+            status_from,
+            None,
+        );
+        if let Some(obj) = data.as_object_mut() {
+            obj.insert("expected_url_count".into(), Value::Number(expected.into()));
         }
+        if session_id.is_none() {
+            if let Some(obj) = data.as_object_mut() {
+                obj.remove("session_id");
+            }
+        }
+        emit_plan_event(events_path, "plan_graduated", data);
     } else if !dry_run {
         let mut data = stamp_event_data(
             &target,
@@ -441,6 +443,7 @@ pub fn cmd_set_expected(plan_path: &Path, count: u32, dry_run: bool) -> OpResult
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn tmp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -485,6 +488,21 @@ mod tests {
         let text = std::fs::read_to_string(&doc).unwrap();
         assert!(text.contains("status: done"));
         assert!(text.contains("iteration_ceiling"));
+    }
+
+    #[test]
+    fn dry_run_stamp_and_graduate_leave_the_doc_alone() {
+        let dir = tmp_dir("dryrun");
+        let doc = dir.join("plan.md");
+        std::fs::write(&doc, fixture()).unwrap();
+        let url = ["https://example.com/pull/9".to_string()];
+        assert_eq!(cmd_stamp(&doc, "SID-D", &url, None, true, None).exit, 0);
+        assert_eq!(std::fs::read_to_string(&doc).unwrap(), fixture());
+
+        assert_eq!(cmd_stamp(&doc, "SID-D", &url, None, false, None).exit, 0);
+        let stamped = std::fs::read_to_string(&doc).unwrap();
+        assert_eq!(cmd_graduate(&doc, true, None).exit, 0);
+        assert_eq!(std::fs::read_to_string(&doc).unwrap(), stamped);
     }
 
     #[test]

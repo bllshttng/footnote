@@ -7,6 +7,7 @@ Obsidian Bases can order "Next up" without a second lookup.
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import Any
 
@@ -35,6 +36,9 @@ def _call(op: str, params: dict) -> "dict | None":
     A StoreUnavailable, or a reply naming an unknown method (a stale keeper),
     prints one stderr warning naming `fno doctor` and returns None.
     """
+    # The keeper runs in its own cwd; a relative path means the caller's.
+    if params.get("plan_path"):
+        params = {**params, "plan_path": os.path.abspath(params["plan_path"])}
     try:
         return _client_for(paths.graph_json()).request(
             "plan_docs", {"op": op, **params}
@@ -102,13 +106,21 @@ def stamp_plan(plan_path, session_id, urls=None, expected_url_count=None, dry_ru
             "dry_run": dry_run,
         },
     )
-    return int(result.get("exit")) if result else 1
+    return _exit(result)
 
 
 def graduate_plan(plan_path, dry_run=False) -> int:
     """Graduate a stamped plan to done when the URL count is met."""
-    result = _call("graduate", {"plan_path": plan_path, "dry_run": dry_run})
-    return int(result.get("exit")) if result else 1
+    return _exit(_call("graduate", {"plan_path": plan_path, "dry_run": dry_run}))
+
+
+def _exit(result: "dict | None") -> int:
+    """The writer's exit code; a failure's message goes to stderr."""
+    if result is None:
+        return 1
+    if result.get("exit") and result.get("message"):
+        sys.stderr.write(f"{result['message']}\n")
+    return int(result.get("exit") or 0)
 
 
 def set_expected_count(plan_path, count, dry_run=False) -> "tuple[int, str]":
@@ -124,6 +136,5 @@ def epic_waves(epic_id: str) -> "tuple[dict[str, int], int]":
     result = _call("waves", {"epic_id": epic_id})
     if result is None:
         return {}, -1
-    return {k: int(v) for k, v in (result.get("wave_by_id") or {}).items()}, int(
-        result.get("max_wave") or -1
-    )
+    waves = {k: int(v) for k, v in (result.get("wave_by_id") or {}).items()}
+    return waves, int(result.get("max_wave", -1))

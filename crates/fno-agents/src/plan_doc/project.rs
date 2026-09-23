@@ -378,8 +378,8 @@ fn with_parent_slug<'a>(
 
 #[cfg(test)]
 mod tests {
+    use super::codec::Fields;
     use super::*;
-    use serde_json::json;
 
     const PLAN: &str = "---\nnode: x-child\nstatus: ready\npriority: p2\nsize: M\ntype: feature\nkill_criteria:\n  - name: iteration_ceiling\n    predicate: iteration > 15\n    reason: too many\n---\n\n# child plan\n";
 

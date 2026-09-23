@@ -6,7 +6,8 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use crate::graph_keeper::{cached_entries, StoreError, StoreState};
+use crate::graph_keeper::{cached_entries, StoreState};
+use crate::graph_store::StoreError;
 
 fn opt_str<'a>(p: &'a Value, key: &str) -> Option<&'a str> {
     p.get(key).and_then(Value::as_str)

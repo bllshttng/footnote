@@ -57,22 +57,30 @@ def _forward(verb: str, extra_args: List[str]) -> int:
                 out.append(extra_args[i + 1])
         return out
 
-    plan_path = _flag("--plan-path") or ""
+    plan_path = _flag("--plan-path")
+    if not plan_path:
+        print(f"error: {verb} needs --plan-path", file=sys.stderr)
+        return 2
     dry_run = "--dry-run" in extra_args
-    if verb == "stamp":
+    try:
         expected = _flag("--expected-url-count")
+        expected_n = int(expected) if expected is not None else None
+        count_n = int(_flag("--count") or 0)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if verb == "stamp":
         return stamp_plan(
             plan_path,
             _flag("--session-id") or "",
             _flags("--url"),
-            int(expected) if expected is not None else None,
+            expected_n,
             dry_run,
         )
     if verb == "graduate":
         return graduate_plan(plan_path, dry_run)
     if verb == "set-expected":
-        count = _flag("--count")
-        rc, message = set_expected_count(plan_path, int(count or 0), dry_run)
+        rc, message = set_expected_count(plan_path, count_n, dry_run)
         if message and rc != 0:
             print(message, file=sys.stderr)
         return rc
