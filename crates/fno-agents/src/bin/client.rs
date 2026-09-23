@@ -1472,6 +1472,7 @@ async fn run(args: Vec<String>) -> i32 {
     // Snapshot before `params` moves into the request: the relocated gate
     // honors the same spawn-control flags the shared construction reads.
     let daemon_gate_flags = gate_flags_from_params(&params);
+    let daemon_gate_seed = fno_agents::spawn_phase::params_seed(&params);
     // Same snapshot for the portal placement: it rides the
     // daemon's response, after the receipt.
     let thread_portal_params = if method == "agent.spawn"
@@ -1492,6 +1493,7 @@ async fn run(args: Vec<String>) -> i32 {
                 name: agent_name.clone(),
                 substrate: "bg".into(),
                 flags: daemon_gate_flags,
+                seed: daemon_gate_seed,
                 ..Default::default()
             },
         ) {
@@ -2350,6 +2352,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 name: name.to_string(),
                 substrate: substrate.to_string(),
                 flags,
+                seed: fno_agents::spawn_phase::params_seed(&params),
                 ..Default::default()
             },
         ) {
