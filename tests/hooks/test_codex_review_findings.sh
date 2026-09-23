@@ -37,6 +37,10 @@ grep -q 'Act on the findings in your current context' "$TMP/turn-findings.err" \
   || { echo "FAIL: nudge does not tell the worker to act in-session"; exit 1; }
 grep -q 'request-self-review --pr <n>' "$TMP/turn-findings.err" \
   || { echo "FAIL: nudge does not require a new-head review"; exit 1; }
+grep -q 'rounds_exhausted' "$TMP/turn-findings.err" \
+  || { echo "FAIL: nudge does not read the round budget"; exit 1; }
+grep -q 'merge on green CI' "$TMP/turn-findings.err" \
+  || { echo "FAIL: nudge does not explain the at-cap disposition"; exit 1; }
 ! grep -qE 'fno agents mail|daemon|king' "$TMP/turn-findings.err" \
   || { echo "FAIL: nudge routed through forbidden king/daemon/mail path"; exit 1; }
 

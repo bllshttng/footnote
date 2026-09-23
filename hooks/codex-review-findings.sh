@@ -67,6 +67,6 @@ p1="$(jq '[.[] | select(((.priority // .severity // "") | ascii_upcase) == "P1" 
 p2="$(jq '[.[] | select(((.priority // .severity // "") | ascii_upcase) == "P2" or ((.title // "") | test("(?i)^\\s*\\[P2\\]")))] | length' <<<"$findings" 2>/dev/null || printf '0')"
 
 cat >&2 <<EOF
-Native review returned $total finding(s) for this turn (P1: $p1, P2: $p2). Act on the findings in your current context now. Read each finding, fix actionable P1/P2 issues, run focused tests, commit and push. Then run 'fno do target request-self-review --pr <n>' on the NEW HEAD; the old attestation is stale. Do not promise completion while findings remain.
+Native review returned $total finding(s) for this turn (P1: $p1, P2: $p2). Act on the findings in your current context now. Read each finding, fix actionable P1/P2 issues, run focused tests, commit and push. Then read 'fno do pr status <n>'. When it reads rounds_exhausted false, run 'fno do target request-self-review --pr <n>' on the new head. When it reads null, run 'fno-agents review-coverage --cwd . --pr <n>' and read again. When it reads rounds_exhausted true, the review phase is complete: decline what you did not fix with a recorded reason, request no review, emit no attestation, and merge on green CI. Below the cap, do not promise completion while findings remain.
 EOF
 exit 2
