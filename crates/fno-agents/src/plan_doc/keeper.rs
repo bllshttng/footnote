@@ -31,11 +31,8 @@ fn caller_path(p: &Value, raw: &str) -> PathBuf {
 /// An op's exit and message; a failure's message rides `warnings`, which the
 /// client prints on the caller's stderr.
 fn op_result(exit: i32, message: String) -> Value {
-    let warnings: Vec<&str> = if exit != 0 && !message.is_empty() {
-        vec![message.as_str()]
-    } else {
-        Vec::new()
-    };
+    let failed = exit != 0 && !message.is_empty();
+    let warnings: Vec<&String> = std::iter::once(&message).filter(|_| failed).collect();
     json!({"exit": exit, "message": message, "warnings": warnings})
 }
 
