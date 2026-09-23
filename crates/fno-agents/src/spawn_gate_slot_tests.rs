@@ -287,8 +287,10 @@ fn succession_cannot_take_a_second_slot_at_cap_plus_one() {
 #[test]
 fn succession_refuses_the_old_king_after_transfer() {
     let fixture = SuccessionFixture::new(3);
+    let mut old_king = fixture.row("old-king");
+    old_king["harness_session_id"] = serde_json::json!("session-old");
     fixture.write_entries(vec![
-        fixture.row("old-king"),
+        old_king,
         fixture.king("new-king", "session-new", "x-epic"),
         fixture.worker("worker", "session-new"),
     ]);
