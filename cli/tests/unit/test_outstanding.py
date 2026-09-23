@@ -2317,6 +2317,32 @@ def test_clear_with_answer_prints_the_delivery_posture(
     assert "mail to 89abcdef" in cleared.output
 
 
+@requires_rust
+def test_clear_with_answer_without_asker_prints_delivery_posture(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: OwnedHarnessIdentity(None, None, (), "empty"),
+    )
+    asked = runner.invoke(outstanding_app, ["ask", "which lane?"])
+    assert asked.exit_code == 0, asked.output
+    qid = asked.stdout.strip().splitlines()[-1]
+    question = next(
+        event
+        for event in _journal_events(project_log("events.jsonl", project_root=root))
+        if event.get("type") == "operator_question"
+        and event.get("data", {}).get("question_id") == qid
+    )
+    assert not question["data"].get("asker")
+
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "ship it"])
+
+    assert cleared.exit_code == 0, cleared.output
+    assert "no asker on record" in cleared.output
+    assert "nobody to wake" in cleared.output
+
+
 def test_clear_with_answer_names_an_undeliverable_posture(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):

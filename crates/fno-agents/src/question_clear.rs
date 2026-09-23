@@ -281,7 +281,7 @@ mod tests {
                 "q-reask",
                 "which lane?",
                 Some("attention lane"),
-                Some("x-1234"),
+                Some("x-0000"),
             ),
         );
 
@@ -295,7 +295,7 @@ mod tests {
         let intake: crate::question_intake::IntakeRequest = serde_json::from_value(json!({
             "question": "which lane again?",
             "subject": "attention lane",
-            "node": "x-1234",
+            "node": "x-0000",
             "storage_root": tmp.path().join("storage"),
             "index_path": req.index_path,
             "journal_path": req.journal_path,
@@ -564,23 +564,22 @@ pub fn run_clear(req: &ClearRequest) -> ClearAnswer {
             }
             newly_closed += 1;
             closed_ids.insert(qid.clone());
-            if let Some(asker) = question_event
+            let asker = question_event
                 .get("data")
                 .and_then(|data| data.get("asker"))
                 .and_then(Value::as_str)
-            {
-                answer.deliveries.push(Delivery {
-                    qid: qid.clone(),
-                    question: question_text(question_event),
-                    asker: asker.to_string(),
-                    session_id: question_event
-                        .get("data")
-                        .and_then(|data| data.get("session_id"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    decision_id,
-                });
-            }
+                .unwrap_or_default();
+            answer.deliveries.push(Delivery {
+                qid: qid.clone(),
+                question: question_text(question_event),
+                asker: asker.to_string(),
+                session_id: question_event
+                    .get("data")
+                    .and_then(|data| data.get("session_id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                decision_id,
+            });
         } else {
             let (close, close_line) = close_event(req, qid, None);
             if let Err(error) = append_close(&req.journal_path, &close_line, qid) {
