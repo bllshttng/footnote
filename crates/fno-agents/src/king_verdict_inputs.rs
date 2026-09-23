@@ -14,8 +14,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// The default check-in interval (`config.king.checkin_interval`, "4h").
-const DEFAULT_CHECKIN_SECS: i64 = 14400;
+/// The default check-in interval (`config.king.checkin_interval`, "55m").
+const DEFAULT_CHECKIN_SECS: i64 = 3300;
 /// The window is three check-in intervals (Python `verdict_counts`).
 const WINDOW_INTERVALS: i64 = 3;
 /// The default compaction ceiling (`config.king.compaction_ceiling`).
@@ -476,7 +476,7 @@ mod tests {
     // --- the window spelling ---
 
     #[test]
-    fn checkin_interval_defaults_to_four_hours_and_window_to_twelve() {
+    fn checkin_interval_defaults_to_fifty_five_minutes_and_window_to_165_minutes() {
         let dir = tmp("default-interval");
         // Pin FNO_CONFIG: a live global config carrying king.checkin_interval
         // (or a prior test's leaked path) must not answer for the default.
@@ -488,8 +488,8 @@ mod tests {
             Some(value) => std::env::set_var("FNO_CONFIG", value),
             None => std::env::remove_var("FNO_CONFIG"),
         }
-        assert_eq!(got, 14400);
-        assert_eq!(window_display(WINDOW_INTERVALS * 14400), "12h");
+        assert_eq!(got, 3300);
+        assert_eq!(window_display(WINDOW_INTERVALS * 3300), "165m");
     }
 
     #[test]

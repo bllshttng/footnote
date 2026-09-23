@@ -290,6 +290,7 @@ crates/fno-agents/src/hook/king_guard.rs
 crates/fno-agents/src/hook/stop.rs
 crates/fno-agents/src/gc_inventory.rs
 crates/fno-agents/src/model_env_scrub.rs
+crates/fno-agents/src/plans_dirs.rs
 crates/fno-agents/src/plugin_install.rs
 crates/fno-agents/src/provider.rs
 crates/fno-agents/src/reclaim.rs

@@ -177,6 +177,33 @@ fn state_mux_ref_roundtrips_and_python_dict_shape_parses() {
 }
 
 #[test]
+fn pending_session_row_roundtrips_and_absent_key_stays_absent() {
+    // The parked spawn-time payload survives a deserialize/re-serialize
+    // intact, and a row without one never grows the key (X3 passthrough).
+    let mut e = sample_entry("parked");
+    e.pending_session_row = Some(serde_json::json!({
+        "phase": "do",
+        "merge_grant": {
+            "approved": true,
+            "source": "config",
+            "recorded_by": "spawn",
+            "recorded_at": "2026-09-22T00:00:00Z"
+        }
+    }));
+    let json = serde_json::to_string(&e).unwrap();
+    let back: RegistryEntry = serde_json::from_str(&json).unwrap();
+    let parked = back.pending_session_row.as_ref().unwrap();
+    assert_eq!(parked["phase"], "do");
+    assert_eq!(parked["merge_grant"]["approved"], true);
+
+    // A row with no parked payload serializes no key at all, not a null.
+    let bare = serde_json::to_string(&sample_entry("plain")).unwrap();
+    assert!(!bare.contains("pending_session_row"));
+    let re: RegistryEntry = serde_json::from_str(&bare).unwrap();
+    assert_eq!(re.pending_session_row, None);
+}
+
+#[test]
 fn harness_backfill_legacy_row_gains_canonical() {
     // x-ec59 / AC1-EDGE: a pre-migration Python row (provider + the legacy
     // per-provider uuid, no harness) gains the canonical pair on load.

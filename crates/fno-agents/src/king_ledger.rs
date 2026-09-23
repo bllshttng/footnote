@@ -87,15 +87,20 @@ fn counts_in_order(fold: &Value) -> Vec<(String, i64)> {
     out
 }
 
-fn active_sum(fold: &Value) -> i64 {
-    ACTIVE_STATUSES
-        .iter()
-        .filter_map(|s| {
-            fold.get("counts")
-                .and_then(|c| c.get(*s))
-                .and_then(|v| v.as_i64())
-        })
-        .sum()
+/// Sum of the ACTIVE_STATUSES buckets under `key` (`counts` or
+/// `owned_counts`). `None` when the key is null or absent, so an unmeasured
+/// owned count is never read as a zero.
+fn active_sum(fold: &Value, key: &str) -> Option<i64> {
+    let counts = fold.get(key)?;
+    if counts.is_null() {
+        return None;
+    }
+    Some(
+        ACTIVE_STATUSES
+            .iter()
+            .filter_map(|s| counts.get(*s).and_then(|v| v.as_i64()))
+            .sum(),
+    )
 }
 
 fn chip_td(status: &str) -> String {
@@ -287,10 +292,14 @@ fn crown_card(crown: &Value, titles: &BTreeMap<String, &Value>) -> String {
             .and_then(|c| c.get("done"))
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
+        let owned = match active_sum(&fold, "owned_counts") {
+            Some(n) => format!("<span><b>{n}</b> owned active</span>"),
+            None => "<span>owned unmeasured</span>".to_string(),
+        };
         out.push_str(&format!(
-            "<div class=\"stats\"><span><b>{}</b> nodes</span><span><b>{}</b> active</span><span><b>{done}</b> done</span></div>",
+            "<div class=\"stats\">{owned}<span><b>{}</b> nodes</span><span><b>{}</b> active</span><span><b>{done}</b> done</span></div>",
             as_i64(&fold, "total"),
-            active_sum(&fold),
+            active_sum(&fold, "counts").unwrap_or(0),
         ));
         out.push_str(&bar_and_legend(&fold));
         let rows: String = fold
@@ -873,7 +882,14 @@ pub fn render(
                     "{} nodes in the root scope",
                     as_i64(&fold, "total")
                 ));
-                parts.push(format!("{} active", active_sum(&fold)));
+                parts.push(format!(
+                    "{} active",
+                    active_sum(&fold, "counts").unwrap_or(0)
+                ));
+                parts.push(match active_sum(&fold, "owned_counts") {
+                    Some(n) => format!("{n} owned active"),
+                    None => "owned unmeasured".to_string(),
+                });
             }
         }
     }
@@ -1023,6 +1039,7 @@ mod tests {
             "holder": "king", "level": 2, "scope": "e-1", "grantor": "human",
             "status": "live", "agree": true, "reason": null, "crown_source": "both",
             "scope_nodes": {"status": "ok", "counts": {"in_progress": 1, "done": 2},
+                "owned_counts": {"in_progress": 1},
                 "total": 3, "omitted": 1,
                 "nodes": [{"id": "x-1", "status": "in_progress", "worker": "w1",
                            "pr_number": 7, "sessions": ["s1"]}]}
@@ -1375,11 +1392,33 @@ mod tests {
     fn crown_card_shows_stats_bar_and_legend() {
         let page = page(base_court(json!([base_crown()])), vec![]);
         assert!(page.contains(
-            "<span><b>3</b> nodes</span><span><b>1</b> active</span><span><b>2</b> done</span>"
+            "<span><b>1</b> owned active</span><span><b>3</b> nodes</span><span><b>1</b> active</span><span><b>2</b> done</span>"
         ));
         assert!(page.contains("style=\"flex:1\""));
         assert!(page.contains("style=\"flex:2\""));
         assert!(page.contains("aria-label=\"in progress 1, done 2\""));
+    }
+
+    /// AC18-ERR: a null owned_counts renders `owned unmeasured` on the card
+    /// and in the footer; nodes, active and done still render.
+    #[test]
+    fn a_null_owned_count_reads_unmeasured_on_card_and_footer() {
+        let mut crown = base_crown();
+        crown["level"] = json!(1);
+        crown["scope_nodes"]["owned_counts"] = Value::Null;
+        let page = page(base_court(json!([crown])), vec![]);
+        assert!(page.contains("<span>owned unmeasured</span>"), "{page}");
+        assert!(page.contains("· owned unmeasured</span>"), "{page}");
+        assert!(page.contains("<b>3</b> nodes</span><span><b>1</b> active</span>"));
+    }
+
+    /// AC17-HP footer leg: the root scope's line carries the owned count.
+    #[test]
+    fn the_footer_carries_the_root_scopes_owned_active_count() {
+        let mut crown = base_crown();
+        crown["level"] = json!(1);
+        let page = page(base_court(json!([crown])), vec![]);
+        assert!(page.contains("1 owned active"), "{page}");
     }
 
     #[test]

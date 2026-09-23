@@ -2613,7 +2613,7 @@ pub(crate) fn node_carries_pr(node: &Value, pr_number: i64, repo: Option<&str>) 
 
 /// Build one session row, validating identity/timestamps under the same
 /// contract as store.append_session_record.
-fn session_row(
+pub(crate) fn session_row(
     phase: &str,
     harness: &str,
     session_id: &str,
@@ -2771,7 +2771,7 @@ fn session_row(
 /// part of the key: one session on one phase is one row, whatever harness
 /// spelling a writer carried (the shape check above already refuses a
 /// provably wrong one).
-fn session_append(
+pub(crate) fn session_append(
     entries: &mut Vec<Value>,
     node_id: &str,
     row: Value,

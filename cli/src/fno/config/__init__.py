@@ -64,7 +64,6 @@ from fno.config._dispatch_verbs import DEFAULT_DISPATCH_VERBS as _DEFAULT_DISPAT
 from fno.config._dispatch_verbs import DispatchVerbDescriptor as DispatchVerbDescriptor
 from fno.config._dispatch_verbs import resolvable_verbs as resolvable_verbs
 from fno.config._king import KING_CHECKIN_TEXT as KING_CHECKIN_TEXT
-from fno.config._king import KING_GOAL_TEXT as KING_GOAL_TEXT
 from fno.config._king import KingBlock
 from fno.config._evals import EvalsBlock
 from fno.config.status_sinks import StatusFanoutConfig as StatusFanoutConfig

@@ -39,7 +39,7 @@ const NUMERIC_DIFF_KEYS: [&str; 9] = [
     "blocked",
     "escalations_open",
     "escalations_overdue",
-    "active_nodes",
+    "owned_active",
     "live_workers",
     "undelivered",
     "held_open",
@@ -307,8 +307,14 @@ fn fetch_board(ctx: &Ctx) -> Result<Value, String> {
 
 fn fetch_fold(ctx: &Ctx) -> Result<Value, String> {
     let crowns = vec![json!({"scope": ctx.scope, "level": ctx.level})];
-    let payload = court_fold(&ctx.graph, &ctx.cwd, None, &crowns)
-        .map_err(|e| format!("scope fold unreadable: {e}"))?;
+    let payload = court_fold(
+        &ctx.graph,
+        &ctx.cwd,
+        None,
+        &crate::paths::AgentsHome::from_env().registry_json(),
+        &crowns,
+    )
+    .map_err(|e| format!("scope fold unreadable: {e}"))?;
     let mine = payload
         .get("scope_nodes")
         .and_then(|s| s.get(&ctx.scope))
@@ -442,12 +448,23 @@ fn r_blocked_child(board: &Result<Value, String>) -> Result<Value, String> {
 fn r_court(folded: &Result<Value, String>) -> Result<Value, String> {
     let court = folded.clone()?;
     let fold = &court["fold"];
-    let total = fold.get("total").and_then(|t| t.as_i64()).unwrap_or(0);
-    let done = fold
-        .get("counts")
-        .and_then(|c| c.get("done"))
-        .and_then(|d| d.as_i64())
-        .unwrap_or(0);
+    let sum_active = |key: &str| -> i64 {
+        crate::court_fold::ACTIVE_STATUSES
+            .iter()
+            .filter_map(|s| {
+                fold.get(key)
+                    .and_then(|c| c.get(*s))
+                    .and_then(|v| v.as_i64())
+            })
+            .sum()
+    };
+    let active_nodes = sum_active("counts");
+    // An unread owned count is null with its reason, never a quiet zero.
+    let owned_active = if fold.get("owned_counts").map(Value::is_null).unwrap_or(true) {
+        Value::Null
+    } else {
+        json!(sum_active("owned_counts"))
+    };
     let mut rows: Vec<Value> = Vec::new();
     for n in fold
         .get("nodes")
@@ -455,8 +472,9 @@ fn r_court(folded: &Result<Value, String>) -> Result<Value, String> {
         .into_iter()
         .flatten()
     {
-        let status = s_str(n, "status").unwrap_or("");
-        if status == "done" || status == "superseded" {
+        // Another crown's node stays off this king's list, but an unread
+        // owner mark keeps the row: a broken instrument never hides work.
+        if n.get("owned") == Some(&json!(false)) {
             continue;
         }
         let session = n
@@ -474,8 +492,10 @@ fn r_court(folded: &Result<Value, String>) -> Result<Value, String> {
         }));
     }
     Ok(json!({
-        "active_nodes": total - done,
-        "total_nodes": total,
+        "active_nodes": active_nodes,
+        "owned_active": owned_active,
+        "owned_reason": fold.get("owned_reason").cloned().unwrap_or(Value::Null),
+        "total_nodes": fold.get("total").and_then(|t| t.as_i64()).unwrap_or(0),
         "rows": rows,
         "epics": fold.get("epics").cloned().unwrap_or(Value::Null),
         "epic_cap": fold.get("epic_cap").cloned().unwrap_or(Value::Null),
@@ -1065,7 +1085,7 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
         data.insert("blocked_children".into(), child.value.clone());
     }
     if let Some(court) = get("court").filter(|r| r.ok) {
-        data.insert("active_nodes".into(), court.value["active_nodes"].clone());
+        data.insert("owned_active".into(), court.value["owned_active"].clone());
     }
     if let Some(workers) = get("workers").filter(|r| r.ok) {
         data.insert("live_workers".into(), workers.value["live_workers"].clone());
@@ -1420,13 +1440,26 @@ fn render_lines(
         Some(r) => lines.push(format!("READER FAILED court: {}", r.error)),
         None => {
             let court = by_name("court").map(|r| &r.value).unwrap_or(&Value::Null);
-            lines.push(format!(
-                "{scope}: {} active of {} nodes",
-                data.get("active_nodes")
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "null".into()),
-                dash(court.get("total_nodes")),
-            ));
+            let active = court
+                .get("active_nodes")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "null".into());
+            let total = dash(court.get("total_nodes"));
+            match data.get("owned_active") {
+                Some(v) if !v.is_null() => lines.push(format!(
+                    "{scope}: {v} owned active of {active} active, {total} nodes"
+                )),
+                _ => {
+                    let reason = court.get("owned_reason").and_then(Value::as_str);
+                    let unmeasured = match reason {
+                        Some(r) if !r.is_empty() => format!("owned unmeasured ({r})"),
+                        _ => "owned unmeasured".to_string(),
+                    };
+                    lines.push(format!(
+                        "{scope}: {unmeasured}, {active} active, {total} nodes"
+                    ));
+                }
+            }
             lines.push(epic_line(court));
             let rows = court
                 .get("rows")
@@ -2306,7 +2339,8 @@ mod tests {
 
     fn fold_payload() -> Value {
         serde_json::from_str(
-            r#"{"fold": {"status": "ok", "total": 5, "counts": {"done": 2}, "nodes": [
+            r#"{"fold": {"status": "ok", "total": 5,
+            "counts": {"in_progress": 2, "ready": 1, "done": 2}, "nodes": [
             {"id": "x-2", "status": "in_progress", "worker": "w1", "pr_number": 7,
              "sessions": ["s1", "s2"]}
         ]}, "stuck": {"blocked": [{"id": "x-3", "blocked_by": ["x-1"]}]}}"#,
@@ -2330,12 +2364,91 @@ mod tests {
         assert_eq!(rows[0]["session"], json!("s1"));
     }
 
+    /// AC13-HP: the active count is the ACTIVE_STATUSES sum, the owned
+    /// headline is the same sum over owned_counts, and a row another crown
+    /// owns drops off while an unread mark keeps its row.
+    #[test]
+    fn the_scope_reading_counts_active_and_owned_active() {
+        let folded = Ok(json!({"fold": {
+            "status": "ok", "total": 15,
+            "counts": {"in_progress": 2, "ready": 1, "idea": 5, "deferred": 3, "done": 4},
+            "owned_counts": {"in_progress": 1, "idea": 2},
+            "nodes": [
+                {"id": "x-1", "status": "in_progress", "owned": true},
+                {"id": "x-2", "status": "ready", "owned": false},
+                {"id": "x-3", "status": "in_progress", "owned": null}
+            ]
+        }}));
+        let court = r_court(&folded).unwrap();
+        assert_eq!(court["active_nodes"], json!(3));
+        assert_eq!(court["owned_active"], json!(1));
+        assert_eq!(court["total_nodes"], json!(15));
+        let ids: Vec<&str> = court["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["x-1", "x-3"], "owned false drops; owned null stays");
+    }
+
+    /// AC16-HP: the scope line leads with the owned count.
+    #[test]
+    fn the_scope_line_leads_with_the_owned_count() {
+        let readings = sample_readings(
+            json!({"open_prs": 1, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 3, "owned_active": 1, "total_nodes": 15, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let line = lines
+            .iter()
+            .find(|l| l.contains("owned active of"))
+            .unwrap();
+        assert_eq!(line, "x-bbbb: 1 owned active of 3 active, 15 nodes");
+    }
+
+    /// AC14-ERR: a failed owner read renders unmeasured with the reason.
+    #[test]
+    fn the_scope_line_reads_unmeasured_with_the_reason() {
+        let readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 3, "owned_active": Value::Null, "total_nodes": 15,
+                   "owned_reason": "territory: registry unreadable (x)", "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 0, "oldest_worker_seen": "none"}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let line = lines
+            .iter()
+            .find(|l| l.contains("owned unmeasured"))
+            .unwrap();
+        assert_eq!(
+            line,
+            "x-bbbb: owned unmeasured (territory: registry unreadable (x)), 3 active, 15 nodes"
+        );
+    }
+
+    /// AC15-EDGE: a previous beat row that carries active_nodes but no
+    /// owned_active reads unmeasured for one beat, never a fake movement.
+    #[test]
+    fn a_previous_row_without_owned_active_reads_unmeasured() {
+        let mut prev = prev_row();
+        prev["data"].as_object_mut().unwrap().remove("owned_active");
+        let data = Map::new();
+        let change = derive_change(Some(prev.get("data").unwrap()), &data, "");
+        assert_eq!(change, "unmeasured: previous row lacks owned_active");
+    }
+
     #[test]
     fn the_epics_line_renders_right_after_the_scope_line() {
         // AC3-HP: the lead reads the cap distance on the court reading
         // itself, one line under the active count.
         let court = json!({
-            "active_nodes": 3, "total_nodes": 5, "rows": [],
+            "active_nodes": 3, "total_nodes": 5, "owned_active": 1, "rows": [],
             "epics": [
                 {"id": "e-1", "open_children": 16, "full": true},
                 {"id": "e-2", "open_children": 3, "full": false}
@@ -2818,7 +2931,7 @@ mod tests {
             "data": {"scope": "x-bbbb", "change": "no change", "open_prs": 9,
                      "free_claim_no_driver": 1, "blocked": 2,
                      "escalations_open": 0, "escalations_overdue": 0,
-                     "active_nodes": 4, "live_workers": 3, "undelivered": 9,
+                     "owned_active": 2, "live_workers": 3, "undelivered": 9,
                      "held_open": 0}})
     }
 
@@ -2842,7 +2955,7 @@ mod tests {
         assert!(err.is_empty());
         let readings = sample_readings(
             json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
+            json!({"active_nodes": 4, "total_nodes": 6, "owned_active": 2, "rows": []}),
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
@@ -2879,7 +2992,7 @@ mod tests {
         assert!(err.is_empty());
         let mut readings = sample_readings(
             json!({"open_prs": 9, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
+            json!({"active_nodes": 4, "total_nodes": 6, "owned_active": 2, "rows": []}),
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
@@ -2928,7 +3041,7 @@ mod tests {
     fn a_failed_control_plane_reader_blocks_the_quiet_beat() {
         let mut readings = sample_readings(
             json!({"open_prs": 9, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
-            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
+            json!({"active_nodes": 4, "total_nodes": 6, "owned_active": 2, "rows": []}),
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
@@ -3174,7 +3287,12 @@ mod tests {
 
     #[test]
     fn hook_beat_writes_one_row_per_missed_beat() {
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", dir.path().join("config.toml"));
         let path = journal(
             dir.path(),
             &[
@@ -3193,47 +3311,31 @@ mod tests {
             .parse::<chrono::DateTime<chrono::Utc>>()
             .unwrap();
         let at = |mins: i64| base + chrono::Duration::minutes(mins);
-        // 479 minutes old: under two intervals, nothing writes.
-        assert!(!hook_beat(
-            &path,
-            dir.path(),
-            "x-bbbb",
-            "sess",
-            &history,
-            at(479)
-        ));
-        assert_eq!(
-            crate::events::committed_journal_text(&path).lines().count(),
-            1
-        );
-        // 481 minutes old: the beat is due, one hook row.
-        assert!(hook_beat(
-            &path,
-            dir.path(),
-            "x-bbbb",
-            "sess",
-            &history,
-            at(481)
-        ));
+        // 109 minutes old: under two 55-minute intervals, nothing writes.
+        let early = hook_beat(&path, dir.path(), "x-bbbb", "sess", &history, at(109));
+        let rows_after_early = crate::events::committed_journal_text(&path).lines().count();
+        // 111 minutes old: the beat is due, one hook row.
+        let due = hook_beat(&path, dir.path(), "x-bbbb", "sess", &history, at(111));
         let rows = crate::events::committed_journal_text(&path);
+        // A fresh row resets the clock: the next stop writes nothing.
+        let fresh = hook_beat(&path, dir.path(), "x-bbbb", "sess", &history, at(112));
+        let rows_after_fresh = crate::events::committed_journal_text(&path).lines().count();
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+
+        assert!(!early);
+        assert_eq!(rows_after_early, 1);
+        assert!(due);
         assert_eq!(rows.lines().count(), 2, "rows: {rows}");
         assert!(rows.contains("\"source\":\"hook\""), "rows: {rows}");
         let written: Value = serde_json::from_str(rows.lines().last().unwrap()).unwrap();
         assert_eq!(written["data"]["scope"], "x-bbbb");
         assert!(!written["data"]["change"].as_str().unwrap().is_empty());
         // The fresh row resets the clock: the next stop writes nothing.
-        assert!(!hook_beat(
-            &path,
-            dir.path(),
-            "x-bbbb",
-            "sess",
-            &history,
-            at(482)
-        ));
-        assert_eq!(
-            crate::events::committed_journal_text(&path).lines().count(),
-            2
-        );
+        assert!(!fresh);
+        assert_eq!(rows_after_fresh, 2);
     }
 
     #[test]

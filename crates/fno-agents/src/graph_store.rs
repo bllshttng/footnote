@@ -2494,6 +2494,12 @@ pub fn locked_mutate_with_hook(
         crate::backlog::epic_cap::configured_cap(path),
     )
     .map_err(StoreError::Invalid)?;
+    crate::backlog::idea_cap::enforce(
+        &raw,
+        &entries,
+        crate::backlog::idea_cap::configured_cap(path).0,
+    )
+    .map_err(StoreError::Invalid)?;
     if let Some(hook) = before_publish {
         hook(&raw)?;
     }
@@ -3642,6 +3648,52 @@ mod tests {
                 .any(|r| crate::graph_store::entry_id(r) == Some("c-16")),
             "the child landed under the fresh epic"
         );
+    }
+
+    #[test]
+    fn the_whole_graph_seam_refuses_the_26th_unplanned_idea() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        let rows: Vec<Value> = (1..=25)
+            .map(|i| {
+                json!({"id": format!("i-{i:02}"), "slug": format!("i-{i:02}"),
+                       "title": format!("idea {i}"), "type": "feature", "status": "idea",
+                       "priority": "p2", "domain": "code", "project": "p",
+                       "created_at": format!("2026-01-{i:02}T00:00:00Z")})
+            })
+            .collect();
+        std::fs::write(&graph, serialize_graph_file(&rows)).unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[backlog]\nmax_open_ideas = 25\n",
+        )
+        .unwrap();
+        let before = file_content_version(&graph);
+        let mut entries = read_rows(&graph).unwrap();
+        entries.push(json!({"id": "i-26", "slug": "i-26", "title": "idea 26",
+                            "type": "feature", "status": "idea", "priority": "p2",
+                            "domain": "code", "project": "p"}));
+        let error = locked_mutate(
+            &graph,
+            MutateInput {
+                entries,
+                canonical_path: None,
+                base_version: base_version(&graph).unwrap(),
+                plan_rungs: None,
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        let StoreError::Invalid(message) = error else {
+            panic!("want Invalid, got {error:?}");
+        };
+        assert!(message.contains("idea cap:"), "{message}");
+        assert!(message.contains("i-01, i-02, i-03"), "{message}");
+        assert_eq!(file_content_version(&graph), before, "digest unchanged");
+        assert!(!read_rows(&graph)
+            .unwrap()
+            .iter()
+            .any(|row| entry_id(row) == Some("i-26")));
     }
 
     #[test]
