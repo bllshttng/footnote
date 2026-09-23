@@ -1253,6 +1253,10 @@ def _run_tick(
     )
 
 
+# A real merge took about 120s, and head attempts ran 115-128s under load.
+_MERGE_FLOOR_S = 150.0
+
+
 def run_execute_queue(
     queue: list,
     *,
@@ -1262,13 +1266,12 @@ def run_execute_queue(
     max_retries: int,
     claim: Any,
 ) -> dict[str, int]:
-    """Drain the merge phase's granted rows; returns executed, held, failed and
-    skipped counts that sum to len(queue). Contract: docs/architecture/pr-watch-merge-phase.md."""
+    """Drain granted rows; executed, held, failed, skipped and budget sum to len(queue)."""
     from fno.pr import _merge
     from fno.pr_watch._state import WatermarkStore
 
     holder = f"pr-watch-merge:{os.getpid()}"
-    counts = {"executed": 0, "held": 0, "failed": 0, "skipped": 0}
+    counts = {"executed": 0, "held": 0, "failed": 0, "skipped": 0, "budget": 0}
 
     def _grant(phase: str, pr: int, cand: Any, grant: dict, **extra: Any) -> None:
         emit("merge_grant_execution",
@@ -1280,6 +1283,7 @@ def run_execute_queue(
     for cand, key, grant_fields in queue:
         pr = cand.pr_number
         pr_lock_key = f"pr-watch:{cand.repo_slug or 'unknown'}:{pr}"
+        set_tick_phase("merge:prepare")
         try:
             claim.acquire_pr_lock(pr_lock_key, holder)
         except Exception:
@@ -1295,11 +1299,11 @@ def run_execute_queue(
                 continue
             why = ("merged" if entry.get("merge_dispatched") else "parked" if entry.get("parked")
                    else "not-open" if entry.get("last_seen_state") == "NOT_OPEN"
-                   else "execute-budget" if left is not None and left < max(_FIRE_FLOOR_S, slowest)
+                   else "execute-budget" if left is not None and left < max(_MERGE_FLOOR_S, slowest)
                    else None)
             if why:
                 emit("pr_watch_skipped", {"pr": pr, "reason": why})
-                counts["skipped"] += 1
+                counts["budget" if why == "execute-budget" else "skipped"] += 1
                 continue
             try:
                 prior_retries = int(entry.get("retries") or 0)

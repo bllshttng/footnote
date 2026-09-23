@@ -1467,6 +1467,11 @@ def test_cli_session_open_refuses_live_foreign_holder(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "_graph_path", lambda: g)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-open2")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    # A test run inside a spawned worker must not leak its own holder in.
+    monkeypatch.delenv("FNO_NODE_CLAIM_HOLDER", raising=False)
+    empty_registry = tmp_path / "registry.json"
+    empty_registry.write_text("", encoding="utf-8")
+    monkeypatch.setattr("fno.paths.agents_registry_path", lambda: empty_registry)
     acquire_claim("node:x-open002", "spawn-handover:worker-a", ttl_ms=60_000)
 
     r = CliRunner().invoke(C.cli, ["session", "open", "x-open002"])
@@ -1475,6 +1480,71 @@ def test_cli_session_open_refuses_live_foreign_holder(tmp_path, monkeypatch):
     assert "held by spawn-handover:worker-a" in r.output
     assert "no planner started" in r.output
     status = claim_status("node:x-open002")
+    assert status["state"] == "live"
+    assert status["holder"] == "spawn-handover:worker-a"
+
+
+def test_cli_session_open_joins_own_spawn_handover_claim(tmp_path, monkeypatch):
+    """The spawn's own claim for this session is joined, not refused: exit 0
+    with status joined, and the claim keeps its holder and acquire time."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import acquire_claim, claim_status
+
+    g = _make_graph(tmp_path, [{"id": "x-open012", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-open12")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    monkeypatch.setenv("FNO_NODE_CLAIM_HOLDER", "spawn-handover:worker-a")
+    claim = acquire_claim("node:x-open012", "spawn-handover:worker-a", ttl_ms=60_000)
+
+    r = CliRunner().invoke(C.cli, ["session", "open", "x-open012", "--json"])
+
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    assert out["status"] == "joined"
+    assert out["holder"] == "spawn-handover:worker-a"
+    status = claim_status("node:x-open012")
+    assert status["state"] == "live"
+    assert status["holder"] == "spawn-handover:worker-a"
+    assert status["acquired_at"] == claim.acquired_at
+
+
+def test_cli_session_open_joins_handover_claim_via_registry_row(tmp_path, monkeypatch):
+    """FNO_NODE_CLAIM_HOLDER is unset in a daemon-forked worker, so open
+    resolves the worker name the registry binds to this session and joins."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.claims.core import acquire_claim, claim_status
+
+    g = _make_graph(tmp_path, [{"id": "x-open013", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-open13")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+    monkeypatch.delenv("FNO_NODE_CLAIM_HOLDER", raising=False)
+    monkeypatch.setattr(
+        "fno.paths.agents_registry_path", lambda: tmp_path / "registry.json"
+    )
+    (tmp_path / "registry.json").write_text(
+        json.dumps({
+            "schema_version": 19,
+            "agents": [
+                {"name": "worker-a", "harness_session_id": "sess-open13"}
+            ],
+        }),
+        encoding="utf-8",
+    )
+    acquire_claim("node:x-open013", "spawn-handover:worker-a", ttl_ms=60_000)
+
+    r = CliRunner().invoke(C.cli, ["session", "open", "x-open013", "--json"])
+
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    assert out["status"] == "joined"
+    assert out["holder"] == "spawn-handover:worker-a"
+    status = claim_status("node:x-open013")
     assert status["state"] == "live"
     assert status["holder"] == "spawn-handover:worker-a"
 

@@ -441,6 +441,7 @@ pub fn run_reclaim(args: &[String], home: &AgentsHome) -> i32 {
             let cwd = std::env::current_dir().unwrap_or_default();
             let root = canonical_repo_root(&cwd).unwrap_or(cwd);
             crate::cargo_build_dirs::sweep(&root, apply, SystemTime::now());
+            crate::cargo_build_dirs::reclaim_idle_trees(&root, apply, SystemTime::now());
             return 0;
         }
         _ => {}
