@@ -72,6 +72,30 @@ fn built_in_lanes(provider: &str) -> Option<i64> {
     (provider == "zai").then_some(5)
 }
 
+/// The `agents.provider_limits.<provider>.subagents` ceiling, or `None` when
+/// the provider is uncapped. Mirrors `provider_lanes_cap`: a config that
+/// never named a provider_limits table falls back to the built-in budget
+/// table, exactly as Python's `provider_subagent_budget` fails open
+/// (`config._BUILTIN_PROVIDER_BUDGETS`). The reign check-in reads it as the
+/// blueprint-subagent ceiling; `None` reads as the default ceiling there.
+pub(crate) fn provider_subagents_cap(config_cwd: &Path, provider: &str) -> Option<usize> {
+    let subagents = match agents_config::config_lookup(config_cwd, &["agents", "provider_limits"]) {
+        Some(table) => table
+            .get(provider)
+            .and_then(|budget| budget.get("subagents"))
+            .and_then(|v| v.as_integer()),
+        None => built_in_subagents(provider),
+    };
+    usize::try_from(subagents.unwrap_or(0))
+        .ok()
+        .filter(|subagents| *subagents >= 1)
+}
+
+/// The built-in budget table (`config._BUILTIN_PROVIDER_BUDGETS`): zai only.
+fn built_in_subagents(provider: &str) -> Option<i64> {
+    (provider == "zai").then_some(1)
+}
+
 // ---------------------------------------------------------------------------
 // Pane liveness: one seam crossing, through the pane owner's own verb
 // ---------------------------------------------------------------------------
@@ -1997,6 +2021,54 @@ mod tests {
         std::fs::write(fnodir.join("config.toml"), "[agents]\nmax_live = 2\n").unwrap();
         assert_eq!(provider_lanes_cap(&dir, "zai"), Some(5), "builtin fallback");
         assert_eq!(provider_lanes_cap(&dir, "openai"), None);
+
+        match prior_config {
+            Some(v) => std::env::set_var("FNO_CONFIG", v),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The subagents ceiling reader: the configured table wins, the built-in
+    /// fallback caps only zai, and a non-positive or missing subagents is
+    /// uncapped (the caller then reads its own default ceiling).
+    #[test]
+    fn subagents_cap_reads_config_with_builtin_fallback() {
+        let dir = std::env::temp_dir().join(format!("fno-subagents-cap-{}", std::process::id()));
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents.provider_limits.openai]\nsubagents = 3\n",
+        )
+        .unwrap();
+        assert_eq!(provider_subagents_cap(&dir, "openai"), Some(3));
+        assert_eq!(
+            provider_subagents_cap(&dir, "zai"),
+            None,
+            "a configured table replaces the builtin"
+        );
+
+        std::fs::write(fnodir.join("config.toml"), "[agents]\nmax_live = 2\n").unwrap();
+        assert_eq!(
+            provider_subagents_cap(&dir, "zai"),
+            Some(1),
+            "builtin fallback"
+        );
+        assert_eq!(provider_subagents_cap(&dir, "openai"), None);
+
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents.provider_limits.openai]\nsubagents = 0\n",
+        )
+        .unwrap();
+        assert_eq!(
+            provider_subagents_cap(&dir, "openai"),
+            None,
+            "subagents 0 is uncapped; the caller reads its own default"
+        );
 
         match prior_config {
             Some(v) => std::env::set_var("FNO_CONFIG", v),
