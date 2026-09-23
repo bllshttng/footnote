@@ -2128,7 +2128,7 @@ pub(crate) fn read_registry_entries(path: &Path) -> Result<Vec<Value>, String> {
 /// `(["claude", "attach", short_id], None)`: a live, short_id-addressable
 /// claude row with no mux ref. `claim_uuid` is `Some` only on the dead-relaunch
 /// arm; every other arm already returns `Err` before this is checked.
-fn should_delegate_claude_live_attach(
+pub(crate) fn should_delegate_claude_live_attach(
     harness: &str,
     claim_uuid: &Option<String>,
     mux_session: &Option<String>,
@@ -2491,40 +2491,22 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // arm also calls before the exec (the wake's `claude attach` can birth
     // the supervisor; the delegation keeps its anti-recursion pin, which the
     // guard never touches).
-    if should_delegate_claude_live_attach(harness, &claim_uuid, &mux_session) {
-        // No claim here: the delegated wake acquires the identical attach
-        // key (resume_wake::resume_attach_claim_key) under its own skip check.
-        // Route via `fno`, never a bare `fno-py`: a cargo-only install has
-        // only the mux on PATH (crates/fno/src/bootstrap.rs).
-        use std::os::unix::process::CommandExt;
-        let mut command = std::process::Command::new("fno");
-        command
-            // --cwd is the EnterWorktree-resolved cwd, not the raw registry
-            // value: Python has no `resolve_resume_cwd` equivalent.
-            .args(["agents", "resume", &name, "--cwd", cwd])
-            .env("FNO_AGENTS_RUNTIME", "python");
-        if let Some(plan) = &reentry_plan {
-            for (key, value) in &plan.env {
-                command.env(key, value);
-            }
-        }
-        if cross_project {
-            command.arg("--cross-project");
-        }
-        if let Some(msg) = &message {
-            command.args(["--message", msg]);
-        }
-        if let Some(plan) = &reentry_plan {
-            crate::claude_supervisor::guard_birth_for_plan(&plan.env);
-        }
-        // exec(), not status(): the process is replaced (exit-127-on-failure
-        // convention, no child process group to propagate signals to).
-        let err = command.exec();
-        eprintln!(
-            "fno agents resume: delegating {name} to fno-py failed: {err}. \
-             Install the fno front door or run `fno-py agents resume {name}` directly."
-        );
-        return 127;
+    // A Working/busy live row takes the message through the mail lane first
+    // (claude queues a mid-turn paste; the wake recipe must not type into a
+    // turn); every other live row delegates to the Python wake as before.
+    // Both halves live in resume_wake (this file is shrink-only).
+    if let Some(code) = crate::resume_wake::claude_live_route(
+        harness,
+        &claim_uuid,
+        &mux_session,
+        entry,
+        &name,
+        cwd,
+        &message,
+        reentry_plan.as_ref(),
+        cross_project,
+    ) {
+        return code;
     }
 
     // The pane target decides the claim, not the other way round: a

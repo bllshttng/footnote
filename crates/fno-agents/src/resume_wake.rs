@@ -6,7 +6,9 @@
 //! `client_verbs.rs`; the delivery and confirmation logic lives here.
 
 use crate::claude_ask::{read_state_json, ClaudeHome};
-use crate::client_verbs::{append_agents_event, trace_events_path};
+use crate::client_verbs::{
+    append_agents_event, should_delegate_claude_live_attach, trace_events_path,
+};
 use crate::daemon::PaneProbe;
 use crate::paths::AgentsHome;
 use crate::state;
@@ -408,6 +410,169 @@ pub(crate) fn codex_resume_wake_route(
         &loaded,
         &ShellViewportIo,
     )
+}
+
+/// The claude live-row resume arm, moved whole out of `client_verbs.rs`
+/// (shrink-only). A row whose roster state is `working` or `busy` takes the
+/// message through the mail lane - claude queues a mid-turn paste, and the
+/// wake recipe must not type Ctrl-U/CR into an attached TUI mid-turn. Every
+/// other live row keeps today's delegation to the Python wake. `None` means
+/// "not this arm" and the caller's remaining paths run unchanged.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn claude_live_route(
+    harness: &str,
+    claim_uuid: &Option<String>,
+    mux_session: &Option<String>,
+    entry: &Value,
+    name: &str,
+    cwd: &str,
+    message: &Option<String>,
+    reentry_plan: Option<&crate::reentry::ReentryPlan>,
+    cross_project: bool,
+) -> Option<i32> {
+    claude_live_route_with(
+        harness,
+        claim_uuid,
+        mux_session,
+        entry,
+        name,
+        cwd,
+        message,
+        reentry_plan,
+        cross_project,
+        claude_live_mail_runner,
+        parked_roster_state,
+        |mut command| {
+            // exec(), not status(): the process is replaced
+            // (exit-127-on-failure convention, no child process group to
+            // propagate signals to).
+            use std::os::unix::process::CommandExt;
+            let err = command.exec();
+            eprintln!(
+                "fno agents resume: delegating {name} to fno-py failed: {err}. \
+                 Install the fno front door or run `fno-py agents resume {name}` directly."
+            );
+            127
+        },
+    )
+}
+
+/// The seam: the mail runner, the roster reader and the delegation exec are
+/// injected so tests run on literal rows. `delegate` receives the exact
+/// Python-delegation `Command` and returns the exit code.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn claude_live_route_with(
+    harness: &str,
+    claim_uuid: &Option<String>,
+    mux_session: &Option<String>,
+    entry: &Value,
+    name: &str,
+    cwd: &str,
+    message: &Option<String>,
+    reentry_plan: Option<&crate::reentry::ReentryPlan>,
+    cross_project: bool,
+    mut run_mail: impl FnMut(&[String]) -> (i32, String, String),
+    roster_state: impl Fn(&str) -> Option<String>,
+    delegate: impl FnOnce(std::process::Command) -> i32,
+) -> Option<i32> {
+    if !should_delegate_claude_live_attach(harness, claim_uuid, mux_session) {
+        return None;
+    }
+    // Working route: a busy row must not be typed into, but the mail lane
+    // already serves it - claude enqueues a mid-turn paste and the send
+    // confirms by content in the transcript.
+    if let Some(text) = message.as_deref() {
+        let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
+        if !short_id.is_empty() {
+            if let Some(state) = roster_state(short_id) {
+                if matches!(state.as_str(), "working" | "busy") {
+                    return Some(deliver_working_mail(name, short_id, text, &mut run_mail));
+                }
+            }
+        }
+    }
+    // No claim here: the delegated wake acquires the identical attach
+    // key (resume_wake::resume_attach_claim_key) under its own skip check.
+    // Route via `fno`, never a bare `fno-py`: a cargo-only install has
+    // only the mux on PATH (crates/fno/src/bootstrap.rs).
+    let mut command = std::process::Command::new("fno");
+    command
+        // --cwd is the EnterWorktree-resolved cwd, not the raw registry
+        // value: Python has no `resolve_resume_cwd` equivalent.
+        .args(["agents", "resume", name, "--cwd", cwd])
+        .env("FNO_AGENTS_RUNTIME", "python");
+    if let Some(plan) = reentry_plan {
+        for (key, value) in &plan.env {
+            command.env(key, value);
+        }
+    }
+    if cross_project {
+        command.arg("--cross-project");
+    }
+    if let Some(msg) = message {
+        command.args(["--message", msg]);
+    }
+    if let Some(plan) = reentry_plan {
+        crate::claude_supervisor::guard_birth_for_plan(&plan.env);
+    }
+    Some(delegate(command))
+}
+
+/// The Working-route delivery: one wrapped `mail send --body` (never --raw),
+/// judged by its receipt, not its exit code - exit 0 covers both
+/// `delivered (hosted)` and `queued (durable)`, so only the receipt says
+/// which. Exit 16 keeps meaning "not delivered live" for every caller
+/// (`pr_nudge.rs` reads nonzero as undelivered).
+fn deliver_working_mail(
+    name: &str,
+    short_id: &str,
+    message: &str,
+    mut run_mail: impl FnMut(&[String]) -> (i32, String, String),
+) -> i32 {
+    let argv: Vec<String> = ["fno", "agents", "mail", "send", name, "--body", message]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let (code, stdout, stderr) = run_mail(&argv);
+    if code != 0 {
+        // A refusal (style gate, budget, unknown recipient) relays whole.
+        eprint!("{stderr}");
+        print!("{stdout}");
+        return code;
+    }
+    let receipt = crate::mail_inject::mail_send_receipt(&stdout);
+    if crate::mail_inject::mail_send_landed(code, &stdout) {
+        println!(
+            "fno agents resume: '{name}' ({short}) is 'Working'; delivered live: {receipt}",
+            short = short_id
+        );
+        0
+    } else {
+        eprintln!(
+            "fno agents resume: '{name}' ({short}) is 'Working'; the message was \
+             NOT delivered live. {receipt}. It lands at the session's next turn \
+             boundary. Do not resend it.",
+            short = short_id
+        );
+        16
+    }
+}
+
+/// The mail transport for the Working route: one `fno agents mail send`.
+/// The verb carries its own poll budget (~30s live-confirm on a busy
+/// recipient), no extra bound here.
+fn claude_live_mail_runner(argv: &[String]) -> (i32, String, String) {
+    match std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .output()
+    {
+        Ok(o) => (
+            o.status.code().unwrap_or(1),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        ),
+        Err(e) => (1, String::new(), e.to_string()),
+    }
 }
 
 /// The delivered-but-not-rebound floor: rebind the row to the thread lane so
@@ -2363,5 +2528,173 @@ mod tests {
         assert!(row.mux.is_none());
         drop(daemon);
         std::fs::remove_dir_all(&home.registry_json().parent().unwrap()).ok();
+    }
+
+    // ---- claude_live_route (the Working mail intercept) ----
+
+    fn live_entry() -> Value {
+        serde_json::json!({"name": "live-w", "harness": "claude", "short_id": "abcd1234"})
+    }
+
+    fn refusing_delegate() -> impl Fn(std::process::Command) -> i32 {
+        |_| panic!("a served Working row must never reach the delegation")
+    }
+
+    #[test]
+    fn a_working_or_busy_row_delivers_through_the_mail_lane() {
+        // AC1-HP: the runner gets the wrapped mail argv once and a hosted
+        // receipt returns 0.
+        for state in ["working", "busy"] {
+            let calls = std::cell::RefCell::new(Vec::new());
+            let code = claude_live_route_with(
+                "claude",
+                &None,
+                &None,
+                &live_entry(),
+                "live-w",
+                "/tmp/x",
+                &Some("go now".to_string()),
+                None,
+                false,
+                |argv| {
+                    calls.borrow_mut().push(argv.to_vec());
+                    (0, "msg-1 delivered (hosted)\n".to_string(), String::new())
+                },
+                |short| (short == "abcd1234").then(|| state.to_string()),
+                refusing_delegate(),
+            );
+            assert_eq!(code, Some(0), "state {state} must deliver");
+            let calls = calls.borrow();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(
+                calls[0],
+                [
+                    "fno".to_string(),
+                    "agents".to_string(),
+                    "mail".to_string(),
+                    "send".to_string(),
+                    "live-w".to_string(),
+                    "--body".to_string(),
+                    "go now".to_string(),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn a_queued_receipt_exits_16_so_nonzero_means_not_delivered_live() {
+        // AC2-EDGE: exit 0 from the send is not a landing; the route must
+        // keep exit 16 meaning "not delivered live" (pr_nudge reads nonzero).
+        let code = claude_live_route_with(
+            "claude",
+            &None,
+            &None,
+            &live_entry(),
+            "live-w",
+            "/tmp/x",
+            &Some("go".to_string()),
+            None,
+            false,
+            |_argv| {
+                (
+                    0,
+                    "msg-1 queued (durable) [live-miss]\n".to_string(),
+                    String::new(),
+                )
+            },
+            |_| Some("working".to_string()),
+            refusing_delegate(),
+        );
+        assert_eq!(code, Some(16));
+    }
+
+    #[test]
+    fn a_refusing_mail_send_returns_its_own_code() {
+        // AC4-ERR: a style or budget refusal relays and keeps its exit code.
+        let code = claude_live_route_with(
+            "claude",
+            &None,
+            &None,
+            &live_entry(),
+            "live probe",
+            "/tmp/x",
+            &Some("go".to_string()),
+            None,
+            false,
+            |_argv| (2, String::new(), "error: over budget".to_string()),
+            |_| Some("working".to_string()),
+            refusing_delegate(),
+        );
+        assert_eq!(code, Some(2));
+    }
+
+    #[test]
+    fn an_idle_or_unknown_row_or_no_message_keeps_todays_delegation() {
+        // AC3-EDGE: the mail runner is never called and the Python delegation
+        // argv is built exactly as today (--message carried when present).
+        let never = std::cell::Cell::new(0u32);
+        let count = |_argv: &[String]| {
+            never.set(never.get() + 1);
+            (0, String::new(), String::new())
+        };
+        let inspect = |with_message: bool| {
+            move |command: std::process::Command| {
+                assert_eq!(command.get_program(), "fno");
+                let args: Vec<String> = command
+                    .get_args()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect();
+                let mut expected = vec![
+                    "agents".to_string(),
+                    "resume".to_string(),
+                    "live-w".to_string(),
+                    "--cwd".to_string(),
+                    "/tmp/x".to_string(),
+                ];
+                if with_message {
+                    expected.push("--message".to_string());
+                    expected.push("go".to_string());
+                }
+                assert_eq!(args, expected);
+                assert!(command.get_envs().any(|(k, v)| {
+                    k == std::ffi::OsStr::new("FNO_AGENTS_RUNTIME")
+                        && v == Some(std::ffi::OsStr::new("python"))
+                }));
+                9
+            }
+        };
+        for state in [Some("idle".to_string()), None] {
+            let code = claude_live_route_with(
+                "claude",
+                &None,
+                &None,
+                &live_entry(),
+                "live-w",
+                "/tmp/x",
+                &Some("go".to_string()),
+                None,
+                false,
+                count,
+                |short| (short == "abcd1234").then(|| state.clone()).flatten(),
+                inspect(true),
+            );
+            assert_eq!(code, Some(9));
+        }
+        let code = claude_live_route_with(
+            "claude",
+            &None,
+            &None,
+            &live_entry(),
+            "live-w",
+            "/tmp/x",
+            &None,
+            None,
+            false,
+            count,
+            |_| Some("working".to_string()),
+            inspect(false),
+        );
+        assert_eq!(code, Some(9));
+        assert_eq!(never.get(), 0);
     }
 }
