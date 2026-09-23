@@ -1203,6 +1203,18 @@ Per-agent pins win over combos when both are configured for the same agent: comb
 
 Unknown combo (in env or settings) logs a WARNING and falls through to the next rule. `ComboNotFoundError` is reserved for `dispatch_with_combo` itself (the silent-bypass-blocker that callers can catch and fall through cleanly).
 
+### What chooses the account a spawn bills
+
+`accounts.active` is rung four of `agents.dispatch_target.resolve_dispatch_target`. Failover and outage-handoff routes read it. It is a rotation pointer, not a spawn default. For a spawn, `agents.spawn_defaults.inject_spawn_defaults` checks the lane, then `agents.profiles.<verb>.account`, then `agents.defaults.account`. An explicit `--account` is the CLI pin.
+
+| Reading | Where it shows | What it means |
+|---|---|---|
+| `accounts.active` | `fno config get accounts.active` | the rotation pointer for failover. A project file overrides the global one. It is one key across harnesses. |
+| the list star | `fno config accounts list`, `*` | which managed record put the credential in the harness slot (the slot stamp) |
+| the identity cell | the same list, `identity=` | which account the slot credential serves, when proved |
+
+Pinning a default is `agents.defaults.account`, and it is the operator's call because it moves billing.
+
 ### Cursor state
 
 Per-combo cursors live in `provider-runtime-state.json` under `combo_cursors.<name>`:
