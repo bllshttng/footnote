@@ -93,7 +93,7 @@ The body holds the title, the question body, `## Options` with one `- [ ] N. <te
 
 ## The arm
 
-The `attention` arm beats every 30 s, reads the projection, routes each item to its crown, writes pages, settles, records and closes. The settle state lives at `~/.fno/attention/questions.json`; the projection cache at `~/.fno/attention/items.json` gains `questions_dir`, which the king check-in reads. `attention.enabled = false` is the kill switch: it stops every page write and answer read, checked on every beat. Routing is computed once, when the page is written, and never refreshed: a crown crowned later never sees older pages in its check-in. When the graph is unreadable the beat delivers nothing (`skip_reason: routing_unreadable`) and the next beat retries.
+The `attention` arm beats every 30 s, reads the projection, routes each item to its crown, writes pages, settles, records and closes. The settle state lives at `~/.fno/attention/questions.json`; the projection cache at `~/.fno/attention/items.json` gains `questions_dir`, which the king check-in reads. `attention.enabled = false` is the kill switch: it stops every page write and answer read, checked on every beat. The arm computes routing once at page-write time and never refreshes it: a crown crowned later never sees older pages in its check-in. When the graph is unreadable the beat delivers nothing (`skip_reason: routing_unreadable`) and the next beat retries.
 
 ## Config keys
 
