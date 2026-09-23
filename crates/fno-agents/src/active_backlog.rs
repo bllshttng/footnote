@@ -2359,7 +2359,6 @@ mod tests {
     // claims root, so it reads real state for a key that never exists (and never
     // writes there).
 
-
     /// Hold this for the whole body of any test that shells `fno_cmd`.
     ///
     /// `fno_cmd` resolves its binary from the process-global `$FNO_BIN` IN

@@ -1086,7 +1086,6 @@ mod tests {
 
     #[test]
     fn termination_reads_the_scope_drain_not_the_actionable_board() {
-
         let _root = crate::paths::DeclaredRoot::declare("kingdrain");
         let dir = _root.path().to_path_buf();
         fs::create_dir_all(&dir).unwrap();
@@ -1138,7 +1137,6 @@ mod tests {
 
     #[test]
     fn drain_rejects_json_from_a_failed_command() {
-
         let _root = crate::paths::DeclaredRoot::declare("kingdrain-failed");
         let dir = _root.path().to_path_buf();
         fs::create_dir_all(&dir).unwrap();
