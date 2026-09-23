@@ -14,7 +14,7 @@ metadata:
 # Reign
 
 When `$CODEX_THREAD_ID` is nonblank, before anything else, Print exactly once:
-`codex posture: reign has no /goal, /loop or Monitor on codex; the wake arm's backstop is this king's only beat.`
+`codex posture: reign uses the externally owned wake arm on codex; no native commands are injected.`
 
 You are the tenured king over `<scope>`. With `--once` you rule one wave and abdicate. Without it you stay. Your job is not to build. It is to keep the territory moving. Read indicators on a beat, pull levers, escalate what a lever cannot fix, and park when parked is the honest state.
 
@@ -42,49 +42,28 @@ How a crown is bestowed, the ladder and succession: [the crown model](references
 
 ## One wave: --once
 
-With `--once` the crown rules one wave and expires. Run Who runs this and On crowning, declare `fno agents king shape pass`, and skip the term. Skip Arm the beat: no monitor, no `/loop`, no `/goal`. Then run [the one-wave pass](references/once.md#run-it-in-this-order) in order and abdicate with `fno agents king done`. A kickoff that dispatches through `fno backlog advance` stays a pass. The wave is a court only when its workers are court teammates that mail you back: declare `fno agents king shape court` and run [court mode](references/once.md#court-mode-reign-over-the-wave) until the wave completes. The levers, Recording a ruling and the three halts apply to both shapes.
+With `--once` the crown rules one wave and expires. Run Who runs this and On crowning, declare `fno agents king shape pass`, and skip the term and native beat. Then run [the one-wave pass](references/once.md#run-it-in-this-order) in order and abdicate with `fno agents king done`. A kickoff that dispatches through `fno backlog advance` stays a pass. The wave is a court only when its workers are court teammates that mail you back: declare `fno agents king shape court` and run [court mode](references/once.md#court-mode-reign-over-the-wave) until the wave completes. The levers, Recording a ruling and the three halts apply to both shapes.
 
 ## Arm the beat
 
-Branch once on what the harness supports, before arming anything. Claude supports harness-tracked Monitors and self-injected native commands: run the full arm below. Codex supports none of them - no `/goal`, no `/loop`, no Monitor tool - and the codex posture line above is that branch: arm nothing native, inject neither command, and never read `CronList` or `/hooks` as a gate. The codex beat is the externally owned wake arm: verify the daemon waker row exists in `fno agents status`, and if it does not, report that honestly and stop - it is never a reason to attempt a native command. Every codex wake runs the check-in body below; that cadence is the reign.
+Branch once on what the harness supports, before arming anything. Claude gets the native `/loop` heartbeat and a shell watch; the watch runs with `claude --bg --exec`, so a quiet interval invokes no model. Codex, opencode, grok and agy use the harness-specific heartbeat or externally owned wake described in [the beat table](references/beat-by-harness.md). None of the harnesses injects `/goal` or arms a Monitor.
 
-On Claude, arm ONE monitor, not six. The 2026-09-10 measurement over one 12-hour reign is the arming contract: the stop hook drove all four real dispatches and the six monitor arms surfaced nothing the king acted on, and this skill charges court costs per wake, not per hour. The monitor is a harness-tracked Monitor running a shell until-loop that costs no tokens while waiting and wakes the session only when its condition changes. Then two self-injected native commands. The deleted arms are demand reads, not beats: mail arrives as a conversation turn and cannot be missed; the board, crown liveness and main CI are read when a decision needs them (the check-in body names each read); capacity is the spawn gate's job, which refused twice in that reign, correctly, while the band's five readings changed no decision.
+The old rule “On Claude, arm ONE monitor, not six” is retired; Claude now arms the loop and settled-PR watch.
 
-1. **Nudge-escalation wake, 600s.** The daemon nudge ladder owns every poke of a quiet session on an open PR. It mails a live session. It resumes one whose process is gone. After three nudges with no activity it files one operator question and emits `pr_nudge_escalated` (docs/reaping-faq.md). This arm never pokes a worker, so no crown adds a second writer. When `fno doctor event find pr_nudge_escalated --since 15m --json` returns a match whose `node` is one of this crown's nodes, the until-loop exits. Take the one `fno agents court --nodes` row whose `manifest_session` equals the `harness_session_id` that `fno whoami --json` prints. Keep its `scope_nodes.nodes` rows marked `owned: true`, so one crown wakes per node. No court row matching your session is a probe failure, never a quiet board. The same holds for a find payload whose `unreadable_files` is above zero. On wake, read the PR with `fno do pr status <n>`: a `ready` PR with no blockers takes the merge lever below. Anything else is the ladder's operator question, which the check-in's `held:` line carries, so name it in the next report. Never `fno agents resume` it: the ladder already tried three times. Measured 2026-09-19 to 2026-09-22: 341 ladder nudges and 10 escalations.
+The old “Nudge-escalation wake” arm label is retired; its event-driven behavior now lives in the settled-PR watch. Codex's branch must arm nothing native.
 
-A red settle does not belong to this arm. The daemon nudge ladder wakes a quiet worker once per red head and names the failing checks (docs/reaping-faq.md).
+1. **Settled-PR watch, 600s.** The daemon nudge ladder owns every poke of a quiet session on an open PR. After three nudges it emits `pr_nudge_escalated`; the watch reads that event, the crown row whose `manifest_session` matches, and its `scope_nodes.nodes` rows marked `owned: true`. A matching node with a ready, blocker-free `fno do pr status <n>` mails the crown one wrapped merge-lever line and exits. A missing crown row, `unreadable_files`, or any failed probe mails `reign watch probe failed: <reading>` and exits 1. The watch lock makes a second launch print its live pid and exit 0. Other matches stay quiet until the next poll.
 
-Every arm emits on **probe failure** as well as on the watched condition. A monitor that is silent when its instrument breaks reports "nothing happened" and "the reader is dead" with the same silence. Gate on a positive marker in the output, never on the exit code alone: `fno backlog show` does not exist and the failure exits 0, so an exit-code caller reads a missing verb as a healthy empty node.
+The watch is a demand arm, not a second board reader. Mail, board, crown liveness, CI, capacity and the tenure verdict remain check-in readings. A red settle stays with the daemon nudge ladder, which names the failing checks.
 
-Not monitored, because each has an owner: individual worker transcripts (court-mode watching, the machinery's job), per-PR CI (the merge arm and the heal driver), and the raw load average (the spawn gate refuses on its own reading, which is the owner a band monitor would only duplicate).
-
-Then, still on the Claude branch only, inject the two native commands, typing them as the operator would. **Send them in two separate turns, never in one breath.** `/goal` is a one-way door: the moment it lands, the stop hook holds the session open and it never idles again, so anything still queued behind it is never delivered. Sending both together leaves the loop waiting forever and the operator has to interrupt the session by hand to get it in. Writing `/loop` first in the same turn does NOT avoid this, because both land in the same input queue and the goal closes the door on whatever has not been read yet.
-
-Inject the loop, end the turn so the harness actually delivers it, then confirm a cron exists before going on:
+On Claude, inject the loop as the cheap heartbeat, then launch the watch as a background shell job:
 
 ```
 fno agents mail send "/loop ${king.checkin_interval} ${king.checkin_text}" --to-self --raw
+claude --bg --exec "bash <skill-dir>/scripts/settled-pr-watch.sh <scope> <harness-session-id>"
 ```
 
-`CronList` must now name the job. An empty list means the loop never landed, so re-send it and stop: a reign with a goal and no loop has no beat, and only the operator can restart one. Once the cron is there, inject the goal:
-
-```
-fno agents mail send "/goal ${king.goal_text}" --to-self --raw
-```
-
-Read both texts with `fno config get`. The defaults, verbatim, so a fresh install runs with no config:
-
-```
-king.checkin_interval = 4h
-king.checkin_text = reign check-in. Run fno agents king checkin: it gathers the check-in readings, prints them, diffs the last beat, and journals reign_checkin. Then act on the printout per the reign skill. When nothing changed and coverage is full, print 'no change' and stop. This beat is a heartbeat. 
-king.goal_text = reign goal. When every node in the crown scope reads done, superseded or will not do, the goal is met. An open operator question blocks completion. An empty actionable queue is a quiet beat, never a finish line. A stand-down order from the operator ends the reign. Until then keep reigning. Never /goal clear on NoProgress.
-```
-
-These defaults pass `fno doctor lint style`, and that is load-bearing rather than cosmetic. The mail bus lints the body it sends, so a default carrying a semicolon or a 26-word sentence refuses its own injection. A fresh install running this skill hit that on its first command and had to pass `--style-exception` to arm at all.
-
-The monitor and stop hook are the beat. The cron is a 4-hour heartbeat whose job is to prove the reign and its monitor are alive.
-
-Confirm the goal with `/hooks`. The loop was already confirmed by `CronList` above. Journal `reign_armed` (`fno doctor event emit`) with every receipt.
+The watch's lock makes relaunching it after each check-in or watch wake safe. Confirm the loop receipt, journal `reign_armed` (`fno doctor event emit`) with both receipts, and use the beat table for every other harness. A quiet watch costs zero king turns; only an event, mail or the heartbeat wakes the reign.
 
 ## The check-in body
 
@@ -100,7 +79,7 @@ Then run `fno agents king checkin` (bare from the crowned session, or `--scope <
 - `board:` the open PR count, the PRs with a free claim and no driver, and the blocked rows with what they are blocked on.
 - `blocked_child:` a child under this crown emitted `<help>` and nothing answered it inside the grace window - the node, the session, and the age.
  - `held:` nodes an open operator question blocks, oldest question first. Each row carries the question id, its age, and the `fno backlog decide <node> "<ruling>" --question-id <id>` command that clears it. When no question holds a node, the line reads `held: none`.
- - `scope <scope>:` the scope node counts, then the active rows with worker, PR and session (the `fno agents court -n` join).
+ - `scope <scope>:` leads with the owned active count. These are the active nodes no deeper live crown holds. Next: the active count in scope and the node total. Then the active rows with worker, PR and session (the `fno agents court -n` join).
  - `epics:` one line under the scope line. It lists each epic in the scope that holds an open direct child, fullest first, as `open/cap` against `backlog.epic_max_open_children`. `19/15 full` means the next child is refused, and `19/- (cap unset)` means no cap is set. The lead plans the split from this line, before a write bounces.
 - `territory:` one row per scope : rung, mission, live against `agents.max_live_per_territory` (the same projection the spawn gate's team cap enforces), the blueprinter handle with its liveness, and the kingless mark. A scope reading blind (the reading failed) is a machine-reported blind spot: name it in every escalation about that scope. The blueprinter is machinery-owned; you feed it nothing and reset nothing.
 - `capacity:` the PAIR - `fno doctor footprint`'s verdict and the spawn gate's own reading, with a `DISAGREE` marker when they differ and `unparsed_lines` named when that is the cause. Measured one second apart, the two gave "fleet CPU 26.8 percent, fine" and "fleet CPU attribution unavailable, refusing to spawn". The verdict does not predict whether a lever fires; the gate is the thing that actually refuses.
@@ -154,6 +133,8 @@ Read a ruling back with `fno backlog decisions <subject>` or `fno inbox decision
 
 The tenured reign does not dispatch. A `--once` pass dispatches only through its kickoff and its court, as [the one-wave pass](references/once.md) says. The single exception: `fno agents status` shows the dispatching arm red, and the spawn is journaled `reign_dispatch_exception` naming the arm and the node BEFORE the spawn fires. A spawn without that row is a defect. Journal it with:
 
+Before a crowned king launches a blueprint on a node, write its confirmed scope and known files or verbs into the node: `fno backlog update <node> --dispatch-brief "<scope; known files and verbs>"`. The brief is a starting point, not a fence, and never lists what to ignore. The blueprint prompt remains `$fno:blueprint <node>`; the brief travels on the node so every launcher gets the same scope.
+
 `fno doctor event emit -t reign_dispatch_exception -s loop -d '{"scope":"<scope>","arm":"<arm>","node":"<id>"}'`
 
 The `-s loop` source keeps the row out of the `test` default, so a king's exception does not masquerade as test output.
@@ -161,7 +142,7 @@ The exception uses the canonical implementation worker line in `references/court
 
 ## Stop and park
 
-Exit is blocked while actionable rows exist; that is the stop hook doing its job. A clean board exits `NoWork` and the loop re-enters on the next beat. `NoProgress` after three unshrinking fires escalates automatically and the session PARKS; the answer wakes it through the wake arm. Do not fight the hook, and do not `/goal clear` on NoProgress.
+Exit is blocked while actionable rows exist; that is the stop hook doing its job. A clean board, or a board waiting only on the user, CI or a worker, exits `NoWork`; the next beat, mail or settled-PR watch wakes the reign. `NoProgress` after three unshrinking fires still escalates automatically and parks the session; the answer wakes it through the wake arm. Do not fight the hook.
 
 ## The three halts
 

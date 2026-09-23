@@ -2,7 +2,7 @@
 
 Project context for AI agents (Claude Code, Gemini CLI, Codex CLI). Canonical source; `CLAUDE.md` / `GEMINI.md` are stubs that import it. Quick reference + index: deep subsystem mechanics live in `docs/` (see [Deep-dive docs](#deep-dive-docs)).
 
-****footnote** is a Claude Code plugin: an autonomous pipeline from idea to shipped PR (think -> plan -> do -> review -> ship). First time here? `fno config setup wizard` (terminal) or `/fno:setup` (in-session).
+****footnote** is a Claude Code plugin: idea -> shipped PR (think -> plan -> do -> review -> ship). Setup: `fno config setup wizard` or `/fno:setup`.
 
 ## Precedence and output style
 
@@ -20,8 +20,8 @@ Lead responses with the next action, number multi-step work, give concrete time 
 5. **Goal-driven execution.** Turn tasks into verifiable goals with a verify step each ("add validation" -> "write failing tests, make them pass").
 6. **Comments earn their place.** Match the surrounding file's comment density and idiom; add one only for a non-obvious invariant, race, or why-not-the-obvious. Never ticket/PR/node IDs. `scripts/ci/check-no-internal-refs.sh` fails on node IDs, prose and code alike; bare ticket and PR numbers still have no gate.
 7. **Reproduce before you fix.** Reproduce a bug end-to-end on the real user path before editing; the repro is also the proof the fix landed. When a UI is in the loop, exercise it and be picky (see #4).
-8. **Quality outweighs cost.** Weight quality, simplicity, robustness, and maintainability over effort-now. Never overrides #2.
-9. **Delete a leg, never a harness forcing two to agree.** Writing a parity guard is itself the trigger to port instead. Protocol: [dual-implementation-inventory](docs/architecture/dual-implementation-inventory.md).
+8. **Quality outweighs cost.** Prefer quality, simplicity and robustness over effort; never overrides #2.
+9. **Delete a leg, never a harness forcing two to agree.** Protocol: [dual-implementation-inventory](docs/architecture/dual-implementation-inventory.md). Plans here audit Python (`cli/src/fno`) and Rust (`crates/`) per surface by file:line or rg-absent, check the inventory, and explain one-leg fixes.
 
 ## Pitfalls corpus (capped)
 

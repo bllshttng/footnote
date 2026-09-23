@@ -237,15 +237,20 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             .iter()
             .any(|owner| owner == &session_id);
         if open_question {
-            return (
+            return terminate(
+                TerminationReason::NoWork,
+                "waiting on the user: an operator question this reign raised is open; the answer wakes the king",
                 0,
-                king_output(
-                    "block",
-                    None,
-                    "board clean but an operator question raised by this reign remains open",
-                    0,
-                    dry,
-                ),
+                dry,
+                &[],
+            );
+        }
+        if board.unreadable_sources {
+            return blind_block(
+                &crate::king_escalation::reading_sources_unreadable(),
+                "board quiet but some sources are unreadable; blocking completion",
+                0,
+                dry,
             );
         }
         // The goal keys completion on the crown draining, not on any queue
@@ -265,15 +270,6 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             )
         };
         if undelivered == 0 {
-            //: a floor count cannot see blind queues; refuse to certify.
-            if board.unreadable_sources {
-                return blind_block(
-                    &crate::king_escalation::reading_sources_unreadable(),
-                    "board quiet but some sources are unreadable; blocking completion",
-                    0,
-                    dry,
-                );
-            }
             return terminate(
                 TerminationReason::NoWork,
                 "board clean; exiting NoWork",
@@ -297,6 +293,17 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             "king_loop_check",
             crate::king_termination::king_undelivered_body(&session_id, undelivered, shrank),
         );
+        if drain_error.is_none() {
+            return terminate(
+                TerminationReason::NoWork,
+                &format!(
+                    "waiting on CI or a worker: {undelivered} driven rows undelivered; a quiet beat, not a finish line"
+                ),
+                0,
+                dry,
+                &[],
+            );
+        }
         if let Some(b) = bounded(dry, &message) {
             return terminate(b.reason, &b.message, 0, b.fires, &[reading]);
         }
