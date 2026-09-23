@@ -288,4 +288,61 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn release_receipt_returns_only_the_claim_it_unlinked() {
+        let temp = TempDir::new().unwrap();
+        with_claims_root(temp.path(), || {
+            let key = "node:release-receipt-test";
+            let root = Some(temp.path().to_path_buf());
+            let acquired = match claims::acquire(
+                key,
+                "target-session:owner",
+                claims::AcquireOpts {
+                    pid: Some(std::process::id()),
+                    root: root.clone(),
+                    ..Default::default()
+                },
+            ) {
+                claims::AcquireOutcome::Acquired(record) => record,
+                other => panic!("claim fixture failed: {other:?}"),
+            };
+
+            let released =
+                claims::release_with_receipt(key, &acquired.holder, Some(temp.path()), None)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(released.acquired_at, acquired.acquired_at);
+            assert!(
+                claims::release_with_receipt(key, &acquired.holder, Some(temp.path()), None,)
+                    .unwrap()
+                    .is_none()
+            );
+
+            let replacement = match claims::acquire(
+                key,
+                "target-session:replacement",
+                claims::AcquireOpts {
+                    pid: Some(std::process::id()),
+                    root,
+                    ..Default::default()
+                },
+            ) {
+                claims::AcquireOutcome::Acquired(record) => record,
+                other => panic!("replacement fixture failed: {other:?}"),
+            };
+            assert!(claims::release_with_receipt(
+                key,
+                "target-session:foreign",
+                Some(temp.path()),
+                None,
+            )
+            .unwrap()
+            .is_none());
+            assert_eq!(
+                claims::status(key, Some(temp.path())).1.unwrap().holder,
+                replacement.holder
+            );
+        });
+    }
 }

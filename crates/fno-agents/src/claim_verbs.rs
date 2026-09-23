@@ -160,14 +160,33 @@ pub fn run_claim(args: &[String]) -> i32 {
                 eprintln!("fno-agents: claim release requires --holder");
                 return 2;
             };
-            match crate::claims::release(
+            match crate::claims::release_with_receipt(
                 &key,
                 &holder,
                 opts.root.as_deref(),
                 opts.events_dir.as_deref(),
             ) {
-                Ok(()) => {
-                    println!("{}", serde_json::json!({"outcome": "released", "key": key}));
+                Ok(Some(claim)) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "outcome": "released",
+                            "released": true,
+                            "key": key,
+                            "claim": claim,
+                        })
+                    );
+                    0
+                }
+                Ok(None) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "outcome": "not_released",
+                            "released": false,
+                            "key": key,
+                        })
+                    );
                     0
                 }
                 Err(error) => {

@@ -2519,6 +2519,18 @@ pub fn release(
     root: Option<&Path>,
     events_dir: Option<&Path>,
 ) -> Result<(), String> {
+    release_with_receipt(key, holder, root, events_dir).map(|_| ())
+}
+
+/// Release a claim and return the exact record removed under the recovery
+/// mutex. A pre-read cannot stand in for this receipt: the holder may have
+/// changed between status and release.
+pub(crate) fn release_with_receipt(
+    key: &str,
+    holder: &str,
+    root: Option<&Path>,
+    events_dir: Option<&Path>,
+) -> Result<Option<ClaimRecord>, String> {
     if key.is_empty() || holder.is_empty() {
         return Err("key and holder must be non-empty".into());
     }
@@ -2526,22 +2538,22 @@ pub fn release(
     with_recovery_lock(&path, || {
         let existing = match read_claim_file(&path) {
             Ok(rec) => rec,
-            Err(ReadError::GoneAway) => return Ok(()),
-            Err(ReadError::Corrupted(_)) => return Ok(()),
+            Err(ReadError::GoneAway) => return Ok(None),
+            Err(ReadError::Corrupted(_)) => return Ok(None),
         };
         if existing.holder != holder {
-            return Ok(());
+            return Ok(None);
         }
         let duration_ms = (now_ms() - existing.acquired_at).max(0);
         match std::fs::remove_file(&path) {
             Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.to_string()),
         }
         let mut data = common_event_data(&existing);
         data.insert("duration_held_ms".into(), Value::Number(duration_ms.into()));
         emit_audit_event(events_dir, "claim_released", data);
-        Ok(())
+        Ok(Some(existing))
     })
 }
 /// Inspect a single key (mirrors `core.claim_status`). Never errors: a
