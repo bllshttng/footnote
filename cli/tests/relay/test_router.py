@@ -56,14 +56,14 @@ def test_resolve_node_unresolved_is_unroutable():
 
 
 def test_default_node_resolver_tolerates_graph_read_failure(monkeypatch):
-    # gemini PR #43: a read_graph() raise must yield None, not propagate.
+    # gemini PR #43: a read_graph_strict() raise must yield None, not propagate.
     import fno.graph.store as store
     from fno.relay.router import _default_node_resolver
 
     def _boom():
         raise RuntimeError("corrupt graph")
 
-    monkeypatch.setattr(store, "read_graph", _boom)
+    monkeypatch.setattr(store, "read_graph_strict", _boom)
     assert _default_node_resolver("fno-x") is None
 
 

@@ -18,7 +18,7 @@ def test_backend_visible_node_reads_active(tmp_path, monkeypatch):
     # Absent from every file on disk: only the backend holds it.
     node = {"id": "probe-node", "project": "fno", "cwd": str(repo_root)}
     monkeypatch.setattr(
-        "fno.graph.store.read_graph", lambda *a, **k: [node]
+        "fno.graph.store.read_graph_strict", lambda *a, **k: [node]
     )
     assert config_cli._repo_has_fno_activity(repo_root, None) is True
 
@@ -32,5 +32,5 @@ def test_unreachable_store_reads_dormant(tmp_path, monkeypatch):
     def boom(*a, **k):
         raise StoreUnavailable("unreachable", "keeper down")
 
-    monkeypatch.setattr("fno.graph.store.read_graph", boom)
+    monkeypatch.setattr("fno.graph.store.read_graph_strict", boom)
     assert config_cli._repo_has_fno_activity(repo_root, None) is False
