@@ -120,6 +120,7 @@ fn node_lists_children_blockers_and_live_sessions() {
         {"phase": "do", "session_id": "s-dead"},
         {"phase": "plan"}
     ]);
+    rows[3]["blocked_by"] = json!(["x-top"]);
     let mut agents = vec![row(Some("s-live"))];
     agents[0].pane_id = Some(3);
     let inp = fixture(rows);
