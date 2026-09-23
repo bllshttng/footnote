@@ -171,10 +171,10 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
             if crate::king_board::not_read_status(status) {
                 let err = queue.get("error").and_then(|v| v.as_str()).unwrap_or("");
                 blind_queues.push(if status == "over_budget" {
-                        format!("{name} not read: {err}")
-                    } else {
-                        format!("{name} is unreadable: {err}")
-                    });
+                    format!("{name} not read: {err}")
+                } else {
+                    format!("{name} is unreadable: {err}")
+                });
                 continue;
             }
             if name == "operator_question" {
@@ -650,7 +650,10 @@ mod tests {
         let parsed = parse_king_board_value(&board).unwrap();
         assert_eq!(
             parsed.spawn_held_ids,
-            vec!["unheld_progress:x-1".to_string(), "undriven_pr:2398".to_string()]
+            vec![
+                "unheld_progress:x-1".to_string(),
+                "undriven_pr:2398".to_string()
+            ]
         );
         assert_eq!(
             parsed.actionable_ids,
@@ -762,11 +765,7 @@ mod tests {
             "reason": "max_live",
             "message": "15 live worker slots >= max_live 15",
         });
-        std::fs::write(
-            &fno,
-            format!("#!/bin/sh\nprintf '%s\\n' '{payload}'\n"),
-        )
-        .unwrap();
+        std::fs::write(&fno, format!("#!/bin/sh\nprintf '%s\\n' '{payload}'\n")).unwrap();
         let mut permissions = std::fs::metadata(&fno).unwrap().permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&fno, permissions).unwrap();
@@ -831,7 +830,9 @@ mod tests {
         let gate = capacity_gate(&board, fno.to_str().unwrap(), tmp.path(), "king", 0, &emit)
             .expect("a refused probe must classify the spawn-held queues");
         match gate {
-            CapacityGate::Saturated { blocked, message, .. } => {
+            CapacityGate::Saturated {
+                blocked, message, ..
+            } => {
                 assert_eq!(blocked, 2);
                 assert!(message.contains("live workers exiting"), "{message}");
             }
@@ -869,7 +870,10 @@ mod tests {
                 actionable,
             } => {
                 assert_eq!(actionable, 2);
-                assert!(message.contains("not read: unplanned is unreadable"), "{message}");
+                assert!(
+                    message.contains("not read: unplanned is unreadable"),
+                    "{message}"
+                );
                 assert!(message.contains("live workers exiting"), "{message}");
             }
             _ => panic!("expected blind saturation to stay distinct from NoWork"),

@@ -1236,9 +1236,8 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let incident_path = crate::fleet_incident::fleet_stop_path(
-            &crate::paths::AgentsHome::at(&home),
-        );
+        let incident_path =
+            crate::fleet_incident::fleet_stop_path(&crate::paths::AgentsHome::at(&home));
         let record = crate::fleet_incident::IncidentRecord {
             version: crate::fleet_incident::STATE_VERSION,
             state: "stopped".into(),
@@ -1253,14 +1252,20 @@ mod tests {
         let stopped = probe::answer(&json!({}));
         assert_eq!(stopped["verdict"], "refused");
         assert_eq!(stopped["reason"], "fleet-stop");
-        assert!(stopped["message"].as_str().unwrap().contains("generation 19"));
+        assert!(stopped["message"]
+            .as_str()
+            .unwrap()
+            .contains("generation 19"));
         assert!(stopped["lanes"].is_object(), "{stopped}");
 
         std::fs::write(&incident_path, b"broken").unwrap();
         let unreadable = probe::answer(&json!({}));
         assert_eq!(unreadable["verdict"], "refused");
         assert_eq!(unreadable["reason"], "fleet-stop-unavailable");
-        assert!(unreadable["message"].as_str().unwrap().contains("unreadable"));
+        assert!(unreadable["message"]
+            .as_str()
+            .unwrap()
+            .contains("unreadable"));
 
         let _ = std::fs::remove_file(&incident_path);
         let clear = probe::answer(&json!({}));

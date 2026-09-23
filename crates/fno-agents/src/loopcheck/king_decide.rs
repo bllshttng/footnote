@@ -398,10 +398,7 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
 }
 
 fn king_board_block_message(board: &crate::king_termination::KingBoard) -> String {
-    let top = board
-        .top_row
-        .as_deref()
-        .unwrap_or("an actionable queue");
+    let top = board.top_row.as_deref().unwrap_or("an actionable queue");
     let mut message = format!("{} actionable; next: {top}", board.actionable);
     if !board.blind_queues.is_empty() {
         message.push_str(&format!("; not read: {}", board.blind_queues.join(", ")));
