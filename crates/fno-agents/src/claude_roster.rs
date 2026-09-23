@@ -335,10 +335,12 @@ fn run_all_agents_command_in(
 /// from the accounts config the same way the mux's `agents_view` reads them
 /// (the crates share no types; the FILE is the contract). Managed accounts
 /// carry no `config_dir` and contribute nothing, so an all-managed config
-/// degrades to the single ambient read. Source precedence: project-local
-/// `.fno/config.toml`, then the `$FNO_GLOBAL_SETTINGS_PATH` sibling, then
-/// `~/.fno/config.toml`. Fail-open to empty: an unreadable config means no
-/// known isolated roots, and the union degrades to the ambient read.
+/// degrades to the single ambient read. Every source is read and the results
+/// merge first-wins per id (project-local `.fno/config.toml`, then the
+/// `$FNO_GLOBAL_SETTINGS_PATH` sibling, then `~/.fno/config.toml`), so one
+/// source's record never hides another source's account. Fail-open to empty:
+/// an unreadable config means no known isolated roots, and the union
+/// degrades to the ambient read.
 pub fn isolated_account_dirs() -> Vec<(String, std::path::PathBuf)> {
     let mut sources: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
@@ -356,16 +358,19 @@ pub fn isolated_account_dirs() -> Vec<(String, std::path::PathBuf)> {
                 .join("config.toml"),
         );
     }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::new();
     for path in sources {
         let Ok(body) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let parsed = parse_isolated_config_dirs(&body, std::env::var_os("HOME").as_deref());
-        if !parsed.is_empty() {
-            return parsed;
+        for (id, dir) in parse_isolated_config_dirs(&body, std::env::var_os("HOME").as_deref()) {
+            if seen.insert(id.clone()) {
+                out.push((id, dir));
+            }
         }
     }
-    Vec::new()
+    out
 }
 
 /// The config dir a removal must address for this row, `None` meaning the
@@ -1190,5 +1195,74 @@ mod tests {
         }
         assert!(result.is_err(), "the injected panic did not run");
         assert_eq!(observed, previous, "the helper leaked its environment");
+    }
+
+    // Every source is read, first wins per id: project-local over global over
+    // home, so one source's record never hides another's.
+    #[test]
+    fn isolated_account_dirs_merge_sources_first_wins_per_id() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let global = std::env::temp_dir().join(format!(
+            "fno-roster-merge-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let home = global.with_file_name(format!(
+            "{}-h",
+            global.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let toml_g = r#"
+[[accounts.records]]
+id = "makers"
+config_dir = "dir-g"
+
+[[accounts.records]]
+id = "beta"
+config_dir = "dir-b"
+"#;
+        let toml_h = r#"
+[[accounts.records]]
+id = "makers"
+config_dir = "dir-h"
+
+[[accounts.records]]
+id = "gamma"
+config_dir = "dir-c"
+"#;
+        std::fs::write(global.join("config.toml"), toml_g).unwrap();
+        std::fs::write(home.join("config.toml"), toml_h).unwrap();
+        let previous_home = std::env::var_os("HOME");
+        let previous_global = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH");
+        std::env::set_var("HOME", &home);
+        std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", global.join("settings.toml"));
+        let out = isolated_account_dirs();
+        match previous_global {
+            Some(v) => std::env::set_var("FNO_GLOBAL_SETTINGS_PATH", v),
+            None => std::env::remove_var("FNO_GLOBAL_SETTINGS_PATH"),
+        }
+        match previous_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        assert_eq!(out.len(), 3);
+        assert_eq!(
+            out[0],
+            ("makers".to_string(), std::path::PathBuf::from("dir-g"))
+        );
+        assert_eq!(
+            out[1],
+            ("beta".to_string(), std::path::PathBuf::from("dir-b"))
+        );
+        assert_eq!(
+            out[2],
+            ("gamma".to_string(), std::path::PathBuf::from("dir-c"))
+        );
     }
 }
