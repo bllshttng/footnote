@@ -8762,7 +8762,7 @@ def cmd_reconcile_findings(
             f"addressed on PR #{f.pr_number} ({f.signal}); retro reconcile-findings "
             f"re-check - fix landed without the thread being resolved/replied"
         )
-        proc = subprocess.run(["fno", "backlog", "done", f.node_id, "--force", "--reason", reason])
+        proc = subprocess.run(["fno", "backlog", "done", f.node_id, "--note", reason])
         if proc.returncode == 0:
             closed += 1
         else:
