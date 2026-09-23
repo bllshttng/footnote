@@ -706,8 +706,9 @@ fn fold_user_ask_answered(
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default();
-    // TEMP-REVERT for split commits; restored in the next commit.
-    let raw = std::fs::read_to_string(index).unwrap_or_default();
+    // Store rows first: Python commits answers to questions.db without
+    // touching the raw journal, so a raw read misses them.
+    let raw = crate::event_store::journal_text(index, &["user_ask_answered"]);
     let mut appended = 0u64;
     let mut dirty = false;
     for line in raw.lines() {

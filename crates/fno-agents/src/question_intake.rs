@@ -134,6 +134,7 @@ fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 /// One open question seen in the index, for dedup and the receipt.
+#[derive(Debug)]
 struct OpenRow {
     id: String,
     ts: String,
@@ -146,7 +147,10 @@ struct OpenRow {
 /// malformed line is skipped; the receipt is advisory and dedup is best
 /// effort against the rows that do parse.
 fn open_rows(index: &Path) -> Vec<OpenRow> {
-    let raw = std::fs::read_to_string(index).unwrap_or_default();
+    // Store rows first: Python commits closes to questions.db without
+    // touching the raw journal, so a raw read marks closed questions open.
+    let raw =
+        crate::event_store::journal_text(index, &["operator_question", "operator_question_closed"]);
     let mut asked: Map<String, Value> = Map::new();
     let mut closed: Vec<String> = Vec::new();
     for line in raw.lines() {
@@ -798,5 +802,34 @@ stops
         let answer = run_intake(&req("newest question", &root), &home);
         assert_eq!(answer.total, Some(2));
         assert_eq!(answer.position, Some(1), "newest sorts first");
+    }
+
+    #[test]
+    fn ac5_hp_a_store_only_close_unmarks_the_question() {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "fno-agents-qintake-openrows-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        let index = p.join("questions.jsonl");
+        let ask = r#"{"ts":"2026-09-23T01:00:00Z","type":"operator_question","source":"agent","data":{"question_id":"q-t1","question":"ship?","blocks":[]}}"#;
+        std::fs::write(&index, format!("{ask}\n")).unwrap();
+        let close = json!({
+            "ts": "2026-09-23T01:05:00Z",
+            "type": "operator_question_closed",
+            "source": "agent",
+            "data": {"question_id": "q-t1"}
+        });
+        crate::event_store::append_envelope(&index, &close.to_string(), None).unwrap();
+        let open = open_rows(&index);
+        assert!(
+            open.iter().all(|r| r.id != "q-t1"),
+            "a store-only close must unmark the question: {open:?}"
+        );
     }
 }
