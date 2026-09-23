@@ -8,7 +8,7 @@
 //! only (unreadable stdin, bad JSON), the same contract `spawn-axes` uses.
 
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -124,6 +124,42 @@ fn decide(payload: &Value) -> (Value, Option<String>) {
             (json!({ "workdir": stdout }), receipt)
         }
     }
+}
+
+/// The typed answer the hosted Codex thread lane reads. The same `decide`
+/// contract unwrapped: the node's worktree path, or the hold reason.
+pub(crate) fn ensure_node_workdir(
+    cwd: &Path,
+    node: &str,
+    harness: &str,
+) -> Result<PathBuf, String> {
+    let payload = json!({
+        "recorded_cwd": cwd.to_string_lossy(),
+        "node": node,
+        "harness": harness,
+    });
+    let (answer, _receipt) = decide(&payload);
+    if let Some(hold) = answer.get("hold").and_then(Value::as_str) {
+        return Err(hold.to_string());
+    }
+    match answer.get("workdir").and_then(Value::as_str) {
+        Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
+        _ => Err("launch-workdir answered neither a workdir nor a hold".to_string()),
+    }
+}
+
+/// True when `cwd` IS a repository's canonical checkout: its git common dir
+/// lives inside it. A linked worktree's common dir lives in the canonical
+/// tree instead, so it reads false there - the lane must never re-home a
+/// spawn whose cwd already is a worktree.
+pub(crate) fn is_canonical_checkout(cwd: &Path) -> bool {
+    let Some(common) = crate::provider::git_common_dir(cwd) else {
+        return false;
+    };
+    let (Ok(root), Ok(common)) = (cwd.canonicalize(), PathBuf::from(common).canonicalize()) else {
+        return false;
+    };
+    common.starts_with(root)
 }
 
 #[cfg(test)]

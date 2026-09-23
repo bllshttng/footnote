@@ -1882,3 +1882,475 @@ async fn recovery_resume_carries_the_stored_config() {
     })
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// Node-backed hosted Codex target threads start in their node worktree
+// (x-ecf4). The fixture gives the lane a REAL canonical checkout (its git
+// common dir lives inside it) plus a fake `fno-py` whose worktree ensure
+// answers `answer` and exits `exit`; FNO_PY is what the ensure resolves, so
+// the fake IS the ensure.
+// ---------------------------------------------------------------------------
+
+/// A canonical-checkout fixture: a real git repo plus a fake `fno-py`. The
+/// tempdir must stay bound for the fixture's lifetime; the returned path is
+/// the binary to publish on FNO_PY under the crate's env lock.
+fn codex_target_launch_cwd_fixture(answer: &str, exit: i32) -> (tempfile::TempDir, PathBuf) {
+    let repo = tempfile::tempdir().unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(repo.path())
+        .status()
+        .unwrap();
+    let bin = repo.path().join("fno-py");
+    std::fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\necho '{answer}'\necho 'worktree ensure: reusing ... created=false' >&2\nexit {exit}\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&bin).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&bin, perm).unwrap();
+    }
+    (repo, bin)
+}
+
+/// The Nth `thread/start` frame the lane ended up sending, waited for
+/// rather than raced: the seed submit is async in the actor.
+async fn codex_target_launch_cwd_thread_start(
+    received: &std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    nth: usize,
+) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let frame = received
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|f| f["method"] == "thread/start")
+            .nth(nth)
+            .cloned();
+        if frame.is_some() || std::time::Instant::now() >= deadline {
+            return frame.expect("thread/start never arrived");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+fn codex_target_launch_cwd_registry_row(home: &AgentsHome, name: &str) -> serde_json::Value {
+    let Ok(raw) = std::fs::read_to_string(home.registry_json()) else {
+        return serde_json::Value::Null;
+    };
+    let registry: serde_json::Value = serde_json::from_str(&raw).expect("registry json");
+    registry["agents"]
+        .as_array()
+        .and_then(|entries| entries.iter().find(|entry| entry["name"] == name).cloned())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// AC1: a node-backed target seeded from the canonical checkout is born in
+/// the node's worktree - the SAME path on the thread/start frame, the
+/// registry row, and the agent_spawned birth event.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_target_launch_cwd_binds_a_canonical_node_target_to_its_worktree() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    let received = std::sync::Arc::clone(&behavior.received);
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-target-cwd-bind");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let (repo, bin) = codex_target_launch_cwd_fixture("", 0);
+        let commit = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "init",
+            ])
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        assert!(commit.success(), "fixture commit failed: {commit}");
+        let worktree = repo.path().join("node-wt");
+        let add_worktree = std::process::Command::new("git")
+            .args(["worktree", "add", "-q", "-b", "feature/x-ecf4"])
+            .arg(&worktree)
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        assert!(add_worktree.success(), "fixture worktree failed: {add_worktree}");
+        let worktree = worktree.to_string_lossy().into_owned();
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\necho '{worktree}'\necho 'worktree ensure: reusing node worktree created=false' >&2\nexit 0\n"
+            ),
+        )
+        .unwrap();
+        std::env::set_var("FNO_PY", &bin);
+
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": repo.path().to_string_lossy(),
+                "node": "x-ecf4",
+                "message": "/fno:target do the work",
+            }),
+        );
+        let spawned = handle_spawn(&ctx, &req).await;
+        assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+
+        let frame = codex_target_launch_cwd_thread_start(&received, 0).await;
+        assert_eq!(
+            frame["params"]["cwd"], worktree,
+            "thread/start is born in the node worktree: {frame}"
+        );
+        let row = codex_target_launch_cwd_registry_row(&home, "t");
+        assert_eq!(
+            row["cwd"], worktree,
+            "the registry row names the node worktree: {row}"
+        );
+        let birth = read_events(&home)
+            .into_iter()
+            .find(|event| event["type"] == "agent_spawned" && event["data"]["name"] == "t")
+            .expect("birth event");
+        assert_eq!(
+            birth["data"]["cwd"], worktree,
+            "the birth event names the node worktree: {birth}"
+        );
+
+        ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// AC2: a refused ensure refuses the WHOLE spawn - no thread, no registry
+/// row, no birth event, and the error names the node and the failing ensure
+/// condition. Starting on canonical as a fallback would be the exact
+/// outcome this lane exists to prevent.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_target_launch_cwd_refusal_starts_nothing() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-target-cwd-refusal");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let (repo, bin) = codex_target_launch_cwd_fixture("", 1);
+        std::env::set_var("FNO_PY", &bin);
+
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": repo.path().to_string_lossy(),
+                "node": "x-ecf4",
+                "message": "/fno:target seed",
+            }),
+        );
+        let spawned = handle_spawn(&ctx, &req).await;
+        let message = match &spawned.payload {
+            crate::protocol::ResponsePayload::Err(e) => e.message.clone(),
+            _ => panic!("spawn should refuse: {spawned:?}"),
+        };
+        assert!(
+            message.contains("x-ecf4") && message.contains("worktree ensure"),
+            "refusal names the node and the failing ensure condition: {message}"
+        );
+        assert_eq!(
+            codex_target_launch_cwd_registry_row(&home, "t"),
+            serde_json::Value::Null,
+            "no registry row for a refused spawn"
+        );
+        let events = read_events(&home);
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["type"] == "agent_spawned" && event["data"]["name"] == "t"),
+            "no birth event for a refused spawn: {events:?}"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// AC3 (unchanged seed): a non-target seed with a node keeps the requested
+/// cwd - the ensure is never consulted, which the refusing fake proves: a
+/// consult would have refused the spawn.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_target_launch_cwd_keeps_a_non_target_seed() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    let received = std::sync::Arc::clone(&behavior.received);
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-target-cwd-keep");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let (repo, bin) = codex_target_launch_cwd_fixture("", 1);
+        std::env::set_var("FNO_PY", &bin);
+        let canonical = repo.path().to_string_lossy().to_string();
+
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": canonical,
+                "node": "x-1",
+                "message": "plain prose, no verb",
+            }),
+        );
+        let spawned = handle_spawn(&ctx, &req).await;
+        assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+        let frame = codex_target_launch_cwd_thread_start(&received, 0).await;
+        assert_eq!(frame["params"]["cwd"], canonical, "non-target keeps cwd");
+
+        ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// AC3 (unchanged seed): a node-less target keeps the requested cwd.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_target_launch_cwd_keeps_a_node_less_target() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    let received = std::sync::Arc::clone(&behavior.received);
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-target-cwd-nodeless");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let (repo, bin) = codex_target_launch_cwd_fixture("", 1);
+        std::env::set_var("FNO_PY", &bin);
+        let canonical = repo.path().to_string_lossy().to_string();
+
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": canonical,
+                "message": "$fno:target do the work",
+            }),
+        );
+        let spawned = handle_spawn(&ctx, &req).await;
+        assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+        let frame = codex_target_launch_cwd_thread_start(&received, 0).await;
+        assert_eq!(frame["params"]["cwd"], canonical, "node-less keeps cwd");
+
+        ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// AC3 (already a worktree): a target seeded from a LINKED worktree keeps
+/// that worktree - the canonical check reads false, the ensure is never
+/// consulted (the refusing fake proves it), and no second worktree is
+/// minted.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_target_launch_cwd_keeps_a_cwd_that_already_is_a_worktree() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    let received = std::sync::Arc::clone(&behavior.received);
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-target-cwd-linked");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let (repo, bin) = codex_target_launch_cwd_fixture("", 1);
+        std::env::set_var("FNO_PY", &bin);
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "init",
+            ])
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        let linked = repo.path().join("linked");
+        std::process::Command::new("git")
+            .args(["worktree", "add", "-q", "-b", "lb", "linked"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": linked.to_string_lossy(),
+                "node": "x-1",
+                "message": "/fno:target do the work",
+            }),
+        );
+        let spawned = handle_spawn(&ctx, &req).await;
+        assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+        let frame = codex_target_launch_cwd_thread_start(&received, 0).await;
+        assert_eq!(
+            frame["params"]["cwd"],
+            linked.to_string_lossy().to_string(),
+            "a linked-worktree cwd is preserved verbatim"
+        );
+        ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// AC3 (policy `never`): the ensure answers the canonical path itself, so
+/// the requested cwd is preserved without minting a worktree. The fake
+/// models exactly that: exit 0, answer = the repo path.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_target_launch_cwd_policy_never_keeps_the_requested_cwd() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    let received = std::sync::Arc::clone(&behavior.received);
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-target-cwd-never");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let (repo, bin) = codex_target_launch_cwd_fixture("", 0);
+        std::env::set_var("FNO_PY", &bin);
+        let canonical = repo.path().to_string_lossy().to_string();
+        // Make the fake answer the repo path like policy `never` does.
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\necho '{canonical}'\necho 'worktree ensure: policy never' >&2\nexit 0\n"
+            ),
+        )
+        .unwrap();
+
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": canonical,
+                "node": "x-1",
+                "message": "/fno:target do the work",
+            }),
+        );
+        let spawned = handle_spawn(&ctx, &req).await;
+        assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+        let frame = codex_target_launch_cwd_thread_start(&received, 0).await;
+        assert_eq!(frame["params"]["cwd"], canonical, "policy never keeps cwd");
+
+        ctx.codex_threads.lock().await.remove("t");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
+
+/// AC4: if the ensured node worktree disappears before thread creation, the
+/// spawn refuses without starting or registering a thread on that missing cwd.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_target_launch_cwd_refuses_a_worktree_removed_after_ensure() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let behavior = crate::codex_fake_daemon::Behavior::quick();
+    let received = std::sync::Arc::clone(&behavior.received);
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-target-cwd-removed");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let (repo, bin) = codex_target_launch_cwd_fixture("", 0);
+        let worktree = repo.path().join("node-wt");
+        std::fs::create_dir(&worktree).unwrap();
+        let worktree = worktree.to_string_lossy().to_string();
+        std::fs::write(
+            &bin,
+            format!("#!/bin/sh\ncat >/dev/null\necho '{worktree}'\nrmdir '{worktree}'\nexit 0\n"),
+        )
+        .unwrap();
+        std::env::set_var("FNO_PY", &bin);
+
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": repo.path().to_string_lossy(),
+                "node": "x-ecf4",
+                "message": "/fno:target do the work",
+            }),
+        );
+        let spawned = handle_spawn(&ctx, &req).await;
+        assert!(
+            !std::path::Path::new(&worktree).exists(),
+            "the fake ensure removed its returned node worktree"
+        );
+        let message = match &spawned.payload {
+            crate::protocol::ResponsePayload::Err(error) => error.message.clone(),
+            _ => panic!("spawn should refuse a removed worktree: {spawned:?}"),
+        };
+        assert!(
+            message.contains("x-ecf4") && message.contains("worktree"),
+            "refusal names the node and missing worktree: {message}"
+        );
+        assert!(
+            received
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .all(|frame| frame["method"] != "thread/start"),
+            "removed worktree must be rejected before thread/start"
+        );
+        assert_eq!(
+            codex_target_launch_cwd_registry_row(&home, "t"),
+            serde_json::Value::Null,
+            "no registry row for a refused spawn"
+        );
+        assert!(
+            !read_events(&home)
+                .iter()
+                .any(|event| event["type"] == "agent_spawned" && event["data"]["name"] == "t"),
+            "no birth event for a refused spawn"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+}
