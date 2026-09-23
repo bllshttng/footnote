@@ -419,8 +419,9 @@ _RECOVERY_ROOT_FLOOR_S = 3.0
 #: Per-phase alarm caps : each phase runs under its own slice,
 #: min(cap, seconds left before the tick ceiling). Every-tick caps are p90s
 #: of 50 measured ticks (2026-09-17, events.jsonl), rounded up; sweep and
-#: merge are the epic's core work and keep their measured room. The fleet
-#: Merge runs last uncapped. The fit test proves the _MERGE_FLOOR_S floor.
+#: merge has no cap and runs last, taking whatever tick time remains.
+
+#: The fit test proves the _MERGE_FLOOR_S floor.
 _EVERY_TICK_CAP_S: dict[str, float] = {
     "settings": 10,
     "sweep": 150,
