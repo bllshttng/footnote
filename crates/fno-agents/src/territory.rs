@@ -720,13 +720,22 @@ pub fn territory_cap(config_cwd: &Path) -> u32 {
 
 /// Live and suspect node lockfiles are the single holder answer. `false`
 /// excludes claims proven stale; a failed directory scan stays unknown.
-pub(crate) fn live_node_claims() -> Result<HashSet<String>, TerritoryUnknown> {
-    let records = crate::claims::list_strict(Some("node:"), None, false)
+fn live_node_claims_from(
+    directory: Option<std::path::PathBuf>,
+) -> Result<HashSet<String>, TerritoryUnknown> {
+    let directory = directory.ok_or_else(|| {
+        TerritoryUnknown("territory: claims path unavailable from FNO_CLAIMS_ROOT or HOME".into())
+    })?;
+    let records = crate::claims::list_in_strict(&[directory], Some("node:"), false)
         .map_err(|error| TerritoryUnknown(format!("territory: claims unreadable: {error}")))?;
     Ok(records
         .into_iter()
         .filter_map(|record| record.key.strip_prefix("node:").map(str::to_string))
         .collect())
+}
+
+pub(crate) fn live_node_claims() -> Result<HashSet<String>, TerritoryUnknown> {
+    live_node_claims_from(crate::claims::claims_dir_for(None))
 }
 
 pub(crate) fn live_held_in(node_ids: &HashSet<String>, held: &HashSet<String>) -> usize {
@@ -1423,6 +1432,12 @@ path = "/repo/alpha"
             "{rows:?}"
         );
         assert!(rows[0]["live"].is_null(), "{rows:?}");
+    }
+
+    #[test]
+    fn missing_claim_root_is_unknown_not_zero() {
+        let error = live_node_claims_from(None).unwrap_err();
+        assert!(error.0.contains("claims path unavailable"), "{error:?}");
     }
 
     #[test]
