@@ -348,18 +348,27 @@ mod probe {
         if let Err(refusal) = spawn_gate_lanes::check_registry_schema(&registry_path, &mut warnings)
         {
             let receipt = refusal.receipt.unwrap_or(Value::Null);
-            return json!({
-                "verdict": "refused",
-                "reason": "registry_schema",
-                "message": format!(
-                    "registry schema {} ahead of schema {} this fno understands; run fno doctor update",
-                    receipt.get("on_disk").map(|v| v.to_string()).unwrap_or_default(),
-                    receipt.get("understood").map(|v| v.to_string()).unwrap_or_default()
-                ),
-                "on_disk": receipt.get("on_disk").cloned().unwrap_or(Value::Null),
-                "understood": receipt.get("understood").cloned().unwrap_or(Value::Null),
-                "rows": [],
-            });
+            let message = format!(
+                "registry schema {} ahead of schema {} this fno understands; run fno doctor update",
+                receipt
+                    .get("on_disk")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+                receipt
+                    .get("understood")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
+            );
+            return refuse_with(
+                "registry_schema",
+                message,
+                json!({
+                    "on_disk": receipt.get("on_disk").cloned().unwrap_or(Value::Null),
+                    "understood": receipt.get("understood").cloned().unwrap_or(Value::Null),
+                }),
+                &[],
+                out,
+            );
         }
 
         // Read provider lanes before any refusal so the answer preserves the
@@ -691,6 +700,22 @@ fn refuse_with(
     rows: &[Value],
     mut out: Map<String, Value>,
 ) -> Value {
+    let mut refusal_rows = rows.to_vec();
+    if !refusal_rows.iter().any(|row| {
+        matches!(
+            row.get("verdict").and_then(Value::as_str),
+            Some("refuse" | "hold")
+        )
+    }) {
+        refusal_rows.push(json!({
+            "name": "gate-verdict",
+            "measured": reason,
+            "threshold": "accepted",
+            "verdict": "refuse",
+            "note": message.clone(),
+        }));
+    }
+
     out.insert("verdict".into(), json!("refused"));
     out.insert("reason".into(), json!(reason));
     out.insert("message".into(), json!(message));
@@ -701,7 +726,7 @@ fn refuse_with(
             out.insert(k, v);
         }
     }
-    out.insert("rows".into(), json!(rows));
+    out.insert("rows".into(), json!(refusal_rows));
     Value::Object(out)
 }
 
@@ -1031,6 +1056,123 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn probe_registry_schema_refusal_names_its_reason_row() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir =
+            std::env::temp_dir().join(format!("fno-verb-registry-schema-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let registry_path = home.join("registry.json");
+        let on_disk = crate::state::REGISTRY_SCHEMA_VERSION as u64 + 1;
+        std::fs::write(
+            &registry_path,
+            format!(r#"{{"schema_version":{on_disk},"entries":[]}}"#),
+        )
+        .unwrap();
+
+        let prior_home = std::env::var_os(crate::paths::HOME_ENV);
+        let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+        std::env::set_var("FNO_CONFIG", dir.join(".fno").join("config.toml"));
+
+        let answer = probe::answer(&json!({
+            "name": "probe-registry-schema",
+            "substrate": "headless",
+        }));
+
+        match prior_home {
+            Some(value) => std::env::set_var(crate::paths::HOME_ENV, value),
+            None => std::env::remove_var(crate::paths::HOME_ENV),
+        }
+        match prior_claims_root {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+
+        assert_eq!(answer["verdict"], "refused");
+        assert_eq!(answer["reason"], "registry_schema");
+        assert_eq!(answer["on_disk"], on_disk);
+        let rows = answer["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], "gate-verdict");
+        assert_eq!(rows[0]["measured"], "registry_schema");
+        assert_eq!(rows[0]["verdict"], "refuse");
+        assert_eq!(rows[0]["note"], answer["message"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuse_with_emits_gate_verdict_when_no_measurement_row_refuses() {
+        let message = "king share is active";
+        let answer = refuse_with(
+            "king_share",
+            String::from(message),
+            json!({}),
+            &[],
+            Map::new(),
+        );
+
+        let rows = answer["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], "gate-verdict");
+        assert_eq!(rows[0]["measured"], "king_share");
+        assert_eq!(rows[0]["threshold"], "accepted");
+        assert_eq!(rows[0]["verdict"], "refuse");
+        assert_eq!(rows[0]["note"], message);
+    }
+
+    #[test]
+    fn refuse_with_keeps_an_existing_refusal_without_adding_a_generic_row() {
+        let measured = fleet_row(3, 3);
+        let answer = refuse_with(
+            "max_live",
+            "fleet full".to_string(),
+            json!({}),
+            std::slice::from_ref(&measured),
+            Map::new(),
+        );
+
+        let rows = answer["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], measured);
+        assert_eq!(rows[0]["name"], "fleet-rows");
+        assert_eq!(rows[0]["verdict"], "refuse");
+    }
+
+    #[test]
+    fn refuse_with_keeps_a_held_measurement_without_adding_a_generic_row() {
+        let held = json!({
+            "name": "cpu-share",
+            "measured": "2.10/12.00 cores",
+            "threshold": "50%",
+            "verdict": "hold",
+            "note": "measurement unavailable",
+        });
+        let answer = refuse_with(
+            "fleet_cpu_share",
+            "CPU measurement unavailable".to_string(),
+            json!({}),
+            std::slice::from_ref(&held),
+            Map::new(),
+        );
+
+        let rows = answer["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], held);
+        assert_eq!(rows[0]["name"], "cpu-share");
+        assert_eq!(rows[0]["verdict"], "hold");
     }
 
     fn mem(
