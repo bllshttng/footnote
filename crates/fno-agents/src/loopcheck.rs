@@ -9528,7 +9528,7 @@ mod bounded_read;
 pub(crate) use bounded_read::ReadErrorKind;
 pub(crate) use bounded_read::{
     bounded_read, bounded_read_diagnostic, log_bounded_read_error, run_bounded, BoundedOutput,
-    BoundedRun, GhReadError, BOUNDED_STDERR_TAIL_CAP,
+    BoundedRun, GhReadError,
 };
 pub(crate) use read_bounds::stopgate_pre_drain_spent;
 pub(crate) use read_bounds::{
@@ -9677,6 +9677,11 @@ pub(crate) fn git_bounded(git_bin: &str, args: &[&str], cwd: &Path) -> Option<Bo
             log_bounded_read_error("git", &error);
             None
         }
+        BoundedRun::Refused => {
+            let error = GhReadError::budget_refused(&read_name);
+            log_bounded_read_error("git", &error);
+            None
+        }
     }
 }
 
@@ -9706,7 +9711,9 @@ fn evaluate_plan_fidelity(
         timeout,
     ) {
         BoundedRun::Completed(out) => classify_plan_fidelity(&out.stdout),
-        BoundedRun::SpawnFailed(_) | BoundedRun::WaitFailed => FidelityGate::Absent,
+        BoundedRun::SpawnFailed(_) | BoundedRun::WaitFailed | BoundedRun::Refused => {
+            FidelityGate::Absent
+        }
         BoundedRun::TimedOut(elapsed) => FidelityGate::Degraded {
             reason: format!(
                 "plan fidelity check timed out after {:.1}s running `{} do plan fidelity {} --json` \
@@ -10983,15 +10990,18 @@ mod tests {
                 assert!(out.status.success(), "status: {:?}", out.status);
                 assert_eq!(out.stdout, b"{\"ok\":true}\n");
                 assert!(
-                    out.stderr_tail.len() <= BOUNDED_STDERR_TAIL_CAP,
+                    out.stderr_tail.len() <= bounded_read::BOUNDED_STDERR_TAIL_CAP,
                     "retained {} > cap {}",
                     out.stderr_tail.len(),
-                    BOUNDED_STDERR_TAIL_CAP
+                    bounded_read::BOUNDED_STDERR_TAIL_CAP
                 );
                 // The tail, not the head: the retained bytes are the END of
                 // the stream, which for a uniform fill is still all 'x' but
                 // provably capped.
-                assert_eq!(out.stderr_tail.len(), BOUNDED_STDERR_TAIL_CAP.min(9999));
+                assert_eq!(
+                    out.stderr_tail.len(),
+                    bounded_read::BOUNDED_STDERR_TAIL_CAP.min(9999)
+                );
                 assert!(out.stderr_tail.iter().all(|&b| b == b'x'));
             }
             other => panic!("expected Completed, got {}", bounded_kind(&other)),
@@ -11018,7 +11028,7 @@ mod tests {
                 assert!(tail.ends_with("TAIL_MARKER\n"), "retained {tail:?}");
                 assert_eq!(
                     out.stderr_tail.len(),
-                    BOUNDED_STDERR_TAIL_CAP,
+                    bounded_read::BOUNDED_STDERR_TAIL_CAP,
                     "a stream past the cap retains exactly the cap"
                 );
             }
@@ -11125,6 +11135,7 @@ mod tests {
             BoundedRun::TimedOut(_) => "TimedOut",
             BoundedRun::SpawnFailed(_) => "SpawnFailed",
             BoundedRun::WaitFailed => "WaitFailed",
+            BoundedRun::Refused => "Refused",
         }
     }
 
