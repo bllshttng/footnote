@@ -279,6 +279,7 @@ pub mod rm_receipt;
 pub mod roster_progress;
 pub mod roster_reap;
 pub mod route_capacity;
+pub mod route_inventory;
 pub mod route_slot;
 pub mod row_truth;
 pub mod run_outcome;

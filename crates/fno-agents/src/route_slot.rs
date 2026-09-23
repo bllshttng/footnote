@@ -1193,6 +1193,9 @@ fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
     if mode == "tier" {
         return tier_leg(payload);
     }
+    if mode == "inventory" {
+        return crate::route_inventory::inventory_leg(payload);
+    }
     if mode == "states" {
         return states_leg(payload);
     }
