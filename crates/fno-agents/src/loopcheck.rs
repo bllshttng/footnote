@@ -2363,6 +2363,7 @@ mod tests {
     mod gh_read_tests;
     mod intent_tests;
     mod local_attestation_tests;
+    mod plan_fidelity_tests;
     mod posture_tests;
     mod pr_read_tests;
     mod review_coverage_verb_tests;
