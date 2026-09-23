@@ -740,7 +740,7 @@ mod tests {
 
     fn resume_fixture(label: &str, body: &str) -> (std::path::PathBuf, PinnedAgentEnv) {
         let tmp =
-            std::env::temp_dir().join(format!("fno-x-6acd-resume-{label}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("fno-resume-probe-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let bin = tmp.join("fake-agents.sh");
@@ -798,15 +798,21 @@ mod tests {
             "receipt",
             "#!/bin/bash\n\
              printf '%s\\n' \"$*\" >> \"$FNO_AGENTS_HOME/argv.log\"\n\
-             echo 'delivered to t-x-e64a-luna over the codex daemon' >&2\n\
+             echo 'delivered to resume-probe-codex over the codex daemon' >&2\n\
              exit 0\n",
         );
 
-        let notice = run_resume("t-x-e64a-luna").await;
+        let notice = run_resume("resume-probe-codex").await;
 
-        assert_eq!(notice, "delivered to t-x-e64a-luna over the codex daemon");
+        assert_eq!(
+            notice,
+            "delivered to resume-probe-codex over the codex daemon"
+        );
         let log = std::fs::read_to_string(tmp.join("argv.log")).unwrap();
-        assert_eq!(log.lines().collect::<Vec<_>>(), ["resume t-x-e64a-luna"]);
+        assert_eq!(
+            log.lines().collect::<Vec<_>>(),
+            ["resume resume-probe-codex"]
+        );
         assert!(
             !log.contains("spawn"),
             "resume never forks a new session: {log}"
