@@ -14,15 +14,7 @@ The stop hook reads the world; it does not maintain state. The only writer is th
 
 Every scheduled arm appends one `control_plane_tick` row to the journal it already uses. The row says what the arm did, or why it did nothing: `data{arm, scheduler, acted, skip_reason, detail, interval_s}`.
 
-The arms:
-
-- `king_wake`, `watchdog`, `pr_watch_merge`: they ride the pr-watch launchd tick.
-- `notify_watch`: the state-change signals arm, also on the pr-watch launchd tick.
-- `active_backlog`: the daemon's mission drain, one row per tick.
-- `auto_continue`: every `advance` call, plus a 1800s reconcile heartbeat from the launchd agent. The heartbeat is gated on `FNO_CONTROL_PLANE_SCHEDULER` so a SessionStart reconcile cannot mask a dead agent.
-- `stop_hook`: the shim below, one row per fire.
-- `reap`, `retire`, `machine_watch`, `crown_ledger`, `fleet_page`: the daemon's own arms, one row per tick. `crown_ledger` renders reign.html every 300 seconds. `fleet_page` renders fleet.html every 1800 seconds.
-- `arm_watch`: the daemon arm that pages the operator about arms broken past the threshold (below).
+The arms: [background-processes.md](background-processes.md#arms) holds every arm, its scheduler, its host, and its interval. That page is the one arms list. This section keeps the row shape, the readout, and the causes.
 
 The row shape is owned by `crates/fno-agents/src/tick_ledger.rs`. Python arms emit through `cli/src/fno/control_plane.py`. `cli/src/fno/events/schema.yaml` pins both validators on the shape.
 
