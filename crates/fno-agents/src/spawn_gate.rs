@@ -638,15 +638,12 @@ fn slot_refusal_line(
 
 /// The territory (key, member node ids, kingless) a node belongs to, or
 /// `None` when the answer cannot be READ (unreadable graph, node absent,
-/// unreadable registry, uncompilable live crown). Membership is EXCLUSIVE
-/// and most-specific-first: a node belongs to the deepest live crown whose
-/// scope holds it - the lowest canonical scope on a tie, the one owner rule
-/// `territory::node_owners` computes for the court and the readout too; an
-/// unowned node counts for its project's loose territory (project nodes
-/// minus every owned node), so one worker never consumes two territories'
-/// caps. `kingless` is false for a live crown scope, true for the loose
-/// fallback - the same answer `resolve_territories` computes for the drain
-/// readout.
+/// unreadable registry, uncompilable live crown). Membership is exclusive:
+/// the deepest live crown whose scope holds the node owns it, the lowest
+/// canonical scope on a tie (`territory::node_owners`); an unowned node
+/// counts for its project's loose territory, so one worker never consumes
+/// two territories' caps. `kingless` is false for a crown scope, true for
+/// the loose fallback.
 pub(crate) fn territory_of_node(
     config_cwd: &Path,
     registry_path: &Path,
@@ -655,10 +652,9 @@ pub(crate) fn territory_of_node(
 ) -> Option<(String, std::collections::HashSet<String>, bool)> {
     use crate::king_board::project_map;
 
-    // Through the backend switch (`graph_store::read_rows_strict`): under
-    // sqlite the file is a frozen mirror, and a cap answered from it polices
-    // a territory the store does not recognize. Unreadable is None, the same
-    // cannot-READ contract as before.
+    // Through the backend switch (`graph_store::read_rows_strict`): a cap
+    // answered from a frozen sqlite mirror polices a territory the store
+    // does not recognize. Unreadable is None, the cannot-READ contract.
     let entries: Vec<Value> = match crate::territory::graph_entries(config_cwd) {
         Ok(rows) => rows,
         Err(_) => return None,
@@ -682,9 +678,11 @@ pub(crate) fn territory_of_node(
         &Ok(project_map(config_cwd).unwrap_or_default()),
     );
     if !failures.is_empty() {
-        for (scope, e) in &failures {
-            warnings.push(format!("territory: crown {scope} uncompilable: {e}"));
-        }
+        warnings.extend(
+            failures
+                .iter()
+                .map(|(s, e)| format!("territory: crown {s} uncompilable: {e}")),
+        );
         return None;
     }
     if let Some(owner) = owners.get(node) {
@@ -4506,10 +4504,8 @@ MemAvailable:    8000000 kB\n";
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// AC6-HP: nested crowns split one project exclusively - an L1 crown
-    /// over `fno` and a live L2 crown over `x-epic`, and neither member set
-    /// reaches into the other. A live crown whose scope does not compile
-    /// blinds the whole read (None), the fail-closed posture.
+    /// AC6-HP: nested crowns split one project exclusively; an uncompilable
+    /// live crown blinds the whole read (None), the fail-closed posture.
     #[test]
     fn territory_of_node_attributes_nested_crowns_exclusively() {
         let _g = claims::test_env_lock()
@@ -4538,36 +4534,43 @@ MemAvailable:    8000000 kB\n";
             ),
         )
         .unwrap();
+        let reg_row = |name: &str, scope: &str, level: i64| {
+            format!(
+                r#"{{"name":"{name}","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":"{scope}","crown_level":{level}}}"#
+            )
+        };
         let reg = dir.join("registry.json");
         std::fs::write(
             &reg,
             format!(
-                r#"{{"schema_version":1,"entries":[{{"name":"king-fno","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":"fno","crown_level":1}},{{"name":"king-epic","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":"x-epic","crown_level":2}}]}}"#
+                r#"{{"schema_version":1,"entries":[{},{}]}}"#,
+                reg_row("king-fno", "fno", 1),
+                reg_row("king-epic", "x-epic", 2)
             ),
         )
         .unwrap();
         let _env = EnvPin::take(&["FNO_HOME"]);
         std::env::set_var("FNO_HOME", &dir);
-
         let mut warnings = Vec::new();
-        let under_epic = territory_of_node(&dir, &reg, "x-1", &mut warnings).expect("attributes");
+        let of =
+            |node: &str| territory_of_node(&dir, &reg, node, &mut warnings).expect("attributes");
+        let under_epic = of("x-1");
         assert_eq!(under_epic.0, "x-epic");
         assert!(!under_epic.1.contains("x-root"), "{:?}", under_epic.1);
-        let root = territory_of_node(&dir, &reg, "x-root", &mut warnings).expect("attributes");
+        let root = of("x-root");
         assert_eq!(root.0, "fno");
         assert!(
             !root.1.contains("x-epic") && !root.1.contains("x-1"),
             "{:?}",
             root.1
         );
-
-        // A live crown whose scope names a non-epic node fails to compile,
-        // and one uncompilable live crown refuses every node-bearing read.
+        // One uncompilable live crown refuses every node-bearing read.
         let reg_bad = dir.join("registry-bad.json");
         std::fs::write(
             &reg_bad,
             format!(
-                r#"{{"schema_version":1,"entries":[{{"name":"king-bad","provider":"claude","cwd":"/tmp","status":"busy","created_at":"2026-01-01T00:00:00Z","pid":{self_pid},"crown_scope":"x-root","crown_level":2}}]}}"#
+                r#"{{"schema_version":1,"entries":[{}]}}"#,
+                reg_row("king-bad", "x-root", 2)
             ),
         )
         .unwrap();
