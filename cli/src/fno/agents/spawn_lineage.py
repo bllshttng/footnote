@@ -277,6 +277,17 @@ def _stamp_spawned_session_row(
         harness = worker_harness
         session_id = worker_session_uuid
     if not harness or not session_id:
+        if worker_name:
+            from fno.paths import agents_registry_path
+            from fno.rust_binary import verb_call
+            try:
+                grant = _resolve_spawn_merge_grant(message) if phase == "do" else None
+                verb_call("pending-session-row", {"action": "park", "name": worker_name,
+                         "phase": phase, "merge_grant": grant,
+                         "registry": str(agents_registry_path())})
+            except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the spawn
+                print(f"spawn: park skipped for {node_id}: {exc}", file=sys.stderr)
+            return
         print(
             f"spawn: session row open skipped for {node_id} "
             f"(no harness session id at spawn); the row was not written. Skipped.",

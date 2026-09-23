@@ -233,6 +233,7 @@ pub mod pane_keeper;
 pub mod pane_relaunch;
 pub mod pane_stop;
 pub mod paths;
+pub mod pending_session_row;
 pub mod pi;
 pub mod planning_lane;
 pub mod plans_dirs;

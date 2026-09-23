@@ -66,3 +66,11 @@ The Rust `machine_watch` arm writes one `machine_sample` row every 300 seconds. 
 Each live session row holds its session id, harness, node, stage, process count, RSS and CPU. Separate `cargo` and `pytest` buckets are included. Top holders are executable basenames only. A refusal carries the newest sample id, age up to 300 seconds, verdict, busy, load and memory fields. `fno agents top` reads the same Rust walk. Codex threads without roots, Linux physical footprint and unreadable compressor sensors remain named gaps. Null means unmeasured, never zero.
 
 Two bounds upstream keep the leak from forming in the first place. The suite runner runs each suite in its own process group with a wall-clock timeout (`config.test.timeout_seconds`, default 1800). On expiry or interrupt it kills the GROUP. Killing cargo alone orphans the deps binary it exec'd, which is exactly how the ppid-1 shape forms. And test-spawned children are killed and waited through Drop guards, so a panicking test no longer leaves a live child whose corpse has no reaper.
+
+## The machine band never gates
+
+The `machine` object is computed on every spawn's own footprint reading and rides that payload to every consumer, but it never decides a spawn. The fleet's attributed CPU share is the only CPU axis that gates. It reads the machine only through the attribution gap: a gap widens the share interval. With no gap, the machine's own cores reach no verdict at all.
+
+Measured on 2026-09-18 on the fleet box: the admission read a 5.3 percent fleet share with `gap: null` and answered `admit`. The same payload's machine band read 3.873 of 12.00 cores, 32.3 percent of its 90 percent band, and answered `calm`. On a machine foreign work has saturated, the band answers `hot` and still gates nothing.
+
+When the load backstop was deleted, the run weighed both costs of a gating band. Gating holds the whole fleet for a browser. Not gating leaves an operator whose box is melting with one number that never moves. Whether the band gates is open with the superuser. This page records the behavior as it ships. No line here claims a ruling that has not landed.

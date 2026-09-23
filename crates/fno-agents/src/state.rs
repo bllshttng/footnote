@@ -846,6 +846,15 @@ pub struct RegistryEntry {
     /// same X3 passthrough duty as `node` itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_reason: Option<String>,
+    /// The sessions row a spawn owed but could not open because no harness
+    /// session id existed yet (`{phase, merge_grant?}`): parked by Python's
+    /// spawn stamp, consumed and cleared by SessionStart's first id
+    /// observation. Mirrors Python's `AgentEntry.pending_session_row`; Rust
+    /// only carries the payload, so it stays a raw Value (X3 passthrough duty
+    /// as `node` and `substrate` before it - without this mirror a daemon
+    /// write drops the parked row silently).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_session_row: Option<serde_json::Value>,
     /// v23: the spawn REQUEST, verbatim as the flags spelled it (any
     /// `[1m]` suffix included), stamped once at birth beside the observed
     /// axes. `model`/`model_basis` flip to a verified observation; these never

@@ -2746,6 +2746,65 @@ def test_cpu_admission_pins_the_shared_gate_fixture():
         assert adm.share_high == pytest.approx(expected["share_high"]), case["name"]
 
 
+def test_cpu_admission_hot_machine_no_gap_still_admits():
+    """The machine band never gates: a reading whose measured cores sit near
+    capacity admits while the fleet's own share stays small and the gap is
+    None. Whole-machine CPU reaches the verdict only through the gap."""
+    from fno import doctor_footprint
+    from fno.footprint import Footprint
+
+    reading = Footprint(
+        sustained_cpu_cores=0.0,
+        descendant_cpu_cores=0.0,
+        fleet_cpu_cores=0.6,
+        descendant_process_count=0,
+        direct_process_count=0,
+        transient_call_count=0,
+        process_count=0,
+        rss_gb=0.0,
+        measured_cpu_cores=11.4,
+        top=[],
+        unparsed_lines=0,
+        attribution_gap=None,
+    )
+    adm = doctor_footprint.cpu_admission(
+        reading, capacity_cores=12.0, share_ceiling=0.5
+    )
+    assert adm.verdict == "admit"
+    assert adm.bound == "exact"
+    assert adm.share_low == pytest.approx(0.05)
+    assert adm.share_high == pytest.approx(0.05)
+
+
+def test_cpu_admission_hot_machine_with_gap_is_undecidable():
+    """The mirror: the same hot reading with a gap widens share_high to the
+    machine share, the ceiling falls inside that band, and the verdict is
+    undecidable."""
+    from fno import doctor_footprint
+    from fno.footprint import Footprint
+
+    reading = Footprint(
+        sustained_cpu_cores=0.0,
+        descendant_cpu_cores=0.0,
+        fleet_cpu_cores=0.6,
+        descendant_process_count=0,
+        direct_process_count=0,
+        transient_call_count=0,
+        process_count=0,
+        rss_gb=0.0,
+        measured_cpu_cores=11.4,
+        top=[],
+        unparsed_lines=0,
+        attribution_gap="2 rows unattributed",
+    )
+    adm = doctor_footprint.cpu_admission(
+        reading, capacity_cores=12.0, share_ceiling=0.5
+    )
+    assert adm.verdict == "undecidable"
+    assert adm.bound == "upper"
+    assert adm.share_high == pytest.approx(0.95)
+
+
 def test_ac10_hp_machine_census_is_machine_wide():
     """x-d6ad AC10: machine_process_count and runnable_count count every
     parsed row, distinct from the roster-scoped counts beside them."""
