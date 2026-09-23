@@ -350,8 +350,16 @@ fn write_targets(command: &str) -> Vec<String> {
 /// `/tmp/out`) and its body is lexed again, appended after a `\n` token so
 /// callers read it as one more command.
 pub(super) fn lex(command: &str) -> Option<Vec<String>> {
+    lex_at_depth(command, 0)
+}
+
+/// Substitution nesting past this bound lexes to `None`: a hostile nest
+/// never executes, and the recursion must stay bounded.
+const MAX_NEST: usize = 128;
+
+fn lex_at_depth(command: &str, nest: usize) -> Option<Vec<String>> {
     let mut bodies: Vec<Vec<String>> = Vec::new();
-    let mut toks = lex_until(&mut command.chars().peekable(), false, &mut bodies)?;
+    let mut toks = lex_until(&mut command.chars().peekable(), false, &mut bodies, nest)?;
     for body in bodies {
         toks.push("\n".to_string());
         toks.extend(body);
@@ -364,9 +372,17 @@ type Src<'a> = std::iter::Peekable<std::str::Chars<'a>>;
 /// Entered just past a glued `(`: the group lexes by the same rules up to
 /// its matching `)`. A `$( )` body is recorded as a command; `$(( ))`
 /// arithmetic and a bare group such as `arr=(a b)` stay words only.
-fn group(chars: &mut Src, bodies: &mut Vec<Vec<String>>, command: bool) -> Option<String> {
+fn group(
+    chars: &mut Src,
+    bodies: &mut Vec<Vec<String>>,
+    command: bool,
+    nest: usize,
+) -> Option<String> {
+    if nest >= MAX_NEST {
+        return None;
+    }
     let arith = chars.peek() == Some(&'(');
-    let body = lex_until(chars, true, bodies)?;
+    let body = lex_until(chars, true, bodies, nest + 1)?;
     let word = format!("({})", body.join(" "));
     if command && !arith {
         bodies.push(body);
@@ -376,7 +392,7 @@ fn group(chars: &mut Src, bodies: &mut Vec<Vec<String>>, command: bool) -> Optio
 
 /// Entered just past an opening backtick: raw text to the next unescaped
 /// backtick, lexed again as its own command.
-fn backtick(chars: &mut Src, bodies: &mut Vec<Vec<String>>) -> Option<String> {
+fn backtick(chars: &mut Src, bodies: &mut Vec<Vec<String>>, nest: usize) -> Option<String> {
     let mut text = String::new();
     loop {
         match chars.next()? {
@@ -385,7 +401,7 @@ fn backtick(chars: &mut Src, bodies: &mut Vec<Vec<String>>) -> Option<String> {
             c => text.push(c),
         }
     }
-    bodies.push(lex(&text)?);
+    bodies.push(lex_at_depth(&text, nest + 1)?);
     Some(format!("`{text}`"))
 }
 
@@ -397,6 +413,7 @@ fn lex_until(
     chars: &mut Src,
     in_subst: bool,
     bodies: &mut Vec<Vec<String>>,
+    nest: usize,
 ) -> Option<Vec<String>> {
     let mut toks: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -435,9 +452,9 @@ fn lex_until(
                     Some('$') if chars.peek() == Some(&'(') => {
                         chars.next();
                         cur.push('$');
-                        cur.push_str(&group(chars, bodies, true)?);
+                        cur.push_str(&group(chars, bodies, true, nest)?);
                     }
-                    Some('`') => cur.push_str(&backtick(chars, bodies)?),
+                    Some('`') => cur.push_str(&backtick(chars, bodies, nest)?),
                     Some(ch) => cur.push(ch),
                     None => return None,
                 }
@@ -497,7 +514,7 @@ fn lex_until(
                 // A glued `(` keeps the word one token (`mv $(pick x)` binds
                 // `/tmp/out`); the body lexes as its own command.
                 let command = cur.ends_with('$');
-                cur.push_str(&group(chars, bodies, command)?);
+                cur.push_str(&group(chars, bodies, command, nest)?);
             }
             ')' if in_subst && depth == 0 => {
                 if !cur.is_empty() {
@@ -518,7 +535,7 @@ fn lex_until(
                 }
                 toks.push(c.to_string());
             }
-            '`' => cur.push_str(&backtick(chars, bodies)?),
+            '`' => cur.push_str(&backtick(chars, bodies, nest)?),
             '<' | '>' => {
                 let mut redir = String::new();
                 if c == '>' && !cur.is_empty() && cur.bytes().all(|b| b.is_ascii_digit()) {

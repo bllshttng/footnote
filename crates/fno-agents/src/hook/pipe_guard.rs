@@ -22,6 +22,13 @@
 //! subshell depth 0 only: a pipefail set inside `( ... )` ends with that
 //! subshell and covers nothing after the `)`.
 //!
+//! One seam stays fail-open: the lexer splices every substitution body
+//! end-to-end after the main tokens, so a pipefail set inside one body is
+//! still set when a later body is judged, although bash runs each
+//! substitution in its own subshell without it. Zero corpus instances
+//! (5000-command replay, 2026-09-22); closing it needs a splice-boundary
+//! token in the shared lexer, which both guards treat as a contract.
+//!
 //! Parse-only: no subprocess, no repository scoping, and it fails OPEN on
 //! anything unexpected (a null payload, a non-Bash tool, a blank command,
 //! an unbalanced quote). Why a refusal and not prose: prose does not fire
@@ -300,6 +307,21 @@ mod tests {
         // segment, so the producer and the cut never met in one pipeline.
         denied("find /x -type f \\( -name \"*.ts\" \\) | head -50");
         denied("/usr/bin/find /x -type f \\( -name \"*.ts\" \\) | head -50");
+    }
+
+    #[test]
+    fn producer_name_in_argument_position_allows() {
+        // The retired shell test pinned this shape: `pgrep` as echo's
+        // argument is prose, never a producer in command position.
+        allowed("echo pgrep | head -4");
+    }
+
+    #[test]
+    fn deep_substitution_nesting_allows_without_aborting() {
+        // A hostile nest lexes to None past the bound; the hook allows
+        // instead of overflowing the stack.
+        let deep = format!("{}x | tail -1", "$( ".repeat(400));
+        allowed(&deep);
     }
 
     #[test]
