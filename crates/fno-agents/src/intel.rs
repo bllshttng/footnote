@@ -964,9 +964,7 @@ fn fold_all(
 }
 
 fn read_events(path: &Path) -> Vec<Value> {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
+    let raw = crate::event_store::journal_text(path, &["loop_check"]);
     raw.lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .collect()

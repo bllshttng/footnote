@@ -945,6 +945,21 @@ pub struct EventQuery {
 }
 
 impl EventQuery {
+    /// The row set every journal-text reader parses: `types` plus the empty
+    /// type (corrupt and typeless rows, which parsers count), rejected rows
+    /// included. No types reads every row.
+    pub fn of_types(types: &[&str]) -> Self {
+        let mut types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+        if !types.is_empty() {
+            types.push(String::new());
+        }
+        EventQuery {
+            types,
+            include_rejected: true,
+            ..Default::default()
+        }
+    }
+
     fn build_sql(&self) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
         let mut where_clauses: Vec<String> = Vec::new();
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -1031,15 +1046,6 @@ pub fn query_events(journal: &Path, q: &EventQuery) -> Result<Vec<EventRow>, Str
         .map_err(|e| e.to_string())
 }
 
-/// The journal text for `types`, complete across rotation generations.
-///
-/// Rotation ingests a generation into the store before the rename, so the
-/// store holds every row that left the live file. The text is those rows (the
-/// store rows whose line is not in the live file, oldest first) followed by
-/// the live file verbatim. The live generation reads exactly as it always
-/// did: append order, identical rows and an unterminated tail all survive.
-/// The read never syncs, so a reader never writes. Any store failure reads
-/// the live file alone, which never tightens a gate.
 /// Every review-evidence row type a loopcheck parser reads from journal text.
 /// One list, so a call site picks a source, never a vocabulary.
 #[allow(dead_code)] // used by fno-agents; the fno copy stays byte-identical
@@ -1057,51 +1063,69 @@ pub(crate) fn review_text(journal: &Path) -> String {
     journal_text(journal, REVIEW_EVENT_TYPES)
 }
 
+/// The journal text for `types`, complete across rotation generations, in
+/// commit order.
+///
+/// Every writer commits to the store, so the committed rows are the order of
+/// record and the live file is at most a raw writer's recent tail. The text
+/// is the committed rows the type filter matches (oldest first) followed by
+/// the live lines the store does not hold yet. The read never syncs, so a
+/// reader never writes. Any store failure reads the live file alone, which
+/// never tightens a gate.
 pub fn journal_text(journal: &Path, types: &[&str]) -> String {
+    journal_text_checked(journal, &EventQuery::of_types(types))
+        .unwrap_or_else(|_| std::fs::read_to_string(live_journal(journal)).unwrap_or_default())
+}
+
+/// [`journal_text`] for a full [`EventQuery`], with a failed read reported as
+/// `Err` instead of the live-file fallback. A journal with neither a live
+/// file nor a store reads as empty and creates nothing; a live file or store
+/// that exists and cannot be read is `Err` naming it.
+pub fn journal_text_checked(journal: &Path, q: &EventQuery) -> Result<String, String> {
     let live = live_journal(journal);
-    let live_text = std::fs::read_to_string(&live).unwrap_or_default();
+    let live_text = match std::fs::read_to_string(&live) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(format!("{}: {err}", live.display())),
+    };
     let store = store_path(&live);
     if !store.is_file() {
-        return live_text;
+        return Ok(live_text);
     }
-    let in_live: std::collections::HashSet<Vec<u8>> = live_text
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| Sha256::digest(l.as_bytes()).to_vec())
-        .collect();
-    let history = open_read(&store).ok().and_then(|conn| {
-        let placeholders = (1..=types.len())
-            .map(|i| format!("?{i}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        // Corrupt and typeless rows store with an empty type; parsers count
-        // our own corrupted rows for their notices.
-        let sql = if types.is_empty() {
-            "SELECT row_hash, line FROM events ORDER BY seq".to_string()
-        } else {
-            format!(
-                "SELECT row_hash, line FROM events WHERE type IN ({placeholders}, '') ORDER BY seq"
-            )
-        };
-        let mut stmt = conn.prepare(&sql).ok()?;
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(types), |r| {
-                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
-            })
-            .ok()?
-            .collect::<Result<Vec<_>, _>>()
-            .ok()?;
-        Some(rows)
-    });
+    let conn = open_read(&store)?;
+    let (sql, args) = q.build_sql();
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("{}: {e}", store.display()))?;
+    let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+    let rows = stmt
+        .query_map(refs.as_slice(), |r| r.get::<_, String>(8))
+        .map_err(|e| format!("{}: {e}", store.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("{}: {e}", store.display()))?;
+    let mut held = conn
+        .prepare("SELECT 1 FROM events WHERE row_hash = ?1")
+        .map_err(|e| format!("{}: {e}", store.display()))?;
     let mut text = String::new();
-    for (hash, line) in history.unwrap_or_default() {
-        if !in_live.contains(&hash) {
-            text.push_str(&line);
+    for line in rows {
+        text.push_str(&line);
+        text.push('\n');
+    }
+    // ponytail: a pre-store line no import took reads as newest; any import fixes it.
+    for raw in live_text.lines() {
+        if raw.is_empty() {
+            continue;
+        }
+        let hash = Sha256::digest(raw.as_bytes()).to_vec();
+        if held
+            .query_row(params![hash], |r| r.get::<_, i64>(0))
+            .is_err()
+        {
+            text.push_str(raw);
             text.push('\n');
         }
     }
-    text.push_str(&live_text);
-    text
+    Ok(text)
 }
 
 /// Write every committed row, in commit order, to `out` as JSONL - atomically
