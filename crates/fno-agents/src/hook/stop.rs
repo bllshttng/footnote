@@ -1284,7 +1284,7 @@ mod tests {
 
     /// The manifest resolves through the crown ROW's cwd, not the Stop
     /// payload's: a king whose shell sits outside the repo still resolves its
-    /// court (x-8387). Every unreadable reading answers None, the fail-open
+    /// court. Every unreadable reading answers None, the fail-open
     /// the hook ships.
     #[test]
     fn king_manifest_in_keys_on_the_crown_row_cwd() {
