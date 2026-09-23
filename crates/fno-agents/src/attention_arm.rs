@@ -23,6 +23,16 @@ pub const DEFAULT_SETTLE_SECS: u64 = 120;
 /// arm gives up and leaves the durable row for a human to finish.
 pub const CLEAR_RETRY_CAP: u32 = 5;
 
+/// How long one bounce mail may run before its kill (AC3-ERR).
+pub const ATTENTION_SEND_TIMEOUT_S: u64 = 30;
+
+/// How long one Python clear may run before its kill (AC4-ERR).
+pub const ATTENTION_CLEAR_TIMEOUT_S: u64 = 180;
+
+/// How long one whole tick may run before the next beat reports it stuck
+/// (AC4-HP).
+pub const ATTENTION_TICK_BUDGET_S: u64 = 120;
+
 /// One `[[attention]]` sink row. Unknown types and bad rows arrive as
 /// errors, never silently dropped (AC6-ERR).
 #[derive(Debug, Clone, PartialEq)]
@@ -561,10 +571,13 @@ fn date_str() -> String {
 }
 
 /// The arm as the daemon holds it: cadence stamp plus one-in-flight gate.
+/// `stage` names the step a live tick stopped in, so a stuck tick can be
+/// reported by the next beat instead of sitting silent.
 pub struct Arm {
     config_cwd: PathBuf,
     last_tick: Mutex<Option<std::time::Instant>>,
     in_flight: Arc<AtomicBool>,
+    stage: Arc<Mutex<Option<(&'static str, std::time::Instant)>>>,
 }
 
 impl Arm {
@@ -573,6 +586,7 @@ impl Arm {
             config_cwd,
             last_tick: Mutex::new(None),
             in_flight: Arc::new(AtomicBool::new(false)),
+            stage: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -610,28 +624,48 @@ pub fn attention_dir() -> Result<PathBuf, std::io::Error> {
 }
 
 /// The not-ready bounce: one wrapped mail to a not-ready item's asker,
-/// naming the id and the missing fields, once per item ever (the second
-/// beat stays quiet via the persisted bounce set). AC9-HP.
-fn bounce_not_ready(items: &[AttentionItem], dir: &Path) {
-    bounce_not_ready_with(items, dir, &|asker, body| {
-        let mut cmd = crate::loop_dispatch::fno_cmd("fno");
-        cmd.args(["agents", "mail", "send", asker, body]);
+/// naming the id and the missing fields, once per item ever (the id saves
+/// on every attempt, so a failed send does not re-mail each beat; the
+/// second beat stays quiet via the persisted bounce set). Items past the
+/// beat deadline are left for the next beat. AC3-HP, AC3-ERR.
+fn bounce_not_ready(items: &[AttentionItem], dir: &Path, deadline: std::time::Instant) -> u64 {
+    bounce_not_ready_with(items, dir, deadline, &|asker, body| {
+        // The command rebuilds per attempt: the bounded helper consumes it.
+        let build_cmd = || {
+            let mut cmd = crate::loop_dispatch::fno_cmd("fno");
+            cmd.args(["agents", "mail", "send", asker, body]);
+            cmd
+        };
+        // ETXTBSY keeps its spawn retry: a binary swap mid-beat must not
+        // cost the asker their one bounce under the save-on-attempt rule.
         matches!(
-            crate::loop_dispatch::retry_etxtbsy(move || cmd.output()),
+            crate::loop_dispatch::retry_etxtbsy(|| {
+                crate::bounded_cmd::output_with_timeout_result(
+                    build_cmd(),
+                    ATTENTION_SEND_TIMEOUT_S,
+                )
+            }),
             Ok(out) if out.status.success()
         )
-    });
+    })
 }
 
 /// [`bounce_not_ready`] with the send injected, so a test counts sends
-/// without a `fno` shellout.
-fn bounce_not_ready_with(items: &[AttentionItem], dir: &Path, send: &dyn Fn(&str, &str) -> bool) {
+/// without a `fno` shellout. Returns the count of eligible items it did
+/// not try.
+fn bounce_not_ready_with(
+    items: &[AttentionItem],
+    dir: &Path,
+    deadline: std::time::Instant,
+    send: &dyn Fn(&str, &str) -> bool,
+) -> u64 {
     let path = dir.join("bounced.json");
     let mut bounced: std::collections::HashSet<String> = std::fs::read_to_string(&path)
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default();
     let mut dirty = false;
+    let mut deferred = 0u64;
     for item in items {
         if item.ready || !matches!(item.kind.as_str(), "question" | "pin") {
             continue;
@@ -647,21 +681,27 @@ fn bounce_not_ready_with(items: &[AttentionItem], dir: &Path, send: &dyn Fn(&str
         if bounced.contains(&item.id) {
             continue;
         }
+        if std::time::Instant::now() >= deadline {
+            deferred += 1;
+            continue;
+        }
         let body = format!(
             "Question {} is missing: {}. Re-ask with the fields (docs/architecture/attention-items.md) or clear it.",
             item.id,
             item.missing.join(", ")
         );
-        if send(&asker, &body) {
-            bounced.insert(item.id.clone());
-            dirty = true;
-        }
+        // The id saves on every attempt: a send that fails or is killed
+        // must not re-mail the same asker on every later beat (AC3-HP).
+        send(&asker, &body);
+        bounced.insert(item.id.clone());
+        dirty = true;
     }
     if dirty {
         if let Ok(s) = serde_json::to_string(&bounced) {
             let _ = std::fs::write(&path, s);
         }
     }
+    deferred
 }
 
 /// Fold `user_ask_answered` rows into every sink: one closed line per row,
@@ -677,7 +717,9 @@ fn fold_user_ask_answered(
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default();
-    let raw = std::fs::read_to_string(index).unwrap_or_default();
+    // Store rows first: Python commits answers to questions.db without
+    // touching the raw journal, so a raw read misses them.
+    let raw = crate::event_store::journal_text(index, &["user_ask_answered"]);
     let mut appended = 0u64;
     let mut dirty = false;
     for line in raw.lines() {
@@ -736,32 +778,48 @@ fn fold_user_ask_answered(
 }
 
 /// The daemon-facing wrapper: due-check plus one-in-flight gate (the
-/// `merge_close::maybe_tick` shape). The body runs off-loop.
+/// `merge_close::maybe_tick` shape). The body runs off-loop. A beat that
+/// finds the previous tick still running past [`ATTENTION_TICK_BUDGET_S`]
+/// emits one timeout row naming the stage it stopped in (AC4-HP).
 pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
     let interval = std::time::Duration::from_secs(ATTENTION_INTERVAL_S);
     {
         let mut last = arm.last_tick.lock().unwrap_or_else(|e| e.into_inner());
-        if last.is_some_and(|t| t.elapsed() < interval)
-            || arm.in_flight.swap(true, Ordering::SeqCst)
-        {
+        if last.is_some_and(|t| t.elapsed() < interval) {
             return;
         }
         *last = Some(std::time::Instant::now());
     }
+    if arm.in_flight.swap(true, Ordering::SeqCst) {
+        let stage = arm.stage.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(d) = stuck_detail(stage, ATTENTION_TICK_BUDGET_S) {
+            emit_tick_row(&home, 0, Some("timeout"), &d);
+        }
+        return;
+    }
     let flag = Arc::clone(&arm.in_flight);
+    let stage = Arc::clone(&arm.stage);
     let cwd = arm.config_cwd.clone();
     tokio::task::spawn_blocking(move || {
         let _gate = crate::daemon::SweepGate(flag);
+        let started = std::time::Instant::now();
+        let mark = |name: &'static str| {
+            *stage.lock().unwrap_or_else(|e| e.into_inner()) = Some((name, started));
+        };
+        mark("sinks");
         let sinks = attention_sinks(&cwd);
         if sinks.is_empty() {
+            mark("emit");
             emit_tick_row(&home, 0, Some("no_sinks"), "no [[attention]] configured");
             return;
         }
+        mark("read_items");
         let (items, unreadable) = read_items(&cwd);
         if !unreadable.is_empty() {
             // An incomplete projection must never drive delivery or the
             // close-elsewhere flip: absent ids would read as closed and
             // flip live blocks that the projection could not see.
+            mark("emit");
             emit_tick_row(&home, 0, Some("source_unreadable"), &unreadable.join("; "));
             return;
         }
@@ -769,11 +827,26 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
         let dir = match attention_dir() {
             Ok(d) => d,
             Err(e) => {
+                mark("emit");
                 emit_tick_row(&home, 0, Some("error"), &format!("attention dir: {e}"));
                 return;
             }
         };
-        bounce_not_ready(&items, &dir);
+        let mut skip: Option<String> = None;
+        let mut detail: Vec<String> = Vec::new();
+        mark("bounce");
+        let bounce_deferred = bounce_not_ready(
+            &items,
+            &dir,
+            started + std::time::Duration::from_secs(ATTENTION_TICK_BUDGET_S),
+        );
+        if bounce_deferred > 0 {
+            detail.push(format!("bounce: budget spent, {bounce_deferred} deferred"));
+            if skip.is_none() {
+                skip = Some("timeout".to_string());
+            }
+        }
+        mark("fold_answered");
         let ok_sinks: Vec<SinkConfig> = sinks
             .iter()
             .filter_map(|e| match e {
@@ -792,8 +865,7 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
             )
         };
         let mut acted = answered;
-        let mut skip: Option<String> = None;
-        let mut detail: Vec<String> = Vec::new();
+        mark("settle");
         for entry in sinks {
             match entry {
                 SinkOrErr::Ok(sink) => {
@@ -816,11 +888,33 @@ pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
             }
         }
         if acted == 0 && skip.is_none() {
-            skip = Some("no_open_items".to_string());
+            // An idle beat must say which kind of idle: a page full of
+            // open items is not an empty projection.
+            skip = Some(
+                if items.is_empty() {
+                    "no_open_items"
+                } else {
+                    "nothing_new"
+                }
+                .to_string(),
+            );
+            detail.push(format!("open={}", items.len()));
         }
+        *stage.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let summary = detail.join("; ");
         emit_tick_row(&home, acted, skip.as_deref(), &summary);
     });
+}
+
+/// The stuck report for a live tick: the stage name and how long the tick
+/// has run, but only once it is past the budget.
+fn stuck_detail(
+    stage: Option<(&'static str, std::time::Instant)>,
+    budget_s: u64,
+) -> Option<String> {
+    let (name, since) = stage?;
+    let secs = since.elapsed().as_secs();
+    (secs > budget_s).then(|| format!("tick still in stage {name} after {secs}s"))
 }
 
 fn now_secs() -> u64 {
@@ -1054,11 +1148,11 @@ impl SinkIo for RealIo {
 
     fn clear(&mut self, id: &str, answer_text: &str) -> Result<(), String> {
         let mut cmd = crate::loop_dispatch::fno_cmd("fno");
-        cmd.args(["inbox", "outstanding", "clear", id, "--answer", answer_text])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        crate::loop_dispatch::retry_etxtbsy(move || cmd.output())
+        cmd.args(["inbox", "outstanding", "clear", id, "--answer", answer_text]);
+        // A kill past ATTENTION_CLEAR_TIMEOUT_S reads as a nonzero status,
+        // so it lands in the caller's bounded retry (AC4-ERR) instead of
+        // parking the tick on one wedged Python clear.
+        crate::bounded_cmd::output_with_timeout_result(cmd, ATTENTION_CLEAR_TIMEOUT_S)
             .map_err(|e| e.to_string())
             .and_then(|out| {
                 if out.status.success() {
@@ -1135,6 +1229,10 @@ mod tests {
         ))
     }
 
+    fn bounce_deadline() -> std::time::Instant {
+        std::time::Instant::now() + std::time::Duration::from_secs(60)
+    }
+
     #[test]
     fn ac9_hp_the_bounce_mails_once_then_stays_quiet() {
         let items = not_ready_items();
@@ -1154,29 +1252,129 @@ mod tests {
                 sends.fetch_add(1, Ordering::SeqCst);
                 true
             };
-            bounce_not_ready_with(&items, &dir, &send);
+            let deferred = bounce_not_ready_with(&items, &dir, bounce_deadline(), &send);
+            assert_eq!(deferred, 0);
         }
         assert_eq!(sends.load(Ordering::SeqCst), 1);
         // Second beat: quiet.
-        bounce_not_ready_with(&items, &dir, &|_a, _b| {
+        bounce_not_ready_with(&items, &dir, bounce_deadline(), &|_a, _b| {
             panic!("a second beat must stay quiet");
         });
     }
 
     #[test]
-    fn ac9_hp_a_failed_bounce_send_is_retried_next_beat() {
+    fn ac3_hp_a_failed_bounce_send_still_saves_the_id() {
+        // AC3-HP: a send that fails (or is killed past its bound) still
+        // saves the id, so a wedged mail lane cannot re-mail the asker on
+        // every beat.
         let items = not_ready_items();
-        let dir = bounce_dir("retry");
+        let dir = bounce_dir("save-on-attempt");
         std::fs::create_dir_all(&dir).unwrap();
-        bounce_not_ready_with(&items, &dir, &|_a, _b| false);
-        let retried = std::sync::atomic::AtomicUsize::new(0);
-        bounce_not_ready_with(&items, &dir, &|a, b| {
-            use std::sync::atomic::Ordering;
-            assert_eq!(a, "worker-1");
-            assert!(b.contains("q-nr"));
-            retried.fetch_add(1, Ordering::SeqCst);
-            true
+        let deferred = bounce_not_ready_with(&items, &dir, bounce_deadline(), &|_a, _b| false);
+        assert_eq!(deferred, 0);
+        let bounced: std::collections::HashSet<String> =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("bounced.json")).unwrap())
+                .unwrap();
+        assert!(bounced.contains("q-nr"), "{bounced:?}");
+        bounce_not_ready_with(&items, &dir, bounce_deadline(), &|_a, _b| {
+            panic!("a saved id must stay quiet");
         });
-        assert_eq!(retried.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn ac3_err_a_spent_budget_defers_the_eligible_item() {
+        // AC3-ERR: past the beat deadline the bounce sends nothing and
+        // reports the eligible item as deferred.
+        let items = not_ready_items();
+        let dir = bounce_dir("budget");
+        std::fs::create_dir_all(&dir).unwrap();
+        let spent = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let deferred = bounce_not_ready_with(&items, &dir, spent, &|_a, _b| {
+            panic!("a spent budget must not send");
+        });
+        assert_eq!(deferred, 1);
+        assert!(!dir.join("bounced.json").exists(), "nothing was sent");
+    }
+
+    #[test]
+    fn ac4_hp_stuck_detail_names_a_stage_past_the_budget() {
+        // AC4-HP: the stuck report fires only past the budget and names
+        // the stage it stopped in.
+        assert_eq!(stuck_detail(None, 120), None);
+        assert_eq!(
+            stuck_detail(Some(("settle", std::time::Instant::now())), 120),
+            None
+        );
+        let stale = Some((
+            "settle",
+            std::time::Instant::now() - std::time::Duration::from_secs(200),
+        ));
+        let d = stuck_detail(stale, 120).unwrap();
+        assert!(d.contains("settle"), "{d}");
+        assert!(d.contains("200"), "{d}");
+    }
+
+    /// Real disk-backed dir state, fake IO: records what the fold appends.
+    struct FoldIo {
+        appended: Vec<String>,
+    }
+
+    impl SinkIo for FoldIo {
+        fn read(&mut self, _path: &Path) -> std::io::Result<String> {
+            Ok(String::new())
+        }
+        fn append(&mut self, _path: &Path, block: &str) -> std::io::Result<()> {
+            self.appended.push(block.to_string());
+            Ok(())
+        }
+        fn write_atomic(&mut self, _path: &Path, _content: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn record(
+            &mut self,
+            _item: &AttentionItem,
+            _sink: &str,
+            _answer: &FileAnswer,
+        ) -> Result<String, String> {
+            Ok(String::new())
+        }
+        fn clear(&mut self, _id: &str, _answer_text: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn notify(&mut self, _title: &str, _body: &str) {}
+    }
+
+    #[test]
+    fn ac5_err_a_store_only_answer_folds_once() {
+        // AC5-ERR: a user_ask_answered row committed only to the store
+        // folds once; a second call appends nothing.
+        let dir = bounce_dir("fold");
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = dir.join("questions.jsonl");
+        let row = serde_json::json!({
+            "ts": "2026-09-23T01:00:00Z",
+            "type": "user_ask_answered",
+            "source": "test",
+            "data": {"session_id": "s1", "turn_id": "t1", "excerpt": "Which?", "answer": "A"}
+        });
+        crate::event_store::append_envelope(&index, &row.to_string(), None).unwrap();
+        let sink = SinkConfig {
+            name: "vault".to_string(),
+            path: dir.join("page.md"),
+            tag: "#jc".to_string(),
+            line: "- [ ] {title}".to_string(),
+            option_line: "    - [ ] {n}. {text}".to_string(),
+            settle_secs: 120,
+            ready_only: false,
+            kinds: vec!["question".to_string()],
+            match_project: None,
+        };
+        let mut io = FoldIo {
+            appended: Vec::new(),
+        };
+        let n = fold_user_ask_answered(&index, &[sink.clone()], &dir, &mut io);
+        assert_eq!(n, 1);
+        let again = fold_user_ask_answered(&index, &[sink], &dir, &mut io);
+        assert_eq!(again, 0, "the acked set must hold across calls");
     }
 }
