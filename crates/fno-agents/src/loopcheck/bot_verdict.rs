@@ -85,17 +85,6 @@ pub(super) fn reviewed_commit_from_body(body: &str) -> &str {
     ""
 }
 
-/// A clean-pass issue comment by `login` that pins the commit it read, as
-/// `(sha, freshness, createdAt)`. The FRESHEST pinned comment wins, selected
-/// by `freshness_rank` exactly as the review-object path selects among a
-/// bot's reviews: comments arrive oldest-first, so first-match would keep the
-/// verdict pinned to the sha of the FIRST clean pass forever - a bot that
-/// re-reviews after a head move posts a second comment the scan would never
-/// reach, and the gate could never clear through this lane again. A marker
-/// with no pinned sha is not evidence (returns None, never an invented sha),
-/// and the marker must sit at a sentence boundary (`marker_at_sentence_end`).
-/// `createdAt` rides along so `bot_verdict` can order a pass against a later
-/// quota bounce; an absent timestamp compares as the empty string.
 /// A usage-limit comment by a characterized bot login. Shared by rule 2's
 /// later-refusal ordering and rule 3, which previously re-implemented the
 /// same three-part filter inline. The author check is two-part (round 3):
@@ -128,6 +117,17 @@ pub(super) fn comment_ts(c: &Value) -> &str {
     c.get("createdAt").and_then(|v| v.as_str()).unwrap_or("")
 }
 
+/// A clean-pass issue comment by `login` that pins the commit it read, as
+/// `(sha, freshness, createdAt)`. The FRESHEST pinned comment wins, selected
+/// by `freshness_rank` exactly as the review-object path selects among a
+/// bot's reviews: comments arrive oldest-first, so first-match would keep the
+/// verdict pinned to the sha of the FIRST clean pass forever - a bot that
+/// re-reviews after a head move posts a second comment the scan would never
+/// reach, and the gate could never clear through this lane again. A marker
+/// with no pinned sha is not evidence (returns None, never an invented sha),
+/// and the marker must sit at a sentence boundary (`marker_at_sentence_end`).
+/// `createdAt` rides along so `bot_verdict` can order a pass against a later
+/// quota bounce; an absent timestamp compares as the empty string.
 pub(super) fn clean_pass_review(
     comments: &[Value],
     login: &str,
