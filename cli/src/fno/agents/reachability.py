@@ -16,9 +16,7 @@ from typing import Any, Optional, TypeGuard
 
 from fno.agents.session_truth import (
     STALE_ATTENTION_S,
-    STALLED_AFTER_S,
     _humanize_age,
-    resolve_session_truth,
 )
 
 REACHABLE = "reachable"
@@ -449,37 +447,40 @@ def registry_falsifier(entry: Any) -> Optional[str]:
     Lives here rather than at either caller because BOTH ``fno agents list`` and
     ``fno agents truth`` read a registry row, and a second copy of this rule is
     how one of them ends up with a decorative guard.
+
+    A claude row's recorded pid and exit stamp yield to claude's own session
+    records, the same swap the pane makes: only a proven live holder cancels.
     """
     mux = getattr(entry, "mux", None)
     if mux_ref_names_a_pane(mux):
         return pane_falsifier(mux)
-    return pid_falsifier(
+    falsifier = pid_falsifier(
         getattr(entry, "pid", None), getattr(entry, "pid_start_time", None)
     ) or exit_falsifier(entry)
+    # ponytail: one subprocess per falsified claude row per read; batch from
+    # _registry_falsifiers if a list grows slow.
+    if falsifier is not None and getattr(entry, "harness", None) == "claude":
+        sid = getattr(entry, "harness_session_id", None)
+        try:
+            proven = bool(sid) and _claude_holder_proven(sid)
+        except Exception:  # noqa: BLE001 -- a broken probe never changes a verdict
+            proven = False
+        if proven:
+            return None
+    return falsifier
 
 
-def reachability(
-    handle: str,
-    *,
-    pid: Optional[int] = None,
-    pid_start_time: Optional[int] = None,
-    stalled_after_s: float = STALLED_AFTER_S,
-    **resolve_kwargs: Any,
-) -> Reachability:
-    """Resolve ``handle`` to a reachability verdict with its basis. Never raises.
-
-    Keyed on the registry HANDLE rather than a session id, because an attach can
-    re-mint a session id while the handle stays put; a join key a re-attach can
-    change is not a join key.
+def _claude_holder_proven(session_id: str) -> bool:
+    """True only when the fno-agents holder action proves a live claude
+    process holds session_id. An error, a timeout, an old binary without the
+    action, held false, or held null is False: the seam only cancels on
+    positive proof.
     """
-    truth = resolve_session_truth(handle, stalled_after_s=stalled_after_s, **resolve_kwargs)
-    return classify_reachability(
-        truth_state=truth.get("state"),
-        age_s=truth.get("last_activity_age_s"),
-        falsifier=pid_falsifier(pid, pid_start_time),
-        last_activity_basis=truth.get("last_activity_basis"),
-        observed_model=truth.get("observed_model"),
-    )
+    from fno.rust_binary import call_binary_json
+
+    error, payload = call_binary_json("reentry-plan", ["holder", session_id], timeout=5)
+    answer = payload.get(session_id) if error is None and isinstance(payload, dict) else None
+    return isinstance(answer, dict) and answer.get("held") is True and answer.get("proven") is True
 
 
 # ---------------------------------------------------------------------------
