@@ -7935,10 +7935,10 @@ def dispatch_send(
                     recipient_live=family1_live,
                     recipient_resumable=not family1_live,
                 ).value
-                # Unknown is hands-off, not dead. A registered peer still has a
-                # confirmable transport, so try it once and let delivery's ack
-                # decide; failure falls through to the durable bus.
-                family1_attemptable = family1_live or family1_state == "unknown"
+                # Unknown is hands-off, not dead. A claude row off any pane is always
+                # tried: mail-inject reads the daemon roster first, and the roster decides.
+                family1_attemptable = family1_live or family1_state == "unknown" or (
+                    existing.harness == "claude" and not existing.mux)
 
                 # W3 write-ahead: a recipient we will not attempt live is asleep,
                 # so it cannot drain during a live window, and there is no live
