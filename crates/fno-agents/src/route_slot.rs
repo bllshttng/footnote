@@ -1147,8 +1147,19 @@ fn payload_fingerprint(payload: &Value) -> String {
 
 pub fn resolve_slot_payload(payload: &Value) -> Value {
     let mut judged: Option<Value> = None;
-    let mut out = resolve_slot_walk(payload, &mut judged);
+    let (resolved, family_lines) = crate::model_family::resolve_payload(payload);
+    let mut out = resolve_slot_walk(&resolved, &mut judged);
     if let Some(obj) = out.as_object_mut() {
+        // Family lines prepend; the walk's last chain entry stays terminal
+        // (spawn_defaults reads slot_chain[-1]).
+        if !family_lines.is_empty() {
+            if let Some(chain) = obj.get_mut("chain").and_then(Value::as_array_mut) {
+                let mut next = family_lines;
+                let existing = std::mem::take(chain);
+                next.extend(existing);
+                *chain = next;
+            }
+        }
         obj.insert("fingerprint".into(), json!(payload_fingerprint(payload)));
         // The summary explain used to build in Python, read straight off the
         // map the walk judged lanes with.
