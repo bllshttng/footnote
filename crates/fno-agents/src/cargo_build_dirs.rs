@@ -1510,7 +1510,7 @@ mod tests {
     fn fake_cargo(dir: &Path, broken_token: &str) {
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let script = crate::write_exec_stub(
+        crate::write_exec_stub(
             &bin,
             "cargo",
             &format!(

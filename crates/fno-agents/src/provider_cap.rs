@@ -2859,7 +2859,7 @@ mod tests {
         let (d1, s1) = scan_fixture();
         let (d2, s2) = scan_fixture();
         assert_ne!(d1.path(), d2.path(), "fixture roots must differ per call");
-        for (dir, s) in ((d1.path(), &s1), (d2.path(), &s2)) {
+        for (dir, s) in [(d1.path(), &s1), (d2.path(), &s2)] {
             for name in ["settings.yaml", "runtime-state.json"] {
                 assert!(dir.join(name).is_file(), "{} missing from {:?}", name, dir);
             }

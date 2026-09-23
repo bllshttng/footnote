@@ -506,7 +506,6 @@ fn stale_doc_block(
 #[cfg(test)]
 mod stale_crown_doc_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
 
     const CROWN_START: &str = "2026-09-15T00:00:00Z";

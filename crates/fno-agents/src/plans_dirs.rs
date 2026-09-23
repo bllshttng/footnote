@@ -234,7 +234,6 @@ mod tests {
     use super::*;
     use crate::claims::test_env_lock;
     use std::fs;
-    use std::fs::Permissions;
     use std::os::unix::fs::PermissionsExt;
 
     /// Pins FNO_CONFIG, PATH, and the cache dir for one test. FNO_CONFIG

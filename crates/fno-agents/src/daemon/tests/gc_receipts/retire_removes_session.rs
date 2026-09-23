@@ -67,7 +67,7 @@ esac
             session = session,
             job_dir = job_dir.display(),
         );
-        let bin = crate::write_exec_stub(&bin_dir, "claude", &script);
+        crate::write_exec_stub(&bin_dir, "claude", &script);
         if pre_stopped {
             std::fs::write(flags.join("pre_stopped"), "").unwrap();
         }

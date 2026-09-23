@@ -6,7 +6,6 @@ use super::*;
 
 use serde_json::Value;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 fn base_args(tmp: &TempDir, extra: &[&str]) -> Vec<String> {

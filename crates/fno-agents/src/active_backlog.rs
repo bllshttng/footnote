@@ -2359,7 +2359,6 @@ mod tests {
     // claims root, so it reads real state for a key that never exists (and never
     // writes there).
 
-    use std::os::unix::fs::PermissionsExt;
 
     /// Hold this for the whole body of any test that shells `fno_cmd`.
     ///

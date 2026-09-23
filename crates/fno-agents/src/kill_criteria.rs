@@ -1143,7 +1143,6 @@ pub fn run_kill_check_capture(args: &[String]) -> (i32, String, String) {
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn parse_cmp_iteration_forms() {

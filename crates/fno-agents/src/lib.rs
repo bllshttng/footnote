@@ -1150,7 +1150,7 @@ mod tests {
         for (file, count) in &by_file {
             let allowed = allowed_counts.get(file.as_str()).copied().unwrap_or(0);
             assert!(
-                count <= allowed,
+                *count <= allowed,
                 "this test writes an executable stub from inside the test \
                  process, where a sibling test's fork can hold the write fd \
                  open and the exec fails with Text file busy. Write it with \
@@ -1191,7 +1191,7 @@ mod tests {
         for _ in 0..4 {
             let stop = Arc::clone(&stop);
             forkers.push(std::thread::spawn(move || {
-                while !stop.load(Ordering::relaxed) {
+                while !stop.load(Ordering::Relaxed) {
                     let _ = std::process::Command::new("/usr/bin/true").status();
                 }
             }));
@@ -1222,7 +1222,7 @@ mod tests {
         for w in writers {
             w.join().expect("writer thread");
         }
-        stop.store(true, Ordering::relaxed);
+        stop.store(true, Ordering::Relaxed);
         for f in forkers {
             f.join().expect("forker thread");
         }

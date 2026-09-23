@@ -909,7 +909,7 @@ mod tests {
         let ls_path = dir.join("ls.json");
         let read_path = dir.join("read.json");
         let stub = crate::write_exec_stub(
-            dir,
+            &dir,
             "fno-stub.sh",
             &format!(
                 "#!/bin/sh\ncase \"$3\" in\nls) cat {} ;;\nread) cat {} ;;\nesac\n",

@@ -2044,7 +2044,6 @@ mod tests {
         // PATH mutation is process-global: take the lib-wide test mutex so a
         // concurrent PATH-dependent test does not inherit this stub.
         let _path_guard = crate::path_test_guard();
-        use std::os::unix::fs::PermissionsExt;
 
         let _guard = crate::claims::test_env_lock()
             .lock()
@@ -2058,7 +2057,7 @@ mod tests {
         let plan_dir = dir.path().join("configured-plans");
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
-        let fake_fno = crate::write_exec_stub(
+        crate::write_exec_stub(
             &bin,
             "fno",
             &format!(
