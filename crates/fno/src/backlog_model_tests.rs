@@ -123,7 +123,8 @@ fn node_lists_children_blockers_and_live_sessions() {
     rows[3]["blocked_by"] = json!(["x-top"]);
     let mut agents = vec![row(Some("s-live"))];
     agents[0].pane_id = Some(3);
-    let inp = fixture(rows);
+    let mut inp = fixture(rows);
+    inp.agents = agents;
     let view = node(&inp, "x-top").expect("the node resolves");
     assert_eq!(view.children.len(), 2);
     assert_eq!(view.blocked_by.len(), 1);
