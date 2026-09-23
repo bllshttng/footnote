@@ -16,7 +16,7 @@ def test_backlog_decisions_json_names_unread_graph_for_unknown_row(
         "decision": "bounded repair grant",
         "authority_source": "agent",
     }
-    monkeypatch.setattr(decide, "_read_index", lambda: ([row], 0))
+    monkeypatch.setattr(decide, "_read_index", lambda *args, **kwargs: ([row], 0))
 
     def unreadable(*, required=False):
         if required:
