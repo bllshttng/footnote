@@ -139,6 +139,8 @@ const OVERLAY_TERMINAL_STATUSES: &[&str] = &["done", "superseded", "deferred", "
 /// Terminal rungs (statuses.TERMINAL_RUNGS): past these a node is closed.
 pub const TERMINAL_RUNGS: &[&str] = &["done", "superseded"];
 
+pub const CLOSING_DEFER_KINDS: &[&str] = &["wont_do", "retracted"];
+
 /// Sentinel prefix the pre-feature workaround overloaded `completed_at` with
 /// to encode deferral (statuses._LEGACY_DEFER_PREFIX).
 const LEGACY_DEFER_PREFIX: &str = "deferred:";
@@ -1330,6 +1332,15 @@ pub fn is_terminal_entry(entry: &Value) -> bool {
         || entry
             .get("superseded_by")
             .map(|v| !v.is_null())
+            .unwrap_or(false)
+    {
+        return true;
+    }
+    if entry.get("status").and_then(Value::as_str) == Some("deferred")
+        && entry
+            .get("deferred_kind")
+            .and_then(Value::as_str)
+            .map(|kind| CLOSING_DEFER_KINDS.contains(&kind))
             .unwrap_or(false)
     {
         return true;
@@ -2828,6 +2839,30 @@ pub fn plan_path_owner_conflict(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn terminal_entry_closes_only_decision_deferrals() {
+        for kind in ["wont_do", "retracted"] {
+            assert!(is_terminal_entry(&json!({
+                "status": "deferred",
+                "deferred_kind": kind,
+            })));
+        }
+        for kind in ["later", "contingent"] {
+            assert!(!is_terminal_entry(&json!({
+                "status": "deferred",
+                "deferred_kind": kind,
+            })));
+        }
+        assert!(!is_terminal_entry(&json!({
+            "status": "deferred",
+            "deferred_kind": null,
+        })));
+        assert!(!is_terminal_entry(&json!({
+            "status": "ready",
+            "deferred_kind": "wont_do",
+        })));
+    }
 
     #[test]
     fn python_json_matches_reference_shapes() {

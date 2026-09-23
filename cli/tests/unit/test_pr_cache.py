@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import fcntl
+import sys
 import time
 
 import pytest
@@ -867,6 +868,68 @@ def test_stale_serve_makes_no_failure_diagnosis(capsys, tmp_path, monkeypatch):
     assert "failing:" not in cap.err
     assert "smoke failed" not in cap.err
     assert '"failures"' not in cap.out
+
+
+def test_a_crash_after_the_payload_exits_4_with_the_payload(cache_env, monkeypatch, capsys):
+    """AC1-HP (x-4c00): a reader that wrote its red payload and THEN raised
+    used to die inside the capture buffer - empty stdout, exit 1, the same
+    code as the red PR itself (the PR 2229 specimen). The payload survives,
+    the crash reads exit 4, and stderr names the exception."""
+    cache_dir, head = cache_env
+
+    def write_then_boom(pr, cwd, prior=None):
+        sys.stdout.write(json.dumps(
+            {"pr": "42", "verdict": "red", "settled": True, "green": False}
+        ) + "\n")
+        raise RuntimeError("boom after the write")
+
+    monkeypatch.setattr(_status, "run_status", write_then_boom)
+    assert _cache.cached_status("42") == 4
+    cap = capsys.readouterr()
+    lines = cap.out.strip().splitlines()
+    assert len(lines) == 1, f"exactly one JSON line, got: {lines}"
+    out = json.loads(lines[0])
+    assert out["verdict"] == "red"
+    assert "boom after the write" in out["reader_error"]
+    assert "reader failed: RuntimeError" in cap.err
+    assert not _row_path(cache_dir).exists(), "a crashed read writes no cache row"
+
+
+def test_a_crash_before_any_payload_exits_4_with_the_error_shape(
+    cache_env, monkeypatch, capsys
+):
+    """AC2-ERR (x-4c00): a reader that raises before writing anything still
+    answers one JSON line with verdict error and a reason naming the failure,
+    never a bare traceback beside empty stdout."""
+    cache_dir, head = cache_env
+
+    def boom(pr, cwd, prior=None):
+        raise ValueError("exploded before the write")
+
+    monkeypatch.setattr(_status, "run_status", boom)
+    assert _cache.cached_status("42") == 4
+    cap = capsys.readouterr()
+    lines = cap.out.strip().splitlines()
+    assert len(lines) == 1, f"exactly one JSON line, got: {lines}"
+    out = json.loads(lines[0])
+    assert out["verdict"] == "error"
+    assert out["reason"].startswith("reader failed:")
+    assert out["settled"] is False
+    assert out["green"] is False
+
+
+def test_tool_missing_still_exits_127_through_the_cache(cache_env, monkeypatch, capsys):
+    """AC3-EDGE (x-4c00): the crash guard re-raises ToolMissing, so the
+    gh-missing exit stays 127 - the generic arm must never swallow the one
+    refusal that names its own exit."""
+    cache_dir, head = cache_env
+    from fno.pr._proc import ToolMissing
+
+    def no_gh(pr, cwd, prior=None):
+        raise ToolMissing("gh")
+
+    monkeypatch.setattr(_status, "run_status", no_gh)
+    assert _status.main(["42"]) == 127
 
 
 def test_live_backoff_window_serves_degraded_with_zero_network(capsys, tmp_path, monkeypatch):

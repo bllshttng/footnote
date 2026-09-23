@@ -1010,6 +1010,44 @@ def _hermetic_resume_pin(monkeypatch):
     monkeypatch.setattr(fork_lineage, "spawn_axes_call", _answer)
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_reap_receipt(monkeypatch):
+    """Hermetic default for the removal-receipt transport.
+
+    The registry choke point stages a removal receipt by asking the Rust
+    receipt builder through `fno.agents.spawn_axes_client.spawn_axes_call`,
+    and in a dev environment that resolver can find a real installed binary.
+    The default answers from the payload's own row and refuses a row with no
+    harness session identity; tests that need a different answer re-stub
+    `fno.agents.spawn_axes_client.spawn_axes_call` and win.
+    """
+    from fno.agents.spawn_axes_client import spawn_axes_call as real_call
+
+    def _answer(payload):
+        ask = payload.get("reap_receipt")
+        if ask is None:
+            return real_call(payload)
+        row = ask.get("row") or {}
+        harness = (row.get("harness") or "").strip()
+        sid = (row.get("harness_session_id") or "").strip()
+        if not harness or not sid:
+            return {"refused": "missing harness session identity"}
+        return {
+            "file": f"{harness}-{sid}.json",
+            "receipt": {
+                "row_name": row.get("name"),
+                "harness": harness,
+                "harness_session_id": sid,
+                "resume": f"claude --resume {sid}",
+                "removed_by": ask.get("removed_by"),
+            },
+        }
+
+    import fno.agents.spawn_axes_client as spawn_axes_client_module
+
+    monkeypatch.setattr(spawn_axes_client_module, "spawn_axes_call", _answer)
+
+
 def checkout_fno_agents_binary():
     """This checkout's own fno-agents binary: $FNO_AGENTS_BIN, else the cargo
     dev build under crates/fno-agents/target. resolve_binary() would prefer a

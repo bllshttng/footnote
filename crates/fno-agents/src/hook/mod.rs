@@ -9,6 +9,7 @@
 //! ratchet never sees them (shrink law d-fe66560a).
 
 pub mod king_guard;
+pub mod pipe_guard;
 pub mod prompt;
 pub mod stop;
 pub mod test_run_guard;
@@ -16,6 +17,24 @@ pub mod test_run_guard;
 use serde_json::json;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+
+/// Dispatch one hook entry by name. Transport, not a client verb: `main()`
+/// calls this before the runtime builds, so a fire costs one process.
+pub fn dispatch(args: &[String]) -> i32 {
+    match args.first().map(String::as_str) {
+        Some("king-guard") => king_guard::run(&args[1..]),
+        Some("pipe-guard") => pipe_guard::run(&args[1..]),
+        Some("prompt") => prompt::run(&args[1..]),
+        Some("test-run-guard") => test_run_guard::run(&args[1..]),
+        Some("stop") => stop::run(&args[1..]),
+        other => {
+            eprintln!(
+                "fno-agents hook: unknown entry {other:?}; expected king-guard, pipe-guard, prompt, test-run-guard or stop"
+            );
+            2
+        }
+    }
+}
 
 /// The resolved events path's parent: the space the hooks key their counters,
 /// king manifests and journals off. `FNO_EVENTS_PATH` wins exactly as it does
@@ -42,6 +61,20 @@ pub(crate) fn read_stdin() -> String {
 pub(crate) fn emit_allow() -> i32 {
     println!("{{}}");
     0
+}
+
+/// One `guard_decision` row into the space events file, the bounded appender
+/// `emit_to_both` uses, shared by every native guard so the rows stay
+/// byte-identical (as `hooks/lib/guard-mark.sh` did).
+pub(crate) fn emit_guard_decision(cwd: &Path, guard: &str, tool: &str, denied: bool) {
+    let path = crate::paths::events_path(cwd);
+    let event = json!({
+        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "type": "guard_decision",
+        "data": {"guard": guard, "decision": if denied { "block" } else { "allow" }, "tool": tool},
+        "source": "hook"
+    });
+    let _ = crate::claims::append_event_line(&path, &event, std::time::Duration::from_secs(2));
 }
 
 /// PreToolUse deny: the exact shape the shell's `_block` printed through jq.

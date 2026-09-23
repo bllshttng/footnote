@@ -1270,7 +1270,7 @@ def _graph_home(tmp_path: Path, rows: list[dict]) -> dict[str, str]:
 
 
 def _add_done_node_wt(canon: Path, name: str, node_id: str) -> Path:
-    """A linked tree whose manifest names `node_id`, aged past the 48h grace,
+    """A linked tree whose manifest names `node_id`, aged past the 30m grace,
     holding one untracked file the sweep must salvage."""
     wt = canon / name
     _git(canon, "worktree", "add", str(wt), "-b", f"feature/{name}", "main")

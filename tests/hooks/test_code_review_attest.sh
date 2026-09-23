@@ -85,6 +85,9 @@ BIN="$TMP/bin"
 mkdir -p "$BIN"
 EMITTED="$TMP/emitted.jsonl"
 CLASSIFY_MARKER="$TMP/classify.ran"
+CLAIM_JSON="$TMP/claims.json"
+RELEASED="$TMP/released.txt"
+printf '%s\n' '[]' > "$CLAIM_JSON"
 export CLASSIFY_PYTHONPATH="$REPO_ROOT/cli/src"
 # The interpreter that can import the real classifier, chosen POSITIVELY and
 # proven before any case runs.
@@ -125,6 +128,22 @@ if [[ "\${1:-}" == "doctor" && "\${2:-}" == "event" && "\${3:-}" == "emit" ]]; t
     exit 17
   fi
   printf '%s\n' "\$*" >> "$EMITTED"
+  exit 0
+fi
+if [[ "\${1:-}" == "agents" && "\${2:-}" == "claim" && "\${3:-}" == "list" ]]; then
+  [[ "\${FNO_TEST_CLAIM_LIST_FAIL:-}" == "1" ]] && exit 19
+  [[ "\${FNO_TEST_CLAIM_LIST_MALFORMED:-}" == "1" ]] && printf '%s\n' '{malformed' && exit 0
+  [[ "\${FNO_TEST_CLAIM_ROW_MALFORMED:-}" == "1" ]] \
+    && printf '%s\n' '[{"key":"review:branch:feat/x","holder":"review-session:S","expired":false,"acquired_at":1,"metadata":"broken"}]' \
+    && exit 0
+  [[ "\${FNO_TEST_CLAIM_KEY_EMPTY:-}" == "1" ]] \
+    && printf '%s\n' '[{"key":"review:branch:","holder":"review-session:S","expired":false,"acquired_at":1,"metadata":{"head_sha":"deadbeef","invocation_id":"ri-test"}}]' \
+    && exit 0
+  cat "$CLAIM_JSON"
+  exit 0
+fi
+if [[ "\${1:-}" == "do" && "\${2:-}" == "pr" && "\${3:-}" == "review-hold" && "\${4:-}" == "release" ]]; then
+  printf '%s\n' "\$*" >> "$RELEASED"
   exit 0
 fi
 if [[ "\${1:-}" == "do" && "\${2:-}" == "review" && "\${3:-}" == "classify" ]]; then
@@ -185,6 +204,7 @@ run_hook() {
   # $1 = payload JSON on stdin
   : > "$EMITTED"
   : > "$CLASSIFY_MARKER"
+  : > "$RELEASED"
   : > "$HOOK_STDOUT"
   : > "$HOOK_STDERR"
   printf '%s' "$1" | FNO="$BIN/fno-stub" bash "$HOOK" >"$HOOK_STDOUT" 2>"$HOOK_STDERR"
@@ -237,8 +257,10 @@ post_tool_use() {
 
 subagent_stop() {
   # $1 = description (may be empty), $2 = last assistant message
-  jq -nc --arg cwd "$WORK" --arg desc "$1" --arg msg "$2" \
-    '{hook_event_name:"SubagentStop", cwd:$cwd, agent_name:$desc, last_assistant_message:$msg}'
+  local session="${3-}"
+  jq -nc --arg cwd "$WORK" --arg desc "$1" --arg msg "$2" --arg session "$session" \
+    '{hook_event_name:"SubagentStop", cwd:$cwd, agent_name:$desc, last_assistant_message:$msg}
+     + (if $session == "" then {} else {session_id:$session} end)'
 }
 
 codex_item_completed() {
@@ -676,6 +698,132 @@ elif ! grep -q 'prose_unparseable' "$EMITTED"; then
   fail "second-fence-nonempty: attested without output_contract=prose_unparseable: $(cat "$EMITTED")"
 else
   pass "second-fence-nonempty: attested fail/prose_unparseable, later fence never read as findings"
+fi
+
+echo "== SubagentStop: the held review checkout is the emit target =="
+git -C "$WORK" checkout -q -B main "$(git -C "$WORK" rev-parse HEAD~1)"
+git -C "$WORK" branch -f feat/x "$WORK_HEAD"
+git -C "$WORK" worktree add "$TMP/held" feat/x >/dev/null
+HOLD_HEAD="$WORK_HEAD"
+jq -nc --arg head "$HOLD_HEAD" '[{
+  key:"review:branch:feat/x", holder:"review-session:S", state:"live",
+  expired:false, acquired_at:1,
+  metadata:{head_sha:$head, invocation_id:"ri-held"}
+}]' > "$CLAIM_JSON"
+
+run_hook "$(subagent_stop "" "$PARTIAL_FINDINGS" S)"
+HOLD_HP_RC=$?
+if [[ "$HOLD_HP_RC" == "0" ]] \
+  && grep -q 'review_attestation' "$EMITTED" \
+  && grep -q 'feat/x' "$EMITTED" \
+  && grep -q 'review-hold release --branch feat/x' "$RELEASED"; then
+  pass "held checkout emits feat/x and releases the hold"
+else
+  fail "held checkout did not emit/release: rc=$HOLD_HP_RC emitted=$(cat "$EMITTED") released=$(cat "$RELEASED")"
+fi
+
+git -C "$WORK" worktree remove -f "$TMP/held" >/dev/null 2>&1
+set +e
+run_hook "$(subagent_stop "" "$PARTIAL_FINDINGS" S)"
+NO_WT_RC=$?
+set -e
+if [[ "$NO_WT_RC" == "2" ]] \
+  && grep -q 'review_invocation' "$EMITTED" \
+  && grep -q 'target_not_checked_out' "$EMITTED" \
+  && grep -q 'ri-held' "$EMITTED" \
+  && ! grep -q 'review_attestation' "$EMITTED" \
+  && grep -q 'feat/x' "$RELEASED" \
+  && grep -q 'feat/x' "$HOOK_STDERR"; then
+  pass "missing held checkout refuses, records, and releases"
+else
+  fail "missing held checkout contract failed: rc=$NO_WT_RC emitted=$(cat "$EMITTED") stderr=$(cat "$HOOK_STDERR") released=$(cat "$RELEASED")"
+fi
+
+git -C "$WORK" worktree add "$TMP/held" feat/x >/dev/null
+echo moved >> "$TMP/held/a.txt"
+git -C "$TMP/held" add a.txt
+git -C "$TMP/held" commit -qm moved
+set +e
+run_hook "$(subagent_stop "" "$PARTIAL_FINDINGS" S)"
+MOVED_RC=$?
+set -e
+if [[ "$MOVED_RC" == "2" ]] \
+  && grep -q 'target_head_moved' "$EMITTED" \
+  && ! grep -q 'review_attestation' "$EMITTED" \
+  && grep -q 'feat/x' "$HOOK_STDERR"; then
+  pass "moved held checkout refuses without attesting"
+else
+  fail "moved held checkout contract failed: rc=$MOVED_RC emitted=$(cat "$EMITTED") stderr=$(cat "$HOOK_STDERR")"
+fi
+git -C "$WORK" worktree remove -f "$TMP/held" >/dev/null 2>&1
+printf '%s\n' '[]' > "$CLAIM_JSON"
+
+: > "$EMITTED"
+: > "$CLASSIFY_MARKER"
+set +e
+printf '%s' "$(subagent_stop "" "$PARTIAL_FINDINGS" S)" \
+  | FNO="$BIN/fno-stub" FNO_TEST_CLAIM_LIST_FAIL=1 bash "$HOOK" \
+    >"$HOOK_STDOUT" 2>"$HOOK_STDERR"
+CLAIM_READ_RC=$?
+set -e
+if [[ "$CLAIM_READ_RC" == "2" ]] \
+  && [[ ! -s "$EMITTED" ]] \
+  && [[ ! -s "$CLASSIFY_MARKER" ]] \
+  && grep -q 'claim could not be read' "$HOOK_STDERR"; then
+  pass "claim-reader failure refuses before wrong-checkout attestation"
+else
+  fail "claim-reader failure was not fail-closed: rc=$CLAIM_READ_RC emitted=$(cat "$EMITTED") stderr=$(cat "$HOOK_STDERR")"
+fi
+
+: > "$EMITTED"
+: > "$CLASSIFY_MARKER"
+set +e
+printf '%s' "$(subagent_stop "" "$PARTIAL_FINDINGS" S)" \
+  | FNO="$BIN/fno-stub" FNO_TEST_CLAIM_LIST_MALFORMED=1 bash "$HOOK" \
+    >"$HOOK_STDOUT" 2>"$HOOK_STDERR"
+CLAIM_MALFORMED_RC=$?
+set -e
+if [[ "$CLAIM_MALFORMED_RC" == "2" ]] \
+  && [[ ! -s "$EMITTED" ]] \
+  && [[ ! -s "$CLASSIFY_MARKER" ]] \
+  && grep -q 'claim was malformed' "$HOOK_STDERR"; then
+  pass "malformed claim data refuses before wrong-checkout attestation"
+else
+  fail "malformed claim data was not fail-closed: rc=$CLAIM_MALFORMED_RC emitted=$(cat "$EMITTED") stderr=$(cat "$HOOK_STDERR")"
+fi
+
+: > "$EMITTED"
+: > "$CLASSIFY_MARKER"
+set +e
+printf '%s' "$(subagent_stop "" "$PARTIAL_FINDINGS" S)" \
+  | FNO="$BIN/fno-stub" FNO_TEST_CLAIM_ROW_MALFORMED=1 bash "$HOOK" \
+    >"$HOOK_STDOUT" 2>"$HOOK_STDERR"
+CLAIM_ROW_MALFORMED_RC=$?
+set -e
+if [[ "$CLAIM_ROW_MALFORMED_RC" == "2" ]] \
+  && [[ ! -s "$EMITTED" ]] \
+  && [[ ! -s "$CLASSIFY_MARKER" ]] \
+  && grep -q 'claim row was malformed' "$HOOK_STDERR"; then
+  pass "malformed claim row refuses before wrong-checkout attestation"
+else
+  fail "malformed claim row was not fail-closed: rc=$CLAIM_ROW_MALFORMED_RC emitted=$(cat "$EMITTED") stderr=$(cat "$HOOK_STDERR")"
+fi
+
+: > "$EMITTED"
+: > "$CLASSIFY_MARKER"
+set +e
+printf '%s' "$(subagent_stop "" "$PARTIAL_FINDINGS" S)" \
+  | FNO="$BIN/fno-stub" FNO_TEST_CLAIM_KEY_EMPTY=1 bash "$HOOK" \
+    >"$HOOK_STDOUT" 2>"$HOOK_STDERR"
+CLAIM_KEY_EMPTY_RC=$?
+set -e
+if [[ "$CLAIM_KEY_EMPTY_RC" == "2" ]] \
+  && [[ ! -s "$EMITTED" ]] \
+  && [[ ! -s "$CLASSIFY_MARKER" ]] \
+  && grep -q 'claim row was malformed' "$HOOK_STDERR"; then
+  pass "empty claim branch refuses before wrong-checkout attestation"
+else
+  fail "empty claim branch was not fail-closed: rc=$CLAIM_KEY_EMPTY_RC emitted=$(cat "$EMITTED") stderr=$(cat "$HOOK_STDERR")"
 fi
 
 echo ""

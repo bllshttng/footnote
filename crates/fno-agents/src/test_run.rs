@@ -809,7 +809,7 @@ fn live_waiter_hold(dir: &Path, checkout: &Path) -> Option<String> {
 /// that read feeds.
 type ParentMap = std::collections::HashMap<u32, u32>;
 
-fn parent_map(rows: &[crate::census::ProcRow]) -> ParentMap {
+pub(crate) fn parent_map(rows: &[crate::census::ProcRow]) -> ParentMap {
     rows.iter().map(|row| (row.pid, row.ppid)).collect()
 }
 
@@ -852,7 +852,7 @@ fn runs_under(
 }
 
 /// A row whose program is cargo.
-fn is_cargo_row(row: &crate::census::ProcRow) -> bool {
+pub(crate) fn is_cargo_row(row: &crate::census::ProcRow) -> bool {
     let argv0 = row.command.split_whitespace().next().unwrap_or("");
     Path::new(argv0)
         .file_name()
@@ -869,7 +869,7 @@ fn runs_nested_cargo(rows: &[crate::census::ProcRow], holder_pid: u32) -> bool {
 /// sccache client's target, or this wrapper's argument), or an argv0 that is
 /// a build-script binary. The holder's own argv never counts: the walk below
 /// excludes the holder row itself.
-fn is_compile(row: &crate::census::ProcRow) -> bool {
+pub(crate) fn is_compile(row: &crate::census::ProcRow) -> bool {
     let argv0 = row.command.split_whitespace().next().unwrap_or("");
     if Path::new(argv0)
         .file_name()

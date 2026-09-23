@@ -329,11 +329,11 @@ git commit -m "fix(review): address feedback"
 ### 7. Push Updates
 
 ```bash
-# Fetch, rebase onto origin/main, preflight, push once
+# Fetch, bring in origin/main (rebase, or merge when the branch holds merges), preflight, push once
 fno do pr push
 ```
 
-The push is refused with exit 2 while CI still runs on the previous head. It names the running check: wait with `fno do pr wait <n> --until settled`, then re-run. Exit 3 names a refusal to fix. A conflict leaves the rebase in progress: resolve it, run `fno do pr rebase --continue`, then re-run the push. Exit 1 means preflight is red, do not ship the updates. Exit 3 can also name commits that exist only on the remote branch: integrate them with `git pull --rebase origin <branch>`, then re-run the push.
+The push is refused with exit 2 while CI still runs on the previous head. It names the running check: wait with `fno do pr wait <n> --until settled`, then re-run. Exit 3 names a refusal to fix. A conflict leaves the rebase in progress: resolve it, run `fno do pr rebase --continue`, then re-run the push. A branch that already merges origin/main uses merge, not rebase. If that merge conflicts, abort it. Merge origin/main by hand, commit, then re-run the push. Exit 1 means preflight is red, do not ship the updates. Exit 3 can also name commits that exist only on the remote branch: integrate them with `git pull --rebase origin <branch>`, then re-run the push.
 
 ### 8. Reply Per-Thread, Then Post the Consolidated Summary
 

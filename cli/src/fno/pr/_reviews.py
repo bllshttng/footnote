@@ -612,15 +612,16 @@ def split_pin_note(note: str) -> tuple[str, str]:
 def _uncovered_row_overtaken(
     data: Optional[dict], row_ts: str, cwd: Optional[str], head: Optional[str]
 ) -> bool:
-    """Whether a head-matching UNCOVERED row has been overtaken by a later
+    """Whether a head-matching stored NO row has been overtaken by a later
     attestation.
 
     Narrow by construction. It fires only for a row that is UNCOVERED at the
-    head being asked about, and only when an in-scope attestation pinned to
-    that same head carries a LATER timestamp than the row. A covered row, a
-    head mismatch and an unknown row are all handled by the arms beside it,
-    and a row with no timestamp cannot be compared, so it is left alone rather
-    than recomputed on a guess.
+    head being asked about, or a covered row whose review posture is explicitly
+    unsatisfied, and only when an in-scope attestation pinned to that same head
+    carries a LATER timestamp than the row. A covered row with a satisfied or
+    absent posture, a head mismatch and an unknown row are handled by the arms
+    beside it, and a row with no timestamp cannot be compared, so it is left
+    alone rather than recomputed on a guess.
 
     Any verdict overtakes, not only a pass. A later fail at the head moved
     what the row reports - a round is spent, and the review count changed -
@@ -631,7 +632,18 @@ def _uncovered_row_overtaken(
     is only "did something attest THIS head after the row was written", and a
     branch-scoped read would pull in rounds for other commits.
     """
-    if not head or not row_ts or not data or data.get("coverage") != "uncovered":
+    if not head or not row_ts or not isinstance(data, dict):
+        return False
+    posture = data.get("review_posture")
+    stored_no = bool(
+        data.get("coverage") == "uncovered"
+        or (
+            data.get("coverage") == "covered"
+            and isinstance(posture, dict)
+            and posture.get("posture_satisfied") is False
+        )
+    )
+    if not stored_no:
         return False
     if data.get("head_sha") != head:
         return False

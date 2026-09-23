@@ -1,14 +1,13 @@
 //! The fleet load engine behind `fno-agents intel --fleet`: what load the
 //! fleet put on this machine, hour by hour, and what session cap follows.
 //!
-//! Sources, all of them history fno already owns: machine_watch tick rows
-//! (the reading survives only as a sentence in the tick detail, written by
-//! cli/src/fno/doctor_footprint.py; a hot row says `crosses band` and
-//! load_15m can read `unavailable`), flat `spawn_gate_refused` rows
+//! Sources, all of them history fno already owns: structured machine_sample
+//! rows written by the Rust machine_watch arm, machine_watch tick rows (a hot
+//! row says `crosses band` and load_15m can read `unavailable`), flat
+//! `spawn_gate_refused` rows
 //! (`kind`, top-level `ts`), `reign_checkin` rows whose `data.live_workers`
-//! is numeric (34 of 138 stored rows carry it), structured `machine_sample`
-//! rows (none until the producer lands; the report says so), and the
-//! incremental transcript fold in [crate::transcript_activity].
+//! is numeric (34 of 138 stored rows carry it), and the incremental transcript
+//! fold in [crate::transcript_activity].
 //!
 //! Every path comes from fno config or a harness store resolver: no user,
 //! uid or repo name appears here.
@@ -148,6 +147,18 @@ struct EventPass {
     no_reading: u64,
     unrecognized: u64,
     skipped_no_ts: u64,
+    samples: Vec<SamplePoint>,
+}
+
+#[derive(Clone, Default)]
+struct SamplePoint {
+    ts: String,
+    ts_ms: i64,
+    top_rss: Vec<Value>,
+    sessions: Vec<Value>,
+    kings: Option<f64>,
+    workers: Option<f64>,
+    usable: bool,
 }
 
 /// One pass over both journals. Dedup by exact line text across the pair:
@@ -224,6 +235,23 @@ fn read_event_line(line: &str, pass: &mut EventPass) {
             }
         }
         "machine_sample" => {
+            pass.samples.push(SamplePoint {
+                ts: ts_string.clone(),
+                ts_ms,
+                top_rss: data
+                    .get("top_rss")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default(),
+                sessions: data
+                    .get("sessions")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default(),
+                kings: data.get("kings").and_then(|v| v.as_f64()),
+                workers: data.get("workers").and_then(|v| v.as_f64()),
+                usable: data.get("sessions").and_then(|v| v.as_array()).is_some(),
+            });
             let compressor = data.get("compressor_gb").and_then(|v| v.as_f64());
             let swap = data.get("swap_used_gb").and_then(|v| v.as_f64());
             if let (Some(c), Some(s)) = (compressor, swap) {
@@ -255,6 +283,38 @@ pub struct FleetReport {
     pub cap: Option<u64>,
     pub cap_reason: String,
     pub coverage: Coverage,
+    pub holders: Vec<HolderRow>,
+    pub stages: Vec<StageRow>,
+    pub shape: FleetShape,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HolderRow {
+    pub name: String,
+    pub latest_rss_mb: f64,
+    pub max_rss_mb: f64,
+    pub max_at: String,
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StageRow {
+    pub stage: String,
+    pub sessions_median: f64,
+    pub rss_mb_median: f64,
+    pub cpu_pct_median: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct FleetShape {
+    pub kings_median: Option<f64>,
+    pub workers_median: Option<f64>,
+    pub king_ratio: Option<f64>,
+    pub king_ratio_review: Option<bool>,
+    pub merges: Option<u64>,
+    pub worker_seats_mean: Option<f64>,
+    pub merges_per_worker_seat_day: Option<f64>,
+    pub reason: String,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -491,7 +551,18 @@ pub(crate) fn analyze(inputs: &Inputs) -> FleetReport {
             fold: receipt,
         },
         floor,
+        holders: Vec::new(),
+        stages: Vec::new(),
+        shape: FleetShape::default(),
     };
+    summarize_samples(
+        &mut report,
+        &pass.samples,
+        floor_ms,
+        now_ms,
+        inputs.window_days,
+        &inputs.home,
+    );
     with_threshold_curve_cap(
         &mut report,
         &windowed,
@@ -500,6 +571,163 @@ pub(crate) fn analyze(inputs: &Inputs) -> FleetReport {
         floor_ms,
     );
     report
+}
+
+fn median_f64(values: &mut [f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(values[values.len() / 2])
+}
+
+fn merged_count(home: &AgentsHome, floor_ms: i64, now_ms: i64) -> Option<u64> {
+    let path = crate::gc_sweep::graph_path(home);
+    if !path.exists() {
+        return Some(0);
+    }
+    let rows = crate::backlog::api::rows(&crate::backlog::api::Store::new(&path)).ok()?;
+    let empty: Vec<String> = Vec::new();
+    let vocab = crate::scoreboard::TerminalVocabulary {
+        doc: &empty,
+        delivery: &empty,
+        ship: &empty,
+    };
+    Some(
+        rows.iter()
+            .filter_map(|row| {
+                let object = row.as_object()?;
+                let id = row
+                    .get("id")
+                    .or_else(|| row.get("slug"))
+                    .and_then(Value::as_str)?;
+                let classified = crate::scoreboard::classify_node(Some(object), id, &[], &vocab);
+                if classified.get("class").and_then(Value::as_str) != Some("merged") {
+                    return None;
+                }
+                let ts = classified
+                    .get("ship_ts")
+                    .and_then(Value::as_str)
+                    .and_then(parse_timestamp_ms)?;
+                (ts >= floor_ms && ts <= now_ms).then_some(1)
+            })
+            .sum(),
+    )
+}
+
+fn parse_timestamp_ms(raw: &str) -> Option<i64> {
+    if let Ok(value) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Some(value.timestamp_millis());
+    }
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S%.f")
+        .ok()
+        .map(|value| value.and_utc().timestamp_millis())
+}
+
+fn summarize_samples(
+    report: &mut FleetReport,
+    samples: &[SamplePoint],
+    floor_ms: i64,
+    now_ms: i64,
+    window_days: u64,
+    home: &AgentsHome,
+) {
+    let samples: Vec<&SamplePoint> = samples
+        .iter()
+        .filter(|sample| sample.usable && sample.ts_ms >= floor_ms && sample.ts_ms <= now_ms)
+        .collect();
+    if samples.is_empty() {
+        report.shape.reason = "no machine_sample rows in this window".into();
+        return;
+    }
+    let mut holders: BTreeMap<String, HolderRow> = BTreeMap::new();
+    for sample in &samples {
+        for holder in &sample.top_rss {
+            let Some(name) = holder.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let rss = holder.get("rss_mb").and_then(Value::as_f64).unwrap_or(0.0);
+            let entry = holders.entry(name.into()).or_insert_with(|| HolderRow {
+                name: name.into(),
+                latest_rss_mb: rss,
+                max_rss_mb: rss,
+                max_at: sample.ts.clone(),
+                session_id: holder
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            });
+            entry.latest_rss_mb = rss;
+            if rss >= entry.max_rss_mb {
+                entry.max_rss_mb = rss;
+                entry.max_at = sample.ts.clone();
+            }
+        }
+    }
+    report.holders = holders.into_values().collect();
+    report.holders.sort_by(|a, b| {
+        b.max_rss_mb
+            .partial_cmp(&a.max_rss_mb)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    report.holders.truncate(10);
+
+    let mut stage_values: BTreeMap<String, Vec<(f64, f64, f64)>> = BTreeMap::new();
+    for sample in &samples {
+        let mut by_stage: BTreeMap<String, (f64, f64, f64)> = BTreeMap::new();
+        for session in &sample.sessions {
+            let stage = session
+                .get("stage")
+                .and_then(Value::as_str)
+                .unwrap_or("unstaged")
+                .to_string();
+            let entry = by_stage.entry(stage).or_default();
+            entry.0 += 1.0;
+            entry.1 += session.get("rss_mb").and_then(Value::as_f64).unwrap_or(0.0);
+            entry.2 += session
+                .get("cpu_pct")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+        }
+        for (stage, values) in by_stage {
+            stage_values.entry(stage).or_default().push(values);
+        }
+    }
+    for (stage, values) in stage_values {
+        let mut sessions: Vec<f64> = values.iter().map(|v| v.0).collect();
+        let mut rss: Vec<f64> = values.iter().map(|v| v.1).collect();
+        let mut cpu: Vec<f64> = values.iter().map(|v| v.2).collect();
+        report.stages.push(StageRow {
+            stage,
+            sessions_median: median_f64(&mut sessions).unwrap_or(0.0),
+            rss_mb_median: median_f64(&mut rss).unwrap_or(0.0),
+            cpu_pct_median: median_f64(&mut cpu).unwrap_or(0.0),
+        });
+    }
+    let mut kings: Vec<f64> = samples.iter().filter_map(|s| s.kings).collect();
+    let mut workers: Vec<f64> = samples.iter().filter_map(|s| s.workers).collect();
+    let kings_median = median_f64(&mut kings);
+    let workers_median = median_f64(&mut workers);
+    report.shape.kings_median = kings_median;
+    report.shape.workers_median = workers_median;
+    report.shape.king_ratio = kings_median
+        .zip(workers_median)
+        .and_then(|(k, w)| (w > 0.0).then_some(k / w));
+    report.shape.king_ratio_review = kings_median.zip(workers_median).map(|(k, w)| k * 4.0 > w);
+    report.shape.worker_seats_mean = if workers.is_empty() {
+        None
+    } else {
+        Some(workers.iter().sum::<f64>() / workers.len() as f64)
+    };
+    report.shape.merges = merged_count(home, floor_ms, now_ms);
+    report.shape.merges_per_worker_seat_day = report
+        .shape
+        .merges
+        .zip(report.shape.worker_seats_mean)
+        .and_then(|(merges, seats)| {
+            (seats > 0.0 && window_days > 0).then_some(merges as f64 / window_days as f64 / seats)
+        });
+    report.shape.reason = format!("{} sample rows", samples.len());
 }
 
 /// Threshold from the slowdown nearest-readings, then the capacity curve and
@@ -979,11 +1207,42 @@ pub(crate) fn render_text(report: &FleetReport) -> String {
         cov.live.last.as_deref().unwrap_or("-"),
     ));
     out.push_str(&format!(
-        "  memory samples: {} rows {}..{} (structured machine_sample rows; none until the producer lands)\n",
+        "  memory samples: {} rows {}..{} (structured machine_sample rows)\n",
         cov.memory.rows,
         cov.memory.first.as_deref().unwrap_or("-"),
         cov.memory.last.as_deref().unwrap_or("-"),
     ));
+    if report.holders.is_empty() {
+        out.push_str("no top memory holders: no machine_sample rows in this window\n");
+    } else {
+        out.push_str("top memory holders:\n");
+        for holder in &report.holders {
+            out.push_str(&format!(
+                "  {} latest {:.1} MB max {:.1} MB at {}\n",
+                holder.name, holder.latest_rss_mb, holder.max_rss_mb, holder.max_at
+            ));
+        }
+    }
+    if report.stages.is_empty() {
+        out.push_str("no cost by stage: session costs unavailable\n");
+    } else {
+        out.push_str("cost by stage:\n");
+        for stage in &report.stages {
+            out.push_str(&format!(
+                "  {}: {:.1} sessions, {:.1} MB RSS, {:.1}% CPU\n",
+                stage.stage, stage.sessions_median, stage.rss_mb_median, stage.cpu_pct_median
+            ));
+        }
+    }
+    match (report.shape.king_ratio, report.shape.worker_seats_mean) {
+        (Some(ratio), Some(seats)) => out.push_str(&format!(
+            "fleet shape: {:.2} kings per worker seat; {:.1} seats; review={}\n",
+            ratio,
+            seats,
+            report.shape.king_ratio_review.unwrap_or(false)
+        )),
+        _ => out.push_str(&format!("fleet shape: {}\n", report.shape.reason)),
+    }
     out.push_str(&format!(
         "  ticks unparsed: {} no-reading, {} unrecognized, {} skipped (no ts)\n",
         cov.no_reading, cov.unrecognized, cov.skipped_no_ts

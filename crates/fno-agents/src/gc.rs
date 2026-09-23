@@ -362,14 +362,12 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
                     // nothing left to plan), and the planner halted (its
                     // last inside-leg report reads done: the turn ended
                     // with no plan, and it is not waiting on anything).
-                    let unfinished = assignments.iter().find(|(n, s)| {
-                        let moved_on = PLANNING_MOVED_ON_STATUSES.contains(&s.as_str());
-                        let marked = row.planning_closed.contains(n)
-                            || row.planning_plan_written.contains(n);
-                        let complete = PLANNING_COMPLETE_STATUSES.contains(&s.as_str()) && marked;
-                        !(moved_on || complete || row.turn_ended)
-                    });
-                    return match unfinished {
+                    return match crate::planning_lane::unfinished(
+                        assignments,
+                        &row.planning_closed,
+                        &row.planning_plan_written,
+                        row.turn_ended,
+                    ) {
                         None => grace_gate(row, PLANNING_IDLE_RETIRE_SECS),
                         Some((n, s)) => (
                             GcAction::Keep,
@@ -1051,10 +1049,11 @@ pub fn production_crown_sweep(home: &AgentsHome, cwd: &Path) -> crate::crown_rea
 
 pub fn production_roster_sweep(
     home: &AgentsHome,
+    cwd: &Path,
     grace_secs: i64,
     scope: crate::agents_config::RosterScope,
 ) -> crate::roster_reap::RosterReapSummary {
-    crate::roster_reap::roster_reap(home, grace_secs, scope, false)
+    crate::roster_reap::roster_reap(home, cwd, grace_secs, scope, false)
 }
 
 pub fn maybe_retirement_sweep(
@@ -1068,6 +1067,7 @@ pub fn maybe_retirement_sweep(
     tab_sweep: fn() -> crate::reap_render::MuxSweep,
     roster_sweep: fn(
         &AgentsHome,
+        &Path,
         i64,
         crate::agents_config::RosterScope,
     ) -> crate::roster_reap::RosterReapSummary,
@@ -1100,7 +1100,7 @@ pub fn maybe_retirement_sweep(
         // roster sweep loads. A session the roster sweep removes becomes a
         // corpse for the NEXT registry pass, through `origin_corpse`.
         let scope = crate::agents_config::roster_scope(&grace_cwd);
-        let roster = roster_sweep(&home, grace_secs, scope);
+        let roster = roster_sweep(&home, &grace_cwd, grace_secs, scope);
         let scope_off = scope == crate::agents_config::RosterScope::Off;
         // The mux surface is one of the stores a reap must clear: the
         // default-flag prune closes an orphaned worker's tab on the retire
@@ -1119,7 +1119,8 @@ pub fn maybe_retirement_sweep(
             "unreadable".to_string()
         } else {
             format!(
-                "retired {} kept {} refused {}",
+                "enumerated {} retired {} kept {} refused {}",
+                roster.enumerated,
                 roster.retired.len(),
                 roster.kept.len(),
                 roster.refused.len()
@@ -1210,6 +1211,7 @@ mod tests {
     /// live claude roster.
     fn noop_roster_sweep(
         _home: &AgentsHome,
+        _cwd: &Path,
         _grace_secs: i64,
         _scope: crate::agents_config::RosterScope,
     ) -> crate::roster_reap::RosterReapSummary {
@@ -1440,6 +1442,7 @@ mod tests {
         tab_sweep: fn() -> crate::reap_render::MuxSweep,
         roster_sweep: fn(
             &AgentsHome,
+            &std::path::Path,
             i64,
             crate::agents_config::RosterScope,
         ) -> crate::roster_reap::RosterReapSummary,
@@ -1552,6 +1555,7 @@ mod tests {
     /// reads back what the arm handed the sweep.
     fn recording_roster_sweep(
         _home: &AgentsHome,
+        _cwd: &Path,
         _grace_secs: i64,
         scope: crate::agents_config::RosterScope,
     ) -> crate::roster_reap::RosterReapSummary {
@@ -1571,6 +1575,7 @@ mod tests {
     /// enumeration-failed shape the arm must name on the tick.
     fn unreadable_roster_sweep(
         _home: &AgentsHome,
+        _cwd: &Path,
         _grace_secs: i64,
         _scope: crate::agents_config::RosterScope,
     ) -> crate::roster_reap::RosterReapSummary {
@@ -1581,6 +1586,7 @@ mod tests {
                 node: None,
                 reason: "roster unreadable: test stub".to_string(),
                 retired: false,
+                class: "contested",
             }],
             ..Default::default()
         }
@@ -1618,7 +1624,7 @@ mod tests {
             row["data"]["detail"]
                 .as_str()
                 .unwrap()
-                .contains("roster=retired 0 kept 0 refused 0"),
+                .contains("roster=enumerated 0 retired 0 kept 0 refused 0"),
             "{:?}",
             row["data"]["detail"]
         );

@@ -218,6 +218,16 @@ pub fn reap_receipt_path(home: &AgentsHome, receipt: &ReapReceipt) -> std::path:
     reap_receipt_path_for(home, &receipt.harness, &receipt.harness_session_id)
 }
 
+/// The receipt filename for one resume identity: `<harness>-<session id>`
+/// in the sanitized alphabet, so every writer lands on the same key.
+fn receipt_file_name(harness: &str, session_id: &str) -> String {
+    format!(
+        "{}-{}.json",
+        receipt_filename_part(harness),
+        receipt_filename_part(session_id)
+    )
+}
+
 /// The receipt path for one resume identity, so a reader without a receipt
 /// in hand (the verify gate's event-derived cohort) spells the key once.
 pub fn reap_receipt_path_for(
@@ -225,11 +235,9 @@ pub fn reap_receipt_path_for(
     harness: &str,
     session_id: &str,
 ) -> std::path::PathBuf {
-    home.root().join("reap-receipts").join(format!(
-        "{}-{}.json",
-        receipt_filename_part(harness),
-        receipt_filename_part(session_id)
-    ))
+    home.root()
+        .join("reap-receipts")
+        .join(receipt_file_name(harness, session_id))
 }
 
 /// Persist one receipt durably. 0600 like the rest of the agents tree.
@@ -245,6 +253,37 @@ pub fn write_reap_receipt(home: &AgentsHome, receipt: &ReapReceipt) -> std::io::
     )?;
     let _ = crate::paths::set_file_mode_0600(&path);
     Ok(())
+}
+
+/// A bare `claude --resume` lands on the account default, so the recipe asks
+/// resume_pin the way the reentry plan does: pin the row's model, or name the
+/// fno door that rebuilds a route a copied command cannot carry.
+fn claude_resume_recipe(
+    e: &state::RegistryEntry,
+    sid: &str,
+    mut argv: Vec<String>,
+    route_provider_of: crate::resume_pin::RouteProviderOf<'_>,
+) -> Vec<String> {
+    let pins = crate::resume_pin::RowPins::from_entry(e);
+    match crate::resume_pin::resolve(Some(pins), None, false, sid, route_provider_of) {
+        Ok(pin) => {
+            crate::resume_pin::append_axes(
+                &mut argv,
+                pin.argv_model.as_deref(),
+                pin.effort.as_deref(),
+            );
+            argv
+        }
+        Err(crate::resume_pin::Unpinned {
+            lost_route: Some((provider, model)),
+            ..
+        }) => [
+            "fno", "agents", "spawn", "--resume", sid, "-P", &provider, "-m", &model,
+        ]
+        .map(str::to_string)
+        .to_vec(),
+        Err(_) => argv,
+    }
 }
 
 /// Build the receipt from the row, or say exactly why it cannot be built.
@@ -273,6 +312,15 @@ pub fn build_reap_receipt(
     let argv = contract
         .render_session_argv(harness, "interactive_resume", Some(sid))
         .map_err(|err| format!("no interactive resume form declared: {err}"))?;
+    // A bare `claude --resume` lands on the account default, so a claude
+    // argv asks resume_pin first; every other harness keeps its table form.
+    let argv = if harness == "claude" {
+        claude_resume_recipe(e, sid, argv, &|m| {
+            crate::claude_adopt::provider_from_route_settings(m)
+        })
+    } else {
+        argv
+    };
     // The native locator: every transcript candidate the harness's own store
     // holds for this session, discovered at receipt time. A store read that
     // fails leaves the locator absent-but-named rather than blocking the
@@ -297,7 +345,19 @@ pub fn build_reap_receipt(
         log_path: e.log_path.clone(),
         created_at: e.created_at.clone(),
         reaped_at: crate::daemon::now_rfc3339_like(),
-        resume: argv.join(" "),
+        // The rendered form a human copies. A claude line is shell-quoted,
+        // so a token like `glm-5.3-flash[1m]` survives zsh's glob; harnesses
+        // whose table form composes a pre_exec `sh -c` script keep the raw
+        // join, because the script token is already shell-quoted content and
+        // quoting it again would corrupt it. resume_argv stays raw either way.
+        resume: if harness == "claude" {
+            argv.iter()
+                .map(|t| crate::client_verbs::shlex_quote(t))
+                .collect::<Vec<_>>()
+                .join(" ")
+        } else {
+            argv.join(" ")
+        },
         ledger: ledger.cloned(),
         removed_by: writer.surface(),
         removal_trigger: writer.trigger().to_string(),
@@ -312,6 +372,34 @@ pub fn build_reap_receipt(
         writer_build: Some(crate::gc_verify::current_build()),
         retirement_contract: Some(crate::gc_verify::retirement_contract()),
     })
+}
+
+/// The spawn-axes `reap_receipt` answer: the removal receipt for one row the
+/// Python registry choke point dropped, from the builder every Rust door
+/// uses. `{"row", "removed_by"}` in; `{"file", "receipt"}` or `{"refused"}`
+/// out. The caller writes the file.
+pub fn decide_reap_receipt(ask: &Value) -> Value {
+    let refused = |reason: String| json!({ "refused": reason });
+    let row: state::RegistryEntry = match ask.get("row").map(|v| serde_json::from_value(v.clone()))
+    {
+        Some(Ok(row)) => row,
+        Some(Err(err)) => return refused(format!("row unreadable: {err}")),
+        None => return refused("no row in the ask".to_string()),
+    };
+    match build_reap_receipt(&row, None, Writer::RegistryWrite) {
+        Ok(mut receipt) => {
+            if let Some(by) = ask.get("removed_by").and_then(Value::as_str) {
+                if !by.is_empty() {
+                    receipt.removed_by = by.to_string();
+                }
+            }
+            json!({
+                "file": receipt_file_name(&receipt.harness, &receipt.harness_session_id),
+                "receipt": receipt,
+            })
+        }
+        Err(err) => refused(err),
+    }
 }
 
 /// The store root one harness's transcripts live under, for the receipt's
@@ -490,6 +578,170 @@ mod tests {
         assert_eq!(
             data["active_surface"], "not-applicable",
             "the removal that already happened is named even with no receipt"
+        );
+    }
+
+    fn axes_row(name: &str, axes: &str) -> state::RegistryEntry {
+        serde_json::from_str(&format!(
+            r#"{{"name":"{name}","short_id":"{name}-id","harness":"claude","harness_session_id":"{name}-session","cwd":"/tmp/x","log_path":"/tmp/x.log","created_at":"2026-09-01T00:00:00Z","status":"live"{axes}}}"#
+        ))
+        .unwrap()
+    }
+
+    fn no_lookup(_: Option<&str>) -> Option<String> {
+        None
+    }
+
+    fn bare_argv(sid: &str) -> Vec<String> {
+        vec![
+            "claude".to_string(),
+            "--resume".to_string(),
+            sid.to_string(),
+        ]
+    }
+
+    #[test]
+    fn ac1_hp_zai_row_recipe_names_the_route_door() {
+        // AC1-HP: a zai row's recipe is the fno door that rebuilds the route.
+        let lookup: crate::resume_pin::RouteProviderOf<'_> =
+            &|m| (m == Some("glm-5.3-flash[1m]")).then(|| "zai".to_string());
+        let e = axes_row(
+            "zairow",
+            r#","provider":"zai","requested_model":"glm-5.3-flash[1m]""#,
+        );
+        let argv = claude_resume_recipe(&e, "zairow-session", bare_argv("zairow-session"), lookup);
+        assert_eq!(
+            argv,
+            [
+                "fno",
+                "agents",
+                "spawn",
+                "--resume",
+                "zairow-session",
+                "-P",
+                "zai",
+                "-m",
+                "glm-5.3-flash[1m]"
+            ]
+        );
+    }
+
+    #[test]
+    fn ac1_edge_anthropic_row_recipe_pins_model_and_effort() {
+        // AC1-EDGE: an anthropic row's recipe pins --model and --effort and
+        // keeps the native binary.
+        let e = axes_row(
+            "opusrow",
+            r#","provider":"anthropic","requested_model":"claude-opus-5","requested_effort":"high""#,
+        );
+        let argv = claude_resume_recipe(
+            &e,
+            "opusrow-session",
+            bare_argv("opusrow-session"),
+            &no_lookup,
+        );
+        assert_eq!(
+            argv,
+            [
+                "claude",
+                "--resume",
+                "opusrow-session",
+                "--model",
+                "claude-opus-5",
+                "--effort",
+                "high"
+            ]
+        );
+    }
+
+    #[test]
+    fn ac1_err_row_without_a_model_keeps_the_bare_form() {
+        // AC1-ERR: nothing to pin, nothing changes.
+        let e = axes_row("barerow", "");
+        let argv = claude_resume_recipe(
+            &e,
+            "barerow-session",
+            bare_argv("barerow-session"),
+            &no_lookup,
+        );
+        assert_eq!(argv, ["claude", "--resume", "barerow-session"]);
+    }
+
+    #[test]
+    fn codex_row_keeps_its_table_form_in_both_fields() {
+        // AC1-EDGE: a codex row never asks resume_pin, and its composed
+        // pre_exec form keeps the raw join byte for byte - the script token
+        // is already shell-quoted content, so the render must not re-quote.
+        let mut e = sample_row("codexrow");
+        e.harness = Some("codex".to_string());
+        let receipt = build_reap_receipt(&e, None, Writer::GcSweep).unwrap();
+        assert_eq!(receipt.resume, receipt.resume_argv.join(" "));
+        assert!(
+            !receipt.resume.contains("'\"'\"'"),
+            "the pre_exec script is not re-quoted: {}",
+            receipt.resume
+        );
+        assert!(receipt.resume.contains("codexrow-session"));
+    }
+
+    #[test]
+    fn ac1_hp_zai_receipt_resume_string_quotes_the_model() {
+        // AC1-HP: the rendered `resume` quotes the [1m] glob; the argv tokens
+        // stay raw. An empty route dir is a lookup miss, so the row's own
+        // provider names the door - hermetic, no route file needed.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let route_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("FNO_ROUTE_SETTINGS_DIR", route_dir.path());
+        let e = axes_row(
+            "zairow2",
+            r#","provider":"zai","requested_model":"glm-5.3-flash[1m]""#,
+        );
+        let receipt = build_reap_receipt(&e, None, Writer::GcSweep).unwrap();
+        // FNO_ROUTE_SETTINGS_DIR stays set (tempdir drop leaves it dangling):
+        // unsetting it process-globally races every lock-free state-resolving
+        // test into the paths.rs guard, and a dangling route dir is just a
+        // lookup miss, which is what this test wants.
+        assert!(
+            receipt.resume.ends_with("-m 'glm-5.3-flash[1m]'"),
+            "{}",
+            receipt.resume
+        );
+        assert_eq!(
+            receipt.resume_argv.last().map(String::as_str),
+            Some("glm-5.3-flash[1m]")
+        );
+    }
+
+    #[test]
+    fn decide_reap_receipt_answers_file_and_receipt_for_a_good_row() {
+        let row = sample_row("goodrow");
+        let ask = json!({"row": row, "removed_by": "probe"});
+        let answer = decide_reap_receipt(&ask);
+        assert!(answer.get("refused").is_none(), "{answer}");
+        assert_eq!(answer["file"], "claude-goodrow-session.json");
+        assert_eq!(answer["receipt"]["removed_by"], "probe");
+        assert_eq!(answer["receipt"]["removal_trigger"], "session");
+        assert_eq!(
+            answer["receipt"]["resume"], "claude --resume goodrow-session",
+            "a row with no model keeps the bare form"
+        );
+    }
+
+    #[test]
+    fn decide_reap_receipt_refuses_a_row_without_a_session_id() {
+        let row: state::RegistryEntry = serde_json::from_str(
+            r#"{"name":"nosid","harness":"claude","cwd":"/tmp/x","created_at":"2026-09-01T00:00:00Z","status":"live"}"#,
+        )
+        .unwrap();
+        let answer = decide_reap_receipt(&json!({"row": row}));
+        assert!(
+            answer["refused"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("missing harness session identity"),
+            "{answer}"
         );
     }
 }
