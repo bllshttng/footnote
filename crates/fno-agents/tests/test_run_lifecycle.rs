@@ -1456,19 +1456,33 @@ fn the_build_door_queues_in_arrival_order() {
     for w in [&outer, &wa, &wb] {
         std::fs::create_dir_all(w).unwrap();
     }
+    // Every build-door waiter first takes a run slot (the fixed lock
+    // order), so the pool must fit the holder and both waiters or the
+    // second waiter wedges at the slot door and never queues here.
+    std::fs::write(root.join("config.toml"), "[test]\nmax_cargo_runs = 4\n")
+        .expect("write the slot-pool config");
+    let slots = || {
+        std::iter::once(("FNO_CONFIG", root.join("config.toml")))
+            .collect::<std::collections::HashMap<_, _>>()
+    };
 
     let holder_pid = detached_pid();
-    let first = build_admit(&root, holder_pid, &outer).status().unwrap();
+    let first = build_admit(&root, holder_pid, &outer)
+        .envs(slots())
+        .status()
+        .unwrap();
     assert!(first.success(), "the detached holder holds build:cargo");
 
     let mut proc_a = Command::new("sleep").arg("60").spawn().unwrap();
     let mut proc_b = Command::new("sleep").arg("60").spawn().unwrap();
     let mut a = build_admit(&root, proc_a.id(), &wa)
+        .envs(slots())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
     std::thread::sleep(Duration::from_secs(1));
     let mut b = build_admit(&root, proc_b.id(), &wb)
+        .envs(slots())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
