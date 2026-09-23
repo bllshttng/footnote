@@ -1545,18 +1545,12 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
             &cached
         }
     };
-    // The board mode: every entry in selection order plus the column facts,
-    // from the same tables and the same claim read - an unreadable claim
-    // store refuses the board exactly as it refuses selection.
-    if params
-        .get("board")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+    // The board mode: every entry in selection order plus the column
+    // facts, on the same fail-closed claim read as selection itself.
+    if matches!(params.get("board").and_then(Value::as_bool), Some(true)) {
         let f = crate::backlog_ready::board_facts(entries, &opts.claimed, opts.now_ms);
-        return Ok(
-            json!({"ids": f.ids, "underway": f.underway, "effective_priority": f.effective_priority}),
-        );
+        let reply = json!({"ids": f.ids, "underway": f.underway, "effective_priority": f.effective_priority});
+        return Ok(reply);
     }
     match select(entries, &opts) {
         Ok(reply) => Ok(json!({
