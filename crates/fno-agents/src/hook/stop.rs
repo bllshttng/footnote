@@ -934,24 +934,13 @@ enum KingResolve {
 }
 
 /// The king manifest resolution: the registry row - not file presence -
-/// proves authority, the scope names the manifest under the space's kings
-/// dir, and any unreadable step answers None (the same fail-open the Python
+/// proves authority, and the manifest is read through the row's own cwd, so
+/// a shell or Stop payload outside the repo still resolves the court it
+/// declared. Any unreadable step answers None (the same fail-open the Python
 /// resolver's catch-all ships). The row lookup is the ONE matcher,
 /// `loop_reign::find_by_session`.
 fn resolve_king(cwd: &Path, fire: &Fire) -> KingResolve {
     if fire.hook_harness_id.is_empty() {
-        return KingResolve::None;
-    }
-    let kings_dir = super::events_space(cwd).join("kings");
-    let has_manifests = std::fs::read_dir(&kings_dir)
-        .map(|mut it| {
-            it.any(|e| {
-                e.map(|e| e.path().extension().is_some_and(|x| x == "md"))
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false);
-    if !has_manifests {
         return KingResolve::None;
     }
     let sid = if fire.resolve_harness_id.is_empty() {
@@ -964,9 +953,22 @@ fn resolve_king(cwd: &Path, fire: &Fire) -> KingResolve {
             Ok(r) => r.entries,
             Err(_) => return KingResolve::None,
         };
-    let Some(row) = crate::loop_reign::find_by_session(&rows, sid, fire.harness.as_deref()) else {
-        return KingResolve::None;
-    };
+    match king_manifest_in(&rows, sid, fire.harness.as_deref(), cwd) {
+        Some(path) => KingResolve::Found(path),
+        None => KingResolve::None,
+    }
+}
+
+/// The manifest through the crown row: the row's cwd names the space (the
+/// payload cwd is only the no-cwd fallback) and `loop_reign::manifest_path`
+/// carries the unsafe-scope refusal.
+fn king_manifest_in(
+    rows: &[crate::state::RegistryEntry],
+    sid: &str,
+    harness: Option<&str>,
+    cwd: &Path,
+) -> Option<PathBuf> {
+    let row = crate::loop_reign::find_by_session(rows, sid, harness)?;
     use crate::AgentStatus;
     if matches!(
         row.status,
@@ -975,25 +977,21 @@ fn resolve_king(cwd: &Path, fire: &Fire) -> KingResolve {
             | AgentStatus::Failed
             | AgentStatus::PermanentDead
     ) {
-        return KingResolve::None;
+        return None;
     }
-    let Some(scope) = row
+    let scope = row
         .crown_scope
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
-        return KingResolve::None;
-    };
-    if scope.contains("..") || scope.contains('/') || scope.contains('\\') {
-        return KingResolve::None;
-    }
-    let path = kings_dir.join(format!("{scope}.md"));
-    if path.is_file() {
-        KingResolve::Found(path)
+        .filter(|s| !s.is_empty())?;
+    let root = if row.cwd.is_empty() {
+        cwd
     } else {
-        KingResolve::None
-    }
+        Path::new(&row.cwd)
+    };
+    crate::loop_reign::manifest_path(&super::events_space(root), scope)
+        .ok()
+        .filter(|path| path.is_file())
 }
 
 /// The pending-delivery retry file this session would resume, if any. With a
@@ -1282,5 +1280,88 @@ mod tests {
             None => std::env::remove_var("CARGO_BUILD_BUILD_DIR"),
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The manifest resolves through the crown ROW's cwd, not the Stop
+    /// payload's: a king whose shell sits outside the repo still resolves its
+    /// court (x-8387). Every unreadable reading answers None, the fail-open
+    /// the hook ships.
+    #[test]
+    fn king_manifest_in_keys_on_the_crown_row_cwd() {
+        use crate::paths::DeclaredRoot;
+        use crate::state::RegistryEntry;
+
+        let _root = DeclaredRoot::declare("stop-king-row");
+        let repo = _root.path().join("repo");
+        let elsewhere = _root.path().join("elsewhere");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        assert_ne!(
+            super::events_space(&repo),
+            super::events_space(&elsewhere),
+            "positive control: the row cwd and the payload cwd must key different spaces"
+        );
+        let scope = "x-test-epic";
+        let kings = super::events_space(&repo).join("kings");
+        std::fs::create_dir_all(&kings).unwrap();
+        let manifest = kings.join(format!("{scope}.md"));
+        std::fs::write(&manifest, "---\nscope: x-test-epic\nshape: court\n---\n").unwrap();
+        let sid = "0c1f2f9a-7777-4000-8000-000000000007";
+        let crowned = RegistryEntry {
+            cwd: repo.to_string_lossy().into_owned(),
+            harness_session_id: Some(sid.into()),
+            crown_scope: Some(scope.into()),
+            ..Default::default()
+        };
+        let rows = vec![crowned];
+        assert_eq!(
+            super::king_manifest_in(&rows, sid, None, &elsewhere),
+            Some(manifest),
+            "the row's cwd, not the payload cwd, names the space"
+        );
+        let terminal = RegistryEntry {
+            status: crate::AgentStatus::Exited,
+            cwd: repo.to_string_lossy().into_owned(),
+            harness_session_id: Some("gone-session".into()),
+            crown_scope: Some(scope.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::king_manifest_in(&[terminal], "gone-session", None, &elsewhere),
+            None
+        );
+        let uncrowned = RegistryEntry {
+            cwd: repo.to_string_lossy().into_owned(),
+            harness_session_id: Some("plain-session".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::king_manifest_in(&[uncrowned], "plain-session", None, &elsewhere),
+            None
+        );
+        let unsafe_scope = RegistryEntry {
+            cwd: repo.to_string_lossy().into_owned(),
+            harness_session_id: Some("sneaky-session".into()),
+            crown_scope: Some("../escape".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::king_manifest_in(&[unsafe_scope], "sneaky-session", None, &elsewhere),
+            None
+        );
+        let no_file = RegistryEntry {
+            cwd: repo.to_string_lossy().into_owned(),
+            harness_session_id: Some("bare-session".into()),
+            crown_scope: Some("x-no-file".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::king_manifest_in(&[no_file], "bare-session", None, &elsewhere),
+            None
+        );
+        assert_eq!(
+            super::king_manifest_in(&rows, "no-such-session", None, &elsewhere),
+            None
+        );
     }
 }
