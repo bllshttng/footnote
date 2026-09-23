@@ -541,6 +541,7 @@ fn with_epic_load(
     entries: &[Value],
     projects: &Result<HashMap<String, String>, String>,
     cap: Option<usize>,
+    idea_cap: (Option<usize>, &'static str),
 ) {
     for crown in crowns {
         let (Some(scope), Some(level)) = (
@@ -560,6 +561,37 @@ fn with_epic_load(
         };
         fold["epics"] = json!(crate::backlog::epic_cap::epic_load(entries, &ids, cap));
         fold["epic_cap"] = json!(cap);
+        let mut scope_ids = ids.clone();
+        let by_id = crate::graph_store::index_by_id(entries);
+        for id in &ids {
+            let mut current = id.as_str();
+            for _ in 0..64 {
+                let Some(parent) = by_id
+                    .get(current)
+                    .and_then(|row| row.get("parent"))
+                    .and_then(Value::as_str)
+                    .filter(|parent| !parent.is_empty())
+                else {
+                    break;
+                };
+                if !scope_ids.insert(parent.to_string()) {
+                    break;
+                }
+                current = parent;
+            }
+        }
+        let scope_entries: Vec<Value> = entries
+            .iter()
+            .filter(|entry| {
+                crate::graph_store::entry_id(entry).is_some_and(|id| scope_ids.contains(id))
+            })
+            .cloned()
+            .collect();
+        fold["idea_cap"] = json!({"cap": idea_cap.0, "source": idea_cap.1});
+        fold["ideas"] = json!(crate::backlog::idea_cap::idea_load(
+            &scope_entries,
+            idea_cap.0
+        ));
     }
 }
 
@@ -676,6 +708,7 @@ pub fn court_fold(
         &entries,
         &projects,
         crate::backlog::epic_cap::configured_cap(graph_path),
+        crate::backlog::idea_cap::configured_cap(graph_path),
     );
     let stuck = stuck_verdict(&folds);
     let line = stuck_line(&stuck);
@@ -1246,6 +1279,11 @@ mod tests {
                 {"id": "e-2", "open_children": 2, "full": false}
             ])
         );
+        assert_eq!(scope["idea_cap"], json!({"cap": 25, "source": "default"}));
+        assert_eq!(
+            scope["ideas"],
+            json!([{"scope": "epic:e-1", "open_ideas": 1, "full": false}])
+        );
     }
 
     /// A fold that is not ok carries neither key: an unread scope must never
@@ -1267,9 +1305,12 @@ mod tests {
             &entries,
             &Ok(HashMap::new()),
             Some(3),
+            (Some(25), "default"),
         );
         assert!(folds["e-1"].get("epics").is_none());
         assert!(folds["e-1"].get("epic_cap").is_none());
+        assert!(folds["e-1"].get("ideas").is_none());
+        assert!(folds["e-1"].get("idea_cap").is_none());
     }
 
     /// No cap configured: `epic_cap` reads null and no row says full; an
@@ -1294,12 +1335,18 @@ mod tests {
             &entries,
             &Ok(HashMap::new()),
             None,
+            (None, "off"),
         );
         assert_eq!(folds["e-1"]["epic_cap"], Value::Null);
         assert_eq!(
             folds["e-1"]["epics"],
             json!([{"id": "e-1", "open_children": 1, "full": false}])
         );
+        assert_eq!(
+            folds["e-1"]["idea_cap"],
+            json!({"cap": null, "source": "off"})
+        );
+        assert_eq!(folds["e-1"]["ideas"], json!([]));
     }
 
     /// Owned marks the deepest crown level, then the lowest scope on a
