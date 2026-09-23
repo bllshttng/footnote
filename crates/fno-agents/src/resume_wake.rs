@@ -1449,7 +1449,12 @@ mod tests {
 
     #[test]
     fn respawn_gate_refusal_prevents_relaunch() {
+        let _env_guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let temp = tempfile::tempdir().unwrap();
+        let claims_root = temp.path().join("claims-root");
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
         let claude_home = crate::claude_ask::ClaudeHome::at(temp.path());
         let jobs = claude_home.jobs_dir_for("abcd1234");
         std::fs::create_dir_all(&jobs).unwrap();
@@ -1500,6 +1505,7 @@ mod tests {
             || Err(83),
         );
         assert!(!marker.exists(), "refused revival must not launch a child");
+        std::env::remove_var("FNO_CLAIMS_ROOT");
     }
 
     #[test]
