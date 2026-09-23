@@ -190,6 +190,15 @@ def _claude_scoped_service(config_dir: Path) -> str:
     return f"{_CLAUDE_KEYCHAIN_SERVICE}-{suffix}"
 
 
+def slot_switch_remedy(account: str) -> str:
+    """The hand path that moves every claude session on the shared slot to `account`."""
+    # `fno config accounts use` replaces this once stored copies are read back and refreshed.
+    slot = Path.home() / ".claude"
+    return (f"with no `/logout` first, sign in as {account} with `claude /login` (interactive"
+            f" sessions) and with `CLAUDE_CONFIG_DIR={slot} claude /login` (background sessions,"
+            f" which read '{_claude_scoped_service(slot)}'); blocked sessions recover on their next request")
+
+
 def _run_security(args: list[str]) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(
@@ -774,33 +783,6 @@ def credential_digest(blob: Optional[str]) -> Optional[str]:
             if isinstance(token, str) and token:
                 material = token
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
-
-
-def credential_expiry(blob: Optional[str]) -> Optional[float]:
-    """``claudeAiOauth.expiresAt`` as epoch SECONDS, or None when absent.
-
-    Claude Code stores it in milliseconds; a value in that range is scaled here
-    so no caller has to guess the unit. A stored blob whose expiry has passed is
-    a dead credential: `fno config accounts use` would materialize it and the next
-    session would prompt for a login.
-    """
-    if not blob:
-        return None
-    try:
-        data = json.loads(blob)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    oauth = data.get("claudeAiOauth")
-    if not isinstance(oauth, dict):
-        return None
-    raw = oauth.get("expiresAt")
-    if not isinstance(raw, (int, float)):
-        return None
-    # Milliseconds since epoch is the shape Claude Code writes; anything past
-    # the year 33658 in seconds is really milliseconds.
-    return float(raw) / 1000.0 if raw > 1e12 else float(raw)
 
 
 def read_blob(record_id: str, root: Path | None = None) -> Optional[str]:
@@ -1600,9 +1582,8 @@ def _reconcile_locked(
                 "ambiguous-slot",
                 detail=(
                     f"the {cli} slot presents credentials belonging to different "
-                    "accounts (a stale scoped Keychain item beside a live unscoped "
-                    "one); whichever was stamped, some reader would get the other - "
-                    "sign out and back in to settle it"
+                    "accounts; whichever was stamped, some reader would get the other - "
+                    + slot_switch_remedy("the account to keep")
                 ),
             )
         return ReconcileResult(
