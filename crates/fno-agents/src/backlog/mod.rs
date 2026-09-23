@@ -12,6 +12,7 @@ pub mod comments;
 pub mod decisions;
 pub mod encounters;
 pub mod epic_cap;
+pub mod idea_cap;
 pub mod model;
 pub mod node_state;
 pub mod nodes;
