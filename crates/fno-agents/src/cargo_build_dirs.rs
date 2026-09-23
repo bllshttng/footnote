@@ -20,7 +20,7 @@
 //! `fno-agents reclaim cargo-build-dirs` / `remove-for` subcommands, and the
 //! in-process `remove_for` the merge reaper calls.
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
@@ -120,14 +120,18 @@ pub(crate) fn cargo_bin() -> Option<PathBuf> {
     None
 }
 
-/// `build_directory` and package names for one manifest, with
+/// Cargo's build and in-checkout target directories plus package names for one
+/// manifest, with
 /// `CARGO_BUILD_BUILD_DIR` forced to `<base>/{workspace-path-hash}` (`Some`)
 /// or removed (`None`) for the call, so both bases answer from the same env.
 /// `Err` carries the manifest path: the receipt names what could not answer.
-pub(crate) fn resolve(
-    manifest: &Path,
-    fno_base: Option<&Path>,
-) -> Result<(PathBuf, Vec<String>), String> {
+pub(crate) struct Resolved {
+    build_dir: PathBuf,
+    target_dir: Option<PathBuf>,
+    names: Vec<String>,
+}
+
+pub(crate) fn resolve(manifest: &Path, fno_base: Option<&Path>) -> Result<Resolved, String> {
     let bin = cargo_bin().ok_or_else(|| manifest.display().to_string())?;
     let mut cmd = Command::new(bin);
     cmd.arg("metadata")
@@ -150,12 +154,16 @@ pub(crate) fn resolve(
     }
     let value: Value =
         serde_json::from_slice(&out.stdout).map_err(|_| manifest.display().to_string())?;
-    let dir = PathBuf::from(
+    let build_dir = PathBuf::from(
         value
             .get("build_directory")
             .and_then(Value::as_str)
             .ok_or_else(|| manifest.display().to_string())?,
     );
+    let target_dir = value
+        .get("target_directory")
+        .and_then(Value::as_str)
+        .map(PathBuf::from);
     let names = value
         .get("packages")
         .and_then(Value::as_array)
@@ -166,7 +174,11 @@ pub(crate) fn resolve(
                 .collect()
         })
         .unwrap_or_default();
-    Ok((dir, names))
+    Ok(Resolved {
+        build_dir,
+        target_dir,
+        names,
+    })
 }
 
 // --- tree resolution ---------------------------------------------------------
@@ -221,9 +233,9 @@ fn answer_tree(tree: &Path, fno_base: &Path) -> Result<TreeAnswer, String> {
     let mut names = BTreeSet::new();
     for manifest in workspace_manifests(tree) {
         for base in [Some(fno_base), None] {
-            let (dir, pkg_names) = resolve(&manifest, base)?;
-            dirs.insert(dir);
-            names.extend(pkg_names);
+            let resolved = resolve(&manifest, base)?;
+            dirs.insert(resolved.build_dir);
+            names.extend(resolved.names);
         }
     }
     Ok(TreeAnswer {
@@ -237,6 +249,47 @@ fn answer_tree(tree: &Path, fno_base: &Path) -> Result<TreeAnswer, String> {
 pub(crate) fn list_for(tree: &Path) -> Result<Vec<PathBuf>, String> {
     let fno_base = fno_build_base(&repo_root_for(tree));
     Ok(answer_tree(tree, &fno_base)?.dirs)
+}
+
+fn tracked_files(tree: &Path, dir: &Path) -> bool {
+    let Ok(relative) = dir.strip_prefix(tree) else {
+        return true;
+    };
+    let Ok(output) = Command::new("git")
+        .current_dir(tree)
+        .args(["ls-files", "-z", "--"])
+        .arg(relative)
+        .output()
+    else {
+        return true;
+    };
+    !output.status.success() || !output.stdout.is_empty()
+}
+
+/// Cargo's identity answer for a member's target directory, filtered before
+/// any removal: it must live below that member, carry Cargo's cache marker,
+/// and contain no tracked file. A manifest that cannot answer refuses the
+/// whole tree; an unsafe answer simply is not a reclaim candidate.
+fn tree_target_dirs(tree: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut dirs = BTreeSet::new();
+    for manifest in workspace_manifests(tree) {
+        let resolved = resolve(&manifest, None)?;
+        let Some(target) = resolved.target_dir else {
+            continue;
+        };
+        let target = phys(&target);
+        let Some(member) = manifest.parent().map(phys) else {
+            continue;
+        };
+        if !target.starts_with(&member)
+            || !target.join(CACHEDIR_TAG).is_file()
+            || tracked_files(tree, &target)
+        {
+            continue;
+        }
+        dirs.insert(target);
+    }
+    Ok(dirs.into_iter().collect())
 }
 
 fn repo_root_for(tree: &Path) -> PathBuf {
@@ -259,9 +312,10 @@ pub(crate) fn managed_bases(root: &Path, trees: &[PathBuf]) -> Vec<PathBuf> {
     let Some(manifest) = workspace_manifests(root).into_iter().next() else {
         return bases;
     };
-    let Ok((dir, _)) = resolve(&manifest, None) else {
+    let Ok(resolved) = resolve(&manifest, None) else {
         return reject(&mut bases);
     };
+    let dir = resolved.build_dir;
     let Some(base) = dir.parent().and_then(Path::parent) else {
         return reject(&mut bases);
     };
@@ -1040,6 +1094,371 @@ pub fn remove_for(tree: &Path) -> usize {
     removed
 }
 
+#[derive(Debug, Default)]
+pub struct TreeReclaim {
+    pub dirs: Vec<(PathBuf, u64)>,
+    pub kept: Vec<(PathBuf, &'static str)>,
+    pub unread: Option<String>,
+}
+
+/// Reclaim the build-base shards and in-checkout target directories named by
+/// one still-readable tree. The target identity checks happen before this
+/// function is allowed to delete anything; locks and a final quiet check are
+/// the last build-in-progress fence.
+pub fn reclaim_tree_build_output(tree: &Path, now: SystemTime, apply: bool) -> TreeReclaim {
+    let mut report = TreeReclaim::default();
+    let Ok(build_dirs) = list_for(tree) else {
+        report.unread = Some(tree.display().to_string());
+        return report;
+    };
+    let Ok(target_dirs) = tree_target_dirs(tree) else {
+        report.unread = Some(tree.display().to_string());
+        return report;
+    };
+    let root = repo_root_for(tree);
+    let bases = managed_bases(&root, &registered_trees(&root));
+    let mut candidates = BTreeSet::new();
+    for dir in build_dirs {
+        if under_any(&dir, &bases) && dir.join(CACHEDIR_TAG).is_file() {
+            candidates.insert(phys(&dir));
+        }
+    }
+    candidates.extend(target_dirs);
+
+    for dir in candidates {
+        let bytes = crate::reclaim::tree_bytes(&dir);
+        if !apply {
+            report.dirs.push((dir, bytes));
+            continue;
+        }
+        match guard_remove(&dir, now, true) {
+            Ok(()) => {
+                report.dirs.push((dir.clone(), bytes));
+                remove_empty_shard(&dir);
+            }
+            Err(reason) => report.kept.push((dir, reason)),
+        }
+    }
+    report
+}
+
+#[derive(Debug, Default)]
+pub struct IdleTreeReport {
+    pub candidates: usize,
+    pub occupied: usize,
+    pub reclaimed: usize,
+    pub reclaimed_bytes: u64,
+    pub candidate_bytes: u64,
+    pub unread: Option<String>,
+    pub lines: Vec<String>,
+}
+
+fn candidate_target_dirs(tree: &Path, now: SystemTime) -> Vec<PathBuf> {
+    workspace_manifests(tree)
+        .into_iter()
+        .filter_map(|manifest| manifest.parent().map(|member| member.join("target")))
+        .filter(|dir| {
+            dir.join(CACHEDIR_TAG).is_file()
+                && quiet_of(dir, now) >= Duration::from_secs(FRESH_SECS)
+        })
+        .collect()
+}
+
+fn idle_candidates(root: &Path, now: SystemTime) -> Vec<(PathBuf, u64)> {
+    registered_trees(root)
+        .into_iter()
+        .filter(|tree| phys(tree) != phys(root))
+        .filter_map(|tree| {
+            let dirs = candidate_target_dirs(&tree, now);
+            (!dirs.is_empty()).then(|| {
+                let bytes = dirs.iter().map(|dir| crate::reclaim::tree_bytes(dir)).sum();
+                (tree, bytes)
+            })
+        })
+        .collect()
+}
+
+fn empty_idle_report(apply: bool) -> IdleTreeReport {
+    let mut report = IdleTreeReport::default();
+    let line = format!(
+        "idle-trees mode={} candidates=0 occupied=0 reclaimed=0 reclaimed_bytes=0 candidate_bytes=0 unread=-",
+        if apply { "apply" } else { "dry-run" }
+    );
+    println!("{line}");
+    report.lines.push(line);
+    report
+}
+
+/// Trees held by the registry or Claude roster. The roster and every
+/// placement needed to prove absence are fail-closed: an unread snapshot or
+/// an unplaced live row means no tree may be reclaimed.
+pub fn occupied_trees(
+    trees: &[PathBuf],
+    registry: &crate::state::Registry,
+    roster: &crate::claude_roster::ClaudeAgentsSnapshot,
+    ages: Option<&HashMap<String, Option<i64>>>,
+    grace_secs: i64,
+) -> Result<BTreeSet<PathBuf>, &'static str> {
+    let mut occupied: BTreeSet<PathBuf> = session_join(trees, registry)
+        .into_iter()
+        .filter_map(|(tree, holders)| (!holders.sessions.is_empty()).then_some(tree))
+        .collect();
+    let rows = match roster {
+        crate::claude_roster::ClaudeAgentsSnapshot::Known { rows, warnings } => {
+            if !warnings.is_empty() {
+                return Err("roster-unread");
+            }
+            rows
+        }
+        crate::claude_roster::ClaudeAgentsSnapshot::Unknown { .. } => return Err("roster-unread"),
+    };
+    let phys_trees: Vec<PathBuf> = trees.iter().map(|tree| phys(tree)).collect();
+    for row in rows {
+        let terminal = row
+            .state
+            .as_deref()
+            .map(crate::claude_roster::is_terminal_roster_state)
+            .unwrap_or(false);
+        let Some(cwd) = row.cwd.as_deref() else {
+            if !terminal {
+                return Err("roster-row-unplaced");
+            }
+            continue;
+        };
+        let Some(tree) = owning_tree(Path::new(cwd), &phys_trees) else {
+            continue;
+        };
+        if !terminal {
+            occupied.insert(tree.clone());
+            continue;
+        }
+        let recent = ages.is_none()
+            || row
+                .session_id
+                .as_ref()
+                .and_then(|id| ages.and_then(|all| all.get(id)))
+                .map(|age| age.map(|seconds| seconds < grace_secs).unwrap_or(true))
+                .unwrap_or(true);
+        if recent {
+            occupied.insert(tree.clone());
+        }
+    }
+    Ok(occupied)
+}
+
+fn idle_trees_with(
+    root: &Path,
+    apply: bool,
+    now: SystemTime,
+    registry: Result<crate::state::Registry, String>,
+    roster: crate::claude_roster::ClaudeAgentsSnapshot,
+    ages: &dyn Fn(&[String]) -> Option<HashMap<String, Option<i64>>>,
+    grace_secs: i64,
+) -> IdleTreeReport {
+    let mut report = IdleTreeReport::default();
+    let candidates = idle_candidates(root, now);
+    report.candidates = candidates.len();
+    report.candidate_bytes = candidates.iter().map(|(_, bytes)| *bytes).sum();
+    if candidates.is_empty() {
+        return empty_idle_report(apply);
+    }
+
+    let registry = match registry {
+        Ok(registry) => registry,
+        Err(_) => {
+            report.unread = Some("registry-unread".to_string());
+            let line = format!(
+                "idle-trees mode={} candidates={} occupied=0 reclaimed=0 reclaimed_bytes=0 candidate_bytes={} unread=registry-unread",
+                if apply { "apply" } else { "dry-run" },
+                report.candidates,
+                report.candidate_bytes
+            );
+            println!("{line}");
+            report.lines.push(line);
+            return report;
+        }
+    };
+    let candidate_trees: Vec<PathBuf> = candidates.iter().map(|(tree, _)| tree.clone()).collect();
+    let ids: Vec<String> = match &roster {
+        crate::claude_roster::ClaudeAgentsSnapshot::Known { rows, .. } => rows
+            .iter()
+            .filter(|row| {
+                row.state
+                    .as_deref()
+                    .map(crate::claude_roster::is_terminal_roster_state)
+                    .unwrap_or(false)
+                    && row
+                        .cwd
+                        .as_deref()
+                        .map(|cwd| owning_tree(Path::new(cwd), &candidate_trees).is_some())
+                        .unwrap_or(false)
+            })
+            .filter_map(|row| row.session_id.clone())
+            .collect(),
+        crate::claude_roster::ClaudeAgentsSnapshot::Unknown { .. } => Vec::new(),
+    };
+    let ages = ages(&ids);
+    let occupied = match occupied_trees(
+        &candidate_trees,
+        &registry,
+        &roster,
+        ages.as_ref(),
+        grace_secs,
+    ) {
+        Ok(occupied) => occupied,
+        Err(reason) => {
+            report.unread = Some(reason.to_string());
+            let line = format!(
+                "idle-trees mode={} candidates={} occupied=0 reclaimed=0 reclaimed_bytes=0 candidate_bytes={} unread={reason}",
+                if apply { "apply" } else { "dry-run" },
+                report.candidates,
+                report.candidate_bytes
+            );
+            println!("{line}");
+            report.lines.push(line);
+            return report;
+        }
+    };
+    let live_cwds = match live_cwds(Some("cargo")) {
+        Ok(cwds) => cwds.into_iter().map(|cwd| phys(&cwd)).collect::<Vec<_>>(),
+        Err(()) => {
+            report.unread = Some("lsof-unread".to_string());
+            let line = format!(
+                "idle-trees mode={} candidates={} occupied={} reclaimed=0 reclaimed_bytes=0 candidate_bytes={} unread=lsof-unread",
+                if apply { "apply" } else { "dry-run" },
+                report.candidates,
+                occupied.len(),
+                report.candidate_bytes
+            );
+            println!("{line}");
+            report.lines.push(line);
+            return report;
+        }
+    };
+    report.occupied = occupied.len();
+    let phys_candidates: Vec<PathBuf> = candidate_trees.iter().map(|tree| phys(tree)).collect();
+    let mut live_trees = HashSet::new();
+    for cwd in live_cwds {
+        if let Some(tree) = owning_tree(&cwd, &phys_candidates) {
+            live_trees.insert(tree.clone());
+        }
+    }
+    for (tree, _) in candidates {
+        let tree = phys(&tree);
+        if occupied.contains(&tree) {
+            let line = format!(
+                "idle-tree kept tree={} dirs=0 bytes=0 reason=occupied",
+                tree.display()
+            );
+            println!("{line}");
+            report.lines.push(line);
+            continue;
+        }
+        if live_trees.contains(&tree) {
+            let line = format!(
+                "idle-tree kept tree={} dirs=0 bytes=0 reason=live-cargo",
+                tree.display()
+            );
+            println!("{line}");
+            report.lines.push(line);
+            continue;
+        }
+        let reclaimed = reclaim_tree_build_output(&tree, now, apply);
+        if let Some(reason) = reclaimed.unread {
+            report.unread = Some(format!("unread:{reason}"));
+            let line = format!(
+                "idle-tree kept tree={} dirs=0 bytes=0 reason=unread:{reason}",
+                tree.display()
+            );
+            println!("{line}");
+            report.lines.push(line);
+            continue;
+        }
+        let bytes: u64 = reclaimed.dirs.iter().map(|(_, bytes)| *bytes).sum();
+        if !reclaimed.dirs.is_empty() {
+            if apply {
+                report.reclaimed += reclaimed.dirs.len();
+                report.reclaimed_bytes += bytes;
+            }
+            let verb = if apply { "reclaimed" } else { "would-reclaim" };
+            let line = format!(
+                "idle-tree {verb} tree={} dirs={} bytes={} reason=-",
+                tree.display(),
+                reclaimed.dirs.len(),
+                bytes
+            );
+            println!("{line}");
+            report.lines.push(line);
+        }
+        for (dir, reason) in reclaimed.kept {
+            let line = format!(
+                "idle-tree kept tree={} dirs=1 bytes={} reason={reason} path={}",
+                tree.display(),
+                crate::reclaim::tree_bytes(&dir),
+                dir.display()
+            );
+            println!("{line}");
+            report.lines.push(line);
+        }
+    }
+    let unread = report.unread.as_deref().unwrap_or("-");
+    let line = format!(
+        "idle-trees mode={} candidates={} occupied={} reclaimed={} reclaimed_bytes={} candidate_bytes={} unread={unread}",
+        if apply { "apply" } else { "dry-run" },
+        report.candidates,
+        report.occupied,
+        report.reclaimed,
+        report.reclaimed_bytes,
+        report.candidate_bytes
+    );
+    println!("{line}");
+    report.lines.push(line);
+    report
+}
+
+pub fn reclaim_idle_trees(root: &Path, apply: bool, now: SystemTime) -> IdleTreeReport {
+    if idle_candidates(root, now).is_empty() {
+        return empty_idle_report(apply);
+    }
+    let registry = crate::paths::AgentsHome::from_env_opt()
+        .ok_or_else(|| "registry-unread".to_string())
+        .and_then(|home| {
+            crate::state::load_registry(&home.registry_json())
+                .map_err(|_| "registry-unread".to_string())
+        });
+    let roster = crate::claude_roster::read_all_agents_union();
+    let grace_secs = crate::agents_config::retire_grace_secs(root) as i64;
+    idle_trees_with(
+        root,
+        apply,
+        now,
+        registry,
+        roster,
+        &|ids| {
+            if ids.is_empty() {
+                return Some(HashMap::new());
+            }
+            let (probes, outcome) = crate::truth_probe::family1_truth_probe_many_measured(ids);
+            match outcome {
+                crate::truth_probe::BatchOutcome::Measured => Some(
+                    ids.iter()
+                        .map(|id| {
+                            (
+                                id.clone(),
+                                probes.get(id).and_then(|probe| {
+                                    probe.last_activity_age_s.map(|age| age.max(0.0) as i64)
+                                }),
+                            )
+                        })
+                        .collect(),
+                ),
+                crate::truth_probe::BatchOutcome::NotMeasured => None,
+            }
+        },
+        grace_secs,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1097,9 +1516,14 @@ mod tests {
             format!(
                 "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in *{broken_token}*) exit 1 ;; esac; done\n\
                  if [ -n \"$CARGO_BUILD_BUILD_DIR\" ]; then\n\
-                 printf '{{\"build_directory\":\"%s\",\"packages\":[{{\"name\":\"fakepkg\"}}]}}\\n' \"$CBD_FNO_ANSWER\"\n\
+                 build=\"$CBD_FNO_ANSWER\"\n\
                  else\n\
-                 printf '{{\"build_directory\":\"%s\",\"packages\":[{{\"name\":\"fakepkg\"}}]}}\\n' \"$CBD_FB_ANSWER\"\n\
+                 build=\"$CBD_FB_ANSWER\"\n\
+                 fi\n\
+                 if [ -n \"$CBD_TARGET_ANSWER\" ]; then\n\
+                 printf '{{\"build_directory\":\"%s\",\"target_directory\":\"%s\",\"packages\":[{{\"name\":\"fakepkg\"}}]}}\\n' \"$build\" \"$CBD_TARGET_ANSWER\"\n\
+                 else\n\
+                 printf '{{\"build_directory\":\"%s\",\"packages\":[{{\"name\":\"fakepkg\"}}]}}\\n' \"$build\"\n\
                  fi\n"
             ),
         )
@@ -1156,6 +1580,7 @@ mod tests {
             std::env::remove_var("CARGO");
             std::env::remove_var("CBD_FNO_ANSWER");
             std::env::remove_var("CBD_FB_ANSWER");
+            std::env::remove_var("CBD_TARGET_ANSWER");
             std::env::remove_var("FNO_CARGO_TARGETS_BASE");
             std::env::remove_var("FNO_CARGO_FREE_BYTES");
             std::env::remove_var("FNO_TEST_LIVE_CARGO_CWDS");
@@ -1166,6 +1591,350 @@ mod tests {
 
     fn seven_h() -> u64 {
         7 * 3600
+    }
+
+    fn init_git_repo(root: &Path) {
+        assert!(Command::new("git")
+            .current_dir(root)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .current_dir(root)
+            .args(["config", "user.email", "fno-test@example.invalid"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .current_dir(root)
+            .args(["config", "user.name", "fno test"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .current_dir(root)
+            .args(["add", "crates/fake/Cargo.toml"])
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    fn plant_target(dir: &Path, quiet_secs: u64) {
+        std::fs::create_dir_all(dir.join("debug/deps")).unwrap();
+        std::fs::write(dir.join(CACHEDIR_TAG), b"Signature: target\n").unwrap();
+        std::fs::write(dir.join("debug/deps/payload"), vec![0u8; 4096]).unwrap();
+        age_every(dir, quiet_secs);
+    }
+
+    #[test]
+    fn reclaim_tree_build_output_removes_target_and_build_dirs_with_bytes() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("tree-output", "never-broken");
+        init_git_repo(&env.root);
+        let target = env.root.join("crates/fake/target");
+        plant_target(&target, seven_h());
+        let build = plant(&env.fno_base, "00", "aaaa11", seven_h(), true);
+        std::env::set_var("CBD_TARGET_ANSWER", &target);
+        let report = reclaim_tree_build_output(&env.root, SystemTime::now(), true);
+
+        assert!(report.unread.is_none(), "{report:?}");
+        assert_eq!(report.dirs.len(), 2, "{report:?}");
+        assert!(report.dirs.iter().all(|(_, bytes)| *bytes > 0));
+        assert!(!target.exists(), "target output is reclaimed");
+        assert!(!build.exists(), "build shard is reclaimed");
+    }
+
+    #[test]
+    fn reclaim_tree_build_output_keeps_a_locked_target() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("tree-locked", "never-broken");
+        init_git_repo(&env.root);
+        let target = env.root.join("crates/fake/target");
+        plant_target(&target, seven_h());
+        std::env::set_var("CBD_TARGET_ANSWER", &target);
+        let lock_path = target.join("debug/.cargo-lock");
+        std::fs::write(&lock_path, b"").unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&lock_path)
+            .unwrap();
+        unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) };
+
+        let report = reclaim_tree_build_output(&env.root, SystemTime::now(), true);
+
+        assert!(target.exists(), "a build in progress keeps target output");
+        assert!(report
+            .kept
+            .iter()
+            .any(|(path, reason)| path == &phys(&target) && *reason == "build-in-progress"));
+        drop(lock);
+    }
+
+    #[test]
+    fn target_identity_rejects_outside_and_tracked_directories() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("tree-identity", "never-broken");
+        init_git_repo(&env.root);
+        let outside = env.fb_parent.join("outside-target");
+        plant_target(&outside, seven_h());
+        std::env::set_var("CBD_TARGET_ANSWER", &outside);
+        let report = reclaim_tree_build_output(&env.root, SystemTime::now(), true);
+        assert!(report.dirs.is_empty(), "{report:?}");
+        assert!(outside.exists(), "a target outside its member stays");
+
+        let tracked = env.root.join("crates/fake/target");
+        plant_target(&tracked, seven_h());
+        std::fs::write(tracked.join("tracked.bin"), b"source").unwrap();
+        assert!(Command::new("git")
+            .current_dir(&env.root)
+            .args(["add", "crates/fake/target/tracked.bin"])
+            .status()
+            .unwrap()
+            .success());
+        std::env::set_var("CBD_TARGET_ANSWER", &tracked);
+        let report = reclaim_tree_build_output(&env.root, SystemTime::now(), true);
+        assert!(report.dirs.is_empty(), "{report:?}");
+        assert!(tracked.exists(), "tracked target output stays");
+    }
+
+    #[test]
+    fn occupied_trees_fails_closed_for_roster_and_respects_nested_tree() {
+        let root = temp_root("occupied");
+        let tree = root.join("wt");
+        let nested = tree.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let reg = sj_registry(vec![sj_entry(
+            "busy",
+            &nested,
+            Some("x-node"),
+            crate::AgentStatus::Busy,
+        )]);
+        let mut row = crate::claude_roster::ClaudeAgentRow::new("done", Some("done"));
+        row.session_id = Some("session".to_string());
+        row.cwd = Some(tree.display().to_string());
+        let roster = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![row]);
+        let ages = HashMap::from([("session".to_string(), Some(5_000))]);
+
+        let occupied = occupied_trees(
+            &[root.clone(), tree.clone(), nested.clone()],
+            &reg,
+            &roster,
+            Some(&ages),
+            1_200,
+        )
+        .unwrap();
+
+        assert!(occupied.contains(&phys(&nested)), "{occupied:?}");
+        assert!(!occupied.contains(&phys(&tree)), "{occupied:?}");
+        assert!(occupied_trees(
+            &[root.clone(), tree.clone()],
+            &reg,
+            &crate::claude_roster::ClaudeAgentsSnapshot::unknown("test"),
+            None,
+            1_200,
+        )
+        .is_err());
+
+        let partial = crate::claude_roster::ClaudeAgentsSnapshot::Known {
+            rows: Vec::new(),
+            warnings: vec!["partial".to_string()],
+        };
+        assert_eq!(
+            occupied_trees(&[], &sj_registry(Vec::new()), &partial, None, 1_200),
+            Err("roster-unread")
+        );
+
+        let mut unplaced = crate::claude_roster::ClaudeAgentRow::new("working", Some("working"));
+        unplaced.cwd = None;
+        assert_eq!(
+            occupied_trees(
+                &[root, tree],
+                &reg,
+                &crate::claude_roster::ClaudeAgentsSnapshot::known(vec![unplaced]),
+                None,
+                1_200,
+            ),
+            Err("roster-row-unplaced")
+        );
+    }
+
+    #[test]
+    fn idle_tree_reclaim_preserves_dirty_and_untracked_source_files() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("idle-tree", "never-broken");
+        init_git_repo(&env.root);
+        let source = env.root.join("crates/fake/src.rs");
+        std::fs::write(&source, b"modified source\n").unwrap();
+        let untracked = env.root.join("crates/fake/untracked.txt");
+        std::fs::write(&untracked, b"untracked source\n").unwrap();
+        assert!(Command::new("git")
+            .current_dir(&env.root)
+            .args(["add", "crates/fake/src.rs"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .current_dir(&env.root)
+            .args(["commit", "-qm", "fixture"])
+            .status()
+            .unwrap()
+            .success());
+        let linked = temp_root("idle-tree-linked");
+        std::fs::remove_dir_all(&linked).unwrap();
+        assert!(Command::new("git")
+            .current_dir(&env.root)
+            .args(["worktree", "add", "-q"])
+            .arg(&linked)
+            .arg("HEAD")
+            .status()
+            .unwrap()
+            .success());
+        let linked_source = linked.join("crates/fake/src.rs");
+        std::fs::write(&linked_source, b"dirty source\n").unwrap();
+        let linked_untracked = linked.join("crates/fake/untracked.txt");
+        std::fs::write(&linked_untracked, b"kept untracked\n").unwrap();
+        let target = linked.join("crates/fake/target");
+        plant_target(&target, seven_h());
+        std::env::set_var("CBD_TARGET_ANSWER", &target);
+        std::env::set_var("FNO_TEST_LIVE_CARGO_CWDS", "");
+
+        let dry_run = idle_trees_with(
+            &env.root,
+            false,
+            SystemTime::now(),
+            Ok(sj_registry(Vec::new())),
+            crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
+            &|_| Some(HashMap::new()),
+            1_200,
+        );
+        assert_eq!(dry_run.reclaimed, 0, "{dry_run:?}");
+        assert!(target.exists(), "dry run deletes nothing");
+
+        let report = idle_trees_with(
+            &env.root,
+            true,
+            SystemTime::now(),
+            Ok(sj_registry(Vec::new())),
+            crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
+            &|_| Some(HashMap::new()),
+            1_200,
+        );
+
+        assert_eq!(report.reclaimed, 1, "{report:?}");
+        assert!(!target.exists(), "only build output is removed");
+        assert_eq!(std::fs::read(&linked_source).unwrap(), b"dirty source\n");
+        assert_eq!(
+            std::fs::read(&linked_untracked).unwrap(),
+            b"kept untracked\n"
+        );
+        assert!(report
+            .lines
+            .iter()
+            .any(|line| line.contains("idle-tree reclaimed")));
+        let _ = Command::new("git")
+            .current_dir(&env.root)
+            .args(["worktree", "remove", "--force"])
+            .arg(&linked)
+            .status();
+        let _ = std::fs::remove_dir_all(&linked);
+    }
+
+    #[test]
+    fn idle_tree_pass_skips_registry_and_roster_when_no_tree_is_a_candidate() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("idle-tree-empty", "never-broken");
+
+        let report = idle_trees_with(
+            &env.root,
+            true,
+            SystemTime::now(),
+            Err("must not read".to_string()),
+            crate::claude_roster::ClaudeAgentsSnapshot::unknown("must not read"),
+            &|_| panic!("must not probe ages"),
+            1_200,
+        );
+
+        assert_eq!(report.candidates, 0);
+        assert!(report.unread.is_none(), "{report:?}");
+        assert!(report
+            .lines
+            .iter()
+            .any(|line| line.contains("candidates=0") && line.contains("unread=-")));
+    }
+
+    #[test]
+    fn idle_tree_pass_fails_closed_for_unread_registry_roster_and_lsof() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("idle-tree-errors", "never-broken");
+        init_git_repo(&env.root);
+        assert!(Command::new("git")
+            .current_dir(&env.root)
+            .args(["commit", "-qm", "fixture"])
+            .status()
+            .unwrap()
+            .success());
+        let linked = temp_root("idle-tree-errors-linked");
+        std::fs::remove_dir_all(&linked).unwrap();
+        assert!(Command::new("git")
+            .current_dir(&env.root)
+            .args(["worktree", "add", "-q"])
+            .arg(&linked)
+            .arg("HEAD")
+            .status()
+            .unwrap()
+            .success());
+        let target = linked.join("crates/fake/target");
+        plant_target(&target, seven_h());
+        std::env::set_var("CBD_TARGET_ANSWER", &target);
+
+        let registry_error = idle_trees_with(
+            &env.root,
+            true,
+            SystemTime::now(),
+            Err("read failed".to_string()),
+            crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
+            &|_| Some(HashMap::new()),
+            1_200,
+        );
+        assert_eq!(registry_error.unread.as_deref(), Some("registry-unread"));
+        assert!(target.exists());
+
+        let roster_error = idle_trees_with(
+            &env.root,
+            true,
+            SystemTime::now(),
+            Ok(sj_registry(Vec::new())),
+            crate::claude_roster::ClaudeAgentsSnapshot::unknown("read failed"),
+            &|_| Some(HashMap::new()),
+            1_200,
+        );
+        assert_eq!(roster_error.unread.as_deref(), Some("roster-unread"));
+        assert!(target.exists());
+
+        std::env::set_var("FNO_TEST_LIVE_CARGO_CWDS", linked.display().to_string());
+        let cargo_error = idle_trees_with(
+            &env.root,
+            true,
+            SystemTime::now(),
+            Ok(sj_registry(Vec::new())),
+            crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
+            &|_| Some(HashMap::new()),
+            1_200,
+        );
+        assert!(cargo_error.unread.is_none(), "{cargo_error:?}");
+        assert!(cargo_error
+            .lines
+            .iter()
+            .any(|line| line.contains("reason=live-cargo")));
+        assert!(target.exists());
+
+        let _ = Command::new("git")
+            .current_dir(&env.root)
+            .args(["worktree", "remove", "--force"])
+            .arg(&linked)
+            .status();
+        let _ = std::fs::remove_dir_all(&linked);
     }
 
     /// AC1-HP: tagged hash dir under the fallback base, fingerprinted, quiet

@@ -203,9 +203,9 @@ use gh_read::{
 };
 pub(crate) use gh_read::{coverage_adapter, is_graphql_read};
 pub(crate) use intent::parse_xml_attr;
-#[cfg(test)]
-use intent::INTENT_LOOKBACK_ENTRIES;
 use intent::{detect_intent, extract_last_assistant_message, Intent};
+#[cfg(test)]
+use intent::{detect_intent_from_text, INTENT_LOOKBACK_ENTRIES};
 use local_attestation::{
     author_is_bot, author_is_known_bot, in_scope_chain, line_carries_keyed_findings,
     local_attestation_verdict, local_latest_attestations, local_refused_verdicts,
@@ -250,7 +250,7 @@ pub(crate) use settings::{parse_settings, value_as_probe_list};
 #[cfg(test)]
 use settings::{scalar_as_singleton, MALFORMED_REVIEWERS_SENTINEL, UNPARSEABLE_SETTINGS_SENTINEL};
 pub(crate) use settings::{scan_manifest_field, Settings};
-use watch_lease::{harness_can_idle, watch_window_ms};
+use watch_lease::{harness_can_idle, watch_target, watch_window_ms, CONTINUE_WORKING};
 
 /// The fno binary every loop-check surface shells, resolved through the same
 /// env seam the hint and fidelity probes use (`FNO_LOOPCHECK_FNO_BIN`,
@@ -802,22 +802,12 @@ pub(crate) fn decide_with_payload(
             .map(|(key, holder)| crate::claims::renew(key, holder, window_ms, None));
         let renewed = matches!(renew_outcome.as_ref(), Some(Ok(true)));
         if can_idle && renewed {
-            // The tag's own `pr=`/`reason=` attributes are the only source
-            // here (the idle verifies nothing), so `blocker` is only as
-            // trustworthy as the agent's tag: pass the declared reason
-            // through when it is one of the two real classes, else the
-            // honest "unknown".
-            let blocker = match reason.as_str() {
-                "ci" => "ci",
-                "review" => "review",
-                "merge_slot" => "merge_slot",
-                _ => "unknown",
-            };
+            let (blocker, pr_number) = watch_target(reason, pr.as_deref());
             emit(
                 "loop_check_watch_idle",
                 serde_json::json!({
                     "session_id": session_id,
-                    "pr": pr.as_deref().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0),
+                    "pr": pr_number,
                     "blocker": blocker,
                     "declared_timeout": timeout.clone().unwrap_or_default(),
                     "reason": reason,
@@ -2006,11 +1996,7 @@ pub(crate) fn decide_with_payload(
 
     // P2: the dominant loop-yield boundary. Enrich the continue
     // message with a one-line inbox nudge so an autonomous loop surfaces mail.
-    let continue_msg = crate::nudge::append_inbox_nudge(
-        "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, arm a harness-tracked watcher with a hard timeout (e.g. background Bash `fno do pr wait <N> --until settled --timeout=30m` - REST through the coalescing cache, 60s interval, never `gh pr checks --watch`, which spends the shared GraphQL quota; a review wait is `--until review`) and end your turn with `<watching reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">` - the session idles until the watcher exits instead of re-waking every tick.",
-        &cwd,
-        &session_id,
-    );
+    let continue_msg = crate::nudge::append_inbox_nudge(CONTINUE_WORKING, &cwd, &session_id);
     (
         0,
         allow_output("block", None, &continue_msg, this_fire, Some(fingerprint)),
