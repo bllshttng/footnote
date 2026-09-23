@@ -275,3 +275,271 @@ fn ac4_node_states_read_an_open_count_of_zero() {
     let (_, _, open) = states["x-spec"].clone();
     assert_eq!(open, 0);
 }
+
+// The primary-stamp family: the sweep records a done node's out-of-band
+// merged primary PR, so its dead do rows settle, and the dry run rehearses
+// the same outcome.
+
+/// The AC1 specimen: a done node whose own merge is unrecorded. Its PR
+/// merged out of band, so the Python writers left `merge_status` null and
+/// the settle's gate skips the node - the defect this family pins.
+fn held_primary_node(id: &str) -> Value {
+    json!({
+        "id": id, "title": "Stamp my primary", "slug": id, "type": "feature",
+        "status": "done", "priority": "p2",
+        "created_at": "2026-09-11T00:00:00+00:00",
+        "completed_at": "2026-09-11T02:00:00+00:00",
+        "merge_status": json!(null),
+        "pr_number": 2180,
+        "pr_url": "https://github.com/o/r/pull/2180",
+        "cwd": "/repo/wt",
+        "sessions": [open_do_row("claude", "sess-prim")],
+    })
+}
+
+/// A home staged with one graph fixture set; the caller adds registry rows.
+fn primary_home(
+    entries: Vec<Value>,
+) -> (
+    tempfile::TempDir,
+    AgentsHome,
+    EventEmitter,
+    tempfile::TempDir,
+) {
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    stage_graph(dir.path(), json!(entries));
+    (dir, home, emitter, transcripts)
+}
+
+fn primary_registry_row(home: &AgentsHome) {
+    state::update_registry(&home.registry_json(), |r| {
+        spawn_row(r, "row-prim", "sess-prim");
+    })
+    .unwrap();
+}
+
+#[test]
+fn ac1_hp_a_merged_primary_answer_stamps_and_settles() {
+    let (dir, home, emitter, transcripts) = primary_home(vec![held_primary_node("x-prim")]);
+    primary_registry_row(&home);
+    let quiet = quiet_transcript(transcripts.path(), "p.jsonl", 2 * 3600);
+    let mut read = |path: &str, _cwd: &str| {
+        assert_eq!(path, "repos/o/r/pulls/2180");
+        Some(gc_sweep::PrState::Merged)
+    };
+    let summary = settle_staged_then_run(
+        &home,
+        &emitter,
+        &move |_| Some(vec![quiet.clone()]),
+        &mut read,
+    );
+
+    assert!(
+        summary.settle_refused.is_empty(),
+        "refused: {:?}",
+        summary.settle_refused
+    );
+    let raw: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
+    assert_eq!(raw["entries"][0]["merge_status"], json!("merged"));
+    assert_eq!(
+        summary.settled_do_rows,
+        vec![("x-prim".into(), "claude".into(), "sess-prim".into())]
+    );
+    assert!(summary.retired.iter().any(|(id, _)| id == "row-prim"));
+    assert_eq!(
+        raw["entries"][0]["sessions"][0]["ended_by"],
+        json!("reap-sweep")
+    );
+}
+
+#[test]
+fn ac1_err_an_open_or_unreadable_primary_stamps_nothing() {
+    for answer in [Some(gc_sweep::PrState::Open), None] {
+        let (dir, home, _emitter, _t) = primary_home(vec![held_primary_node("x-prim")]);
+        let mut read = |_path: &str, _cwd: &str| answer;
+        let (settled, refused) = gc_sweep::settle_stale_do_rows_with(&home, &mut read);
+        assert!(settled.is_empty());
+        assert!(refused.is_empty(), "{:?}", refused);
+        let raw: Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
+        assert_eq!(raw["entries"][0]["merge_status"], json!(null));
+        assert!(raw["entries"][0]["sessions"][0]
+            .as_object()
+            .unwrap()
+            .get("ended_at")
+            .is_none());
+    }
+}
+
+#[test]
+fn ac1_edge_a_recorded_failure_or_a_rowless_node_pays_no_read() {
+    let held_failed = json!({
+        "id": "x-fail", "title": "failed", "slug": "x-fail", "type": "feature",
+        "status": "done", "priority": "p2",
+        "created_at": "2026-09-11T00:00:00+00:00",
+        "completed_at": "2026-09-11T02:00:00+00:00",
+        "merge_status": "failed",
+        "pr_number": 2100,
+        "pr_url": "https://github.com/o/r/pull/2100",
+        "cwd": "/repo/wt",
+        "sessions": [open_do_row("claude", "sess-fail")],
+    });
+    let rowless = json!({
+        "id": "x-rowless", "title": "rowless", "slug": "x-rowless", "type": "feature",
+        "status": "done", "priority": "p2",
+        "created_at": "2026-09-11T00:00:00+00:00",
+        "completed_at": "2026-09-11T02:00:00+00:00",
+        "merge_status": json!(null),
+        "pr_number": 2101,
+        "pr_url": "https://github.com/o/r/pull/2101",
+        "cwd": "/repo/wt",
+    });
+    let (dir, home, emitter, transcripts) = primary_home(vec![held_failed, rowless]);
+    state::update_registry(&home.registry_json(), |r| {
+        spawn_row(r, "row-fail", "sess-fail");
+    })
+    .unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "e.jsonl", 2 * 3600);
+    let mut read = |_path: &str, _cwd: &str| panic!("no read may be paid");
+    let summary = settle_staged_then_run(
+        &home,
+        &emitter,
+        &move |_| Some(vec![quiet.clone()]),
+        &mut read,
+    );
+
+    let raw: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("graph.json")).unwrap()).unwrap();
+    assert_eq!(raw["entries"][0]["merge_status"], json!("failed"));
+    assert_eq!(raw["entries"][1]["merge_status"], json!(null));
+    assert!(summary.settled_do_rows.is_empty());
+    let hold = summary
+        .holds
+        .iter()
+        .find(|hold| hold.id == "row-fail")
+        .expect("the failed-merge row carries a hold");
+    assert_eq!(hold.detail, "merge_status: failed");
+}
+
+fn dry_run_with(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    planned: &[gc_sweep::StaleDoRow],
+    stamps: &[gc_sweep::PrStamp],
+    transcripts: &dyn Fn(&state::RegistryEntry) -> Option<Vec<std::path::PathBuf>>,
+) -> GcSummary {
+    let read_graph = |h: &AgentsHome| {
+        gc_sweep::read_graph_entries(h).map(|g| gc_sweep::without_settled(g, planned, stamps))
+    };
+    let mut summary = gc_sweep::run(
+        home,
+        emitter,
+        0,
+        true,
+        0,
+        &read_graph,
+        transcripts,
+        &staged_ages(transcripts),
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &|_e| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
+        &|_| (None, None),
+        &|_| None,
+    );
+    summary.settled_do_rows = planned
+        .iter()
+        .map(|row| {
+            (
+                row.node.clone(),
+                row.harness.clone(),
+                row.session_id.clone(),
+            )
+        })
+        .collect();
+    summary
+}
+
+#[test]
+fn ac3_hp_the_dry_run_rehearses_the_primary_stamp() {
+    let (dir, home, emitter, transcripts) = primary_home(vec![held_primary_node("x-prim")]);
+    primary_registry_row(&home);
+    let quiet = quiet_transcript(transcripts.path(), "p2.jsonl", 2 * 3600);
+    let raw_before = std::fs::read(dir.path().join("graph.json")).unwrap();
+    let mut read = |path: &str, _cwd: &str| {
+        assert_eq!(path, "repos/o/r/pulls/2180");
+        Some(gc_sweep::PrState::Merged)
+    };
+    let (planned, stamps) = crate::additional_prs::plan_settle(&home, &mut read);
+    assert_eq!(planned.len(), 1);
+    assert_eq!(stamps.len(), 1);
+    assert!(stamps[0].primary);
+    assert_eq!(stamps[0].number, 2180);
+    let summary = dry_run_with(&home, &emitter, &planned, &stamps, &move |_| {
+        Some(vec![quiet.clone()])
+    });
+    assert_eq!(
+        summary.settled_do_rows,
+        vec![("x-prim".into(), "claude".into(), "sess-prim".into())]
+    );
+    assert!(
+        summary.kept_open_do_row.is_empty(),
+        "{:?}",
+        summary.kept_open_do_row
+    );
+    assert!(!summary
+        .holds
+        .iter()
+        .any(|hold| hold.id == "row-prim" && hold.reason == "open do row on done node"));
+    let raw_after = std::fs::read(dir.path().join("graph.json")).unwrap();
+    assert_eq!(raw_before, raw_after);
+}
+
+#[test]
+fn ac3_edge_a_primary_stamp_and_an_open_extra_rehearse_the_real_hold() {
+    let mut node = held_primary_node("x-prim");
+    node["additional_prs"] = json!([{"number": 1523, "url": "https://github.com/o/r/pull/1523"}]);
+    let (_dir, home, emitter, transcripts) = primary_home(vec![node]);
+    primary_registry_row(&home);
+    let quiet = quiet_transcript(transcripts.path(), "p3.jsonl", 2 * 3600);
+    let mut answers: std::collections::HashMap<String, Option<gc_sweep::PrState>> =
+        std::collections::HashMap::new();
+    answers.insert(
+        "repos/o/r/pulls/2180".to_string(),
+        Some(gc_sweep::PrState::Merged),
+    );
+    answers.insert(
+        "repos/o/r/pulls/1523".to_string(),
+        Some(gc_sweep::PrState::Open),
+    );
+    let mut read = |path: &str, _cwd: &str| answers.get(path).copied().flatten();
+    let (planned, stamps) = crate::additional_prs::plan_settle(&home, &mut read);
+    assert!(
+        planned.is_empty(),
+        "the open extra keeps the row out of the settle plan"
+    );
+    assert_eq!(stamps.len(), 1);
+    assert!(stamps[0].primary);
+    let staged = gc_sweep::read_graph_entries(&home).unwrap();
+    let subtracted = gc_sweep::without_settled(staged, &planned, &stamps);
+    assert_eq!(
+        subtracted.pr_state["x-prim"],
+        (Some("merged".to_string()), 1, 1)
+    );
+    let summary = dry_run_with(&home, &emitter, &planned, &stamps, &move |_| {
+        Some(vec![quiet.clone()])
+    });
+    let hold = summary
+        .holds
+        .iter()
+        .find(|hold| hold.id == "row-prim")
+        .expect("the held row carries a hold");
+    assert_eq!(hold.detail, "additional_prs: 1 of 1 not recorded merged");
+    assert_eq!(
+        summary.kept_open_do_row,
+        vec![("row-prim".to_string(), "x-prim".to_string())]
+    );
+}
