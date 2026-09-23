@@ -2023,7 +2023,7 @@ mod tests {
             crate::graph_store::MutateInput {
                 entries: after.clone(),
                 canonical_path: None,
-                base_version: crate::graph_store::base_version(&graph),
+                base_version: crate::graph_store::base_version(&graph).unwrap(),
                 plan_rungs: None,
             },
             std::time::Duration::from_secs(10),
@@ -2076,7 +2076,7 @@ mod tests {
             crate::graph_store::MutateInput {
                 entries: after.clone(),
                 canonical_path: None,
-                base_version: crate::graph_store::base_version(&graph),
+                base_version: crate::graph_store::base_version(&graph).unwrap(),
                 plan_rungs: None,
             },
             std::time::Duration::from_secs(10),
