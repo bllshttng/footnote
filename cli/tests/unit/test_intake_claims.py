@@ -1922,8 +1922,6 @@ def test_warn_similar_nodes_includes_archived_nodes(monkeypatch, tmp_path, capsy
     # codex P2: a shipped-and-archived node is the answer to a duplicate filing,
     # but once the sweep stamps `archived_at` the default reads no longer see
     # it. The dedup scan must read the store's archived residents too.
-    from fno.graph.store import _worker_binary
-
     graph = tmp_path / "graph.json"
     graph.write_text(
         json.dumps({"entries": [

@@ -1710,15 +1710,16 @@ def test_add_pr_warns_when_reread_row_remains_offered(tmp_graph, monkeypatch):
     )
     # Ready is stored state now, not a load-time derivation from plan presence,
     # so the offered row is seeded ready outright.
+    node_id = "ab-offered1"
     plan = tmp_graph.parent / "ready.md"
     plan.write_text("---\nstatus: ready\n---\n\n# Ready\n")
     tmp_graph.write_text(json.dumps({"entries": [{
-        "id": "ab-offered1", "title": "Still offered", "status": "ready",
+        "id": node_id, "title": "Still offered", "status": "ready",
         "project": "p", "plan_path": str(plan), "priority": "p2",
         "created_at": "2026-09-01T00:00:00Z",
     }]}) + "\n")
 
-    result = _invoke("backlog", "update", "ab-offered1", "--add-pr", "777")
+    result = _invoke("backlog", "update", node_id, "--add-pr", "777")
 
     assert result.exit_code == 0, result.output
     assert "still offered by ready" in result.stderr

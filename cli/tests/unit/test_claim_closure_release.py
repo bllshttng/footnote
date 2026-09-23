@@ -15,7 +15,6 @@ import json
 import os
 import socket
 
-import pytest
 from pathlib import Path
 
 from fno.claims.cli import RosterReading, _node_settlement

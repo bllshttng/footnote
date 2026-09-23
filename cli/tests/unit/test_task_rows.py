@@ -184,8 +184,6 @@ def test_task_list_no_plan_refuses_and_writes_nothing(
 def test_unknown_task_id_exits_2_naming_plan_ids(
     tmp_graph: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    from fno.graph import cli as graph_cli
-
     result = _task_update(
         monkeypatch, _live_pid(), "x-t1", "9.9", "--status", "in_progress",
         "--owner", SID_A,

@@ -1636,7 +1636,7 @@ def test_cli_intake_and_session_close_project_a_live_blueprint_claim(tmp_path, m
         ["backlog", "intake", str(plan), "--claims", "x-open010"],
     )
     assert intake.exit_code == 0, intake.output
-    held = read_graph(g)[0]
+    held = read_graph_strict(g)[0]
     assert held["status"] == "in_progress"
     assert held["locked_by"] == "sess-open10"
     assert held["plan_path"] == str(plan)
@@ -1657,7 +1657,7 @@ def test_cli_intake_and_session_close_project_a_live_blueprint_claim(tmp_path, m
     assert row["phase"] == "blueprint"
     assert row["started_at"] == expected_start
     assert "ended_at" in row
-    after = read_graph(g)[0]
+    after = read_graph_strict(g)[0]
     assert after["status"] == "ready"
     assert after["locked_by"] is None
     assert after["locked_at"] is None
