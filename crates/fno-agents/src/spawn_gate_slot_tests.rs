@@ -267,7 +267,7 @@ fn succession_refusal_reports_no_caller_and_a_caller_without_a_live_row() {
 }
 
 #[test]
-fn a_pending_heir_cannot_take_a_second_slot_at_cap_plus_one() {
+fn succession_cannot_take_a_second_slot_at_cap_plus_one() {
     let fixture = SuccessionFixture::new(2);
     let mut heir = fixture.row("pending-heir");
     heir["harness_session_id"] = serde_json::json!("session-heir");
@@ -285,7 +285,7 @@ fn a_pending_heir_cannot_take_a_second_slot_at_cap_plus_one() {
 }
 
 #[test]
-fn the_old_king_cannot_succeed_after_the_crown_transfers() {
+fn succession_refuses_the_old_king_after_transfer() {
     let fixture = SuccessionFixture::new(3);
     fixture.write_entries(vec![
         fixture.row("old-king"),
@@ -304,7 +304,7 @@ fn the_old_king_cannot_succeed_after_the_crown_transfers() {
 }
 
 #[test]
-fn caller_session_matching_multiple_live_rows_is_ambiguous() {
+fn succession_refuses_ambiguous_caller_session() {
     let fixture = SuccessionFixture::new(2);
     let rows: Vec<RegistryEntry> = serde_json::from_value(serde_json::json!([
         fixture.king("king-a", "session-shared", "x-epic"),
