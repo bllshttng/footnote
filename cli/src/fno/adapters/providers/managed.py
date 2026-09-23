@@ -1764,9 +1764,11 @@ def _clear_unverified_codex_stamp(root: Path) -> str:
 
 
 def _capture_outgoing(outgoing: ProviderRecord, root: Path) -> bool:
-    """Refresh the outgoing credential through Rust, or use the codex port."""
     if outgoing.harness == "claude":
-        return _vault("sync").get("verdict") == "written"
+        verdict = _vault("sync").get("verdict")
+        if verdict in ("written", "unchanged"):
+            return verdict == "written"
+        raise ManagedStoreError(f"could not capture outgoing Claude credential ({verdict or 'unknown'}); slot was not touched")
     blobs = canonical_slot_blobs(outgoing.harness)  # KeychainError propagates
     if len(blobs) != 1:
         return False
@@ -1815,9 +1817,7 @@ def _switch_locked(
 ) -> SwitchResult:
     stored = _blob_path(target.id, root)
     if target.harness == "claude":
-        refresh_args = ["--id", target.id]
-        if target.config_dir is not None:
-            refresh_args.extend(("--config-dir", str(target.config_dir)))
+        refresh_args = ["--id", target.id] + (["--config-dir", str(target.config_dir)] if target.config_dir else [])
         receipt = _vault("refresh", *refresh_args)
         if receipt.get("verdict") == "dead":
             raise ManagedStoreError(

@@ -108,13 +108,18 @@ impl External for SystemExternal {
 
     fn live_claude(&self) -> Vec<LiveClaude> {
         let (rows, _unreadable) = crate::census::process_table();
+        let default_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))
+            .unwrap_or_else(|| PathBuf::from(".claude"));
         rows.into_iter()
             .filter(|row| looks_like_claude(&row.command))
             .map(|row| LiveClaude {
                 // None is deliberately conservative: the process environment
                 // is absent or unreadable, so it may own the default slot.
                 config_dir: crate::spawn_context::ancestor_env_marker(row.pid, "CLAUDE_CONFIG_DIR")
-                    .map(PathBuf::from),
+                    .map(PathBuf::from)
+                    .or_else(|| Some(default_dir.clone())),
             })
             .collect()
     }
@@ -443,7 +448,7 @@ fn live_owner(
         process
             .config_dir
             .map(|path| normalized_path(&path) == wanted)
-            .unwrap_or(true)
+            .unwrap_or(false)
     })
 }
 
@@ -931,6 +936,31 @@ mod tests {
         let (code, receipt) = execute(
             "refresh",
             &options(temp.path(), &slot, Some("live")),
+            &external,
+        );
+        assert_eq!(code, 4);
+        assert_eq!(receipt.verdict, "live-owner");
+    }
+
+    #[test]
+    fn refresh_refuses_for_a_live_process_on_the_config_dir() {
+        let temp = TempDir::new().unwrap();
+        let slot = temp.path().join("slot");
+        let who = principal("acct-process", "org-process");
+        record(
+            temp.path(),
+            "process",
+            &who,
+            &blob("stored", "refresh", now_ms() - 1),
+        );
+        let mut external = MockExternal::default();
+        external.live.push(LiveClaude {
+            config_dir: Some(slot.clone()),
+        });
+
+        let (code, receipt) = execute(
+            "refresh",
+            &options(temp.path(), &slot, Some("process")),
             &external,
         );
         assert_eq!(code, 4);

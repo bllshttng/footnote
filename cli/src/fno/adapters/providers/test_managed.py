@@ -227,6 +227,18 @@ class TestSwitch:
             managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
         assert fake_slot["claude"] == before
 
+    def test_sync_refusal_aborts_before_writing_the_slot(self, fake_slot, tmp_path, monkeypatch):
+        by_id = _register_two(fake_slot, tmp_path)
+        before = fake_slot["claude"]
+        monkeypatch.setattr(
+            managed,
+            "_vault",
+            lambda action, *args: {"verdict": "profile-unavailable" if action == "sync" else "fresh"},
+        )
+        with pytest.raises(managed.ManagedStoreError, match="could not capture"):
+            managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+        assert fake_slot["claude"] == before
+
     def test_missing_vault_binary_refuses_before_writing_the_slot(
         self, fake_slot, tmp_path, monkeypatch
     ):
