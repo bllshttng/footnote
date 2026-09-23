@@ -1,4 +1,6 @@
 use crate::harness_capabilities::HarnessContract;
+use serde_json::Value;
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResumeRoute {
@@ -60,6 +62,125 @@ pub(crate) fn resume_route(
             "fno agents resume: {name}: the {harness} resume form is a terminal program and this caller has no terminal; run fno agents resume {name} from a terminal"
         ))
     }
+}
+
+pub(crate) fn print_resume_command(
+    name: &str,
+    entry: &Value,
+    harness: &str,
+    form_session_id: &str,
+    cwd_override: Option<&str>,
+    home: &crate::paths::AgentsHome,
+    contract: &HarnessContract,
+    route: &ResumeRoute,
+) -> i32 {
+    if form_session_id.is_empty() {
+        eprintln!(
+            "fno agents resume: agent {} has no recorded session_id for harness {}.",
+            crate::client_verbs::py_repr_str(name),
+            crate::client_verbs::py_repr_str(harness)
+        );
+        return 13;
+    }
+    let mut argv = match contract.render_session_argv_raw(
+        harness,
+        "interactive_resume",
+        Some(form_session_id),
+    ) {
+        Ok(argv) => argv,
+        Err(_) => {
+            if let ResumeRoute::Refused(line) = route {
+                eprintln!("{line}");
+            } else {
+                eprintln!(
+                    "fno agents resume: harness {} resume contract is invalid.",
+                    crate::client_verbs::py_repr_str(harness)
+                );
+            }
+            return 13;
+        }
+    };
+    let row_name = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(name);
+    let client_resume = contract
+        .conversion(harness)
+        .map(|conversion| conversion.strategy.as_str() == "client-resume")
+        .unwrap_or(false);
+    let recorded_cwd = entry.get("cwd").and_then(Value::as_str).unwrap_or("");
+    let cwd = cwd_override.map(str::to_string).unwrap_or_else(|| {
+        if client_resume {
+            let claude_uuid = entry
+                .get("claude_session_uuid")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            crate::reentry::resolve_resume_cwd(
+                &crate::claude_ask::ClaudeHome::from_env(),
+                recorded_cwd,
+                claude_uuid,
+            )
+            .to_string_lossy()
+            .into_owned()
+        } else {
+            recorded_cwd.to_string()
+        }
+    });
+    let codex_route_outcome =
+        crate::codex_route::resume_route(harness, entry, Path::new(&cwd), &mut argv);
+    if let Some(code) = crate::codex_route::resume_verdict(&codex_route_outcome, entry, row_name) {
+        return code;
+    }
+    let mut print_env = match &codex_route_outcome {
+        Some(Ok(Some(route))) => route.env_masked(),
+        _ => Vec::new(),
+    };
+    if client_resume {
+        match crate::reentry::resolve_reentry(
+            &home.registry_json(),
+            row_name,
+            crate::reentry::ReentryTransition::Resume,
+            None,
+            Some(&cwd),
+        ) {
+            Ok(plan) => {
+                let plan = plan.carry_pins(&mut argv);
+                if let Some(path) = plan.route_settings_path.as_deref() {
+                    if !path.is_empty() && !argv.iter().any(|token| token == "--settings") {
+                        argv.splice(1..1, ["--settings".to_string(), path.to_string()]);
+                    }
+                }
+                print_env.extend(
+                    plan.env
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone())),
+                );
+            }
+            Err(reason) => {
+                let reason = reason.lines().next().unwrap_or("re-entry plan unavailable");
+                eprintln!(
+                    "fno agents resume: {reason}; printing the declared contract command only."
+                );
+            }
+        }
+    }
+    let identity = match crate::pane_relaunch::mesh_identity_assignments(
+        entry.get("name").and_then(Value::as_str).unwrap_or(name),
+        harness,
+        entry.get("node").and_then(Value::as_str),
+    ) {
+        Ok(identity) => identity,
+        Err(reason) => {
+            eprintln!("fno agents resume: {reason}; refusing an unattributable resume");
+            return 13;
+        }
+    };
+    let mut printable = vec!["env".to_string()];
+    printable.extend(identity);
+    printable.extend(crate::pane_relaunch::env_prefixed(&print_env, &argv));
+    crate::pane_relaunch::print_relaunch_command(None, &cwd, &printable, &[], row_name);
+    0
 }
 
 #[cfg(test)]

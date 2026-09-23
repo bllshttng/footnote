@@ -160,16 +160,29 @@ fn write_executable(path: &Path, body: &str) {
 }
 
 fn run_null(fixture: &Fixture, row: &Row, extra: &[&str], path: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+    run_null_with_env(fixture, row, extra, path, &[])
+}
+
+fn run_null_with_env(
+    fixture: &Fixture,
+    row: &Row,
+    extra: &[&str],
+    path: &Path,
+    extra_env: &[(&str, &str)],
+) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fno-agents"));
+    command
         .args(["resume", &row.command_id])
         .args(extra)
         .env_clear()
         .env("FNO_AGENTS_HOME", &fixture.home)
         .env("HOME", fixture.root.path())
         .env("PATH", path)
-        .stdin(Stdio::null())
-        .output()
-        .expect("fno-agents starts")
+        .stdin(Stdio::null());
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    command.output().expect("fno-agents starts")
 }
 
 fn run_terminal(fixture: &Fixture, row: &Row, path: &Path) -> (u32, String) {
@@ -361,4 +374,238 @@ fn terminal_missing_binary_and_rowless_session_refusals_are_actionable() {
         "{stderr}"
     );
     assert!(!stderr.contains("fno agents adopt"), "{stderr}");
+}
+
+#[test]
+fn codex_print_command_keeps_route_args_and_masks_route_key_without_side_effects() {
+    let fixture = Fixture::new();
+    let row = fixture.row("codex", "thread", false).clone();
+    let mut entries = fixture
+        .rows
+        .iter()
+        .map(|row| row_json(row, fixture.root.path()))
+        .collect::<Vec<_>>();
+    let entry = entries
+        .iter_mut()
+        .find(|entry| entry["name"] == row.name)
+        .unwrap();
+    entry["route_provider_id"] = json!("zai-openai");
+    entry["model_name"] = json!("glm-route-test");
+    entry["node"] = json!("resume-node-test");
+    fixture.write_registry_entries(&entries);
+
+    let config_dir = fixture.root.path().join(".fno");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        "[model_routing.providers.zai-openai]\nprotocol = \"openai\"\nbase_url = \"https://example.invalid/v1\"\napi_key_env = \"FNO_TEST_ZAI_KEY\"\n",
+    )
+    .unwrap();
+
+    let output = run_null_with_env(
+        &fixture,
+        &row,
+        &["--print-command"],
+        &fixture.bins,
+        &[("FNO_TEST_ZAI_KEY", "must-not-print-this-key")],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("model_providers.zai-openai"), "{stdout}");
+    assert!(stdout.contains("model_provider='zai-openai'"), "{stdout}");
+    assert!(stdout.contains("model='glm-route-test'"), "{stdout}");
+    assert!(
+        stdout.contains(&format!(
+            "exec env FNO_AGENT_SELF={} FNO_AGENT_HARNESS=codex FNO_NODE=resume-node-test",
+            row.name
+        )),
+        "{stdout}"
+    );
+    let route_provider = stdout.find("FNO_ROUTE_PROVIDER=zai-openai").unwrap();
+    let codex_executable = stdout.rfind(" codex ").unwrap();
+    assert!(route_provider < codex_executable, "{stdout}");
+    assert!(
+        stdout.contains("FNO_TEST_ZAI_KEY=<from config>"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("must-not-print-this-key"), "{stdout}");
+    assert!(!stdout.contains("fake-executed"), "{stdout}");
+    assert!(fixture.events().is_empty(), "{}", fixture.events());
+
+    let entry = entries
+        .iter_mut()
+        .find(|entry| entry["name"] == row.name)
+        .unwrap();
+    entry["route_provider_id"] = json!("missing-provider");
+    fixture.write_registry_entries(&entries);
+    let output = run_null(&fixture, &row, &["--print-command"], &fixture.bins);
+    assert_eq!(output.status.code(), Some(13));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("was launched on codex route missing-provider"),
+        "{stderr}"
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("fake-executed"));
+    assert!(fixture.events().is_empty(), "{}", fixture.events());
+}
+
+#[test]
+fn claude_print_command_keeps_reentry_settings_and_env_without_truth_or_side_effects() {
+    let fixture = Fixture::new();
+    let row = fixture.row("claude", "pane", false).clone();
+    let settings = fixture.root.path().join("route-settings.json");
+    fs::write(
+        &settings,
+        r#"{"env":{"ANTHROPIC_BASE_URL":"https://example.invalid","FNO_ROUTE_PROVIDER":"routed"}}"#,
+    )
+    .unwrap();
+    let config_dir = fixture.root.path().join("claude-config");
+    fs::create_dir_all(&config_dir).unwrap();
+    let account_log = fixture.root.path().join("fno-calls.log");
+    write_executable(
+        &fixture.bins.join("fno"),
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FNO_TEST_ACCOUNT_LOG\"\nif [ \"$1 $2 $3 $4 $5\" = 'config accounts show makers --print-binding' ]; then printf 'CLAUDE_CONFIG_DIR=%s\\n' \"$FNO_TEST_CLAUDE_CONFIG\"; exit 0; fi\nexit 17\n",
+    );
+    let mut entries = fixture
+        .rows
+        .iter()
+        .map(|row| row_json(row, fixture.root.path()))
+        .collect::<Vec<_>>();
+    let entry = entries
+        .iter_mut()
+        .find(|entry| entry["name"] == row.name)
+        .unwrap();
+    entry["route_settings_path"] = json!(settings);
+    entry["launch_account"] = json!("makers");
+    entry["node"] = json!("resume-node-test");
+    entry.as_object_mut().unwrap().remove("short_id");
+    fixture.write_registry_entries(&entries);
+
+    let config_dir = config_dir.to_string_lossy().into_owned();
+    let account_log = account_log.to_string_lossy().into_owned();
+    let output = run_null_with_env(
+        &fixture,
+        &row,
+        &["--print-command"],
+        &fixture.bins,
+        &[
+            ("FNO_TEST_CLAUDE_CONFIG", &config_dir),
+            ("FNO_TEST_ACCOUNT_LOG", &account_log),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--settings"), "{stdout}");
+    assert!(stdout.contains(settings.to_str().unwrap()), "{stdout}");
+    assert!(
+        stdout.contains(&format!("CLAUDE_CONFIG_DIR={config_dir}")),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "exec env FNO_AGENT_SELF={} FNO_AGENT_HARNESS=claude FNO_NODE=resume-node-test",
+            row.name
+        )),
+        "{stdout}"
+    );
+    let config_env = stdout
+        .find(&format!("CLAUDE_CONFIG_DIR={config_dir}"))
+        .unwrap();
+    let claude_executable = stdout.rfind(" claude ").unwrap();
+    assert!(config_env < claude_executable, "{stdout}");
+    assert!(!stdout.contains("fake-executed"), "{stdout}");
+    assert_eq!(
+        fs::read_to_string(&account_log).unwrap(),
+        "config accounts show makers --print-binding\n"
+    );
+    assert!(fixture.events().is_empty(), "{}", fixture.events());
+
+    let entry = entries
+        .iter_mut()
+        .find(|entry| entry["name"] == row.name)
+        .unwrap();
+    entry["route_settings_path"] = json!(fixture.root.path().join("missing-settings.json"));
+    fixture.write_registry_entries(&entries);
+    let output = run_null_with_env(
+        &fixture,
+        &row,
+        &["--print-command"],
+        &fixture.bins,
+        &[
+            ("FNO_TEST_CLAUDE_CONFIG", &config_dir),
+            ("FNO_TEST_ACCOUNT_LOG", &account_log),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let contract = HarnessContract::packaged().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for token in contract
+        .render_session_argv_raw("claude", "interactive_resume", Some(&row.resume_id))
+        .unwrap()
+    {
+        assert!(stdout.contains(&token), "missing {token:?}: {stdout}");
+    }
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("printing the declared contract command only"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!stdout.contains("--settings"), "{stdout}");
+    assert!(!stdout.contains("fake-executed"), "{stdout}");
+    assert_eq!(
+        fs::read_to_string(&account_log).unwrap(),
+        "config accounts show makers --print-binding\n"
+    );
+    assert!(fixture.events().is_empty(), "{}", fixture.events());
+}
+
+#[test]
+fn claude_print_command_uses_transcript_resolved_cwd() {
+    let fixture = Fixture::new();
+    let row = fixture.row("claude", "thread", false).clone();
+    let root = fixture.root.path().canonicalize().unwrap();
+    let stale_cwd = root.join("removed-worktree");
+    let mut entries = fixture
+        .rows
+        .iter()
+        .map(|row| row_json(row, fixture.root.path()))
+        .collect::<Vec<_>>();
+    let entry = entries
+        .iter_mut()
+        .find(|entry| entry["name"] == row.name)
+        .unwrap();
+    entry["cwd"] = json!(stale_cwd);
+    fixture.write_registry_entries(&entries);
+
+    let transcript = root
+        .join(".claude/projects/resume-cwd-test")
+        .join(format!("{}.jsonl", row.resume_id));
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    fs::write(
+        &transcript,
+        format!("{}\n", json!({"cwd": root.to_string_lossy()})),
+    )
+    .unwrap();
+
+    let output = run_null(&fixture, &row, &["--print-command"], &fixture.bins);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(root.to_str().unwrap()), "{stdout}");
+    assert!(!stdout.contains(stale_cwd.to_str().unwrap()), "{stdout}");
+    assert!(stdout.contains("exec env FNO_AGENT_SELF="), "{stdout}");
+    assert!(!stdout.contains("fake-executed"), "{stdout}");
+    assert!(fixture.events().is_empty(), "{}", fixture.events());
 }

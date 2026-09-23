@@ -2207,41 +2207,16 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         }
     }
     if print_command {
-        let form_session_id = resume_session_id(entry, harness);
-        if form_session_id.is_empty() {
-            eprintln!(
-                "fno agents resume: agent {} has no recorded session_id for harness {}.",
-                py_repr_str(&name),
-                py_repr_str(harness)
-            );
-            return 13;
-        }
-        let argv = match contract.render_session_argv_raw(
+        return crate::resume_route::print_resume_command(
+            &name,
+            entry,
             harness,
-            "interactive_resume",
-            Some(form_session_id),
-        ) {
-            Ok(argv) => argv,
-            Err(_) => {
-                if let ResumeRoute::Refused(line) = &route {
-                    eprintln!("{line}");
-                } else {
-                    eprintln!(
-                        "fno agents resume: harness {} resume contract is invalid.",
-                        py_repr_str(harness)
-                    );
-                }
-                return 13;
-            }
-        };
-        let row_name = entry
-            .get("name")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(&name);
-        let cwd = entry.get("cwd").and_then(Value::as_str).unwrap_or("");
-        crate::pane_relaunch::print_relaunch_command(None, cwd, &argv, &[], row_name);
-        return 0;
+            resume_session_id(entry, harness),
+            cwd_override.as_deref(),
+            home,
+            &contract,
+            &route,
+        );
     }
     if let ResumeRoute::Refused(line) = &route {
         eprintln!("{line}");
