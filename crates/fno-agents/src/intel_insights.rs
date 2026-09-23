@@ -330,11 +330,15 @@ pub(crate) fn mark_sampled(
     rows: &mut [SessionRow],
     request: SampleRequest,
 ) -> (Option<usize>, Option<usize>) {
-    let eligible_ids: Vec<&str> = rows
+    let mut eligible_ids: Vec<&str> = rows
         .iter()
         .filter(|r| r.kind == "attended" && r.idle && r.substantive)
         .map(|r| r.session.as_str())
         .collect();
+    // A codex resume writes several rollout files under one thread id; the
+    // sample ranks sessions, not files.
+    eligible_ids.sort_unstable();
+    eligible_ids.dedup();
     let eligible = eligible_ids.len();
     match request {
         SampleRequest::None => (None, None),
@@ -887,6 +891,29 @@ mod tests {
         let operators = vec![t0 as i64 + 1, t0 as i64 + 40, t0 as i64 + 7200];
         let gaps = response_gaps(&operators, &assistant);
         assert_eq!(gaps, vec![40]);
+    }
+
+    #[test]
+    fn mark_sampled_ranks_unique_sessions_not_files() {
+        // A codex resume leaves several rollout rows under one thread id;
+        // duplicates collapse before the rank.
+        let mut a1 = row("aaaa", "codex");
+        a1.kind = "attended".to_string();
+        a1.substantive = true;
+        a1.idle = true;
+        let mut a2 = row("aaaa", "codex");
+        a2.kind = "attended".to_string();
+        a2.substantive = true;
+        a2.idle = true;
+        let mut b = row("bbbb", "claude");
+        b.kind = "attended".to_string();
+        b.substantive = true;
+        b.idle = true;
+        let mut rows = vec![a1, a2, b];
+        let (eligible, sampled) = mark_sampled(&mut rows, SampleRequest::All);
+        assert_eq!(eligible, Some(2));
+        assert_eq!(sampled, Some(2));
+        assert!(rows[0].sampled && rows[1].sampled);
     }
 
     #[test]
