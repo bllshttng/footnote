@@ -1252,6 +1252,41 @@ def test_ready_names_reviewer_refused_and_the_reviewer(monkeypatch, capsys):
     assert "reviewer_refused" in captured.err
 
 
+def test_reviewer_refused_empty_diff_names_the_inline_lane(monkeypatch, capsys):
+    import json
+
+    _green_fetch(monkeypatch)
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {
+            "coverage": "uncovered",
+            "review_state": "reviewer_refused",
+            "reviewed_count": 0,
+            "verdicts": [
+                {
+                    "producer": "local_attestation",
+                    "name": "code-review",
+                    "verdict": "refused",
+                    "refusal_reason": "empty_diff",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        _status,
+        "_merge_decision",
+        lambda pr, repo, facts: _receipt("review_coverage_reviewer_refused"),
+    )
+
+    _status.run_status("42")
+    err = capsys.readouterr().err
+    assert "reviewer_refused" in err
+    assert "/fno:review" in err
+    assert "$fno:review" in err
+    assert "spawn the reviewer" not in err
+
+
 def _coverage_status_projection_fetch(monkeypatch, posted_state="SUCCESS", *, state="OPEN"):
     monkeypatch.setattr(
         _status,
