@@ -657,6 +657,11 @@ fn mutate_single_row_once(
         &rows_after,
         crate::backlog::epic_cap::configured_cap(graph),
     )?;
+    crate::backlog::idea_cap::enforce(
+        &rows,
+        &rows_after,
+        crate::backlog::idea_cap::configured_cap(graph).0,
+    )?;
     let version = content_version(&rows_after);
     stamp_version(&transaction, &version)?;
     transaction.commit().map_err(|error| error.to_string())?;
@@ -2590,6 +2595,45 @@ mod tests {
             rows_after.iter().any(|r| entry_id_from(r) == Some("c-16")),
             "the child landed under the fresh epic"
         );
+    }
+
+    #[test]
+    fn the_single_row_seam_refuses_the_26th_unplanned_idea() {
+        let _env_lock = crate::claims::test_env_lock().lock().unwrap();
+        let spaces = tempfile::TempDir::new().unwrap();
+        declare_test_roots(spaces.path());
+        let (dir, graph) = seeded_sqlite_fixture();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[backlog]\nmax_open_ideas = 25\n",
+        )
+        .unwrap();
+
+        mutate_single_row(&graph, "node_create", |rows| {
+            for i in 1..=25 {
+                rows.push(serde_json::json!({
+                    "id": format!("i-{i:02}"), "slug": format!("i-{i:02}"),
+                    "title": format!("idea {i}"), "type": "feature", "status": "idea",
+                    "priority": "p2", "domain": "code", "project": "p"
+                }));
+            }
+            Ok(true)
+        })
+        .unwrap();
+        let before = export_rows(&open(&graph).unwrap()).unwrap();
+        let error = mutate_single_row(&graph, "node_create", |rows| {
+            rows.push(serde_json::json!({
+                "id": "i-26", "slug": "i-26", "title": "idea 26", "type": "feature",
+                "status": "idea", "priority": "p2", "domain": "code", "project": "p"
+            }));
+            Ok(true)
+        })
+        .unwrap_err();
+        assert!(error.contains("idea cap:"), "{error}");
+        assert!(error.contains("--wave-of"), "{error}");
+        let after = export_rows(&open(&graph).unwrap()).unwrap();
+        assert_eq!(after.len(), before.len());
+        assert!(!after.iter().any(|row| entry_id_from(row) == Some("i-26")));
     }
 
     fn entry_id_from(row: &Value) -> Option<&str> {

@@ -98,12 +98,12 @@ pub fn enforce(pre: &[Value], post: &[Value], cap: Option<usize>) -> Result<(), 
         oldest.sort_by(|left, right| {
             left.get("created_at")
                 .and_then(Value::as_str)
-                .unwrap_or("")
+                .unwrap_or("\u{10ffff}")
                 .cmp(
                     right
                         .get("created_at")
                         .and_then(Value::as_str)
-                        .unwrap_or(""),
+                        .unwrap_or("\u{10ffff}"),
                 )
                 .then_with(|| {
                     crate::graph_store::entry_id(left)
