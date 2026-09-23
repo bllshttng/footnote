@@ -165,7 +165,7 @@ pub fn read_snapshot() -> Option<String> {
 
 /// Read a node's derived status, tolerating the pre-rename `_status` key so a
 /// graph.json not yet re-written by the Python side still classifies.
-fn node_status(e: &serde_json::Value) -> Option<&str> {
+pub(crate) fn node_status(e: &serde_json::Value) -> Option<&str> {
     e.get("status")
         .or_else(|| e.get("_status"))
         .and_then(|v| v.as_str())
@@ -245,7 +245,7 @@ pub enum BoardScope {
 impl BoardScope {
     /// Whether a card carrying `project` (already trimmed; `None` = unscoped)
     /// belongs on this board.
-    fn keeps(&self, project: Option<&str>) -> bool {
+    pub(crate) fn keeps(&self, project: Option<&str>) -> bool {
         match (self, project) {
             (BoardScope::All, _) => true,
             (_, None) => true,
@@ -481,7 +481,8 @@ pub const UNLANED: &str = "unlaned";
 /// Canonical board column order, mirroring `KANBAN_COLUMNS` in
 /// `graph/render.py`: Now leads (genuine today-work), Triage holds the
 /// awaiting-ack queue, Done is terminal.
-const KANBAN_COLUMNS: [&str; 5] = ["Now", "Next", "Later", "Triage", "Done"];
+pub(crate) const KANBAN_COLUMNS: [&str; 6] =
+    ["In Progress", "Now", "Next", "Later", "Triage", "Done"];
 
 /// A lane's position in [`KANBAN_COLUMNS`]; anything unrecognized sorts last.
 fn lane_rank(lane: &str) -> usize {
@@ -501,13 +502,20 @@ fn lane_rank(lane: &str) -> usize {
 /// sits. Kept deliberately close to the Python, ordering included, so a change
 /// there is easy to mirror here.
 ///
+/// One named difference: a live claim puts the card in In Progress here,
+/// while `_kanban_column` accepts `live_claimed` and never reads it.
+///
 /// `claimed` folds the graph `status` and the live-lockfile claim together (a
 /// node another session drives may never write a graph status -);
-/// `underway` is [`in_progress_epics`] membership.
+/// `underway` is [`in_progress_epics`] membership; `effective_priority` is
+/// the epic-promoted priority the backlog read model feeds from the keeper
+/// (`None` keeps the node's own priority, what `derive_queue` and the mux
+/// `--top` door still do).
 pub(crate) fn kanban_column(
     e: &serde_json::Value,
     claimed: bool,
     underway: bool,
+    effective_priority: Option<&str>,
 ) -> Option<&'static str> {
     if e.get("type").and_then(|v| v.as_str()) == Some("roadmap") {
         return None;
@@ -516,18 +524,24 @@ pub(crate) fn kanban_column(
         return Some("Done");
     }
     let status = node_status(e).unwrap_or("ready");
+    if status == "done" {
+        return Some("Done");
+    }
     if matches!(status, "deferred" | "superseded") {
         return None; // off-board until reactivated
     }
-    if claimed || underway {
-        return Some("Now");
+    if status == "in_progress" || claimed || underway {
+        return Some("In Progress");
     }
     // Queued is orthogonal to `status`: a node awaiting human ack is not active
-    // work, so it must not inflate Now - but a claimed node stays in Now.
+    // work, so it must not inflate the active lanes.
     if has_stamp(e, "queued_at") {
         return Some("Triage");
     }
-    match e.get("priority").and_then(|v| v.as_str()).unwrap_or("p2") {
+    match effective_priority
+        .or_else(|| e.get("priority").and_then(|v| v.as_str()))
+        .unwrap_or("p2")
+    {
         "p0" | "p1" => Some("Now"),
         "p3" => Some("Later"),
         _ => Some("Next"),
@@ -551,7 +565,7 @@ fn has_stamp(e: &serde_json::Value, field: &str) -> bool {
 /// write time, so this reader must derive it itself rather than trust the
 /// raw `status` field. Fails closed like the Python: a `blocked_by` id absent
 /// from `id_to_entry` counts as blocked, never as satisfied.
-fn has_open_dependency(
+pub(crate) fn has_open_dependency(
     e: &serde_json::Value,
     id_to_entry: &HashMap<&str, &serde_json::Value>,
 ) -> bool {
@@ -674,7 +688,7 @@ pub fn derive_queue(
         // unlaned keeps the two boards agreeing on what is even on the board -
         // an excluded node rendered as an actionable card would be a row the
         // canonical board says does not exist.
-        let Some(lane) = kanban_column(e, claimed, underway.contains(id)) else {
+        let Some(lane) = kanban_column(e, claimed, underway.contains(id), None) else {
             continue;
         };
         rows.push((
