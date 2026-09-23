@@ -92,7 +92,6 @@ got="$(stored '.invocation_id')"
 [[ "$got" == "UNJOINED" ]] \
   && pass "missing sidecar emits UNJOINED" \
   || fail "missing sidecar marker: want UNJOINED, got '$got'"
-rm -f "$REPO/.fno/target-state.md"
 
 # 1. On a branch: the payload records the branch, and the receipt names it.
 rm -f "$TMP/last-emit.txt"
@@ -106,6 +105,16 @@ case "$RECEIPT" in
   *"branch=feature/x-e601"*) pass "receipt names the branch" ;;
   *) fail "receipt lacks branch=feature/x-e601: $RECEIPT" ;;
 esac
+case "$RECEIPT" in
+  *"run=target-run run_harness=claude attester="*) pass "receipt names run identity and attester" ;;
+  *) fail "receipt lacks run identity and attester: $RECEIPT" ;;
+esac
+if grep -q '[[:space:]]harness=' <<<"$RECEIPT"; then
+  fail "receipt carries a bare harness= token: $RECEIPT"
+else
+  pass "receipt has no bare harness= token"
+fi
+rm -f "$REPO/.fno/target-state.md"
 
 # 2. Detached HEAD: the literal "HEAD" names no branch, and an empty branch
 #    field is byte-identical to the pre-branch-field backlog - a live emit

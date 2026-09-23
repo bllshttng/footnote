@@ -432,7 +432,7 @@ def emit(
         "with --events.",
     ),
 ) -> None:
-    """Emit a single canonical event to events.jsonl.
+    """Emit a single canonical event to the project event store (events.db beside the journal path).
 
     The envelope is ``{ts, type, source, data}`` (see
     ``cli/src/fno/events/schema.yaml``). Validation runs before the
