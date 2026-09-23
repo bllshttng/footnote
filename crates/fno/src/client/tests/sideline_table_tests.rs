@@ -18,7 +18,7 @@ fn sideline_name_middle_elides_and_keeps_suffix_gap_to_the_message() {
     let mut view = two_pane_view();
     view.sideline_width = 60;
     let mut a = tab_agent(None, None, false);
-    a.name = "blueprinter-fno-8bef7b".into();
+    a.name = "dispatch-fno-8bef7b".into();
     a.tail = Some("**PR 2113 merged as `84fa`.**".into());
     view.layout.agents = vec![a];
     let frame = view.compose();

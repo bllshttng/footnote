@@ -34,7 +34,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "backlog-note",
     "backlog-notes",
     "bash-census",
-    "blueprint-feed",
     "board",
     "claim",
     "codex-assign-project",
@@ -815,15 +814,11 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::session_start_bytes::run_session_start_bytes(&args[1..]);
     }
 
-    // `territory-rows`/`blueprint-feed`: the territory fact set's
-    // daemon-free reads and the standing blueprinter's feed actions. Direct
+    // `territory-rows`: the territory fact set's daemon-free reads. Direct
     // dispatch like graph-get: the Python `fno config active-backlog-*`
-    // passthroughs and the supervisor's tick invoke the binary directly.
+    // passthroughs invoke the binary directly.
     if verb == "territory-rows" {
         return fno_agents::territory::run_territory_rows(&args[1..]);
-    }
-    if verb == "blueprint-feed" {
-        return fno_agents::territory::run_blueprint_feed(&args[1..]);
     }
     if verb == "active-backlog-receipt" {
         return fno_agents::territory::run_active_backlog_receipt(&args[1..]);
