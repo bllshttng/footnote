@@ -17,11 +17,11 @@ the renderer splices that fragment between markers on the local board.
 The section's CSS ships inside the fragment, so the board never needs to
 know the section exists.
 
-The fragment is one court read behind the board that splices it: a graph mutation re-renders the board in-process with the previous fragment, and the next fragment write closes the gap. Refresh cadence belongs to the caller (hooks, or the operator).
+The fragment is one court read behind the board that splices it. A graph mutation re-renders the board in-process with the previous fragment, and the next fragment write closes the gap. Refresh cadence belongs to the caller (hooks, or the operator).
 
 ## The fold lives in the native binary
 
-`fno-agents court-fold` reads the graph, the claims dir, and the registry. It compiles each crown's scope with the rules `king_board/scope.rs` applies, and names workers through the same native claim verdicts `claim sweep` uses, so a fold and the claims surface cannot disagree about who holds a node. Python passes the crowns `gather_court` already adjudicated and reads the answer back. A fold that cannot run - stale binary, unreadable graph, timeout - marks the crown `unresolved` with the reason rather than rendering an empty table.
+`fno-agents court-fold` reads the graph, the claims dir, and the registry. It compiles each crown's scope with the rules `king_board/scope.rs` applies. Workers are named through the same native claim verdicts `claim sweep` uses, so a fold and the claims surface cannot disagree about who holds a node. Python passes the crowns `gather_court` already adjudicated and reads the answer back. A fold that cannot run - stale binary, unreadable graph, timeout - marks the crown `unresolved` with the reason rather than rendering an empty table.
 
 The fold resolves its own claims directory. Every key it asks after is a `node:` key. Those route to the global claims root on both the Rust and the Python side. One resolver answers, and no caller passes a path. `--claims-dir` stays as an override for tests.
 
