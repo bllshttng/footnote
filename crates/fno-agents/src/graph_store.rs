@@ -2398,6 +2398,7 @@ pub fn locked_mutate_with_hook(
         .len()
         .saturating_sub(raw.iter().filter(|e| is_dict(e)).count());
     let mut entries = input.entries;
+    apply_defaults(&mut entries, false);
 
     // The presence invariant holds at the STORE boundary, not only at the
     // typed update path: the Python mutator runs client-side against plain
