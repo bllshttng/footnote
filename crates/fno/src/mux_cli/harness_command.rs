@@ -75,6 +75,25 @@ fn screen_postcondition_matches(before: &str, after: &str, expected: &Regex) -> 
         && super::pane_submit::positive_post_submit_marker(before, after)
 }
 
+fn empty_composer_pattern(raw: &str) -> Result<Regex, String> {
+    if !raw.contains('^') || !raw.contains('$') {
+        return Err("--empty-composer must be an anchored line regex".into());
+    }
+    let regex =
+        Regex::new(raw).map_err(|error| format!("--empty-composer regex is invalid: {error}"))?;
+    if [
+        "ordinary screen text",
+        "drafted prompt text",
+        "contextCompaction output",
+    ]
+    .iter()
+    .any(|sample| regex.is_match(sample))
+    {
+        return Err("--empty-composer regex also matches ordinary screen text".into());
+    }
+    Ok(regex)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct CommandReceipt {
     request_id: String,
@@ -584,8 +603,8 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
         }
     }
     if let Some(pattern) = args.empty_composer.as_deref() {
-        if let Err(error) = Regex::new(pattern) {
-            eprintln!("fno mux command: --empty-composer is not a valid regex: {error}");
+        if let Err(error) = empty_composer_pattern(pattern) {
+            eprintln!("fno mux command: {error}");
             return EXIT_USAGE;
         }
     }
@@ -852,11 +871,12 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
             return EXIT_ERROR;
         }
     };
-    let empty_composer = args
-        .empty_composer
-        .as_deref()
-        .and_then(|pattern| Regex::new(pattern).ok())
-        .expect("screen proof validates its empty-composer regex before submission");
+    let empty_composer = empty_composer_pattern(
+        args.empty_composer
+            .as_deref()
+            .expect("screen proof validates its empty-composer regex before submission"),
+    )
+    .expect("screen proof validated its empty-composer regex before submission");
     if !empty_composer.is_match(&before) {
         let mut receipt = reservation.clone();
         receipt.status = CommandStatus::Refused.word().into();
@@ -1202,6 +1222,13 @@ mod tests {
             "contextCompaction started",
             &expected
         ));
+    }
+
+    #[test]
+    fn empty_composer_proof_requires_a_specific_anchored_marker() {
+        assert!(empty_composer_pattern("(?m)^❯\\s*$").is_ok());
+        assert!(empty_composer_pattern(".+").is_err());
+        assert!(empty_composer_pattern("(?m)^.*$").is_err());
     }
 
     #[test]

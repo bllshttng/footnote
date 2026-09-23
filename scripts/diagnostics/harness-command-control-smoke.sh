@@ -14,8 +14,9 @@ usage: harness-command-control-smoke.sh --session <full-session-uuid> --harness 
 
 The selected session must already be a disposable session registered below
 the isolated FNO roots. This command does not create, restart, or re-point a
-live session. Set FNO_EMPTY_COMPOSER_EXPECT to a regex for the empty prompt
-and FNO_SCREEN_EXPECT to a post-submit marker absent before each screen action.
+live session. Set FNO_EMPTY_COMPOSER_EXPECT to an anchored line regex for the empty prompt
+and FNO_SCREEN_EXPECT_PICKER/STATUS/COMPACT/RESUME to post-submit markers absent
+before the matching screen action. FNO_SCREEN_EXPECT is the shared fallback.
 USAGE
 }
 
@@ -87,6 +88,7 @@ RUN_DIR="$ROOT/command-control-smoke"
 mkdir -p "$RUN_DIR"
 RUN_ID="command-control-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 SCREEN_EXPECT="${FNO_SCREEN_EXPECT:-}"
+EMPTY_COMPOSER_EXPECT="${FNO_EMPTY_COMPOSER_EXPECT:-}"
 LS_OUT="$RUN_DIR/mux-ls.json"
 LS_ERR="$RUN_DIR/mux-ls.stderr"
 if ! "$MUX_BIN" mux ls --json >"$LS_OUT" 2>"$LS_ERR"; then
@@ -133,7 +135,7 @@ run_case() {
   local timeout_seconds="$5"
   local screen_expect="${6:-$SCREEN_EXPECT}"
   local expected_error="${7:-}"
-  local empty_composer_expect="${8:-${FNO_EMPTY_COMPOSER_EXPECT:-}}"
+  local empty_composer_expect="${8:-$EMPTY_COMPOSER_EXPECT}"
   local request_id="${RUN_ID}-${case_name}"
   local out="$RUN_DIR/${case_name}.stdout"
   local err="$RUN_DIR/${case_name}.stderr"
@@ -240,18 +242,18 @@ if [[ "$HARNESS" == codex ]]; then
   run_case paused-to-active "/goal resume" goal-active verified 30
   run_case idle-goal "/goal" goal-active verified 30
   run_case busy-refusal "/goal" goal-active refused 30 "" "refusing before typing"
-  run_case pending-composer "/rc" screen refused 30 "$SCREEN_EXPECT" "composer"
-  run_case screen-picker "/rc" screen verified 30 "$SCREEN_EXPECT"
+  run_case pending-composer "/rc" screen refused 30 "${FNO_SCREEN_EXPECT_PICKER:-$SCREEN_EXPECT}" "composer"
+  run_case screen-picker "/rc" screen verified 30 "${FNO_SCREEN_EXPECT_PICKER:-$SCREEN_EXPECT}"
   run_case timeout-no-retry "/compact" compact unknown 1
   run_case provider-compact "/compact" compact verified 30
 else
-  run_case idle-status "/status" screen verified 30
-  run_case busy-refusal "/status" screen refused 30 "$SCREEN_EXPECT" "refusing before typing"
-  run_case pending-composer "/rc" screen refused 30 "$SCREEN_EXPECT" "composer"
-  run_case screen-picker "/rc" screen verified 30 "$SCREEN_EXPECT"
-  run_case timeout-no-retry "/status" screen unknown 1 "$SCREEN_EXPECT"
+  run_case idle-status "/status" screen verified 30 "${FNO_SCREEN_EXPECT_STATUS:-$SCREEN_EXPECT}"
+  run_case busy-refusal "/status" screen refused 30 "${FNO_SCREEN_EXPECT_STATUS:-$SCREEN_EXPECT}" "refusing before typing"
+  run_case pending-composer "/rc" screen refused 30 "${FNO_SCREEN_EXPECT_PICKER:-$SCREEN_EXPECT}" "composer"
+  run_case screen-picker "/rc" screen verified 30 "${FNO_SCREEN_EXPECT_PICKER:-$SCREEN_EXPECT}"
+  run_case timeout-no-retry "/status" screen unknown 1 "${FNO_SCREEN_EXPECT_TIMEOUT:-$SCREEN_EXPECT}"
   run_case provider-compact "/compact" screen verified 30 "${FNO_COMPACT_SCREEN_EXPECT:-$SCREEN_EXPECT}"
-  run_case paused-to-active "/rc" screen verified 30 "$SCREEN_EXPECT"
+  run_case paused-to-active "/rc" screen verified 30 "${FNO_SCREEN_EXPECT_RESUME:-$SCREEN_EXPECT}"
 fi
 
 python3 - "$RUN_DIR" "$SESSION" "$HARNESS" "$ROOT" "$RUN_ID" <<'PY'
