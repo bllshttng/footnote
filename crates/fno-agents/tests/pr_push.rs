@@ -185,7 +185,7 @@ fn pushes_once_with_the_behind_receipt() {
     let (code, out, err) = run_verb(&d, &[]);
     assert_eq!(code, 0, "{out}\n{err}");
     assert!(out.contains("behind-before=3 behind-after=0"), "{out}");
-    assert!(out.contains("preflight=absent"), "{out}");
+    assert!(out.contains("preflight=skipped"), "{out}");
     assert!(out.contains("ci=settled"), "{out}");
     assert!(out.contains("sha=abc1234"), "{out}");
     assert!(out.contains("pushed=1"), "{out}");
@@ -317,9 +317,31 @@ fn force_ci_cancel_pushes_and_records_the_bypass() {
 #[test]
 fn no_preflight_is_recorded_in_the_receipt() {
     let (_t, d) = tmpdir();
+    std::fs::create_dir_all(d.join("scripts/ci")).unwrap();
+    write_exec(
+        &d.join("scripts/ci"),
+        "preflight.sh",
+        "#!/bin/sh\necho ran > \"$(dirname \"$0\")/../../preflight.log\"\nexit 3\n",
+    );
     let (code, out, err) = run_verb(&d, &["--no-preflight"]);
     assert_eq!(code, 0, "{out}\n{err}");
     assert!(out.contains("preflight=skipped"), "{out}");
+    assert!(!d.join("preflight.log").exists(), "runner did not run");
+}
+
+#[test]
+fn default_push_skips_an_installed_preflight_runner() {
+    let (_t, d) = tmpdir();
+    std::fs::create_dir_all(d.join("scripts/ci")).unwrap();
+    write_exec(
+        &d.join("scripts/ci"),
+        "preflight.sh",
+        "#!/bin/sh\necho ran > \"$(dirname \"$0\")/../../preflight.log\"\nexit 3\n",
+    );
+    let (code, out, err) = run_verb(&d, &[]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(out.contains("preflight=skipped"), "{out}");
+    assert!(!d.join("preflight.log").exists(), "runner did not run");
 }
 
 #[test]
@@ -331,7 +353,7 @@ fn a_red_preflight_refuses_the_push() {
         "preflight.sh",
         "#!/bin/sh\necho red > \"$(dirname \"$0\")/../../preflight.log\"\nexit 3\n",
     );
-    let (code, _out, err) = run_verb(&d, &[]);
+    let (code, _out, err) = run_verb(&d, &["--preflight"]);
     assert_eq!(code, 1, "{err}");
     assert!(d.join("preflight.log").exists(), "preflight ran");
     assert!(
