@@ -2149,6 +2149,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         name,
         print_command,
         message,
+        message_already_queued,
         cross_project,
         cwd: cwd_override,
         account,
@@ -2503,6 +2504,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         &name,
         cwd,
         &message,
+        message_already_queued,
         reentry_plan.as_ref(),
         cross_project,
     ) {

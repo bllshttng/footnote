@@ -427,6 +427,7 @@ pub(crate) fn claude_live_route(
     name: &str,
     cwd: &str,
     message: &Option<String>,
+    message_already_queued: bool,
     reentry_plan: Option<&crate::reentry::ReentryPlan>,
     cross_project: bool,
 ) -> Option<i32> {
@@ -438,6 +439,7 @@ pub(crate) fn claude_live_route(
         name,
         cwd,
         message,
+        message_already_queued,
         reentry_plan,
         cross_project,
         claude_live_mail_runner,
@@ -469,6 +471,7 @@ pub(crate) fn claude_live_route_with(
     name: &str,
     cwd: &str,
     message: &Option<String>,
+    message_already_queued: bool,
     reentry_plan: Option<&crate::reentry::ReentryPlan>,
     cross_project: bool,
     mut run_mail: impl FnMut(&[String]) -> (i32, String, String),
@@ -486,6 +489,13 @@ pub(crate) fn claude_live_route_with(
         if !short_id.is_empty() {
             if let Some(state) = roster_state(short_id) {
                 if matches!(state.as_str(), "working" | "busy") {
+                    if message_already_queued {
+                        eprintln!(
+                            "fno agents resume: '{name}' ({short_id}) is 'Working'; \
+                             the message is already queued and will not be resent."
+                        );
+                        return Some(16);
+                    }
                     return Some(deliver_working_mail(name, short_id, text, &mut run_mail));
                 }
             }
@@ -2554,6 +2564,7 @@ mod tests {
                 "live-w",
                 "/tmp/x",
                 &Some("go now".to_string()),
+                false,
                 None,
                 false,
                 |argv| {
@@ -2593,6 +2604,7 @@ mod tests {
             "live-w",
             "/tmp/x",
             &Some("go".to_string()),
+            false,
             None,
             false,
             |_argv| {
@@ -2609,6 +2621,39 @@ mod tests {
     }
 
     #[test]
+    fn a_durably_queued_working_message_is_not_sent_twice() {
+        let mail_calls = std::cell::Cell::new(0u32);
+        let code = claude_live_route_with(
+            "claude",
+            &None,
+            &None,
+            &live_entry(),
+            "live-w",
+            "/tmp/x",
+            &Some("go".to_string()),
+            true,
+            None,
+            false,
+            |_| {
+                mail_calls.set(mail_calls.get() + 1);
+                (
+                    0,
+                    "msg-2 queued (durable) [live-miss]".to_string(),
+                    String::new(),
+                )
+            },
+            |_| Some("working".to_string()),
+            refusing_delegate(),
+        );
+        assert_eq!(code, Some(16));
+        assert_eq!(
+            mail_calls.get(),
+            0,
+            "the original durable mail is already queued"
+        );
+    }
+
+    #[test]
     fn a_refusing_mail_send_returns_its_own_code() {
         // AC4-ERR: a style or budget refusal relays and keeps its exit code.
         let code = claude_live_route_with(
@@ -2619,6 +2664,7 @@ mod tests {
             "live probe",
             "/tmp/x",
             &Some("go".to_string()),
+            false,
             None,
             false,
             |_argv| (2, String::new(), "error: over budget".to_string()),
@@ -2672,6 +2718,7 @@ mod tests {
                 "live-w",
                 "/tmp/x",
                 &Some("go".to_string()),
+                false,
                 None,
                 false,
                 count,
@@ -2688,6 +2735,7 @@ mod tests {
             "live-w",
             "/tmp/x",
             &None,
+            false,
             None,
             false,
             count,
