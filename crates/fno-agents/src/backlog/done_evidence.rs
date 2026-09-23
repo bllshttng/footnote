@@ -123,7 +123,7 @@ mod tests {
             json!({"additional_prs": [{"number": 7}]}),
             json!({"completion_note": "shipped as a docs change"}),
             json!({"artifact_url": "https://example.test/artifact"}),
-            json!({"retired": "stale-postmortem-receipt"}),
+            json!({"retired": "aged-receipt"}),
         ];
         for kind in &kinds {
             let mut post = closed_row("ab-evd0002");
