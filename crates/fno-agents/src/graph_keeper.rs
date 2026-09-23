@@ -3570,7 +3570,7 @@ mod tests {
         })
     }
 
-#[ignore = "row-commit version semantics are under reconciliation: the flip stamped whole-store versions, and whether disjoint committers from one begin still conflict is the keeper handshake ruling to make. Revisit with that decision."]
+    #[ignore = "row-commit version semantics are under reconciliation: the flip stamped whole-store versions, and whether disjoint committers from one begin still conflict is the keeper handshake ruling to make. Revisit with that decision."]
     fn commit_rows_disjoint_no_conflict() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
@@ -3962,10 +3962,6 @@ mod tests {
         );
         assert_eq!(r1, r2);
     }
-
-
-
-
 
     #[test]
     fn plan_refs_ships_only_the_rung_inputs() {
@@ -4392,7 +4388,7 @@ mod tests {
         assert!(!sock.exists(), "idle exit must unlink the socket");
     }
 
-#[ignore = "row-commit version semantics are under reconciliation: the flip stamped whole-store versions, and whether disjoint committers from one begin still conflict is the keeper handshake ruling to make. Revisit with that decision."]
+    #[ignore = "row-commit version semantics are under reconciliation: the flip stamped whole-store versions, and whether disjoint committers from one begin still conflict is the keeper handshake ruling to make. Revisit with that decision."]
     fn an_op_with_a_stale_base_version_conflicts_instead_of_writing() {
         // rank_top computes its rank from a begin snapshot; the base_version
         // it carries must make the keeper refuse when the file moved between
