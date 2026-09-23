@@ -13,7 +13,7 @@ from typing import Optional
 
 
 def _live_miss_age_suffix(recipient: str) -> str:
-    """The transcript-age suffix a bare live-miss receipt carries (AC8).
+    """The transcript-age suffix a live-miss or transcript- reason carries (AC8).
 
     A bare live-miss reads the same for a transient miss to a genuinely live
     peer (re-send works) and for a session that stood down hours ago (nothing
