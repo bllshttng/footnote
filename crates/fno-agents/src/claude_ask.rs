@@ -3847,11 +3847,13 @@ mod tests {
         fs::create_dir_all(&sessions).unwrap();
         write_session(&sessions, "4242", "feedc0de", "bg", Some("/tmp/acct.sock"));
         let ch = ClaudeHome::at(&home).with_extra_roots([acct.clone()]);
+        // jobs_dir_for picks the first root whose job dir EXISTS, so the
+        // account's dir must exist before the call.
+        fs::create_dir_all(acct.join("jobs").join("feedc0de")).unwrap();
         let loc = locate_session(&ch, "feedc0de").unwrap();
         assert_eq!(loc.pid, 4242);
         assert_eq!(loc.messaging_socket_path, "/tmp/acct.sock");
         assert_eq!(loc.session_id.as_deref(), Some("sess-feedc0de"));
-        fs::create_dir_all(acct.join("jobs").join("feedc0de")).unwrap();
         assert_eq!(loc.jobs_dir, acct.join("jobs").join("feedc0de"));
     }
 
