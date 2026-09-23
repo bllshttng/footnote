@@ -69,6 +69,13 @@ fn classify_postcondition(submitted: bool, proof: Result<bool, String>) -> Comma
     }
 }
 
+fn classify_text_submission_error(error: &ControlError) -> CommandStatus {
+    match error {
+        ControlError::Unanswered(_) => CommandStatus::Unknown,
+        ControlError::Fatal(_) | ControlError::FatalCode { .. } => CommandStatus::Refused,
+    }
+}
+
 fn screen_postcondition_matches(before: &str, after: &str, expected: &Regex) -> bool {
     !expected.is_match(before)
         && expected.is_match(after)
@@ -937,6 +944,7 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
         true,
         Some(&expected_identity),
     ) {
+        let status = classify_text_submission_error(&error);
         let receipt = CommandReceipt {
             request_id,
             selector: args.selector,
@@ -948,16 +956,18 @@ pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
             proof: proof.word().into(),
             expected_screen: args.expect.clone(),
             empty_composer: args.empty_composer.clone(),
-            status: classify_postcondition(true, Err(error.to_string()))
-                .word()
-                .into(),
+            status: status.word().into(),
             before_digest: digest(&before),
             after_digest: digest(&before),
-            detail: "text submission reply lost; command outcome is unknown".into(),
+            detail: if status == CommandStatus::Refused {
+                format!("refused before typing: {error}")
+            } else {
+                format!("text submission reply lost; command outcome is unknown: {error}")
+            },
         };
         let _ = write_receipt(&receipt);
         print_receipt(&receipt);
-        return EXIT_CONTROL_UNANSWERED;
+        return command_status_exit_code(&receipt.status);
     }
     if let Err(error) = send_pane_bytes(
         &sock,
@@ -1238,6 +1248,17 @@ mod tests {
         );
         assert_eq!(
             classify_postcondition(false, Ok(true)),
+            CommandStatus::Refused
+        );
+        assert_eq!(
+            classify_text_submission_error(&ControlError::Unanswered("timeout".into())),
+            CommandStatus::Unknown
+        );
+        assert_eq!(
+            classify_text_submission_error(&ControlError::FatalCode {
+                code: err_code::TARGET_NOT_IDLE,
+                msg: "busy".into(),
+            }),
             CommandStatus::Refused
         );
         assert!(safe_request_id("request-1").is_ok());

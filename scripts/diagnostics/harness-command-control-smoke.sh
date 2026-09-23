@@ -241,12 +241,12 @@ export SESSION
 if [[ "$HARNESS" == codex ]]; then
   run_case paused-to-active "/goal resume" goal-active verified 30
   run_case idle-goal "/goal" goal-active verified 30
-  run_case busy-refusal "/goal" goal-active refused 30 "" "refusing before typing"
+  run_case busy-refusal "/goal" goal-active refused 30 "" "refused before typing"
   run_case timeout-no-retry "/compact" compact unknown 1
   run_case provider-compact "/compact" compact verified 30
 else
   run_case idle-status "/status" screen verified 30 "${FNO_SCREEN_EXPECT_STATUS:-$SCREEN_EXPECT}"
-  run_case busy-refusal "/status" screen refused 30 "${FNO_SCREEN_EXPECT_STATUS:-$SCREEN_EXPECT}" "refusing before typing"
+  run_case busy-refusal "/status" screen refused 30 "${FNO_SCREEN_EXPECT_STATUS:-$SCREEN_EXPECT}" "refused before typing"
   run_case pending-composer "/rc" screen refused 30 "${FNO_SCREEN_EXPECT_PICKER:-$SCREEN_EXPECT}" "composer"
   run_case screen-picker "/rc" screen verified 30 "${FNO_SCREEN_EXPECT_PICKER:-$SCREEN_EXPECT}"
   run_case timeout-no-retry "/status" screen unknown 1 "${FNO_SCREEN_EXPECT_TIMEOUT:-$SCREEN_EXPECT}"
