@@ -33,7 +33,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::additional_prs::PrStamp;
+pub(crate) use crate::additional_prs::PrStamp;
 pub(crate) use crate::additional_prs::PrState;
 use crate::events::EventEmitter;
 use crate::gc::{
@@ -1070,6 +1070,15 @@ pub(crate) fn without_settled(
         }
     }
     for stamp in stamps {
+        if stamp.primary {
+            // The rehearsal reads the primary's outcome as recorded, so the
+            // hold line it names is the hold line the real pass answers;
+            // the open-extras count is untouched.
+            if let Some((merge, _, _)) = graph.pr_state.get_mut(&stamp.node) {
+                *merge = Some(stamp.merge_status.to_string());
+            }
+            continue;
+        }
         if let Some((_, _, open)) = graph.pr_state.get_mut(&stamp.node) {
             *open = open.saturating_sub(1);
         }
