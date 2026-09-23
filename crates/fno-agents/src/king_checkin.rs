@@ -3174,7 +3174,12 @@ mod tests {
 
     #[test]
     fn hook_beat_writes_one_row_per_missed_beat() {
+        let _env_lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", dir.path().join("config.toml"));
         let path = journal(
             dir.path(),
             &[
@@ -3193,47 +3198,31 @@ mod tests {
             .parse::<chrono::DateTime<chrono::Utc>>()
             .unwrap();
         let at = |mins: i64| base + chrono::Duration::minutes(mins);
-        // 479 minutes old: under two intervals, nothing writes.
-        assert!(!hook_beat(
-            &path,
-            dir.path(),
-            "x-bbbb",
-            "sess",
-            &history,
-            at(479)
-        ));
-        assert_eq!(
-            crate::events::committed_journal_text(&path).lines().count(),
-            1
-        );
-        // 481 minutes old: the beat is due, one hook row.
-        assert!(hook_beat(
-            &path,
-            dir.path(),
-            "x-bbbb",
-            "sess",
-            &history,
-            at(481)
-        ));
+        // 109 minutes old: under two 55-minute intervals, nothing writes.
+        let early = hook_beat(&path, dir.path(), "x-bbbb", "sess", &history, at(109));
+        let rows_after_early = crate::events::committed_journal_text(&path).lines().count();
+        // 111 minutes old: the beat is due, one hook row.
+        let due = hook_beat(&path, dir.path(), "x-bbbb", "sess", &history, at(111));
         let rows = crate::events::committed_journal_text(&path);
+        // A fresh row resets the clock: the next stop writes nothing.
+        let fresh = hook_beat(&path, dir.path(), "x-bbbb", "sess", &history, at(112));
+        let rows_after_fresh = crate::events::committed_journal_text(&path).lines().count();
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+
+        assert!(!early);
+        assert_eq!(rows_after_early, 1);
+        assert!(due);
         assert_eq!(rows.lines().count(), 2, "rows: {rows}");
         assert!(rows.contains("\"source\":\"hook\""), "rows: {rows}");
         let written: Value = serde_json::from_str(rows.lines().last().unwrap()).unwrap();
         assert_eq!(written["data"]["scope"], "x-bbbb");
         assert!(!written["data"]["change"].as_str().unwrap().is_empty());
         // The fresh row resets the clock: the next stop writes nothing.
-        assert!(!hook_beat(
-            &path,
-            dir.path(),
-            "x-bbbb",
-            "sess",
-            &history,
-            at(482)
-        ));
-        assert_eq!(
-            crate::events::committed_journal_text(&path).lines().count(),
-            2
-        );
+        assert!(!fresh);
+        assert_eq!(rows_after_fresh, 2);
     }
 
     #[test]
