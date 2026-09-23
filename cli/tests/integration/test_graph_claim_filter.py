@@ -68,6 +68,14 @@ def _invoke(*args):
     return runner.invoke(app, list(args), catch_exceptions=False)
 
 
+def _store_entries(g):
+    # The store owns state; graph.json is a frozen export, so read-backs
+    # come from store rows.
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(g)
+
+
 def test_next_skips_live_claimed_node(tmp_graph, tmp_path):
     """A live TTL claim on ab-aaaaaaaa makes `graph next` pick ab-bbbbbbbb."""
     tmp_graph.write_text(json.dumps({"entries": _two_ready_entries()}) + "\n")
@@ -143,7 +151,10 @@ def test_next_refuses_when_worked_evidence_is_unreadable(tmp_graph, monkeypatch)
     assert "roster timeout" in result.output
     assert "selection refused" in result.output
     assert '"id"' not in result.output
-    assert json.loads(tmp_graph.read_text())["entries"] == entries
+    # same ids and statuses: the refused selection must not have written
+    assert [(e['id'], e.get('status')) for e in _store_entries(tmp_graph)] == [
+        (e['id'], e.get('status')) for e in entries
+    ]
 
 
 def test_next_refuses_when_the_graph_is_unreadable(tmp_graph, monkeypatch):
@@ -264,10 +275,7 @@ def test_rank_uses_stored_status_board_lane(tmp_graph, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "Later/p" in result.output
-    persisted = {
-        entry["id"]: entry
-        for entry in json.loads(tmp_graph.read_text())["entries"]
-    }
+    persisted = {entry["id"]: entry for entry in _store_entries(tmp_graph)}
     assert persisted["ab-anchor1"]["rank"] == 5.0
     assert persisted["ab-claimed1"]["rank"] < persisted["ab-anchor1"]["rank"]
 
@@ -286,10 +294,7 @@ def test_rank_does_not_need_live_claim_state(tmp_graph):
     )
 
     assert result.exit_code == 0, result.output
-    persisted = {
-        entry["id"]: entry
-        for entry in json.loads(tmp_graph.read_text())["entries"]
-    }
+    persisted = {entry["id"]: entry for entry in _store_entries(tmp_graph)}
     assert persisted["ab-target01"]["rank"] < persisted["ab-anchor01"]["rank"]
 
 
@@ -332,7 +337,10 @@ def test_dispatch_selection_refuses_when_live_claim_state_is_unavailable(
 
         assert result.exit_code == 1
         assert "live claim state is unavailable" in result.output
-        assert json.loads(tmp_graph.read_text())["entries"] == entries
+        # same ids and statuses: the refused selection must not have written
+        assert [(e["id"], e.get("status")) for e in _store_entries(tmp_graph)] == [
+            (e["id"], e.get("status")) for e in entries
+        ]
     finally:
         # A mode-000 dir left behind makes the next run's rm_rf of this tree
         # fail with Errno 66 ("Directory not empty") - no process needed.

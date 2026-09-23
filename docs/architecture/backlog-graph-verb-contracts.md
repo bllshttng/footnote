@@ -43,7 +43,7 @@ The author is matched by identity, never by name shape: an address that names a 
 
 The body is a POINTER, never the note: the node id, the note's opening words, and the command to read it. A full body breaks rule 7's 80-word per-message cap on the first send.
 
-The delivery lives in the VERB, not in the write. The status-fanout adapter writes its ``task_done`` / ``run_summary`` stamps as machine records through the native ``backlog-note`` binary. Machine progress lines never mail: one note per finished task is traffic no reader asked for. A fact somebody chose to record is the case that needs a reader.
+The delivery lives in the VERB, not in ``append_progress_note``. The status-fanout adapter writes its ``task_done`` / ``run_summary`` stamps through the store function, so machine progress lines never mail: one note per finished task is traffic no reader asked for. A fact somebody chose to record is the case that needs a reader.
 
 ``--quiet`` is the deliberate silent annotation. Delivery is the default because the two failure modes are not symmetric: a forgotten flag costs a redundant mail, where a forgotten mail costs the finding.
 
@@ -239,7 +239,7 @@ Exit codes: 0 success (node closed) 1 validation error (bad id, node not found) 
 
 Clear a node's completion, returning it to its underlying state.
 
-Every other lifecycle transition had an inverse (``defer``/``undefer``, ``supersede``/``unsupersede``, ``queue``/``unqueue``); ``done`` was terminal with none, so a node closed in error was corrected by hand-editing ``graph.json``, which a PreToolUse hook forbids for good reason.
+Every other lifecycle transition had an inverse (``defer``/``undefer``, ``supersede``/``unsupersede``, ``queue``/``unqueue``); ``done`` was terminal with none, so a node closed in error was corrected by hand-editing the graph store, which a PreToolUse hook forbids for good reason.
 
 Refuses when a referenced PR is MERGED. That is ``done``'s gate inverted: the work is in main, and clearing the completion would make the graph assert that shipped work did not ship. The remedy is almost always to file the remaining work as its own node (``fno backlog idea``) rather than to reopen the record of the part that landed. ``--force`` records a deliberate reopen of shipped work, and is journaled as such.
 

@@ -1260,9 +1260,6 @@ def tick() -> None:
                     woke_n = len(wake_summary.get("woke", []) or [])
                     evaluated = int(wake_summary.get("evaluated", 0) or 0)
                     truth_reads = int(wake_summary.get("truth_reads", 0) or 0)
-                    refused = ",".join(
-                        f"{r['scope']}:{r['refusal']}" for r in wake_summary.get("refused") or []
-                    )
                     if crowns == 0:
                         skip = "no_crowned_target"
                     elif woke_n:
@@ -1278,7 +1275,6 @@ def tick() -> None:
                         f"crowns={crowns} evaluated={evaluated}/{crowns}"
                         f" truth_reads={truth_reads}"
                         + (f" woke={woke}" if woke else "")
-                        + (f" refused={refused}" if refused else "")
                         + (f" note={note}" if note else "")
                     )
                     _emit_tick_row("king_wake", interval_s=kw_i, acted=woke_n,

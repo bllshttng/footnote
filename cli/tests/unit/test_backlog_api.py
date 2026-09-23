@@ -71,12 +71,6 @@ def _fixture(tmp_path: Path) -> Path:
     )
 
 
-def test_entry_is_node_alias():
-    from fno.graph import types
-
-    assert types.Entry is types.Node
-
-
 def test_node_query_returns_typed_models(tmp_path):
     # AC16-HP: typed aggregates and description == the wire details.
     graph = _fixture(tmp_path)

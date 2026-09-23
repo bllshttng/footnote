@@ -282,7 +282,7 @@ def test_skill_routes_questions_to_the_deferred_pile_not_idea():
 
 def test_skill_forbids_direct_state_edits():
     text = SKILL.read_text()
-    assert "graph.json" in text and "Never" in text
+    assert "graph.db" in text and "Never" in text
     for forbidden in ("jq -i", "sed -i"):
         assert forbidden in text, "the brief must name the direct-edit paths it forbids"
 

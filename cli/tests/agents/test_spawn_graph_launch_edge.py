@@ -149,7 +149,7 @@ def test_a_graph_failure_never_fails_the_spawn(monkeypatch, parent, capsys):
     def boom(*a, **k):
         raise RuntimeError("graph keeper is wedged")
 
-    monkeypatch.setattr(store, "read_graph", boom)
+    monkeypatch.setattr(store, "read_graph_strict", boom)
 
     _stamp_launch_edge("x-1234")
 

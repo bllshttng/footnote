@@ -530,6 +530,13 @@ pub(crate) trait TranscriptSource {
     /// Tool calls the assistant made, in the harness's own row shape, from
     /// the same raw text.
     fn tool_uses(&self, raw: &str) -> usize;
+
+    /// Activity counters (tokens, lines, tool errors, extensions, aborted
+    /// turns, assistant timestamps) from the same raw text. A source with no
+    /// parser returns `None`, and its report fields read null, never 0.
+    fn activity(&self, _raw: &str) -> Option<crate::session_activity::Activity> {
+        None
+    }
 }
 
 pub(crate) fn within_window(mtime: u64, days: u64, now: u64) -> bool {
@@ -672,6 +679,10 @@ impl TranscriptSource for ClaudeSource {
 
     fn tool_uses(&self, raw: &str) -> usize {
         claude_shaped_tool_uses(raw)
+    }
+
+    fn activity(&self, raw: &str) -> Option<crate::session_activity::Activity> {
+        Some(crate::session_activity::claude_activity(raw))
     }
 }
 
@@ -832,15 +843,20 @@ impl TranscriptSource for CodexSource {
 
     fn tool_uses(&self, raw: &str) -> usize {
         raw.lines()
-            .filter(|line| line.contains("\"function_call\""))
+            .filter(|line| line.contains("_call\""))
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .filter(|row| {
-                row.get("payload")
+                let t = row
+                    .get("payload")
                     .and_then(|p| p.get("type"))
-                    .and_then(|t| t.as_str())
-                    == Some("function_call")
+                    .and_then(|t| t.as_str());
+                t == Some("function_call") || t == Some("custom_tool_call")
             })
             .count()
+    }
+
+    fn activity(&self, raw: &str) -> Option<crate::session_activity::Activity> {
+        Some(crate::session_activity::codex_activity(raw))
     }
 }
 
@@ -1003,6 +1019,28 @@ mod tests {
             "0f0e1d2c-3b4a-4958-8675-3092f4c1b2a3"
         );
         assert_eq!(rollout_session_id("rollout-plain"), "rollout-plain");
+    }
+
+    #[test]
+    fn codex_tool_uses_count_custom_and_function_calls() {
+        let raw = [
+            json!({"type": "response_item", "payload": {"type": "custom_tool_call", "input": "x"}}),
+            json!({"type": "response_item", "payload": {"type": "function_call", "arguments": "{}"}}),
+            json!({"type": "response_item", "payload": {"type": "message", "role": "user"}}),
+            json!({"type": "event_msg", "payload": {"type": "token_count"}}),
+        ]
+        .iter()
+        .map(|r| r.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        assert_eq!(
+            CodexSource {
+                sessions_dir: None,
+                roots: None
+            }
+            .tool_uses(&raw),
+            2
+        );
     }
 
     fn write_session_file(dir: &Path, slug: &str, sid: &str, cwd: &str) {

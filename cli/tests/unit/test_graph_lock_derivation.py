@@ -13,7 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from fno.graph.store import _graph_lock_path, locked_mutate_graph
+from fno.graph.store import _graph_lock_path, commit_rows_via_store
+from fno.graph.store import read_graph_strict
 
 
 # --- AC2: the lock sits beside graph.json, resolved, never in /tmp ---
@@ -61,18 +62,26 @@ def test_concurrent_writers_serialize(tmp_path):
             # it. Under the derived sibling lock the whole block is serialized.
             base = list(entries)
             time.sleep(0.05)
-            base.append({"id": node_id, "title": node_id, "status": "intake"})
+            base.append({"id": node_id, "title": node_id, "status": "idea"})
             return base
         return mutator
 
-    threads = [
-        threading.Thread(target=lambda i=i: locked_mutate_graph(g, append(f"x-{i}")))
-        for i in range(2)
-    ]
+    # A writer that exhausts its retries raises in ITS thread; capture that
+    # or the failure reads as a lost update instead of the real conflict.
+    failures: list[tuple[str, BaseException]] = []
+
+    def run(i: int) -> None:
+        try:
+            commit_rows_via_store(g, append(f"x-{i}"))
+        except BaseException as exc:  # noqa: BLE001 - re-raised below
+            failures.append((f"x-{i}", exc))
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(2)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
 
-    ids = {e["id"] for e in json.loads(g.read_text())["entries"]}
+    ids = {e["id"] for e in read_graph_strict(g)}
+    assert not failures, f"writer died: {failures}"
     assert ids == {"x-0", "x-1"}, f"lost update: {ids}"

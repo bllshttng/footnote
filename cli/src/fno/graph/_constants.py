@@ -43,13 +43,9 @@ def _graph_html() -> Path:
 
 
 def _graph_archive_json() -> Path:
-    """Route through paths.graph_archive_json() so the archive tracks any
-    config.paths.graph_json override (it is a sibling of the working graph)."""
-    try:
-        from fno import paths as _paths
-        return _paths.graph_archive_json()
-    except Exception:
-        return _state_dir() / "graph-archive.json"
+    """A sibling of the working graph, so the archive tracks any
+    config.paths.graph_json override the same way the graph does."""
+    return _graph_json().parent / "graph-archive.json"
 
 
 def _ledger_json() -> Path:
@@ -273,9 +269,7 @@ def _archived_id_pool() -> set[str]:
     try:
         import json as _json
 
-        from fno.paths import graph_archive_json
-
-        archive_path = graph_archive_json()
+        archive_path = _graph_archive_json()
         if not archive_path.exists():
             _ARCHIVE_ID_MEMO["key"] = None
             return set()
