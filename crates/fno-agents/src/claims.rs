@@ -412,10 +412,20 @@ fn list_in_result_with_policy(
             })?;
             let file_name = entry.file_name();
             let file_name = file_name.to_string_lossy();
-            if !file_type.is_file() || !file_name.ends_with(".lock") {
+            if !file_name.ends_with(".lock") {
                 continue;
             }
             let path = entry.path();
+            if !file_type.is_file() {
+                if fail_on_corrupted
+                    && encoded_prefix
+                        .as_deref()
+                        .is_none_or(|wanted| file_name.starts_with(wanted))
+                {
+                    return Err(format!("lockfile {} is not a regular file", path.display()));
+                }
+                continue;
+            }
             let rec = match read_claim_file(&path) {
                 Ok(record) => record,
                 Err(ReadError::GoneAway) => continue,

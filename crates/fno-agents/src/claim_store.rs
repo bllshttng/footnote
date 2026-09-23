@@ -345,4 +345,20 @@ mod tests {
             );
         });
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_claim_listing_refuses_symlinked_lockfiles() {
+        let temp = TempDir::new().unwrap();
+        let path = claims::claim_path("node:x-symlink", Some(temp.path())).unwrap();
+        let directory = path.parent().unwrap();
+        std::fs::create_dir_all(directory).unwrap();
+        let target = temp.path().join("claim-target");
+        std::fs::write(&target, "not a lockfile").unwrap();
+        std::os::unix::fs::symlink(target, &path).unwrap();
+
+        let error =
+            claims::list_in_strict(&[directory.to_path_buf()], Some("node:"), true).unwrap_err();
+        assert!(error.contains("not a regular file"), "{error}");
+    }
 }

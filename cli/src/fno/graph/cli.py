@@ -3800,8 +3800,7 @@ def cmd_update(
     if add_pr is not None and stored_node.get("status") == "ready":
         typer.echo(
             f"warning: {stored_node.get('id', task_id)} is still offered by ready; "
-            f"hold it with fno agents claim acquire node:{stored_node.get('id', task_id)} "
-            f"--holder <holder>, then stamp the PR with --pr-number {add_pr}",
+            f"claim it with fno agents claim acquire node:{stored_node.get('id', task_id)} --holder <holder>",
             err=True,
         )
     if pr_number is not None and not clearing_number:
@@ -5733,8 +5732,6 @@ def cmd_task_update(
 
         try:
             _before = _claim_status(key)
-            # A pid-less claim stays protected as suspect inside its lease.
-            # Keep a matching holder's claim across a later row refusal.
             held_before = _before.get("holder") == holder and _before.get("state") in ("live", "suspect")
         except Exception:  # noqa: BLE001 - an unreadable claim is not a held one
             held_before = False
