@@ -120,7 +120,7 @@ pub(crate) fn status_cache_key(payload: &Value) -> Value {
     // Review-evidence lines at this head (attestations, coverage rows,
     // findings): a fresh verdict on an unchanged head must rekey.
     let journal = crate::paths::events_path(&cwd);
-    let text = crate::events_store::review_text(&journal);
+    let text = crate::event_store::review_text(&journal);
     if !head.is_empty() {
         let mut count = 0usize;
         let mut last = String::new();

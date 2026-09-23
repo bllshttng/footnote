@@ -19,7 +19,7 @@
 //!   ordering (Python <-> Rust interleaving) is unspecified by design;
 //!   consumers filter by `source` when ordering matters.
 //! - **No rotation destroys ingested history**: a durable journal past
-//!   [`ROTATE_AT_BYTES`] is ingested into its `events.db` (`events_store`)
+//!   [`ROTATE_AT_BYTES`] is ingested into its `events.db` (`event_store`)
 //!   BEFORE the rename, so one generation on disk still means no lost rows.
 //!
 //! Envelope : the unified line is `{ts, type, source, data:{...}}` -

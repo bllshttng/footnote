@@ -65,7 +65,7 @@ impl SubmitIndex {
     /// rotation). Unreadable means empty: the fold degrades to all-unknown,
     /// never a failed fold.
     pub(crate) fn load(journal: &Path) -> SubmitIndex {
-        let text = crate::events_store::journal_text(journal, &["operator_submit"]);
+        let text = crate::event_store::journal_text(journal, &["operator_submit"]);
         let mut index = SubmitIndex::empty();
         for line in text.lines() {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {

@@ -139,7 +139,6 @@ pub mod evals_trend;
 pub mod event_store;
 pub mod events;
 pub mod events_limits;
-pub mod events_store;
 pub mod evidence;
 pub mod fallback_chain;
 pub mod feed;
