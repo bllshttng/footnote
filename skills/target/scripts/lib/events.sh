@@ -159,16 +159,22 @@ _append_bounded_event() {
     fi
     events_path="$requested_path"
     if [[ -L "$events_path" ]]; then
-        events_path=$(_resolve_event_symlink "$events_path") || return 1
+        events_path=$(_resolve_event_symlink "$events_path") || {
+            printf '%s: could not resolve the journal symlink %s; event not stored\n' \
+                "$label" "$requested_path" >&2
+            return 1
+        }
     fi
     # Both guards run BEFORE the commit: the store would happily create the
     # parent directory the append guard exists to refuse.
     #
-    # A skipped append returns 3, never 0. A caller reading 0 as "the row is
+    # Exit-code contract: 0 stored, 3 skipped on purpose and silent, 1 lost
+    # with one stderr line naming the label, the path and the reason. A
+    # skipped append returns 3, never 0. A caller reading 0 as "the row is
     # stored" is the shape this whole guard exists to refuse, and the thrash
-    # detector counts appended lines. Silent, because guard-mark fires per
-    # tool call and a note per call is noise in exactly the repos this
-    # leaves alone.
+    # detector counts appended lines. The skip stays silent, because
+    # guard-mark fires per tool call and a note per call is noise in exactly
+    # the repos this leaves alone; a real failure never does.
     _refuse_shell_hermetic_escape "$events_path" "$label" || return 1
     _shell_events_may_create_parent "$events_path" || return 3
     # One bounded native commit. The store's SQL transaction is the
@@ -188,11 +194,31 @@ _append_bounded_event() {
         done
     fi
     if [[ -z "$bin" ]]; then
-        bin=$(command -v fno 2>/dev/null) || return 1
+        bin=$(command -v fno 2>/dev/null) || {
+            printf '%s: no fno binary found; event not stored in %s\n' \
+                "$label" "$events_path" >&2
+            return 1
+        }
     fi
-    printf '%s' "$event" | "$bin" doctor event emit-envelope --events "$events_path" >/dev/null 2>&1
+    # stdout is discarded (hooks print JSON there); stderr is the store's
+    # refusal reason and reaches the caller's stderr on a failure.
+    local err rc=0
+    err=$(printf '%s' "$event" | "$bin" doctor event emit-envelope --events "$events_path" 2>&1 >/dev/null) || rc=$?
+    if (( rc != 0 )); then
+        # Normalized to 1: a store exit of 3 must not read as the opt-out skip.
+        printf '%s: the event store refused the append to %s (exit %s): %s\n' \
+            "$label" "$events_path" "$rc" "${err:-no reason given}" >&2
+        return 1
+    fi
 }
 
+# emit_event SOURCE TYPE [DATA]
+#
+# rc=0  emitted (row committed through the store)
+# rc=1  lost: the payload was not valid JSON, or the store refused; stderr
+#       names the label, the journal and the reason
+# rc=3  skipped: the journal's `.fno/` does not exist, so this repo never
+#       opted in. Silent, as in emit_polling_external_review.
 emit_event() {
     local source="${1:?source required}"
     local type="${2:?type required}"
@@ -207,8 +233,14 @@ emit_event() {
         --arg src "$source" \
         --arg type "$type" \
         --argjson data "$data" \
-        '{ts: $ts, source: $src, type: $type, data: $data}' 2>/dev/null) || return 0
-    _append_bounded_event emit_event "$event" "$EVENTS_FILE" || true
+        '{ts: $ts, source: $src, type: $type, data: $data}' 2>/dev/null) || {
+        printf '%s: payload for %s is not valid JSON; event not stored\n' \
+            emit_event "$type" >&2
+        return 1
+    }
+    local append_rc=0
+    _append_bounded_event emit_event "$event" "$EVENTS_FILE" || append_rc=$?
+    return "$append_rc"
 }
 
 # emit_event_raw TYPE JSON [SOURCE]
@@ -237,8 +269,16 @@ emit_event_raw() {
         --arg type "$type" \
         --arg source "$source" \
         --argjson data "$json" \
-        '{ts: $ts, type: $type, source: $source, data: $data}' 2>/dev/null) || return 0
-    _append_bounded_event emit_event_raw "$event" "$events_path" || true
+        '{ts: $ts, type: $type, source: $source, data: $data}' 2>/dev/null) || {
+        printf '%s: payload for %s is not valid JSON; event not stored\n' \
+            emit_event_raw "$type" >&2
+        return 1
+    }
+    # Same rc contract as emit_event: 0 stored, 3 skipped on purpose, 1 lost
+    # with the reason already on stderr from the root.
+    local append_rc=0
+    _append_bounded_event emit_event_raw "$event" "$events_path" || append_rc=$?
+    return "$append_rc"
 }
 
 # emit_polling_external_review key=value [key=value ...]
