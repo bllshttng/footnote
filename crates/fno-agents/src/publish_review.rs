@@ -10,7 +10,7 @@
 //! port; Python keeps the two doors and nothing else). One JSON payload on
 //! stdin, one JSON answer on stdout, same contract as `spawn-axes`. The emit
 //! chokepoint (`fno event emit -t review_attestation`) and the hidden
-//! `fno pr publish-review` verb are the two doors; the payload is the same
+//! `fno do pr publish-review` verb are the two doors; the payload is the same
 //! shape for both, with the verb door passing empty `verdict` to have the
 //! default resolved from the newest head-pinned attestation for HEAD.
 //!
