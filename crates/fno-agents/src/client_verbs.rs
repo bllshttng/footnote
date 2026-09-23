@@ -2452,28 +2452,19 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         );
     }
 
-    // Live claude row (short_id, no mux ref): delegate to the Python wake
-    // (resume_cli.py `_resume_claude_wake`) rather than re-deriving its
-    // pty/bracketed-paste/retry recipe natively - ONE implementation; the
-    // full rationale lives on `claude_supervisor::guard_birth`, which this
-    // arm also calls before the exec (the wake's `claude attach` can birth
-    // the supervisor; the delegation keeps its anti-recursion pin, which the
-    // guard never touches).
-    if matches!(&route, ResumeRoute::ClientResume) {
-        if let Some(code) = crate::resume_wake::claude_live_route(
-            harness,
-            &claim_uuid,
-            &mux_session,
+    // Live claude rows are read from the account's roster and resumed over
+    // control.sock; the Python wake and its supervisor-birth leg are retired.
+    if should_delegate_claude_live_attach(harness, &claim_uuid, &mux_session) {
+        return crate::resume_wake::claude_live_route(
             entry,
             &name,
+            &row_name,
             cwd,
-            &message,
-            message_already_queued,
+            message.as_deref(),
             reentry_plan.as_ref(),
             cross_project,
-        ) {
-            return code;
-        }
+            home,
+        );
     }
 
     // A codex thread wakes over the daemon before the terminal exec path.
@@ -4545,12 +4536,9 @@ mod tests {
 
     #[test]
     fn acquire_named_session_claim_guards_resume_attach_keys() {
-        // The live-attach delegation itself acquires no claim (Python's
-        // `_resume_claude_wake` does, gated on skip-eligibility, once exec'd)
-        // -- but the attach key this exercises is still the shared
-        // contract: Python's own claim builds the identical key so the two
-        // runtimes contend for the same lock on the same row whichever one
-        // ends up acquiring it. Verify that key independently
+        // The live-attach route acquires this key before injecting. Verify the
+        // shared lock contract independently: it refuses a second concurrent
+        // writer on the same row, as the session-claim path does for its key.
         // refuses a second concurrent writer, the same contract
         // acquire_resume_session_claim already has for its own key.
         use crate::claims::{acquire, AcquireOpts, AcquireOutcome};

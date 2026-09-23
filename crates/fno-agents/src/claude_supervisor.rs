@@ -3,20 +3,16 @@
 //! The supervisor is ONE long-lived process per `CLAUDE_CONFIG_DIR`; it takes
 //! its whole env from the first client that births it and forks every hosted
 //! session from that env. A value naming one session, route or delegation is
-//! therefore never right there: the measured specimen (`FNO_AGENTS_RUNTIME`
-//! pinned `python` by the delegated wake, plus `FNO_WAKE_MSG`,
-//! `FNO_ROUTE_PROVIDER=zai` and the z.ai endpoint/token) disabled every
-//! Rust-only `fno agents` verb inside every hosted session for the
-//! supervisor's whole life, and left the birth session's identity readable in
-//! its `ps eww` output.
+//! therefore never right there. One measured birth carried
+//! `FNO_AGENTS_RUNTIME`, `FNO_WAKE_MSG`, `FNO_ROUTE_PROVIDER=zai` and the z.ai
+//! endpoint/token; it disabled every Rust-only `fno agents` verb in every
+//! hosted session for the supervisor's whole life and left the birth
+//! session's identity readable in `ps eww` output.
 //!
-//! The anti-recursion pin is CORRECT on a delegated one-verb child (the
-//! `run_resume` delegation execs `fno agents resume` pinned to the Python
-//! front door; without the pin that exec re-enters this binary and loops),
-//! and wrong on a supervisor that lives for hours. The rule here is
-//! birth-scoped, not key-scoped: nothing is stripped from any client, we only
-//! make sure a supervisor we can see coming is born clean. A supervisor that
-//! is already running keeps its env until the operator restarts it.
+//! Python `bg_create` enters through `run_birth_exec`, which applies this
+//! guard before the client command. The rule is birth-scoped, not key-scoped:
+//! nothing is stripped from the client; only a newly born supervisor is
+//! cleaned. A supervisor that is already running keeps its env until restart.
 //!
 //! Measured 2026-09-19 (throwaway `CLAUDE_CONFIG_DIR`): no
 //! fno-reachable `claude` verb births a supervisor when the verb itself
@@ -39,31 +35,53 @@ use crate::model_env_scrub::MODEL_ENV_KEYS;
 /// A new per-session stamp then defaults to the safe side, and a new
 /// machine-wide key that belongs here announces itself as a setting that did
 /// not take effect, which is the failure an operator can see and fix.
-const SUPERVISOR_WIDE_FNO_KEYS: [&str; 15] = [
+const SUPERVISOR_WIDE_FNO_KEYS: [&str; 34] = [
     "FNO_AGENTS_BIN",
+    "FNO_AGENTS_DAEMON_BIN",
+    "FNO_AGENTS_FRONT",
     "FNO_AGENTS_HOME",
     "FNO_BIN",
+    "FNO_BUS_DIR",
+    "FNO_CARGO_TARGETS_BASE",
+    "FNO_CC_DAEMON_RV_ROOT",
     "FNO_CLAIMS_ROOT",
+    "FNO_CLAUDE_DAEMON_DIR",
+    "FNO_CLAUDE_PROJECTS_DIR",
+    "FNO_CODEX_BIN",
+    "FNO_CODEX_SESSIONS_DIR",
     "FNO_CONFIG",
     "FNO_EVENTS_PATH",
     "FNO_GLOBAL_SETTINGS_PATH",
     "FNO_HOME",
+    "FNO_KILLCHECK_GIT_BIN",
     "FNO_LOOPCHECK_FNO_BIN",
+    "FNO_LOOPCHECK_GH_BIN",
+    "FNO_LOOPCHECK_GIT_BIN",
+    "FNO_LOOPS_MAIL_BIN",
+    "FNO_MUX_DIR",
+    "FNO_OPERATOR_CAPTURE_DIR",
+    "FNO_PLANS_DIRS_CACHE_DIR",
+    "FNO_PR_STATUS_CACHE_DIR",
     "FNO_PY",
+    "FNO_RECLAIM_STATE_ROOT",
     "FNO_ROUTE_SETTINGS_DIR",
     "FNO_RUNTIME_STATE_PATH",
     "FNO_SPACES_DIR",
     "FNO_SPAWN_GATE",
     "FNO_TRACKER_BACKEND",
+    "FNO_VERIFY_GIT_BIN",
 ];
+
+// A new FNO_ registry row fails classification until it lands in this list or
+// crates/fno-agents/src/claude_supervisor_held_keys.txt. The default is held.
 
 /// Every key that must never reach a supervisor's birth env: per-session
 /// identity, route and delegation stamps (`FNO_*` outside the machine-wide
 /// set, `CODEX_COMPANION_*`), route and credential carriers, the model vars,
-/// and the birth session's own claude identity. `CLAUDE_CONFIG_DIR` is
-/// deliberately absent: it selects WHICH supervisor and credential store a
-/// client addresses, and stripping it would move the session to another
-/// account.
+/// and the birth session's own claude identity. Unknown FNO_ keys are held
+/// unless the machine-wide allow list above or the held-key file classifies them.
+/// `CLAUDE_CONFIG_DIR` selects which supervisor and credential store a client
+/// addresses, so stripping it would move the session to another account.
 pub fn is_poison(key: &str) -> bool {
     if SUPERVISOR_WIDE_FNO_KEYS.contains(&key) || key.starts_with("FNO_TEST_") {
         return false;
@@ -201,13 +219,14 @@ fn wait_for_supervisor(config_dir: Option<&Path>) -> bool {
 /// before it spawns or execs the `claude` client. `overlay` is the env that
 /// site is about to apply, read only for the `CLAUDE_CONFIG_DIR` naming which
 /// supervisor is addressed; the ambient value stands in when it carries none.
+/// Python's `bg_create` reaches this guard through `run_birth_exec`.
 ///
 /// Arm A (the measured pick): when no supervisor serves that dir, start one
 /// detached with every poison key held back, wait up to 5 s for it to serve,
 /// and print one stderr line naming what was held back. The client's own
-/// command is never touched, which is why this takes no `Command` - the
-/// delegation in `run_resume` must keep its `FNO_AGENTS_RUNTIME=python` pin,
-/// and only a host that reads that pin is this guard's problem.
+/// command is never touched; only the detached supervisor's birth env is
+/// filtered. `run_birth_exec` leaves the client argv, env, cwd, streams, and
+/// pid intact when it replaces itself with Claude.
 ///
 /// Every failure degrades to silence and lets the client run: a guard that
 /// refused here would break a working lane over a condition the client cannot
@@ -273,6 +292,22 @@ where
 /// `guard_birth` for the common site whose env is a reentry plan's map.
 pub fn guard_birth_for_plan(env: &std::collections::BTreeMap<String, String>) {
     guard_birth(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+}
+
+/// Run a Claude client command after guarding any supervisor it may birth.
+/// `--` is a strict fence; the client argv, environment, cwd, and streams pass
+/// through unchanged when the process is replaced.
+pub fn run_birth_exec(args: &[String]) -> i32 {
+    if args.first().map(String::as_str) != Some("--") || args.len() < 2 || args[1].is_empty() {
+        eprintln!("fno-agents claude-birth-exec: expected -- <claude argv...>");
+        return 2;
+    }
+    guard_birth(std::iter::empty::<(&str, &str)>());
+    use std::os::unix::process::CommandExt;
+    let argv = &args[1..];
+    let error = std::process::Command::new(&argv[0]).args(&argv[1..]).exec();
+    eprintln!("claude CLI not found: {error}");
+    127
 }
 
 #[cfg(test)]
@@ -464,5 +499,68 @@ mod tests {
 
         assert!(!birth_allowed(true, Some(config_dir), Some(claude_bin)));
         assert!(birth_allowed(true, Some(config_dir), Some(&fixture_bin)));
+    }
+
+    #[test]
+    fn every_fno_registry_key_is_classified_for_the_supervisor() {
+        use std::collections::HashSet;
+
+        let held_text = include_str!("claude_supervisor_held_keys.txt");
+        let validate = |registry: &str| -> Result<(), String> {
+            let keys: Vec<&str> = registry
+                .lines()
+                .filter_map(|line| {
+                    let name = line.strip_prefix("| `")?.split('`').next()?;
+                    name.starts_with("FNO_").then_some(name)
+                })
+                .collect();
+            if keys.len() <= 100 {
+                return Err(format!(
+                    "expected over 100 FNO_ registry rows, found {}",
+                    keys.len()
+                ));
+            }
+            let mut held = HashSet::new();
+            for name in held_text
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            {
+                if !held.insert(name) {
+                    return Err(format!("{name} occurs more than once in the held list"));
+                }
+                if !keys.contains(&name) {
+                    return Err(format!(
+                        "{name} is in crates/fno-agents/src/claude_supervisor_held_keys.txt but has no row in docs/env-vars.md"
+                    ));
+                }
+            }
+            for name in keys.iter().filter(|name| !name.starts_with("FNO_TEST_")) {
+                let kept = !is_poison(name);
+                let explicitly_held = held.contains(name);
+                if kept == explicitly_held {
+                    return Err(format!(
+                        "{name} has a row in docs/env-vars.md but no supervisor classification: add it to SUPERVISOR_WIDE_FNO_KEYS in crates/fno-agents/src/claude_supervisor.rs if it configures the machine, or to crates/fno-agents/src/claude_supervisor_held_keys.txt if it names one session"
+                    ));
+                }
+            }
+            for name in ["FNO_AGENTS_RUNTIME", "FNO_ROUTE_PROVIDER"] {
+                if !held.contains(name) {
+                    return Err(format!("{name} must remain in the supervisor held list"));
+                }
+            }
+            if !is_poison("FNO_WAKE_MSG") {
+                return Err("FNO_WAKE_MSG must remain poison by the FNO_ default".to_string());
+            }
+            Ok(())
+        };
+
+        let registry = include_str!("../../../docs/env-vars.md");
+        validate(registry).unwrap();
+        let probe = format!("{registry}\n| `FNO_ZZ_PROBE` | rs | probe |\n");
+        let error = validate(&probe).unwrap_err();
+        assert!(error.contains("FNO_ZZ_PROBE"));
+        assert!(error.contains("SUPERVISOR_WIDE_FNO_KEYS"));
+        assert!(error.contains("claude_supervisor_held_keys.txt"));
     }
 }
