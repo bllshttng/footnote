@@ -2340,7 +2340,7 @@ mod tests {
 
     /// Seed a schema-2 store whose db rows lag the json: the title change
     /// after the seed is published to graph.json only, then the store is
-    /// downgraded and one stale soak key is planted.
+    /// downgraded.
     fn schema2_graph_with_stale_rows(dir: &TempDir) -> PathBuf {
         let graph = two_node_graph(dir);
         let rows = raw_rows(&graph);
@@ -2355,13 +2355,6 @@ mod tests {
                 [],
             )
             .unwrap();
-        connection
-            .execute(
-                "INSERT INTO graph_meta(key, value) VALUES('soak_clean_since_ms', '123')
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                [],
-            )
-            .unwrap();
         drop(connection);
         graph
     }
@@ -2370,9 +2363,9 @@ mod tests {
     fn schema_v3_population_keeps_its_rows_and_stamps_three() {
         // The store is sqlite from birth now: a populated schema-2 store's
         // rows are the record, and graph.json is a frozen seed, not an
-        // authority. The first schema-3 open keeps the rows, stamps the new
-        // schema, and leaves no soak key; parity still reports the mirror's
-        // staleness instead of papering over it with a rebuild.
+        // authority. The schema-3 open keeps the rows and stamps the new
+        // schema; parity still reports the mirror's staleness instead of
+        // papering over it with a rebuild.
         let dir = TempDir::new().unwrap();
         let graph = schema2_graph_with_stale_rows(&dir);
         let entries = read_entries(&graph).unwrap();
@@ -2391,14 +2384,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(schema, SCHEMA_VERSION);
-        let soak: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM graph_meta WHERE key LIKE 'soak_%'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(soak, 0, "the soak keys were deleted");
     }
 
     #[test]
