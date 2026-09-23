@@ -6,7 +6,9 @@ Question pages need no setup. The attention arm writes one page per open questio
 
 ## Is this page for you?
 
-The stakes are the user's attention and the fleet's unblocking: a delivered question the user cannot answer holds work. Not for one-way event pushes to phones and webhooks. Those are the status fanout in [status-fanout](../status-fanout.md). For the mux's own needs overlay, use the mux.
+The stakes are the user's attention and the fleet's unblocking: a delivered question the user cannot answer holds work.
+
+Not for: one-way event pushes to phones and webhooks. Those are the status fanout in [status-fanout](../status-fanout.md). For the mux's own needs overlay, use the mux.
 
 ## The model
 
