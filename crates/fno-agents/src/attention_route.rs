@@ -165,7 +165,8 @@ impl Router {
 
         if out.crown.is_none() {
             // With a node: the node's graph project. Without: the asker's
-            // live crown, else its row's node, else the workspace basename.
+            // live crown, else its row's node, else the workspace basename
+            // of the item's own project.
             let mut candidates: Vec<String> = Vec::new();
             if let Some(node) = &node {
                 if let Some(project) = self.entry_project(node) {
@@ -203,6 +204,11 @@ impl Router {
                         }
                     }
                 }
+            }
+            // The basename fallback the plan names for a node-less item:
+            // the rung-1 crown whose workspace path basename matches.
+            if out.crown.is_none() && candidates.is_empty() && !item.project.is_empty() {
+                candidates.push(item.project.clone());
             }
             if out.crown.is_none() {
                 for project in &candidates {

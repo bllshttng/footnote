@@ -358,10 +358,6 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
             "which implementation should land?",
             "--ask",
             "pick one",
-            "--option",
-            "index",
-            "--option",
-            "journal",
             "--node",
             "x-one",
             "--blocks",
@@ -375,7 +371,6 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
     event = _journal_events(project_log("events.jsonl", project_root=root))[-1]
     assert event["data"]["asker"] == "01234567"
     assert event["data"]["ask"] == "pick one"
-    assert event["data"]["options"] == ["index", "journal"]
     assert event["data"]["blocks"] == ["x-one", "x-two"]
     assert event["data"]["session_id"] == "ledger-run-id"
     assert "live" not in event["data"], "liveness is computed, never stored"
@@ -394,7 +389,7 @@ def test_asker_ask_field_options_and_blocks_are_recorded(
         "node": "x-one",
         "asker": "01234567",
         "ask": "pick one",
-        "options": ["index", "journal"],
+        "options": [],
         "blocks": ["x-one", "x-two"],
         "subject": None,
         "live": True,
@@ -636,6 +631,8 @@ class TestAskNearbyLawRefusal:
                 "PR 1847 shrank +207 to +142. d-4b39ad4c is in view; asking anyway.",
                 "--subject",
                 "pr-1847-budget-exception",
+                "--ask",
+                "finish the lane",
             ],
         )
         assert allowed.exit_code == 0, allowed.output

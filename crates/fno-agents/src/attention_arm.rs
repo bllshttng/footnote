@@ -205,6 +205,7 @@ pub fn tick_pages(
     // 3. Deliver: one page per kept item with no page in the folder or in
     // done/. A router that cannot load delivers nothing this beat.
     let mut routing_err: Option<String> = None;
+    let mut fresh: Vec<(String, &AttentionItem, Routing)> = Vec::new();
     for item in &routed {
         if pages.iter().any(|p| p.front.question_id == item.id) || done_ids.contains(&item.id) {
             continue;
@@ -215,9 +216,14 @@ pub fn tick_pages(
         match io.route(item) {
             Ok(routing) => {
                 let rendered = render_page(item, &routing);
-                let path = dir.join(page_file_name(item));
+                let name = page_file_name(item);
+                let path = dir.join(&name);
                 match io.create_new(&path, &rendered) {
-                    Ok(true) => tick.delivered += 1,
+                    Ok(true) => {
+                        tick.delivered += 1;
+                        let stem = name.trim_end_matches(".md").to_string();
+                        fresh.push((stem, item, routing));
+                    }
                     Ok(false) => {}
                     Err(e) => {
                         tick.skip = Some("error".to_string());
@@ -269,6 +275,18 @@ pub fn tick_pages(
                 king: page.front.king.clone(),
             });
         }
+    }
+    // Pages delivered this beat are open too: the index lists them on the
+    // beat that writes them (AC4-HP).
+    for (stem, item, routing) in &fresh {
+        open_entries.push(IndexEntry {
+            stem: stem.clone(),
+            id: item.id.clone(),
+            title: attention_file::page_title(&item.title),
+            kind: item.kind.clone(),
+            blocks: item.blocks.clone(),
+            king: routing.king.clone().unwrap_or_else(|| "none".to_string()),
+        });
     }
     let mut done_entries: Vec<DoneEntry> = done_pages
         .iter()
