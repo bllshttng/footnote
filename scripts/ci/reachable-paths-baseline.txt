@@ -51,13 +51,13 @@ A	claude_code_stop_hook_block_cap	py=cli/src/fno/agents/harnesses/claude.py|cli/
 A	delivery-evaluate-response.v1	py=cli/src/fno/delivery/contracts.py;rs=crates/fno-agents/src/delivery_completion.rs	# protocol
 A	expired_claims_retain_days	py=cli/src/fno/config/_sweeps.py;rs=crates/fno-agents/src/agents_config.rs	# protocol: Python validates the operator setting and the Rust reaper consumes the same retention leaf
 A	pr_status_cache_retain_days	py=cli/src/fno/config/_sweeps.py;rs=crates/fno-agents/src/agents_config.rs	# protocol: Python validates the operator setting and the Rust reaper consumes the same retention leaf
-A	description={description}	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol
+A	description={description}	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck/coverage_status.rs	# protocol
 A	empty supported {action}	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# msg-twin
 A	failed to read {log_path}: {exc}	py=cli/src/fno/agents/read.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	fno agents resume: registry read failed: {exc}	py=cli/src/fno/agents/resume_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	fno agents trace: agent name is required unless --all is set	py=cli/src/fno/agents/trace_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	fno mux ls --json failed	py=cli/src/fno/update.py;rs=crates/fno/src/client_tests/update_modal_tests.rs	# msg-twin
-A	fno/review-coverage-unavailable	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/king_board/prs.rs|crates/fno-agents/src/loopcheck.rs	# protocol: check-coverage-context-parity.sh pins the py consts against every surface, loopcheck.rs included; the board port's prs source reuses the same coverage tag
+A	fno/review-coverage-unavailable	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/king_board/prs.rs|crates/fno-agents/src/loopcheck/coverage_status.rs	# protocol: check-coverage-context-parity.sh pins the py consts against every surface, loopcheck.rs included; the board port's prs source reuses the same coverage tag
 A	fno_global_settings_path	py=cli/src/fno/adapters/providers/loader.py|cli/src/fno/config/_loader.py|cli/src/fno/config_io.py|cli/src/fno/conftest.py|cli/src/fno/hermetic.py;rs=crates/fno-agents/src/agents_config.rs|crates/fno-agents/src/claude_roster.rs|crates/fno-agents/src/claude_supervisor.rs|crates/fno/src/agents_view.rs|crates/fno/src/digest_overlay.rs|crates/fno/src/sideline_color.rs	# protocol
 A	fno_operator_capture_dir	py=cli/src/fno/inbox/operator_turns.py;rs=crates/fno-agents/src/king_termination.rs	# data: the operator capture override is a shared Python/Rust path pin; both queue readers must resolve the same ledger
 A	fno_mux_shell_integration	py=cli/src/fno/agents/mux_spawn.py;rs=crates/fno/src/client.rs|crates/fno/src/pty.rs	# protocol
@@ -101,10 +101,10 @@ A	permission_mode_requested	py=cli/src/fno/agents/cli.py;rs=crates/fno-agents/sr
 A	refused-newer-than-transcript	py=cli/src/fno/agents/row_contradiction.py;rs=crates/fno-agents/src/daemon/list_rows.rs	# protocol
 A	registry read failed: {exc}	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/mux_spawn.py;rs=crates/fno-agents/src/attach.rs	# msg-twin
 A	registry name must be 1-64 letters, numbers, underscores, or hyphens	py=cli/src/fno/agents/registry.py;rs=crates/fno-agents/src/state.rs	# msg-twin: the rename grammar refusal is the Python port's verbatim string
-A	review coverage waived for this head	py=cli/src/fno/pr/_coverage_gate.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol: the affirmative waiver value both gates demand on the single law row; review_coverage_paths.rs pins both carriers
+A	review coverage waived for this head	py=cli/src/fno/pr/_coverage_gate.py;rs=crates/fno-agents/src/loopcheck/coverage_status.rs	# protocol: the affirmative waiver value both gates demand on the single law row; review_coverage_paths.rs pins both carriers
 A	.[] | .filename // empty	py=cli/src/fno/pr/_merge.py;rs=crates/fno-agents/src/merge_gates.rs	# protocol: the GitHub pull-request file listing jq expression is shared by the Python and Rust merge readers
 A	stub-manifest-{node_id}.json	py=cli/src/fno/stub_manifest.py;rs=crates/fno-agents/src/merge_gates.rs	# data: both stub-manifest readers resolve the same per-node filename
-A	repos/:owner/:repo/statuses/{head}	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol
+A	repos/:owner/:repo/statuses/{head}	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck/coverage_status.rs	# protocol
 A	resume-attach:{short_id}	py=cli/src/fno/agents/resume_cli.py;rs=crates/fno-agents/src/resume_wake.rs	# protocol; one carrier per language by construction - every Rust caller goes through resume_wake.rs's resume_attach_claim_key, and Python's _resume_claude_wake must keep building the same key or the two runtimes stop contending for one lock
 A	roster-live-inject-failed	py=cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# protocol
 A	route settings file {path} has no env mapping	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/reentry.rs	# msg-twin: the Rust resolver and the Python restore read the same settings shape and refuse with the same sentence
