@@ -50,6 +50,24 @@ impl SuccessionFixture {
         let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
         let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
         let prior_node = std::env::var_os("FNO_NODE");
+        let pid = std::process::id();
+        let pid_start: u64 = claims::process_create_time_ms(pid as i32)
+            .unwrap_or(0)
+            .try_into()
+            .unwrap_or(0);
+        let mut fixture = Self {
+            _lock: lock,
+            dir,
+            registry: std::path::PathBuf::new(),
+            pid,
+            pid_start,
+            prior_home,
+            prior_claims,
+            prior_config,
+            prior_spawn_gate,
+            prior_payload,
+            prior_node,
+        };
         std::env::set_var(crate::paths::HOME_ENV, &home);
         std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
         std::env::set_var("FNO_CONFIG", &config);
@@ -60,26 +78,8 @@ impl SuccessionFixture {
             r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
         );
 
-        let registry = crate::paths::AgentsHome::from_env().registry_json();
-        std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
-        let pid = std::process::id();
-        let pid_start: u64 = claims::process_create_time_ms(pid as i32)
-            .unwrap_or(0)
-            .try_into()
-            .unwrap_or(0);
-        let fixture = Self {
-            _lock: lock,
-            dir,
-            registry,
-            pid,
-            pid_start,
-            prior_home,
-            prior_claims,
-            prior_config,
-            prior_spawn_gate,
-            prior_payload,
-            prior_node,
-        };
+        fixture.registry = crate::paths::AgentsHome::from_env().registry_json();
+        std::fs::create_dir_all(fixture.registry.parent().unwrap()).unwrap();
         fixture.write_entries(Vec::new());
         fixture
     }
