@@ -4,7 +4,9 @@
 //! has one owner per language and the two agree through the slug contract in
 //! `paths::space_slug`. Binary-direct (no daemon), resolved from the process
 //! cwd. The `escalations` key is Rust-owned: nothing in Python reads the
-//! directory, so it has no Python accessor to mirror.
+//! directory, so it has no Python accessor to mirror. Same for the
+//! `plans-dirs` subverb (plans_dirs.rs): Rust-owned, with the plan-location
+//! guard as its only consumer.
 
 use std::path::PathBuf;
 
@@ -22,9 +24,15 @@ pub fn run(args: &[String]) -> i32 {
         args
     };
     let Some(name) = args.first() else {
-        eprintln!("usage: fno-agents state path <target-state|run-log|events|plans|inbox|kings|scratchpad|status-sinks|worktree-log|codemap|escalations>");
+        eprintln!("usage: fno-agents state path <target-state|run-log|events|plans|inbox|kings|scratchpad|status-sinks|worktree-log|codemap|escalations|plans-dirs>");
         return 2;
     };
+    // `plans-dirs` is not a single-path accessor: it answers with one dir per
+    // REGISTERED project (see plans_dirs.rs), so it dispatches before the
+    // name-to-path table.
+    if name == "plans-dirs" {
+        return crate::plans_dirs::run(&args[1..]);
+    }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // Canonicalize so the slug matches what a caller passing the canonical
     // path (e.g. loop-check's resolved --cwd) hashes: /var vs /private/var
@@ -32,7 +40,7 @@ pub fn run(args: &[String]) -> i32 {
     let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
     let Some(path) = resolve(name, &cwd) else {
         eprintln!(
-            "error: unknown state path {name} (known: codemap, escalations, events, inbox, kings, plans, run-log, scratchpad, status-sinks, target-state, worktree-log)"
+            "error: unknown state path {name} (known: codemap, escalations, events, inbox, kings, plans, plans-dirs, run-log, scratchpad, status-sinks, target-state, worktree-log)"
         );
         return 2;
     };
