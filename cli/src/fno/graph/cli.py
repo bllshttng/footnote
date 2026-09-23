@@ -8732,7 +8732,7 @@ def cmd_reconcile_findings(
     (). This re-runs the harvest addressed-detection against each open
     retro node's source PR and closes the ones now addressed - the
     reconciliation counterpart to the harvest-side suppression. Dry-run by
-    default; ``--apply`` closes via ``fno backlog done --force``. A PR whose
+    default; ``--apply`` closes via ``fno backlog done --note``. A PR whose
     review state can't be read is skipped, never closed on uncertainty.
     """
     import subprocess
