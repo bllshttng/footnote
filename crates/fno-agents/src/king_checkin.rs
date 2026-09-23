@@ -307,7 +307,7 @@ fn board_queue<'a>(board: &'a Value, name: &str) -> Result<&'a Value, String> {
 /// Rust constant).
 const DEFAULT_BLUEPRINT_CEILING: usize = 2;
 
-/// The check-in's blueprint reading (x-8aba): this session's live blueprint
+/// The check-in's blueprint reading: this session's live blueprint
 /// subagents against the ceiling, then which unplanned nodes to start and
 /// which to skip. The claim list and the session id arrive through the seam
 /// (arguments, not ambient reads) so the unit tests need no claims directory.
@@ -1450,7 +1450,10 @@ fn render_lines(
                 .into_iter()
                 .flatten()
             {
-                lines.push(format!("  start /fno:blueprint subagent {}", dash(Some(id))));
+                lines.push(format!(
+                    "  start /fno:blueprint subagent {}",
+                    dash(Some(id))
+                ));
             }
             for skip in bp
                 .get("skips")
