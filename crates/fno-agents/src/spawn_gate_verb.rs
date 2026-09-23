@@ -271,6 +271,7 @@ fn gate_answer(payload: &Value) -> Value {
         substrate: str_of(payload, "substrate"),
         flags,
         route_provider: opt_str_of(payload, "route_provider"),
+        node: opt_str_of(payload, "node"),
         account: opt_str_of(payload, "account"),
         caller_session: opt_str_of(payload, "caller_session"),
         holder_pid: Some(holder_pid as u32),
