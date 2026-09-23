@@ -2500,6 +2500,10 @@ pub fn locked_mutate_with_hook(
         crate::backlog::idea_cap::configured_cap(path).0,
     )
     .map_err(StoreError::Invalid)?;
+    // The close-evidence rule holds at this seam too: a write that sets
+    // completed_at on an existing open row must leave the row a record of
+    // why, or the whole publish refuses and nothing lands.
+    crate::backlog::done_evidence::enforce(&raw, &entries).map_err(StoreError::Invalid)?;
     if let Some(hook) = before_publish {
         hook(&raw)?;
     }
@@ -2887,6 +2891,47 @@ mod tests {
     fn empty_containers_stay_inline_like_python() {
         let v = json!({"a": [], "b": {}});
         assert_eq!(to_python_json(&v), "{\n  \"a\": [],\n  \"b\": {}\n}");
+    }
+
+    #[test]
+    fn an_evidence_less_close_is_refused_at_the_publication_seam() {
+        // The whole-graph seam refuses the write outright and the file
+        // keeps its bytes: a refusal leaves no trace on disk.
+        let root = tempfile::tempdir().unwrap();
+        let graph = root.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            json!({"entries": [json!({
+                "id": "ab-evid0001", "title": "no record", "slug": "no-record",
+                "type": "feature", "status": "ready", "priority": "p2",
+            })]})
+            .to_string(),
+        )
+        .unwrap();
+        let before = std::fs::read(&graph).unwrap();
+        let entries = vec![json!({
+            "id": "ab-evid0001", "title": "no record", "slug": "no-record",
+            "type": "feature", "status": "done", "priority": "p2",
+            "completed_at": "2026-09-23T00:00:00+00:00",
+        })];
+        let input = MutateInput {
+            entries,
+            canonical_path: None,
+            base_version: file_content_version(&graph),
+            plan_rungs: None,
+        };
+        let err = locked_mutate(&graph, input, std::time::Duration::from_secs(5))
+            .err()
+            .expect("an evidence-less close must refuse");
+        assert!(
+            matches!(&err, StoreError::Invalid(text) if text.contains("ab-evid0001")),
+            "expected an Invalid naming the id, got {err:?}"
+        );
+        assert_eq!(
+            std::fs::read(&graph).unwrap(),
+            before,
+            "a refused write leaves the file byte-identical"
+        );
     }
 
     #[test]
