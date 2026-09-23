@@ -50,7 +50,7 @@ fno agents rm helper          # remove the registry row
 
 ## Where this goes
 
-Each agent runs its own loop and they coordinate over the bus, so you can put a Claude builder and a Codex helper on the same repo and let them work in parallel. From a phone or any runner-less surface, the `/fno:agent` skill is a friendlier router over these same verbs (it normalizes messy input and confirms a billed launch before it happens).
+Each agent runs its own loop and messages peers over the bus. Pair a Claude builder with a Codex helper on one repo. Use `/fno:agent` to route peers from a phone or runner-less surface. The skill normalizes requests and confirms a billed launch.
 
 ## See also
 
