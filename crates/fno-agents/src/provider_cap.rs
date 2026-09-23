@@ -746,18 +746,9 @@ pub fn provider_quota_states(
     Some(quota_states_from_snapshot(&snapshot))
 }
 
-/// Append one line to `questions.jsonl` (the feed's question store).
-pub fn append_questions_row(path: &std::path::Path, row: &Value) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(f, "{}", row);
-    }
+/// Append one row through the store shared by Rust and Python readers.
+pub fn append_questions_row(path: &std::path::Path, row: &Value) -> Result<(), String> {
+    crate::event_store::append_envelope(path, &row.to_string(), None).map(|_| ())
 }
 
 /// `questions.jsonl` lives beside the agents home (`~/.fno`).
@@ -1091,7 +1082,7 @@ pub fn close_operator_question(
     closed_by: &str,
     now_epoch: i64,
 ) {
-    append_questions_row(
+    let _ = append_questions_row(
         &questions_path(home),
         &json!({
             "ts": epoch_to_rfc3339(now_epoch),
@@ -1673,7 +1664,7 @@ fn open_question(home: &AgentsHome, lane: &CapLane, now_epoch: i64) {
         .iter()
         .map(|m| format!("{} ({})", m.name, m.provider))
         .collect();
-    append_questions_row(
+    let _ = append_questions_row(
         &questions_path(home),
         &json!({
             "ts": epoch_to_rfc3339(now_epoch),
@@ -2449,7 +2440,7 @@ mod tests {
             now_epoch_secs(),
             &deps,
         );
-        let rows = std::fs::read_to_string(questions_path(&home)).unwrap_or_default();
+        let rows = crate::event_store::journal_text(&questions_path(&home), &["operator_question"]);
         let asks = rows
             .lines()
             .filter(|l| l.contains("\"choices\""))

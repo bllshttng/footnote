@@ -3721,13 +3721,14 @@ exit 0
         );
         let gh = log_of(d, "gh.log");
         assert_eq!(gh.matches("run rerun 1 --failed").count(), 1, "{gh}");
-        let store_before = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
+        let store_before =
+            crate::event_store::journal_text(&d.join("questions.jsonl"), &["fleet_task"]);
         assert!(
             !store_before.contains("fleet_task"),
             "no task before the rerun answers: {store_before}"
         );
         run_heal(&drive_args(d, &[]));
-        let store = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
+        let store = crate::event_store::journal_text(&d.join("questions.jsonl"), &["fleet_task"]);
         assert_eq!(
             store.matches(r#""type":"fleet_task""#).count(),
             1,
@@ -3740,7 +3741,7 @@ exit 0
         assert!(store.contains(r#""run":"fno do pr heal 1""#), "{store}");
         // The next tick re-files nothing: the open task dedups on its key.
         run_heal(&drive_args(d, &[]));
-        let store = std::fs::read_to_string(d.join("questions.jsonl")).unwrap_or_default();
+        let store = crate::event_store::journal_text(&d.join("questions.jsonl"), &["fleet_task"]);
         assert_eq!(
             store.matches(r#""type":"fleet_task""#).count(),
             1,

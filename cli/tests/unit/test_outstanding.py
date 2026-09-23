@@ -85,8 +85,6 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # before this fixture runs. Without the clear, session resolution reads the
     # live target-state.md instead of this sandbox, and the ownership tests
     # would pass on the real session id rather than the one they set.
-    import fno.paths as paths_mod
-
     # The clear path projects decisions onto the subject node's graph entry,
     # resolving GRAPH_JSON through the module attribute. Pin it to a
     # nonexistent path so these tests never read or write the real machine
@@ -282,20 +280,61 @@ def test_ask_clear_round_trip_and_idempotence(root: Path):
 
     cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "yes, widen it"])
     assert cleared.exit_code == 0, cleared.output
-    assert "1" in cleared.stdout
+    assert f"outstanding: closed {qid} (decision d-" in cleared.stdout
+    assert "recorded)" in cleared.stdout
 
     after = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)
     assert after["questions"] == []
 
-    # Idempotent: a second clear, and an id that was never open, are exit-0
-    # no-ops that report a count of 0 rather than failing.
+    # Idempotent clears name each id instead of returning an unlabeled count.
     again = runner.invoke(outstanding_app, ["clear", qid])
     assert again.exit_code == 0
-    assert "0" in again.stdout
+    assert f"{qid} was already closed; nothing written" in again.stdout
 
     unknown = runner.invoke(outstanding_app, ["clear", "q-neverexisted"])
     assert unknown.exit_code == 0
-    assert "0" in unknown.stdout
+    assert "q-neverexisted is not a question id this machine knows" in unknown.stdout
+
+
+@requires_rust
+def test_clear_bridge_writes_schema_valid_rows_under_five_seconds(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fno import paths
+    from fno.events import validate
+    from fno.outstanding import deliver
+    from tests._event_rows import event_rows
+
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: OwnedHarnessIdentity(
+            "89abcdef-full-session", "codex", (), "single"
+        ),
+    )
+    monkeypatch.setattr(deliver, "deliver_answer", lambda *args: "delivery stub")
+    asked = runner.invoke(outstanding_app, ["ask", "which lane?", "--subject", "test lane"])
+    qid = asked.stdout.strip().splitlines()[-1]
+    started = time.monotonic()
+
+    cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "ship it"])
+
+    assert cleared.exit_code == 0, cleared.output
+    assert time.monotonic() - started < 5
+    sources = (
+        project_log("events.jsonl", project_root=root),
+        paths.decisions_jsonl(),
+        paths.questions_jsonl(),
+    )
+    written = [
+        event
+        for source in sources
+        for event in event_rows(source)
+        if event.get("type") in {"operator_decision", "operator_question_closed"}
+    ]
+    assert any(event["type"] == "operator_decision" for event in written)
+    assert any(event["type"] == "operator_question_closed" for event in written)
+    for event in written:
+        validate(event)
 
 
 def _journal_last(events_path):
@@ -1130,18 +1169,16 @@ def test_clear_preserves_asker_as_the_best_answer_provenance(
         ),
     )
     qid = runner.invoke(outstanding_app, ["ask", "which lane?"]).stdout.strip().splitlines()[-1]
-    recorded: dict[str, object] = {}
-
-    def record_decision(**kwargs):
-        recorded.update(kwargs)
-        return {"decision_id": "d-recorded"}
-
-    monkeypatch.setattr("fno.decide.record_decision", record_decision)
 
     cleared = runner.invoke(outstanding_app, ["clear", qid, "--answer", "coord"])
 
     assert cleared.exit_code == 0, cleared.output
-    assert recorded["asked_by"] == "89abcdef"
+    decision = next(
+        event
+        for event in _journal_events(project_log("events.jsonl", project_root=root))
+        if event["type"] == "operator_decision"
+    )
+    assert decision["data"]["asked_by"] == "89abcdef"
 
 
 @requires_rust
@@ -1763,8 +1800,6 @@ def capture_roots(
     for p in (this, other):
         p.mkdir(parents=True)
     monkeypatch.setenv("FNO_REPO_ROOT", str(this))
-    import fno.paths as paths_mod
-
     (this / ".fno").mkdir(exist_ok=True)
     graph = tmp_path / "graph.json"
     graph.write_text(

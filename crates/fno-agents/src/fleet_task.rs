@@ -74,7 +74,7 @@ fn now_ts() -> String {
 }
 
 fn append(store: &Path, kind: &str, data: Value) {
-    crate::provider_cap::append_questions_row(
+    let _ = crate::provider_cap::append_questions_row(
         store,
         &json!({"ts": now_ts(), "type": kind, "source": "daemon", "data": data}),
     );

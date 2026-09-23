@@ -19,6 +19,7 @@ use crate::paths::AgentsHome;
 use crate::provider_cap::questions_path;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -146,13 +147,13 @@ struct OpenRow {
 /// Latest ask per id minus closes, folded from the machine index. A
 /// malformed line is skipped; the receipt is advisory and dedup is best
 /// effort against the rows that do parse.
-fn open_rows(index: &Path) -> Vec<OpenRow> {
+pub fn question_rows(index: &Path) -> (Map<String, Value>, HashSet<String>) {
     // Store rows first: Python commits closes to questions.db without
     // touching the raw journal, so a raw read marks closed questions open.
     let raw =
         crate::event_store::journal_text(index, &["operator_question", "operator_question_closed"]);
     let mut asked: Map<String, Value> = Map::new();
-    let mut closed: Vec<String> = Vec::new();
+    let mut closed = HashSet::new();
     for line in raw.lines() {
         if line.trim().is_empty() {
             continue;
@@ -168,10 +169,17 @@ fn open_rows(index: &Path) -> Vec<OpenRow> {
             Some("operator_question") => {
                 asked.insert(qid, v);
             }
-            Some("operator_question_closed") => closed.push(qid),
+            Some("operator_question_closed") => {
+                closed.insert(qid);
+            }
             _ => {}
         }
     }
+    (asked, closed)
+}
+
+fn open_rows(index: &Path) -> Vec<OpenRow> {
+    let (asked, closed) = question_rows(index);
     let mut out: Vec<OpenRow> = asked
         .into_iter()
         .filter(|(id, _)| !closed.contains(id))
@@ -470,7 +478,7 @@ already waits ({}). Answer it or clear it; do not ask twice.",
     }
 
     // Machine-wide recall index: best-effort, reported.
-    let index_error = write_index_row(&index, &event).err();
+    let index_error = crate::provider_cap::append_questions_row(&index, &event).err();
     if let Some(e) = index_error {
         answer.lines.push(format!(
             "outstanding: recorded {qid} in the project journal, but the recall index \
@@ -509,19 +517,6 @@ raise it another way or answer it yourself."
     }
     answer.qid = Some(qid);
     answer
-}
-
-fn write_index_row(index: &Path, event: &Value) -> Result<(), String> {
-    use std::io::Write;
-    if let Some(parent) = index.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(index)
-        .map_err(|e| e.to_string())?;
-    writeln!(f, "{event}").map_err(|e| e.to_string())
 }
 
 /// Where the new id lands in the render: (position 1-based, total). None
@@ -681,7 +676,8 @@ stops
             Some(1)
         );
         // The index row landed too.
-        let index = std::fs::read_to_string(questions_path(&home)).unwrap();
+        let index =
+            crate::event_store::journal_text(&questions_path(&home), &["operator_question"]);
         assert!(index.contains(&qid));
         assert_eq!(answer.position, Some(1));
         assert_eq!(answer.total, Some(1));
@@ -798,7 +794,7 @@ stops
             "source": "target",
             "data": {"question_id": "q-old", "question": "old", "blocks": ["x-1", "x-2"]}
         });
-        write_index_row(&index, &older).unwrap();
+        crate::provider_cap::append_questions_row(&index, &older).unwrap();
         let answer = run_intake(&req("newest question", &root), &home);
         assert_eq!(answer.total, Some(2));
         assert_eq!(answer.position, Some(1), "newest sorts first");

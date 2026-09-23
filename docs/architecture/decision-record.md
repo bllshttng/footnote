@@ -23,6 +23,14 @@ The old `fno decide` spelling remains as a one-release compatibility shim. It pr
 
 Both are explicit on purpose. Automatic classification of "was that a ruling?" is judgment on a truncated view, which `docs/architecture/memory-system.md` records as deprecated for cause.
 
+## Closing a question
+
+`fno inbox outstanding clear <qid> --answer "..."` writes the graph decision first, mirrors its envelope to the project journal and decision index, then closes the question in the project journal and machine question store. The receipt for each id prints before node projection and mail delivery.
+
+The graph decision keyed by `question_id` is the resume record. Repeating the same answer reuses its decision id and finishes missing mirrors or close rows. A different answer refuses with the existing decision id and the safe close or retract path.
+
+Clear exits 0 when every id succeeds, 4 for unknown ids, 3 for a different-answer refusal, and 1 for a write failure. It prints labeled counts for closed, resumed, already closed, unknown, and refused ids; it never prints a bare count.
+
 ## Authority lanes
 
 Every read derives an authority lane in the engine. `operator` authority is `law`. Agent and crown authority are both `coord`. `beastmode` authority is `grant`. The human list leads with `LAW`, `coord`, or `grant`, and `--lane law|coord|grant|unattributed` filters at that same engine seam.
