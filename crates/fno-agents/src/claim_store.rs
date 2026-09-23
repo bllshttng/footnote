@@ -361,4 +361,56 @@ mod tests {
             claims::list_in_strict(&[directory.to_path_buf()], Some("node:"), true).unwrap_err();
         assert!(error.contains("not a regular file"), "{error}");
     }
+
+    #[test]
+    fn strict_claim_listing_refuses_a_lockfile_with_a_mismatched_key() {
+        let temp = TempDir::new().unwrap();
+        let root = Some(temp.path().to_path_buf());
+        let record = match claims::acquire(
+            "node:x-original",
+            "target-session:owner",
+            claims::AcquireOpts {
+                pid: Some(std::process::id()),
+                root: root.clone(),
+                ..Default::default()
+            },
+        ) {
+            claims::AcquireOutcome::Acquired(record) => record,
+            other => panic!("claim fixture failed: {other:?}"),
+        };
+        let wrong_path = claims::claim_path("node:x-mismatch", Some(temp.path())).unwrap();
+        std::fs::write(&wrong_path, claims::serialize_claim(&record).unwrap()).unwrap();
+        let directory = wrong_path.parent().unwrap();
+
+        let error =
+            claims::list_in_strict(&[directory.to_path_buf()], Some("node:"), true).unwrap_err();
+        assert!(error.contains("filename does not match key"), "{error}");
+    }
+
+    #[test]
+    fn strict_node_listing_refuses_a_node_filename_with_a_non_node_claim() {
+        let temp = TempDir::new().unwrap();
+        let record = match claims::acquire(
+            "task:x-original:1.1",
+            "target-session:owner",
+            claims::AcquireOpts {
+                pid: Some(std::process::id()),
+                root: Some(temp.path().to_path_buf()),
+                ..Default::default()
+            },
+        ) {
+            claims::AcquireOutcome::Acquired(record) => record,
+            other => panic!("claim fixture failed: {other:?}"),
+        };
+        let node_path = claims::claim_path("node:x-mismatch", Some(temp.path())).unwrap();
+        std::fs::write(&node_path, claims::serialize_claim(&record).unwrap()).unwrap();
+
+        let error = claims::list_in_strict(
+            &[node_path.parent().unwrap().to_path_buf()],
+            Some("node:"),
+            true,
+        )
+        .unwrap_err();
+        assert!(error.contains("filename does not match key"), "{error}");
+    }
 }

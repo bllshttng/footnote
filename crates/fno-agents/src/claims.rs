@@ -440,7 +440,21 @@ fn list_in_result_with_policy(
                     continue;
                 }
             };
-            if prefix.is_some_and(|wanted| !rec.key.starts_with(wanted)) {
+            let matches_prefix = prefix.is_none_or(|wanted| rec.key.starts_with(wanted));
+            let matches_filename_prefix = encoded_prefix
+                .as_deref()
+                .is_none_or(|wanted| file_name.starts_with(wanted));
+            if fail_on_corrupted && (matches_prefix || matches_filename_prefix) {
+                let expected_file_name = format!("{}.lock", encode_key(&rec.key));
+                if file_name.as_ref() != expected_file_name.as_str() {
+                    return Err(format!(
+                        "lockfile {} filename does not match key {}",
+                        path.display(),
+                        rec.key
+                    ));
+                }
+            }
+            if !matches_prefix {
                 continue;
             }
             let state = classify(&rec, None);
