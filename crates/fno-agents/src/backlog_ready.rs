@@ -2140,11 +2140,8 @@ mod tests {
         let now_ms = parse_iso_str("2026-09-23T00:00:00Z").unwrap();
         let split =
             parse_date_filter(&["--created-after".into(), "2026-09-01".into()], now_ms).unwrap();
-        let inline = parse_date_filter(
-            &["--created-after=2026-09-01T00:00:00Z".into()],
-            now_ms,
-        )
-        .unwrap();
+        let inline =
+            parse_date_filter(&["--created-after=2026-09-01T00:00:00Z".into()], now_ms).unwrap();
 
         assert_eq!(split.created_after, inline.created_after);
     }
