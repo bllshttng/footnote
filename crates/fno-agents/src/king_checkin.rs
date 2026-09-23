@@ -2756,12 +2756,20 @@ mod tests {
         let fnodir = dir.join(".fno");
         std::fs::create_dir_all(&fnodir).unwrap();
         std::fs::write(fnodir.join("config.toml"), config_toml).unwrap();
+        // FNO_CONFIG pins the walk to the fixture the way the lanes-cap test
+        // does: a repo-root .fno/config.toml must never leak into the read.
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
         let prior_provider = std::env::var_os("FNO_ROUTE_PROVIDER");
         std::env::set_var("FNO_ROUTE_PROVIDER", "zai");
         let reading = r_blueprint(&Ok(board), dir, session_id.map(str::to_string), Ok(holders));
         match prior_provider {
             Some(v) => std::env::set_var("FNO_ROUTE_PROVIDER", v),
             None => std::env::remove_var("FNO_ROUTE_PROVIDER"),
+        }
+        match prior_config {
+            Some(v) => std::env::set_var("FNO_CONFIG", v),
+            None => std::env::remove_var("FNO_CONFIG"),
         }
         reading
     }
