@@ -241,6 +241,8 @@ The gate skips the redeemer's own reservation in the provider count. It releases
 
 The cap refuses (never queues) at `territory_cap`. It stays enforced under `--force`: force speaks for the machine being busy, never for one territory overrunning its team. Waiting cannot help, since the team is full where the caller is standing, so this refuses the same way the provider cap does. `EXIT_TERRITORY_CAP` (86) separates this from the machine-wide cap so a caller can tell "the fleet is full" (queueable) from "this territory's team is over the line" (the other territories keep their headroom).
 
+A node counts for the deepest live crown whose scope holds it, then the lowest canonical scope on a tie (`territory::node_owners`). A node that no live crown holds counts for its project's loose territory. The court's owned counts read the same rule, so a spawn refusal and the court readout can never disagree about whose node a worker is on. On a registry where the L1 fno crown and four live L2 crowns coexist, a spawn for an L2 node counts against that L2 territory, not the fno root.
+
 Two CLI verbs read the same Rust territory projection so no two surfaces disagree. `fno config active-backlog` (`config_cli.py`) passes through the `active-backlog-receipt` binary call: territories resolved from the graph, the crown registry, the workspace map, and `config.active_backlog`. It is read-only and exit 1 names the unreadable source. `fno config active-backlog-territories` (hidden) passes through `territory-rows`: one row per scope, with its missions, king or kingless state, and live count against the cap. The row also names the standing blueprinter's handle. Both verbs are read-only.
 
 ## A dispatch outcome is dispatched, skipped, or failed
