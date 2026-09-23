@@ -149,6 +149,23 @@ def _switch_lock_path(root: Path | None = None) -> Path:
     return (root or store_root()) / ".switch.lock"
 
 
+def _vault(action: str, *args: str) -> dict:
+    from fno.rust_binary import find_dev_binary, resolve_binary
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        raise ManagedStoreError("fno-agents binary not found; run fno doctor update --rust")
+    proc = subprocess.run(
+        [str(binary), "provider-cap", "vault", action, "--store", str(store_root()),
+         "--lock-held", "--json", *args],
+        capture_output=True, text=True,
+    )
+    try:
+        receipt = json.loads(proc.stdout)
+    except (TypeError, ValueError) as exc:
+        raise ManagedStoreError((proc.stderr or "vault returned no JSON receipt").strip()) from exc
+    return receipt
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -1747,23 +1764,9 @@ def _clear_unverified_codex_stamp(root: Path) -> str:
 
 
 def _capture_outgoing(outgoing: ProviderRecord, root: Path) -> bool:
-    """Re-snapshot the outgoing account's current slot credential. True if done.
-
-    Reads the SAME canonical candidates the identity path resolves, because
-    those two must not disagree about which credential belongs to a record:
-    reconciliation may have stored the proven (unscoped) blob while a
-    scoped-first read here would capture the other one straight back over it.
-
-    More than one distinct credential in the slot means we cannot say which is
-    this record's, so it captures nothing and the older snapshot stands. That
-    loses a rotated refresh token at worst - recoverable with a login - where
-    guessing would file another account's credential under this record, which
-    is silent and is not. It is the same "skip capture rather than poison it"
-    stance the taint check above already takes.
-
-    A read failure still propagates: overwriting the slot without capturing a
-    live credential we could not read would lose the outgoing token for real.
-    """
+    """Refresh the outgoing credential through Rust, or use the codex port."""
+    if outgoing.harness == "claude":
+        return _vault("sync").get("verdict") == "written"
     blobs = canonical_slot_blobs(outgoing.harness)  # KeychainError propagates
     if len(blobs) != 1:
         return False
@@ -1811,6 +1814,16 @@ def _switch_locked(
     pin_policy: str = "warn",
 ) -> SwitchResult:
     stored = _blob_path(target.id, root)
+    if target.harness == "claude":
+        refresh_args = ["--id", target.id]
+        if target.config_dir is not None:
+            refresh_args.extend(("--config-dir", str(target.config_dir)))
+        receipt = _vault("refresh", *refresh_args)
+        if receipt.get("verdict") == "dead":
+            raise ManagedStoreError(
+                f"stored credential for '{target.id}' is spent (invalid_grant); sign in as "
+                f"{target.id} and run `fno config accounts register {target.id}`; the slot was not touched"
+            )
     try:
         target_blob = stored.read_text(encoding="utf-8")
     except OSError as exc:
