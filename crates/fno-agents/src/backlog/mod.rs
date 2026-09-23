@@ -1997,14 +1997,15 @@ mod tests {
 
     #[test]
     fn flipgate_shadow_normalization_only_change_reaches_the_store() {
-        // AC1-HP: the file row lacks the default lists; a mutation on a
+        // AC1-HP: the seeded row lacks the default lists; a mutation on a
         // DIFFERENT node publishes the defaulted form. The diff must see
         // that change against the raw baseline and save the row.
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
-        let raw = raw_rows(&graph);
-        // Seed the store from the raw file: the db now holds ab-one with no
-        // tags key, exactly what the last publish wrote.
+        let mut raw = raw_rows(&graph);
+        // The seed is the UN-defaulted form: no tags key, what an older
+        // file's row looked like before the defaults pipeline ran.
+        raw[0].as_object_mut().unwrap().remove("tags");
         shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
         let mut after = raw.clone();
         // The Python mutator sends defaulted rows: ab-one gains "tags": [].
@@ -2017,7 +2018,6 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .insert("title".to_string(), Value::String("Two changed".into()));
-        std::fs::write(&graph, crate::graph_store::serialize_graph_file(&after)).unwrap();
         let outcome = crate::graph_store::locked_mutate_with_hook(
             &graph,
             crate::graph_store::MutateInput {
@@ -2035,18 +2035,30 @@ mod tests {
             "{:?}",
             outcome.shadow_warning
         );
-        let report = parity(&graph).unwrap();
+        // graph.db is the only store; graph.json is frozen under it, so the
+        // assertion reads the store, never file-vs-store parity.
+        let stored = read_entries(&graph).unwrap();
+        let one = stored
+            .iter()
+            .find(|e| e.get("id") == Some(&Value::String("ab-one".into())))
+            .unwrap();
         assert_eq!(
-            report.divergent, 0,
-            "defaulted row reached the store: {report:?}"
+            one.get("tags"),
+            Some(&Value::Array(vec![])),
+            "defaulted row reached the store"
         );
+        let two = stored
+            .iter()
+            .find(|e| e.get("id") == Some(&Value::String("ab-two".into())))
+            .unwrap();
+        assert_eq!(two.get("title"), Some(&Value::String("Two changed".into())));
     }
 
     #[test]
     fn flipgate_shadow_superseded_settle_reaches_the_store() {
         // AC2-HP: the raw row is blocked with superseded_by set; the
         // mutation pipeline settles it to superseded. The settle must reach
-        // the store, not only graph.json.
+        // the store, not only the published rows.
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
         let mut raw = raw_rows(&graph);
@@ -2063,7 +2075,6 @@ mod tests {
             "blocked_reason".to_string(),
             Value::String("pending supersession".into()),
         );
-        std::fs::write(&graph, crate::graph_store::serialize_graph_file(&raw)).unwrap();
         shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
         // Mutate the OTHER node; the pipeline settles ab-two itself.
         let mut after = raw_rows(&graph);
@@ -2088,10 +2099,16 @@ mod tests {
             "{:?}",
             outcome.shadow_warning
         );
-        let report = parity(&graph).unwrap();
+        // graph.db is the only store; the settle is read back from it.
+        let stored = read_entries(&graph).unwrap();
+        let two = stored
+            .iter()
+            .find(|e| e.get("id") == Some(&Value::String("ab-two".into())))
+            .unwrap();
         assert_eq!(
-            report.divergent, 0,
-            "the settle reached the store: {report:?}"
+            two.get("status"),
+            Some(&Value::String("superseded".into())),
+            "the settle reached the store"
         );
     }
 
