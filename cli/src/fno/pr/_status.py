@@ -389,6 +389,8 @@ def verdict_line(payload: dict) -> str:
         if first.get("step"):
             label += f"[{first['step']}]"
         fail_slot = f" failing: {label}"
+    history = payload.get("branch_history") or {}
+    history_slot = f" history: {history['line']}" if history.get("line") else ""
     return (
         f"{payload.get('pr')} "
         f"{str(payload.get('pr_state') or 'UNKNOWN').upper()} "
@@ -396,7 +398,7 @@ def verdict_line(payload: dict) -> str:
         f"{settled_slot} "
         f"{mergeable_slot} "
         f"{'ready' if payload.get('ready') else 'NOT-ready'} "
-        f"@ {head[:12] or 'unknown'}{coverage_at} - {clause}{fail_slot}"
+        f"@ {head[:12] or 'unknown'}{coverage_at}{history_slot} - {clause}{fail_slot}"
     )
 
 
@@ -502,6 +504,15 @@ def _github_merge_blockers(pr_json, rollup, cwd):
         return {"blockers": ["github_merge_state_unknown"], "source": str(exc)}
 
 
+def _branch_history(pr_json, rollup, cwd, prior):
+    from fno.rust_binary import verb_call
+    try:
+        result = verb_call("authorized-merge", {"op": "status-branch-history", "cwd": cwd, "branch": pr_json.get("headRefName"), "rollup": rollup, "workflow_runs": pr_json.get("workflowRuns") or [], "prior": (prior or {}).get("branch_history")}, timeout=60)
+        return result if result.get("line") else None
+    except Exception:
+        return None
+
+
 def _review_owner_guidance(coverage: dict, worktree: dict) -> Optional[dict]:
     """Explain a counted local review whose author differs from this session."""
     from fno.pr._reviews import counted_freshness
@@ -568,13 +579,13 @@ def _merge_authority(repo: str) -> dict:
         enabled = bool(am.enabled)
         grant = str(am.grant or "none")
         return {
-            "auto_merge_enabled": enabled,
+            "config_auto_merge_enabled": enabled,
             "grant": grant,
             "mergeable_autonomously": enabled and grant == "dispatch",
         }
     except Exception:  # noqa: BLE001 - an unreadable config is not a verdict
         return {
-            "auto_merge_enabled": None,
+            "config_auto_merge_enabled": None,
             "grant": None,
             "mergeable_autonomously": None,
         }
@@ -815,6 +826,12 @@ def run_status(
         )
 
     github_merge = None if is_terminal else _github_merge_blockers(pr_json, rollup, cwd)
+    history_needed = verdict == "red" and not is_terminal and any(
+        str(_alt(check.get("conclusion"), check.get("state"), "")).upper()
+        in {"CANCELLED", "TIMED_OUT"}
+        for check in _latest_per_name(generic_rollup)
+    )
+    branch_history = _branch_history(pr_json, generic_rollup, cwd, prior_payload) if history_needed else None
     # Rerun recovery, probed on every green read of a live PR (fail-open).
     rerun: Optional[dict] = None
     if verdict == "green" and not is_terminal:
@@ -929,6 +946,7 @@ def run_status(
         "mergeable": pr_json.get("mergeable"),
         "github_merge_state": github_merge,
         "checks": counts,
+        **({"branch_history": branch_history} if branch_history else {}),
         # Red reads only: name the failing checks and, where the job log
         # reads, the failing step, its first error line, and the steps
         # fail-fast never reached (an unreached step is not a pass).

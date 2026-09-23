@@ -633,6 +633,12 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
         println!("{}", crate::resume_pin::decide(pin));
         return 0;
     }
+    // A `reap_receipt` field asks the receipt builder for the Python
+    // registry choke point's removal receipt (same field-on-a-verb shape).
+    if let Some(ask) = parsed.get("reap_receipt") {
+        println!("{}", crate::receipt::decide_reap_receipt(ask));
+        return 0;
+    }
     // A `pi_session_lookup` field asks the pi store owner what a
     // (cwd, session id) pair resolves to right now (same field-on-a-verb
     // shape as node_seed).

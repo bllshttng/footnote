@@ -73,10 +73,18 @@ def cmd_note(
     graph_path = graph_cli._graph_path()
 
     # Archived refusal BEFORE the write, exact PR 1871 remedy (AC16); quiet
-    # mode never bypasses it (it guards the write, not the delivery).
+    # mode never bypasses it (it guards the write, not the delivery). Live
+    # first, then the archive: a live id is live whatever the archive holds
+    # (the same order update, reopen, and unarchive take).
     from fno.graph._archive_lookup import refuse_update_if_archived
+    from fno.graph._intake import _find_node
+    from fno.graph.api import wire_rows
 
-    if refuse_update_if_archived(task_id):
+    try:
+        live = _find_node(wire_rows(path=graph_path), task_id)
+    except Exception:  # noqa: BLE001 - an unreadable store is the write path's error to report
+        live = None
+    if live is None and refuse_update_if_archived(task_id):
         raise typer.Exit(code=1)
 
     # Refuse BEFORE the write: an unread note is a silent drop wearing a

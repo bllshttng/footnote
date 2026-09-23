@@ -1188,6 +1188,7 @@ mod tests {
         let out = resolve(json!({
             "kind": "crown-widen",
             "requested": "e-1,e-2",
+            "target": "lead-a",
             "caller": {"name": "lead-a", "status": "idle", "crown_scope": "e-1",
                        "harness_session_id": "aaaaaaaa-1111-4aaa-8aaa-aaaaaaaaaaaa",
                        "cc_session_id": null},

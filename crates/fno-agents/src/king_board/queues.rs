@@ -1030,6 +1030,15 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         .iter()
         .filter(|r| r.get("actionable").and_then(Value::as_bool) == Some(true))
         .count() as i64;
+    // An unread gate (exit 4, a failed call, an exhausted slice) leaves
+    // `ready` null: that is no evidence of a driverless PR, so the number is
+    // never filed under undriven_pr. The row stays visible under mergeable_pr
+    // with the read_pr_gates warning naming it.
+    let gate_unread: HashSet<i64> = pr_rows
+        .iter()
+        .filter(|r| r.get("ready") == Some(&Value::Null))
+        .filter_map(|r| r.get("number").and_then(Value::as_i64))
+        .collect();
 
     // Undriven PR: the complement of stalled_holder, the second half of ONE
     // predicate. Fail CLOSED on an unreadable claim list: every node would
@@ -1137,6 +1146,11 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             let pr_number = node.get("pr_number").and_then(Value::as_i64);
             if let Some(n) = pr_number {
                 if mergeable_numbers.contains(&n) {
+                    continue;
+                }
+                // Applied whatever `autonomous_merge` says: an unread gate is
+                // not evidence of a driverless PR.
+                if gate_unread.contains(&n) {
                     continue;
                 }
             }
@@ -1998,6 +2012,53 @@ mod tests {
             .find(|q| q["name"] == "mergeable_pr")
             .unwrap();
         assert_eq!(q["count"], json!(0), "{q}");
+    }
+
+    #[test]
+    fn an_unread_gate_is_never_filed_as_undriven() {
+        // AC8-HP: no gate row leaves `ready` null, which is no
+        // evidence of a driverless PR. The PR stays visible under
+        // mergeable_pr and out of undriven_pr.
+        let inputs = pr_board_inputs(
+            json!([
+                {"number": 1712, "title": "gate never answered"},
+            ]),
+            json!([{"id": "x-in", "pr_number": 1712}]),
+        );
+
+        let board = build_board(&inputs);
+
+        let mergeable = queue_rows(&board, "mergeable_pr");
+        assert_eq!(mergeable.len(), 1, "the row stays visible: {mergeable:?}");
+        assert_eq!(mergeable[0]["ready"], Value::Null);
+        let undriven = queue_rows(&board, "undriven_pr");
+        assert!(
+            undriven.iter().all(|r| r["id"] != "x-in"),
+            "an unread gate was filed as undriven: {undriven:?}"
+        );
+    }
+
+    #[test]
+    fn a_red_gate_verdict_keeps_the_pr_in_undriven() {
+        // AC9-EDGE: `ready: false` is a real verdict, not an unread
+        // gate; a driverless PR behind it still needs a driver named.
+        let mut inputs = pr_board_inputs(
+            json!([
+                {"number": 1713, "title": "gate answered: red"},
+            ]),
+            json!([{"id": "x-in", "pr_number": 1713}]),
+        );
+        inputs.pr_gates = SourceRead::ok(json!([
+            {"number": 1713, "ready": false, "ready_blockers": ["ci_red"]},
+        ]));
+
+        let board = build_board(&inputs);
+
+        let undriven = queue_rows(&board, "undriven_pr");
+        assert!(
+            undriven.iter().any(|r| r["id"] == "x-in"),
+            "a red gate verdict lost its undriven row: {undriven:?}"
+        );
     }
 
     #[test]

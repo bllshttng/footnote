@@ -115,6 +115,11 @@ fn entry(
             None,
             None,
         ),
+        "cwd_not_checkout" => (
+            "a node's recorded cwd is not a git checkout, so gh cannot find its repository",
+            None,
+            Some(OPERATOR),
+        ),
         _ => (
             "no class matches; read the skip reason and detail",
             None,
@@ -331,6 +336,11 @@ fn classify(row: &mut ArmStatus, facts: &RepairFacts) {
         )
     } else if skip == "timeout" {
         ("timeout".to_string(), None)
+    } else if detail.contains("not a git repository") {
+        (
+            "cwd_not_checkout".to_string(),
+            Some(cwd_not_checkout_repair(&detail)),
+        )
     } else {
         ("unclassified".to_string(), None)
     };
@@ -355,6 +365,24 @@ fn select_unmeasured_repair(detail: &str) -> String {
         Some(project) => format!("fno backlog advance --project {project} --source ac --json"),
         None => "fno backlog advance --source ac --json".to_string(),
     }
+}
+
+/// The node id a merge_close detail names after `first: `; `None` when the
+/// detail names none.
+fn node_from_detail(detail: &str) -> Option<&str> {
+    detail
+        .split_once("first: ")?
+        .1
+        .split_whitespace()
+        .next()
+        .filter(|id| *id != "?")
+}
+
+/// The repair for `cwd_not_checkout`. The `<p>`/`<checkout>` placeholders stay
+/// literal: the right checkout is a human judgment, not a resolver guess.
+fn cwd_not_checkout_repair(detail: &str) -> String {
+    let id = node_from_detail(detail).unwrap_or("<id>");
+    format!("fno backlog update {id} --project <p> --cwd <checkout>")
 }
 
 fn suffix(row: &ArmStatus) -> String {
@@ -835,6 +863,33 @@ mod tests {
         assert!(mc.line.ends_with("heal=operator"), "{}", mc.line);
         assert!(!mc.line.contains("repair:"), "{}", mc.line);
         assert!(mc.repair.is_none());
+    }
+
+    #[test]
+    fn a_not_a_repository_failure_names_the_node_repair() {
+        let mut mc = row("merge_close", SCHED_DAEMON);
+        mc.failing = true;
+        mc.skip_reason = Some("failures".into());
+        // The verbatim detail from the 2026-09-19 incident: the node was
+        // filed from /private/tmp, so the reverse-map gh call ran there and
+        // git refused.
+        mc.detail = Some(
+            "closed=0 promise_unmet=0 failures=2; first: x-cccc PR #0: reverse-map gh query \
+             failed: gh pr list (merged) failed (rc=1): failed to run git: fatal: not a git \
+             repository (or any of the parent directories)"
+                .into(),
+        );
+        let mut rows = vec![mc];
+        annotate(&mut rows, &facts(false));
+        let mc = &rows[0];
+        assert!(mc.line.contains("cause=cwd_not_checkout"), "{}", mc.line);
+        assert!(
+            mc.line
+                .contains("repair: fno backlog update x-cccc --project <p> --cwd <checkout>"),
+            "{}",
+            mc.line
+        );
+        assert!(mc.line.ends_with("heal=operator"), "{}", mc.line);
     }
 
     #[test]

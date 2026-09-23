@@ -2570,7 +2570,6 @@ def test_update_registry_accounts_for_a_removed_row(
     same ``reap-receipts/`` directory the Rust and watchdog writers use.
     """
     use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.harness_map import render_session_argv
     from fno.agents.registry import AgentEntry, update_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
@@ -2595,6 +2594,15 @@ def test_update_registry_accounts_for_a_removed_row(
         ],
     )
 
+    import fno.agents.spawn_axes_client as spawn_axes_client_module
+
+    answered = spawn_axes_client_module.spawn_axes_call(
+        {"reap_receipt": {
+            "row": {"name": "dropped", "harness": "claude",
+                    "harness_session_id": "dropped-s"},
+            "removed_by": "probe-remover",
+        }}
+    )
     update_registry(
         lambda es: [e for e in es if e.name != "dropped"], path=registry_path
     )
@@ -2614,11 +2622,10 @@ def test_update_registry_accounts_for_a_removed_row(
         tmp_path / ".fno" / "agents" / "reap-receipts" / "claude-dropped-s.json"
     )
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert receipt["row_name"] == "dropped"
-    assert receipt["removed_by"] == data["remover"]
-    assert receipt["resume"] == " ".join(
-        render_session_argv("claude", "interactive_resume", "dropped-s")
-    )
+    expected = dict(answered["receipt"])
+    # the ask rides the real remover
+    expected["removed_by"] = data["remover"]
+    assert receipt == expected, "the file holds what the spawn-axes ask answered"
 
 
 def test_update_registry_emits_nothing_when_nothing_is_removed(
@@ -2811,6 +2818,49 @@ def test_update_registry_keeps_a_receipt_the_sweep_already_staged(
     assert len(removals) == 1
     assert removals[0]["data"]["receipt_staged"] is True
     assert removals[0]["data"]["name"] == "swept"
+
+
+def test_update_registry_reports_a_stale_binary_and_writes_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A spawn-axes answer with no receipt reads as a binary that predates
+    the field: no file is written, and the event names the update verb."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    import fno.agents.spawn_axes_client as spawn_axes_client_module
+
+    monkeypatch.setattr(
+        spawn_axes_client_module, "spawn_axes_call", lambda payload: {}
+    )
+    from fno.agents.registry import AgentEntry, update_registry
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    events_path = tmp_path / ".fno" / "agents" / "events.jsonl"
+    _seed_rows(
+        registry_path,
+        [
+            AgentEntry(
+                name="kept", harness="claude", harness_session_id="kept-s",
+                cwd="/tmp", log_path="/tmp/k.log",
+            ),
+            AgentEntry(
+                name="dropped", harness="claude", harness_session_id="dropped-s",
+                cwd="/tmp", log_path="/tmp/d.log",
+            ),
+        ],
+    )
+
+    update_registry(
+        lambda es: [e for e in es if e.name != "dropped"], path=registry_path
+    )
+
+    removals = _removal_events(events_path)
+    assert len(removals) == 1
+    assert removals[0]["data"]["receipt_staged"] is False
+    assert "fno doctor update --rust" in removals[0]["data"]["reason"], (
+        removals[0]["data"]["reason"]
+    )
+    assert not (tmp_path / ".fno" / "agents" / "reap-receipts").exists()
 
 
 def test_rename_agent_is_not_a_removal(tmp_path: Path, monkeypatch) -> None:
