@@ -40,6 +40,11 @@ export FNO_MUX_DIR="$MUX_DIR"
 export FNO_AGENTS_HOME="$TMP_DIR/agents"
 mkdir -p "$FNO_AGENTS_HOME"
 export FNO_AGENTS_WORKER_BIN="$WORKER_BIN"
+# The CI smoke sandbox stages FNO_AGENTS_BIN as a sandbox client with no
+# sibling daemon; the client would resolve a split triad and refuse the dry
+# run. Name the daemon this checkout built, the lever the refusal itself
+# sanctions.
+export FNO_AGENTS_DAEMON_BIN="$DAEMON_BIN"
 SESSION="cptt-$$"
 export SESSION
 SERVER_PID=""
