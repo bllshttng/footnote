@@ -172,7 +172,7 @@ Draft to a file and run `fno doctor lint style --stdin < file` before sending. T
 
 ## Backlog
 
-`fno backlog done` closes a node only when the row records why. For work that shipped without a PR, pass it: `fno backlog done <id> --note "<why>"`. A bare close on a node with no `--pr-number`, `--note` or `--link` is refused by the store and nothing is written; for a forced close, write the note first with `fno backlog update <id> --completion-note "<why>"`.
+A close needs a record of why. For work that shipped without a PR, pass it: `fno backlog done <id> --note "<why>"`. A bare close on a node with no `--pr-number`, `--note` or `--link` is refused by the store. Nothing is written. For a forced close, write the note first with `fno backlog update <id> --completion-note "<why>"`.
 
 Its `--reason` flag pairs with `--force` only, to explain bypassing the merged-PR cross-check. It does not carry a completion note.
 

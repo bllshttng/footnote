@@ -235,7 +235,7 @@ The rich completion surface (--backfill, --force-overwrite, --pr-number, --pr-ur
 
 Exit codes: 0 success (node closed) 1 validation error (bad id, node not found) 2 usage error (--force without --reason) 3 gh cross-check refused: CLOSED-unmerged / UNKNOWN, no merge evidence (retryable when the PR merges; walker treats this as Parked) 4 gh outage: subprocess failure / timeout / parse error; retryable 5 awaiting merge: PR OPEN, not merged; node stays in_review (success-shaped; close lands via reconcile/advance at merge) 6 promise unmet: plan promised work that has not all shipped (multi-wave with no assertion, a failed close_probe, or fewer merged ships than expected_url_count). Use --force --reason to record a deliberate half-ship.
 
-The store refuses a close that leaves the row with no record of why: the store checks every close at its publication seam and refuses when the row would carry no PR ref, no completion note, no artifact link and no retired stamp, so a bare close on a node that shipped nothing writes nothing. A Python caller sees exit 1 with the refusal as the last stderr line; the repair flags are `--pr-number`, `--note` and `--link`, and a forced close writes the note first with `fno backlog update <id> --completion-note "<why>"`.
+A close records why, or the store refuses it. At the store's publication seam, every close meets one rule. The row must carry a PR ref, a completion note, an artifact link or a retired stamp. A close that leaves none writes nothing. A Python caller sees exit 1 with the refusal as the last stderr line. The repair flags are `--pr-number`, `--note` and `--link`, and a forced close writes the note first with `fno backlog update <id> --completion-note "<why>"`.
 
 ## cmd_reopen
 
