@@ -1164,6 +1164,31 @@ fn candidate_target_dirs(tree: &Path, now: SystemTime) -> Vec<PathBuf> {
         .collect()
 }
 
+fn idle_candidates(root: &Path, now: SystemTime) -> Vec<(PathBuf, u64)> {
+    registered_trees(root)
+        .into_iter()
+        .filter(|tree| phys(tree) != phys(root))
+        .filter_map(|tree| {
+            let dirs = candidate_target_dirs(&tree, now);
+            (!dirs.is_empty()).then(|| {
+                let bytes = dirs.iter().map(|dir| crate::reclaim::tree_bytes(dir)).sum();
+                (tree, bytes)
+            })
+        })
+        .collect()
+}
+
+fn empty_idle_report(apply: bool) -> IdleTreeReport {
+    let mut report = IdleTreeReport::default();
+    let line = format!(
+        "idle-trees mode={} candidates=0 occupied=0 reclaimed=0 reclaimed_bytes=0 candidate_bytes=0 unread=-",
+        if apply { "apply" } else { "dry-run" }
+    );
+    println!("{line}");
+    report.lines.push(line);
+    report
+}
+
 /// Trees held by the registry or Claude roster. The roster and every
 /// placement needed to prove absence are fail-closed: an unread snapshot or
 /// an unplaced live row means no tree may be reclaimed.
@@ -1179,7 +1204,12 @@ pub fn occupied_trees(
         .filter_map(|(tree, holders)| (!holders.sessions.is_empty()).then_some(tree))
         .collect();
     let rows = match roster {
-        crate::claude_roster::ClaudeAgentsSnapshot::Known { rows, .. } => rows,
+        crate::claude_roster::ClaudeAgentsSnapshot::Known { rows, warnings } => {
+            if !warnings.is_empty() {
+                return Err("roster-unread");
+            }
+            rows
+        }
         crate::claude_roster::ClaudeAgentsSnapshot::Unknown { .. } => return Err("roster-unread"),
     };
     let phys_trees: Vec<PathBuf> = trees.iter().map(|tree| phys(tree)).collect();
@@ -1226,30 +1256,11 @@ fn idle_trees_with(
     grace_secs: i64,
 ) -> IdleTreeReport {
     let mut report = IdleTreeReport::default();
-    let trees: Vec<PathBuf> = registered_trees(root)
-        .into_iter()
-        .filter(|tree| phys(tree) != phys(root))
-        .collect();
-    let candidates: Vec<(PathBuf, u64)> = trees
-        .iter()
-        .filter_map(|tree| {
-            let dirs = candidate_target_dirs(tree, now);
-            (!dirs.is_empty()).then(|| {
-                let bytes = dirs.iter().map(|dir| crate::reclaim::tree_bytes(dir)).sum();
-                (tree.clone(), bytes)
-            })
-        })
-        .collect();
+    let candidates = idle_candidates(root, now);
     report.candidates = candidates.len();
     report.candidate_bytes = candidates.iter().map(|(_, bytes)| *bytes).sum();
     if candidates.is_empty() {
-        let line = format!(
-            "idle-trees mode={} candidates=0 occupied=0 reclaimed=0 reclaimed_bytes=0 candidate_bytes=0 unread=-",
-            if apply { "apply" } else { "dry-run" }
-        );
-        println!("{line}");
-        report.lines.push(line);
-        return report;
+        return empty_idle_report(apply);
     }
 
     let registry = match registry {
@@ -1406,6 +1417,9 @@ fn idle_trees_with(
 }
 
 pub fn reclaim_idle_trees(root: &Path, apply: bool, now: SystemTime) -> IdleTreeReport {
+    if idle_candidates(root, now).is_empty() {
+        return empty_idle_report(apply);
+    }
     let registry = crate::paths::AgentsHome::from_env_opt()
         .ok_or_else(|| "registry-unread".to_string())
         .and_then(|home| {
@@ -1711,6 +1725,15 @@ mod tests {
         )
         .is_err());
 
+        let partial = crate::claude_roster::ClaudeAgentsSnapshot::Known {
+            rows: Vec::new(),
+            warnings: vec!["partial".to_string()],
+        };
+        assert_eq!(
+            occupied_trees(&[], &sj_registry(Vec::new()), &partial, None, 1_200),
+            Err("roster-unread")
+        );
+
         let mut unplaced = crate::claude_roster::ClaudeAgentRow::new("working", Some("working"));
         unplaced.cwd = None;
         assert_eq!(
@@ -1804,6 +1827,29 @@ mod tests {
             .arg(&linked)
             .status();
         let _ = std::fs::remove_dir_all(&linked);
+    }
+
+    #[test]
+    fn idle_tree_pass_skips_registry_and_roster_when_no_tree_is_a_candidate() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = setup("idle-tree-empty", "never-broken");
+
+        let report = idle_trees_with(
+            &env.root,
+            true,
+            SystemTime::now(),
+            Err("must not read".to_string()),
+            crate::claude_roster::ClaudeAgentsSnapshot::unknown("must not read"),
+            &|_| panic!("must not probe ages"),
+            1_200,
+        );
+
+        assert_eq!(report.candidates, 0);
+        assert!(report.unread.is_none(), "{report:?}");
+        assert!(report
+            .lines
+            .iter()
+            .any(|line| line.contains("candidates=0") && line.contains("unread=-")));
     }
 
     #[test]
