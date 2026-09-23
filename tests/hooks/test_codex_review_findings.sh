@@ -39,6 +39,10 @@ grep -q 'request-self-review --pr <n>' "$TMP/turn-findings.err" \
   || { echo "FAIL: nudge does not require a new-head review"; exit 1; }
 grep -q 'rounds_exhausted' "$TMP/turn-findings.err" \
   || { echo "FAIL: nudge does not read the round budget"; exit 1; }
+grep -q 'review-hold round --branch <branch> --head <sha>' "$TMP/turn-findings.err" \
+  || { echo "FAIL: nudge does not explain the pre-PR budget read"; exit 1; }
+grep -q 'request-self-review' "$TMP/turn-findings.err" \
+  || { echo "FAIL: nudge does not name the review request path"; exit 1; }
 grep -q 'merge on green CI' "$TMP/turn-findings.err" \
   || { echo "FAIL: nudge does not explain the at-cap disposition"; exit 1; }
 ! grep -qE 'fno agents mail|daemon|king' "$TMP/turn-findings.err" \
