@@ -576,6 +576,8 @@ pub struct RosterWorker {
     /// claim is reanchored to (that is footnote's long-lived HOLDER pid).
     #[serde(default)]
     pub pid: Option<u32>,
+    #[serde(default)]
+    pub repl_pid: Option<u32>,
     /// Worker process start time; mirrors `RegistryEntry::pid_start_time`. Only
     /// ever compared for equality.
     ///
@@ -954,6 +956,7 @@ mod tests {
         let w = RosterWorker {
             session_id: "x".into(),
             pid: None,
+            repl_pid: None,
             proc_start: None,
             pty_sock: Some(pty.to_string_lossy().into_owned()),
             pty_auth: None,
@@ -982,6 +985,7 @@ mod tests {
         let w = RosterWorker {
             session_id: "x".into(),
             pid: None,
+            repl_pid: None,
             proc_start: None,
             pty_sock: Some(pty.to_string_lossy().into_owned()),
             pty_auth: None,

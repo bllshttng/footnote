@@ -31,10 +31,10 @@ The threshold is the 25th percentile, nearest rank, of the load at slowdown turn
 
 ## Sources and windows
 
-- machine_watch tick rows: the load reading lives in the tick detail sentence. Hot rows say `crosses band`, and `load_15m` can read `unavailable`.
+- machine_watch writes one structured `machine_sample` row per 300-second beat. Hot rows say `crosses band`, and `load_15m` can read `unavailable`.
 - spawn-gate refusals per hour, from the flat journal rows.
 - live workers, from crown check-ins that carry the count.
-- memory history, from structured machine_sample rows. When none exist yet, the report says so honestly.
+- memory history, top holders, cost by stage and fleet shape, from structured machine_sample rows. When none exist yet, the report says so honestly.
 - transcript activity, read incrementally from the harness transcript stores with a byte budget per run.
 
 ## Empty states

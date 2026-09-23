@@ -51,6 +51,7 @@ impl Budget {
 /// Why a bounded read produced no stdout. A budget kill is a different event
 /// from a source failure: the source may have been healthy, the board just
 /// stopped paying for it, and downstream the two must not render as one word.
+#[derive(Debug)]
 pub(crate) enum RunFailure {
     Failed(String),
     KilledAtSlice(String),
@@ -80,6 +81,7 @@ impl RunFailure {
 /// the real `fno` front door), which then keep writing into whatever HOME the
 /// caller staged - under test, a tempdir that dies with the test, recreating
 /// it after the drop (measured: 23.5 GB of leaked `.tmp*` fake-HOMEs).
+#[derive(Debug)]
 pub(crate) struct RunOutput {
     pub(crate) stdout: Vec<u8>,
     pub(crate) stderr: Vec<u8>,
@@ -97,6 +99,20 @@ pub(crate) fn run_with_timeout_full(
     cmd: &[String],
     cwd: &Path,
     timeout: Duration,
+) -> Result<RunOutput, RunFailure> {
+    run_with_timeout_accepting(cmd, cwd, timeout, &[0])
+}
+
+/// `run_with_timeout_full` that accepts a set of exit codes as success. The
+/// pr-status gate needs this: exits 0-3 are CI verdicts whose stdout carries
+/// the JSON payload (0 green, 1 red, 2 pending, 3 unknown), so refusing them
+/// throws away the answer at the moment it matters most. Exit 4 and every
+/// other exit stays a reader failure and returns `Err`.
+pub(crate) fn run_with_timeout_accepting(
+    cmd: &[String],
+    cwd: &Path,
+    timeout: Duration,
+    accept: &[i32],
 ) -> Result<RunOutput, RunFailure> {
     use std::io::Read;
     use std::os::unix::process::CommandExt;
@@ -141,7 +157,8 @@ pub(crate) fn run_with_timeout_full(
             Ok(Some(status)) => {
                 let stdout = out_reader.join().unwrap_or_default();
                 let stderr = err_reader.join().unwrap_or_default();
-                if !status.success() {
+                let code = status.code().unwrap_or(-1);
+                if !accept.contains(&code) {
                     let detail = String::from_utf8_lossy(&stderr);
                     let detail = detail.trim();
                     let detail = if detail.is_empty() {
@@ -151,7 +168,7 @@ pub(crate) fn run_with_timeout_full(
                     };
                     return Err(RunFailure::Failed(format!(
                         "exit {}: {}",
-                        status.code().unwrap_or(-1),
+                        code,
                         detail.chars().take(500).collect::<String>()
                     )));
                 }
@@ -285,5 +302,38 @@ mod tests {
         let err = run_with_timeout(&cmd, dir.path(), Duration::from_secs(10)).unwrap_err();
         assert!(!err.over_budget());
         assert!(err.message().contains("exit 3"), "{}", err.message());
+    }
+
+    #[test]
+    fn an_accepting_run_returns_the_payload_of_a_verdict_exit() {
+        // AC6-HP: a red PR reads exit 1 with the JSON verdict on
+        // stdout; accepting 0-3 must return that payload, not drop it.
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "echo '{\"verdict\":\"red\"}'; exit 1".to_string(),
+        ];
+        let out =
+            run_with_timeout_accepting(&cmd, dir.path(), Duration::from_secs(10), &[0, 1, 2, 3])
+                .unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).contains("\"verdict\":\"red\""));
+    }
+
+    #[test]
+    fn an_accepting_run_still_refuses_an_exit_outside_the_set() {
+        // AC7-ERR: exit 4 is a reader failure, never a verdict; the
+        // error names the exit so the gate stays unanswered loudly.
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "echo '{\"verdict\":\"error\"}'; exit 4".to_string(),
+        ];
+        let err =
+            run_with_timeout_accepting(&cmd, dir.path(), Duration::from_secs(10), &[0, 1, 2, 3])
+                .unwrap_err();
+        assert!(!err.over_budget());
+        assert!(err.message().contains("exit 4"), "{}", err.message());
     }
 }
