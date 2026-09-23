@@ -148,20 +148,6 @@ pub(crate) fn ensure_node_workdir(
     }
 }
 
-/// True when `cwd` IS a repository's canonical checkout: its git common dir
-/// lives inside it. A linked worktree's common dir lives in the canonical
-/// tree instead, so it reads false there - the lane must never re-home a
-/// spawn whose cwd already is a worktree.
-pub(crate) fn is_canonical_checkout(cwd: &Path) -> bool {
-    let Some(common) = crate::provider::git_common_dir(cwd) else {
-        return false;
-    };
-    let (Ok(root), Ok(common)) = (cwd.canonicalize(), PathBuf::from(common).canonicalize()) else {
-        return false;
-    };
-    common.starts_with(root)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
