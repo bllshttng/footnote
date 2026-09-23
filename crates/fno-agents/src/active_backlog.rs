@@ -568,9 +568,17 @@ fn resolve_dispatch(
     // Park a dead dispatch BEFORE `fno backlog done`: its merged-PR cross-check
     // only runs when refs already exist, so a ref-less node would otherwise
     // close exit 0 and score the dead dispatch as a win.
-    let close = if classify(ev.reason.clone()).projection().merge_armable
-        && !node_has_pr_ref(cfg, node_id)
-    {
+    let merge_armable = classify(ev.reason.clone()).projection().merge_armable;
+    // The park guard and the close note ask the same question, so the node
+    // is read once per event and the answer is shared. Non-close terminals
+    // (a crash, NoProgress) spawn no read at all.
+    let close_eligible = merge_armable || is_done_reason(&ev.reason);
+    let has_pr_ref = if close_eligible {
+        node_has_pr_ref(cfg, node_id)
+    } else {
+        false
+    };
+    let close = if merge_armable && !has_pr_ref {
         CloseOutcome::Parked(
             "DonePRGreen terminal with no PR ref on the node (zero-artifact dispatch)".to_string(),
         )
@@ -584,7 +592,7 @@ fn resolve_dispatch(
             "done".to_string(),
             node_id.to_string(),
         ];
-        if !node_has_pr_ref(cfg, node_id) {
+        if !has_pr_ref {
             args.push("--note".to_string());
             args.push(drain_close_note(&ev.reason, &ev.message));
         }
