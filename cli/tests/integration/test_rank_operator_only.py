@@ -35,7 +35,11 @@ def _seed(g: Path, entries: list[dict]) -> None:
 
 
 def _rank_of(g: Path, node_id: str):
-    for e in json.loads(g.read_text())["entries"]:
+    # The store owns state; graph.json is a frozen export, so read-backs
+    # come from store rows.
+    from fno.graph.store import read_graph_strict
+
+    for e in read_graph_strict(g):
         if e.get("id") == node_id:
             return e.get("rank")
     return None

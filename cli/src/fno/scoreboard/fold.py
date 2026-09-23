@@ -303,6 +303,13 @@ def read_graph_nodes(path: Path) -> list[dict]:
         nodes = list(nodes.values())
     if not isinstance(nodes, list):  # valid JSON, junk shape (null / scalar / {"entries": null})
         return []
+    # Seed rows keep the pre-rename `_status` key; recover it before the
+    # defaults pass drops it, or a seeded claimed row reads unclaimed.
+    for node in nodes:
+        if isinstance(node, dict) and node.get("status") is None:
+            legacy = node.get("_status")
+            if legacy == "claimed":
+                node["status"] = "in_progress"
     # Filtered HERE rather than in the shared pass: this is a display signal, so
     # a malformed row is nothing but noise. Other readers count those rows as
     # evidence the graph is corrupt, which is why the migration pass skips them

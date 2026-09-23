@@ -25,7 +25,7 @@ from fno.company.coordinator import (
     commit,
     request_effect_approval,
 )
-from fno.graph.store import read_graph
+from fno.graph.store import read_graph_strict
 
 NOW = datetime(2026, 8, 3, 12, tzinfo=UTC)
 
@@ -87,7 +87,7 @@ def test_ac1_commit_writes_one_epic_and_children_with_company_work(tmp_path: Pat
     # role-b depends on role-a -> ordinary blocked_by edge to child_a's node.
     assert child_b.depends_on == (child_a.node_id,)
 
-    entries = {e["id"]: e for e in read_graph(graph)}
+    entries = {e["id"]: e for e in read_graph_strict(graph)}
     epic = entries[result.epic_id]
     assert epic["type"] == "epic"
     assert epic["parent"] is None
@@ -110,10 +110,17 @@ def test_ac1_commit_creates_no_file_outside_graph_and_kanban(tmp_path: Path) -> 
     graph = tmp_path / "graph.json"
     commit(proposal, graph_path=graph, project="fno", now=NOW)
     created = {p.name for p in tmp_path.iterdir()}
-    # graph.json plus its Kanban projection; a backup/lock may also exist.
-    assert "graph.json" in created
+    # graph.db plus its Kanban/html projections (the render may also create a
+    # spaces/ sibling dir); a backup/lock may also exist. The conftest
+    # sandbox owns the .fno state dir and is platform, not commit output.
+    assert "graph.db" in created
+    created.discard(".fno")
+    created.discard(".fno-home")  # the conftest HOME-pin sandbox
     assert all(
-        name.startswith("graph") or name.endswith(".lock") or name.endswith(".bak")
+        name.startswith("graph")
+        or name == "spaces"
+        or name.endswith(".lock")
+        or name.endswith(".bak")
         for name in created
     )
 
@@ -135,7 +142,7 @@ def test_ac1_refuses_when_parenting_under_a_nested_epic(tmp_path: Path) -> None:
     assert isinstance(result, CoordinatorRefusal)
     assert result.reason is CoordinatorRefusalReason.EPIC_DEPTH
     # nothing was written: the seeded graph is intact
-    seeded = {e["id"] for e in read_graph(graph)}
+    seeded = {e["id"] for e in read_graph_strict(graph)}
     assert seeded == {"x-epic0", "x-epic1"}
 
 

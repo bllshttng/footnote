@@ -19,11 +19,10 @@ if [[ ! "$new_id" =~ ^ab-[0-9a-f]{8}$ ]]; then
   exit 1
 fi
 
-# Entry actually landed in graph.json
-count=$(python3 -c "
-import json
-d = json.load(open('$TMP/.fno/graph.json'))
-print(sum(1 for e in d['entries'] if e['id'] == '$new_id'))
+# Entry actually landed in the store (graph.json is a fold-on-open seed)
+count=$(uv run python -c "
+from fno.graph.store import read_graph_strict
+print(sum(1 for e in read_graph_strict('$TMP/.fno/graph.json') if e['id'] == '$new_id'))
 ")
 if [[ "$count" != "1" ]]; then
   echo "FAIL: expected 1 entry with id $new_id, got $count"
@@ -74,10 +73,9 @@ if [[ ! "$force_id" =~ ^ab-[0-9a-f]{8}$ ]]; then
   exit 1
 fi
 # Confirm domain is the verbatim "res", not "research"
-dom=$(python3 -c "
-import json
-d = json.load(open('$TMP/.fno/graph.json'))
-e = next(x for x in d['entries'] if x['id'] == '$force_id')
+dom=$(uv run python -c "
+from fno.graph.store import read_graph_strict
+e = next(x for x in read_graph_strict('$TMP/.fno/graph.json') if x['id'] == '$force_id')
 print(e['domain'])
 ")
 if [[ "$dom" != "res" ]]; then

@@ -265,11 +265,21 @@ def test_smoke_setup_cleans_fno_agents_and_fno_before_building_cached_artifacts(
 def test_rust_ci_cleans_fno_agents_before_unit_tests() -> None:
     # The heavy cargo job moved to cli-ci.yml (x-861c): the shards must gate
     # it, so the clean-before-test order is asserted there. The job is now
-    # split by crate, and each crate's order lives in its own shard job.
+    # split by crate, and each crate's order lives in its own shard job; the
+    # fno-agents integration shard carries the same invariant against its
+    # own --test '*' leg.
     workflow = yaml.safe_load(_CLI_WORKFLOW.read_text())
     jobs = workflow["jobs"]
 
-    for job_name, package in (("test-agents", "fno-agents"), ("test-mux", "fno")):
+    for job_name, package, test_step in (
+        ("test-agents", "fno-agents", "cargo test --lib --bins (fno-agents)"),
+        (
+            "test-agents-integration",
+            "fno-agents",
+            "cargo test --test '*' --test-threads=1 (fno-agents real-process integration)",
+        ),
+        ("test-mux", "fno", "cargo test --lib --bins (fno mux)"),
+    ):
         steps = jobs[job_name]["steps"]
         names = [step.get("name", "") for step in steps]
         clean = names.index("Clean cached Rust package artifacts")
@@ -279,7 +289,7 @@ def test_rust_ci_cleans_fno_agents_before_unit_tests() -> None:
             f"cargo clean -p {package} --manifest-path crates/{package}/Cargo.toml"
             in clean_lines
         )
-        unit = names.index(f"cargo test --lib --bins ({'fno mux' if package == 'fno' else package})")
+        unit = names.index(test_step)
         assert clean < unit, f"rust-ci can test a stale cached {package} harness"
 
 

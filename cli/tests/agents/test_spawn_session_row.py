@@ -96,9 +96,9 @@ def _seed_graph() -> None:
 
 def _node_rows() -> list[dict]:
     from fno import paths
-    from fno.graph.store import read_graph
+    from fno.graph.store import read_graph_strict
 
-    return next(e for e in read_graph(paths.graph_json()) if e["id"] == NODE).get(
+    return next(e for e in read_graph_strict(paths.graph_json()) if e["id"] == NODE).get(
         "sessions", []
     )
 
@@ -172,7 +172,9 @@ def test_spawn_with_node_and_review_verb_opens_row(workdir_claude, resolvable_uu
     # spawning session's id - the observed_model join needs the full form.
     assert row["session_id"] == FULL_UUID
     assert row["started_at"]
-    assert "ended_at" not in row
+    # The strict store read returns the full envelope: an open session's
+    # absence reads as None, not as a missing key (the file leg omitted it).
+    assert row.get("ended_at") is None
     assert row["observed_model"].get("kind") != "unreadable"
     assert "effort" in row
     assert row["effort"] == "xhigh"

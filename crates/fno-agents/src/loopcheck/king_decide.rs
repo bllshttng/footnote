@@ -346,6 +346,13 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         }) => {
             return terminate(TerminationReason::NoWork, &message, blocked, fires, &[]);
         }
+        Some(crate::king_termination::CapacityGate::SaturatedBlind {
+            message,
+            actionable,
+        }) => {
+            let reading = crate::king_escalation::reading_sources_unreadable();
+            return blind_block(&reading, &message, actionable, dry);
+        }
         Some(crate::king_termination::CapacityGate::Split {
             message,
             actionable,
@@ -370,9 +377,6 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             "cleared": cleared,
         }),
     );
-    let top = board
-        .top_row
-        .unwrap_or_else(|| "an actionable queue".to_string());
     // decide()'s documented contract, one screen up: exit 0 for allow and for
     // this healthy block; the ONLY other verdict-bearing exit is the degraded
     // unreadable-board block above, which carries the same payload on 2. Any
@@ -386,11 +390,20 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         king_output(
             "block",
             None,
-            &format!("{} actionable; next: {top}", board.actionable),
+            &king_board_block_message(&board),
             board.actionable,
             dry + 1,
         ),
     )
+}
+
+fn king_board_block_message(board: &crate::king_termination::KingBoard) -> String {
+    let top = board.top_row.as_deref().unwrap_or("an actionable queue");
+    let mut message = format!("{} actionable; next: {top}", board.actionable);
+    if !board.blind_queues.is_empty() {
+        message.push_str(&format!("; not read: {}", board.blind_queues.join(", ")));
+    }
+    message
 }
 
 /// The stale-crown-doc gate: past the compaction ceiling, a crown handoff doc
@@ -648,6 +661,30 @@ mod stale_crown_doc_tests {
         let now = std::time::SystemTime::now();
         assert!(
             stale_crown_doc_gate(&manifest("claude"), &transcript, tmp.path(), &fno, now).is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod king_board_message_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn the_final_block_names_queues_that_were_not_read() {
+        let board = crate::king_termination::parse_king_board_value(&json!({
+            "actionable": 3,
+            "queues": [
+                {"name": "unplanned", "status": "unreadable", "actionable": true,
+                 "error": "truth probe timed out", "rows": []},
+                {"name": "mergeable_pr", "status": "ok", "actionable": true,
+                 "rows": [{"number": 2398}]},
+            ],
+        }))
+        .unwrap();
+        assert_eq!(
+            king_board_block_message(&board),
+            "3 actionable; next: mergeable_pr:2398; not read: unplanned is unreadable: truth probe timed out"
         );
     }
 }

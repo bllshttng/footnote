@@ -172,7 +172,9 @@ def test_corrupt_graph_is_not_recast_as_empty(tmp_path: Path) -> None:
     entries, error = _load_graph(graph)
 
     assert entries is None
-    assert error and "not valid JSON" in error
+    # The store import refuses an unreadable seed; the wording names the store,
+    # not the old JSON parse.
+    assert error and ("could not be read" in error or "not valid JSON" in error)
 
 
 def test_receipt_resolves_paths_from_requested_repository(monkeypatch, tmp_path: Path) -> None:
