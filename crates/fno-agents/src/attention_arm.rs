@@ -51,6 +51,8 @@ pub trait SinkIo {
     fn rename(&mut self, from: &Path, to: &Path) -> std::io::Result<()>;
     /// The folder's top-level `.md` files, sorted.
     fn list_md(&mut self, dir: &Path) -> Vec<PathBuf>;
+    /// Whether the path exists, through the same seam as every other read.
+    fn path_exists(&mut self, path: &Path) -> bool;
     /// Route one item to its crown. `Err` names the unread source.
     fn route(&mut self, item: &AttentionItem) -> Result<Routing, String>;
     /// Write one `attention_answer` row. Returns the `Recorded:` receipt text.
@@ -500,7 +502,13 @@ fn close_elsewhere(
     } else {
         row.closed_by.as_str()
     };
-    let receipt = format!("Recorded: {} ({})", short_answer(&answer), recorded_by);
+    let shown = short_answer(&answer);
+    let shown = if shown.is_empty() {
+        "no answer recorded".to_string()
+    } else {
+        shown
+    };
+    let receipt = format!("Recorded: {} ({})", shown, recorded_by);
     close_and_move(
         page,
         dir,
@@ -568,7 +576,7 @@ fn move_to_done(
     let done_dir = dir.join("done");
     let mut target = done_dir.join(format!("{id}.md"));
     let mut n = 2;
-    while target.exists() {
+    while io.path_exists(&target) {
         target = done_dir.join(format!("{id}-{n}.md"));
         n += 1;
     }
@@ -1233,6 +1241,10 @@ impl SinkIo for RealIo {
         out
     }
 
+    fn path_exists(&mut self, path: &Path) -> bool {
+        path.exists()
+    }
+
     fn route(&mut self, item: &AttentionItem) -> Result<Routing, String> {
         Ok(self.router()?.route(item))
     }
@@ -1586,6 +1598,9 @@ mod tests {
                 })
                 .cloned()
                 .collect()
+        }
+        fn path_exists(&mut self, path: &Path) -> bool {
+            self.files.contains_key(path)
         }
         fn route(&mut self, _item: &AttentionItem) -> Result<Routing, String> {
             if self.broken_routing {

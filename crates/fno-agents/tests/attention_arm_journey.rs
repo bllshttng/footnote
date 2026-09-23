@@ -74,6 +74,9 @@ impl SinkIo for JourneyIo {
         out.sort();
         out
     }
+    fn path_exists(&mut self, path: &Path) -> bool {
+        path.exists()
+    }
     fn route(&mut self, _item: &fno_agents::attention::AttentionItem) -> Result<Routing, String> {
         if self.broken {
             Err("graph unreadable".to_string())
