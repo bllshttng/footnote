@@ -665,6 +665,22 @@ fn refuse_with(
     rows: &[Value],
     mut out: Map<String, Value>,
 ) -> Value {
+    let mut refusal_rows = rows.to_vec();
+    if !refusal_rows.iter().any(|row| {
+        matches!(
+            row.get("verdict").and_then(Value::as_str),
+            Some("refuse" | "hold")
+        )
+    }) {
+        refusal_rows.push(json!({
+            "name": "gate-verdict",
+            "measured": reason,
+            "threshold": "accepted",
+            "verdict": "refuse",
+            "note": message.clone(),
+        }));
+    }
+
     out.insert("verdict".into(), json!("refused"));
     out.insert("reason".into(), json!(reason));
     out.insert("message".into(), json!(message));
@@ -675,7 +691,7 @@ fn refuse_with(
             out.insert(k, v);
         }
     }
-    out.insert("rows".into(), json!(rows));
+    out.insert("rows".into(), json!(refusal_rows));
     Value::Object(out)
 }
 
@@ -983,6 +999,68 @@ fn lanes_answer(
 mod tests {
     use super::*;
     use crate::spawn_gate::SWAPIN_REFUSE_BYTES_PER_S;
+
+    #[test]
+    fn refuse_with_emits_gate_verdict_when_no_measurement_row_refuses() {
+        let message = "king share is active";
+        let answer = refuse_with(
+            "king_share",
+            message.to_string(),
+            json!({}),
+            &[],
+            Map::new(),
+        );
+
+        let rows = answer["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], "gate-verdict");
+        assert_eq!(rows[0]["measured"], "king_share");
+        assert_eq!(rows[0]["threshold"], "accepted");
+        assert_eq!(rows[0]["verdict"], "refuse");
+        assert_eq!(rows[0]["note"], message);
+    }
+
+    #[test]
+    fn refuse_with_keeps_an_existing_refusal_without_adding_a_generic_row() {
+        let measured = fleet_row(3, 3);
+        let answer = refuse_with(
+            "max_live",
+            "fleet full".to_string(),
+            json!({}),
+            std::slice::from_ref(&measured),
+            Map::new(),
+        );
+
+        let rows = answer["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], measured);
+        assert_eq!(rows[0]["name"], "fleet-rows");
+        assert_eq!(rows[0]["verdict"], "refuse");
+    }
+
+    #[test]
+    fn refuse_with_keeps_a_held_measurement_without_adding_a_generic_row() {
+        let held = json!({
+            "name": "cpu-share",
+            "measured": "2.10/12.00 cores",
+            "threshold": "50%",
+            "verdict": "hold",
+            "note": "measurement unavailable",
+        });
+        let answer = refuse_with(
+            "fleet_cpu_share",
+            "CPU measurement unavailable".to_string(),
+            json!({}),
+            std::slice::from_ref(&held),
+            Map::new(),
+        );
+
+        let rows = answer["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], held);
+        assert_eq!(rows[0]["name"], "cpu-share");
+        assert_eq!(rows[0]["verdict"], "hold");
+    }
 
     fn mem(
         avail: Option<f64>,
