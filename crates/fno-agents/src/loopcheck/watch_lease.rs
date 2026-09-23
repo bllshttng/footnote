@@ -473,7 +473,7 @@ mod tests {
             Some(live as i32),
             "the anchor must MOVE to the live bg-job row pid"
         );
-        assert_eq!(after.expires_at.unwrap() > crate::claims::now_ms(), true);
+        assert!(after.expires_at.unwrap() > crate::claims::now_ms());
     }
 
     #[test]
