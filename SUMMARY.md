@@ -40,4 +40,5 @@ This head has 163.
 - I canceled it at the queue cutoff. It has no local source verdict.
 - PR CI found stale seam/reachable-path baselines, placement-path constructions and legacy Python resume test hooks.
 - The baselines and tests were updated. CI rerun is pending.
+- CI will gate all changed paths.
 - No whole-suite local run started.
