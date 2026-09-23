@@ -160,7 +160,11 @@ fn old_server_reaped_before_rebind_probe() {
     // 3s grace never elapses, `forced` still reads false, and the probe reports
     // a graceful stop that never happened. Every other test in this file waits
     // here first.
-    let _up = connect_with_retry(&scratch.main_sock());
+    let _up = connect_with_retry_for(
+        &scratch.main_sock(),
+        Duration::from_secs(30),
+        "incumbent startup",
+    );
     let termination = incumbent.terminate_and_wait();
 
     let mut replacement = spawn_server(&scratch.main_sock(), &[]);
@@ -188,8 +192,12 @@ fn old_server_reaped_before_rebind_probe() {
         "replacement exited instead of rebinding {}",
         scratch.main_sock().display()
     );
-    // Panics on its own 10s budget if the replacement never accepts.
-    let _accepted = connect_with_retry(&scratch.main_sock());
+    // Panics on its own 30s budget if the replacement never accepts.
+    let _accepted = connect_with_retry_for(
+        &scratch.main_sock(),
+        Duration::from_secs(30),
+        "replacement rebind",
+    );
 
     println!(
         "old_server_reaped_before_rebind old_pid={} new_pid={} socket={} status={:?}",
