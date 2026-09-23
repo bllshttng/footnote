@@ -1773,6 +1773,8 @@ class TestCanonicalSlotRead:
         result = managed.reconcile_slot("claude", by_id=by_id, root=tmp_path)
 
         assert result.outcome == "ambiguous-slot"
+        assert "no `/logout`" in result.detail
+        assert "sign out" not in result.detail
         assert _store_state(tmp_path) == before
 
     def test_agreeing_items_reconcile_normally(
