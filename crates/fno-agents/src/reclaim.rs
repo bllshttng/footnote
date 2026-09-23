@@ -693,7 +693,7 @@ pub(crate) mod tests {
         dir
     }
 
-    fn install_fake_uv(root: &Path) -> Option<std::ffi::OsString> {
+    fn install_fake_uv(root: &Path) {
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let uv = bin.join("uv");
@@ -709,14 +709,46 @@ pub(crate) mod tests {
             .chain(std::env::split_paths(old.as_deref().unwrap_or_default()))
             .collect::<Vec<_>>();
         std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
-        old
     }
 
-    fn restore_path(path: Option<std::ffi::OsString>) {
-        if let Some(path) = path {
-            std::env::set_var("PATH", path);
-        } else {
-            std::env::remove_var("PATH");
+    struct ReclaimTestEnv {
+        cwd: PathBuf,
+        vars: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl ReclaimTestEnv {
+        fn new() -> Self {
+            const VARS: &[&str] = &[
+                "PATH",
+                "HOME",
+                "CODEX_HOME",
+                "FNO_RECLAIM_TEMP_ROOT",
+                "FNO_RECLAIM_STATE_ROOT",
+                "CARGO",
+                "CBD_FNO",
+                "CBD_FB",
+                "FNO_CARGO_TARGETS_BASE",
+            ];
+            ReclaimTestEnv {
+                cwd: std::env::current_dir().unwrap(),
+                vars: VARS
+                    .iter()
+                    .map(|name| (*name, std::env::var_os(name)))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for ReclaimTestEnv {
+        fn drop(&mut self) {
+            for (name, value) in self.vars.drain(..) {
+                if let Some(value) = value {
+                    std::env::set_var(name, value);
+                } else {
+                    std::env::remove_var(name);
+                }
+            }
+            let _ = std::env::set_current_dir(&self.cwd);
         }
     }
 
@@ -770,9 +802,8 @@ pub(crate) mod tests {
         let state = temp_lane_root("state");
         let codex = state.join("codex");
         let fake_home = state.join("home");
-        let old_path = install_fake_uv(&root);
-        let old_cwd = std::env::current_dir().unwrap();
-        let old_home = std::env::var_os("HOME");
+        let process_env = ReclaimTestEnv::new();
+        install_fake_uv(&root);
         std::env::set_current_dir(&root).unwrap();
         std::env::set_var("HOME", &fake_home);
         std::env::set_var("FNO_RECLAIM_TEMP_ROOT", &root);
@@ -780,16 +811,7 @@ pub(crate) mod tests {
         std::env::set_var("CODEX_HOME", &codex);
         let home = AgentsHome::at(state.join("agents"));
         let rc = run_reclaim(&["--apply".to_string()], &home);
-        std::env::remove_var("FNO_RECLAIM_TEMP_ROOT");
-        std::env::remove_var("FNO_RECLAIM_STATE_ROOT");
-        std::env::remove_var("CODEX_HOME");
-        restore_path(old_path);
-        if let Some(home) = old_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
-        std::env::set_current_dir(old_cwd).unwrap();
+        drop(process_env);
         assert_eq!(rc, 0);
         assert!(!old.exists(), "the aged fake HOME is removed");
         assert!(fresh.exists(), "the fresh fake HOME survives");
@@ -892,9 +914,8 @@ pub(crate) mod tests {
         let state = temp_lane_root("cargo-lane-state");
         let codex = state.join("codex");
         let fake_home = state.join("home");
-        let old_path = install_fake_uv(&root);
-        let old_cwd = std::env::current_dir().unwrap();
-        let old_home = std::env::var_os("HOME");
+        let process_env = ReclaimTestEnv::new();
+        install_fake_uv(&root);
         std::env::set_current_dir(&repo).unwrap();
         std::env::set_var("HOME", &fake_home);
         std::env::set_var("FNO_RECLAIM_TEMP_ROOT", &root);
@@ -918,20 +939,7 @@ pub(crate) mod tests {
 
         let rc = run_reclaim(&["--apply".to_string()], &home);
 
-        std::env::remove_var("FNO_RECLAIM_TEMP_ROOT");
-        std::env::remove_var("FNO_RECLAIM_STATE_ROOT");
-        std::env::remove_var("CODEX_HOME");
-        restore_path(old_path);
-        if let Some(home) = old_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
-        std::env::set_current_dir(old_cwd).unwrap();
-        std::env::remove_var("CARGO");
-        std::env::remove_var("CBD_FNO");
-        std::env::remove_var("CBD_FB");
-        std::env::remove_var("FNO_CARGO_TARGETS_BASE");
+        drop(process_env);
         assert_eq!(rc, 0);
         assert!(!orphan.exists(), "the orphan hash dir is reaped");
         let receipt: serde_json::Value = serde_json::from_str(
@@ -994,9 +1002,8 @@ pub(crate) mod tests {
     }
 
     fn run_codex_reclaim(codex: &Path, state: &Path, temp: &Path) -> String {
-        let old_path = install_fake_uv(temp);
-        let old_cwd = std::env::current_dir().unwrap();
-        let old_home = std::env::var_os("HOME");
+        let process_env = ReclaimTestEnv::new();
+        install_fake_uv(temp);
         std::env::set_current_dir(temp).unwrap();
         std::env::set_var("HOME", temp);
         std::env::set_var("CODEX_HOME", codex);
@@ -1008,18 +1015,10 @@ pub(crate) mod tests {
         std::env::set_var("FNO_RECLAIM_TEMP_ROOT", temp);
         let home = AgentsHome::at(state.join("agents"));
         let rc = run_reclaim(&["--apply".to_string()], &home);
+        let receipt = std::fs::read_to_string(state.join("reclaim/last-run.json"));
+        drop(process_env);
         assert_eq!(rc, 0);
-        let receipt = std::fs::read_to_string(state.join("reclaim/last-run.json")).unwrap();
-        std::env::remove_var("CODEX_HOME");
-        std::env::remove_var("FNO_RECLAIM_STATE_ROOT");
-        std::env::remove_var("FNO_RECLAIM_TEMP_ROOT");
-        restore_path(old_path);
-        if let Some(home) = old_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
-        std::env::set_current_dir(old_cwd).unwrap();
+        let receipt = receipt.unwrap();
         receipt
     }
 
@@ -1191,6 +1190,7 @@ pub(crate) mod tests {
     #[test]
     fn plugin_cache_copies_resolves_codex_home_override() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _process_env = ReclaimTestEnv::new();
         let codex = codex_home_fixture("codex-cache-home");
         let target = codex.join("plugins/cache/footnote/fno/0.3.2/crates/fno-agents/target");
         std::fs::create_dir_all(&target).unwrap();
@@ -1205,6 +1205,7 @@ pub(crate) mod tests {
     #[test]
     fn plugin_cache_copies_ignores_missing_codex_cache() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _process_env = ReclaimTestEnv::new();
         let codex = codex_home_fixture("codex-empty-cache-home");
         std::env::set_var("CODEX_HOME", &codex);
         assert_eq!(
