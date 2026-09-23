@@ -744,6 +744,55 @@ def test_quiet_archived_node_uses_the_archive_refusal(monkeypatch) -> None:
     assert "no node resolves" not in result.stderr
 
 
+def _run_note_quiet(monkeypatch, node_id: str, live_rows: list[dict]):
+    """Run `fno backlog note <id> <text> --quiet` with the archive and the
+    live read stubbed, so the archive pre-check is the only store contact."""
+    from typer.testing import CliRunner
+
+    from fno.cli import app
+    from fno.graph import cli as graph_cli
+    from fno.graph import note_cli as note_bridge
+
+    monkeypatch.setattr(graph_cli, "_graph_path", lambda *a, **k: Path("graph.json"))
+    monkeypatch.setattr(
+        "fno.graph.api.wire_rows", lambda *, path=None: list(live_rows)
+    )
+    monkeypatch.setattr(
+        "fno.graph._archive_lookup.archived_entry",
+        lambda nid: {"id": node_id} if nid == node_id else None,
+    )
+    monkeypatch.setattr(
+        note_bridge,
+        "_write_state",
+        lambda nid, text, *, quiet, session_id, graph_path, reads=None: (
+            0,
+            _stubbed_receipt(nid),
+        ),
+    )
+    return CliRunner().invoke(app, ["backlog", "note", node_id, "the finding", "--quiet"])
+
+
+def test_a_live_node_with_an_archive_twin_still_notes(monkeypatch) -> None:
+    """The x-12d1 deadlock: an archive row shares a live id, note refused and
+    named an unarchive that reported nothing to restore. Live first, then the
+    archive: a node the update door accepts, the note door accepts too."""
+    result = _run_note_quiet(monkeypatch, "x-12d1", [{"id": "x-12d1", "type": "feature"}])
+    assert result.exit_code == 0, result.stderr
+    assert "noted x-12d1" in result.stdout
+    assert "is archived" not in result.stderr
+
+
+def test_an_archive_only_id_still_refuses_after_a_live_miss(monkeypatch) -> None:
+    """The pre-check keeps its teeth: no live row, archive row present, the
+    exact PR 1871 remedy stands."""
+    result = _run_note_quiet(monkeypatch, "x-3a64", [])
+    assert result.exit_code == 1
+    assert (
+        "Error: node x-3a64 is archived; run `fno backlog unarchive x-3a64`"
+        " to restore it before updating."
+    ) in result.stderr
+
+
 def test_a_refusal_writes_nothing_and_exits_three(monkeypatch) -> None:
     def no_send(address: str, body: str) -> str:
         raise AssertionError("a refused note must not send")

@@ -579,13 +579,13 @@ def _merge_authority(repo: str) -> dict:
         enabled = bool(am.enabled)
         grant = str(am.grant or "none")
         return {
-            "auto_merge_enabled": enabled,
+            "config_auto_merge_enabled": enabled,
             "grant": grant,
             "mergeable_autonomously": enabled and grant == "dispatch",
         }
     except Exception:  # noqa: BLE001 - an unreadable config is not a verdict
         return {
-            "auto_merge_enabled": None,
+            "config_auto_merge_enabled": None,
             "grant": None,
             "mergeable_autonomously": None,
         }

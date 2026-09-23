@@ -59,6 +59,12 @@ The wedged-pair shape is why the zombie clause exists. On 2026-09-06 a deps bina
 
 The lever is `fno-agents orphan-reap`, a binary-direct verb. Dry-run by default, it prints each confirmed orphan with its pid, elapsed time, zombie count and disposition. `--apply` sends SIGKILL to exactly the named pids; `--json` emits the same rows under `orphan_test_binaries`. Detection is native to `fno-agents` (module `orphan_reap`), so the lever answers even when the Python CLI cannot. The daemon runs the same code path with the kill enabled every 300 seconds behind the standard one-in-flight, off-loop sweep gate, and emits an `orphan_test_binary_reaped` event per kill. The box this matters on is the box whose readings go dark.
 
+## Session costs
+
+The Rust `machine_watch` arm writes one `machine_sample` row every 300 seconds. It bands host busy from user, nice and system CPU ticks over the beat. It also records 15-minute load per core. Spawn admission never reads this machine load. The summed per-process CPU figure was dropped after the 2026-09-21 reading showed 48.7% while `top` showed 0.0% idle.
+
+Each live session row holds its session id, harness, node, stage, process count, RSS and CPU. Separate `cargo` and `pytest` buckets are included. Top holders are executable basenames only. A refusal carries the newest sample id, age up to 300 seconds, verdict, busy, load and memory fields. `fno agents top` reads the same Rust walk. Codex threads without roots, Linux physical footprint and unreadable compressor sensors remain named gaps. Null means unmeasured, never zero.
+
 Two bounds upstream keep the leak from forming in the first place. The suite runner runs each suite in its own process group with a wall-clock timeout (`config.test.timeout_seconds`, default 1800). On expiry or interrupt it kills the GROUP. Killing cargo alone orphans the deps binary it exec'd, which is exactly how the ppid-1 shape forms. And test-spawned children are killed and waited through Drop guards, so a panicking test no longer leaves a live child whose corpse has no reaper.
 
 ## The machine band never gates

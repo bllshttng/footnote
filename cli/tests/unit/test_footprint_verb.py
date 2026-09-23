@@ -2948,22 +2948,4 @@ def test_parse_reads_the_linux_state_header():
     assert reading.runnable_count == 1
 
 
-def _reading_with_machine(measured: float, processes: int, runnable: int) -> Footprint:
-    return Footprint(
-        sustained_cpu_cores=0.0,
-        descendant_cpu_cores=0.0,
-        fleet_cpu_cores=0.0,
-        descendant_process_count=0,
-        direct_process_count=0,
-        transient_call_count=0,
-        process_count=0,
-        rss_gb=0.0,
-        measured_cpu_cores=measured,
-        top=[],
-        unparsed_lines=0,
-        machine_process_count=processes,
-        runnable_count=runnable,
-    )
-
-
 # ---------------------------------------------------------------------------

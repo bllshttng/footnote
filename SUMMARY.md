@@ -1,18 +1,23 @@
-# SUMMARY - x-00c5 combined session survival + codex shared-daemon ownership
+# Summary: a claude reap receipt pins model or route
 
-All eight waves landed and committed on this branch.
+## What landed
 
-## Fixed on discovery
+- `crates/fno-agents/src/receipt.rs`: a claude receipt's resume line now asks resume_pin (`claude_resume_recipe`). It pins `--model`/`--effort` from the row. When a non-Anthropic route served the row, the line names `fno agents spawn --resume <sid> -P <provider> -m <model>` instead. The claude `resume` string is shell-quoted. `receipt_file_name` was extracted. `decide_reap_receipt` answers the spawn-axes `reap_receipt` field.
+- `crates/fno-agents/src/resume_receipt.rs`: the preserved-session hint prints the receipt's own rendered line (`resume:`). When the line is the route door, the hint adds a new-session note.
+- `crates/fno-agents/src/spawn_axes.rs`: the `reap_receipt` field routes to `decide_reap_receipt` (same field-on-a-verb shape as `resume_pin`).
+- `cli/src/fno/agents/registry.py`: `_stage_removal_receipt` asks the Rust builder and writes the answered file (14 added lines).
+- `cli/src/fno/agents/resume_cli.py`: the claude exact-predecessor lane refuses with exit 13 and names the spawn door (10 added lines).
+- Docs: `retirement-receipts.md` gained the recipe paragraph and the Python door row. `dual-implementation-inventory.md` marks the removal-receipt-writers row builder-retired.
 
-The wave-6 resume rewrite put pre_exec on codex's resume row. The mux reader refused pre_exec on the resume lane, so restore read codex as unresumable. The reader now carries pre_exec there. The fail-open render composes it like the attach renderer. Reader and builder tests pin the shape.
+## Deviation from the plan
 
-## Deviations from the bound plan
+The plan's codex expectation ("keeps `codex resume <sid> --remote unix://` in both fields") assumed no pre_exec composition. The codex capability form composes a `sh -c '<pre>; exec …'` wrapper, so per-token shlex quoting re-quotes an already-quoted script and corrupts it. Fix: quoting applies to the claude branch only. Non-claude harnesses keep the raw `argv.join(" ")`.
 
-1. The plan's resume-form extraction from agents_view.rs was skipped. The file measures 4,993 lines, under the shrink-only gate. No shrink was owed.
-2. The harness-map and restore test updates were not needed. No row semantics changed. The three-level visibility note landed in the docs instead.
-3. Matrix row (e) uses the real fno-agents binary with a private home. The daemon refuses planted rows missing invariant fields. The real binary proves the same contract.
-4. The journey script skips cleanly without two local codex builds or auth. AC24-REMOTE stays the operator's post-merge readback.
-5. AC23-EDGE rides an in-module lock-busy unit test. The lock API is crate-private, and the shape needs only the lock.
-6. The window values ride the receipt as before and after strings. Absent reads None, never an invented default. A stripped key reads failed with writer=unknown.
-7. The budget overruns paid with two extractions. The argv-fact helpers moved to server/argv_facts.rs with their tests. squad_store's inline tests moved to squad_store_tests.rs.
-8. Two full-suite failures remain. Both sit in files this branch never touches. They match the known local flake class, and CI arbitrates.
+## Verification
+
+- `cargo test --lib` filters `receipt`, `resume_receipt`, `gc_receipts`, `spawn_axes`: green. `the_live_eighteen_split_fifteen_and_three` passes in isolation. Its one broad-filter failure is the documented lock-free env race in `paths.rs`, not this diff.
+- `--test retirement_e2e`: 9 passed.
+- `cargo fmt --check`: clean. `clippy --all-targets`: zero findings in the touched files. The 690 crate-wide findings are pre-existing under local clippy 1.94, and CI's pinned toolchain arbitrates.
+- Python: `test_registry.py` + `test_lineage_resolution.py` + `test_agents_history.py`: 121 passed. `check-python-static.sh`: clean.
+- `check-file-budget.sh`: cli/src/fno +24 against the 30 budget and the 26 grant cap. No over-budget file grew. `check-no-internal-refs.sh`: clean.
+- Live binary probe with planted rows: the zai row prints `fno agents spawn --resume <sid> -P zai -m 'glm-5.3-flash[1m]'` with `removal_trigger: session`. The anthropic row prints `claude --resume <sid> --model claude-opus-5`.
