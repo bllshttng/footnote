@@ -16,7 +16,7 @@ The command prints the URL and a token once at bind. The token is in the query s
 
 The page's **backlog** link opens the current private `fno backlog view` file through the same token. Render or refresh that file first with `FNO_NO_OPEN=1 fno backlog view`. The `/backlog` response is never cached. A missing file names that command, and a missing or wrong token returns no backlog bytes.
 
-The bridge also serves the backlog as JSON through the same token. `/backlog/model.json` takes `lanes`, `project`, `epic`, `status`, `priority`, `size`, `king`, `q` and `all`. `/backlog/node.json?id=<id>` returns one node, 404 when the store has no such node and 503 when the store read failed. Each body carries `"schema": 1`. The bridge re-reads at most every 30 seconds unless the store changed.
+The bridge also serves the backlog as JSON through the same token. `/backlog/model.json` takes `lanes`, `project`, `epic`, `status`, `priority`, `size`, `king`, `q` and `all`. `/backlog/node.json?id=<id>` returns one node. When the store holds no such node, the answer is 404. When the store read failed, it is 503. Each body carries `"schema": 1`. The bridge re-reads at most every 30 seconds unless the store changed.
 
 The **crown** page serves `reign.html`. If it is older than five minutes, the bridge re-renders it. The **fleet** page serves `fleet.html`. The fno-agents daemon renders it every 30 minutes. If `/fleet` returns 404, the daemon has not ticked yet.
 
