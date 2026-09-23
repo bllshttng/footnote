@@ -813,8 +813,7 @@ def _list_decisions(
         typer.echo(f"backlog decisions: {exc}", err=True)
         raise typer.Exit(1)
 
-    unknown = [row for row in found if row.get("lifecycle") == "unknown"]
-    if unknown:
+    if unknown := [row for row in found if row.get("lifecycle") == "unknown"]:
         typer.echo(
             f"backlog decisions: {unknown[0].get('lifecycle_reason')}, "
             f"so {len(unknown)} coord ruling(s) read UNKNOWN, not unscoped.",
