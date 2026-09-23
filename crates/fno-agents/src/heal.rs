@@ -203,6 +203,20 @@ const PINNED_FMT: &str = "+1.94.1";
 /// otherwise swallow anything a guard printed alongside a real failure.
 const SIGNATURES: &[Signature] = &[
     Signature {
+        name: "timed_out",
+        plan: "escalate: the job hit its timeout-minutes cap; cut or split the work",
+        matches: |c| c.log.contains("exceeded the maximum execution time"),
+        resolve: |c| {
+            Remedy::Escalate {
+                repro: format!(
+                    "{}: the job hit its timeout-minutes cap, so a rerun hits it again; cut or split the work",
+                    c.log
+                ),
+            }
+        },
+        rerunnable: false,
+    },
+    Signature {
         name: "cancelled",
         plan: "rerun: gh run rerun <run>, at most once per head sha",
         matches: |c| c.bucket == "cancel",
@@ -914,17 +928,21 @@ fn findings_for(
     let mut out = Vec::new();
     for row in failing_rows(&checks) {
         let check = row["name"].as_str().unwrap_or("").to_string();
-        let log = match job_id(row["link"].as_str().unwrap_or("")) {
-            Some(id) => gh_api(
-                a,
-                &format!("repos/{{owner}}/{{repo}}/actions/jobs/{id}/logs"),
-                &[],
-            )
-            // A log the API cannot serve (expired retention, a commit status
-            // with no job) is REPORTED as unreadable, never dropped: a check
-            // heal cannot read is still red.
-            .unwrap_or_else(|e| format!("log unavailable: {e}")),
-            None => "log unavailable: not an Actions job".to_string(),
+        let log = if let Some(timeout) = row.get("timeout").and_then(|v| v.as_str()) {
+            timeout.to_string()
+        } else {
+            match job_id(row["link"].as_str().unwrap_or("")) {
+                Some(id) => gh_api(
+                    a,
+                    &format!("repos/{{owner}}/{{repo}}/actions/jobs/{id}/logs"),
+                    &[],
+                )
+                // A log the API cannot serve (expired retention, a commit status
+                // with no job) is REPORTED as unreadable, never dropped: a check
+                // heal cannot read is still red.
+                .unwrap_or_else(|e| format!("log unavailable: {e}")),
+                None => "log unavailable: not an Actions job".to_string(),
+            }
         };
         let stripped = strip_timestamps(&log);
         let bucket = row["bucket"].as_str().unwrap_or("").to_string();

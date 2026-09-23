@@ -128,9 +128,32 @@ pub(crate) fn read_checks_rows(gh_bin: &str, cwd: &Path, head: &str) -> Result<V
         };
         for run in runs {
             raw.push(run.clone());
-            rows.push(json!({
+            let timeout = if run.get("conclusion").and_then(Value::as_str) == Some("cancelled")
+                && run
+                    .pointer("/output/annotations_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    > 0
+            {
+                run.get("id")
+                    .and_then(Value::as_u64)
+                    .and_then(|id| {
+                        gh_api_pages(
+                            gh_bin,
+                            cwd,
+                            &format!("repos/{{owner}}/{{repo}}/check-runs/{id}/annotations"),
+                        )
+                        .ok()
+                    })
+                    .and_then(|pages| {
+                        crate::pr_status_facts::timeout_annotation(&Value::Array(pages))
+                    })
+            } else {
+                None
+            };
+            let mut row = json!({
                 "name": run.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                "bucket": rest_bucket(run),
+                "bucket": if timeout.is_some() { "fail" } else { rest_bucket(run) },
                 "link": run.get("html_url").and_then(|v| v.as_str()).unwrap_or(""),
                 "workflow": run
                     .pointer("/check_suite/id")
@@ -138,7 +161,11 @@ pub(crate) fn read_checks_rows(gh_bin: &str, cwd: &Path, head: &str) -> Result<V
                     .unwrap_or_default(),
                 "startedAt": run.get("started_at").and_then(|v| v.as_str()).unwrap_or(""),
                 "completedAt": run.get("completed_at").and_then(|v| v.as_str()).unwrap_or(""),
-            }));
+            });
+            if let Some(timeout) = timeout {
+                row["timeout"] = json!(timeout);
+            }
+            rows.push(row);
         }
     }
     // A run that failed before minting a job owns no check run; the shared
@@ -1269,7 +1296,21 @@ mod tests {
             r#"#!/bin/sh
 D="$(dirname "$0")"
 for a in "$@"; do case "$a" in
+  */check-runs/*/annotations)
+    if [ -f "$D/fail-timeout-annotations" ]; then
+      echo "gh: annotation read failed" >&2
+      exit 1
+    fi
+    echo '[{"annotation_level":"failure","message":"The job has exceeded the maximum execution time of 35m0s"}]'
+    exit 0 ;;
   */check-runs)
+    if [ -f "$D/timeout-run" ]; then
+      echo '{"check_runs":[{"id":123,"name":"stress","status":"completed","conclusion":"cancelled","output":{"annotations_count":1},"started_at":"2026-09-19T06:00:00Z","completed_at":"2026-09-19T06:40:00Z","html_url":"https://github.com/o/r/actions/runs/123/job/456","check_suite":{"id":88}}]}'
+      exit 0 ;;
+    fi
+    if [ -f "$D/cancel-run" ]; then
+      echo '{"check_runs":[{"id":124,"name":"cancelled","status":"completed","conclusion":"cancelled","output":{"annotations_count":0},"started_at":"2026-09-19T06:00:00Z","completed_at":"2026-09-19T06:10:00Z","html_url":"https://github.com/o/r/actions/runs/124/job/457","check_suite":{"id":89}}]}'
+      exit 0 ;;
     echo '{"check_runs":[{"name":"rust-ci","status":"completed","conclusion":"success","started_at":"2026-09-19T06:00:00Z","completed_at":"2026-09-19T06:05:00Z","html_url":"https://github.com/o/r/actions/runs/35344488345/job/99","check_suite":{"id":7}}]}'
     exit 0 ;;
   */status)
@@ -1311,6 +1352,62 @@ exit 1
             "https://github.com/o/r/actions/runs/35366958901"
         );
         assert_eq!(hit["workflow"], ".github/workflows/cli-ci.yml");
+    }
+
+    #[test]
+    fn timeout_annotations_escalate_while_unannotated_and_unreadable_cancels_rerun() {
+        let message = "The job has exceeded the maximum execution time of 35m0s";
+        for (marker, check_name, expected_bucket, expected_signature) in [
+            ("timeout-run", "stress", "fail", "timed_out"),
+            ("cancel-run", "cancelled", "cancel", "cancelled"),
+            (
+                "timeout-run fail-timeout-annotations",
+                "stress",
+                "cancel",
+                "cancelled",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let gh = stub_gh(dir.path());
+            for flag in marker.split_whitespace() {
+                std::fs::write(dir.path().join(flag), b"").unwrap();
+            }
+            let rows = read_checks_rows(gh.to_str().unwrap(), dir.path(), "abc123").unwrap();
+            let row = rows
+                .iter()
+                .find(|row| row["name"] == check_name)
+                .expect("the check run row");
+            assert_eq!(row["bucket"], expected_bucket);
+            let log = row.get("timeout").and_then(Value::as_str).unwrap_or("");
+            if expected_signature == "timed_out" {
+                assert_eq!(row["timeout"], message);
+            } else {
+                assert!(row.get("timeout").is_none());
+            }
+            let check = row["name"].as_str().unwrap_or("");
+            let bucket = row["bucket"].as_str().unwrap_or("");
+            let link = row["link"].as_str().unwrap_or("");
+            let finding = crate::heal::classify(
+                &crate::heal::Ctx {
+                    check,
+                    log,
+                    bucket,
+                    link,
+                },
+                false,
+            );
+            assert_eq!(finding.signature, expected_signature);
+            match expected_signature {
+                "timed_out" => assert!(matches!(
+                    finding.remedy,
+                    crate::heal::Remedy::Escalate { .. }
+                )),
+                _ => assert!(matches!(
+                    finding.remedy,
+                    crate::heal::Remedy::Rerun { ref run_id } if run_id == "124"
+                )),
+            }
+        }
     }
 
     #[test]
