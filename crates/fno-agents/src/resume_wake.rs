@@ -519,8 +519,12 @@ pub(crate) fn claude_live_route_with(
     if cross_project {
         command.arg("--cross-project");
     }
-    if let Some(msg) = message {
-        command.args(["--message", msg]);
+    // The durable mail is the next-turn context; this resume only needs to
+    // wake the session, or it would inject the same body twice.
+    if !message_already_queued {
+        if let Some(msg) = message {
+            command.args(["--message", msg]);
+        }
     }
     if let Some(plan) = reentry_plan {
         crate::claude_supervisor::guard_birth_for_plan(&plan.env);
@@ -2744,5 +2748,39 @@ mod tests {
         );
         assert_eq!(code, Some(9));
         assert_eq!(never.get(), 0);
+    }
+
+    #[test]
+    fn durable_mail_wake_does_not_forward_the_queued_message() {
+        let mail_calls = std::cell::Cell::new(0u32);
+        for state in [Some("idle".to_string()), None] {
+            let code = claude_live_route_with(
+                "claude",
+                &None,
+                &None,
+                &live_entry(),
+                "live-w",
+                "/tmp/x",
+                &Some("go".to_string()),
+                true,
+                None,
+                false,
+                |_argv| {
+                    mail_calls.set(mail_calls.get() + 1);
+                    (0, String::new(), String::new())
+                },
+                |short| (short == "abcd1234").then(|| state.clone()).flatten(),
+                |command| {
+                    let args: Vec<String> = command
+                        .get_args()
+                        .map(|arg| arg.to_string_lossy().into_owned())
+                        .collect();
+                    assert_eq!(args, ["agents", "resume", "live-w", "--cwd", "/tmp/x"]);
+                    9
+                },
+            );
+            assert_eq!(code, Some(9));
+        }
+        assert_eq!(mail_calls.get(), 0);
     }
 }
