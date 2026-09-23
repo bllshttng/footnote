@@ -14709,8 +14709,6 @@ async fn xf331_hover_armed_non_verb_key_disarms_and_forwards() {
 
 #[tokio::test]
 async fn xf331_selector_r_on_an_agent_row_opens_rename() {
-    // `r` now renames the agent row under the selector, while preserving the
-    // no-PTY-send contract of the client-local overlay.
     let mut v = unified_rows_view();
     let mut buf: Vec<u8> = Vec::new();
     let idx = agent_row_at(&v, |a| a.pane_id == Some(10));
