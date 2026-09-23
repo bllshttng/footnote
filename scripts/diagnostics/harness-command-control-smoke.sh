@@ -14,7 +14,8 @@ usage: harness-command-control-smoke.sh --session <full-session-uuid> --harness 
 
 The selected session must already be a disposable session registered below
 the isolated FNO roots. This command does not create, restart, or re-point a
-live session.
+live session. Set FNO_SCREEN_EXPECT to a regex that is absent before each
+screen action and appears after it.
 USAGE
 }
 
@@ -84,6 +85,8 @@ fi
 
 RUN_DIR="$ROOT/command-control-smoke"
 mkdir -p "$RUN_DIR"
+RUN_ID="command-control-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+SCREEN_EXPECT="${FNO_SCREEN_EXPECT:-}"
 LS_OUT="$RUN_DIR/mux-ls.json"
 LS_ERR="$RUN_DIR/mux-ls.stderr"
 if ! "$MUX_BIN" mux ls --json >"$LS_OUT" 2>"$LS_ERR"; then
@@ -128,13 +131,19 @@ run_case() {
   local proof="$3"
   local expected="$4"
   local timeout_seconds="$5"
-  local request_id="command-control-${case_name}"
+  local screen_expect="${6:-$SCREEN_EXPECT}"
+  local expected_error="${7:-}"
+  local request_id="${RUN_ID}-${case_name}"
   local out="$RUN_DIR/${case_name}.stdout"
   local err="$RUN_DIR/${case_name}.stderr"
   local code=0
   local expect_args=()
   if [[ "$proof" == screen ]]; then
-    expect_args=(--expect .+)
+    if [[ -z "$screen_expect" ]]; then
+      echo "command-control-blocked: $case_name needs FNO_SCREEN_EXPECT" >&2
+      exit 2
+    fi
+    expect_args=(--expect "$screen_expect")
   fi
   set +e
   "$MUX_BIN" mux command "$SESSION" \
@@ -145,7 +154,21 @@ run_case() {
     "${expect_args[@]}" >"$out" 2>"$err"
   code=$?
   set -e
-  CASE_CODE="$code" CASE_OUT="$out" CASE_ERR="$err" CASE_EXPECTED="$expected" CASE_NAME="$case_name" SESSION="$SESSION" python3 - <<'PY'
+  local replay_out="$RUN_DIR/${case_name}.replay.stdout"
+  local replay_err="$RUN_DIR/${case_name}.replay.stderr"
+  local replay_code=0
+  if [[ "$expected" == unknown ]]; then
+    set +e
+    "$MUX_BIN" mux command "$SESSION" \
+      --text "$text" \
+      --proof "$proof" \
+      --timeout-seconds "$timeout_seconds" \
+      --request-id "$request_id" \
+      "${expect_args[@]}" >"$replay_out" 2>"$replay_err"
+    replay_code=$?
+    set -e
+  fi
+  CASE_CODE="$code" CASE_OUT="$out" CASE_ERR="$err" CASE_EXPECTED="$expected" CASE_EXPECTED_ERROR="$expected_error" CASE_NAME="$case_name" SESSION="$SESSION" CASE_REPLAY_OUT="$replay_out" CASE_REPLAY_CODE="$replay_code" python3 - <<'PY'
 import json
 import os
 import sys
@@ -154,6 +177,7 @@ from pathlib import Path
 name = os.environ["CASE_NAME"]
 code = int(os.environ["CASE_CODE"])
 expected = os.environ["CASE_EXPECTED"]
+expected_error = os.environ["CASE_EXPECTED_ERROR"]
 out = Path(os.environ["CASE_OUT"]).read_text(errors="replace")
 err = Path(os.environ["CASE_ERR"]).read_text(errors="replace")
 row = None
@@ -166,10 +190,24 @@ for line in out.splitlines():
         row = candidate
         break
 if expected == "refused":
-    if code == 0:
-        print(f"command-control-blocked: {name} unexpectedly succeeded", file=sys.stderr)
+    if (
+        code == 0
+        or not expected_error
+        or expected_error not in err
+        or row is None
+        or row.get("status") != "refused"
+        or row.get("session_id") != os.environ["SESSION"]
+    ):
+        print(f"command-control-blocked: {name} refusal lacked its expected reason: {err.strip()}", file=sys.stderr)
         raise SystemExit(2)
-    print(json.dumps({"case": name, "status": "refused", "exit": code, "stderr": err.strip()}))
+    if name == "pending-composer" and (
+        not row.get("before_digest")
+        or row.get("before_digest") != row.get("after_digest")
+        or "screen unchanged" not in row.get("detail", "")
+    ):
+        print(f"command-control-blocked: {name} did not prove the composer screen stayed unchanged", file=sys.stderr)
+        raise SystemExit(2)
+    print(json.dumps({"case": name, "expected": expected, "status": row["status"], "receipt": row, "exit": code}))
     raise SystemExit(0)
 if row is None:
     print(f"command-control-blocked: {name} returned no native receipt: {err.strip()}", file=sys.stderr)
@@ -177,7 +215,20 @@ if row is None:
 if row.get("status") != expected or row.get("session_id") != os.environ["SESSION"]:
     print(f"command-control-blocked: {name} receipt is not {expected} for the selected full session", file=sys.stderr)
     raise SystemExit(2)
-print(json.dumps({"case": name, "status": row["status"], "receipt": row, "exit": code}))
+if expected == "unknown":
+    replay = Path(os.environ["CASE_REPLAY_OUT"]).read_text(errors="replace")
+    replay_rows = []
+    for line in replay.splitlines():
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and "status" in candidate:
+            replay_rows.append(candidate)
+    if int(os.environ["CASE_REPLAY_CODE"]) == 0 or replay_rows != [row]:
+        print(f"command-control-blocked: {name} retry did not return the same unknown receipt", file=sys.stderr)
+        raise SystemExit(2)
+print(json.dumps({"case": name, "expected": expected, "status": row["status"], "receipt": row, "exit": code}))
 PY
 }
 
@@ -185,21 +236,21 @@ export SESSION
 # The sequence is intentionally explicit and ordered. Negative cases must
 # refuse before typing; positive cases must return the native postcondition.
 if [[ "$HARNESS" == codex ]]; then
-  run_case idle-goal "/goal" goal-active verified 30
-  run_case busy-refusal "/goal" goal-active refused 30
-  run_case pending-composer "/rc" screen verified 30
-  run_case screen-picker "/rc" screen verified 30
-  run_case timeout-no-retry "/compact" compact refused 1
-  run_case provider-compact "/compact" compact verified 30
   run_case paused-to-active "/goal resume" goal-active verified 30
+  run_case idle-goal "/goal" goal-active verified 30
+  run_case busy-refusal "/goal" goal-active refused 30 "" "refusing before typing"
+  run_case pending-composer "/rc" screen refused 30 "$SCREEN_EXPECT" "pending composer"
+  run_case screen-picker "/rc" screen verified 30 "$SCREEN_EXPECT"
+  run_case timeout-no-retry "/compact" compact unknown 1
+  run_case provider-compact "/compact" compact verified 30
 else
   run_case idle-status "/status" screen verified 30
-  run_case busy-refusal "/status" screen refused 30
-  run_case pending-composer "/rc" screen verified 30
-  run_case screen-picker "/rc" screen verified 30
-  run_case timeout-no-retry "/status" screen refused 1
-  run_case provider-compact "/compact" screen verified 30
-  run_case paused-to-active "/rc" screen verified 30
+  run_case busy-refusal "/status" screen refused 30 "$SCREEN_EXPECT" "refusing before typing"
+  run_case pending-composer "/rc" screen refused 30 "$SCREEN_EXPECT" "pending composer"
+  run_case screen-picker "/rc" screen verified 30 "$SCREEN_EXPECT"
+  run_case timeout-no-retry "/status" screen unknown 1 "$SCREEN_EXPECT"
+  run_case provider-compact "/compact" screen verified 30 "${FNO_COMPACT_SCREEN_EXPECT:-$SCREEN_EXPECT}"
+  run_case paused-to-active "/rc" screen verified 30 "$SCREEN_EXPECT"
 fi
 
 python3 - "$RUN_DIR" "$SESSION" "$HARNESS" "$ROOT" <<'PY'
@@ -220,7 +271,11 @@ for path in sorted(run_dir.glob("*.stdout")):
             continue
         if value.get("case"):
             rows.append(value)
-if len(rows) != 7 or any(row.get("status") not in {"verified", "refused"} for row in rows):
+if len(rows) != 7 or any(
+    row.get("status") != row.get("expected")
+    or row.get("status") not in {"verified", "refused", "unknown"}
+    for row in rows
+):
     print("command-control-blocked: command journey did not produce all seven classified receipts", file=sys.stderr)
     raise SystemExit(2)
 positive = [row for row in rows if row.get("status") == "verified"]
@@ -234,15 +289,8 @@ receipt = {
     "versions": {"fno": "native", "harness": harness},
     "session_id": session,
     "harness": harness,
-    "correlation_id": "command-control-" + session,
-    "continuation_owner": "native-command-controller",
+    "run_id": run_id,
     "action_hash": "sha256:" + hashlib.sha256(payload.encode()).hexdigest(),
-    "user_message_count": 0,
-    "window": {"source": "command-control-journey"},
-    "goal_before": {"status": "active"},
-    "goal_after": {"status": "active"},
-    "park_interval_seconds": 0,
-    "wake_result": "paused-to-active",
     "cases": rows,
     "root": str(root),
     "status": "verified",

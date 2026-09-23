@@ -200,13 +200,13 @@ bash scripts/diagnostics/harness-command-control-smoke.sh \
   --session <full-disposable-session-id> --harness <codex|claude>
 ```
 
-The independent continuation smoke creates its own private Git repository,
-`CODEX_HOME`, and FNO state. It sends one initial prompt, never sends mail or
-queue input, and writes a receipt only when an independent Stop block precedes
-a useful nonce action. The receipt also records provider versions, full ids,
-correlation, owner, action hash, user-message count, requested/default/max/
-percent/effective window facts, goal before/after, park interval, wake result,
-and repeated compaction/resume/private-daemon-replacement boundaries.
+The independent continuation probe creates its own private Git repository,
+`CODEX_HOME`, and FNO state. It sends one initial prompt and never sends mail
+or queue input. The current runner measures the independent Stop-to-nonce
+journey, but does not collect provider goal/window, quiet-park/wake, or repeated
+boundary receipts yet. It exits blocked without writing a full verification
+receipt; it never fills those fields from expected constants. The verifier
+accepts only the current receipt schema and rejects older synthetic receipts.
 
 ```bash
 python3 scripts/diagnostics/codex-reign-continuation-smoke.py --run

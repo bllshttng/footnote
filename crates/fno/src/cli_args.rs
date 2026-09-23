@@ -180,9 +180,6 @@ pub struct MuxCommandArgs {
     /// Maximum seconds spent waiting for the command-specific proof.
     #[arg(long, default_value_t = 30)]
     pub timeout_seconds: u64,
-    /// Defer a typed provider action until the next lifecycle boundary.
-    #[arg(long)]
-    pub at_next_boundary: bool,
     /// Stable id used to make retries idempotent.
     #[arg(long)]
     pub request_id: Option<String>,
@@ -1124,7 +1121,6 @@ mod tests {
             "contextCompaction",
             "--timeout-seconds",
             "9",
-            "--at-next-boundary",
             "--request-id",
             "req-1",
         ]);
@@ -1136,7 +1132,6 @@ mod tests {
                 assert_eq!(parsed.text, "/compact");
                 assert_eq!(parsed.proof, "compact");
                 assert_eq!(parsed.timeout_seconds, 9);
-                assert!(parsed.at_next_boundary);
                 assert_eq!(parsed.request_id.as_deref(), Some("req-1"));
             }
             other => panic!("native command door parsed incorrectly: {other:?}"),

@@ -556,7 +556,15 @@ fn stop_payload(sid: &str, message: Option<&str>) -> Value {
 #[test]
 fn stop_decision_schema_carries_the_correlation_contract() {
     let schema = include_str!("../../../cli/src/fno/events/schema.yaml");
-    assert!(schema.contains("- name: stop_decision"));
+    let stop_schema = schema
+        .split("- name: stop_decision")
+        .nth(1)
+        .and_then(|tail| tail.split("\n  - name:").next())
+        .expect("stop_decision schema row exists");
+    let required = stop_schema
+        .lines()
+        .find(|line| line.contains("required:"))
+        .expect("stop_decision declares required fields");
     for field in [
         "session_id",
         "raw_identity_candidates",
@@ -572,13 +580,12 @@ fn stop_decision_schema_carries_the_correlation_contract() {
         "harness_output_contract",
     ] {
         assert!(
-            schema.contains(&format!("required: [")) && schema.contains(field)
-                || schema.contains(&format!("        - {field}")),
+            required.contains(field),
             "stop_decision must require {field}"
         );
     }
     assert!(
-        schema.contains("enum: [empty, json_block, exit_2_stderr]"),
+        stop_schema.contains("enum: [empty, json_block, exit_2_stderr]"),
         "stop_decision must describe the empty allow output contract"
     );
 }

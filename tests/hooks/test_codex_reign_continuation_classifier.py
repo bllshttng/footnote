@@ -194,3 +194,16 @@ def test_missing_positive_evidence_is_malformed_not_verified():
     assert result["ok"] is False
     assert result["class"] == "malformed-output"
     assert result["failed_reader"] == "receipt.correlation_id"
+
+
+def test_previous_receipt_schema_is_not_accepted_as_current_live_evidence():
+    receipt = verified_receipt()
+    receipt["schema_version"] = 1
+
+    result = load_diagnostic().classify_receipt(receipt)
+
+    assert result == {
+        "ok": False,
+        "class": "malformed-output",
+        "failed_reader": "receipt.schema_version",
+    }

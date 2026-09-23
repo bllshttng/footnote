@@ -972,6 +972,12 @@ fn arbitrate_codex_continuation_from_reading(
     let Some(scope) = first_raw_field(manifest, &["scope", "crown_scope"]) else {
         return GoalArbitration::Refusal("active Codex goal has no crown scope".into());
     };
+    let expected_owner = format!("king:{}", scope.trim());
+    if owner != expected_owner {
+        return GoalArbitration::Refusal(format!(
+            "active Codex goal owner must derive from crown scope: expected {expected_owner:?}, got {owner:?}"
+        ));
+    }
     let expected_objective = crate::codex_thread::reign_objective(&scope);
     if live.objective != expected_objective {
         return GoalArbitration::Refusal(format!(
@@ -1750,6 +1756,16 @@ mod tests {
             ),
             GoalArbitration::Delegated
         );
+        let conflicting_owner = format!("{manifest}continuation_owner: king:scope-b\n");
+        assert!(matches!(
+            arbitrate_codex_continuation_from_reading(
+                "king",
+                &fire,
+                &conflicting_owner,
+                Ok(Some(active.clone()))
+            ),
+            GoalArbitration::Refusal(reason) if reason.contains("derive from crown scope")
+        ));
         assert_eq!(
             arbitrate_codex_continuation_from_reading("king", &fire, manifest, Ok(None)),
             GoalArbitration::None

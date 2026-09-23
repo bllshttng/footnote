@@ -255,6 +255,29 @@ async fn provider_action(
         }
         "thread/goal/set" => {
             let (objective, owner) = goal_set_contract(command, scope, session_id)?;
+            if command.trim() == "/goal resume" {
+                let current = thread
+                    .goal_get_typed()
+                    .await
+                    .map_err(|error| format!("Codex provider goal unreadable: {error}"))?
+                    .ok_or_else(|| "Codex goal resume refused: no paused reign goal".to_string())?;
+                verify_goal(&current, &objective, GoalStatus::Paused, "resume")?;
+                let active = thread
+                    .goal_set_typed(&current.objective, GoalStatus::Active)
+                    .await
+                    .map_err(|error| format!("Codex provider goal resume refused: {error}"))?;
+                verify_goal(&active, &objective, GoalStatus::Active, "resume")?;
+                return Ok(json!({
+                    "verified": true,
+                    "action": "goal_set",
+                    "provider": "codex",
+                    "thread_id": session_id,
+                    "status": "active",
+                    "previous_status": "paused",
+                    "objective": active.objective,
+                    "continuation_owner": owner,
+                }));
+            }
             let current = thread
                 .goal_get_typed()
                 .await
@@ -302,6 +325,16 @@ fn goal_set_contract(
     scope: &str,
     session_id: &str,
 ) -> Result<(String, String), String> {
+    if command.trim() == "/goal resume" {
+        let scope = scope.trim();
+        if scope.is_empty() {
+            return Err("Codex goal resume requires the exact crown scope".into());
+        }
+        return Ok((
+            crate::codex_thread::reign_objective(scope),
+            format!("king:{scope}"),
+        ));
+    }
     let objective = command
         .trim()
         .strip_prefix("/goal")
@@ -335,12 +368,8 @@ fn continuation_owner_for_goal(
         }
         return Ok(format!("king:{}", scope.trim()));
     }
-    if let Some(reign_scope) = objective.strip_prefix("$fno:reign ") {
-        let reign_scope = reign_scope.trim();
-        if reign_scope.is_empty() {
-            return Err("Codex reign goal objective has no scope".into());
-        }
-        return Ok(format!("king:{reign_scope}"));
+    if objective.starts_with("$fno:reign ") {
+        return Err("Codex reign goal owner requires the exact manifest scope".into());
     }
     if session_id.trim().is_empty() {
         return Err("Codex provider goal has no exact session id".into());
@@ -492,9 +521,15 @@ mod tests {
     fn goal_set_contract_does_not_offer_clear_and_keeps_reign_scope_pinned() {
         assert!(goal_set_contract("/goal clear", "x-aaaa", "thread-1").is_err());
         assert!(goal_set_contract("/goal $fno:reign x-bbbb", "x-aaaa", "thread-1").is_err());
+        assert!(goal_set_contract("/goal $fno:reign x-aaaa", "", "thread-1").is_err());
         assert_eq!(
-            goal_set_contract("/goal $fno:reign x-aaaa", "", "thread-1").unwrap(),
-            ("$fno:reign x-aaaa".to_string(), "king:x-aaaa".to_string())
+            goal_set_contract("/goal resume", "scope-a", "thread-1").unwrap(),
+            ("$fno:reign scope-a".to_string(), "king:scope-a".to_string())
+        );
+        assert!(goal_set_contract("/goal resume", "", "thread-1").is_err());
+        assert_eq!(
+            goal_set_contract("/goal keep working", "", "thread-1").unwrap(),
+            ("keep working".to_string(), "target:thread-1".to_string())
         );
     }
 

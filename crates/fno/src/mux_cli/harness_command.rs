@@ -182,12 +182,150 @@ fn reserve_receipt_at(path: &std::path::Path, receipt: &CommandReceipt) -> Resul
     Ok(true)
 }
 
+fn write_refused_receipt(receipt: &CommandReceipt) -> Result<(), String> {
+    let path = receipt_path(&receipt.request_id)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| format!("cannot record refusal receipt: {error}"))?;
+    let body = serde_json::to_vec_pretty(receipt)
+        .map_err(|error| format!("encode refusal receipt: {error}"))?;
+    file.write_all(&body)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("write refusal receipt: {error}"))
+}
+
 fn command_status_exit_code(status: &str) -> i32 {
     match status {
         "verified" => EXIT_OK,
         "unknown" => EXIT_CONTROL_UNANSWERED,
         _ => EXIT_ERROR,
     }
+}
+
+fn pane_infos(sock: &Path, session: &str) -> Result<Vec<proto::PaneInfo>, String> {
+    match control_roundtrip(sock, session, ControlVerb::PaneLs)
+        .map_err(|error| format!("portal pane list unreadable: {error}"))?
+    {
+        ServerMsg::PaneList { panes } => Ok(panes),
+        ServerMsg::Err { msg, .. } => Err(format!("portal pane list refused: {msg}")),
+        other => Err(format!("unexpected portal pane-list reply: {other:?}")),
+    }
+}
+
+struct OwnedPortal {
+    sock: std::path::PathBuf,
+    session: String,
+    pane: u64,
+    index: u8,
+    identity: String,
+}
+
+impl Drop for OwnedPortal {
+    fn drop(&mut self) {
+        let still_owned = pane_infos(&self.sock, &self.session)
+            .ok()
+            .is_some_and(|panes| {
+                panes.iter().any(|pane| {
+                    pane.pane_id == self.pane
+                        && pane.fno_id.as_deref() == Some(self.identity.as_str())
+                })
+            });
+        if !still_owned {
+            eprintln!(
+                "fno mux command: leaving portal {} pane {} open because its identity changed",
+                self.index, self.pane
+            );
+            return;
+        }
+        match control_roundtrip(
+            &self.sock,
+            &self.session,
+            ControlVerb::PaneKill {
+                pane: self.pane,
+                hand_off_to: None,
+            },
+        ) {
+            Ok(ServerMsg::Ok) => {}
+            Ok(ServerMsg::Err { msg, .. }) => eprintln!(
+                "fno mux command: owned portal {} pane {} cleanup refused: {msg}",
+                self.index, self.pane
+            ),
+            Ok(other) => eprintln!(
+                "fno mux command: owned portal {} pane {} cleanup returned {other:?}",
+                self.index, self.pane
+            ),
+            Err(error) => eprintln!(
+                "fno mux command: owned portal {} pane {} cleanup failed: {error}",
+                self.index, self.pane
+            ),
+        }
+    }
+}
+
+fn open_command_portal(
+    row_name: &str,
+    session_id: &str,
+    env_session: Option<&str>,
+) -> Result<OwnedPortal, String> {
+    let session = resolve_session(None, env_session);
+    let sock = proto::socket_path(&session).map_err(|error| error.to_string())?;
+    let before = pane_infos(&sock, &session)?;
+    if before
+        .iter()
+        .any(|pane| pane.fno_id.as_deref() == Some(session_id))
+    {
+        return Err("paneless row already has a pane view; refusing to repoint it".into());
+    }
+    let placement = PanePlacement {
+        portal_new: true,
+        ..PanePlacement::default()
+    };
+    let landing = match control_roundtrip(
+        &sock,
+        &session,
+        ControlVerb::ThreadPane {
+            name: row_name.to_string(),
+            portal: None,
+            placement,
+        },
+    )
+    .map_err(|error| format!("new portal result unknown: {error}"))?
+    {
+        ServerMsg::Notice { text } => text,
+        ServerMsg::Err { msg, .. } => return Err(format!("new portal refused: {msg}")),
+        other => return Err(format!("unexpected new portal reply: {other:?}")),
+    };
+    if !landing.contains("thread pane ->") {
+        return Err(format!("new portal did not confirm a landing: {landing}"));
+    }
+    let portal_index = Regex::new(r"\(portal ([0-9]+)\)")
+        .ok()
+        .and_then(|regex| regex.captures(&landing))
+        .and_then(|captures| captures.get(1))
+        .and_then(|index| index.as_str().parse::<u8>().ok())
+        .ok_or_else(|| format!("new portal reply has no owned portal index: {landing}"))?;
+    let after = pane_infos(&sock, &session)?;
+    let before_ids = before.iter().map(|pane| pane.pane_id).collect::<Vec<_>>();
+    let added = after
+        .iter()
+        .filter(|pane| {
+            pane.fno_id.as_deref() == Some(session_id) && !before_ids.contains(&pane.pane_id)
+        })
+        .collect::<Vec<_>>();
+    if added.len() != 1 {
+        return Err(format!(
+            "portal {portal_index} landed without exactly one new pane joined to session {session_id}"
+        ));
+    }
+    Ok(OwnedPortal {
+        sock,
+        session,
+        pane: added[0].pane_id,
+        index: portal_index,
+        identity: session_id.to_string(),
+    })
 }
 
 fn cleanup_receipts() {
@@ -302,13 +440,22 @@ fn provider_receipt_matches(
                 }
             }
             if method == "thread/goal/set" {
-                let Some(objective) = command
-                    .trim()
-                    .strip_prefix("/goal")
-                    .map(str::trim)
-                    .filter(|objective| !objective.is_empty())
-                else {
-                    return false;
+                let resume = command.trim() == "/goal resume";
+                let objective = if resume {
+                    let Some(scope) = scope.filter(|scope| !scope.trim().is_empty()) else {
+                        return false;
+                    };
+                    format!("$fno:reign {}", scope.trim())
+                } else {
+                    let Some(objective) = command
+                        .trim()
+                        .strip_prefix("/goal")
+                        .map(str::trim)
+                        .filter(|objective| !objective.is_empty())
+                    else {
+                        return false;
+                    };
+                    objective.to_string()
                 };
                 let expected_owner = if !scope.unwrap_or_default().trim().is_empty() {
                     format!("king:{}", scope.unwrap_or_default().trim())
@@ -317,8 +464,14 @@ fn provider_receipt_matches(
                 } else {
                     format!("target:{session_id}")
                 };
-                receipt.get("objective").and_then(serde_json::Value::as_str) == Some(objective)
+                receipt.get("objective").and_then(serde_json::Value::as_str)
+                    == Some(objective.as_str())
                     && owner == expected_owner
+                    && (!resume
+                        || receipt
+                            .get("previous_status")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("paused"))
             } else {
                 true
             }
@@ -400,7 +553,7 @@ fn run_provider_action(
     Ok((receipt, raw))
 }
 
-pub fn command(args: MuxCommandArgs, _env_session: Option<&str>) -> i32 {
+pub fn command(args: MuxCommandArgs, env_session: Option<&str>) -> i32 {
     let proof = match ProofKind::parse(&args.proof) {
         Ok(proof) => proof,
         Err(error) => {
@@ -463,24 +616,60 @@ pub fn command(args: MuxCommandArgs, _env_session: Option<&str>) -> i32 {
         eprintln!("fno mux command: live row has no full harness session id");
         return EXIT_ERROR;
     };
-    if row.exited
-        || row.dnd
-        || row.badge == Some(crate::proto::AgentBadge::Working)
-        || row.answerable.is_some()
-    {
-        eprintln!(
-            "fno mux command: refusing before typing; the selected row is busy, blocked, or held"
-        );
-        return EXIT_ERROR;
-    }
     let harness = row.harness.clone().unwrap_or_default();
     let recipe = action_for(&harness, &args.text, proof);
-    if args.at_next_boundary {
-        if recipe.is_none() {
-            eprintln!("fno mux command: --at-next-boundary requires a typed provider action");
-            return EXIT_USAGE;
+    let refusal = if row.exited {
+        Some("selected row is exited")
+    } else if row.dnd {
+        Some("selected row is held by DND")
+    } else if row.answerable.is_some() {
+        Some("selected row has a pending composer")
+    } else if row.badge == Some(crate::proto::AgentBadge::Working) {
+        Some("selected row is busy")
+    } else {
+        None
+    };
+    if let Some(reason) = refusal {
+        let (before_digest, after_digest) = row
+            .mux
+            .as_ref()
+            .and_then(|(mux_session, pane)| {
+                let sock = proto::socket_path(mux_session).ok()?;
+                let before = pane_text(&sock, mux_session, *pane).ok()?;
+                let after = pane_text(&sock, mux_session, *pane).ok()?;
+                Some((digest(&before), digest(&after)))
+            })
+            .unwrap_or_default();
+        let receipt = CommandReceipt {
+            request_id,
+            selector: args.selector,
+            session_id: session_id.clone(),
+            harness,
+            transport: recipe
+                .as_ref()
+                .map(|(transport, _, _)| transport.clone())
+                .unwrap_or_else(|| if row.mux.is_some() { "pane" } else { "portal" }.into()),
+            expected_identity: session_id,
+            command: args.text,
+            proof: proof.word().into(),
+            status: CommandStatus::Refused.word().into(),
+            before_digest: before_digest.clone(),
+            after_digest: after_digest.clone(),
+            detail: format!(
+                "refused before typing: {reason}; screen {}",
+                if !before_digest.is_empty() && before_digest == after_digest {
+                    "unchanged"
+                } else {
+                    "unchanged state unverified"
+                }
+            ),
+        };
+        if let Err(error) = write_refused_receipt(&receipt) {
+            eprintln!("fno mux command: {error}");
+            return EXIT_ERROR;
         }
-        eprintln!("fno mux command: boundary scheduling is not available on this controller");
+        eprintln!("fno mux command: {}", receipt.detail);
+        print_receipt(&receipt);
         return EXIT_ERROR;
     }
     if recipe.is_none() && proof != ProofKind::Screen {
@@ -490,14 +679,10 @@ pub fn command(args: MuxCommandArgs, _env_session: Option<&str>) -> i32 {
         );
         return EXIT_USAGE;
     }
-    if recipe.is_none() && row.mux.is_none() {
-        eprintln!("fno mux command: paneless row has no declared provider action");
-        return EXIT_ERROR;
-    }
     let transport = recipe
         .as_ref()
         .map(|(transport, _, _)| transport.as_str())
-        .unwrap_or("pane");
+        .unwrap_or(if row.mux.is_some() { "pane" } else { "portal" });
     let reservation = CommandReceipt {
         request_id: request_id.clone(),
         selector: args.selector.clone(),
@@ -594,144 +779,171 @@ pub fn command(args: MuxCommandArgs, _env_session: Option<&str>) -> i32 {
             EXIT_CONTROL_UNANSWERED
         };
     }
-    match row.mux.clone() {
-        None => {
-            eprintln!("fno mux command: paneless row has no declared provider action");
-            return EXIT_ERROR;
-        }
-        Some((session, pane)) => {
-            let sock = match proto::socket_path(&session) {
-                Ok(path) => path,
-                Err(error) => {
-                    eprintln!("fno mux command: {error}");
-                    return EXIT_USAGE;
-                }
-            };
-            let before = match pane_text(&sock, &session, pane) {
-                Ok(text) => text,
-                Err(error) => {
-                    eprintln!("fno mux command: cannot read before screen: {error}");
+    let (session, pane, _owned_portal) = match row.mux.clone() {
+        Some((session, pane)) => (session, pane, None),
+        None => match open_command_portal(&row.name, &session_id, env_session) {
+            Ok(portal) => (portal.session.clone(), portal.pane, Some(portal)),
+            Err(error) => {
+                let mut receipt = reservation.clone();
+                receipt.detail = format!("paneless portal result unknown: {error}");
+                if let Err(write_error) = write_receipt(&receipt) {
+                    eprintln!("fno mux command: {write_error}");
                     return EXIT_ERROR;
                 }
-            };
-            let expected_identity = session_id.clone();
-            if let Err(error) = send_pane_bytes(
-                &sock,
-                &session,
-                pane,
-                args.text.clone().into_bytes(),
-                true,
-                Some(&expected_identity),
-            ) {
-                let receipt = CommandReceipt {
-                    request_id,
-                    selector: args.selector,
-                    session_id,
-                    harness,
-                    transport: "pane".into(),
-                    expected_identity: expected_identity.clone(),
-                    command: args.text,
-                    proof: proof.word().into(),
-                    status: classify_postcondition(true, Err(error.to_string()))
-                        .word()
-                        .into(),
-                    before_digest: digest(&before),
-                    after_digest: digest(&before),
-                    detail: "text submission reply lost; command outcome is unknown".into(),
-                };
-                let _ = write_receipt(&receipt);
                 print_receipt(&receipt);
                 return EXIT_CONTROL_UNANSWERED;
             }
-            if let Err(error) = send_pane_bytes(
-                &sock,
-                &session,
-                pane,
-                vec![b'\r'],
-                false,
-                Some(&expected_identity),
-            ) {
-                let receipt = CommandReceipt {
-                    request_id,
-                    selector: args.selector,
-                    session_id,
-                    harness,
-                    transport: "pane".into(),
-                    expected_identity: expected_identity.clone(),
-                    command: args.text,
-                    proof: proof.word().into(),
-                    status: CommandStatus::Unknown.word().into(),
-                    before_digest: digest(&before),
-                    after_digest: digest(&before),
-                    detail: format!("submission reply lost: {error}"),
-                };
-                let _ = write_receipt(&receipt);
+        },
+    };
+    let sock = if let Some(portal) = _owned_portal.as_ref() {
+        portal.sock.clone()
+    } else {
+        match proto::socket_path(&session) {
+            Ok(path) => path,
+            Err(error) => {
+                let mut receipt = reservation.clone();
+                receipt.status = CommandStatus::Refused.word().into();
+                receipt.detail =
+                    format!("refused before typing: mux socket is unavailable: {error}");
+                if let Err(write_error) = write_receipt(&receipt) {
+                    eprintln!("fno mux command: {write_error}");
+                    return EXIT_ERROR;
+                }
                 print_receipt(&receipt);
-                return EXIT_CONTROL_UNANSWERED;
+                return EXIT_USAGE;
             }
-            let expected = args
-                .expect
-                .as_deref()
-                .and_then(|pattern| Regex::new(pattern).ok())
-                .expect("screen proof validates its expected regex before submission");
-            let deadline = Instant::now() + Duration::from_secs(args.timeout_seconds);
-            let mut after = String::new();
-            let mut verified = false;
-            let mut last_read_error = None;
-            loop {
-                match pane_text(&sock, &session, pane) {
-                    Ok(text) => {
-                        verified = screen_postcondition_matches(&before, &text, &expected);
-                        after = text;
-                        last_read_error = None;
-                        if verified {
-                            break;
-                        }
-                    }
-                    Err(error) => last_read_error = Some(error.to_string()),
-                }
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(100).min(remaining));
-            }
-            let status = classify_postcondition(true, Ok(verified));
-            let receipt = CommandReceipt {
-                request_id,
-                selector: args.selector,
-                session_id,
-                harness,
-                transport: "pane".into(),
-                expected_identity,
-                command: args.text,
-                proof: proof.word().into(),
-                status: status.word().into(),
-                before_digest: digest(&before),
-                after_digest: digest(&after),
-                detail: if verified {
-                    "identity-pinned pane postcondition observed".into()
-                } else if let Some(error) = last_read_error {
-                    format!("screen postcondition unreadable before timeout: {error}")
-                } else {
-                    format!(
-                        "screen postcondition not observed within {}s",
-                        args.timeout_seconds
-                    )
-                },
-            };
-            if let Err(error) = write_receipt(&receipt) {
-                eprintln!("fno mux command: {error}");
+        }
+    };
+    let before = match pane_text(&sock, &session, pane) {
+        Ok(text) => text,
+        Err(error) => {
+            let mut receipt = reservation.clone();
+            receipt.status = CommandStatus::Refused.word().into();
+            receipt.detail = format!("refused before typing: cannot read before screen: {error}");
+            if let Err(write_error) = write_receipt(&receipt) {
+                eprintln!("fno mux command: {write_error}");
                 return EXIT_ERROR;
             }
             print_receipt(&receipt);
-            return if status == CommandStatus::Verified {
-                EXIT_OK
-            } else {
-                EXIT_CONTROL_UNANSWERED
-            };
+            return EXIT_ERROR;
         }
+    };
+    let expected_identity = session_id.clone();
+    if let Err(error) = send_pane_bytes(
+        &sock,
+        &session,
+        pane,
+        args.text.clone().into_bytes(),
+        true,
+        Some(&expected_identity),
+    ) {
+        let receipt = CommandReceipt {
+            request_id,
+            selector: args.selector,
+            session_id,
+            harness,
+            transport: reservation.transport.clone(),
+            expected_identity: expected_identity.clone(),
+            command: args.text,
+            proof: proof.word().into(),
+            status: classify_postcondition(true, Err(error.to_string()))
+                .word()
+                .into(),
+            before_digest: digest(&before),
+            after_digest: digest(&before),
+            detail: "text submission reply lost; command outcome is unknown".into(),
+        };
+        let _ = write_receipt(&receipt);
+        print_receipt(&receipt);
+        return EXIT_CONTROL_UNANSWERED;
     }
+    if let Err(error) = send_pane_bytes(
+        &sock,
+        &session,
+        pane,
+        vec![b'\r'],
+        false,
+        Some(&expected_identity),
+    ) {
+        let receipt = CommandReceipt {
+            request_id,
+            selector: args.selector,
+            session_id,
+            harness,
+            transport: reservation.transport.clone(),
+            expected_identity: expected_identity.clone(),
+            command: args.text,
+            proof: proof.word().into(),
+            status: CommandStatus::Unknown.word().into(),
+            before_digest: digest(&before),
+            after_digest: digest(&before),
+            detail: format!("submission reply lost: {error}"),
+        };
+        let _ = write_receipt(&receipt);
+        print_receipt(&receipt);
+        return EXIT_CONTROL_UNANSWERED;
+    }
+    let expected = args
+        .expect
+        .as_deref()
+        .and_then(|pattern| Regex::new(pattern).ok())
+        .expect("screen proof validates its expected regex before submission");
+    let deadline = Instant::now() + Duration::from_secs(args.timeout_seconds);
+    let mut after = String::new();
+    let mut verified = false;
+    let mut last_read_error = None;
+    loop {
+        match pane_text(&sock, &session, pane) {
+            Ok(text) => {
+                verified = screen_postcondition_matches(&before, &text, &expected);
+                after = text;
+                last_read_error = None;
+                if verified {
+                    break;
+                }
+            }
+            Err(error) => last_read_error = Some(error.to_string()),
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100).min(remaining));
+    }
+    let status = classify_postcondition(true, Ok(verified));
+    let receipt = CommandReceipt {
+        request_id,
+        selector: args.selector,
+        session_id,
+        harness,
+        transport: reservation.transport.clone(),
+        expected_identity,
+        command: args.text,
+        proof: proof.word().into(),
+        status: status.word().into(),
+        before_digest: digest(&before),
+        after_digest: digest(&after),
+        detail: if verified {
+            "identity-pinned pane postcondition observed".into()
+        } else if let Some(error) = last_read_error {
+            format!("screen postcondition unreadable before timeout: {error}")
+        } else {
+            format!(
+                "screen postcondition not observed within {}s",
+                args.timeout_seconds
+            )
+        },
+    };
+    if let Err(error) = write_receipt(&receipt) {
+        eprintln!("fno mux command: {error}");
+        return EXIT_ERROR;
+    }
+    print_receipt(&receipt);
+    return if status == CommandStatus::Verified {
+        EXIT_OK
+    } else {
+        EXIT_CONTROL_UNANSWERED
+    };
 }
 
 #[cfg(test)]
@@ -867,6 +1079,40 @@ mod tests {
             Some("other"),
             "/goal status",
             &get_receipt
+        ));
+
+        let resumed_receipt = serde_json::json!({
+            "verified": true,
+            "action": "goal_set",
+            "thread_id": "thread-1",
+            "status": "active",
+            "previous_status": "paused",
+            "objective": "$fno:reign court",
+            "continuation_owner": "king:court"
+        });
+        assert!(provider_receipt_matches(
+            "thread/goal/set",
+            "goal-active",
+            "thread-1",
+            Some("court"),
+            "/goal resume",
+            &resumed_receipt
+        ));
+        let missing_pause = serde_json::json!({
+            "verified": true,
+            "action": "goal_set",
+            "thread_id": "thread-1",
+            "status": "active",
+            "objective": "$fno:reign court",
+            "continuation_owner": "king:court"
+        });
+        assert!(!provider_receipt_matches(
+            "thread/goal/set",
+            "goal-active",
+            "thread-1",
+            Some("court"),
+            "/goal resume",
+            &missing_pause
         ));
     }
 
