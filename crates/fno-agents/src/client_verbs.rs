@@ -1830,16 +1830,8 @@ where
     let dead = matches!(truth_state.as_deref(), Some("done" | "stalled"));
 
     if live && !short_id.is_empty() {
-        // Deliberately silent on mechanism: the caller (`run_resume`) decides
-        // AFTER this returns whether the row gets --print-command'd, the
-        // Python headless wake-and-verify delegation, or (a mux pane row
-        // never reaches this arm, so that leaves) nothing else -- an
-        // "attaching" claim printed here was true when this arm always led
-        // to a bare `claude attach` exec, and stayed on the screen after the
-        // delegation replaced that exec with a wake that never attaches at
-        // all. The caller's own downstream output (the printed command, or
-        // fno-py's before -> after line) is what actually describes what
-        // happened.
+        // The caller decides whether to print the command, deliver through
+        // control.sock, or use a mux pane; downstream output names the action.
         eprintln!("fno agents resume: {name} is live");
         let argv = crate::harness_capabilities::render_session_argv_with_ids(
             "claude",
