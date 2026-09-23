@@ -95,188 +95,12 @@ pub enum TerminationReason {
     Aborted,
 }
 
-// ── manifest parsing ──────────────────────────────────────────────────────────
-
-#[derive(Debug, PartialEq)]
-enum Intent {
-    Promise,
-    Aborted {
-        reason: String,
-    },
-    /// Agent-declared async watch: it has armed a harness-tracked
-    /// watcher and wants the session to idle until that watcher fires rather
-    /// than re-blocking every stop tick. All attributes are advisory (used for
-    /// the event and the lease math), never load-bearing: external truth
-    /// decides whether idling is actually allowed.
-    Watching {
-        reason: String,
-        pr: Option<String>,
-        timeout: Option<String>,
-    },
-    None,
-}
-
-fn extract_assistant_text(val: &Value) -> String {
-    // Try /message/content as string
-    if let Some(s) = val.pointer("/message/content").and_then(|v| v.as_str()) {
-        return s.to_string();
-    }
-    // Try /message/content as array of blocks
-    if let Some(arr) = val.pointer("/message/content").and_then(|v| v.as_array()) {
-        let mut parts = Vec::new();
-        for block in arr {
-            // Only include text blocks (not tool_use, tool_result)
-            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
-                    parts.push(t.to_string());
-                }
-            }
-        }
-        return parts.join(" ");
-    }
-    // Fallback: top-level content
-    if let Some(s) = val.get("content").and_then(|v| v.as_str()) {
-        return s.to_string();
-    }
-    String::new()
-}
-
-/// Detect intent with proper attribute extraction. Precedence within one
-/// message: aborted > watching > promise. aborted is the hardest stop;
-/// watching outranks promise so a session that both promises and asks to idle
-/// idles (its promise is re-evaluated on the next wake).
-fn detect_intent_from_text(text: &str) -> Intent {
-    // Look for <aborted ...> tag
-    if let Some(aborted_start) = text.find("<aborted") {
-        // Find the closing >
-        if let Some(gt) = text[aborted_start..].find('>') {
-            let tag_text = &text[aborted_start..aborted_start + gt + 1];
-            let reason = parse_xml_attr(tag_text, "reason").unwrap_or_default();
-            return Intent::Aborted { reason };
-        }
-    }
-    if let Some(w_start) = text.find("<watching") {
-        if let Some(gt) = text[w_start..].find('>') {
-            let tag_text = &text[w_start..w_start + gt + 1];
-            return Intent::Watching {
-                reason: parse_xml_attr(tag_text, "reason").unwrap_or_default(),
-                pr: parse_xml_attr(tag_text, "pr"),
-                timeout: parse_xml_attr(tag_text, "timeout"),
-            };
-        }
-    }
-    if text.contains("<promise>") {
-        return Intent::Promise;
-    }
-    Intent::None
-}
-
-pub(crate) fn parse_xml_attr(tag_text: &str, attr: &str) -> Option<String> {
-    let pattern = format!(r#"{attr}=""#);
-    let start = tag_text.find(&pattern)? + pattern.len();
-    let end = tag_text[start..].find('"')?;
-    Some(tag_text[start..start + end].to_string())
-}
-
-/// Extract `last_assistant_message` from the Stop-hook stdin JSON
-///. The harness emits it as a plain string (the stopping
-/// turn's final assistant text, blocks joined by newline and trimmed),
-/// omitted when empty. Any parse failure -> None so the caller falls back
-/// to the transcript scan.
-fn extract_last_assistant_message(hook_input: &str) -> Option<String> {
-    let val: Value = serde_json::from_str(hook_input).ok()?;
-    let s = val.get("last_assistant_message")?.as_str()?;
-    let trimmed = s.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-/// A-primary, B-fallback intent read. A present payload is the
-/// stopping turn's final text - recomputed per fire, race-free, overwrite-
-/// proof - and is authoritative, INCLUDING its "no tag" answer. Falling
-/// through to the transcript behind a tag-less payload would resurrect the
-/// stale-promise edge the bounded scan exists to contain. Returns the intent
-/// plus its source for the loop_check event (`payload` | `transcript`).
-fn detect_intent(
-    last_assistant_message: Option<&str>,
-    transcript_path: &Path,
-) -> (Intent, &'static str) {
-    match last_assistant_message {
-        Some(text) => (detect_intent_from_text(text), "payload"),
-        None => (detect_intent_full(transcript_path), "transcript"),
-    }
-}
-
-/// Fallback transcript scan: bounded lookback over the
-/// newest INTENT_LOOKBACK_ENTRIES assistant text entries instead of
-/// last-line-only. Newest tag wins; a tag-less entry no longer ends the
-/// scan, which covers the promise-overwritten-by-block-feedback shape when
-/// no payload exists. The bound is load-bearing: a stale promise from
-/// pivoted work must fall out of the window (done()'s head_shipped read is
-/// the real gate against the remainder).
-const INTENT_LOOKBACK_ENTRIES: usize = 5;
-
-fn detect_intent_full(transcript_path: &Path) -> Intent {
-    let Ok(content) = std::fs::read_to_string(transcript_path) else {
-        return Intent::None;
-    };
-
-    let lines: Vec<&str> = content.lines().collect();
-    let mut scanned: usize = 0;
-    // `watching` is honored ONLY from the single newest assistant entry
-    //: a stale watch-request from earlier work must not idle a session
-    // that has since moved on. `promise`/`aborted` keep their bounded lookback.
-    let mut newest_entry = true;
-    for line in lines.iter().rev() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(val) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let role = val
-            .pointer("/message/role")
-            .or_else(|| val.get("role"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if role != "assistant" {
-            continue;
-        }
-        let text = extract_assistant_text(&val);
-        if text.is_empty() {
-            continue;
-        }
-        match detect_intent_from_text(&text) {
-            Intent::None => {
-                scanned += 1;
-                if scanned >= INTENT_LOOKBACK_ENTRIES {
-                    return Intent::None;
-                }
-            }
-            // A watching tag below the newest entry is stale: skip it (counts
-            // as a scanned entry) and keep scanning for a promise/aborted.
-            Intent::Watching { .. } if !newest_entry => {
-                scanned += 1;
-                if scanned >= INTENT_LOOKBACK_ENTRIES {
-                    return Intent::None;
-                }
-            }
-            tagged => return tagged,
-        }
-        newest_entry = false;
-    }
-    Intent::None
-}
-
 // ── git / gh helpers ──────────────────────────────────────────────────────────
 
 /// PR state vocabulary (fu-4faa3d). Parsed once at the read_pr_info boundary.
 /// `as_str()` reproduces the exact legacy strings so the fingerprint (which
 /// persists across fires in events.jsonl) stays byte-identical.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum PrState {
     Open,
@@ -748,6 +572,7 @@ mod review_count;
 mod review_state;
 use attestation_journal::missing_global_attestations;
 pub use attestation_journal::unattested_reviewers_scan_text;
+mod intent;
 mod settings;
 mod watch_lease;
 use async_wait::{arm_watch_hint, async_wait_class, conflicting_reason, merge_slot_reason};
@@ -756,12 +581,18 @@ pub use authorship::AttestationOrigin;
 use authorship::{classify_attestation_origin, default_attestation_origin};
 pub(crate) use awaiting_merge::main_head_failing_checks;
 pub use coverage_receipt::coverage_receipt_line;
+pub(crate) use intent::parse_xml_attr;
+#[cfg(test)]
+use intent::INTENT_LOOKBACK_ENTRIES;
+use intent::{detect_intent, extract_last_assistant_message, Intent};
 use settings::{
     fail_closed_settings, normalize_reviewer, parse_manifest, parse_settings_result,
     session_cost_from_ledger, Manifest, PeerEntry,
 };
 #[cfg(test)]
 pub(crate) use settings::{parse_settings, value_as_probe_list};
+#[cfg(test)]
+use settings::{scalar_as_singleton, MALFORMED_REVIEWERS_SENTINEL, UNPARSEABLE_SETTINGS_SENTINEL};
 pub(crate) use settings::{scan_manifest_field, Settings};
 use watch_lease::{harness_can_idle, watch_window_ms};
 
@@ -11926,6 +11757,7 @@ mod tests {
 
     // The spaces-move chokepoint tests live in their own file: this module
     // is shrink-only, and the tests were the code this change touched.
+    mod intent_tests;
     mod settings_tests;
     mod space_chokepoint_tests;
     #[test]
@@ -12153,297 +11985,6 @@ mod tests {
         let tail = stderr_tail(payload.as_bytes());
         assert!(tail.len() <= 200);
         assert!(!tail.is_empty());
-    }
-
-    #[test]
-    fn detect_intent_promise() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("t.jsonl");
-        let line = serde_json::json!({
-            "message": {"role": "assistant", "content": "done <promise>COMPLETE</promise>"}
-        });
-        std::fs::write(&path, serde_json::to_string(&line).unwrap() + "\n").unwrap();
-        assert_eq!(detect_intent_full(&path), Intent::Promise);
-    }
-
-    #[test]
-    fn detect_intent_aborted_beats_promise() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("t.jsonl");
-        // Last line has aborted (even if earlier had promise, aborted in same msg wins)
-        let line = serde_json::json!({
-            "message": {"role": "assistant", "content": "<aborted reason=\"user\">done</aborted>"}
-        });
-        std::fs::write(&path, serde_json::to_string(&line).unwrap() + "\n").unwrap();
-        assert!(matches!(detect_intent_full(&path), Intent::Aborted { .. }));
-    }
-
-    #[test]
-    fn detect_intent_tool_result_ignored() {
-        // Tool result content with promise-like text should not trigger
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("t.jsonl");
-        let user_line = serde_json::json!({
-            "message": {"role": "user", "content": "<promise>fake</promise>"}
-        });
-        std::fs::write(&path, serde_json::to_string(&user_line).unwrap() + "\n").unwrap();
-        assert_eq!(detect_intent_full(&path), Intent::None);
-    }
-
-    #[test]
-    fn detect_intent_none_when_no_assistant() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("t.jsonl");
-        let line = serde_json::json!({"message": {"role": "user", "content": "go"}});
-        std::fs::write(&path, serde_json::to_string(&line).unwrap() + "\n").unwrap();
-        assert_eq!(detect_intent_full(&path), Intent::None);
-    }
-
-    #[test]
-    fn detect_intent_array_content_blocks() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("t.jsonl");
-        let line = serde_json::json!({
-            "message": {
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": "<promise>done</promise>"},
-                    {"type": "tool_use", "name": "Bash"}
-                ]
-            }
-        });
-        std::fs::write(&path, serde_json::to_string(&line).unwrap() + "\n").unwrap();
-        assert_eq!(detect_intent_full(&path), Intent::Promise);
-    }
-
-    #[test]
-    fn extract_last_assistant_message_plain_string() {
-        let payload = r#"{"transcript_path":"/t.jsonl","last_assistant_message":"  done <promise>MISSION COMPLETE: x</promise>  "}"#;
-        assert_eq!(
-            extract_last_assistant_message(payload).as_deref(),
-            Some("done <promise>MISSION COMPLETE: x</promise>")
-        );
-    }
-
-    #[test]
-    fn extract_last_assistant_message_degrades_to_none() {
-        // Missing field, malformed JSON, non-string value, and empty/blank
-        // strings all degrade to None (transcript fallback), never an error.
-        assert_eq!(
-            extract_last_assistant_message(r#"{"transcript_path":"/t.jsonl"}"#),
-            None
-        );
-        assert_eq!(extract_last_assistant_message("not json {"), None);
-        assert_eq!(
-            extract_last_assistant_message(r#"{"last_assistant_message":{"text":"obj"}}"#),
-            None
-        );
-        assert_eq!(
-            extract_last_assistant_message(r#"{"last_assistant_message":"   "}"#),
-            None
-        );
-    }
-
-    #[test]
-    fn detect_intent_payload_promise_wins_over_stale_transcript() {
-        // AC2-HP: at the promise turn's own fire the transcript does NOT yet
-        // contain the final message; the payload alone must carry the intent.
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("t.jsonl");
-        let line = serde_json::json!({
-            "message": {"role": "assistant", "content": "still working on it"}
-        });
-        std::fs::write(&path, serde_json::to_string(&line).unwrap() + "\n").unwrap();
-        let (intent, source) =
-            detect_intent(Some("<promise>MISSION COMPLETE: done</promise>"), &path);
-        assert_eq!(intent, Intent::Promise);
-        assert_eq!(source, "payload");
-    }
-
-    #[test]
-    fn detect_intent_payload_no_tag_is_authoritative() {
-        // A tag-less payload is the stopping turn's final text; it must NOT
-        // fall through to the transcript (stale-promise containment).
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("t.jsonl");
-        let line = serde_json::json!({
-            "message": {"role": "assistant", "content": "<promise>old stale promise</promise>"}
-        });
-        std::fs::write(&path, serde_json::to_string(&line).unwrap() + "\n").unwrap();
-        let (intent, source) = detect_intent(Some("moving on to other work"), &path);
-        assert_eq!(intent, Intent::None);
-        assert_eq!(source, "payload");
-    }
-
-    #[test]
-    fn detect_intent_payload_aborted_beats_promise() {
-        let (intent, source) = detect_intent(
-            Some("<promise>done</promise> <aborted reason=\"kill\">stop</aborted>"),
-            Path::new("/nonexistent"),
-        );
-        assert!(matches!(intent, Intent::Aborted { ref reason } if reason == "kill"));
-        assert_eq!(source, "payload");
-    }
-
-    #[test]
-    fn watching_intent_parses_all_attrs() {
-        let (intent, source) = detect_intent(
-            Some("waiting <watching reason=\"ci\" pr=\"404\" timeout=\"30m\">"),
-            Path::new("/nonexistent"),
-        );
-        assert_eq!(source, "payload");
-        assert_eq!(
-            intent,
-            Intent::Watching {
-                reason: "ci".into(),
-                pr: Some("404".into()),
-                timeout: Some("30m".into()),
-            }
-        );
-    }
-
-    #[test]
-    fn watching_intent_malformed_attrs_default_to_absent() {
-        // A bare tag: attributes absent, not an error; lease math applies its
-        // own default window downstream.
-        let (intent, _) = detect_intent(Some("<watching>"), Path::new("/nonexistent"));
-        assert_eq!(
-            intent,
-            Intent::Watching {
-                reason: String::new(),
-                pr: None,
-                timeout: None,
-            }
-        );
-    }
-
-    #[test]
-    fn watching_intent_aborted_beats_watching() {
-        let (intent, _) = detect_intent(
-            Some("<watching reason=\"ci\" pr=\"1\"> <aborted reason=\"kill\">"),
-            Path::new("/nonexistent"),
-        );
-        assert!(matches!(intent, Intent::Aborted { ref reason } if reason == "kill"));
-    }
-
-    #[test]
-    fn watching_intent_beats_promise() {
-        let (intent, _) = detect_intent(
-            Some("<promise>done</promise> <watching reason=\"review\" pr=\"9\">"),
-            Path::new("/nonexistent"),
-        );
-        assert!(matches!(intent, Intent::Watching { .. }));
-    }
-
-    #[test]
-    fn watching_intent_newest_transcript_entry_honored() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("t.jsonl");
-        let line = serde_json::json!({
-            "message": {"role": "assistant", "content": "<watching reason=\"ci\" pr=\"7\">"}
-        });
-        std::fs::write(&path, serde_json::to_string(&line).unwrap() + "\n").unwrap();
-        assert!(matches!(detect_intent_full(&path), Intent::Watching { .. }));
-    }
-
-    #[test]
-    fn watching_intent_stale_transcript_not_honored() {
-        // AC3-EDGE: a watching tag 2 entries back with a tag-less newest entry
-        // must NOT resurrect as Watching (payload-or-newest-entry rule).
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("t.jsonl");
-        let mut content = String::new();
-        for text in [
-            "<watching reason=\"ci\" pr=\"3\">", // oldest
-            "still going",
-            "moving on to unrelated work", // newest
-        ] {
-            let line = serde_json::json!({"message": {"role": "assistant", "content": text}});
-            content.push_str(&serde_json::to_string(&line).unwrap());
-            content.push('\n');
-        }
-        std::fs::write(&path, content).unwrap();
-        assert_eq!(detect_intent_full(&path), Intent::None);
-    }
-
-    #[test]
-    fn watching_intent_stale_watch_does_not_shadow_deeper_promise() {
-        // A stale watching in the newest-but-one entry is skipped, and a real
-        // promise deeper in the lookback window still wins.
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("t.jsonl");
-        let mut content = String::new();
-        for text in [
-            "<promise>MISSION COMPLETE: shipped</promise>", // oldest, real
-            "<watching reason=\"ci\" pr=\"3\">",            // stale (not newest)
-            "tag-less newest",                              // newest
-        ] {
-            let line = serde_json::json!({"message": {"role": "assistant", "content": text}});
-            content.push_str(&serde_json::to_string(&line).unwrap());
-            content.push('\n');
-        }
-        std::fs::write(&path, content).unwrap();
-        assert_eq!(detect_intent_full(&path), Intent::Promise);
-    }
-
-    #[test]
-    fn detect_intent_absent_payload_falls_back_to_transcript() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("t.jsonl");
-        let line = serde_json::json!({
-            "message": {"role": "assistant", "content": "<promise>COMPLETE</promise>"}
-        });
-        std::fs::write(&path, serde_json::to_string(&line).unwrap() + "\n").unwrap();
-        let (intent, source) = detect_intent(None, &path);
-        assert_eq!(intent, Intent::Promise);
-        assert_eq!(source, "transcript");
-    }
-
-    #[test]
-    fn detect_intent_lookback_finds_promise_behind_block_feedback() {
-        // AC2-EDGE ("the block destroys the evidence"): promise 3 assistant
-        // text entries back - block feedback reply + a follow-up on top -
-        // must still be detected by the bounded fallback scan.
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("t.jsonl");
-        let mut content = String::new();
-        for text in [
-            "<promise>MISSION COMPLETE: shipped</promise>",
-            "acknowledged the block; checking CI",
-            "CI is still pending, waiting",
-        ] {
-            let line = serde_json::json!({
-                "message": {"role": "assistant", "content": text}
-            });
-            content.push_str(&serde_json::to_string(&line).unwrap());
-            content.push('\n');
-        }
-        std::fs::write(&path, content).unwrap();
-        assert_eq!(detect_intent_full(&path), Intent::Promise);
-    }
-
-    #[test]
-    fn detect_intent_lookback_bound_holds() {
-        // AC2-EDGE ("grill the stale-promise edge"): a promise older than
-        // INTENT_LOOKBACK_ENTRIES assistant text entries must NOT ride the
-        // window.
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("t.jsonl");
-        let mut content = String::new();
-        let line = serde_json::json!({
-            "message": {"role": "assistant", "content": "<promise>stale</promise>"}
-        });
-        content.push_str(&serde_json::to_string(&line).unwrap());
-        content.push('\n');
-        for i in 0..INTENT_LOOKBACK_ENTRIES {
-            let line = serde_json::json!({
-                "message": {"role": "assistant", "content": format!("pivoted work step {i}")}
-            });
-            content.push_str(&serde_json::to_string(&line).unwrap());
-            content.push('\n');
-        }
-        std::fs::write(&path, content).unwrap();
-        assert_eq!(detect_intent_full(&path), Intent::None);
     }
 
     #[test]
