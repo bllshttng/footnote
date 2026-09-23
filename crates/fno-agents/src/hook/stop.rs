@@ -959,9 +959,11 @@ fn resolve_king(cwd: &Path, fire: &Fire) -> KingResolve {
     }
 }
 
-/// The manifest through the crown row: the row's cwd names the space (the
-/// payload cwd is only the no-cwd fallback) and `loop_reign::manifest_path`
-/// carries the unsafe-scope refusal.
+/// The manifest through the crown row: the row's cwd names the space, and a
+/// row whose cwd names a since-removed directory (a deleted linked worktree
+/// keys its own dead slug) falls back to the payload cwd's space before
+/// answering None. `loop_reign::manifest_path` carries the unsafe-scope
+/// refusal.
 fn king_manifest_in(
     rows: &[crate::state::RegistryEntry],
     sid: &str,
@@ -984,14 +986,20 @@ fn king_manifest_in(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())?;
-    let root = if row.cwd.is_empty() {
-        cwd
-    } else {
-        Path::new(&row.cwd)
-    };
-    crate::loop_reign::manifest_path(&super::events_space(root), scope)
-        .ok()
-        .filter(|path| path.is_file())
+    let mut roots = Vec::with_capacity(2);
+    if !row.cwd.is_empty() {
+        roots.push(PathBuf::from(&row.cwd));
+    }
+    roots.push(cwd.to_path_buf());
+    roots
+        .iter()
+        .map(|root| {
+            crate::loop_reign::manifest_path(&super::events_space(root), scope)
+                .ok()
+                .filter(|path| path.is_file())
+        })
+        .find(Option::is_some)
+        .flatten()
 }
 
 /// The pending-delivery retry file this session would resume, if any. With a
@@ -1362,6 +1370,35 @@ mod tests {
         assert_eq!(
             super::king_manifest_in(&rows, "no-such-session", None, &elsewhere),
             None
+        );
+
+        // A row whose cwd names a removed directory (a deleted linked
+        // worktree keys its own dead slug) falls back to the payload cwd's
+        // space before answering None.
+        let payload_kings = super::events_space(&elsewhere).join("kings");
+        std::fs::create_dir_all(&payload_kings).unwrap();
+        std::fs::write(payload_kings.join(format!("{scope}.md")), "fallback").unwrap();
+        let dead_cwd = RegistryEntry {
+            cwd: _root
+                .path()
+                .join("removed-worktree")
+                .join("deleted-subdir")
+                .to_string_lossy()
+                .into_owned(),
+            harness_session_id: Some("ghost-session".into()),
+            crown_scope: Some(scope.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::king_manifest_in(&[dead_cwd], "ghost-session", None, &elsewhere),
+            Some(payload_kings.join(format!("{scope}.md"))),
+            "a dead row-cwd falls back to the payload cwd's space"
+        );
+        // With BOTH spaces holding a manifest, the row's own still wins.
+        assert_eq!(
+            super::king_manifest_in(&rows, sid, None, &elsewhere),
+            Some(manifest),
+            "the row's cwd keeps precedence over the payload fallback"
         );
     }
 }
