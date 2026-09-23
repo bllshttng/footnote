@@ -1005,7 +1005,7 @@ mod tests {
         let message = "king share is active";
         let answer = refuse_with(
             "king_share",
-            message.to_string(),
+            String::from(message),
             json!({}),
             &[],
             Map::new(),

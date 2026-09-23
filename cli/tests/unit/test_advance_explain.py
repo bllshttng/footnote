@@ -291,7 +291,11 @@ def test_preview_keeps_gate_refusal_visible_without_axis_stop(monkeypatch):
         "verdict": "refuse",
         "note": "fleet incident stop is active",
     }
-    cpu_row = {"name": "cpu-share", "measured": "2.10/12.00 cores", "verdict": "refuse"}
+    cpu_row = {
+        "name": "cpu-share", "measured": "2.10/12.00 cores", "threshold": "50%",
+        "verdict": "refuse", "key": "agents.max_fleet_cpu_share",
+        "note": "spawn-gate: cannot decide",
+    }
     cases = [
         ([_ready_node("x-win")], gate_row, "cap-full"),
         ([], gate_row, None),
