@@ -3,7 +3,8 @@
 //! classify the outcome as a type. Moved verbatim out of `loopcheck.rs`
 //! (shrink-only under the file budget); policy stays at the call site.
 
-use crate::bounded_spawn::{kill_process_group, killpg, spawn_bounded};
+use super::read_bounds::STOPGATE_PRE_DRAIN_SPENT_BOUND;
+use crate::bounded_spawn::{kill_process_group, killpg};
 use std::ffi::OsStr;
 use std::io::Read as _;
 use std::path::Path;
@@ -18,6 +19,7 @@ pub(crate) const BOUNDED_STDERR_TAIL_CAP: usize = 2000;
 /// and a capped stderr tail. Parsers read `stdout`; the status and tail exist
 /// so a non-zero exit or a failing child can be NAMED at the call site rather
 /// than collapsed into "the read failed".
+#[derive(Debug)]
 pub(crate) struct BoundedOutput {
     pub(crate) status: std::process::ExitStatus,
     pub(crate) stdout: Vec<u8>,
@@ -29,6 +31,7 @@ pub(crate) struct BoundedOutput {
 /// again read as "the read failed" or wedge forever - it reads as exactly
 /// what happened, with the verb and the elapsed time attached at the call
 /// site.
+#[derive(Debug)]
 pub(crate) enum BoundedRun {
     Completed(BoundedOutput),
     TimedOut(std::time::Duration),
@@ -42,6 +45,10 @@ pub(crate) enum BoundedRun {
     /// from `TimedOut` or a wait failure would misreport as "timed out
     /// after 0s", naming a hang that never happened.
     WaitFailed,
+    /// The read was never run: the fire budget was spent before it, and a
+    /// bound at the 1ms spent line is a refusal receipt, not the timeout of
+    /// a hang that never happened.
+    Refused,
 }
 
 /// Run `fno_bin args...` under a native wall-clock bound, killing the
@@ -62,6 +69,12 @@ pub(crate) fn run_bounded(
     cwd: &Path,
     timeout: std::time::Duration,
 ) -> BoundedRun {
+    // A spent fire refuses pre-drain reads at the 1ms bound. Spawning a
+    // child under it produced TimedOut(1ms): "a hang that never happened",
+    // and under load the spawn itself was the read's only real cost.
+    if timeout <= STOPGATE_PRE_DRAIN_SPENT_BOUND {
+        return BoundedRun::Refused;
+    }
     let mut child = match crate::bounded_spawn::spawn_bounded(fno_bin, args, cwd) {
         Ok(c) => c,
         Err(kind) => return BoundedRun::SpawnFailed(kind),
@@ -170,13 +183,18 @@ pub(crate) enum ReadErrorKind {
     Unrunnable,
     /// The child outlived its bound and the process group was killed.
     TimedOut,
+    /// The read never ran: the fire budget was spent before it. Opposite
+    /// operator response from TimedOut (nothing is wedged; the fire is just
+    /// over budget), so it keeps its own kind rather than collapsing into
+    /// the timeout vocabulary.
+    BudgetRefused,
 }
 
 /// One external read's typed failure: the logical read name, the kind, the
 /// capped stderr tail, and - for a timeout - the elapsed bound. Threads
 /// through every stop-gate reader so the render sites classify instead of
 /// guessing from a detail string.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct GhReadError {
     pub(crate) read: String,
     pub(crate) kind: ReadErrorKind,
@@ -246,6 +264,16 @@ impl GhReadError {
         }
     }
 
+    pub(crate) fn budget_refused(read: &str) -> Self {
+        GhReadError {
+            read: read.to_string(),
+            kind: ReadErrorKind::BudgetRefused,
+            stderr_tail: String::new(),
+            elapsed: None,
+            spawn_kind: None,
+        }
+    }
+
     pub(crate) fn render(&self) -> String {
         match self.kind {
             ReadErrorKind::TimedOut => format!(
@@ -261,6 +289,10 @@ impl GhReadError {
                 "external read '{}' could not run; retrying next fire. {}",
                 self.read, self.stderr_tail
             ),
+            ReadErrorKind::BudgetRefused => format!(
+                "external read '{}' was not run: the fire budget was spent before the read; retrying next fire",
+                self.read
+            ),
         }
     }
 
@@ -272,6 +304,7 @@ impl GhReadError {
             ReadErrorKind::TimedOut => "timeout",
             ReadErrorKind::Failed => "failed",
             ReadErrorKind::Unrunnable => "unrunnable",
+            ReadErrorKind::BudgetRefused => "budget_refused",
         }
     }
 }
@@ -316,5 +349,56 @@ pub(crate) fn bounded_read(
             &format!("spawn failed ({kind:?})"),
         )),
         BoundedRun::WaitFailed => Err(GhReadError::unrunnable(read_name, "wait failed")),
+        BoundedRun::Refused => Err(GhReadError::budget_refused(read_name)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn a_bound_at_the_spent_line_refuses_without_spawning() {
+        // AC7: a fire stamped past its reserve line answers pre-drain reads
+        // with the refusal kind, and no child starts - the read was not run,
+        // which is a different fact from a child that was killed.
+        super::super::stopgate_stamp_fire(0, std::time::Instant::now(), 16_000);
+        let bound = super::super::stopgate_read_timeout();
+        assert_eq!(bound, STOPGATE_PRE_DRAIN_SPENT_BOUND);
+        let err = bounded_read(
+            OsStr::new("/bin/true"),
+            &[],
+            Path::new("/"),
+            "test read",
+            bound,
+        )
+        .unwrap_err();
+        assert!(matches!(err.kind, ReadErrorKind::BudgetRefused), "{err:?}");
+        assert_eq!(err.outcome(), "budget_refused");
+        assert!(err.render().contains("was not run"));
+    }
+
+    #[test]
+    fn a_wedged_child_still_reports_timed_out_with_its_real_bound() {
+        // AC8: the refusal must not swallow real timeouts. A child that
+        // genuinely wedges under a 500ms bound still reports TimedOut with
+        // the bound it actually ran under.
+        let dir = tempfile::tempdir().unwrap();
+        let start = std::time::Instant::now();
+        match run_bounded(
+            OsStr::new("/bin/sleep"),
+            &["5"],
+            dir.path(),
+            Duration::from_millis(500),
+        ) {
+            BoundedRun::TimedOut(elapsed) => {
+                assert!(elapsed >= Duration::from_millis(500) && elapsed < Duration::from_secs(3));
+            }
+            other => panic!(
+                "expected TimedOut, got {other:?} (after {:?})",
+                start.elapsed()
+            ),
+        }
     }
 }

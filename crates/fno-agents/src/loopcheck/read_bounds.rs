@@ -31,7 +31,8 @@ pub(crate) const STOPGATE_BOUND_FLOOR: std::time::Duration = std::time::Duration
 /// and enough of them spend it whole (measured: a floored drain at 271ms
 /// after roughly 64 such reads). Refusing fast keeps the aggregate erosion
 /// near zero, and the bound stays positive so the read is still killable.
-const STOPGATE_PRE_DRAIN_SPENT_BOUND: std::time::Duration = std::time::Duration::from_millis(1);
+pub(crate) const STOPGATE_PRE_DRAIN_SPENT_BOUND: std::time::Duration =
+    std::time::Duration::from_millis(1);
 
 /// King fires hold this much of the fire budget back for the drain read, the
 /// last read and the one that decides completion. Drain cost scales with
@@ -151,6 +152,22 @@ pub(crate) fn stopgate_drain_timeout() -> std::time::Duration {
                 .max(STOPGATE_BOUND_FLOOR)
             }
             None => configured,
+        }
+    })
+}
+
+/// True when this fire's pre-drain reads are past the reserve line: the
+/// board (and every pre-drain read) refuses instead of reading at the 1ms
+/// spent bound.
+pub(crate) fn stopgate_pre_drain_spent() -> bool {
+    STOPGATE_READS.with(|cell| {
+        let (_, deadline, reserve_ms) = *cell.borrow();
+        match deadline {
+            Some(d) => d
+                .saturating_duration_since(std::time::Instant::now())
+                .saturating_sub(std::time::Duration::from_millis(reserve_ms))
+                .is_zero(),
+            None => false,
         }
     })
 }

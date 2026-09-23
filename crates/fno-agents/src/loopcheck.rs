@@ -22,14 +22,12 @@ use crate::{
 // facade's `disposition_blockers`, and a private import made it unnameable
 // through the facade it is published under.
 use crate::acceptance_evidence::{evaluate_done_probes, ProbeGate, PROBE_TIMEOUT};
-use crate::bounded_spawn::{kill_process_group, killpg};
 pub use crate::disposition_gate::{blockers_withhold, DispositionBlocker};
 use crate::king_termination::{bound_breached, king_output, king_quiet_body};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::ffi::OsStr;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 // ── public types ──────────────────────────────────────────────────────────────
 
@@ -9532,6 +9530,7 @@ pub(crate) use bounded_read::{
     bounded_read, bounded_read_diagnostic, log_bounded_read_error, run_bounded, BoundedOutput,
     BoundedRun, GhReadError, BOUNDED_STDERR_TAIL_CAP,
 };
+pub(crate) use read_bounds::stopgate_pre_drain_spent;
 pub(crate) use read_bounds::{
     clamp_to_fire_deadline, drain_reserve_half_spent, stopgate_drain_timeout,
     stopgate_fire_remaining_ms, stopgate_harness_margin_remaining_ms, stopgate_hold_drain_reserve,
@@ -9591,10 +9590,13 @@ fn probe_gh_bin(gh_bin: &OsStr, cwd: &Path) -> GhProbeOutcome {
         ) {
             // Completion proves existence at any exit code; a timeout proves
             // it too (the child ran and outlived its bound), and a Failed
-            // read can only follow a completed spawn.
+            // read can only follow a completed spawn. A budget refusal says
+            // nothing about the binary either way; it reads present so the
+            // fire keeps degrading through the individually-refused reads
+            // instead of flipping a transport verdict it could not measure.
             Ok(_)
             | Err(GhReadError {
-                kind: ReadErrorKind::Failed | ReadErrorKind::TimedOut,
+                kind: ReadErrorKind::Failed | ReadErrorKind::TimedOut | ReadErrorKind::BudgetRefused,
                 ..
             }) => return GhProbeOutcome::Present,
             Err(GhReadError {

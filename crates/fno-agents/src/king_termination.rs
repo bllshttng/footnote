@@ -303,6 +303,12 @@ pub(crate) fn read_king_board(
     state_path: &Path,
 ) -> Result<KingBoard, String> {
     let _ = fno_bin;
+    // Past the reserve line the board refuses instead of reading at the 1ms
+    // bound: a board that never answered is the readable, bounded outcome a
+    // spent fire owes the king, and the drain's reserve stays untouched.
+    if crate::loopcheck::stopgate_pre_drain_spent() {
+        return Err("king board not read: the fire budget was spent before the board".to_string());
+    }
     let opts = crate::king_board::BoardOpts {
         budget_ms: crate::loopcheck::stopgate_read_timeout().as_millis() as u64,
         max_pr_reads: crate::king_board::DEFAULT_MAX_PR_READS,
