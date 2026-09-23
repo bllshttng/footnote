@@ -173,6 +173,8 @@ Priority is bounded to four values, so two agents disagreeing about a node produ
 
 ## Lifecycle
 
+`fno backlog ready` accepts `--created-before`, `--created-after`, `--touched-before`, and `--touched-after` with values such as `30d` or an ISO date, plus `--sort created|touched` (oldest first); touched uses `touched_at`, falling back to `created_at`. Preview the 60-day stale-idea sweep with `fno backlog ready --ideas --touched-before 60d --sort touched --json`.
+
 `intake -> triage -> ready/next -> done`, with two reversible side states:
 
 | Action | Command | Effect |
