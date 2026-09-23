@@ -1730,6 +1730,7 @@ fn decide_gate(
                     pause = CPU_HOLD_POLL;
                 }
                 "admit" => {
+                    blind_samples = 0;
                     // A held spawn needs CPU_ADMIT_SAMPLES consecutive
                     // under-ceiling samples before it believes the drain
                     // (LD4); a spawn that was never held admits on the first.
@@ -1751,7 +1752,6 @@ fn decide_gate(
                             // queued passes do not reprint the admit line.
                             held_on_cpu = false;
                             under_streak = 0;
-                            blind_samples = 0;
                         }
                     }
                     if !hold_pause {

@@ -329,3 +329,96 @@ fn an_unreadable_instrument_never_admits_by_rereading() {
     assert_eq!(receipt["samples"], 3);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A readable CPU admit breaks the run of consecutive blind samples even if
+/// the independent slot cap keeps the spawn queued.
+#[test]
+fn an_admit_resets_blind_samples_before_slot_wait() {
+    let _g = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("fno-gate-admit-reset-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let root = dir.join("claims-root");
+    std::fs::create_dir_all(&root).unwrap();
+    std::env::set_var("FNO_CLAIMS_ROOT", &root);
+    let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
+    std::env::remove_var("FNO_SPAWN_GATE");
+    let prior_config = std::env::var_os("FNO_CONFIG");
+    std::env::remove_var("FNO_CONFIG");
+    let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+    std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD");
+    let prior_payload_seq = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
+    let seq = dir.join("payload-seq.txt");
+    let blind = format!("{}\n", fixture_payload("undecidable"));
+    let admit = r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#;
+    std::fs::write(
+        &seq,
+        format!("{blind}{admit}\n{blind}{admit}\n{blind}{blind}{blind}"),
+    )
+    .unwrap();
+    std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", &seq);
+    let fnodir = dir.join(".fno");
+    std::fs::create_dir_all(&fnodir).unwrap();
+    std::fs::write(
+        fnodir.join("config.toml"),
+        "[agents]\nmax_live = 1\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+    )
+    .unwrap();
+    let reg = dir.join("registry.json");
+    std::fs::write(
+        &reg,
+        format!(
+            r#"{{"schema_version":{},"entries":[{{"name":"w1","provider":"claude","cwd":"/tmp","status":"live","pid":{},"created_at":"2026-01-01T00:00:00Z"}}]}}"#,
+            crate::state::REGISTRY_SCHEMA_VERSION,
+            std::process::id()
+        ),
+    )
+    .unwrap();
+
+    let got = run_gate(
+        &dir,
+        &reg,
+        GateInput {
+            name: "w2".into(),
+            substrate: "bg".into(),
+            flags: GateFlags {
+                force: false,
+                no_wait: false,
+            },
+            ..Default::default()
+        },
+    );
+
+    std::env::remove_var("FNO_CLAIMS_ROOT");
+    std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ");
+    match prior_payload_seq {
+        Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ", value),
+        None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD_SEQ"),
+    }
+    match prior_spawn_gate {
+        Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+        None => std::env::remove_var("FNO_SPAWN_GATE"),
+    }
+    match prior_config {
+        Some(value) => std::env::set_var("FNO_CONFIG", value),
+        None => std::env::remove_var("FNO_CONFIG"),
+    }
+    match prior_payload {
+        Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+        None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+    }
+
+    let refusal = got.err().expect("three consecutive blind reads refuse");
+    assert_eq!(refusal.exit_code, EXIT_LOAD_REFUSED, "{refusal:?}");
+    let receipt = refusal.receipt.expect("refusal carries a receipt");
+    assert_eq!(receipt["reason"], "cpu_share_undecidable");
+    assert_eq!(receipt["samples"], 3);
+    let remaining = std::fs::read_to_string(&seq).unwrap();
+    assert_eq!(
+        remaining.lines().count(),
+        1,
+        "each ordinary admit resets the consecutive blind-read count; remaining: {remaining:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
