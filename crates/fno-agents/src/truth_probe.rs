@@ -741,6 +741,17 @@ pub enum BatchOutcome {
 pub fn family1_truth_probe_many_measured(
     handles: &[String],
 ) -> (std::collections::HashMap<String, TruthProbe>, BatchOutcome) {
+    family1_truth_probe_many_measured_within(handles, None)
+}
+
+/// [`family1_truth_probe_many_measured`] under a caller's deadline: each
+/// page's timeout is capped by what remains, and a page reached after the
+/// deadline returns [`BatchOutcome::NotMeasured`] without spawning. `None`
+/// keeps today's self-chosen page bounds.
+pub fn family1_truth_probe_many_measured_within(
+    handles: &[String],
+    deadline: Option<Instant>,
+) -> (std::collections::HashMap<String, TruthProbe>, BatchOutcome) {
     // `--handles` is comma-separated, so a handle CARRYING a comma cannot be
     // put on the wire: the reader would split it into two handles that match
     // no row, and that row would go unanswered on every list, silently and
@@ -754,20 +765,25 @@ pub fn family1_truth_probe_many_measured(
         .cloned()
         .partition(|h| is_truth_batchable_handle(h));
     let (mut probes, timed_out) = truth_pages(&batchable, TRUTH_BATCH_PAGE, |page| {
-        family1_truth_probe_batchable(page)
+        family1_truth_probe_batchable_within(page, deadline)
     });
     // A comma handle whose single probe did not answer is the same fact the
     // batchable leg's `timed_out` carries: the instrument never produced a
     // reading for that handle. Fold it into the page outcome, so the row words
     // `unmeasured` instead of publishing the `no-evidence` verdict a clean
-    // page earns.
+    // page earns. A spent deadline answers the same way without spawning:
+    // the fallback probes each carry their own 5s bound.
     let mut fallback_unanswered = false;
-    for handle in unrepresentable {
-        match family1_truth_probe(&handle) {
-            Some(probe) => {
-                probes.insert(handle, probe);
+    if page_bound(Duration::from_secs(5), deadline, Instant::now()).is_none() {
+        fallback_unanswered = unrepresentable.len() > 0;
+    } else {
+        for handle in unrepresentable {
+            match family1_truth_probe(&handle) {
+                Some(probe) => {
+                    probes.insert(handle, probe);
+                }
+                None => fallback_unanswered = true,
             }
-            None => fallback_unanswered = true,
         }
     }
     let outcome = page_outcome(timed_out, fallback_unanswered);
@@ -814,11 +830,15 @@ fn page_outcome(batchable_timed_out: bool, fallback_unanswered: bool) -> BatchOu
 
 /// The batchable leg's answer plus whether its run timed out (`false` when the
 /// batch answered, or when the double-crash fallback probed each handle
-/// itself - that fallback is a real measurement, never a timeout).
-fn family1_truth_probe_batchable(
+/// itself - that fallback is a real measurement, never a timeout). Under a
+/// caller's deadline: the page's self-chosen bound is capped by what remains
+/// of it, and a page reached after the deadline answers unmeasured with
+/// nothing spawned.
+fn family1_truth_probe_batchable_within(
     handles: &[String],
+    deadline: Option<Instant>,
 ) -> (std::collections::HashMap<String, TruthProbe>, bool) {
-    match family1_truth_batch_latched(handles) {
+    match family1_truth_batch_latched(handles, deadline) {
         Some((probes, timed_out)) => (probes, timed_out),
         None => {
             eprintln!(
@@ -846,11 +866,21 @@ fn family1_truth_probe_batchable(
 /// answer rather than starting a second batch.
 fn family1_truth_batch_latched(
     handles: &[String],
+    deadline: Option<Instant>,
 ) -> Option<(std::collections::HashMap<String, TruthProbe>, bool)> {
     if handles.is_empty() {
         return Some((std::collections::HashMap::new(), false));
     }
-    let timeout = family1_truth_batch_timeout(handles.len());
+    // A deadline already spent answers "never measured" with nothing spawned:
+    // the page's self-chosen bound would otherwise run the batch to the full
+    // 20s-to-60s timeout whatever the caller could still afford.
+    let Some(timeout) = page_bound(
+        family1_truth_batch_timeout(handles.len()),
+        deadline,
+        Instant::now(),
+    ) else {
+        return Some((std::collections::HashMap::new(), true));
+    };
     let key = single_flight::flight_key(&["agents", "truth", "--handles", &handles.join(",")]);
     let mut own: Option<Option<TruthBatchAttempt>> = None;
     // The latch wait is NOT subtracted here, unlike the single probe: this
@@ -899,6 +929,59 @@ fn family1_truth_batch_timeout(handles: usize) -> Duration {
     const PER_HANDLE: Duration = Duration::from_millis(750);
     const CEILING: Duration = Duration::from_secs(60);
     std::cmp::min(BASE + PER_HANDLE * handles as u32, CEILING)
+}
+
+/// The bound one page may run under: the caller's deadline capped by the
+/// batch's own timeout, `None` once the deadline is spent. Pure in `now` so
+/// the arithmetic is testable without a race.
+fn page_bound(base: Duration, deadline: Option<Instant>, now: Instant) -> Option<Duration> {
+    match deadline {
+        None => Some(base),
+        Some(d) => {
+            let left = d.saturating_duration_since(now);
+            if left.is_zero() {
+                None
+            } else {
+                Some(left.min(base))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod page_bound_tests {
+    use super::*;
+
+    #[test]
+    fn a_page_bound_caps_by_deadline_and_refuses_a_spent_one() {
+        let now = Instant::now();
+        // No deadline: the batch keeps its self-chosen bound.
+        assert_eq!(
+            page_bound(Duration::from_secs(20), None, now),
+            Some(Duration::from_secs(20))
+        );
+        // A deadline 2s out caps a 20s batch to 2s.
+        let bound = page_bound(
+            Duration::from_secs(20),
+            Some(now + Duration::from_secs(2)),
+            now,
+        )
+        .expect("future deadline");
+        assert!(
+            bound <= Duration::from_secs(2) && bound > Duration::from_secs(1),
+            "{bound:?}"
+        );
+        // A deadline already past is spent: nothing may spawn.
+        assert_eq!(page_bound(Duration::from_secs(20), Some(now), now), None);
+        assert_eq!(
+            page_bound(
+                Duration::from_secs(20),
+                Some(now - Duration::from_secs(5)),
+                now
+            ),
+            None
+        );
+    }
 }
 
 /// [`family1_truth_probe_many`] with the command built per attempt, so a test
