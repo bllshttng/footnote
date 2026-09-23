@@ -117,7 +117,7 @@ Use only mechanical inputs. Do not hide subjective judgment inside the weights.
 
 ## Async-wait idling (the `<watching>` contract)
 
-When your only outstanding work is a wait - CI still running, a bot review not yet posted, or a local run you started (a test suite, a build, a review fork) - with nothing to do until it settles, do NOT keep waking every stop tick to re-check. Each wake is a full model invocation that produces zero progress. Instead, idle the session to ZERO invocations until the watched state changes:
+When your only outstanding work is a wait, do NOT keep waking every stop tick to re-check. Each wake is a full model invocation that produces zero progress. Instead, idle the session to ZERO invocations until the watched state changes. The wait can be CI still running, a bot review not yet posted, or a local run you started. A local run is a test suite, a build, a review fork:
 
 1. **Arm a harness-tracked watcher with a hard timeout.** Use a background task the harness re-invokes the model on when it exits - background `Bash` (`run_in_background`) or a `Monitor` - whose command embeds a hard timeout, e.g.:
 
@@ -136,7 +136,7 @@ When your only outstanding work is a wait - CI still running, a bot review not y
    <watching reason="local" timeout="30m">
    ```
 
-   `reason` is `ci`, `review`, `merge_slot`, or `local` (a run on this machine: a test suite, a build, a review fork). `pr` is a real PR number; leave it out for a local run, never `pr="0"`. The attributes feed the idle event and the claim-lease math. On a claude session whose claim lease renews, loop-check idles without reading PR state, so the tag is only as true as you write it. Where the lease cannot renew or the harness cannot self-wake, the tag is ignored and you are told the real blocker.
+   `reason` is `ci`, `review`, `merge_slot`, or `local` (a run on this machine: a test suite, a build, a review fork). `pr` is a real PR number. Leave it out for a local run, never `pr="0"`. The attributes feed the idle event and the claim-lease math. On a claude session whose claim lease renews, loop-check idles without reading PR state, so the tag is only as true as you write it. Where the lease cannot renew or the harness cannot self-wake, the tag is ignored and you are told the real blocker.
 
 3. **On wake, re-check and either proceed or re-arm.** The harness re-invokes you when the watcher exits (settle, timeout, or kill). If the state settled, proceed. If the timeout fired and it is still pending, re-arm the watcher and re-emit `<watching>` - one cheap turn per ~30 min instead of one per ~90 s.
 
