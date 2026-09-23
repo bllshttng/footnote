@@ -785,13 +785,13 @@ def _list_decisions(
 
     try:
         # No cap on the read; the total is known here, so a truncated answer
-        # can say so. One soft graph read per subject query; an empty result
-        # is retried strictly when coord lifecycle needs the graph.
+        # can say so. One soft graph read per subject query, passed down to
+        # every resolver that used to re-read it.
         entries = None
         if subject:
             from fno.decide import _graph_entries
 
-            entries = _graph_entries() or None
+            entries = _graph_entries() or None  # strict lifecycle retry for an empty read
         label, found, damaged = list_decisions(
             subject,
             limit=None,
