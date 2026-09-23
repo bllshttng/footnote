@@ -753,6 +753,26 @@ mod tests {
         }
     }
 
+    fn gate_status_stub(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fno = dir.join("fno");
+        let payload = json!({
+            "verdict": "refused",
+            "reason": "max_live",
+            "message": "15 live worker slots >= max_live 15",
+        });
+        std::fs::write(
+            &fno,
+            format!("#!/bin/sh\nprintf '%s\\n' '{payload}'\n"),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&fno).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fno, permissions).unwrap();
+        fno
+    }
+
     fn accepted_probe() -> GateProbe {
         GateProbe {
             verdict: "accepted".to_string(),
@@ -794,8 +814,6 @@ mod tests {
 
     #[test]
     fn refused_probe_saturates_unheld_progress_and_undriven_pr() {
-        use std::os::unix::fs::PermissionsExt;
-
         let board = parse_king_board_value(&json!({
             "actionable": 2,
             "queues": [
@@ -807,15 +825,7 @@ mod tests {
         }))
         .unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        let fno = tmp.path().join("fno");
-        std::fs::write(
-            &fno,
-            "#!/bin/sh\nprintf '%s\\n' '{\"verdict\":\"refused\",\"reason\":\"max_live\",\"message\":\"15 live worker slots >= max_live 15\"}'\n",
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&fno).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&fno, permissions).unwrap();
+        let fno = gate_status_stub(tmp.path());
         let emit = |_: &str, _: Value| {};
 
         let gate = capacity_gate(&board, fno.to_str().unwrap(), tmp.path(), "king", 0, &emit)
@@ -847,6 +857,22 @@ mod tests {
         match verdict {
             SaturationOutcome::SaturatedBlind { blocked } => assert_eq!(blocked, 2),
             _ => panic!("expected a blind saturation verdict"),
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let fno = gate_status_stub(tmp.path());
+        let emit = |_: &str, _: Value| {};
+        let gate = capacity_gate(&board, fno.to_str().unwrap(), tmp.path(), "king", 0, &emit)
+            .expect("the blind saturation remains a gate result");
+        match gate {
+            CapacityGate::SaturatedBlind {
+                message,
+                actionable,
+            } => {
+                assert_eq!(actionable, 2);
+                assert!(message.contains("not read: unplanned is unreadable"), "{message}");
+                assert!(message.contains("live workers exiting"), "{message}");
+            }
+            _ => panic!("expected blind saturation to stay distinct from NoWork"),
         }
     }
 
