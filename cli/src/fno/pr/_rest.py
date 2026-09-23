@@ -550,6 +550,7 @@ def _zero_job_rows(
     rows, listing = out.get("rows"), out.get("listing")
     if out.get("error") or not isinstance(rows, list) or not isinstance(listing, list):
         return [], [], f"zero-job run read failed: {out.get('error') or 'no rows'}"
+    check_runs[:] = out.get("check_runs") or check_runs
     return rows, listing, ""
 
 
@@ -632,6 +633,7 @@ def fetch_pr_rest(
                 # Per-run workflow name from the listing above; "" when the
                 # details_url names no run the listing knows.
                 "workflow": run_names.get(run_id.group(1), "") if run_id else "",
+                **({"timeout": cr["timeout"]} if cr.get("timeout") else {}),
             }
         )
 
