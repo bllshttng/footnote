@@ -31,7 +31,8 @@
 //! (the default) is the chain above, `all` widens to rows fno itself
 //! spawned (sessions or registry provenance) whose work is open. The rule
 //! under every value is positive: an unowned session retires only on an
-//! fno-ownership marker - a sessions[] row fno wrote, or a reap receipt
+//! fno-ownership marker - a sessions[] row fno wrote, a recorded territory
+//! blueprinter name, or a reap receipt
 //! an earlier retirement staged for the same session (the
 //! leaked-retirement class: the sweep that leaked a session is the sweep
 //! that staged its receipt). A name
@@ -44,8 +45,8 @@
 //! is unreachable by construction, not by default value, and a wrong
 //! config cannot reach it.
 
-use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::claude_roster::{ClaudeAgentRow, ClaudeAgentsSnapshot};
@@ -64,6 +65,7 @@ pub struct RosterJudgement {
     /// Why the row was kept or retired, in both directions.
     pub reason: String,
     pub retired: bool,
+    pub class: &'static str,
 }
 
 #[derive(Debug, Default)]
@@ -112,11 +114,22 @@ fn judgement(
     reason: String,
     retired: bool,
 ) -> RosterJudgement {
+    judgement_class(short_id, node, reason, retired, "unmarked")
+}
+
+fn judgement_class(
+    short_id: &str,
+    node: Option<String>,
+    reason: String,
+    retired: bool,
+    class: &'static str,
+) -> RosterJudgement {
     RosterJudgement {
         short_id: short_id.to_string(),
         node,
         reason,
         retired,
+        class,
     }
 }
 
@@ -133,6 +146,7 @@ pub fn render(summary: &RosterReapSummary, json_out: bool, dry_run: bool) -> Str
                         "node": j.node,
                         "reason": j.reason,
                         "retired": j.retired,
+                        "class": j.class,
                     })
                 })
                 .collect()
@@ -169,6 +183,20 @@ pub fn render(summary: &RosterReapSummary, json_out: bool, dry_run: bool) -> Str
         "  enumerated {} judged, {} probed through the quiet gate, {} resolved\n",
         summary.enumerated, summary.probed, summary.answered
     ));
+    let mut classes = [0usize; 4];
+    for j in summary.kept.iter().chain(summary.retired.iter()) {
+        match j.class {
+            "fleet" => classes[0] += 1,
+            "unmarked" => classes[1] += 1,
+            "owned" => classes[2] += 1,
+            "contested" => classes[3] += 1,
+            _ => {}
+        }
+    }
+    out.push_str(&format!(
+        "  classes: fleet {}, unmarked {}, owned {}, contested {}\n",
+        classes[0], classes[1], classes[2], classes[3]
+    ));
     if summary.nothing_resolved() {
         out.push_str("  refusing: every probe came back unresolved; the sweep removed nothing\n");
     }
@@ -180,25 +208,63 @@ pub fn render(summary: &RosterReapSummary, json_out: bool, dry_run: bool) -> Str
     }
     for j in &summary.retired {
         let node = j.node.as_deref().unwrap_or("-");
-        out.push_str(&format!("  {verb} {} ({}: {node})\n", j.short_id, j.reason));
+        out.push_str(&format!(
+            "  {verb} {} [{}] ({}: {node})\n",
+            j.short_id, j.class, j.reason
+        ));
     }
     for (id, reason) in &summary.refused {
         out.push_str(&format!("  refused {id} ({reason})\n"));
     }
     for j in &summary.kept {
-        out.push_str(&format!("  kept {} ({})\n", j.short_id, j.reason));
+        out.push_str(&format!(
+            "  kept {} [{}] ({})\n",
+            j.short_id, j.class, j.reason
+        ));
     }
     out
 }
 
 /// The roster-side sweep. Every I/O seam is injected so a test stages the
 /// world; production wiring is [`roster_reap`].
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     home: &crate::paths::AgentsHome,
     grace_secs: i64,
     scope: crate::agents_config::RosterScope,
     dry_run: bool,
+    roster: &ClaudeAgentsSnapshot,
+    registry: &[RegistryEntry],
+    read_graph: &dyn Fn() -> Option<GraphRead>,
+    transcripts: &dyn Fn(&RegistryEntry) -> Option<Vec<PathBuf>>,
+    age_many: &dyn Fn(&[&RegistryEntry]) -> HashMap<String, Option<i64>>,
+    now: i64,
+    remove: &dyn Fn(&RegistryEntry) -> CascadeOutcome,
+) -> RosterReapSummary {
+    run_with_scope_workers(
+        home,
+        grace_secs,
+        scope,
+        dry_run,
+        &BTreeMap::new(),
+        roster,
+        registry,
+        read_graph,
+        transcripts,
+        age_many,
+        now,
+        remove,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_with_scope_workers(
+    home: &crate::paths::AgentsHome,
+    grace_secs: i64,
+    scope: crate::agents_config::RosterScope,
+    dry_run: bool,
+    scope_workers: &BTreeMap<String, String>,
     roster: &ClaudeAgentsSnapshot,
     registry: &[RegistryEntry],
     read_graph: &dyn Fn() -> Option<GraphRead>,
@@ -217,7 +283,15 @@ pub(crate) fn run(
                 summary.instrument_unread = true;
                 summary.kept = warnings
                     .iter()
-                    .map(|w| judgement("", None, format!("roster unreadable: {w}"), false))
+                    .map(|w| {
+                        judgement_class(
+                            "",
+                            None,
+                            format!("roster unreadable: {w}"),
+                            false,
+                            "contested",
+                        )
+                    })
                     .collect();
                 return summary;
             }
@@ -276,6 +350,9 @@ pub(crate) fn run(
         basis: String,
         terminal: Option<String>,
         pid: Option<u32>,
+        class: &'static str,
+        grace: i64,
+        early_fire: bool,
     }
     let mut candidates: Vec<Candidate> = Vec::new();
     for row in &rows {
@@ -293,9 +370,13 @@ pub(crate) fn run(
             || row.name.as_deref().is_some_and(|n| owned.contains(n));
         if owned_match {
             summary.kept_owned += 1;
-            summary
-                .kept
-                .push(judgement(&ident, None, "owned by an fno row".into(), false));
+            summary.kept.push(judgement_class(
+                &ident,
+                None,
+                "owned by an fno row".into(),
+                false,
+                "owned",
+            ));
             continue;
         }
         // Scope off retires nothing and judges nothing: no graph read, no
@@ -320,10 +401,45 @@ pub(crate) fn run(
         entry.harness = Some("claude".into());
         entry.cwd = row.cwd.clone().unwrap_or_default();
         entry.origin = Some("spawn".into());
+        let terminal = row
+            .state
+            .as_deref()
+            .filter(|s| crate::claude_roster::is_terminal_roster_state(s));
+        if let Some(scope_key) = row.name.as_deref().and_then(|name| scope_workers.get(name)) {
+            if let Some(state) = terminal {
+                candidates.push(Candidate {
+                    entry,
+                    ident,
+                    node: None,
+                    basis: format!("territory blueprinter for scope {scope_key}"),
+                    terminal: Some(state.to_string()),
+                    pid: row.pid,
+                    class: "fleet",
+                    grace: grace_secs,
+                    early_fire: false,
+                });
+            } else {
+                summary.kept.push(judgement_class(
+                    &ident,
+                    None,
+                    format!(
+                        "territory blueprinter for scope {scope_key}: harness state {} is not terminal",
+                        row.state.as_deref().unwrap_or("unknown")
+                    ),
+                    false,
+                    "fleet",
+                ));
+            }
+            continue;
+        }
         let Some(graph) = &graph else {
-            summary
-                .kept
-                .push(judgement(&ident, None, "graph unreadable".into(), false));
+            summary.kept.push(judgement_class(
+                &ident,
+                None,
+                "graph unreadable".into(),
+                false,
+                "contested",
+            ));
             continue;
         };
         let hits = transcripts(&entry);
@@ -333,9 +449,13 @@ pub(crate) fn run(
         // A hold (conflict or PR contradiction) names itself, and stays a
         // keep at every scope: contested truth is not a scope question.
         if let Some(hold) = &verdict.hold {
-            summary
-                .kept
-                .push(judgement(&ident, node, hold.as_str().to_string(), false));
+            summary.kept.push(judgement_class(
+                &ident,
+                node,
+                hold.as_str().to_string(),
+                false,
+                "contested",
+            ));
             continue;
         }
         // The basis names why the row may retire. `all` widens the
@@ -383,14 +503,65 @@ pub(crate) fn run(
                     crate::receipt::reap_receipt_path_for(home, entry.harness_name(), sid).exists()
                 })
         };
+        let marker_class = if strong_source || receipt_marker() {
+            "fleet"
+        } else {
+            "unmarked"
+        };
+        if let WorkState::Open { .. } = &verdict.work {
+            if strong_source {
+                if let Some(signals) = crate::planning_lane::signals(graph, sid, &entry.name) {
+                    if !signals.assignments.is_empty() {
+                        if let Some((planning_node, planning_status)) =
+                            crate::planning_lane::unfinished(
+                                &signals.assignments,
+                                &signals.closed,
+                                &signals.plan_written,
+                                false,
+                            )
+                        {
+                            let reason_node = planning_node.clone();
+                            summary.kept.push(judgement_class(
+                                &ident,
+                                Some(reason_node),
+                                crate::gc::KeepReason::PlanningUnclosed {
+                                    node: planning_node.clone(),
+                                    status: planning_status.clone(),
+                                }
+                                .as_str()
+                                .to_string()
+                                    + &format!(": {planning_node} {planning_status}"),
+                                false,
+                                "fleet",
+                            ));
+                            continue;
+                        }
+                        let nodes = signals
+                            .assignments
+                            .iter()
+                            .map(|(node, _)| node.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        candidates.push(Candidate {
+                            entry,
+                            ident,
+                            node,
+                            basis: format!("planning finished: {nodes} (via sessions)"),
+                            terminal: terminal.map(str::to_string),
+                            pid: row.pid,
+                            class: "fleet",
+                            grace: crate::gc::PLANNING_IDLE_RETIRE_SECS,
+                            early_fire: false,
+                        });
+                        continue;
+                    }
+                }
+            }
+        }
         // the terminal read hoisted out of the Open arm. Every row
         // here is claude by construction, so `row.state` is in hand, and
         // recency must be able to yield to it exactly as the registry
         // sweep's grace_gate does.
-        let terminal = row
-            .state
-            .as_deref()
-            .filter(|s| crate::claude_roster::is_terminal_roster_state(s));
         let open_release: Option<String> = match &verdict.work {
             WorkState::Open { node: n, status } => {
                 let inactive = crate::gc::INACTIVE_NODE_STATUSES.contains(&status.as_str());
@@ -438,11 +609,12 @@ pub(crate) fn run(
                 if scope_all_strong {
                     match open_pr_verdict(graph, sid, n, &entry.cwd, true, None) {
                         OpenPrVerdict::Holds { node, pr } | OpenPrVerdict::Unread { node, pr } => {
-                            summary.kept.push(judgement(
+                            summary.kept.push(judgement_class(
                                 &ident,
                                 Some(node.clone()),
                                 format!("open pr: {node} #{pr}"),
                                 false,
+                                marker_class,
                             ));
                             continue;
                         }
@@ -454,11 +626,12 @@ pub(crate) fn run(
                         if scope_all_strong {
                             release.clone()
                         } else {
-                            summary.kept.push(judgement(
+                            summary.kept.push(judgement_class(
                                 &ident,
                                 Some(n.clone()),
                                 format!("open work: {n} {status}; {release}"),
                                 false,
+                                marker_class,
                             ));
                             continue;
                         }
@@ -467,11 +640,12 @@ pub(crate) fn run(
                         format!("open work {n} {status} at roster scope all (via {via})")
                     }
                     None => {
-                        summary.kept.push(judgement(
+                        summary.kept.push(judgement_class(
                             &ident,
                             Some(n.clone()),
                             format!("open work: {n} {status}"),
                             false,
+                            marker_class,
                         ));
                         continue;
                     }
@@ -500,6 +674,11 @@ pub(crate) fn run(
                 }
             }
         };
+        let class = if strong_source || receipt_marker() {
+            "fleet"
+        } else {
+            "unmarked"
+        };
         candidates.push(Candidate {
             entry,
             ident,
@@ -507,6 +686,9 @@ pub(crate) fn run(
             basis,
             terminal: terminal.map(str::to_string),
             pid: row.pid,
+            class,
+            grace: grace_secs,
+            early_fire: true,
         });
     }
 
@@ -523,6 +705,7 @@ pub(crate) fn run(
         let ident = c.ident.clone();
         let node = c.node.clone();
         let basis = c.basis.clone();
+        let class = c.class;
         let age = ages
             .get(&crate::gc::row_handle(&c.entry))
             .copied()
@@ -531,19 +714,48 @@ pub(crate) fn run(
             summary.answered += 1;
         }
         let pid_gone = c.pid.is_some_and(crate::daemon::pid_is_gone);
+        let pid_dead = c.pid.is_none() || pid_gone;
         match age {
-            None => summary.kept.push(judgement(
+            None => summary.kept.push(judgement_class(
                 &ident,
                 node,
                 "transcript unresolved".into(),
                 false,
+                class,
             )),
-            Some(age) if age <= grace_secs && !pid_gone && c.terminal.is_none() => {
-                summary.kept.push(judgement(
+            Some(_age) if !c.early_fire && c.terminal.is_none() => {
+                summary.kept.push(judgement_class(
+                    &ident,
+                    node,
+                    format!(
+                        "session not terminal: harness state {}",
+                        c.terminal.as_deref().unwrap_or("unknown")
+                    ),
+                    false,
+                    class,
+                ))
+            }
+            Some(age) if !c.early_fire && age <= c.grace => summary.kept.push(judgement_class(
+                &ident,
+                node,
+                format!("active: transcript written {age}s ago"),
+                false,
+                class,
+            )),
+            Some(_age) if !c.early_fire && !pid_dead => summary.kept.push(judgement_class(
+                &ident,
+                node,
+                format!("active: process for {} is alive", ident),
+                false,
+                class,
+            )),
+            Some(age) if c.early_fire && age <= c.grace && !pid_gone && c.terminal.is_none() => {
+                summary.kept.push(judgement_class(
                     &ident,
                     node,
                     format!("active: transcript written {age}s ago"),
                     false,
+                    class,
                 ))
             }
             Some(age) => {
@@ -551,7 +763,7 @@ pub(crate) fn run(
                 // went because the harness says the session finished, not
                 // because the transcript aged out. A dead pid and a terminal
                 // harness state are the two early-fire witnesses.
-                let basis = if c.terminal.is_some() && age <= grace_secs {
+                let basis = if c.early_fire && c.terminal.is_some() && age <= c.grace {
                     format!(
                         "{basis}; session terminal: harness state {}",
                         c.terminal.as_deref().unwrap_or_default()
@@ -565,12 +777,16 @@ pub(crate) fn run(
                     basis
                 };
                 if dry_run {
-                    summary.retired.push(judgement(&ident, node, basis, true));
+                    summary
+                        .retired
+                        .push(judgement_class(&ident, node, basis, true, class));
                 } else {
                     let outcome = remove(&c.entry);
                     if outcome.satisfies_applied() {
                         write_receipt(home, &c.entry, &outcome, node.as_deref(), &basis);
-                        summary.retired.push(judgement(&ident, node, basis, true));
+                        summary
+                            .retired
+                            .push(judgement_class(&ident, node, basis, true, class));
                     } else {
                         // Name WHY the removal did not confirm, not just the
                         // outcome tag: the detail is what tells the operator
@@ -644,6 +860,7 @@ fn write_receipt(
 /// removal cascade from the live seams.
 pub fn roster_reap(
     home: &crate::paths::AgentsHome,
+    cwd: &std::path::Path,
     grace_secs: i64,
     scope: crate::agents_config::RosterScope,
     dry_run: bool,
@@ -657,21 +874,24 @@ pub fn roster_reap(
             // rows owns a session, so this sweep removes nothing.
             let mut summary = RosterReapSummary::default();
             summary.instrument_unread = true;
-            summary.kept = vec![judgement(
+            summary.kept = vec![judgement_class(
                 "",
                 None,
                 format!("registry unreadable: {e}"),
                 false,
+                "contested",
             )];
             return summary;
         }
     };
     let store = std::cell::RefCell::new(crate::gc_inventory::HarnessStoreIndex::default());
-    run(
+    let scope_workers = crate::territory::recorded_scope_workers(cwd);
+    run_with_scope_workers(
         home,
         grace_secs,
         scope,
         dry_run,
+        &scope_workers,
         &roster,
         &registry.entries,
         &|| crate::gc_sweep::read_graph_entries(home),
@@ -1922,5 +2142,118 @@ mod tests {
             "{summary:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_finished_planner_retires_after_its_planning_grace() {
+        let dir = tmpdir("finished-planner");
+        let transcript = quiet_transcript(&dir, "s-plan");
+        let rows = vec![row("plan1234", Some("s-plan"), Some("blueprinter-plan"))];
+        let mut graph = graph_done_via_sessions("x-p", &["s-plan"]);
+        graph.statuses.insert("x-p".into(), "ready".into());
+        graph
+            .index
+            .insert("s-plan".into(), vec![("x-p".into(), "ready".into())]);
+        graph.work_index = graph.index.clone();
+        graph
+            .phases
+            .insert("s-plan".into(), vec!["blueprint".into()]);
+        graph.closed_planning.insert(
+            "s-plan".into(),
+            std::collections::HashSet::from(["x-p".into()]),
+        );
+        let summary = run_with_scope_workers(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &BTreeMap::new(),
+            &roster(rows),
+            &[],
+            &|| Some(graph.clone()),
+            &|_| Some(vec![transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert_eq!(summary.retired.len(), 1, "{summary:?}");
+        assert!(
+            summary.retired[0]
+                .reason
+                .starts_with("planning finished: x-p"),
+            "{summary:?}"
+        );
+        assert_eq!(summary.retired[0].class, "fleet");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_recorded_terminal_territory_blueprinter_retires_without_transcript_provenance() {
+        let dir = tmpdir("territory-blueprinter");
+        let transcript = quiet_transcript(&dir, "sid-blue");
+        let rows = vec![row(
+            "blue1234",
+            Some("sid-blue"),
+            Some("blueprinter-fno-8bef7b"),
+        )];
+        let scope_workers =
+            BTreeMap::from([(String::from("blueprinter-fno-8bef7b"), String::from("fno"))]);
+        let summary = run_with_scope_workers(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &scope_workers,
+            &roster(rows),
+            &[],
+            &|| Some(graph_done("x-epic")),
+            &|_| Some(vec![transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert_eq!(summary.retired.len(), 1, "{summary:?}");
+        assert!(
+            summary.retired[0]
+                .reason
+                .starts_with("territory blueprinter for scope fno"),
+            "{summary:?}"
+        );
+        assert_eq!(summary.retired[0].class, "fleet");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn render_names_roster_classes() {
+        let summary = RosterReapSummary {
+            kept: vec![
+                judgement_class("owned", None, "owned".into(), false, "owned"),
+                judgement_class("hand", None, "hand-started".into(), false, "unmarked"),
+                judgement_class("hold", None, "hold".into(), false, "contested"),
+            ],
+            retired: vec![judgement_class(
+                "planner",
+                None,
+                "planning finished".into(),
+                true,
+                "fleet",
+            )],
+            ..Default::default()
+        };
+        let text = render(&summary, false, true);
+        assert!(text.contains("classes: fleet 1, unmarked 1, owned 1, contested 1"));
+        assert!(text.contains("kept hand [unmarked]"));
+        let json = render(&summary, true, true);
+        assert!(json.contains("\"class\":\"fleet\""));
     }
 }

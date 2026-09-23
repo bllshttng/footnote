@@ -3244,7 +3244,7 @@ fn run_roster_reap(rest: &[String]) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let grace_secs = fno_agents::agents_config::retire_grace_secs(&cwd) as i64;
     let scope = fno_agents::agents_config::roster_scope(&cwd);
-    let summary = fno_agents::roster_reap::roster_reap(&home, grace_secs, scope, dry_run);
+    let summary = fno_agents::roster_reap::roster_reap(&home, &cwd, grace_secs, scope, dry_run);
     print!(
         "{}",
         fno_agents::roster_reap::render(&summary, json_out, dry_run)
