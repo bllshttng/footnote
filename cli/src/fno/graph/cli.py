@@ -5735,10 +5735,7 @@ def cmd_task_update(
             _before = _claim_status(key)
             # A pid-less claim stays protected as suspect inside its lease.
             # Keep a matching holder's claim across a later row refusal.
-            held_before = (
-                _before.get("holder") == holder
-                and _before.get("state") in ("live", "suspect")
-            )
+            held_before = _before.get("holder") == holder and _before.get("state") in ("live", "suspect")
         except Exception:  # noqa: BLE001 - an unreadable claim is not a held one
             held_before = False
 

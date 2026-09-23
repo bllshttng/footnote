@@ -214,6 +214,31 @@ fn api_node_fails_closed_when_claims_path_is_unreadable() {
 }
 
 #[test]
+fn api_nodes_refuse_when_a_node_claim_lockfile_is_corrupted() {
+    let claims = ClaimsFixture::new();
+    let lockfile = crate::claims::claim_path("node:ab-one", Some(claims._root.path())).unwrap();
+    std::fs::write(&lockfile, "not valid claim YAML").unwrap();
+    let territory_error = crate::territory::live_node_claims()
+        .expect_err("territory counts must not treat a corrupted claim as absent");
+    let territory_message = format!("{territory_error:?}");
+    assert!(
+        territory_message.contains("claims unreadable"),
+        "{territory_message}"
+    );
+    let graph_dir = TempDir::new().unwrap();
+    let store = arm(&graph_dir, crate::backlog::Backend::Json);
+
+    let error = nodes(&store, &NodeFilter::default(), &Page::default())
+        .expect_err("bulk graph reads must not treat a corrupted claim as absent");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains(&lockfile.display().to_string()),
+        "{message}"
+    );
+    assert!(message.contains("claim state is unavailable"), "{message}");
+}
+
+#[test]
 fn api_nodes_pages_two_then_cursor_third() {
     // AC14-HP: first:2 over 3 matching rows returns 2 with a next page; the
     // end cursor resumes at the third.

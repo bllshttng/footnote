@@ -135,7 +135,7 @@ fn park_session_claims(
     writer_pid: u32,
     daemon_pid: u32,
 ) -> Result<Vec<crate::convert::claim_repin::HeldClaim>, String> {
-    let records = match crate::claims::list(None, None, false) {
+    let records = match crate::claims::list_strict(None, None, false) {
         Ok(records) => records,
         // A claims directory that cannot be read is not a claim that moved. Say
         // so rather than proceed as though there were none to carry.

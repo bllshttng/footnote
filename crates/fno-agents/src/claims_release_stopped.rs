@@ -95,28 +95,35 @@ fn record_belongs_to_stopped(rec: &ClaimRecord, target: &StoppedHolder) -> bool 
 
 /// Holder-bound release at ONE verbatim claims directory (the per-dir twin of
 /// [`release`], which resolves `<root>/.fno/claims` and so cannot reach a
-/// spaces-era `<space>/claims` layout): re-read, require the holder to still
-/// match, remove, emit `claim_released`.
+/// spaces-era `<space>/claims` layout): re-read, require the scanned record
+/// generation to match, remove, emit `claim_released` under the recovery lock.
 fn release_stopped_at(
     dir: &Path,
     rec: &ClaimRecord,
     events_dir: Option<&Path>,
 ) -> Result<PathBuf, String> {
     let path = dir.join(format!("{}.lock", encode_key(&rec.key)));
-    let existing = match read_claim_file(&path) {
-        Ok(existing) => existing,
-        Err(ReadError::GoneAway) => return Err("claim already gone".into()),
-        Err(ReadError::Corrupted(error)) => return Err(error),
-    };
-    if existing.holder != rec.holder {
-        return Err("holder changed since the scan".into());
-    }
-    let duration_ms = (now_ms() - existing.acquired_at).max(0);
-    std::fs::remove_file(&path).map_err(|error| error.to_string())?;
-    let mut data = common_event_data(&existing);
-    data.insert("duration_held_ms".into(), Value::Number(duration_ms.into()));
-    emit_audit_event(events_dir, "claim_released", data);
-    Ok(path)
+    crate::claims::with_recovery_lock(&path, || {
+        let existing = match read_claim_file(&path) {
+            Ok(existing) => existing,
+            Err(ReadError::GoneAway) => return Err("claim already gone".into()),
+            Err(ReadError::Corrupted(error)) => return Err(error),
+        };
+        if existing.holder != rec.holder
+            || existing.acquired_at != rec.acquired_at
+            || existing.pid != rec.pid
+            || existing.expires_at != rec.expires_at
+            || existing.session_id != rec.session_id
+        {
+            return Err("claim changed since the scan".into());
+        }
+        let duration_ms = (now_ms() - existing.acquired_at).max(0);
+        std::fs::remove_file(&path).map_err(|error| error.to_string())?;
+        let mut data = common_event_data(&existing);
+        data.insert("duration_held_ms".into(), Value::Number(duration_ms.into()));
+        emit_audit_event(events_dir, "claim_released", data);
+        Ok(path.clone())
+    })
 }
 
 /// The stopped worker's harness session id, read from the registry row a
@@ -361,6 +368,48 @@ mod tests {
             .filter(|e| e["type"] == "claim_released")
             .count();
         assert_eq!(released_events, 2, "each release emits claim_released");
+    }
+
+    #[test]
+    fn stopped_release_preserves_a_reacquired_same_holder_claim() {
+        let td = TempDir::new().unwrap();
+        let claims_dir = td.path().join("claims");
+        let old = stopped_rec(
+            "node:x-race",
+            "target-session:sess-race",
+            Some(dead_pid() as i32),
+            Some("sess-race"),
+            "session-prover",
+        );
+        write_rec(&claims_dir, &old);
+        let path = lockfile_of(&claims_dir, &old.key);
+        let lock = crate::claims::recovery_lock_path(&path);
+        let token =
+            crate::claims::acquire_dir_mutex(&lock, std::time::Duration::from_secs(2), true)
+                .unwrap();
+        let dir = claims_dir.clone();
+        let events_dir = td.path().to_path_buf();
+        let old_for_release = old.clone();
+        let release = std::thread::spawn(move || {
+            release_stopped_at(&dir, &old_for_release, Some(&events_dir))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut fresh = old.clone();
+        fresh.acquired_at = old.acquired_at + 1_000;
+        fresh.pid = Some(std::process::id() as i32);
+        write_rec(&claims_dir, &fresh);
+        crate::claims::release_dir_mutex(&lock, &token);
+
+        assert!(
+            release.join().unwrap().is_err(),
+            "stop release must refuse a later claim generation"
+        );
+        assert!(path.exists(), "the reacquired holder's lockfile survives");
+        assert_eq!(
+            read_claim_file(&path).unwrap().acquired_at,
+            fresh.acquired_at
+        );
     }
 
     fn lockfile_of(dir: &Path, key: &str) -> PathBuf {

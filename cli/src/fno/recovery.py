@@ -864,7 +864,6 @@ def _redispatch(
 
     Stop the rate-limited session and respawn ``/target`` on the now-active
     (swapped) provider, continuing in the SAME worktree (work-so-far lives in the
-    branch's atomic commits there). Returns True iff a replacement worker was
     With no ``flags``, the caller guarantees the new active provider's cli is
     ``claude``, so the substrate is ``bg`` (claude-only) and ``--harness claude``
     selects the now-active claude record the swap installed in settings.yaml.

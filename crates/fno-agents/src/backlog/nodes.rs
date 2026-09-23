@@ -126,7 +126,7 @@ fn claims_directory() -> Result<std::path::PathBuf, String> {
 
 fn list_node_claims(prefix: Option<&str>) -> Result<Vec<crate::claims::ClaimRecord>, String> {
     let directory = claims_directory()?;
-    crate::claims::list_in(&[directory], prefix, true)
+    crate::claims::list_in_strict(&[directory], prefix, true)
         .map_err(|error| format!("claim state is unavailable: {error}"))
 }
 
@@ -153,16 +153,10 @@ fn project_claim(record: &crate::claims::ClaimRecord) -> Result<NodeClaim, Strin
 fn claim_for_node(node_id: &str) -> Result<NodeClaim, String> {
     let key = format!("node:{node_id}");
     let directory = claims_directory()?;
-    let records = crate::claims::list_in(&[directory.clone()], Some(&key), true)
+    let records = crate::claims::list_in_strict(&[directory], Some(&key), true)
         .map_err(|error| format!("claim state is unavailable: {error}"))?;
     if let Some(record) = records.iter().find(|record| record.key == key) {
         return project_claim(record);
-    }
-    if crate::claims::status(&key, None).0 == crate::claims::ClaimState::Corrupted {
-        return Err(format!(
-            "claim state is unavailable: lockfile for {key} under {} is unreadable",
-            directory.display()
-        ));
     }
     Ok(NodeClaim::default())
 }

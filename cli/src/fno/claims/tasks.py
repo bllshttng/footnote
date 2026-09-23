@@ -21,7 +21,6 @@ from .types import Claim
 #: coordinate across the project's worktrees like lane slots.
 TASK_PREFIX = "task:"
 
-#: A pid-less task claim's lease; a thread session has no process of its own.
 TASK_CLAIM_TTL_MS = 7_200_000  # 2 hours, the node-claim default
 
 

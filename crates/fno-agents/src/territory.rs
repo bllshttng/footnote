@@ -721,7 +721,7 @@ pub fn territory_cap(config_cwd: &Path) -> u32 {
 /// Live and suspect node lockfiles are the single holder answer. `false`
 /// excludes claims proven stale; a failed directory scan stays unknown.
 pub(crate) fn live_node_claims() -> Result<HashSet<String>, TerritoryUnknown> {
-    let records = crate::claims::list(Some("node:"), None, false)
+    let records = crate::claims::list_strict(Some("node:"), None, false)
         .map_err(|error| TerritoryUnknown(format!("territory: claims unreadable: {error}")))?;
     Ok(records
         .into_iter()

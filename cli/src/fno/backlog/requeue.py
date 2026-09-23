@@ -103,6 +103,8 @@ def _unclaim_node(task_id: str) -> None:
         raise typer.Exit(code=1)
 
     node_id = task_id
+    if _read_node(node_id, _graph_path()) is None:
+        raise typer.BadParameter(f"unclaim: graph node {node_id} not found")
     lock_note = _release_node_lockfile(node_id)
     if lock_note.startswith("lockfile"):
         raise typer.BadParameter(f"unclaim refused: {lock_note}")

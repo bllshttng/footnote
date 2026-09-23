@@ -44,27 +44,62 @@ pub fn force_release(key: &str, reason: &str, root: Option<&Path>) -> Result<Val
         return Err("reason must be non-empty for force-release".to_string());
     }
     let path = claims::claim_path(key, root)?;
-    if !path.exists() {
-        return Ok(json!({
+    claims::with_recovery_lock(&path, || {
+        if !path.exists() {
+            return Ok(json!({
+                "key": key,
+                "path": path.clone(),
+                "archived": false,
+                "force_released": false,
+                "previous_holder": Value::Null,
+            }));
+        }
+        let previous_holder = claims::read_claim_file(&path)
+            .ok()
+            .map(|record| record.holder);
+        let destination = archive_path(&path)?;
+        std::fs::rename(&path, &destination).map_err(|error| error.to_string())?;
+        Ok(json!({
             "key": key,
-            "path": path,
-            "archived": false,
-            "force_released": false,
-            "previous_holder": Value::Null,
-        }));
-    }
-    let previous_holder = claims::read_claim_file(&path)
-        .ok()
-        .map(|record| record.holder);
-    let destination = archive_path(&path)?;
-    std::fs::rename(&path, &destination).map_err(|error| error.to_string())?;
-    Ok(json!({
-        "key": key,
-        "path": path,
-        "archived": true,
-        "force_released": true,
-        "previous_holder": previous_holder,
-    }))
+            "path": path.clone(),
+            "archived": true,
+            "force_released": true,
+            "previous_holder": previous_holder,
+        }))
+    })
+}
+
+fn reap_one(path: &Path, expected: &ClaimRecord) -> Result<bool, String> {
+    claims::with_recovery_lock(path, || {
+        let current = match claims::read_claim_file(path) {
+            Ok(record) => record,
+            Err(claims::ReadError::GoneAway) => return Ok(false),
+            Err(claims::ReadError::Corrupted(error)) => {
+                return Err(format!("{}: corrupted claim: {error}", path.display()))
+            }
+        };
+        if &current != expected {
+            return Ok(false);
+        }
+        let destination = archive_path(path)?;
+        std::fs::rename(path, &destination).map_err(|error| error.to_string())?;
+        let archived = claims::read_claim_file(&destination).map_err(|error| {
+            format!(
+                "archive verification failed: {}: {error:?}",
+                destination.display()
+            )
+        })?;
+        if archived.key != current.key
+            || archived.holder != current.holder
+            || archived.acquired_at != current.acquired_at
+        {
+            return Err(format!(
+                "archive verification failed: {} changed during reap",
+                path.display()
+            ));
+        }
+        Ok(true)
+    })
 }
 
 pub fn reap(root: Option<&Path>, apply: bool) -> Result<Value, String> {
@@ -86,11 +121,10 @@ pub fn reap(root: Option<&Path>, apply: bool) -> Result<Value, String> {
             continue;
         }
         let path = claims::claim_path(&record.key, root)?;
-        let destination = archive_path(&path)?;
-        match std::fs::rename(&path, &destination) {
-            Ok(()) if !path.exists() && destination.exists() => reaped += 1,
-            Ok(()) => failures.push(format!("archive verification failed: {}", path.display())),
-            Err(error) => failures.push(format!("{}: {error}", path.display())),
+        match reap_one(&path, &record) {
+            Ok(true) => reaped += 1,
+            Ok(false) => {}
+            Err(error) => failures.push(error),
         }
     }
     Ok(json!({
@@ -106,6 +140,8 @@ pub fn reap(root: Option<&Path>, apply: bool) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     struct ClaimsRootRestore(Option<std::ffi::OsString>);
@@ -130,6 +166,25 @@ mod tests {
         result
     }
 
+    fn reaped_pid() -> u32 {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    fn live_replacement(old: &ClaimRecord, holder: &str) -> ClaimRecord {
+        let mut fresh = old.clone();
+        fresh.holder = holder.to_string();
+        fresh.acquired_at = claims::now_ms();
+        fresh.pid = Some(std::process::id() as i32);
+        fresh.session_id = None;
+        fresh
+    }
+
     #[test]
     fn repo_space_listing_reads_the_resolved_lockfile_directory() {
         let temp = TempDir::new().unwrap();
@@ -152,6 +207,85 @@ mod tests {
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].key, key);
             assert_eq!(records[0].holder, "pr:17");
+        });
+    }
+
+    #[test]
+    fn reap_one_refuses_a_fresh_replacement_after_a_stale_scan() {
+        let temp = TempDir::new().unwrap();
+        with_claims_root(temp.path(), || {
+            let key = "node:reap-race-test";
+            let mut old = match claims::acquire(
+                key,
+                "target-session:old",
+                claims::AcquireOpts {
+                    pid: Some(reaped_pid()),
+                    ..Default::default()
+                },
+            ) {
+                claims::AcquireOutcome::Acquired(record) => record,
+                other => panic!("claim fixture failed: {other:?}"),
+            };
+            let path = claims::claim_path(key, Some(temp.path())).unwrap();
+            old.session_id = None;
+            std::fs::write(&path, claims::serialize_claim(&old).unwrap()).unwrap();
+            let lock = claims::recovery_lock_path(&path);
+            let token = claims::acquire_dir_mutex(&lock, Duration::from_secs(2), true).unwrap();
+            let fresh = live_replacement(&old, "target-session:fresh");
+            std::fs::write(&path, claims::serialize_claim(&fresh).unwrap()).unwrap();
+            claims::release_dir_mutex(&lock, &token);
+
+            assert!(!reap_one(&path, &old).unwrap());
+            assert_eq!(
+                claims::status(key, Some(temp.path())).1.unwrap().holder,
+                fresh.holder
+            );
+        });
+    }
+
+    #[test]
+    fn release_waits_for_recovery_and_preserves_a_replacement_holder() {
+        let temp = TempDir::new().unwrap();
+        with_claims_root(temp.path(), || {
+            let key = "node:release-race-test";
+            let mut old = match claims::acquire(
+                key,
+                "target-session:old",
+                claims::AcquireOpts {
+                    pid: Some(reaped_pid()),
+                    ..Default::default()
+                },
+            ) {
+                claims::AcquireOutcome::Acquired(record) => record,
+                other => panic!("claim fixture failed: {other:?}"),
+            };
+            let path = claims::claim_path(key, Some(temp.path())).unwrap();
+            old.session_id = None;
+            std::fs::write(&path, claims::serialize_claim(&old).unwrap()).unwrap();
+            let lock = claims::recovery_lock_path(&path);
+            let token = claims::acquire_dir_mutex(&lock, Duration::from_secs(2), true).unwrap();
+            let root = temp.path().to_path_buf();
+            let release_key = key.to_string();
+            let holder = old.holder.clone();
+            let release = thread::spawn(move || {
+                claims::release(&release_key, &holder, Some(&root), Some(&root))
+            });
+            thread::sleep(Duration::from_millis(200));
+            let waited_for_lock = !release.is_finished();
+
+            let fresh = live_replacement(&old, "target-session:fresh");
+            std::fs::write(&path, claims::serialize_claim(&fresh).unwrap()).unwrap();
+            claims::release_dir_mutex(&lock, &token);
+
+            release.join().unwrap().unwrap();
+            assert!(
+                waited_for_lock,
+                "release ignored the per-key recovery mutex"
+            );
+            assert_eq!(
+                claims::status(key, Some(temp.path())).1.unwrap().holder,
+                fresh.holder
+            );
         });
     }
 }

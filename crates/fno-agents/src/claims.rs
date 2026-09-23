@@ -268,6 +268,14 @@ pub fn claim_path(key: &str, root: Option<&Path>) -> Result<PathBuf, String> {
     Ok(claims_dir(key, root)?.join(format!("{}.lock", encode_key(key))))
 }
 
+pub(crate) fn recovery_lock_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!("{name}.recovery.d"))
+}
+
 /// The claims DIRECTORY (`<root>/.fno/claims`) for an explicit root, else the
 /// global root. `None` when no root resolves (no `$FNO_CLAIMS_ROOT`, no
 /// `$HOME`) — callers sweep-read fail-open on that.
@@ -314,6 +322,20 @@ pub fn list(
     root: Option<&Path>,
     include_stale: bool,
 ) -> Result<Vec<ClaimRecord>, String> {
+    list_in(&claim_dirs(root), prefix, include_stale)
+}
+
+/// Enumerate claims for a reader that must distinguish a broken lockfile from
+/// an absent claim. Ordinary listings keep their records-only behavior.
+pub fn list_strict(
+    prefix: Option<&str>,
+    root: Option<&Path>,
+    include_stale: bool,
+) -> Result<Vec<ClaimRecord>, String> {
+    list_in_strict(&claim_dirs(root), prefix, include_stale)
+}
+
+fn claim_dirs(root: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(global) = global_claims_root() {
         dirs.push(global.join(CLAIMS_DIRNAME));
@@ -321,7 +343,7 @@ pub fn list(
     if let Some(local) = root {
         dirs.push(local.join(CLAIMS_DIRNAME));
     }
-    list_in(&dirs, prefix, include_stale)
+    dirs
 }
 
 /// Scan VERBATIM directories. Spaces-era claims live directly at
@@ -335,6 +357,16 @@ pub fn list_in(
     list_in_result(dirs, prefix, include_stale).map(|(records, _)| records)
 }
 
+/// Scan claims like [`list_in`], but refuse a malformed lockfile whose encoded
+/// filename matches the requested key prefix.
+pub fn list_in_strict(
+    dirs: &[PathBuf],
+    prefix: Option<&str>,
+    include_stale: bool,
+) -> Result<Vec<ClaimRecord>, String> {
+    list_in_result_with_policy(dirs, prefix, include_stale, true).map(|(records, _)| records)
+}
+
 /// Ok carries the records plus the directories whose `read_dir` succeeded,
 /// so a caller can tell a true empty from a scan that never reached a file.
 pub(crate) fn list_in_result(
@@ -342,6 +374,16 @@ pub(crate) fn list_in_result(
     prefix: Option<&str>,
     include_stale: bool,
 ) -> Result<(Vec<ClaimRecord>, Vec<PathBuf>), String> {
+    list_in_result_with_policy(dirs, prefix, include_stale, false)
+}
+
+fn list_in_result_with_policy(
+    dirs: &[PathBuf],
+    prefix: Option<&str>,
+    include_stale: bool,
+    fail_on_corrupted: bool,
+) -> Result<(Vec<ClaimRecord>, Vec<PathBuf>), String> {
+    let encoded_prefix = prefix.map(encode_key);
     let mut seen_dirs = std::collections::BTreeSet::new();
     let mut read_dirs = Vec::new();
     let mut best: std::collections::BTreeMap<String, (u8, ClaimRecord)> =
@@ -368,14 +410,25 @@ pub(crate) fn list_in_result(
             let file_type = entry.file_type().map_err(|error| {
                 format!("claims root {} unreadable mid-scan: {error}", dir.display())
             })?;
-            if !file_type.is_file() || !entry.file_name().to_string_lossy().ends_with(".lock") {
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+            if !file_type.is_file() || !file_name.ends_with(".lock") {
                 continue;
             }
-            let Ok(rec) = read_claim_file(&entry.path()) else {
-                // The list contract is records, not diagnostics. Corrupted
-                // rows are withheld exactly as an unreadable root is: they
-                // cannot authorize an apply pass.
-                continue;
+            let path = entry.path();
+            let rec = match read_claim_file(&path) {
+                Ok(record) => record,
+                Err(ReadError::GoneAway) => continue,
+                Err(ReadError::Corrupted(error)) => {
+                    if fail_on_corrupted
+                        && encoded_prefix
+                            .as_deref()
+                            .is_none_or(|wanted| file_name.starts_with(wanted))
+                    {
+                        return Err(format!("lockfile {} unreadable: {error}", path.display()));
+                    }
+                    continue;
+                }
             };
             if prefix.is_some_and(|wanted| !rec.key.starts_with(wanted)) {
                 continue;
@@ -1575,6 +1628,19 @@ pub(crate) fn release_dir_mutex(lock_dir: &Path, token: &str) {
     );
 }
 
+/// Serialize a lockfile mutation with acquire's stale-recovery rename.
+pub(crate) fn with_recovery_lock<T>(
+    path: &Path,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let lock = recovery_lock_path(path);
+    let token = acquire_dir_mutex(&lock, RECOVERY_LOCK_MAX_WAIT, true)
+        .ok_or_else(|| format!("claim recovery mutex unavailable for {}", path.display()))?;
+    let result = operation();
+    release_dir_mutex(&lock, &token);
+    result
+}
+
 /// Set `path`'s mtime to `age` in the past. Best-effort: a failure (read-only
 /// mount, path vanished mid-restore) is swallowed, mirroring
 /// `fno.mutex.steal_if_stale`'s `os.utime` - a reporting-adjacent backdate must
@@ -2255,12 +2321,7 @@ fn idempotent_reacquire_guarded(
     opts: &AcquireOpts,
     events_dir: Option<&Path>,
 ) -> RecoverResult {
-    let recovery_lock = path.with_file_name(format!(
-        "{}.recovery.d",
-        path.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    ));
+    let recovery_lock = recovery_lock_path(path);
     let token = match std::fs::create_dir(&recovery_lock) {
         Ok(()) => stamp_owner(&recovery_lock),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -2323,12 +2384,7 @@ fn recover_stale(
     opts: &AcquireOpts,
     events_dir: Option<&Path>,
 ) -> RecoverResult {
-    let recovery_lock = path.with_file_name(format!(
-        "{}.recovery.d",
-        path.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    ));
+    let recovery_lock = recovery_lock_path(path);
     let token = match std::fs::create_dir(&recovery_lock) {
         Ok(()) => stamp_owner(&recovery_lock),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -2456,6 +2512,7 @@ fn wait_for_recovery_release(recovery_lock: &Path, max_wait: Duration) {
 /// Release a claim we hold (mirrors `core.release_claim`, non-strict):
 /// missing file, different holder, and corrupted file are all silent success
 /// (releases are idempotent; a corrupted file is left for force-release).
+/// The recovery mutex keeps the holder check and unlink ordered with acquire.
 pub fn release(
     key: &str,
     holder: &str,
@@ -2466,24 +2523,26 @@ pub fn release(
         return Err("key and holder must be non-empty".into());
     }
     let path = claim_path(key, root)?;
-    let existing = match read_claim_file(&path) {
-        Ok(rec) => rec,
-        Err(ReadError::GoneAway) => return Ok(()),
-        Err(ReadError::Corrupted(_)) => return Ok(()),
-    };
-    if existing.holder != holder {
-        return Ok(());
-    }
-    let duration_ms = (now_ms() - existing.acquired_at).max(0);
-    match std::fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.to_string()),
-    }
-    let mut data = common_event_data(&existing);
-    data.insert("duration_held_ms".into(), Value::Number(duration_ms.into()));
-    emit_audit_event(events_dir, "claim_released", data);
-    Ok(())
+    with_recovery_lock(&path, || {
+        let existing = match read_claim_file(&path) {
+            Ok(rec) => rec,
+            Err(ReadError::GoneAway) => return Ok(()),
+            Err(ReadError::Corrupted(_)) => return Ok(()),
+        };
+        if existing.holder != holder {
+            return Ok(());
+        }
+        let duration_ms = (now_ms() - existing.acquired_at).max(0);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.to_string()),
+        }
+        let mut data = common_event_data(&existing);
+        data.insert("duration_held_ms".into(), Value::Number(duration_ms.into()));
+        emit_audit_event(events_dir, "claim_released", data);
+        Ok(())
+    })
 }
 /// Inspect a single key (mirrors `core.claim_status`). Never errors: a
 /// missing file (or one that vanishes mid-read) is `Free`, an unreadable one
@@ -2619,12 +2678,7 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
         Err(ReadError::GoneAway) => return Ok(false),
         Err(ReadError::Corrupted(_)) => return Ok(false),
     };
-    let recovery_lock = path.with_file_name(format!(
-        "{}.recovery.d",
-        path.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    ));
+    let recovery_lock = recovery_lock_path(&path);
     // A peer holding the mutex is mid-reclaim; back off (best-effort) rather
     // than race it. A missed renewal only shortens the lease. But a CORPSE here
     // would block every renewal until some other path cleared it, which is the
