@@ -3201,9 +3201,9 @@ def _raw_send(
                 if not subject_ok:
                     reason = (
                         f"{name!r} review/start would read an empty diff: "
-                        f"{subject_detail}. Fire from the PR worktree session "
-                        "(`fno do target request-self-review --pr <n>`) or "
-                        "spawn the reviewer with --cwd <worktree>."
+                        f"{subject_detail}. Run the review inline in the PR "
+                        "worktree session: `fno do target request-self-review`, "
+                        "or `$fno:review <level>` there."
                     )
                     if check:
                         print(f"not-injectable: {reason}")
