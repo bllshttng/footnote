@@ -24,7 +24,7 @@
 
 use crate::graph_store::WorkState;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// The row verdict: retire now, or keep with a named reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1102,6 +1102,24 @@ pub fn maybe_retirement_sweep(
         let scope = crate::agents_config::roster_scope(&grace_cwd);
         let roster = roster_sweep(&home, &grace_cwd, grace_secs, scope);
         let scope_off = scope == crate::agents_config::RosterScope::Off;
+        let mut builds_reclaimed = 0usize;
+        let mut builds_bytes = 0u64;
+        let mut builds_unread = false;
+        for root in crate::daemon::worktree_sweep::registry_repo_roots(&home) {
+            let root = Path::new(&root);
+            if crate::cargo_build_dirs::workspace_manifests(root).is_empty() {
+                continue;
+            }
+            let report = crate::cargo_build_dirs::reclaim_idle_trees(root, true, SystemTime::now());
+            builds_reclaimed += report.reclaimed;
+            builds_bytes += report.reclaimed_bytes;
+            builds_unread |= report.unread.is_some();
+        }
+        let builds_detail = if builds_unread {
+            "builds=unread".to_string()
+        } else {
+            format!("builds=reclaimed {builds_reclaimed} bytes {builds_bytes}")
+        };
         // The mux surface is one of the stores a reap must clear: the
         // default-flag prune closes an orphaned worker's tab on the retire
         // cadence, so the operator never runs the manual
@@ -1136,13 +1154,13 @@ pub fn maybe_retirement_sweep(
             )
         };
         let detail = format!(
-            "roster={roster_detail} {mux_detail} {crowns_detail} held={}",
+            "roster={roster_detail} {mux_detail} {crowns_detail} {builds_detail} held={}",
             summary.holds.len()
         );
         // `acted` counts BOTH sweeps' retirements: the registry sweep's and
         // the roster sweep's. A tick that retired only roster sessions reads
         // acted>0, never a held zero.
-        let acted = summary.retired.len() + roster.retired.len();
+        let acted = summary.retired.len() + roster.retired.len() + builds_reclaimed;
         // A zero-acted tick says which zero it was: a sweep that could not
         // read its registry, nothing classified, or work judged and held.
         let skip_reason = if acted == 0 {
@@ -1401,6 +1419,13 @@ mod tests {
                 row["data"]["interval_s"],
                 interval.as_secs(),
                 "the arms row must carry the interval the guard compared"
+            );
+            assert!(
+                row["data"]["detail"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("builds=reclaimed 0 bytes 0"),
+                "the retire receipt names the build reclaim pass: {row}"
             );
             // The body handed back the NEXT window's interval, resolved
             // under the same env: the handoff loop is closed.
