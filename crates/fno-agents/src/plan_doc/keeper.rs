@@ -28,6 +28,17 @@ fn caller_path(p: &Value, raw: &str) -> PathBuf {
     }
 }
 
+/// An op's exit and message; a failure's message rides `warnings`, which the
+/// client prints on the caller's stderr.
+fn op_result(exit: i32, message: String) -> Value {
+    let warnings: Vec<&str> = if exit != 0 && !message.is_empty() {
+        vec![message.as_str()]
+    } else {
+        Vec::new()
+    };
+    json!({"exit": exit, "message": message, "warnings": warnings})
+}
+
 /// `{op: "project"|"stamp"|"graduate"|"set_expected"|"waves", ...}`.
 /// `project` reads the graph this keeper owns and rewrites each named node's
 /// linked plan doc; `stamp`/`graduate`/`set_expected` write plan frontmatter
@@ -114,7 +125,7 @@ pub(crate) fn handle_plan_docs(state: &StoreState, params: &Value) -> Result<Val
                     .unwrap_or(false),
                 events_path(state, params),
             );
-            Ok(json!({"exit": result.exit, "message": result.message}))
+            Ok(op_result(result.exit, result.message))
         }
         "graduate" => {
             let Some(plan_path) = opt_str(params, "plan_path") else {
@@ -130,7 +141,7 @@ pub(crate) fn handle_plan_docs(state: &StoreState, params: &Value) -> Result<Val
                     .unwrap_or(false),
                 events_path(state, params),
             );
-            Ok(json!({"exit": result.exit, "message": result.message}))
+            Ok(op_result(result.exit, result.message))
         }
         "set_expected" => {
             let Some(plan_path) = opt_str(params, "plan_path") else {
@@ -170,8 +181,14 @@ pub(crate) fn handle_plan_docs(state: &StoreState, params: &Value) -> Result<Val
         }
         // `fno do plan stamp|graduate|set-expected` hand their raw flags here.
         "argv" => match argv_params(params) {
-            Ok(parsed) => handle_plan_docs(state, &parsed),
-            Err(message) => Ok(json!({"exit": 2, "message": message})),
+            Ok(parsed) => {
+                let out = handle_plan_docs(state, &parsed)?;
+                // The CLI verb reports every failure, a missing doc included.
+                let exit = out["exit"].as_i64().unwrap_or(0) as i32;
+                let message = out["message"].as_str().unwrap_or_default().to_string();
+                Ok(op_result(exit, message))
+            }
+            Err(message) => Ok(op_result(2, message)),
         },
         other => Err(StoreError::Invalid(format!(
             "unknown plan_docs op {other:?}"
@@ -269,5 +286,11 @@ mod tests {
         assert!(bad("stamp", json!(["--plan-path"])).is_err());
         assert!(bad("stamp", json!(["--plan-path", "p", "--bogus", "1"])).is_err());
         assert!(bad("nope", json!(["--plan-path", "p"])).is_err());
+        // A failure's message reaches the caller's stderr; success stays quiet.
+        assert_eq!(
+            op_result(2, "error: x".into())["warnings"],
+            json!(["error: x"])
+        );
+        assert_eq!(op_result(0, "note".into())["warnings"], json!([]));
     }
 }
