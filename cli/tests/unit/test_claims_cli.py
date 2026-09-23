@@ -12,6 +12,7 @@ from fno.claims.core import ClaimContended, ClaimValidationError, acquire_claim
 from fno.claims.io import dedup_claims_roots
 
 from .test_claim_reap import _dead_pid  # noqa: F401
+from fno.graph.store import read_graph_strict
 
 
 runner = CliRunner()
@@ -557,7 +558,7 @@ def test_release_stamp_do_writes_the_do_window(tmp_path, monkeypatch):
         cli, ["release", "node:ab-dotest", "--holder", "target-session:s", "--stamp-do"]
     )
     assert stamped.exit_code == 0, stamped.output
-    rows = json.loads(g.read_text())["entries"][0].get("sessions", [])
+    rows = read_graph_strict(g)[0].get("sessions", [])
     do = [x for x in rows if x.get("phase") == "do"]
     assert len(do) == 1
     assert do[0]["harness"] == "claude"
@@ -600,7 +601,7 @@ def test_handover_acquire_opens_the_do_row_too(tmp_path, monkeypatch):
     assert out.exit_code == 0, out.output
     assert "handover from" in out.output
 
-    rows = json.loads(g.read_text())["entries"][0].get("sessions", [])
+    rows = read_graph_strict(g)[0].get("sessions", [])
     do = [x for x in rows if x.get("phase") == "do"]
     assert len(do) == 1, rows
     assert do[0]["started_at"]
@@ -661,14 +662,15 @@ def test_acquire_opens_do_provenance_row(tmp_path, monkeypatch):
         cli, ["acquire", "node:ab-acqtest", "--holder", "target-session:s", "--ttl", "1h"]
     )
     assert acq.exit_code == 0, acq.output
-    rows = json.loads(g.read_text())["entries"][0].get("sessions", [])
+    rows = read_graph_strict(g)[0].get("sessions", [])
     do = [x for x in rows if x.get("phase") == "do"]
     assert len(do) == 1
     assert do[0]["harness"] == "claude"
     # owned (holder) session wins over the ambient CLAUDE_CODE_SESSION_ID
     assert do[0]["session_id"] == "s"
     assert do[0]["started_at"]
-    assert "ended_at" not in do[0]  # opened, not closed
+    # The typed store emits the full envelope: an open row's end fields are null.
+    assert do[0].get("ended_at") is None  # opened, not closed
 
 
 def test_acquire_then_release_closes_do_window(tmp_path, monkeypatch):
@@ -700,7 +702,7 @@ def test_acquire_then_release_closes_do_window(tmp_path, monkeypatch):
         cli, ["release", "node:ab-acqrel", "--holder", "target-session:s", "--stamp-do"]
     )
     assert rel.exit_code == 0, rel.output
-    rows = json.loads(g.read_text())["entries"][0].get("sessions", [])
+    rows = read_graph_strict(g)[0].get("sessions", [])
     do = [x for x in rows if x.get("phase") == "do"]
     assert len(do) == 1  # one row, not two - release closed the acquire row
     assert do[0]["started_at"] and do[0]["ended_at"]
@@ -729,7 +731,7 @@ def _do_graph(tmp_path, monkeypatch, node_id, session_marker):
 
 def _do_rows(graph_path):
     return [
-        x for x in json.loads(graph_path.read_text())["entries"][0].get("sessions", [])
+        x for x in read_graph_strict(graph_path)[0].get("sessions", [])
         if x.get("phase") == "do"
     ]
 
@@ -854,7 +856,7 @@ def test_release_without_stamp_do_writes_no_provenance(tmp_path, monkeypatch):
         cli, ["release", "node:ab-dotest2", "--holder", "target-session:s"]
     )
     assert bare.exit_code == 0, bare.output
-    assert json.loads(g.read_text())["entries"][0].get("sessions", []) == []
+    assert read_graph_strict(g)[0].get("sessions", []) == []
 
 
 def test_non_node_key_uses_cwd_not_global(tmp_path, monkeypatch):

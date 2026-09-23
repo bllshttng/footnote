@@ -1738,7 +1738,13 @@ fn entry_acc(glyph: &str, label: &str, id: &str) -> PopupRow {
 fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
     let mut rows: Vec<PopupRow> = Vec::new();
     let mut actions: Vec<MenuAction> = Vec::new();
-    let mut add = |row: PopupRow, acts: &[MenuAction]| {
+    let mut add = |mut row: PopupRow, acts: &[MenuAction]| {
+        if let (PopupRow::Entry { hint, .. }, [action]) = (&mut row, acts) {
+            *hint = action
+                .accelerator_id()
+                .and_then(crate::keys::menu_key_for)
+                .unwrap_or_default();
+        }
         rows.push(row);
         actions.extend_from_slice(acts);
     };
@@ -1755,25 +1761,19 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
     add(PopupRow::Header(agent.name.clone()), &[]);
     add(PopupRow::Rule, &[]);
     if agent.exited {
-        add(
-            entry_acc("✕", "Remove", "remove-row"),
-            &[MenuAction::Remove],
-        );
-        add(entry_acc("◉", "Peek", "peek-row"), &[MenuAction::Peek]);
+        add(entry("✕", "Remove"), &[MenuAction::Remove]);
+        add(entry("◉", "Peek"), &[MenuAction::Peek]);
         // Resume above the rule (AC7): the menu twin of peek `r`, on the row
         // state `r` accepts - an exited row.
-        add(
-            entry_acc("↻", "Resume", "resume-row"),
-            &[MenuAction::Resume],
-        );
+        add(entry("↻", "Resume"), &[MenuAction::Resume]);
     } else if agent.pane_id.is_some() {
         // Live pane row: already placed, so re-placement is a MOVE of the live
         // pane, never an attach. Same 2x2 grid geometry the paneless branch uses
         // below, so the two menus read as one system; the verbs differ because
         // the operations do (move a running pane vs. place a new one).
         add(entry("→", "Focus"), &[MenuAction::Focus]);
-        add(entry_acc("◉", "Peek", "peek-row"), &[MenuAction::Peek]);
-        add(entry_acc("✉", "Mail", "mail-row"), &[MenuAction::Mail]);
+        add(entry("◉", "Peek"), &[MenuAction::Peek]);
+        add(entry("✉", "Mail"), &[MenuAction::Mail]);
         add(PopupRow::Rule, &[]);
         add(
             PopupRow::FullWidth("▭ New Tab".into()),
@@ -1797,19 +1797,13 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
             &[MenuAction::MoveDir(Dir::Up), MenuAction::MoveDir(Dir::Down)],
         );
         add(PopupRow::Rule, &[]);
-        add(entry_acc("■", "Stop", "stop-row"), &[MenuAction::Stop]);
-        add(
-            entry_acc("✕", "Remove", "remove-row"),
-            &[MenuAction::Remove],
-        );
+        add(entry("■", "Stop"), &[MenuAction::Stop]);
+        add(entry("✕", "Remove"), &[MenuAction::Remove]);
     } else if agent.attach_id.is_some() {
         // Paneless bg row: the motivating case - open as a tab or a split pane.
         // Open-here leads (repoint the focused viewer). The client can't know viewer-ness, so the
         // server's fail-closed notice is the feedback path when the focus isn't a detachable viewer.
-        add(
-            entry_acc("⊙", "Open Here", "open-here"),
-            &[MenuAction::OpenHere],
-        );
+        add(entry("⊙", "Open Here"), &[MenuAction::OpenHere]);
         add(
             PopupRow::FullWidth("▭ New Tab".into()),
             &[MenuAction::NewTab],
@@ -1827,32 +1821,26 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
             &[MenuAction::Split(Dir::Up), MenuAction::Split(Dir::Down)],
         );
         add(PopupRow::Rule, &[]);
-        add(entry_acc("◉", "Peek", "peek-row"), &[MenuAction::Peek]);
-        add(entry_acc("✉", "Mail", "mail-row"), &[MenuAction::Mail]);
-        add(entry_acc("■", "Stop", "stop-row"), &[MenuAction::Stop]);
-        add(
-            entry_acc("✕", "Remove", "remove-row"),
-            &[MenuAction::Remove],
-        );
+        add(entry("◉", "Peek"), &[MenuAction::Peek]);
+        add(entry("✉", "Mail"), &[MenuAction::Mail]);
+        add(entry("■", "Stop"), &[MenuAction::Stop]);
+        add(entry("✕", "Remove"), &[MenuAction::Remove]);
     } else {
         // A live row that is neither pane-hosted nor attachable here.
-        add(entry_acc("◉", "Peek", "peek-row"), &[MenuAction::Peek]);
-        add(entry_acc("✉", "Mail", "mail-row"), &[MenuAction::Mail]);
+        add(entry("◉", "Peek"), &[MenuAction::Peek]);
+        add(entry("✉", "Mail"), &[MenuAction::Mail]);
         if agent.no_pane_reason == Some(AgentNoPaneReason::LivePaneless) {
             add(entry("↩", "Reattach"), &[MenuAction::Reattach]);
         }
-        add(entry_acc("■", "Stop", "stop-row"), &[MenuAction::Stop]);
-        add(
-            entry_acc("✕", "Remove", "remove-row"),
-            &[MenuAction::Remove],
-        );
+        add(entry("■", "Stop"), &[MenuAction::Stop]);
+        add(entry("✕", "Remove"), &[MenuAction::Remove]);
     }
     // Diff is common to every row state: it reads the row's worktree,
     // which an exited or paneless row has just as much as a live pane-hosted
     // one - and a finished worker's diff is the one you most want to read.
     // Bound in menu scope now, so its hint is the live key.
     add(PopupRow::Rule, &[]);
-    add(entry_acc("±", "Diff", "diff-row"), &[MenuAction::Diff]);
+    add(entry("±", "Diff"), &[MenuAction::Diff]);
     // Live AND exited rows are renamable; an EXTERNAL row is claude-owned.
     if !agent.external {
         add(entry("✎", "Rename"), &[MenuAction::RenameAgent]);
@@ -13604,18 +13592,7 @@ async fn selector_keys(
                     None => view.set_notice("only a live pane-hosted worker can detach".into()),
                 }
             }
-            b'r' => {
-                // Rename the squad at the cursor. Tab/other rows have
-                // no squad rename here (prefix+, renames a tab), so they notice.
-                let squad = match view.display_rows().get(cur) {
-                    Some(DisplayRow::Sel(r)) if r.tab.is_none() => Some(r.squad),
-                    _ => None,
-                };
-                match squad {
-                    Some(sq) => view.open_rename(RenameTarget::Squad(sq)),
-                    None => view.set_notice("only a workspace row can be renamed".into()),
-                }
-            }
+            b'r' => view.rename_at_cursor(cur),
             b' ' => {
                 // Open the read-only peek overlay: an agent row shows
                 // its status sentence + recent transcript from disk; a

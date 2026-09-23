@@ -21,7 +21,7 @@ def test_positive_control_names_the_undocumented_file(tmp_path):
 def test_state_root_mirroring_the_doc_is_fully_documented(tmp_path, monkeypatch):
     use_tmpdir(monkeypatch, tmp_path)
     from fno import paths
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     root = Path(paths.state_dir())
     for pattern in top_level_patterns(DOC):
@@ -30,5 +30,5 @@ def test_state_root_mirroring_the_doc_is_fully_documented(tmp_path, monkeypatch)
     # materialized mirror: the mutation emits the graph, its render, and the
     # backups/ rotation beside it.
     (root / "graph.json").write_text('{"entries": []}\n', encoding="utf-8")
-    locked_mutate_graph(root / "graph.json", lambda entries: entries)
+    commit_rows_via_store(root / "graph.json", lambda entries: entries)
     assert undocumented(root, DOC) == []

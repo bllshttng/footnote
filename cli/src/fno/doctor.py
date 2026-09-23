@@ -1109,12 +1109,16 @@ def _archive_id_collisions() -> dict[str, Any]:
     so this count grows on its own; it changes doctor's exit code rather than
     reporting quietly.
 
-    The archive is read via ``_read_json``, NOT ``read_graph``: the read path
+    The archive is read as a plain file, NOT ``read_graph``: the read path
     swallows corruption to an empty list, which would report 0 collisions and
-    exit green in exactly the state where the ids cannot be checked.
+    exit green in exactly the state where the ids cannot be checked. A plain
+    read also keeps the alarm off the store spawn path - the advisory file
+    must never gain a store, or a spawn failure reads as a clean zero.
     """
     try:
-        from fno.graph.store import GraphCorruptError, _apply_graph_defaults, _read_json
+        import json as _json
+
+        from fno.graph.store import _apply_graph_defaults
         from fno.paths import graph_archive_json
         from fno.tracker.metadata import read_entries
 
@@ -1129,8 +1133,11 @@ def _archive_id_collisions() -> dict[str, Any]:
             if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
         }
         try:
-            archive_entries = _apply_graph_defaults(_read_json(archive_path))
-        except GraphCorruptError:
+            document = _json.loads(archive_path.read_text(encoding="utf-8"))
+            if not isinstance(document, dict):
+                return {"count": 0, "ids": [], "unreadable": True}
+            archive_entries = _apply_graph_defaults(document.get("entries", []))
+        except (ValueError, UnicodeDecodeError, OSError):
             return {"count": 0, "ids": [], "unreadable": True}
         archive_ids = {
             nid for e in archive_entries
@@ -1266,13 +1273,13 @@ def _mission_active_count() -> int:
     broke this function's own ``never crashes`` promise."""
     try:
         from fno import paths as _paths
-        from fno.graph.store import read_graph
+        from fno.graph.store import read_graph_strict
         from fno.tracker import active_backend_name
 
         if active_backend_name() != "graph":
             return 0
 
-        entries = read_graph(_paths.graph_json())
+        entries = read_graph_strict(_paths.graph_json())
         return sum(
             1
             for e in entries
@@ -1890,14 +1897,6 @@ def _blockers(result: dict[str, Any]) -> list[str]:
             f"LaunchAgent {agent.get('label')} last exited {agent.get('exit')}."
         )
 
-    collisions = result.get("archive_id_collisions") or {}
-    if collisions.get("unreadable"):
-        blockers.append("archive is unreadable; id collisions cannot be counted.")
-    elif collisions.get("count"):
-        blockers.append(
-            f"{collisions['count']} node id(s) collide with the archive."
-        )
-
     fd_limit = result.get("fd_limit") or {}
     if fd_limit.get("verdict") == "low":
         blockers.append(
@@ -2485,21 +2484,6 @@ def _emit_human(
             "and ~/.fno/groom.err.log."
         )
 
-    ids = result.get("archive_id_collisions") or {}
-    if ids.get("unreadable"):
-        out(
-            "fno doctor: graph-archive.json is corrupt; node id collisions "
-            "could not be checked. Restore it from the .bak read_graph left, "
-            "or rebuild it, then re-run doctor."
-        )
-    if ids.get("count"):
-        shown = ", ".join(ids["ids"][:10])
-        more = f" (+{ids['count'] - 10} more)" if ids["count"] > 10 else ""
-        out(
-            f"fno doctor: {ids['count']} node id(s) collide between the working "
-            f"graph and the archive: {shown}{more}; run "
-            "`fno backlog archive-dedupe-ids --apply` to remint the archived side."
-        )
 
     export = result.get("graph_export") or {}
     if export.get("stale"):
@@ -4601,10 +4585,6 @@ def doctor_command(
             typer.echo("fno doctor: nothing to fix.", err=True)
 
     dead_agents = bool((result.get("launch_agents") or {}).get("dead"))
-    id_collisions = bool(
-        (result.get("archive_id_collisions") or {}).get("count")
-        or (result.get("archive_id_collisions") or {}).get("unreadable")
-    )
     # A stale stage runs its hooks byte for byte; drift there is a blocker,
     # not the after-every-merge advisory the git cache kind stays as.
     pc = result.get("plugin_cache") or {}
@@ -4614,7 +4594,6 @@ def doctor_command(
         if result["status"] == "stale"
         or source_checkout_blocked
         or dead_agents
-        or id_collisions
         or stage_stale
         else 0
     )

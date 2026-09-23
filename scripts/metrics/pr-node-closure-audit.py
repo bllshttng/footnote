@@ -221,10 +221,10 @@ def _fetch_corpus(limit: int) -> list[dict]:
 
 
 def _live_node_ids() -> set[str]:
-    from fno.graph.store import read_graph
+    from fno.graph.store import read_graph_strict
     from fno.paths import graph_json
 
-    entries = read_graph(graph_json())
+    entries = read_graph_strict(graph_json())
     return {e["id"] for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
 
 

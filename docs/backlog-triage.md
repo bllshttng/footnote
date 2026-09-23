@@ -4,7 +4,7 @@ Triage is where deferred work gets sorted and promoted. As of the
 `fno backlog capture` feature it draws from **two sources** in one
 picker:
 
-1. **Graph nodes** (`ab-XXXXXXXX`) in `graph.json`: real backlog items that
+1. **Graph nodes** (`ab-XXXXXXXX`) in the graph.db backlog store: real backlog items that
    carry a plan or at least an idea-stage intent. Managed by `fno backlog`
    (intake / idea / ready / next / done / defer).
 2. **Inbox items** (`fu-XXXXXX`) in the capture-tier inbox file: small

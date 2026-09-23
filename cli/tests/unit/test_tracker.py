@@ -27,6 +27,7 @@ from fno.tracker import (
 from fno.tracker import sidecar as sidecar_mod
 from fno.tracker.github_backend import parse_github_id
 from fno.tracker.sidecar import Sidecar, load, save
+from fno.graph.store import read_graph_strict
 
 
 def _write_graph(path: Path, entries: list[dict]) -> Path:
@@ -272,7 +273,7 @@ def test_sidecar_graph_mode_roundtrips_through_entry(tmp_path, monkeypatch, grap
     returned = save(sc)
     # Graph mode returns the graph path and updates the entry in place...
     assert returned == g
-    entries = json.loads(g.read_text())["entries"]
+    entries = read_graph_strict(g)
     entry = next(e for e in entries if e["id"] == "ab-1")
     assert entry["cwd"] == "/new"
     assert entry["pr_number"] == 42
@@ -336,7 +337,7 @@ def test_sidecar_external_mode_never_reads_the_graph(
     path = save(sc)
     assert path == sidecars / "EXT-1.json"
     # The graph file is byte-identical: external mode never wrote through it.
-    assert json.loads(g.read_text())["entries"][0]["cwd"] == "/graph-sentinel"
+    assert read_graph_strict(g)[0]["cwd"] == "/graph-sentinel"
 
 
 def test_sidecar_external_mode_missing_file_is_empty(tmp_path, monkeypatch, external_mode):

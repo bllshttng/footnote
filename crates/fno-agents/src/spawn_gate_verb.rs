@@ -376,6 +376,31 @@ mod probe {
             out.insert("lanes".into(), lanes.clone());
         }
 
+        match crate::fleet_incident::verdict() {
+            crate::fleet_incident::Verdict::Clear(_) => {}
+            crate::fleet_incident::Verdict::Stopped(record) => {
+                return refuse_with(
+                    "fleet-stop",
+                    format!(
+                        "fleet incident stop is active (generation {}, reason: {})",
+                        record.generation, record.reason
+                    ),
+                    json!({"generation": record.generation}),
+                    &[],
+                    out,
+                );
+            }
+            crate::fleet_incident::Verdict::Unavailable(detail) => {
+                return refuse_with(
+                    "fleet-stop-unavailable",
+                    format!("fleet incident state is unreadable ({detail})"),
+                    json!({"detail": detail}),
+                    &[],
+                    out,
+                );
+            }
+        }
+
         // The route axis of the quota wall: the SAME call the gate makes, so
         // the probe and the gate cannot disagree about what refuses (the gate
         // runs it ahead of every machine axis).
@@ -1159,9 +1184,102 @@ mod tests {
         }
         assert_eq!(answer["live_workers"], 3, "slots stay rows + reservations");
         assert_eq!(answer["verdict"], "accepted");
+        assert_ne!(answer["reason"], "fleet-stop");
 
         std::env::remove_var(crate::paths::HOME_ENV);
         std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        match prior_payload {
+            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn probe_mirrors_fleet_incident_verdict_before_capacity_and_keeps_lanes() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-incident-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let prior_home = std::env::var_os(crate::paths::HOME_ENV);
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        let claims_root = dir.join("claims-root");
+        let prior_claims_root = std::env::var_os("FNO_CLAIMS_ROOT");
+        std::env::set_var("FNO_CLAIMS_ROOT", &claims_root);
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 28\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", fnodir.join("config.toml"));
+        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+        std::env::set_var(
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
+        );
+        std::fs::write(
+            home.join("registry.json"),
+            serde_json::json!({
+                "schema_version": crate::state::REGISTRY_SCHEMA_VERSION,
+                "entries": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let incident_path =
+            crate::fleet_incident::fleet_stop_path(&crate::paths::AgentsHome::at(&home));
+        let record = crate::fleet_incident::IncidentRecord {
+            version: crate::fleet_incident::STATE_VERSION,
+            state: "stopped".into(),
+            generation: 19,
+            changed_at: "2026-09-18T19:48:00Z".into(),
+            changed_by: "test".into(),
+            reason: "repro".into(),
+            source: Some("file".into()),
+        };
+        std::fs::write(&incident_path, serde_json::to_string(&record).unwrap()).unwrap();
+
+        let stopped = probe::answer(&json!({}));
+        assert_eq!(stopped["verdict"], "refused");
+        assert_eq!(stopped["reason"], "fleet-stop");
+        assert!(stopped["message"]
+            .as_str()
+            .unwrap()
+            .contains("generation 19"));
+        assert!(stopped["lanes"].is_object(), "{stopped}");
+
+        std::fs::write(&incident_path, b"broken").unwrap();
+        let unreadable = probe::answer(&json!({}));
+        assert_eq!(unreadable["verdict"], "refused");
+        assert_eq!(unreadable["reason"], "fleet-stop-unavailable");
+        assert!(unreadable["message"]
+            .as_str()
+            .unwrap()
+            .contains("unreadable"));
+
+        let _ = std::fs::remove_file(&incident_path);
+        let clear = probe::answer(&json!({}));
+        assert_eq!(clear["verdict"], "accepted");
+        assert_ne!(clear["reason"], "fleet-stop");
+
+        match prior_home {
+            Some(value) => std::env::set_var(crate::paths::HOME_ENV, value),
+            None => std::env::remove_var(crate::paths::HOME_ENV),
+        }
+        match prior_claims_root {
+            Some(value) => std::env::set_var("FNO_CLAIMS_ROOT", value),
+            None => std::env::remove_var("FNO_CLAIMS_ROOT"),
+        }
         match prior_config {
             Some(value) => std::env::set_var("FNO_CONFIG", value),
             None => std::env::remove_var("FNO_CONFIG"),

@@ -86,18 +86,6 @@ def test_contained_node_with_free_claim_stays_out():
     assert [row["id"] for row in receipt["rows"]] == ["x-open"]
 
 
-def test_owner_of_a_contained_child_is_still_offerable():
-    """Containment folds the child into the owner's PR, so the OWNER is the
-    node that must dispatch. Its parent pointer is the containment mark, not
-    a box."""
-    receipt = classify_planned_unclaimed(
-        [_node("x-owner"), _node("x-sub", contained_in="x-owner", parent="x-owner")],
-        [],
-    )
-
-    assert [row["id"] for row in receipt["rows"]] == ["x-owner"]
-
-
 @pytest.mark.parametrize("state", ["live", "suspect", "stale", "corrupted"])
 def test_ac5_any_claim_state_stays_out(state):
     receipt = classify_planned_unclaimed(

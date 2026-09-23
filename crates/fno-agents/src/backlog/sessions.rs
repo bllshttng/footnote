@@ -95,112 +95,67 @@ pub fn delete(connection: &Connection, node_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-type RowParts = (
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    String,
-);
-
-fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RowParts> {
-    Ok((
-        row.get::<_, String>(0)?,
-        row.get::<_, String>(1)?,
-        row.get::<_, String>(2)?,
-        row.get::<_, Option<String>>(3)?,
-        row.get::<_, Option<String>>(4)?,
-        row.get::<_, Option<String>>(5)?,
-        row.get::<_, Option<String>>(6)?,
-        row.get::<_, Option<String>>(7)?,
-        row.get::<_, Option<String>>(8)?,
-        row.get::<_, Option<String>>(9)?,
-        row.get::<_, Option<String>>(10)?,
-        row.get::<_, String>(11)?,
-    ))
-}
-
-fn build(parts: RowParts) -> SessionRecord {
-    let (
-        phase,
-        harness,
-        session_id,
-        started_at,
-        ended_at,
-        ended_by,
-        effort,
-        at,
-        claimed_at,
-        observed_model,
-        merge_grant,
-        extras_raw,
-    ) = parts;
-    let extras: serde_json::Map<String, Value> =
-        serde_json::from_str(&extras_raw).unwrap_or_default();
-    SessionRecord {
-        phase,
-        harness,
-        session_id,
-        started_at,
-        ended_at,
-        ended_by,
-        effort: effort.and_then(|v| serde_json::from_str(&v).ok()),
-        at: at.and_then(|v| serde_json::from_str(&v).ok()),
-        claimed_at: claimed_at.and_then(|v| serde_json::from_str(&v).ok()),
-        observed_model: observed_model.and_then(|v| serde_json::from_str(&v).ok()),
-        merge_grant: merge_grant.and_then(|v| serde_json::from_str(&v).ok()),
-        extras,
-    }
-}
-
 /// One node's sessions in list order (seq). Schema 3: the extras column
 /// round-trips the item keys the typed model keeps as `extras`; an
 /// unparsable value reads as empty.
 pub fn load(connection: &Connection, node_id: &str) -> Result<Vec<SessionRecord>, String> {
     let mut statement = connection
-        .prepare_cached(
+        .prepare(
             "SELECT phase, harness, session_id, started_at, ended_at, ended_by, effort, at,
                     claimed_at, observed_model, merge_grant, extras
              FROM sessions WHERE node_id = ?1 ORDER BY seq",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map(params![node_id], map_row)
+        .query_map(params![node_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, String>(11)?,
+            ))
+        })
         .map_err(|error| error.to_string())?;
     let mut out = Vec::new();
     for row in rows {
-        out.push(build(row.map_err(|error| error.to_string())?));
-    }
-    Ok(out)
-}
-
-/// Every node's sessions, grouped by node id, in list order within each
-/// node. One full scan instead of one query per node.
-pub(crate) fn load_all(
-    connection: &Connection,
-) -> Result<std::collections::HashMap<String, Vec<SessionRecord>>, String> {
-    let mut statement = connection
-        .prepare_cached(
-            "SELECT phase, harness, session_id, started_at, ended_at, ended_by, effort, at,
-                    claimed_at, observed_model, merge_grant, extras, node_id
-             FROM sessions ORDER BY node_id, seq",
-        )
-        .map_err(|error| error.to_string())?;
-    let rows = statement
-        .query_map([], |row| Ok((row.get::<_, String>(12)?, map_row(row)?)))
-        .map_err(|error| error.to_string())?;
-    let mut out: std::collections::HashMap<String, Vec<SessionRecord>> =
-        std::collections::HashMap::new();
-    for row in rows {
-        let (node_id, parts) = row.map_err(|error| error.to_string())?;
-        out.entry(node_id).or_default().push(build(parts));
+        let (
+            phase,
+            harness,
+            session_id,
+            started_at,
+            ended_at,
+            ended_by,
+            effort,
+            at,
+            claimed_at,
+            observed_model,
+            merge_grant,
+            extras_raw,
+        ) = row.map_err(|error| error.to_string())?;
+        let extras: serde_json::Map<String, Value> =
+            serde_json::from_str(&extras_raw).unwrap_or_default();
+        out.push(SessionRecord {
+            phase,
+            harness,
+            session_id,
+            started_at,
+            ended_at,
+            ended_by,
+            effort: effort.and_then(|v| serde_json::from_str(&v).ok()),
+            at: at.and_then(|v| serde_json::from_str(&v).ok()),
+            claimed_at: claimed_at.and_then(|v| serde_json::from_str(&v).ok()),
+            observed_model: observed_model.and_then(|v| serde_json::from_str(&v).ok()),
+            merge_grant: merge_grant.and_then(|v| serde_json::from_str(&v).ok()),
+            extras,
+        });
     }
     Ok(out)
 }

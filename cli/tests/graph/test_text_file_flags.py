@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 
 from fno.graph import cli as graph_cli
 from fno.graph.cli import cli
-from fno.graph.store import locked_mutate_graph, read_graph
+from fno.graph.store import commit_rows_via_store, read_graph_strict
 
 runner = CliRunner()
 
@@ -46,7 +46,7 @@ def _seed_node(g, node_id="x-eeee"):
         )
         return entries
 
-    locked_mutate_graph(g, _add)
+    commit_rows_via_store(g, _add)
 
 
 def test_note_body_file_roundtrip_quotes_and_newlines(tmp_graph):
@@ -83,7 +83,7 @@ def test_idea_details_file_roundtrip(tmp_graph):
     receipt = json.loads(r.stdout)
     minted = receipt["id"]
     assert minted, "expected a minted node"
-    node = next(e for e in read_graph(tmp_graph) if e.get("id") == minted)
+    node = next(e for e in read_graph_strict(tmp_graph) if e.get("id") == minted)
     assert node["details"] == details
 
 

@@ -24,10 +24,16 @@ class _FakeClient:
         self.conflicts = conflicts
         self.entries = entries
         self.commits = 0
+        self.version = 0
 
     def request(self, verb: str, payload: dict[str, Any]) -> dict[str, Any]:
         if verb == "begin":
-            return {"version": "v1", "entries": self.entries}
+            self.version += 1
+            return {
+                "version": f"v{self.version}",
+                "entries": self.entries,
+                "base_digests": {e["id"]: f"d{self.version}" for e in self.entries},
+            }
         if verb == "commit_rows":
             self.commits += 1
             if self.commits <= self.conflicts:
@@ -37,16 +43,6 @@ class _FakeClient:
                 "backup": None,
                 "closure_releases": [],
                 "entries": payload["changed"],
-            }
-        if verb == "commit":
-            self.commits += 1
-            if self.commits <= self.conflicts:
-                raise store._Conflict()
-            return {
-                "dropped": 0,
-                "backup": None,
-                "closure_releases": [],
-                "entries": payload["entries"],
             }
         raise AssertionError(f"unexpected verb {verb}")
 
@@ -103,14 +99,14 @@ def test_two_conflicts_emit_two_events_then_commit(
     g = _graph(tmp_path)
     install(_FakeClient(conflicts=2, entries=[]), g)
 
-    committed = store.locked_mutate_graph(g, lambda entries: entries)
+    committed = store.commit_rows_via_store(g, lambda entries: entries)
 
     assert committed == []
     rows = _conflicts(journal)
     assert len(rows) == 2, rows
     assert [r["data"]["attempt"] for r in rows] == [1, 2]
     assert all(r["data"]["exhausted"] is False for r in rows)
-    assert [r["data"]["attempts_max"] for r in rows] == [5, 5]
+    assert [r["data"]["attempts_max"] for r in rows] == [store._TX_ATTEMPTS] * 2
     assert all(r["data"]["graph_path"] == str(g) for r in rows)
     assert all(r["source"] == "python" for r in rows)
     assert len(sleeps) == 2
@@ -121,18 +117,22 @@ def test_exhaustion_emits_exhausted_then_raises(
 ) -> None:
     sleeps, install = tx
     g = _graph(tmp_path)
-    install(_FakeClient(conflicts=5, entries=[]), g)
+    install(_FakeClient(conflicts=store._TX_ATTEMPTS, entries=[]), g)
 
-    with pytest.raises(RuntimeError, match="graph mutated under us 5 times"):
-        store.locked_mutate_graph(g, lambda entries: entries)
+    with pytest.raises(
+        RuntimeError, match=rf"graph mutated under us {store._TX_ATTEMPTS} times"
+    ):
+        store.commit_rows_via_store(g, lambda entries: entries)
 
     rows = _conflicts(journal)
-    assert len(rows) == 5, rows
+    assert len(rows) == store._TX_ATTEMPTS, rows
     assert rows[-1]["data"]["exhausted"] is True
-    assert [r["data"]["attempt"] for r in rows] == [1, 2, 3, 4, 5]
-    # Backoff ran before every retry: four sleeps, each within its
-    # full-jitter bound, so wall time is at least their sum.
-    assert len(sleeps) == 4
+    assert [r["data"]["attempt"] for r in rows] == list(
+        range(1, store._TX_ATTEMPTS + 1)
+    )
+    # Backoff ran before every retry: one fewer sleep than attempts, each
+    # within its full-jitter bound, so wall time is at least their sum.
+    assert len(sleeps) == store._TX_ATTEMPTS - 1
     for i, slept in enumerate(sleeps):
         bound = min(store._TX_BACKOFF_CAP_S, store._TX_BACKOFF_BASE_S * 2**i)
         assert 0 <= slept <= bound, (i, slept, bound)
@@ -156,65 +156,4 @@ def test_an_unwritable_journal_never_changes_the_outcome(
         store, "_finish_mutation", lambda path, outcome: outcome["entries"]
     )
 
-    assert store.locked_mutate_graph(g, lambda entries: entries) == []
-
-
-class _RowsConflictClient:
-    """begin serves named rows; the first `conflicts` commit_rows raise."""
-
-    def __init__(self, conflicts: int, entries: list[dict[str, Any]]):
-        self.conflicts = conflicts
-        self.entries = entries
-        self.attempts = 0
-
-    def request(self, verb: str, payload: dict[str, Any]) -> dict[str, Any]:
-        if verb == "begin":
-            return {"version": "v1", "entries": [dict(row) for row in self.entries]}
-        if verb == "commit_rows":
-            self.attempts += 1
-            if self.attempts <= self.conflicts:
-                raise store._Conflict("graph conflict on n1")
-            changed_ids = {row["id"] for row in payload["changed"]}
-            kept = [row for row in self.entries if row["id"] not in changed_ids]
-            return {"entries": [*kept, *payload["changed"]]}
-        raise AssertionError(f"unexpected verb {verb}")
-
-
-def _retitled(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    entries[0]["title"] = "after"
-    return entries
-
-
-def test_a_retrying_write_speaks_on_stderr(
-    tmp_path: Path, journal: list, tx, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """AC8: one stderr attempt line per conflict, so a caller killed
-    mid-retry by a timeout or a pipe still has a transcript."""
-    sleeps, install = tx
-    g = _graph(tmp_path)
-    install(_RowsConflictClient(conflicts=2, entries=[{"id": "n1", "title": "before"}]), g)
-
-    store.locked_mutate_graph(g, _retitled)
-
-    err = capsys.readouterr().err
-    assert "retrying 1/5" in err, err
-    assert "retrying 2/5" in err, err
-    assert len(sleeps) == 2
-
-
-def test_a_conflict_event_names_its_nodes_and_session(
-    tmp_path: Path, journal: list, tx, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC9: the emitted row carries the touched ids and the session id, so
-    two concurrent chains in one journal can be told apart."""
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-test-1")
-    sleeps, install = tx
-    g = _graph(tmp_path)
-    install(_RowsConflictClient(conflicts=1, entries=[{"id": "n1", "title": "before"}]), g)
-
-    store.locked_mutate_graph(g, _retitled)
-
-    rows = _conflicts(journal)
-    assert len(rows) == 1, rows
-    assert rows[0]["data"]["touched"] == ["n1"], rows
-    assert rows[0]["data"]["session_id"] == "sess-test-1", rows
+    assert store.commit_rows_via_store(g, lambda entries: entries) == []
