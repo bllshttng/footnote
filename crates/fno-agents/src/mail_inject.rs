@@ -38,7 +38,7 @@ use crate::claude_attach::{perform_attach, AttachRequest, UnixControlTransport};
 use crate::claude_drive::{
     contains_detach_sentinel, find_transcript_in, transcript_len, DriveError,
 };
-use crate::claude_roster::ClaudeRoster;
+use crate::claude_roster::{read_control_key_in, ClaudeRoster};
 use crate::codex_inject::discover_loaded_threads;
 use crate::paths::AgentsHome;
 
@@ -638,16 +638,6 @@ fn resolve_target(session: &str) -> Result<(PathBuf, String, PathBuf), &'static 
         &crate::claude_roster::daemon_dir(),
         &crate::claude_drive::claude_projects_dir(),
     )
-}
-
-fn read_control_key_in(daemon_dir: &Path) -> Option<String> {
-    let raw = std::fs::read_to_string(daemon_dir.join("control.key")).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
 }
 
 /// Deliver `text` to `session` over the daemon `control.sock`: resolve the
