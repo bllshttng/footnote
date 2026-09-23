@@ -24,6 +24,9 @@ use std::time::Duration;
 /// activity.
 pub const MAX_ATTEMPTS: u32 = 3;
 
+const NUDGE_SENDER: &str = "pr-nudge";
+const NUDGE_SENDER_LINE: &str = "Automatic retry from the fno daemon pr-nudge arm, not a person. A hold from your crown or the operator outranks it.";
+
 /// The bounded subprocess budget, shared by the PR-status read and every
 /// mail/resume/ask effect.
 const RUN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -361,6 +364,12 @@ pub fn apply(
             // Mail and resume are only reachable past `due`, which is where
             // the one status read happened.
             let status = status.expect("mail and resume rungs imply a due row");
+            if !actionable_nudge_status(&status) {
+                if &state != state_param {
+                    save_state(home, &row.session_id, &state);
+                }
+                return;
+            }
             let text = nudge_text(row, &status);
             let resume_argv = vec![
                 "fno".to_string(),
@@ -381,6 +390,10 @@ pub fn apply(
                     "agents".to_string(),
                     "mail".to_string(),
                     "send".to_string(),
+                    "--from-name".to_string(),
+                    NUDGE_SENDER.to_string(),
+                    "--origin".to_string(),
+                    "scheduler".to_string(),
                     row.session_id.clone(),
                     text,
                 ];
@@ -550,13 +563,26 @@ fn settled_red_head(payload: &Value) -> Option<String> {
     }
 }
 
+fn actionable_nudge_status(status: &Result<Value, i32>) -> bool {
+    let Ok(payload) = status else {
+        return false;
+    };
+    let settled = payload.get("settled").and_then(Value::as_bool) == Some(true);
+    let actionable_verdict = matches!(
+        payload.get("verdict").and_then(Value::as_str),
+        Some("red" | "green")
+    );
+    let open = payload.get("pr_state").and_then(Value::as_str) == Some("OPEN");
+    settled && actionable_verdict && open
+}
+
 /// The nudge body: the order to drive, plus the PR's own verdict, head and
 /// failing checks so the session starts the fix round without a round
 /// trip.
 fn nudge_text(row: &OpenPrRow, status: &Result<Value, i32>) -> String {
     let pr = row.pr;
     let node = &row.node;
-    match status {
+    let body = match status {
         Err(code) => format!(
             "continue: PR #{pr} on node {node} is open and not merged. Drive it to merge. \
              fno do pr status {pr}: pr status unread (exit {code})"
@@ -594,7 +620,8 @@ fn nudge_text(row: &OpenPrRow, status: &Result<Value, i32>) -> String {
                 text
             }
         }
-    }
+    };
+    format!("{NUDGE_SENDER_LINE} {body}")
 }
 
 /// The failing checks as one ` | `-joined string. A settled red with no
@@ -926,7 +953,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 (
                     0,
-                    status_payload("pending", false, "0123456789abcdef"),
+                    status_payload("green", true, "0123456789abcdef"),
                     String::new(),
                 )
             } else if argv.contains(&"send".to_string()) {
@@ -953,8 +980,19 @@ mod tests {
         let mail = &text_runner_calls[1];
         assert_eq!(mail[1], "agents");
         assert_eq!(mail[3], "send");
-        assert!(mail[5].contains("PR #1943"));
-        assert!(mail[5].contains("pending unsettled @ 0123456789ab"));
+        assert_eq!(
+            mail.get(4..8).unwrap_or(&[]),
+            &[
+                "--from-name".to_string(),
+                "pr-nudge".to_string(),
+                "--origin".to_string(),
+                "scheduler".to_string(),
+            ][..]
+        );
+        let mail_text = mail.get(9).map(String::as_str).unwrap_or("");
+        assert!(mail_text.starts_with("Automatic retry from the fno daemon pr-nudge arm"));
+        assert!(mail_text.contains("PR #1943"));
+        assert!(mail_text.contains("green settled @ 0123456789ab"));
         let saved = load_state(&home, &row(true).session_id);
         assert_eq!(saved.attempts, 1);
         assert_eq!(saved.undelivered, 0);
@@ -969,12 +1007,17 @@ mod tests {
     #[test]
     fn stopped_row_gets_resume() {
         let r = row(false);
-        let mut saw_resume = false;
+        let settled = status_payload("green", true, "0123456789abcdef");
+        let mut resume_argv = None;
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
-            if argv.contains(&"resume".to_string()) {
-                saw_resume = true;
+            if argv.contains(&"do".to_string()) {
+                (0, settled.clone(), String::new())
+            } else if argv.contains(&"resume".to_string()) {
+                resume_argv = Some(argv.to_vec());
+                (0, String::new(), String::new())
+            } else {
+                (0, String::new(), String::new())
             }
-            (0, String::new(), String::new())
         };
         let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-resume"));
         let emitter = EventEmitter::new(home.events_jsonl(), "test");
@@ -988,7 +1031,9 @@ mod tests {
             1900,
             &mut runner,
         );
-        assert!(saw_resume);
+        let resume = resume_argv.expect("settled status should resume a stopped row");
+        assert!(resume[5].starts_with("Automatic retry from the fno daemon pr-nudge arm"));
+        assert!(!resume[5].contains("<fno_mail"));
         let _ = std::fs::remove_dir_all(std::env::temp_dir().join("fno-pn-resume"));
     }
 
@@ -1058,7 +1103,7 @@ mod tests {
                 );
             }
             if argv.contains(&"send".to_string()) {
-                mail_text = Some(argv[5].clone());
+                mail_text = argv.last().cloned();
                 return (
                     0,
                     "msg-1 queued (durable) [live-miss]\n".into(),
@@ -1783,9 +1828,115 @@ mod tests {
     }
 
     #[test]
-    fn an_unparseable_status_read_keeps_the_unread_line() {
-        // AC4-ERR: empty stdout with exit 1. The old line stands, and no
-        // red head is read.
+    fn unread_pr_status_sends_nothing_and_next_pass_retries() {
+        let r = row(true);
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-unread-retry"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let mut first_calls = Vec::new();
+        let mut first_runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
+            first_calls.push(argv.to_vec());
+            if argv.contains(&"do".to_string()) {
+                (1, String::new(), String::new())
+            } else {
+                (0, "msg-1 delivered (hosted)\n".into(), String::new())
+            }
+        };
+        apply(
+            &home,
+            &emitter,
+            &r,
+            &LadderState::default(),
+            false,
+            900,
+            1900,
+            &mut first_runner,
+        );
+        drop(first_runner);
+
+        assert_eq!(first_calls.len(), 1, "an unread status must not send mail");
+        assert!(first_calls[0].contains(&"do".to_string()));
+        let state = load_state(&home, &r.session_id);
+        assert_eq!(state.attempts, 0);
+        assert_eq!(state.undelivered, 0);
+        assert_eq!(state.last_nudge_at, None);
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(!events.contains("pr_nudge_sent"));
+
+        let settled = status_payload("green", true, "0123456789abcdef");
+        let mut next_calls = Vec::new();
+        let mut next_runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
+            next_calls.push(argv.to_vec());
+            if argv.contains(&"do".to_string()) {
+                (0, settled.clone(), String::new())
+            } else {
+                (0, "msg-2 delivered (hosted)\n".into(), String::new())
+            }
+        };
+        apply(
+            &home,
+            &emitter,
+            &r,
+            &state,
+            false,
+            900,
+            1901,
+            &mut next_runner,
+        );
+        drop(next_runner);
+        assert_eq!(
+            next_calls.len(),
+            2,
+            "the next pass retries status, then mails"
+        );
+        assert!(next_calls[1].contains(&"send".to_string()));
+        assert_eq!(load_state(&home, &r.session_id).attempts, 1);
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn unsettled_pr_status_sends_no_resume_or_attempt() {
+        let r = row(false);
+        let pending = status_payload("pending", false, "0123456789abcdef");
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-unsettled"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        let mut calls = Vec::new();
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
+            calls.push(argv.to_vec());
+            if argv.contains(&"do".to_string()) {
+                (2, pending.clone(), String::new())
+            } else {
+                (0, String::new(), String::new())
+            }
+        };
+        apply(
+            &home,
+            &emitter,
+            &r,
+            &LadderState::default(),
+            false,
+            900,
+            1900,
+            &mut runner,
+        );
+        drop(runner);
+
+        assert_eq!(calls.len(), 1, "an unsettled status must not resume");
+        assert!(calls[0].contains(&"do".to_string()));
+        let state = load_state(&home, &r.session_id);
+        assert_eq!(state.attempts, 0);
+        assert_eq!(state.undelivered, 0);
+        assert_eq!(state.last_nudge_at, None);
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(!events.contains("pr_nudge_sent"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+    }
+
+    #[test]
+    fn an_unparseable_status_read_remains_unreadable() {
+        // Empty stdout with exit 1 remains a read error; apply must keep it
+        // silent and retry on the next pass.
         let r = row(true);
         let mut runner = |argv: &[String], _cwd: &str| -> (i32, String, String) {
             if argv.contains(&"do".to_string()) {
@@ -1796,8 +1947,6 @@ mod tests {
         };
         let status = read_status(&r, &mut runner);
         assert!(matches!(status, Err(1)));
-        let text = nudge_text(&r, &status);
-        assert!(text.contains("pr status unread (exit 1)"), "{text}");
     }
 
     #[test]
@@ -1847,7 +1996,7 @@ mod tests {
             if argv.contains(&"do".to_string()) {
                 (1, out.clone(), String::new())
             } else if argv.contains(&"send".to_string()) {
-                mail_text = Some(argv[5].clone());
+                mail_text = argv.last().cloned();
                 (0, "msg-1 delivered (hosted)\n".into(), String::new())
             } else {
                 (0, String::new(), String::new())
