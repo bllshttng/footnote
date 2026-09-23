@@ -899,17 +899,6 @@ pub fn classify_with_basis_and_exclusivity(
     session_witness: Option<SessionWitness<'_>>,
 ) -> (ClaimState, &'static str) {
     let now = now.unwrap_or_else(now_ms);
-    // The witness is consulted only for records that CARRY a session id; a
-    // blank stamp is absent, so legacy-shaped records never reach it.
-    let session_live = |witness: SessionWitness<'_>| -> Option<&'static str> {
-        rec.session_id
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .and_then(|_| match witness(rec) {
-                SessionLiveness::Live(witness_basis) => Some(witness_basis),
-                SessionLiveness::Absent | SessionLiveness::Unresolved => None,
-            })
-    };
     // A `dispatch:` pid can predate the worker's exec, so it waits for expiry.
     // A gate pid never does, so it decides before the TTL ends.
     if rec.key.starts_with("gate:") {
@@ -978,13 +967,14 @@ pub fn classify_with_basis_and_exclusivity(
             // byte-for-byte today's verdict, which every pre-change claim and
             // the reaper counts the 1511 revert restored depend on.
             if rec.session_id.as_deref().is_some_and(|s| !s.is_empty()) {
+                let session_state = witness(rec);
                 if (rec.key.starts_with("node:") || rec.key.starts_with("task:"))
                     && is_same_machine(&rec.host, rec.machine_id.as_deref())
-                    && matches!(witness(rec), SessionLiveness::Absent)
+                    && matches!(&session_state, SessionLiveness::Absent)
                 {
                     return (ClaimState::Stale, basis::SESSION_ABSENT);
                 }
-                if let Some(witness_basis) = session_live(witness) {
+                if let SessionLiveness::Live(witness_basis) = session_state {
                     return (ClaimState::Live, witness_basis);
                 }
                 if now < rec.expires_at.unwrap_or(now) + UNRESOLVED_GRACE_MS {

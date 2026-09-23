@@ -454,12 +454,29 @@ mod tests {
                 other => panic!("claim fixture failed: {other:?}"),
             };
             let now = claims::now_ms();
-            old.acquired_at = now - 120_000;
-            old.expires_at = Some(now - 60_000);
+            old.acquired_at = now - claims::UNRESOLVED_GRACE_MS - 120_000;
+            old.expires_at = Some(now - claims::UNRESOLVED_GRACE_MS - 60_000);
             old.pid_provenance = Some("ambient".into());
             old.session_id = Some("thread-session".into());
             let path = claims::claim_path(key, Some(temp.path())).unwrap();
             std::fs::write(&path, claims::serialize_claim(&old).unwrap()).unwrap();
+
+            let observations = std::cell::Cell::new(0usize);
+            let inconsistent_witness = |_: &claims::ClaimRecord| {
+                let call = observations.get();
+                observations.set(call + 1);
+                if call == 0 {
+                    claims::SessionLiveness::Live("test-session-live")
+                } else {
+                    claims::SessionLiveness::Absent
+                }
+            };
+            assert_eq!(
+                claims::classify_with_session_witness(&old, Some(&inconsistent_witness),),
+                claims::ClaimState::Live,
+                "one classification must reuse its session witness answer"
+            );
+            assert_eq!(observations.get(), 1, "session witness was read twice");
 
             let live = |_: &claims::ClaimRecord| claims::SessionLiveness::Live("test-session-live");
             let live_witness: claims::SessionWitness<'_> = &live;
