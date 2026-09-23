@@ -310,6 +310,10 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::naming::run_name_codes(&args[1..]);
     }
 
+    if matches!(verb, "claude-birth-exec") {
+        return fno_agents::claude_supervisor::run_birth_exec(&args[1..]);
+    }
+
     // `review-summary` is the display-line author for a pre-push reviewed PR:
     // the /pr create worker runs it against the attestation journal (global
     // state root by default) and appends its stdout to the body. Same
@@ -1263,7 +1267,7 @@ async fn run(args: Vec<String>) -> i32 {
         // gone and its policy state is unknown, so it refuses rather than
         // falling through to a harness default the seam could have refused.
         if spawn_needs_python_seam(&params) {
-            let err = exec_python_front(&args);
+            let err = fno_agents::scrape::exec_python_front(&args);
             eprintln!(
                 "fno-agents: config.agents.profiles is read only by the Python \
                  spawn seam, and exec of 'fno agents spawn' failed: {err}. No \
@@ -1339,7 +1343,7 @@ async fn run(args: Vec<String>) -> i32 {
                 .filter(|a| !a.starts_with("--defaults-applied"))
                 .cloned()
                 .collect();
-            let err = exec_python_front(&pane_args);
+            let err = fno_agents::scrape::exec_python_front(&pane_args);
             eprintln!(
                 "fno-agents: substrate 'pane' is mux-hosted via the Python CLI, \
                  but exec of 'fno agents spawn' failed: {err}. Install the fno \
@@ -1360,7 +1364,7 @@ async fn run(args: Vec<String>) -> i32 {
                 .filter(|a| !a.starts_with("--defaults-applied"))
                 .cloned()
                 .collect();
-            let err = exec_python_front(&account_args);
+            let err = fno_agents::scrape::exec_python_front(&account_args);
             eprintln!(
                 "fno-agents: --account resolution runs in the Python CLI, but \
                  exec of 'fno agents spawn' failed: {err}. Run `fno agents \
@@ -1966,29 +1970,6 @@ fn spawn_needs_python_seam(params: &Value) -> bool {
         return false;
     }
     params.get("defaults_applied").is_none()
-}
-
-/// Exec the Python front door with the given spawn argv. `fno` is the entry
-/// point on a deployed machine; a bare venv install (CI runners included)
-/// only ships `fno-py`, so a NotFound on the first candidate falls through
-/// to the PATH-robust resolver ([`fno_agents::scrape::fno_py`]) - a bare
-/// name here failed whenever the wheel bin was off PATH. Returns
-/// the last exec error so the caller's refusal names reality.
-fn exec_python_front(args: &[String]) -> std::io::Error {
-    use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new(fno_agents::scrape::fno_bin())
-        .arg("agents")
-        .args(args)
-        .env("FNO_AGENTS_RUNTIME", "python")
-        .exec();
-    if err.kind() == std::io::ErrorKind::NotFound {
-        return std::process::Command::new(fno_agents::scrape::fno_py())
-            .arg("agents")
-            .args(args)
-            .env("FNO_AGENTS_RUNTIME", "python")
-            .exec();
-    }
-    err
 }
 
 // The `--agent` refusal for codex names the native role form, not generic advice.

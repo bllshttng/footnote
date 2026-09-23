@@ -1,62 +1,15 @@
-"""fno.agents.resume_cli — ``fno agents resume`` subcommand.
+"""Python fallback for ``fno agents resume``.
 
-Task 3.4 from 2026-05-22-fno-agents-observability.md.
+Resolves an agent name to its provider, session id, and cwd from the registry. ``--print-command`` emits a pasteable command instead of starting a process.
 
-Resolves an agent name to its provider + session id + cwd from the
-registry and resumes it in the recorded cwd. ``--print-command`` dumps a
-shell-pasteable one-liner instead, useful inside Claude Code (which
-can't host an interactive TUI from inside a subprocess).
-
-Provider resume substrates (Locked Decision #6, claude arm reworked to wake
-instead of exec):
-
-- ``codex`` → ``codex resume <codex_session_id>`` (bypasses the
-  exec-source picker filter via direct UUID argument), via
-  ``os.execvp``: hands the terminal to the provider CLI.
-- ``claude`` → woken headlessly: a pty (``script -q /dev/null``), the
-  row's own routed env restored from ``route_settings_path``, the
-  message injected as three separate bracketed-paste-safe writes
-  (clear / text / submit), and the live state verified to have moved to
-  Working. Never execs: ``fno agents attach`` is the interactive
-  hand-off; this is the unattended counterpart, and every step in the
-  recipe can exit 0 having done nothing, so verification is what makes
-  a no-op detectable instead of a lie. Up to two wake attempts, each
-  bounded by a fixed ~19s send sequence plus a 60s subprocess timeout, so
-  a full failure takes up to roughly two minutes wall-clock, not instant.
-  ``--print-command`` prints the interactive attach form
-  (``claude attach <short_id>``) for a Claude background row: that is the
-  manual escape hatch for a human who wants to type into the session directly,
-  distinct from the verified PTY wake used by direct
-  ``fno agents resume <name>``.
-- ``gemini`` / ``opencode`` → exec into the provider's own resume CLI,
-  same as codex.
-
-Exit codes:
-- 0   - success (``--print-command``; a non-claude direct resume, where
-  ``os.execvp`` replaces the process and the Python interpreter is
-  gone; or a claude resume that verified Working).
-- 2   - a claude row's recorded route could not be restored; refused
-  rather than waking it onto the default account.
-- 11  - a claude row's wake claim is held live by another writer; refused
-  rather than racing pty writes with a concurrent resume.
-- 12  - the wake claim itself could not be acquired (a validation or
-  filesystem failure, not a held-by-other conflict).
-- 13  - name not in registry / missing cwd / missing session_id /
-  unsupported provider.
-- 14  - provider CLI not on ``$PATH``.
-- 16  - claude wake attempts ran but the wake never landed: the live state
-  never reached Working AND the message never appeared in the transcript
-  after the pre-wake marker.
+Codex, Gemini, and OpenCode keep their provider resume paths. Claude rows return exit 13 because the Rust ``fno-agents`` runtime owns Claude resume and supervisor birth.
 """
 from __future__ import annotations
 
 import os
 import shlex
 import shutil
-import signal
-import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -185,593 +138,6 @@ def _build_opencode_steer_argv(name: str, message: str, cwd: str) -> list[str]:
     return [executable, "ask", name, message, "--cwd", cwd]
 
 
-_DEFAULT_WAKE_MESSAGE = "continue"
-_WAKE_ATTEMPTS = 2
-_WAKE_ATTEMPT_TIMEOUT_SEC = 60.0
-_WAKE_RETRY_BACKOFF_SEC = 2.0
-_WAKE_TARGET_STATUS = "Working"
-# A row already in one of these needs no wake: Working is the target itself,
-# Idle is a live, reachable session that may hold unsubmitted composer
-# text - injecting keystrokes into it risks destroying that text for no
-# benefit, since the row isn't blocked or stopped in the first place - and
-# Done is a terminal row that was never going to reach Working no matter how
-# many attempts run (visible here for the first time now that
-# `claude_agents_json` passes `--all`). Shared with read.py's live_status
-# fill-in gate via claude.py's NOT_BLOCKED_STATUSES_LOWER (imported lazily,
-# inside _resume_claude_wake, matching this module's existing convention of
-# deferring fno.agents submodule imports to call time) -- both used to
-# hand-enumerate this same subset independently and had already drifted out
-# of sync with each other by the time review caught it.
-
-
-def _default_agents_state_fn() -> dict[str, dict]:
-    """Live-status map keyed by short_id, `--all` included.
-
-    `claude agents --json` alone omits stopped/completed rows, so a
-    verification read against that narrower view can never observe a
-    blocked session (state "Needs input") land on "Working" -- the same
-    blind spot that made every reap sweep report success over an empty set.
-    """
-    from fno.agents.harnesses.claude import claude_agents_json
-
-    live_map, warnings = claude_agents_json()
-    if warnings:
-        # Best-effort diagnostic only: claude_agents_json() reports its own
-        # failures (missing PATH, subprocess timeout, unparseable JSON) via
-        # this list, not an exception. Dropping it silently, as every other
-        # caller of this function avoids doing (read.py, cli.py), meant a
-        # wake read "unknown" before and after because the shellout itself
-        # was broken, burned two full wake attempts against a session it
-        # could never observe, and reported a bare "did not reach Working"
-        # with no hint the real cause was upstream.
-        for warning in warnings:
-            print(f"fno agents resume: {warning}", file=sys.stderr)
-    return live_map
-
-
-def _script_wrapped_attach(short_id: str) -> str:
-    """The pty-allocating shell fragment that runs ``claude attach <id>``.
-
-    BSD ``script`` (macOS, the verified environment) takes the command as
-    trailing argv: ``script -q /dev/null claude attach <id>``. GNU/util-linux
-    ``script`` (Linux) has no such form -- the command rides ``-c`` instead:
-    ``script -qc "claude attach <id>" /dev/null``. Branching here picks the
-    right syntax up front rather than guessing one and failing silently on
-    the other (the wake would report exit 16 with no clue the real cause was
-    a platform mismatch).
-
-    A real BSD ``sys.platform`` carries a trailing version number (e.g.
-    ``freebsd13``, ``openbsd7``) -- it never ends in the literal substring
-    ``"bsd"``, so the check matches on the OS name prefix instead.
-    """
-    attach_cmd = f"claude attach {shlex.quote(short_id)}"
-    _BSD_PREFIXES = ("freebsd", "openbsd", "netbsd", "dragonfly")
-    if sys.platform == "darwin" or sys.platform.startswith(_BSD_PREFIXES):
-        return f"script -q /dev/null {attach_cmd}"
-    return f"script -qc {shlex.quote(attach_cmd)} /dev/null"
-
-
-class _WakeTeardownUnconfirmed(Exception):
-    """Raised when a timed-out wake's process tree could not be confirmed dead.
-
-    ``killpg`` never reaches the pty-attached ``claude attach`` child (see
-    :func:`_kill_wake_process_tree`), so ``pkill`` is not a secondary
-    backstop -- it is the ONLY mechanism that can reach it. If ``pkill``
-    itself cannot run at all (missing binary), teardown has zero visibility
-    into whether that child is still alive, and firing a second wake_fn
-    call in that state risks two processes injecting into the same pty
-    concurrently. The retry loop refuses to retry on this signal rather
-    than risk that.
-    """
-
-
-def _kill_wake_process_tree(proc: "subprocess.Popen[bytes]", short_id: str) -> bool:
-    """Best-effort teardown of an abandoned wake attempt's process tree.
-
-    Shared by the timeout and interrupt paths in ``_default_wake_fn``.
-    ``script``'s pty-attached child (the process that actually execs into
-    ``claude attach``) calls ``login_tty()``, which ``setsid()``s it into a
-    BRAND NEW session before exec -- so it is never a member of the ``bash``
-    pgid killed first, and that killpg call does not reach it. Finish the
-    job by matching the unique short_id in its command line instead of by
-    process-group membership; best-effort (no match is the common case when
-    the process already exited on its own after stdin closed).
-
-    Returns ``True`` once ``pkill`` has run (whether or not it matched
-    anything -- a miss is the expected, already-exited case above), and
-    ``False`` only when ``pkill`` could not run at all (missing binary),
-    the one case where this function has no visibility into the child's
-    fate. A narrower race -- the child hasn't execve'd into ``claude
-    attach`` yet, so its argv doesn't match even though it is still alive
-    -- is NOT distinguished from a genuine miss; that residual few-second
-    window is accepted the same way the skip-check's own entry-time race
-    is (see ``_resume_claude_wake``'s docstring).
-    """
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except OSError:
-        pass
-    proc.wait()
-    try:
-        subprocess.run(
-            ["pkill", "-f", f"claude attach {short_id}"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return True
-    except OSError:
-        return False
-
-
-def _default_wake_fn(
-    short_id: str,
-    *,
-    message: str,
-    route_env: Optional[dict[str, str]],
-    cwd: str,
-    account_env: Optional[dict[str, str]] = None,
-    timeout: float = _WAKE_ATTEMPT_TIMEOUT_SEC,
-) -> None:
-    """One wake attempt: pty + routed env + clear/send/submit.
-
-    ``claude attach`` allocates no pty of its own; invoked non-interactively
-    it prints "Attaching..." and exits having done nothing, which reads as a
-    no-op rather than a refusal. ``script`` supplies the pty.
-
-    The attached session runs with bracketed paste on, so a trailing ``\\r``
-    sent in the SAME write as the message inserts a newline into the input
-    instead of submitting it -- three stacked, unsent wake messages were the
-    visible proof of this on a real blocked fleet. The clear (``\\x15``),
-    the message, and the submit (``\\r``) are three separate timed writes.
-
-    A row launched on a secondary route (``route_settings_path``) must be
-    woken with that SAME env: ``claude attach`` takes no options, so only
-    the child process environment can carry ``ANTHROPIC_BASE_URL`` and the
-    auth token. The caller resolves ``route_env`` via
-    :func:`fno.agents.model_routing.read_route_settings` and hands it here
-    already resolved -- this function never reads the settings file itself,
-    so a credential never has to round-trip through a shell echo. The
-    scrub-then-overlay order matches ``bg_create``/``headless_create``: an
-    operator's own ambient ``ANTHROPIC_API_KEY`` is cleared first, so it can
-    never sit alongside the routed row's credential in the attaching
-    subprocess.
-
-    Runs in its own process group (``start_new_session=True``) so a timeout
-    kills the whole ``script``/``claude attach`` tree, not just the
-    top-level ``bash``: an orphaned grandchild left holding the pty is
-    exactly what would make a retry's second ``claude attach`` race the
-    first for the same session.
-
-    Runs ``script``/``claude attach`` from the agent's own recorded ``cwd``,
-    matching every other resume arm (the non-claude ``os.chdir(cwd)`` before
-    exec, and the Rust exec fallback's ``set_current_dir(cwd)``): ``claude
-    attach <short_id>`` looks the session up by id, not by directory, so this
-    is not load-bearing for finding the right session, but a wrong cwd would
-    still leak into anything the attaching process reads project-locally.
-
-    Does not reuse ``dispatch.py``'s ``_mux_pane_send``/``_paste_then_submit``
-    (a guarded send plus content-based transcript confirmation): that
-    primitive addresses a mux-hosted PANE, a different substrate from the
-    ``claude --bg`` supervisor a blocked/stopped row actually is here, and
-    has no ``claude attach`` arm. The fixed sleep sequence below is the
-    exact recipe verified against a real blocked fleet; the caller's
-    post-attempt state read (``_resume_claude_wake``) is the readiness
-    signal this function itself does not have.
-    """
-    env = dict(os.environ)
-    # An incoherent inherited model env is the exact repro this seam exists
-    # for: a woken incarnation inherited the parent's foreign model name with
-    # no base URL and died on turn one behind a "woken" receipt. Strip
-    # unconditionally, BEFORE the route overlay, so a real route still
-    # re-supplies its own model vars and wins.
-    from fno.agents.model_routing import (
-        overlay_restores_model_env,
-        scrub_incoherent_model_env_and_notify,
-    )
-
-    scrub_incoherent_model_env_and_notify(
-        env, routed=overlay_restores_model_env(route_env)
-    )
-    # the account binding (CLAUDE_CONFIG_DIR) applies before the
-    # route overlay, same precedence as every spawn seam - account selects
-    # the namespace, route wins endpoint/auth/model. Cleared FIRST so an
-    # ambient dir from the caller's shell (an alt-account alias) cannot
-    # survive a row bound to a different account. Auth vars scrub for the
-    # same reason the attach seam scrubs them: an ambient credential of a
-    # DIFFERENT kind (an oauth token next to the account's api key) outranks
-    # the overlay in claude and bills whoever the caller's shell was logged
-    # in as.
-    if account_env:
-        from fno.agents.account_env import SCRUB_AUTH_VARS
-
-        for var in SCRUB_AUTH_VARS:
-            env.pop(var, None)
-        env.pop("CLAUDE_CONFIG_DIR", None)
-        env.update(account_env)
-    # Scrub only when there is something to restore, matching
-    # bg_create/headless_create (harnesses/claude.py): a route-less row (the
-    # common default-account case) keeps its ambient auth untouched rather
-    # than losing it with nothing put back.
-    if route_env:
-        from fno.agents.account_env import SCRUB_AUTH_VARS
-
-        for key in SCRUB_AUTH_VARS:
-            env.pop(key, None)
-        env.update(route_env)
-    env["FNO_WAKE_MSG"] = message
-    script_cmd = (
-        "{ sleep 7; printf '\\x15'; sleep 1; printf '%s' \"$FNO_WAKE_MSG\"; "
-        "sleep 2; printf '\\r'; sleep 9; } | "
-    ) + _script_wrapped_attach(short_id)
-    proc = subprocess.Popen(
-        ["bash", "-c", script_cmd],
-        env=env,
-        cwd=cwd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        if not _kill_wake_process_tree(proc, short_id):
-            raise _WakeTeardownUnconfirmed(
-                f"wake attempt for {short_id} timed out and its process tree "
-                "could not be confirmed dead (pkill unavailable); refusing "
-                "to risk a second concurrent wake"
-            ) from exc
-        raise
-    except BaseException:
-        # Ctrl-C (SIGINT) never reaches this detached tree --
-        # start_new_session=True put it in its own process group, off the
-        # terminal's foreground group that SIGINT targets -- so without this
-        # it keeps running, and keeps queued to inject the wake message,
-        # after the operator believes they cancelled. Same teardown as a
-        # timeout, then let the real exception (KeyboardInterrupt or
-        # otherwise) propagate.
-        _kill_wake_process_tree(proc, short_id)
-        raise
-
-
-def _resume_claude_wake(
-    *,
-    name: str,
-    short_id: str,
-    session_id: Optional[str],
-    confirm_session_id: Optional[str] = None,
-    cwd: str,
-    harness: str,
-    route_settings_path: Optional[str],
-    launch_account: Optional[str] = None,
-    provider: Optional[str] = None,
-    message: str,
-    message_explicit: bool = False,
-    emit_event: Any,
-    wake_fn: Any,
-    agents_state_fn: Any,
-    claim_fn: Any,
-) -> ResumeResult:
-    """Wake a blocked/stopped claude session and verify it actually moved.
-
-    ``fno agents attach`` already owns the interactive hand-off (exec into
-    the TUI, hand the terminal to the operator); this is the headless
-    counterpart -- allocate a pty, restore the row's own route, inject the
-    message, and confirm the message reached the transcript. Exit 0
-    requires that transcript marker : a status word that reads
-    Working proves a session moved, never that THIS wake landed, so the
-    content read alone decides success.
-
-    ``claim_fn`` is acquired only once a wake attempt is actually about to
-    run (gated on ``not skipped``, below), not for an already-Working/
-    Done row's no-op read: two concurrent no-op resumes on such a row
-    must both exit 0, not race each other into a spurious "held by another
-    writer" over a lock that guards a pty write neither of them is making.
-    """
-    from fno.agents.harnesses.claude import (
-        NOT_BLOCKED_STATUSES_LOWER,
-        WAKE_SKIP_STATUSES_LOWER,
-    )
-
-    def _state_of() -> str:
-        row = agents_state_fn().get(short_id) or {}
-        return str(row.get("live_status") or "unknown")
-
-    before = _state_of()
-    after = before
-    last_err = ""
-    # Already Working (a stale-registry race, the operator resuming the wrong
-    # name, or a live session that isn't actually blocked): don't inject
-    # anything into a session mid-turn. Done: no process to reach. Idle is
-    # NOT skipped -- it is between turns, exactly the silent session the wake
-    # lane exists to move. Skip straight to reporting; the loop below never
-    # runs. This check is only AT loop entry, not re-read immediately before
-    # each wake_fn call: if the session transitions out of a skip-eligible
-    # state during _default_wake_fn's ~7s pre-clear sleep, the keystrokes
-    # still land. Narrowing that window needs the wake subprocess itself to
-    # poll and abort mid-sleep, which would change the verified wake.sh
-    # recipe's timing; accepted as a residual few-second race rather than
-    # risk that.
-    #
-    # WAKE_SKIP_STATUSES_LOWER, not NOT_BLOCKED_STATUSES_LOWER: the wider set
-    # made an Idle row a green no-op, and an idle session between turns is
-    # the one state the unclaimed-mail hint points resume at. The mid-loop
-    # settle check below keeps the wider set on purpose -- it stops a SECOND
-    # injection after one already fired.
-    #
-    # Computed once here rather than re-derived at each of its five uses
-    # below (claim gate, route_env gate, loop guard, exit-16 condition, emit
-    # guard): a future edit to the skip condition that touches only some of
-    # the five call sites would silently reintroduce the exact misreport bug
-    # the surrounding comments already describe as fixed once.
-    skipped = before.lower() in WAKE_SKIP_STATUSES_LOWER
-
-    # The transcript confirm id: the row's full uuid, never the transport
-    # short_id. The claude transcript FILE is named by the uuid, so a
-    # short-id confirm could never resolve a transcript and only the status
-    # word was left to decide success - the false receipt. Falls back
-    # to the resolved session_id (the exact lane's matched uuid) for a row
-    # that records no canonical uuid.
-    confirm_id = confirm_session_id or session_id
-
-    if skipped and message_explicit:
-        # The skip is a green no-op only for a BARE resume. An operator who
-        # named a message expects it delivered; exiting 0 here is the false
-        # receipt this lane exists to kill. Name the state and the
-        # undelivered payload; attach owns the interactive hand-off.
-        return ResumeResult(
-            exit_code=16,
-            stderr=(
-                f"fno agents resume: {name!r} ({short_id}) is {before!r}; it "
-                f"was not woken and the message {message!r} was NOT "
-                "delivered. Re-run without --message for a bare no-op "
-                f"resume, or `fno agents attach {name}` to deliver it "
-                "yourself.\n"
-            ),
-        )
-
-    # Claim before waking, gated on `not skipped` (see docstring): this
-    # function is also a standalone entrypoint (FNO_AGENTS_RUNTIME=python, or
-    # no Rust binary installed at all), reachable without ever going through
-    # Rust's own delegation claim. Guarding only the Rust side would leave
-    # this direct path racing real pty writes with no lock -- the
-    # guard-on-one-of-N-paths trap applied to this PR's own new claim rather
-    # than to the wake implementation it originally caught. Keyed identically
-    # to Rust's delegation claim so the two entrypoints contend for the same
-    # lock on the same row.
-    if not skipped:
-        claim_err = claim_fn(short_id)
-        if claim_err is not None:
-            claim_exit, claim_msg = claim_err
-            return ResumeResult(exit_code=claim_exit, stderr=claim_msg + "\n")
-
-    route_env: Optional[dict[str, str]] = None
-    # the account axis resolves under the same `not skipped` gate as
-    # the route - a skip-eligible row launches nothing, so there is nothing
-    # to mis-bill. A routed or non-Anthropic row with UNKNOWN account
-    # refuses (exit 3, the re-entry refusal code): a woken attach inherits
-    # the caller's ambient namespace, and guessing one is the wrong-bill
-    # door. A proven default row keeps its ambient env untouched.
-    account_env: Optional[dict[str, str]] = None
-    routed_row = bool(route_settings_path)
-    non_anthropic = bool(provider) and provider != "anthropic"
-    if not skipped:
-        if launch_account is None and (routed_row or non_anthropic):
-            shape = "routed" if routed_row else f"on provider {provider!r}"
-            return ResumeResult(
-                exit_code=3,
-                stderr=(
-                    f"fno agents resume: agent {name!r} is {shape} and "
-                    "records no launch account; waking it would guess a "
-                    "namespace and bill the wrong account. Restamp the row "
-                    "or re-spawn the worker.\n"
-                ),
-            )
-        if launch_account is not None and launch_account != "default":
-            from fno.agents.account_env import (
-                AccountResolutionError,
-                resolve_account_overlay,
-            )
-
-            try:
-                account_env = dict(resolve_account_overlay(launch_account).env)
-            except AccountResolutionError as exc:
-                return ResumeResult(
-                    exit_code=3,
-                    stderr=(
-                        f"fno agents resume: launch account {launch_account!r} "
-                        f"recorded on agent {name!r} no longer resolves: "
-                        f"{exc}\n"
-                    ),
-                )
-    # Gated on `not skipped`: route_env only feeds the wake attempts below,
-    # which never run for a skip-eligible row. Restoring it unconditionally
-    # meant a row that needed no wake at all (already Working/Done) but
-    # happened to carry a stale route file got refused with exit 2 instead
-    # of reporting the no-op success it actually was.
-    if not skipped and route_settings_path:
-        from fno.agents.model_routing import RouteRestoreError, read_route_settings
-
-        try:
-            route_env = read_route_settings(route_settings_path)
-        except RouteRestoreError as exc:
-            return ResumeResult(
-                exit_code=2,
-                stderr=(
-                    f"fno agents resume: agent {name!r} was launched on the "
-                    f"route recorded at {route_settings_path}, and it cannot "
-                    f"be restored ({exc}). Refusing to wake it onto the "
-                    f"default account.\n"
-                ),
-            )
-
-    # Transcript timestamp BEFORE any wake fires: the marker confirm_wake_landed
-    # needs to tell a record the wake produced from one already there. A status
-    # poll cannot do this job -- one attempt is ~19s of wall clock, so a short
-    # turn can start AND finish inside it and the post-attempt state reads Idle
-    # again; "never woke" and "woke and already finished" are indistinguishable
-    # in the status word. Read under the same `not skipped` gate as the claim
-    # and the route: a skipped row launches nothing, so there is no marker to
-    # take. Lazy import matches every other import in this file; watchdog
-    # imports nothing from here, so the direction stays acyclic.
-    before_epoch: Optional[float] = None
-    if not skipped:
-        from fno.agents.watchdog import confirm_wake_landed, tail_facts
-
-        before_facts = (
-            tail_facts(confirm_id, cwd, agent=harness) if confirm_id else None
-        )
-        before_epoch = (
-            before_facts.last_event_epoch if before_facts is not None else None
-        )
-
-    if not skipped:
-        for _attempt in range(_WAKE_ATTEMPTS):
-            teardown_unconfirmed = False
-            try:
-                wake_fn(
-                    short_id,
-                    message=message,
-                    route_env=route_env,
-                    cwd=cwd,
-                    account_env=account_env,
-                )
-            except subprocess.TimeoutExpired:
-                last_err = "wake attempt timed out"
-            except _WakeTeardownUnconfirmed as exc:
-                last_err = str(exc)
-                teardown_unconfirmed = True
-            except Exception as exc:  # noqa: BLE001 - mapped to the bounded exit-16 report below, not a raw traceback
-                last_err = f"wake attempt failed: {exc}"
-            # Read state even after a caught exception: `script`/`claude
-            # attach` only returns when the attach TUI exits, which need not
-            # happen the instant the piped stdin hits EOF, so a message that
-            # actually landed can still be mid-flight when the subprocess
-            # timeout fires. Skipping this read on the exception path would
-            # score a successful wake as failed.
-            after = _state_of()
-            if after.lower() == _WAKE_TARGET_STATUS.lower():
-                break
-            if teardown_unconfirmed:
-                # The previous attempt's process tree could not be confirmed
-                # dead (see _WakeTeardownUnconfirmed); firing another wake_fn
-                # call here risks two processes injecting into the same pty
-                # concurrently. Stop retrying rather than risk that.
-                break
-            if after.lower() in NOT_BLOCKED_STATUSES_LOWER:
-                # The row settled into Idle/Done between attempts (the
-                # operator's own session ended, or an unrelated race) without
-                # ever reaching Working. Firing another wake would inject
-                # keystrokes into a session that no longer needs them -- the
-                # same unsubmitted-text risk NOT_BLOCKED_STATUSES_LOWER exists
-                # to avoid at loop entry, just discovered mid-loop instead.
-                # `skipped` stays False: the exit-16 report below is still
-                # the right outcome to surface, just without a wasted retry.
-                break
-            if _attempt < _WAKE_ATTEMPTS - 1:
-                # A short backoff before retrying, not part of the verified
-                # ~19s send sequence itself (that stays untouched): a wake
-                # that failed once due to something transient (a slow
-                # supervisor tick, a momentarily busy pty) benefits from not
-                # immediately re-hammering the same session.
-                time.sleep(_WAKE_RETRY_BACKOFF_SEC)
-
-    # A skipped row (before already Working/Done) reports success on its
-    # `before` state even when that state isn't the wake target: nothing was
-    # attempted, so "did it reach Working" is the wrong question to ask.
-    #
-    # Landed means the transcript shows the message, never that a status
-    # word said Working: a short turn starts and finishes inside
-    # one ~19s attempt, so a DELIVERED wake can read Idle again, and a row
-    # recovering from an API error flips to Working on its own with nothing
-    # injected. Content is the marker the watchdog's own wake lane already
-    # trusts; the status read above only stops retries early and feeds the
-    # before -> after line.
-    #
-    # Check the outcome BEFORE emitting: the event is named "agent_resumed",
-    # so emitting it unconditionally would misreport a wake that never
-    # reached Working as a success, the same pre-fix shape a sigma review
-    # already caught below for the exec-based harnesses' chdir failure.
-    landed = False
-    if not skipped and confirm_id and before_facts is not None:
-        # Gated on a resolvable PRE-wake transcript: if the transcript store
-        # could not be read before the wake, no marker can land in it after,
-        # so polling the confirm cadence here would only burn its full
-        # window before the same refusal.
-        landed = confirm_wake_landed(
-            confirm_id, cwd, message, before_epoch, agent=harness
-        )
-    if not skipped and not landed:
-        # A wake cannot reach a session that has exited. An adopted row carries
-        # a uuid and a short_id but no answering supervisor, so it takes the
-        # live arm, burns every attempt against a process that is not there,
-        # and lands here reading "did not reach Working" -- which describes a
-        # sluggish session, not a dead one. `before` is read from the
-        # supervisor's own state map, and a short_id it has no row for reads
-        # "unknown": that is the positive marker for "nothing answered", not an
-        # inference from the failure itself. The liveness classifier upstream
-        # is deliberately left alone; widening or narrowing it moves every
-        # caller and risks a second writer on one transcript.
-        relaunch = ""
-        if before.lower() == "unknown" and session_id:
-            # `--name` is load-bearing, not cosmetic. spawn's revive branch is
-            # gated on finding an existing row with THIS name; without it spawn
-            # mints a fresh slug, `revive` stays False, and the operator gets a
-            # SECOND row while the dead one they were trying to resume stays in
-            # the registry -- the exact state this hint exists to break them out
-            # of. It is also what makes spawn print its own old-to-new handle
-            # line, which is likewise gated on `revive`.
-            #
-            # `--cwd` is appended only when there is one to name: an empty value
-            # renders a bare `--cwd ` that fails on paste with "requires an
-            # argument". Never print a command that cannot run.
-            where = f" --cwd {cwd}" if cwd else ""
-            relaunch = (
-                f"\nNo process answered for {short_id}. A wake cannot reach a "
-                "session that has exited.\n"
-                "Relaunch the conversation instead: fno agents spawn --name "
-                f"{name} --resume {session_id}{where}\n"
-            )
-        return ResumeResult(
-            exit_code=16,
-            stderr=(
-                f"fno agents resume: {name!r} ({short_id}) wake NOT "
-                f"confirmed: {message!r} is not in the transcript after "
-                f"the wake (before={before!r} after={after!r}"
-                + (f"; {last_err}" if last_err else "")
-                + ")."
-                + (relaunch or "\n")
-            ),
-        )
-
-    # A skipped row never entered the wake loop -- emitting "agent_resumed"
-    # for it would claim a resume happened when nothing was attempted, the
-    # same misreport the exit-16 check above already refuses for a failed
-    # wake. The failure branch already returned above, so the only path left
-    # here besides a skip is a genuine wake that reached Working.
-    if not skipped:
-        try:
-            emit_event(
-                "agent_resumed",
-                name=name,
-                provider=harness,
-                session_id=session_id,
-                cwd=cwd,
-                before=before,
-                after=after,
-            )
-        except OSError:  # best-effort telemetry; never mask the resume outcome.
-            pass
-
-    # No exec_argv/exec_cwd: this path never execs (unlike every other
-    # harness's resume arm), so leaving those fields set to a
-    # ["claude", "attach", short_id] this call never runs would misdescribe
-    # what just happened to a future reader of the result.
-    return ResumeResult(
-        exit_code=0,
-        output=f"{name} ({short_id}): {before} -> {after}\n",
-    )
-
-
 def _shell_quote(s: str) -> str:
     """POSIX shell quoting for --print-command output.
 
@@ -783,63 +149,18 @@ def _shell_quote(s: str) -> str:
     return shlex.quote(s)
 
 
-def _default_acquire_resume_attach_claim(
-    short_id: str, *, root: Optional[Any] = None
-) -> Optional[tuple[int, str]]:
-    """Real claim acquisition guarding the standalone claude wake path.
-
-    Keyed identically to the Rust delegation's own claim
-    (``resume-attach:{short_id}`` in ``client_verbs.rs``'s
-    ``acquire_named_session_claim``), so a directly-invoked
-    ``FNO_AGENTS_RUNTIME=python fno agents resume`` and a Rust-delegated one
-    contend for the same lock on the same row instead of two independent,
-    non-cooperating guards. Returns ``None`` on success, else
-    ``(exit_code, message)`` (not yet printed): 11 when another writer
-    already holds it (matches Rust's ``AcquireOutcome::HeldByOther``), 12
-    for any other claim-layer failure -- a validation error or a
-    filesystem error (disk full, EACCES) -- matching Rust's
-    ``AcquireOutcome::Error`` rather than letting it propagate as a raw
-    traceback out of what is supposed to be a bounded-exit-code CLI.
-    ``root`` is a test seam for the claims-file root; ``None`` in prod.
-    """
-    from fno.claims.core import ClaimHeldByOther, acquire_claim
-
-    holder = f"resume:{os.getpid()}"
-    try:
-        acquire_claim(
-            f"resume-attach:{short_id}",
-            holder,
-            reason="interactive resume single-writer",
-            root=root,
-        )
-        return None
-    except ClaimHeldByOther as exc:
-        return (
-            11,
-            f"fno agents resume: session {short_id} is held live by another "
-            f"writer ({exc.holder}, pid={exc.pid}, host={exc.host}); not "
-            f"opening a second writer on one transcript.",
-        )
-    except Exception as exc:  # noqa: BLE001 - mapped to a bounded exit code
-        return (12, f"fno agents resume: could not claim session {short_id}: {exc}")
-
-
 def resume_logic(
     *,
     name: str,
     print_command: bool = False,
-    message: str = _DEFAULT_WAKE_MESSAGE,
-    message_explicit: bool = False,
+    message: str = "continue",
     cwd_override: Optional[str] = None,
     cross_project: bool = False,
     registry_loader: Optional[Any] = None,
     path_checker: Optional[Any] = None,
     cwd_checker: Optional[Any] = None,
-    claim_fn: Optional[Any] = None,
     emit_event: Optional[Any] = None,
     execvp: Optional[Any] = None,
-    wake_fn: Optional[Any] = None,
-    agents_state_fn: Optional[Any] = None,
 ) -> ResumeResult:
     """Pure-function resume pipeline; Typer command wraps this.
 
@@ -847,12 +168,7 @@ def resume_logic(
         name: Registered agent name.
         print_command: When True, return the shell snippet and exit 0
             instead of resuming.
-        message: Text to inject once the claude session is woken.
-            Ignored for every other harness, which resume via exec instead.
-        message_explicit: Whether the caller actually passed ``--message``
-            (vs the default). A skip-eligible row (Working/Done) with an
-            explicit message refuses exit 16 instead of reporting a no-op
-            that silently dropped the payload.
+        message: Text passed to provider resume flows that accept a message.
         cwd_override: Use this cwd instead of the registry's recorded one.
             The Rust binary resolves a claude row's EnterWorktree-moved
             transcript dir before delegating here (`resolve_resume_cwd`);
@@ -866,27 +182,15 @@ def resume_logic(
             (defaults to shutil.which).
         cwd_checker: Optional callable ``(cwd) -> bool`` for the
             resume-time cwd-reachability check (defaults to os.path.isdir).
-        claim_fn: Optional callable ``(short_id) -> Optional[tuple[int, str]]``
-            for the claude wake single-writer claim (defaults to
-            :func:`_default_acquire_resume_attach_claim`). Returns ``None``
-            on success, else ``(exit_code, message)``.
         emit_event: Optional ``(kind, **data) -> None`` for the
             ``agent_resumed`` event (defaults to events.emit).
         execvp: Optional ``(file, args) -> None`` for the final exec
             call (defaults to os.execvp). Tests provide a no-op. Used
             only for non-claude harnesses; the claude path never execs.
-        wake_fn: Optional callable performing one claude wake attempt
-            (defaults to :func:`_default_wake_fn`). Test seam.
-        agents_state_fn: Optional callable returning the short_id ->
-            live-status map used to verify a claude wake (defaults to
-            :func:`_default_agents_state_fn`). Test seam.
-
     Returns:
         :class:`ResumeResult`: for --print-command, output carries the
-        shell one-liner; for a claude resume, output carries the
-        before -> after state transition; for direct resume of every
-        other harness, exec_argv/exec_cwd carry what os.execvp was
-        (about to be) called with.
+        shell one-liner; Claude rows return a runtime refusal; other harnesses
+        carry the provider argv and cwd that os.execvp receives.
     """
     # Lazy-load registry to avoid import-time cost on cold trace runs.
     if registry_loader is None:
@@ -1080,48 +384,13 @@ def resume_logic(
         )
 
     if harness == "claude":
-        # `fno agents attach` owns the interactive hand-off; a claude
-        # resume wakes the session headlessly and verifies the state moved,
-        # rather than exec'ing into an attach that (run non-interactively)
-        # would print "Attaching..." and exit having done nothing.
-        #
-        # claim_fn is resolved here but acquired inside _resume_claude_wake,
-        # gated on the row actually needing a wake (see that function's
-        # docstring) -- this function is also a standalone entrypoint
-        # (FNO_AGENTS_RUNTIME=python, or no Rust binary installed at all),
-        # reachable without ever going through Rust's own delegation claim.
-        # Guarding only the Rust side would leave this direct path racing
-        # real pty writes with no lock -- the guard-on-one-of-N-paths trap
-        # applied to this PR's own new claim rather than to the wake
-        # implementation it originally caught. Keyed identically to Rust's
-        # delegation claim so the two entrypoints contend for the same lock
-        # on the same row.
-        if claim_fn is None:
-            claim_fn = _default_acquire_resume_attach_claim
-        if emit_event is None:
-            from fno.agents import events as events_mod
-            emit_event = events_mod.emit
-        return _resume_claude_wake(
-            name=name,
-            short_id=getattr(entry, "short_id", "") or "",
-            session_id=session_id,
-            confirm_session_id=(
-                getattr(entry, "harness_session_id", None)
-                or getattr(entry, "claude_session_uuid", None)
+        return ResumeResult(
+            exit_code=13,
+            stderr=(
+                f"fno agents resume: agent {name!r} is a claude row; it resumes through "
+                "the fno-agents runtime. Unset FNO_AGENTS_RUNTIME=python, or run "
+                "fno doctor update if no binary is installed.\n"
             ),
-            cwd=cwd,
-            harness=harness,
-            route_settings_path=getattr(entry, "route_settings_path", None),
-            launch_account=getattr(entry, "launch_account", None),
-            provider=getattr(entry, "provider", None),
-            message=message,
-            message_explicit=message_explicit,
-            emit_event=emit_event,
-            wake_fn=wake_fn if wake_fn is not None else _default_wake_fn,
-            agents_state_fn=(
-                agents_state_fn if agents_state_fn is not None else _default_agents_state_fn
-            ),
-            claim_fn=claim_fn,
         )
 
     # chdir BEFORE emit so a stale cwd surfaces as "agent_resume_failed"
@@ -1183,9 +452,8 @@ def cmd_resume(
     message: Optional[str] = typer.Option(
         None, "--message", "-m",
         help=(
-            "Text to inject once a claude session is woken. Ignored for "
-            "every other harness, which resume via exec instead. Default: "
-            "the wake word."
+            "Text to send through a provider resume flow that accepts messages. "
+            "Claude rows require the Rust fno-agents runtime."
         ),
     ),
     cwd: Optional[str] = typer.Option(
@@ -1204,18 +472,11 @@ def cmd_resume(
         ),
     ),
 ) -> None:
-    """Resume an agent in its recorded cwd via the provider's resume CLI.
-
-    A claude agent is woken headlessly: allocate a pty, restore its route,
-    inject `message`, and verify the message reached the transcript (exit
-    16 if it did not). Every other harness execs into the provider's own
-    resume CLI in the recorded cwd, handing over the terminal.
-    """
+    """Resume a registered agent or refuse when Python cannot own its runtime."""
     result = resume_logic(
         name=name,
         print_command=print_command,
-        message=message if message is not None else _DEFAULT_WAKE_MESSAGE,
-        message_explicit=message is not None,
+        message=message if message is not None else "continue",
         cwd_override=cwd,
         cross_project=cross_project,
     )
