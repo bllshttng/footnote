@@ -203,7 +203,7 @@ def collect_failures(
                 entry["step"] = step
                 err = first_error(log_text, step)
                 if err:
-                    entry["first_error"] = err
+                    entry.setdefault("first_error", err)
             runner_unreached = unreached_runner_steps(log_text)
             if runner_unreached:
                 entry["unreached_steps"] = runner_unreached
