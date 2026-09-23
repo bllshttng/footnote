@@ -453,6 +453,33 @@ pub fn live_crowns(registry_path: &Path) -> Result<Vec<Crown>, TerritoryUnknown>
     Ok(out)
 }
 
+/// Which live crown answers for each node: the deepest crown level whose
+/// scope holds the node, then the lowest canonical scope on a tie. A crown
+/// whose scope does not compile owns nothing; it comes back in the second
+/// list with its reason, and each caller decides whether that blind spot
+/// refuses.
+pub(crate) fn node_owners(
+    crowns: &[Crown],
+    entries: &[Value],
+    projects: &Result<HashMap<String, String>, String>,
+) -> (HashMap<String, String>, Vec<(String, String)>) {
+    let mut sorted: Vec<&Crown> = crowns.iter().collect();
+    sorted.sort_by(|a, b| b.level.cmp(&a.level).then_with(|| a.scope.cmp(&b.scope)));
+    let mut owners: HashMap<String, String> = HashMap::new();
+    let mut failures: Vec<(String, String)> = Vec::new();
+    for crown in sorted {
+        match compile_territory(&crown.scope, entries, projects) {
+            Ok((_, ids)) => {
+                for id in ids {
+                    owners.entry(id).or_insert_with(|| crown.scope.clone());
+                }
+            }
+            Err(e) => failures.push((crown.scope.clone(), e)),
+        }
+    }
+    (owners, failures)
+}
+
 /// The workspace project map: canonical project name -> normalized absolute
 /// path (mirrors `fno.graph.maintain.load_workspaces`). Best-effort like the
 /// Python read: a missing map contributes nothing, and the drain assembly
@@ -1250,20 +1277,25 @@ pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
     let live_names: HashSet<&str> = live.iter().map(|r| r.name.as_str()).collect();
     let live_nodes: Vec<Option<&str>> = live.iter().map(|r| r.node.as_deref()).collect();
 
-    // Exclusive membership: a crowned node counts for its crown
-    // scope only, so a worker can never cost two territories at once - the
-    // same rule the spawn gate enforces.
-    let mut memberships: Vec<(&Territory, Result<(String, HashSet<String>), String>)> = Vec::new();
-    let mut crown_ids: HashSet<String> = HashSet::new();
-    for territory in &territories {
-        let compiled = compile_territory(&territory.key, &entries, &project_map(config_cwd));
-        if !territory.kingless {
-            if let Ok((_, ids)) = &compiled {
-                crown_ids.extend(ids.iter().cloned());
-            }
-        }
-        memberships.push((territory, compiled));
-    }
+    // Exclusive membership: a node counts for the one live crown that owns
+    // it - the deepest crown holding it, the same rule `node_owners` gives
+    // the spawn gate and the court - so a worker can never cost two
+    // territories at once. An unowned node stays loose.
+    let (owners, _) = node_owners(
+        &live_crowns(registry_path).unwrap_or_default(),
+        &entries,
+        &project_map(config_cwd),
+    );
+
+    let memberships: Vec<(&Territory, Result<(String, HashSet<String>), String>)> = territories
+        .iter()
+        .map(|territory| {
+            (
+                territory,
+                compile_territory(&territory.key, &entries, &project_map(config_cwd)),
+            )
+        })
+        .collect();
 
     memberships
         .into_iter()
@@ -1273,8 +1305,12 @@ pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
                 Err(_) => ("unknown", HashSet::new()),
             };
             let mut ids = ids;
-            if territory.kingless {
-                ids.retain(|id| !crown_ids.contains(id));
+            if membership == "ok" {
+                if territory.kingless {
+                    ids.retain(|id| !owners.contains_key(id));
+                } else {
+                    ids.retain(|id| owners.get(id) == Some(&territory.key));
+                }
             }
             let live_count = if membership == "ok" {
                 Some(live_nodes.iter().filter_map(|n| *n).filter(|n| ids.contains(*n)).count())
@@ -1729,6 +1765,147 @@ path = "/repo/alpha"
         assert_eq!(crowned["holder"], "king-a");
         assert_eq!(crowned["mission"], "e-1");
         assert_eq!(crowned["live"], 1, "w-1 works e-1a inside the crown scope");
+    }
+
+    fn owners_from_registry(
+        cwd: &Path,
+        registry: &Path,
+    ) -> (HashMap<String, String>, Vec<(String, String)>) {
+        let crowns = live_crowns(registry).unwrap();
+        let entries: Vec<Value> = graph_fixture()["entries"].as_array().unwrap().clone();
+        node_owners(&crowns, &entries, &project_map(cwd))
+    }
+
+    #[test]
+    fn node_owners_maps_each_node_to_its_deepest_live_crown() {
+        let _env = env_guard();
+        let (_tmp, cwd, registry) = fixture_env();
+        std::fs::write(
+            &registry,
+            json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
+                {"name": "king-p", "status": "live", "crown_scope": "alpha", "crown_level": 1,
+                 "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
+                {"name": "king-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+                 "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let (owners, failures) = owners_from_registry(&cwd, &registry);
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(owners.get("e-1"), Some(&"e-1".to_string()));
+        assert_eq!(owners.get("e-1a"), Some(&"e-1".to_string()));
+        assert_eq!(owners.get("e-loose"), Some(&"alpha".to_string()));
+        assert_eq!(owners.get("e-outs"), None, "beta has no crown");
+    }
+
+    #[test]
+    fn a_scope_tie_goes_to_the_lowest_canonical_scope() {
+        let _env = env_guard();
+        let (_tmp, cwd, registry) = fixture_env();
+        std::fs::write(
+            &registry,
+            json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
+                {"name": "king-01", "status": "live", "crown_scope": "e-0,e-1", "crown_level": 2,
+                 "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
+                {"name": "king-1", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+                 "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let entries: Vec<Value> = vec![
+            json!({"id": "e-0", "type": "epic", "project": "alpha", "status": "in_progress", "priority": "p1"}),
+            json!({"id": "e-1", "type": "epic", "project": "alpha", "status": "in_progress", "priority": "p1"}),
+            json!({"id": "e-1a", "parent": "e-1", "project": "alpha", "status": "ready", "priority": "p1"}),
+            json!({"id": "e-loose", "project": "alpha", "status": "ready", "priority": "p1"}),
+        ];
+        let (owners, failures) = node_owners(
+            &live_crowns(&registry).unwrap(),
+            &entries,
+            &project_map(&cwd),
+        );
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(owners.get("e-1a"), Some(&"e-0,e-1".to_string()));
+        assert_eq!(owners.get("e-0"), Some(&"e-0,e-1".to_string()));
+    }
+
+    #[test]
+    fn an_exited_crown_row_owns_nothing() {
+        let _env = env_guard();
+        let (_tmp, cwd, registry) = fixture_env();
+        std::fs::write(
+            &registry,
+            json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
+                {"name": "king-p", "status": "live", "crown_scope": "alpha", "crown_level": 1,
+                 "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
+                {"name": "king-a", "status": "exited", "crown_scope": "e-1", "crown_level": 2,
+                 "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let (owners, failures) = owners_from_registry(&cwd, &registry);
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(owners.get("e-1"), Some(&"alpha".to_string()));
+        assert_eq!(owners.get("e-1a"), Some(&"alpha".to_string()));
+        assert_eq!(owners.get("e-loose"), Some(&"alpha".to_string()));
+    }
+
+    #[test]
+    fn territory_rows_count_each_worker_in_exactly_one_row() {
+        let _env = env_guard();
+        let (_tmp, cwd, registry) = fixture_env();
+        std::fs::write(
+            &registry,
+            json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
+                {"name": "king-p", "status": "live", "crown_scope": "alpha", "crown_level": 1,
+                 "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
+                {"name": "king-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+                 "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
+                {"name": "w-1", "status": "live", "node": "e-1a", "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z",
+                 "pid": std::process::id()},
+                {"name": "w-loose", "status": "live", "node": "e-loose", "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z",
+                 "pid": std::process::id()}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let rows = territory_rows(&cwd, &registry);
+        let loose = rows.iter().find(|r| r["scope"] == "alpha").unwrap();
+        let crowned = rows.iter().find(|r| r["scope"] == "e-1").unwrap();
+        assert_eq!(
+            crowned["live"], 1,
+            "e-1a's worker counts for e-1 only: {rows:?}"
+        );
+        assert_eq!(
+            loose["live"], 1,
+            "e-loose's worker counts for alpha only: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_epic_crown_scope_reads_unknown_while_others_stay_ok() {
+        let _env = env_guard();
+        let (_tmp, cwd, registry) = fixture_env();
+        std::fs::write(
+            &registry,
+            json!({"schema_version": crate::state::REGISTRY_SCHEMA_VERSION, "agents": [
+                {"name": "king-a", "status": "live", "crown_scope": "e-1", "crown_level": 2,
+                 "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"},
+                {"name": "king-bad", "status": "live", "crown_scope": "e-loose", "crown_level": 2,
+                 "cwd": "/repo/alpha", "harness": "claude", "created_at": "2026-09-07T00:00:00Z"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let rows = territory_rows(&cwd, &registry);
+        let bad = rows.iter().find(|r| r["scope"] == "e-loose").unwrap();
+        let good = rows.iter().find(|r| r["scope"] == "e-1").unwrap();
+        assert_eq!(bad["membership"], "unknown");
+        assert!(bad["live"].is_null());
+        assert_eq!(good["membership"], "ok");
+        assert_eq!(good["live"], 1, "{rows:?}");
     }
 
     #[test]
