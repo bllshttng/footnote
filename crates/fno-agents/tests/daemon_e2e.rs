@@ -1678,17 +1678,38 @@ async fn restart_force_recovers_a_wedged_holder() {
 
     // A verb against the wedge fails within the client's read deadline, not by
     // hanging. Driven through a CHILD client with a short injected deadline:
-    // the default (90s, sized above the daemon's legit slow-handler budgets)
+    // the default (120s, sized above the daemon's legit slow-handler budgets)
     // is far too long for a test, and the env override must never touch this
     // process's ambient calls.
+    //
+    // The spawn rides a backstop, not a tight wall-clock assert: under the
+    // 20-trial stress run (load average in the hundreds) merely exec-ing this
+    // binary has been measured at 30s+, twice red-lining a 30s bound while the
+    // client inside behaved perfectly. Promptness is therefore proved by the
+    // child's OWN deadline line ("within 500ms" below; a leaked default would
+    // read "within 120s"), and the backstop exists only to turn a true hang
+    // into a bounded failure instead of a stuck job.
     let started = Instant::now();
-    let status_out = Command::new(CLIENT_BIN)
-        .envs(fno_agents::test_run::self_owner_env())
-        .env("FNO_AGENTS_HOME", home.root())
-        .env("FNO_AGENTS_RESPONSE_DEADLINE_MS", "500")
-        .args(["status"])
-        .output()
-        .expect("client runs");
+    let backstop = Duration::from_secs(180);
+    let status_out = match tokio::time::timeout(
+        backstop,
+        tokio::process::Command::new(CLIENT_BIN)
+            .envs(fno_agents::test_run::self_owner_env())
+            .env("FNO_AGENTS_HOME", home.root())
+            .env("FNO_AGENTS_RESPONSE_DEADLINE_MS", "500")
+            .args(["status"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    {
+        Ok(inner) => inner.expect("client runs"),
+        Err(_) => panic!(
+            "the client never exited: {backstop:?} backstop fired after {:?}; \
+             a hang, not the bounded failure under test",
+            started.elapsed()
+        ),
+    };
     assert!(
         !status_out.status.success(),
         "a verb against the wedge must fail, got: {:?}",
@@ -1700,11 +1721,8 @@ async fn restart_force_recovers_a_wedged_holder() {
         "the failure names the wedge shape: {stderr}"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(30),
-        // 30s, not 10s: the bound proves the failure is bounded, never a
-        // hang, and a loaded machine (load average in the hundreds) needs
-        // the headroom to spawn the child at all.
-        "the injected deadline bounded the failure"
+        stderr.contains("within 500ms"),
+        "the injected deadline bounded the failure: {stderr}"
     );
 
     // The recovery: one verb, no operator kill.
