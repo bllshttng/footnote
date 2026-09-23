@@ -55,7 +55,11 @@ def _seed(g: Path, entries: list[dict]) -> None:
 
 
 def _read(g: Path) -> list[dict]:
-    return json.loads(g.read_text()).get("entries", [])
+    # The store owns state; graph.json is a frozen export, so read-backs
+    # come from store rows.
+    from fno.graph.store import read_graph_strict
+
+    return read_graph_strict(g)
 
 
 def _node(node_id: str, **over) -> dict:
@@ -165,7 +169,7 @@ def test_maintain_apply_refuses_when_live_claim_state_is_unavailable(
 ):
     import fno.graph.cli as gcli
 
-    entries = [_node("ab-leak03", cwd="/tmp/pytest-of-x/pytest-9/p")]
+    entries = [_node("ab-leak03", cwd="/tmp/pytest-of-x/pytest-9/p", status="idea")]
     _seed(tmp_graph, entries)
 
     def unavailable(*args, **kwargs):
@@ -177,7 +181,11 @@ def test_maintain_apply_refuses_when_live_claim_state_is_unavailable(
 
     assert result.exit_code == 1
     assert "live claim state is unavailable" in result.output
-    assert _read(tmp_graph) == entries
+    # The refused apply must not have mutated the graph: same ids, same cwd.
+    after = _read(tmp_graph)
+    assert [(e["id"], e.get("cwd"), e.get("status")) for e in after] == [
+        (e["id"], e.get("cwd"), e.get("status")) for e in entries
+    ]
 
 
 # --- AC2-HP / AC2-ERR: judgment legs propose, never mutate -----------------
@@ -189,9 +197,12 @@ def test_maintain_cli_judgment_legs_propose_only(tmp_graph):
     _seed(
         tmp_graph,
         [
-            # two near-duplicate ideas (no plan_path -> status idea)
-            _node("ab-dup01", title="Same idea", created_at=old),
-            _node("ab-dup02", title="same  idea!", created_at=old),
+            # two near-duplicate ideas (no plan_path -> status idea).
+            # Slugs are explicit: the import derives slugs from titles, so
+            # rows whose titles normalize identically collide on the slug
+            # index and only one survives.
+            _node("ab-dup01", title="Same idea", created_at=old, slug="same-idea"),
+            _node("ab-dup02", title="same  idea!", created_at=old, slug="same-idea-b"),
         ],
     )
     # Even WITH --apply, dedup + drain must not mutate.
@@ -467,9 +478,10 @@ def _clean_events():
 
 
 def _ready(node_id: str, **over) -> dict:
-    # A node with a plan_path and no completed/deferred state derives status:
-    # ready (the auto-defer candidate filter only considers ready nodes).
-    return _node(node_id, plan_path=f"plans/{node_id}.md", **over)
+    # Ready is stored state now (the plan-presence derivation died with the
+    # json leg), so the seed carries it explicitly. The auto-defer candidate
+    # filter only considers ready nodes.
+    return _node(node_id, plan_path=f"plans/{node_id}.md", status="ready", **over)
 
 
 def test_maintain_cli_auto_defer_at_threshold(tmp_graph):
@@ -948,4 +960,5 @@ def test_maintain_abandoned_leg_settles_gone_holds_active(
     assert len(live_rows) == 1
     assert live_rows[0].get("ended_at") is None
     assert live_rows[0]["session_id"] == _SID_LIVE
-    assert "ended_at" not in live_rows[0]
+    # Store rows normalize an open session to ended_at=None.
+    assert live_rows[0].get("ended_at") is None

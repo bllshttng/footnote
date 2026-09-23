@@ -67,13 +67,15 @@ assert r.get('node_id'), r
 print(r['node_id'])
 ")
 
-# 3) Provenance assertions on the new graph node.
+# 3) Provenance assertions on the new graph node. The node lives in the
+# store; graph.json is only the fold-on-open seed.
 NODE_ID="$NODE_ID" SENT_MSG="$SENT_MSG" FAKE_HOME="$FAKE_HOME" \
-python3 <<'PY'
-import json, os, sys
-graph_path = os.path.join(os.environ["FAKE_HOME"], ".fno", "graph.json")
-graph = json.load(open(graph_path))
-entries = graph.get("entries", [])
+uv run python <<'PY'
+import os, sys
+from pathlib import Path
+from fno.graph.store import read_graph_strict
+graph_path = Path(os.environ["FAKE_HOME"], ".fno", "graph.json")
+entries = read_graph_strict(graph_path)
 node_id = os.environ["NODE_ID"]
 match = [e for e in entries if e.get("id") == node_id]
 if not match:

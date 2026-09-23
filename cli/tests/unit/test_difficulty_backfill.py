@@ -7,6 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.graph.store import read_graph_strict
 
 
 runner = CliRunner()
@@ -64,7 +65,7 @@ def test_migrate_difficulty_backfill_cli_writes_positive_sample(tmp_graph):
     assert result.exit_code == 0, result.output
     receipt = json.loads(result.output)
     assert receipt["written"] == ["x-cli-large"]
-    row = json.loads(tmp_graph.read_text())["entries"][0]
+    row = read_graph_strict(tmp_graph)[0]
     assert row["difficulty"] == "high"
     assert row["difficulty_history"][-1]["source"] == "backfill"
 

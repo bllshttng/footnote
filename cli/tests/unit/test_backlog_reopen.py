@@ -17,6 +17,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.graph.store import read_graph_strict
 
 runner = CliRunner()
 
@@ -60,7 +61,7 @@ def _write(graph: Path, *entries: dict) -> None:
 
 
 def _read(graph: Path) -> dict[str, dict]:
-    return {e["id"]: e for e in json.loads(graph.read_text())["entries"]}
+    return {e["id"]: e for e in read_graph_strict(graph)}
 
 
 def _node(nid: str, **over) -> dict:
@@ -558,7 +559,7 @@ def test_the_marker_clears_when_the_reopened_child_closes_again(tmp_graph):
         ),
         _node("ab-c0000000", parent="ab-e0000000", completed_at=None, status="in_progress"),
     )
-    live = list(json.loads(tmp_graph.read_text())["entries"])
+    live = list(read_graph_strict(tmp_graph))
     child = next(e for e in live if e["id"] == "ab-c0000000")
     _apply_completion_fields(child)
     _cascade_close_parents(live, "ab-c0000000")
@@ -616,7 +617,7 @@ def test_a_close_reopen_close_cycle_re_annotates_the_epic(tmp_graph):
     runner.invoke(app, ["backlog", "reopen", "ab-c0000000", "--reason", "wrong"])
 
     # Re-close the child the way `done` does, then let the cascade run.
-    live = list(json.loads(tmp_graph.read_text())["entries"])
+    live = list(read_graph_strict(tmp_graph))
     child = next(e for e in live if e["id"] == "ab-c0000000")
     _apply_completion_fields(child)
     _cascade_close_parents(live, "ab-c0000000")

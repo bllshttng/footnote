@@ -194,14 +194,17 @@ def test_exhausted_slot_persists_defer_and_the_retry_selects(
               "slot-queue: every configured lane exhausted; retry_at=unknown"]
     )
     assert defer_result.exit_code == 0, defer_result.output
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    # The store owns state; the json mirror can lag the last write.
+    from fno.graph.store import read_graph_strict
+
+    entries = read_graph_strict(tmp_graph)
     assert entries[0].get("deferred_at"), "defer not persisted"
     assert "slot-queue" in entries[0]["deferred_reason"]
 
     # The queue-return owner brings the node back (the controlled retry).
     undefer_result = runner.invoke(app, ["backlog", "undefer", node_id])
     assert undefer_result.exit_code == 0, undefer_result.output
-    entries = json.loads(tmp_graph.read_text())["entries"]
+    entries = read_graph_strict(tmp_graph)
     assert not entries[0].get("deferred_at"), "deferred state survived undefer"
 
     # Capacity observed fresh on the retry: the slot selects a lane and
