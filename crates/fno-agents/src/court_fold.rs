@@ -358,7 +358,7 @@ fn fold_one(
                     json!("no live registry row holds this crown"),
                 )
             } else {
-                let total = owned_counts_raw.values().sum();
+                let total: i64 = owned_counts_raw.values().sum();
                 (
                     json!(total),
                     Value::Object(ordered_counts(&owned_counts_raw)),
