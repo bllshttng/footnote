@@ -115,6 +115,19 @@ The comparison is family-wise and suffix-aware. The bracketed suffix names the c
 
 Absence of a `requested_*` stamp means unknown, never a default. Adoption reuses a live session (correct, standing policy) and observed no request, so its row stamps nothing. The verdict helper lives in `fno.agents.row_contradiction.model_substitution` with its Rust twin in `crates/fno-agents/src/state.rs`.
 
+## Account: one axis, two readings
+
+| Reading | Decided by | Moves when |
+|---|---|---|
+| pays | the credential the session holds. Its `CLAUDE_CONFIG_DIR` setting determines which Keychain item it reads. | the item it reads changes and its daemon re-reads it, or a new session starts. The steps live in the rotation doc's switching section. |
+| sees | the remote-control identity the session connected with | the session reconnects |
+
+"Pays" and "sees" move by different steps, so they can split. A reconnect moves "sees". A login moves "pays" only for sessions that read the item it wrote. Those sessions move only after they re-read it. See [Switching claude accounts is manual, by design](../provider-rotation.md#switching-claude-accounts-is-manual-by-design) for the steps. The mobile app shows "sees" and says nothing about billing.
+
+For a spawn, `--account`, `agents.defaults.account`, `agents.profiles.<verb>.account` and a lane's `account` choose "pays". `accounts.active` is not one of them.
+
+An unpinned claude spawn bills whatever login its launching process holds. Read which login that is in the identity column of `fno config accounts list`. See [What chooses the account a spawn bills](../provider-rotation.md#what-chooses-the-account-a-spawn-bills).
+
 ## Resolver authority
 
 `inject_spawn_defaults` (`cli/src/fno/agents/spawn_defaults.py`) decides which config value fills which axis on a spawn. It holds one rule: an explicit command-line axis is never overwritten by a profile default. A profile can fill an axis the command line left unset. A profile-filled harness that cannot carry an already-typed route is the case this plan handles. When that fill makes an explicitly-set axis unusable, the refusal names the config path, the value, the axis it set, and the caller's own flags. This is a cross-axis collision, not a precedence bug. No field-wise rule was ever violated, so the report says what happened instead of what looks like an override.
